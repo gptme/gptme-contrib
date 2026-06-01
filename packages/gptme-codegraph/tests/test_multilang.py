@@ -1,7 +1,7 @@
-"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#, Ruby, C++).
+"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#, Ruby, C++, Kotlin).
 
 Verifies that parse_file, extract_symbols, and build_index work correctly
-for JavaScript, TypeScript, Rust, Go, Java, C#, Ruby, and C++ source files.
+for JavaScript, TypeScript, Rust, Go, Java, C#, Ruby, C++, and Kotlin source files.
 """
 
 from __future__ import annotations
@@ -61,6 +61,10 @@ _skip_no_ruby = pytest.mark.skipif(
 _skip_no_php = pytest.mark.skipif(
     not _has_grammar("php"),
     reason="tree-sitter-php not installed",
+)
+_skip_no_kotlin = pytest.mark.skipif(
+    not _has_grammar("kotlin"),
+    reason="tree-sitter-kotlin not installed",
 )
 
 
@@ -2085,6 +2089,151 @@ function processItems(array $items): void {
     assert (
         "doSomethingElse" in proc.calls
     ), f"Expected 'doSomethingElse' in calls, got {proc.calls}"
+
+
+# ---------------------------------------------------------------------------
+# Kotlin extraction tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def kotlin_module() -> Generator[Path, None, None]:
+    """A Kotlin file with imports, classes, methods, object, and top-level functions."""
+    code = """\
+package app.service
+
+import kotlin.math.max
+import app.model.User as DomainUser
+import app.util.*
+
+class Calculator(private var value: Int = 0) {
+    fun add(n: Int): Calculator {
+        value += n
+        log("added")
+        return this
+    }
+
+    fun current(): Int = value
+
+    companion object {
+        fun create(initial: Int): Calculator {
+            return Calculator(initial)
+        }
+    }
+}
+
+interface Describable {
+    fun describe(): String
+}
+
+object Logger {
+    fun log(msg: String) {
+        println(msg)
+    }
+}
+
+fun helper(name: String): String {
+    return name.trim().uppercase()
+}
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".kt", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_kotlin
+def test_language_detection_kotlin(kotlin_module: Path):
+    """Kotlin: .kt files are detected as Kotlin."""
+    result = parse_file(kotlin_module)
+    assert result.language == "kotlin"
+
+
+@_skip_no_kotlin
+def test_language_detection_kotlin_script(tmp_path: Path):
+    """Kotlin: .kts scripts are detected as Kotlin."""
+    script = tmp_path / "build.kts"
+    script.write_text("fun configure() {}\n")
+    result = parse_file(script)
+    assert result.language == "kotlin"
+    assert any(sym.name == "configure" for sym in result.symbols)
+
+
+@_skip_no_kotlin
+def test_parse_kotlin_classes_and_objects(kotlin_module: Path):
+    """Kotlin: classes, interfaces, and objects are extracted as class symbols."""
+    result = parse_file(kotlin_module)
+    classes = {s.name for s in result.symbols if s.kind == "class"}
+    assert "Calculator" in classes
+    assert "Describable" in classes
+    assert "Logger" in classes
+
+
+@_skip_no_kotlin
+def test_parse_kotlin_methods(kotlin_module: Path):
+    """Kotlin: member, companion object, and interface functions are methods."""
+    result = parse_file(kotlin_module)
+    methods = {(s.name, s.parent_class) for s in result.symbols if s.kind == "method"}
+    assert ("add", "Calculator") in methods
+    assert ("current", "Calculator") in methods
+    assert ("create", "Calculator") in methods
+    assert ("describe", "Describable") in methods
+    assert ("log", "Logger") in methods
+
+
+@_skip_no_kotlin
+def test_parse_kotlin_top_level_function(kotlin_module: Path):
+    """Kotlin: top-level functions are extracted as functions."""
+    result = parse_file(kotlin_module)
+    functions = {s.name for s in result.symbols if s.kind == "function"}
+    assert "helper" in functions
+
+
+@_skip_no_kotlin
+def test_parse_kotlin_imports(kotlin_module: Path):
+    """Kotlin: imports include module/name split, aliases, and wildcards."""
+    result = parse_file(kotlin_module)
+    imports = {(imp.module, imp.name, imp.alias) for imp in result.imports}
+    assert ("kotlin.math", "max", None) in imports
+    assert ("app.model", "User", "DomainUser") in imports
+    assert ("app.util", "*", None) in imports
+
+
+@_skip_no_kotlin
+def test_parse_kotlin_calls(kotlin_module: Path):
+    """Kotlin: call expressions are extracted from function bodies."""
+    result = parse_file(kotlin_module)
+    add = next(s for s in result.symbols if s.name == "add")
+    assert "log" in add.calls
+    create = next(s for s in result.symbols if s.name == "create")
+    assert "Calculator" in create.calls
+    helper = next(s for s in result.symbols if s.name == "helper")
+    assert any("trim" in call for call in helper.calls)
+    assert any("uppercase" in call for call in helper.calls)
+
+
+@_skip_no_kotlin
+def test_parse_kotlin_line_numbers(kotlin_module: Path):
+    """Kotlin: symbol line numbers are positive and ordered."""
+    result = parse_file(kotlin_module)
+    assert result.symbols
+    for sym in result.symbols:
+        assert sym.start_line >= 1
+        assert sym.end_line >= sym.start_line
+
+
+@_skip_no_kotlin
+def test_build_index_kotlin(kotlin_module: Path):
+    """Kotlin: build_index picks up symbols from .kt files."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        shutil.copy(kotlin_module, d)
+        index = build_index(d)
+        assert index.lookup("Calculator"), "Calculator not found in index"
+        assert index.lookup("helper"), "helper not found in index"
 
 
 # ---------------------------------------------------------------------------
