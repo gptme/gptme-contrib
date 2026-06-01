@@ -3403,6 +3403,13 @@ def build_cross_file_call_graph(
                     resolved = _resolve_imported_symbol(call, imports, directory)
                     if resolved and resolved in known_names:
                         resolved_calls.add(resolved)
+                    elif "::" in call:
+                        # Rust path-qualified call: ``crate::module::fn()`` or
+                        # ``super::util::parse()`` — no explicit ``use`` import.
+                        # Extract the last path segment as the candidate name.
+                        last_segment = call.rsplit("::", 1)[-1]
+                        if last_segment in known_names:
+                            resolved_calls.add(last_segment)
                     # else: external builtin/library — ignore
             qid = name_to_qid.get(sym.name, sym.qualified_id())
             qid_calls = {name_to_qid.get(c, c) for c in resolved_calls}
