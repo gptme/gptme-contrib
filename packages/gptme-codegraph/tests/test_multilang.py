@@ -1,7 +1,7 @@
-"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java).
+"""Tests for multi-language support in gptme-codegraph (JS/TS, Rust, Go, Java, C#).
 
 Verifies that parse_file, extract_symbols, and build_index work correctly
-for JavaScript, TypeScript, Rust, Go, and Java source files.
+for JavaScript, TypeScript, Rust, Go, Java, and C# source files.
 """
 
 from __future__ import annotations
@@ -45,6 +45,10 @@ _skip_no_rust = pytest.mark.skipif(
 _skip_no_java = pytest.mark.skipif(
     not _has_grammar("java"),
     reason="tree-sitter-java not installed",
+)
+_skip_no_csharp = pytest.mark.skipif(
+    not _has_grammar("c_sharp"),
+    reason="tree-sitter-c-sharp not installed",
 )
 
 # ---------------------------------------------------------------------------
@@ -285,7 +289,7 @@ def multilang_project(tmp_path: Path) -> Generator[Path, None, None]:
     rust_dir = proj / "src" / "rust"
     rust_dir.mkdir(parents=True)
     (rust_dir / "lib.rs").write_text(
-        "pub fn init() -> bool { true }\n" "pub struct State { pub ready: bool }\n"
+        "pub fn init() -> bool { true }\npub struct State { pub ready: bool }\n"
     )
 
     yield proj
@@ -1070,3 +1074,175 @@ def test_build_index_java(java_module: Path):
         index = build_index(d)
         assert "Calculator" in index.entries
         assert "add" in index.entries
+
+
+@pytest.fixture
+def csharp_module() -> Generator[Path, None, None]:
+    """A C# file with a namespace, class, interface, enum, methods, usings."""
+    code = """\
+using System;
+using System.Collections.Generic;
+using static System.Math;
+using Json = System.Text.Json;
+
+namespace Example.App
+{
+    public class Calculator
+    {
+        private int value;
+
+        public Calculator(int initial)
+        {
+            this.value = initial;
+        }
+
+        public int Add(int n)
+        {
+            return value + n;
+        }
+
+        public static Calculator FromList(List<int> values)
+        {
+            Console.WriteLine(values[0]);
+            return new Calculator(values[0]);
+        }
+    }
+
+    public interface IDescribable
+    {
+        string Describe();
+        int Size();
+    }
+
+    public enum Operation
+    {
+        Add,
+        Multiply,
+        Subtract
+    }
+}
+"""
+    with tempfile.NamedTemporaryFile(suffix=".cs", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# C# tests
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_csharp
+def test_language_detection_csharp(csharp_module: Path):
+    """C#: .cs files are detected as the csharp language."""
+    result = parse_file(csharp_module)
+    assert result.language == "csharp"
+
+
+@_skip_no_csharp
+def test_parse_csharp_class(csharp_module: Path):
+    """C#: class nested in a namespace is extracted with correct kind."""
+    result = parse_file(csharp_module)
+    cls = next((s for s in result.symbols if s.name == "Calculator"), None)
+    assert cls is not None
+    assert cls.kind == "class"
+
+
+@_skip_no_csharp
+def test_parse_csharp_methods(csharp_module: Path):
+    """C#: methods carry their parent class."""
+    result = parse_file(csharp_module)
+    add = next((s for s in result.symbols if s.name == "Add"), None)
+    assert add is not None
+    assert add.kind == "method"
+    assert add.parent_class == "Calculator"
+
+
+@_skip_no_csharp
+def test_parse_csharp_constructor(csharp_module: Path):
+    """C#: constructor_declaration is extracted as a method."""
+    result = parse_file(csharp_module)
+    ctors = [s for s in result.symbols if s.name == "Calculator" and s.kind == "method"]
+    assert len(ctors) == 1
+    assert ctors[0].parent_class == "Calculator"
+
+
+@_skip_no_csharp
+def test_parse_csharp_interface(csharp_module: Path):
+    """C#: interface is extracted as a class symbol with its methods."""
+    result = parse_file(csharp_module)
+    iface = next((s for s in result.symbols if s.name == "IDescribable"), None)
+    assert iface is not None
+    assert iface.kind == "class"
+    describe = next((s for s in result.symbols if s.name == "Describe"), None)
+    assert describe is not None
+    assert describe.parent_class == "IDescribable"
+
+
+@_skip_no_csharp
+def test_parse_csharp_enum(csharp_module: Path):
+    """C#: enum is extracted as a class symbol."""
+    result = parse_file(csharp_module)
+    enum_sym = next((s for s in result.symbols if s.name == "Operation"), None)
+    assert enum_sym is not None
+    assert enum_sym.kind == "class"
+
+
+@_skip_no_csharp
+def test_parse_csharp_imports_basic(csharp_module: Path):
+    """C#: using directives resolve to module + last-segment name."""
+    result = parse_file(csharp_module)
+    generic = next((i for i in result.imports if i.name == "Generic"), None)
+    assert generic is not None
+    assert generic.module == "System.Collections"
+
+    system = next((i for i in result.imports if i.name == "System"), None)
+    assert system is not None
+    assert system.module == ""
+
+
+@_skip_no_csharp
+def test_parse_csharp_imports_alias(csharp_module: Path):
+    """C#: aliased using (using Json = System.Text.Json) records the alias."""
+    result = parse_file(csharp_module)
+    aliased = next((i for i in result.imports if i.alias == "Json"), None)
+    assert aliased is not None
+    assert aliased.name == "Json"
+    assert aliased.module == "System.Text"
+
+
+@_skip_no_csharp
+def test_parse_csharp_calls(csharp_module: Path):
+    """C#: invocation_expression nodes are extracted as calls."""
+    result = parse_file(csharp_module)
+    from_list = next((s for s in result.symbols if s.name == "FromList"), None)
+    assert from_list is not None
+    assert any(
+        "WriteLine" in c for c in from_list.calls
+    ), f"Expected a WriteLine call, got: {from_list.calls}"
+
+
+@_skip_no_csharp
+def test_parse_csharp_line_numbers(csharp_module: Path):
+    """C#: symbol line numbers are positive and ordered."""
+    result = parse_file(csharp_module)
+    assert result.symbols
+    for sym in result.symbols:
+        assert sym.start_line >= 1
+        assert sym.end_line >= sym.start_line
+
+
+@_skip_no_csharp
+def test_build_index_csharp(csharp_module: Path):
+    """C#: build_index picks up symbols from a .cs file."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        dest = Path(d) / csharp_module.name
+        shutil.copy(csharp_module, dest)
+        index = build_index(d)
+        assert "Calculator" in index.entries
+        assert "Add" in index.entries

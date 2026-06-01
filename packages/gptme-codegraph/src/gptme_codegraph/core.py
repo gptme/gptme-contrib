@@ -3,7 +3,8 @@
 Complementary to gptme-rag (text chunks), this retrieves code *structure*:
 function/class definitions, call graphs, and blast radius.
 
-Supports Python, TypeScript/JavaScript, Rust, and Go via tree-sitter grammars.
+Supports Python, TypeScript/JavaScript, Rust, Go, Java, and C# via tree-sitter
+grammars.
 To add a new language: add grammar dep to pyproject.toml, extend _LANG_MAP
 and _load_language, then add extractor functions.
 
@@ -47,6 +48,7 @@ _LANG_MAP: dict[str, str] = {
     ".rs": "rust",
     ".go": "go",
     ".java": "java",
+    ".cs": "csharp",
 }
 
 _GRAMMAR_MODULES: dict[str, str] = {
@@ -58,6 +60,7 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "rust": "tree_sitter_rust",
     "go": "tree_sitter_go",
     "java": "tree_sitter_java",
+    "csharp": "tree_sitter_c_sharp",
 }
 
 _SOURCE_EXTENSIONS: tuple[str, ...] = tuple(_LANG_MAP.keys())
@@ -132,6 +135,12 @@ def _load_language(name: str):
         import tree_sitter_java as tsjava  # type: ignore[import-not-found,unused-ignore]
 
         grammar_map["java"] = tsjava.language()
+    except ImportError:
+        pass
+    try:
+        import tree_sitter_c_sharp as tscsharp  # type: ignore[import-not-found,unused-ignore]
+
+        grammar_map["csharp"] = tscsharp.language()
     except ImportError:
         pass
 
@@ -714,7 +723,9 @@ def _extract_calls(node) -> list[str]:
         cursor = node.walk()
         reached_root = False
         while not reached_root:
-            if cursor.node.type in {"call", "call_expression"}:
+            if cursor.node.type in {"call", "call_expression", "invocation_expression"}:
+                # Python "call", JS/TS/Rust/Go "call_expression", C#
+                # "invocation_expression" all expose a "function" field.
                 func_node = cursor.node.child_by_field_name("function")
                 if func_node:
                     calls.append(_text(func_node))
@@ -1637,6 +1648,152 @@ def _extract_imports_java(root) -> list[ImportInfo]:
 
 
 # ---------------------------------------------------------------------------
+# C# extraction
+# ---------------------------------------------------------------------------
+
+
+_CSHARP_TYPE_NODES = frozenset(
+    {
+        "class_declaration",
+        "struct_declaration",
+        "record_declaration",
+        "interface_declaration",
+        "enum_declaration",
+    }
+)
+_CSHARP_NAMESPACE_NODES = frozenset(
+    {"namespace_declaration", "file_scoped_namespace_declaration"}
+)
+
+
+def _csharp_body(node):
+    """Return a C# type's member-list node (the ``body`` field or a child
+    ``declaration_list``/``enum_member_declaration_list``)."""
+    body = node.child_by_field_name("body")
+    if body is not None:
+        return body
+    for child in node.named_children:
+        if child.type in ("declaration_list", "enum_member_declaration_list"):
+            return child
+    return None
+
+
+def _extract_symbols_csharp(root, filepath: str) -> list[Symbol]:
+    """Extract classes, structs, records, interfaces, enums, and their methods
+    from a C# parse tree.
+
+    C# declarations may be nested inside ``namespace`` blocks (block-scoped or
+    file-scoped), so containers are walked recursively.
+    """
+    symbols: list[Symbol] = []
+
+    def _members(body_node, parent_class: str) -> None:
+        for member in body_node.named_children:
+            if member.type in ("method_declaration", "constructor_declaration"):
+                name_node = member.child_by_field_name("name")
+                if name_node:
+                    body = member.child_by_field_name("body")
+                    calls = _extract_calls(body) if body else []
+                    symbols.append(
+                        Symbol(
+                            name=_text(name_node),
+                            kind="method",
+                            file=filepath,
+                            start_line=member.start_point[0] + 1,
+                            end_line=member.end_point[0] + 1,
+                            parent_class=parent_class,
+                            calls=list(set(calls)),
+                        )
+                    )
+            elif member.type in _CSHARP_TYPE_NODES:
+                _type_decl(member)
+
+    def _type_decl(node) -> None:
+        name_node = node.child_by_field_name("name")
+        if not name_node:
+            return
+        type_name = _text(name_node)
+        symbols.append(
+            Symbol(
+                name=type_name,
+                kind="class",
+                file=filepath,
+                start_line=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+            )
+        )
+        body = _csharp_body(node)
+        if body is not None:
+            _members(body, parent_class=type_name)
+
+    def _walk_container(node) -> None:
+        for child in node.named_children:
+            if child.type in _CSHARP_NAMESPACE_NODES:
+                body = _csharp_body(child)
+                _walk_container(body if body is not None else child)
+            elif child.type in _CSHARP_TYPE_NODES:
+                _type_decl(child)
+
+    _walk_container(root)
+    return symbols
+
+
+def _extract_imports_csharp(root) -> list[ImportInfo]:
+    """Extract ``using`` directives from a C# parse tree.
+
+    Handles ``using System;``, ``using System.Collections.Generic;``,
+    ``using static System.Math;``, and ``using Foo = System.Bar;`` (alias).
+    """
+    imports: list[ImportInfo] = []
+
+    def _walk(node) -> None:
+        for child in node.named_children:
+            if child.type == "using_directive":
+                # For `using Alias = Some.Namespace;` the "name" field holds the
+                # alias identifier; plain/`static` usings have no "name" field and
+                # carry the namespace as an unnamed qualified_name/identifier child.
+                alias_node = child.child_by_field_name("name")
+                alias = _text(alias_node) if alias_node is not None else None
+                ns_node = next(
+                    (c for c in child.named_children if c.type == "qualified_name"),
+                    None,
+                )
+                if ns_node is None:
+                    ns_node = next(
+                        (
+                            c
+                            for c in child.named_children
+                            if c.type == "identifier"
+                            and (alias is None or _text(c) != alias)
+                        ),
+                        None,
+                    )
+                qualified = _text(ns_node) if ns_node is not None else ""
+                if not qualified:
+                    continue
+                if "." in qualified:
+                    dot = qualified.rfind(".")
+                    module, name = qualified[:dot], qualified[dot + 1 :]
+                else:
+                    module, name = "", qualified
+                imports.append(
+                    ImportInfo(
+                        file="",
+                        module=module,
+                        name=name,
+                        alias=alias,
+                        is_from=True,
+                    )
+                )
+            elif child.type in _CSHARP_NAMESPACE_NODES:
+                body = _csharp_body(child)
+                _walk(body if body is not None else child)
+
+    _walk(root)
+    return imports
+
+
+# ---------------------------------------------------------------------------
 # Multi-language parse_file
 # ---------------------------------------------------------------------------
 
@@ -1645,7 +1802,8 @@ def parse_file(filepath: Path) -> FileParseResult:
     """Extract all symbols and imports from a source file.
 
     Detects language from file extension and dispatches to the correct
-    tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, Go, and Java.
+    tree-sitter grammar. Supports Python, TypeScript/JavaScript, Rust, Go,
+    Java, and C#.
     """
     code = filepath.read_bytes()
     lang_name = _detect_language(filepath)
@@ -1674,6 +1832,9 @@ def parse_file(filepath: Path) -> FileParseResult:
     elif lang_name == "java":
         symbols = _extract_symbols_java(root, filename)
 
+    elif lang_name == "csharp":
+        symbols = _extract_symbols_csharp(root, filename)
+
     imports: list[ImportInfo] = []
     if lang_name == "python":
         imports = _extract_imports(root)
@@ -1685,6 +1846,8 @@ def parse_file(filepath: Path) -> FileParseResult:
         imports = _extract_imports_go(root)
     elif lang_name == "java":
         imports = _extract_imports_java(root)
+    elif lang_name == "csharp":
+        imports = _extract_imports_csharp(root)
 
     for imp in imports:
         imp.file = filename
