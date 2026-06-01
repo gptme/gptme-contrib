@@ -1585,6 +1585,12 @@ def test_parse_c_imports_local(c_module: Path):
 def test_parse_c_line_numbers(c_module: Path):
     """C: symbol line numbers are positive and ordered."""
     result = parse_file(c_module)
+    assert result.symbols
+    for sym in result.symbols:
+        assert sym.start_line >= 1
+        assert sym.end_line >= sym.start_line
+
+
 # ---------------------------------------------------------------------------
 # C++
 # ---------------------------------------------------------------------------
@@ -1675,6 +1681,45 @@ def test_parse_cpp_line_numbers(cpp_module: Path):
     for sym in result.symbols:
         assert sym.start_line >= 1
         assert sym.end_line >= sym.start_line
+
+
+@pytest.fixture
+def cpp_conditional_module() -> Generator[Path, None, None]:
+    """A C++ file with preprocessor-conditional includes and a conditionally-compiled class."""
+    code = """\
+#include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#ifndef NO_EXTRA
+#include <extra.hpp>
+#endif
+#if defined(FEATURE_X)
+#include <feature.hpp>
+class FeatureX {};
+#endif
+#ifdef USE_WIDGET
+class Widget {};
+#endif
+class Base {};
+"""
+    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w", delete=False) as f:
+        f.write(code)
+        path = Path(f.name)
+    yield path
+    path.unlink(missing_ok=True)
+
+
+@_skip_no_cpp
+def test_parse_cpp_preprocessor_conditional(cpp_conditional_module: Path):
+    """C++: #include inside #ifdef/#ifndef/#if is extracted via recursive walk."""
+    result = parse_file(cpp_conditional_module)
+
+    import_names = {i.name for i in result.imports}
+    assert "vector" in import_names, "top-level include missing"
+    assert "windows.h" in import_names, "#ifdef-guarded include missing"
+    assert "extra.hpp" in import_names, "#ifndef-guarded include missing"
+    assert "feature.hpp" in import_names, "#if defined(...)-guarded include missing"
 
 
 @_skip_no_c
@@ -2043,7 +2088,6 @@ function processItems(array $items): void {
 
 
 # ---------------------------------------------------------------------------
-
 @_skip_no_cpp
 def test_build_index_cpp(cpp_module: Path):
     """C++: build_index picks up symbols from a .cpp file."""

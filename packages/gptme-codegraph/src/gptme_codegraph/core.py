@@ -2526,12 +2526,25 @@ def _extract_symbols_cpp(root, filepath: str) -> list[Symbol]:
 
 
 def _extract_imports_cpp(root) -> list[ImportInfo]:
-    """Extract ``#include`` directives from a C++ parse tree."""
+    """Extract ``#include`` directives from a C++ parse tree.
+
+    Walks recursively through preprocessor conditionals (``#ifdef``, ``#ifndef``,
+    ``#if``, ``#elif``, ``#else``) so that platform-specific or feature-guarded
+    includes are not silently dropped.
+    """
     imports: list[ImportInfo] = []
 
-    for child in root.named_children:
-        if child.type != "preproc_include":
-            continue
+    _PREPROC_WRAPPER = frozenset(
+        {
+            "preproc_ifdef",
+            "preproc_ifndef",
+            "preproc_if",
+            "preproc_elif",
+            "preproc_else",
+        }
+    )
+
+    def _extract_include(child) -> None:
         path_node = child.child_by_field_name("path")
         if path_node is None:
             path_node = next(
@@ -2543,10 +2556,10 @@ def _extract_imports_cpp(root) -> list[ImportInfo]:
                 None,
             )
         if path_node is None:
-            continue
+            return
         include_path = _strip_include_delimiters(_text(path_node))
         if not include_path:
-            continue
+            return
         parts = include_path.split("/")
         imports.append(
             ImportInfo(
@@ -2557,6 +2570,15 @@ def _extract_imports_cpp(root) -> list[ImportInfo]:
                 is_from=True,
             )
         )
+
+    def _walk(node) -> None:
+        for child in node.named_children:
+            if child.type in _PREPROC_WRAPPER:
+                _walk(child)
+            elif child.type == "preproc_include":
+                _extract_include(child)
+
+    _walk(root)
     return imports
 
 
