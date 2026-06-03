@@ -487,7 +487,7 @@ check_assigned_issues() {
         # silent the moment the gate first emits (or silently seeding on first
         # sight when someone else already holds the ball). See alice#55.
         last_actor=$(gh api "repos/$repo/issues/$issue_number/comments" \
-            --jq 'last.user.login // empty' 2>/dev/null || true)
+            --paginate --jq 'last.user.login // empty' 2>/dev/null | tail -1 || true)
         [ -z "$last_actor" ] && last_actor=$(gh api "repos/$repo/issues/$issue_number" \
             --jq '.user.login' 2>/dev/null || true)
 
