@@ -4,6 +4,19 @@ from __future__ import annotations
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _reset_module_caches():
+    """Reset module-level caches before and after each test."""
+    from headroom_compressor.hooks import compressor
+
+    compressor._config_cache = None
+    compressor._SmartCrusher = None
+    yield
+    compressor._config_cache = None
+    compressor._SmartCrusher = None
+
+
 # ── helpers ────────────────────────────────────────────────────────
 
 
@@ -71,6 +84,60 @@ def _build_cat_content(n: int = 500) -> str:
     lines = [f"line {i}: some config content here" for i in range(n)]
     cmd = "Ran command: `cat /etc/config.ini`\n"
     return cmd + "\n".join(lines)
+
+
+def _build_fenced_content(inner: str, lang: str = "stdout") -> str:
+    """Wrap inner content in a gptme-style ```stdout...``` fence (real output format)."""
+    cmd = "Ran command: `gh issue list --json state,title`\n"
+    return cmd + f"\n```{lang}\n{inner}\n```\n"
+
+
+# ── _unwrap_fence tests ────────────────────────────────────────────
+
+
+class TestUnwrapFence:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from headroom_compressor.hooks.compressor import _unwrap_fence
+
+        self._unwrap = _unwrap_fence
+
+    def test_stdout_fence(self):
+        data = "\n```stdout\nhello world\n```\n"
+        parts = self._unwrap(data)
+        assert parts is not None
+        fence_open, inner, fence_close, trailing = parts
+        assert inner == "hello world"
+        assert "```stdout" in fence_open
+        assert "```" in fence_close
+
+    def test_generic_fence(self):
+        data = "\n```\nhello world\n```\n"
+        parts = self._unwrap(data)
+        assert parts is not None
+        _, inner, _, _ = parts
+        assert inner == "hello world"
+
+    def test_no_fence_returns_none(self):
+        assert self._unwrap("plain text content") is None
+        assert self._unwrap("\njust some json content") is None
+
+    def test_roundtrip_preserves_content(self):
+        """Unwrap + rewrap should reconstruct the original exactly."""
+        inner_content = '{"items": [1, 2, 3]}'
+        original_data = f"\n```stdout\n{inner_content}\n```\n"
+        parts = self._unwrap(original_data)
+        assert parts is not None
+        fence_open, inner, fence_close, trailing = parts
+        reconstructed = fence_open + inner + fence_close + trailing
+        assert reconstructed == original_data
+
+    def test_multiline_inner_content(self):
+        data = "\n```stdout\nline1\nline2\nline3\n```\n"
+        parts = self._unwrap(data)
+        assert parts is not None
+        _, inner, _, _ = parts
+        assert inner == "line1\nline2\nline3"
 
 
 # ── _coerce_raw_tool_prefixes tests ────────────────────────────────
@@ -397,6 +464,77 @@ class TestGenerationPreHook:
         msg = _tool_message(content)
         msgs = [msg]
         list(generation_pre_hook(msgs))
+        assert msgs[0].content == content
+
+    def test_hook_compresses_fenced_stdout_content(self, monkeypatch):
+        """Content in a ```stdout``` fence is unwrapped before crushing, then rewrapped."""
+        from dataclasses import dataclass
+
+        from headroom_compressor.hooks import compressor
+
+        received_data: list[str] = []
+
+        @dataclass
+        class FakeResult:
+            was_modified: bool = True
+            strategy: str = "test"
+            compressed: str = "[compressed_inner]"
+
+        class FakeCrusher:
+            def crush(self, data: str) -> FakeResult:
+                received_data.append(data)
+                return FakeResult()
+
+        monkeypatch.setattr(compressor, "_get_crusher", lambda: FakeCrusher())
+
+        import json
+
+        inner_json = json.dumps([{"id": i, "title": f"item {i}"} for i in range(200)])
+        content = _build_fenced_content(inner_json)
+        msg = _tool_message(content)
+        msgs = [msg]
+
+        list(compressor.generation_pre_hook(msgs))
+
+        # Crusher received the raw inner content (no fence wrapper)
+        assert len(received_data) == 1
+        assert received_data[0] == inner_json
+        assert "```stdout" not in received_data[0]
+
+        # Final message has the compressed marker, the command prefix, and fence restored
+        final = msgs[0].content
+        assert final.startswith("[Headroom compressed")
+        assert "gh issue list" in final
+        assert "```stdout" in final
+        assert "[compressed_inner]" in final
+
+    def test_hook_fenced_passthrough_preserves_original(self, monkeypatch):
+        """When crusher passes through, fenced content is preserved unchanged."""
+        from dataclasses import dataclass
+
+        from headroom_compressor.hooks import compressor
+
+        @dataclass
+        class FakeResult:
+            was_modified: bool = False
+            strategy: str = "passthrough"
+            compressed: str = ""
+
+        class FakeCrusher:
+            def crush(self, data: str) -> FakeResult:
+                return FakeResult()
+
+        monkeypatch.setattr(compressor, "_get_crusher", lambda: FakeCrusher())
+
+        import json
+
+        inner_json = json.dumps([{"id": i} for i in range(200)])
+        content = _build_fenced_content(inner_json)
+        msg = _tool_message(content)
+        msgs = [msg]
+
+        list(compressor.generation_pre_hook(msgs))
+
         assert msgs[0].content == content
 
     def test_register(self, monkeypatch):

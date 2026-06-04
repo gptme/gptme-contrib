@@ -76,6 +76,7 @@ class HeadroomCompressorConfig:
 
 
 _SmartCrusher = None  # type: ignore
+_config_cache: HeadroomCompressorConfig | None = None
 
 
 def _coerce_int(value: Any, default: int, *, minimum: int) -> int:
@@ -109,6 +110,9 @@ def _coerce_raw_tool_prefixes(value: Any) -> tuple[str, ...]:
 
 def get_compressor_config() -> HeadroomCompressorConfig:
     """Read compressor config from env + [plugin.headroom_compressor]."""
+    global _config_cache
+    if _config_cache is not None:
+        return _config_cache
     config = get_config()
 
     # Read plugin settings from gptme config
@@ -135,7 +139,7 @@ def get_compressor_config() -> HeadroomCompressorConfig:
     file_enabled = bool(settings.get("enabled"))
     enabled = env_enabled if env_enabled is not None else file_enabled
 
-    return HeadroomCompressorConfig(
+    _config_cache = HeadroomCompressorConfig(
         enabled=enabled,
         min_compress_chars=_coerce_int(
             settings.get("min_compress_chars"),
@@ -146,6 +150,7 @@ def get_compressor_config() -> HeadroomCompressorConfig:
             settings.get("raw_tool_prefixes", [])
         ),
     )
+    return _config_cache
 
 
 def _get_crusher():
@@ -222,6 +227,25 @@ def _split_tool_output(content: str) -> tuple[str, str]:
     return content[: idx + 1], content[idx + 1 :]
 
 
+# Matches a markdown code fence block: ```lang\n<content>\n```
+# gptme wraps tool outputs in ```stdout...``` fences; SmartCrusher needs the raw content.
+_FENCE_RE = re.compile(
+    r"^(\s*```\w*\n)(.*?)(\n```)(\s*)$",
+    re.DOTALL,
+)
+
+
+def _unwrap_fence(data: str) -> tuple[str, str, str, str] | None:
+    """If data is a single markdown code fence, return (open, content, close, trailing).
+
+    Returns None if data is not a single fenced block.
+    """
+    m = _FENCE_RE.match(data)
+    if m:
+        return m.group(1), m.group(2), m.group(3), m.group(4)
+    return None
+
+
 def generation_pre_hook(
     messages: list[Message],
     **kwargs: Any,
@@ -254,10 +278,23 @@ def generation_pre_hook(
         ):
             try:
                 prefix, data = _split_tool_output(message.content)
-                result = crusher.crush(data)
+                # gptme wraps tool outputs in ```stdout...``` fences.
+                # Unwrap to give SmartCrusher raw content, then rewrap after.
+                fence_parts = _unwrap_fence(data)
+                if fence_parts:
+                    fence_open, inner_data, fence_close, fence_trailing = fence_parts
+                    result = crusher.crush(inner_data)
+                    compressed_data = (
+                        fence_open + result.compressed + fence_close + fence_trailing
+                        if result.was_modified
+                        else data
+                    )
+                else:
+                    result = crusher.crush(data)
+                    compressed_data = result.compressed if result.was_modified else data
                 if result.was_modified:
                     original_len = len(message.content)
-                    compressed_len = len(prefix) + len(result.compressed)
+                    compressed_len = len(prefix) + len(compressed_data)
                     savings_pct = round((1 - compressed_len / original_len) * 100)
                     session_savings += original_len - compressed_len
                     session_compressed += 1
@@ -268,7 +305,7 @@ def generation_pre_hook(
                                 f"(orig={original_len}, "
                                 f"strategy={result.strategy}, "
                                 f"savings={savings_pct}%)]\n"
-                                f"{prefix}{result.compressed}"
+                                f"{prefix}{compressed_data}"
                             )
                         )
                     )
@@ -295,7 +332,10 @@ def generation_pre_hook(
                     chars_saved=session_savings,
                 )
         except Exception:
-            pass
+            logger.debug(
+                "headroom_compressor: CostTracker.record_extra() failed",
+                exc_info=True,
+            )
 
         logger.info(
             "headroom_compressor: compressed %d message(s), saved %d chars "
