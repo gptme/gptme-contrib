@@ -7,14 +7,18 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_module_caches():
-    """Reset module-level caches before and after each test."""
+    """Reset module-level caches and accumulators before and after each test."""
     from headroom_compressor.hooks import compressor
 
     compressor._config_cache = None
     compressor._SmartCrusher = None
+    compressor._compressed_count = 0
+    compressor._total_savings = 0
     yield
     compressor._config_cache = None
     compressor._SmartCrusher = None
+    compressor._compressed_count = 0
+    compressor._total_savings = 0
 
 
 # ── helpers ────────────────────────────────────────────────────────
@@ -401,10 +405,27 @@ class TestGenerationPreHook:
         assert '{"items":"compressed"}' in msgs[0].content
 
     def test_hook_skips_raw_prefix_messages(self, monkeypatch):
-        """Messages matching raw_tool_prefixes are NOT compressed."""
+        """Messages matching raw_tool_prefixes are NOT compressed.
+
+        Mocks _get_crusher so the hook exercises the full pipeline
+        including the raw-prefix check (does NOT exit early due to
+        missing headroom-ai in CI).
+        """
+        from dataclasses import dataclass
+
         from headroom_compressor.hooks import compressor
 
-        # Mock get_compressor_config to return a config with raw prefixes
+        @dataclass
+        class _PassthroughResult:
+            was_modified: bool = False
+            strategy: str = "passthrough"
+            compressed: str = ""
+
+        class _PassthroughCrusher:
+            def crush(self, data: str) -> _PassthroughResult:
+                return _PassthroughResult()
+
+        monkeypatch.setattr(compressor, "_get_crusher", lambda: _PassthroughCrusher())
 
         def patched_config():
             return compressor.HeadroomCompressorConfig(
