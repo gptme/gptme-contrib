@@ -66,6 +66,77 @@ def _build_prose_content(n: int = 500) -> str:
     return cmd + para * n
 
 
+def _build_cat_content(n: int = 500) -> str:
+    """Tool output from a 'cat' command, used to test raw_tool_prefixes."""
+    lines = [f"line {i}: some config content here" for i in range(n)]
+    cmd = "Ran command: `cat /etc/config.ini`\n"
+    return cmd + "\n".join(lines)
+
+
+# ── _coerce_raw_tool_prefixes tests ────────────────────────────────
+
+
+class TestCoerceRawToolPrefixes:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from headroom_compressor.hooks.compressor import _coerce_raw_tool_prefixes
+
+        self._coerce = _coerce_raw_tool_prefixes
+
+    def test_none(self):
+        assert self._coerce(None) == ()
+
+    def test_string(self):
+        assert self._coerce("cat ") == ("cat ",)
+
+    def test_list(self):
+        assert self._coerce(["cat ", "echo "]) == ("cat ", "echo ")
+
+    def test_tuple(self):
+        assert self._coerce(("cat ",)) == ("cat ",)
+
+    def test_invalid_type(self):
+        assert self._coerce(42) == ()
+
+    def test_mixed_list_skips_non_strings(self):
+        assert self._coerce(["cat ", 42, "echo "]) == ("cat ", "echo ")
+
+
+# ── _content_matches_raw_prefix tests ──────────────────────────────
+
+
+class TestContentMatchesRawPrefix:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from headroom_compressor.hooks.compressor import _content_matches_raw_prefix
+
+        self._match = _content_matches_raw_prefix
+
+    def test_matches_cat_prefix(self):
+        content = "Ran command: `cat /etc/config.ini`\nfoo\nbar\n"
+        assert self._match(content, ("cat ",))
+
+    def test_matches_echo_prefix(self):
+        content = 'Ran command: `echo "hello"`\nhello\n'
+        assert self._match(content, ("echo",))
+
+    def test_no_match_without_prefixes(self):
+        content = "Ran command: `cat /etc/config.ini`\nfoo\n"
+        assert not self._match(content, ())
+
+    def test_no_match_for_different_prefix(self):
+        content = "Ran command: `grep pattern file.txt`\nresult\n"
+        assert not self._match(content, ("cat ",))
+
+    def test_no_match_for_executed_code_block(self):
+        """Executed code blocks don't have a command to match against."""
+        content = "Executed code block.\nfoo\nbar\n"
+        assert not self._match(content, ("cat ",))
+
+    def test_empty_content(self):
+        assert not self._match("", ("cat ",))
+
+
 # ── _is_compressible_message tests ─────────────────────────────────
 
 
@@ -113,8 +184,64 @@ class TestIsCompressibleMessage:
         msg = _tool_message("Ran command: `ls`\n" + "x" * 100)
         assert not self._check(msg, min_chars=500)
 
+    def test_skipped_by_raw_prefix(self):
+        """Messages matching raw_tool_prefixes should not be compressed."""
+        msg = _tool_message(_build_cat_content(200))
+        assert not self._check(msg, min_chars=1, raw_prefixes=("cat ",))
 
-# ── generation_pre_hook tests ─────────────────────────────────────
+    def test_not_skipped_by_unrelated_prefix(self):
+        """Messages not matching raw_tool_prefixes should still be compressible."""
+        msg = _tool_message(_build_grep_content(200))
+        assert self._check(msg, min_chars=1, raw_prefixes=("cat ",))
+
+
+# ── get_compressor_config tests ─────────────────────────────────────
+
+
+class TestGetCompressorConfig:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from headroom_compressor.hooks.compressor import get_compressor_config
+
+        self._get_config = get_compressor_config
+
+    def test_default_config_disabled(self):
+        """No env var, no config file → disabled."""
+        cfg = self._get_config()
+        assert not cfg.enabled
+        assert cfg.min_compress_chars == 2000
+        assert cfg.raw_tool_prefixes == ()
+
+    def test_env_var_enables(self):
+        """GPTME_HEADROOM_ENABLED=1 → enabled."""
+        import os
+
+        os.environ["GPTME_HEADROOM_ENABLED"] = "1"
+        try:
+            cfg = self._get_config()
+            assert cfg.enabled
+        finally:
+            del os.environ["GPTME_HEADROOM_ENABLED"]
+
+    def test_env_var_false(self):
+        """GPTME_HEADROOM_ENABLED=0 → disabled."""
+        import os
+
+        os.environ["GPTME_HEADROOM_ENABLED"] = "0"
+        try:
+            cfg = self._get_config()
+            assert not cfg.enabled
+        finally:
+            del os.environ["GPTME_HEADROOM_ENABLED"]
+
+    def test_file_empty_settings_stays_disabled(self):
+        """Config file with no plugin section → disabled (but doesn't crash)."""
+        cfg = self._get_config()
+        # Should not crash; default is disabled
+        assert not cfg.enabled
+
+
+# ── generation_pre_hook tests ──────────────────────────────────────
 
 
 class TestGenerationPreHook:
@@ -189,6 +316,62 @@ class TestGenerationPreHook:
         assert "Ran command: `curl https://example.com/api/items/`" in msgs[0].content
         assert '{"items":"compressed"}' in msgs[0].content
 
+    def test_hook_skips_raw_prefix_messages(self, monkeypatch):
+        """Messages matching raw_tool_prefixes are NOT compressed."""
+        from headroom_compressor.hooks import compressor
+
+        # Mock get_compressor_config to return a config with raw prefixes
+
+        def patched_config():
+            return compressor.HeadroomCompressorConfig(
+                enabled=True,
+                min_compress_chars=1,
+                raw_tool_prefixes=("cat ",),
+            )
+
+        monkeypatch.setattr(compressor, "get_compressor_config", patched_config)
+
+        content = _build_cat_content(200)
+        msg = _tool_message(content)
+        msgs = [msg]
+        list(compressor.generation_pre_hook(msgs))
+        # Should not be compressed — cat output matches raw prefix
+        assert "[Headroom compressed" not in msgs[0].content
+
+    def test_hook_compresses_non_raw_prefix(self, monkeypatch):
+        """Messages NOT matching raw_tool_prefixes ARE compressed by fake crusher."""
+        from dataclasses import dataclass
+
+        from headroom_compressor.hooks import compressor
+
+        @dataclass
+        class FakeResult:
+            was_modified: bool = True
+            strategy: str = "json"
+            compressed: str = "[compressed]"
+
+        class FakeCrusher:
+            def crush(self, data: str) -> FakeResult:
+                return FakeResult()
+
+        monkeypatch.setattr(compressor, "_get_crusher", lambda: FakeCrusher())
+
+        def patched_config():
+            return compressor.HeadroomCompressorConfig(
+                enabled=True,
+                min_compress_chars=1,
+                raw_tool_prefixes=("cat ",),
+            )
+
+        monkeypatch.setattr(compressor, "get_compressor_config", patched_config)
+
+        content = _build_grep_content(200)
+        msg = _tool_message(content)
+        msgs = [msg]
+        list(compressor.generation_pre_hook(msgs))
+        # Should be compressed — grep output doesn't match "cat " prefix
+        assert "[Headroom compressed" in msgs[0].content
+
     def test_small_message_not_compressed(self, monkeypatch):
         """Small messages are not touched."""
         from headroom_compressor.hooks.compressor import generation_pre_hook
@@ -209,7 +392,6 @@ class TestGenerationPreHook:
         from gptme.hooks import HookType
 
         fresh_registry = registry.HookRegistry()
-        # Monkeypatch at the re-export level so delayed imports in register() pick it up
         monkeypatch.setattr("gptme.hooks.register_hook", fresh_registry.register)
 
         from headroom_compressor.hooks.compressor import register
