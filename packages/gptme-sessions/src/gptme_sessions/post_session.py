@@ -677,7 +677,7 @@ def post_session(
             if smell is not None:
                 record_kwargs["smell_score"] = smell
         except Exception:  # pragma: no cover - defensive; smell is non-critical
-            logger.debug("smell-score computation failed", exc_info=True)
+            logger.warning("smell-score computation failed", exc_info=True)
     if session_id is not None:
         record_kwargs["session_id"] = session_id
     if token_count is not None:
