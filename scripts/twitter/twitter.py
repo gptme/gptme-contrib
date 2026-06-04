@@ -87,8 +87,9 @@ from url_utils import validate_urls_in_text  # type: ignore[import-not-found]
 DEFAULT_SINCE = "7d"
 DEFAULT_LIMIT = 10
 
-# Initialize rich console
-console = Console()
+# Initialize rich console (stderr=True so status messages don't pollute stdout
+# when callers capture stdout for JSON output, e.g. twitter-dispatch.sh)
+console = Console(stderr=True)
 
 
 @lru_cache(maxsize=1)
