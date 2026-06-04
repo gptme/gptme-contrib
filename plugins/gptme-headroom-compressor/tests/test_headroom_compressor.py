@@ -164,7 +164,12 @@ class TestGenerationPreHook:
 
     def test_register(self, monkeypatch):
         """Registration produces a valid hook entry (name, priority)."""
-        from gptme.hooks import HookType, registry
+        try:
+            from gptme.hooks import registry  # noqa: F401
+        except ImportError:
+            pytest.skip("gptme version does not expose hooks.registry")
+
+        from gptme.hooks import HookType
 
         fresh_registry = registry.HookRegistry()
         # Monkeypatch at the re-export level so delayed imports in register() pick it up
