@@ -36,6 +36,7 @@ from .deliverables import (
 from .discovery import extract_project, extract_session_name
 from .record import SessionRecord
 from .signals import extract_from_path
+from .smell import compute_smell_score
 from .store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -669,6 +670,14 @@ def post_session(
             logger.info("Auto-detected journal_path from trajectory: %s", journal_path)
     if journal_path is not None:
         record_kwargs["journal_path"] = journal_path
+        # Voice-quality signal: scan the journal prose for regex LLM smells.
+        # Cheap (stdlib regex), best-effort — never let it break recording.
+        try:
+            smell = compute_smell_score(journal_path)
+            if smell is not None:
+                record_kwargs["smell_score"] = smell
+        except Exception:  # pragma: no cover - defensive; smell is non-critical
+            logger.warning("smell-score computation failed", exc_info=True)
     if session_id is not None:
         record_kwargs["session_id"] = session_id
     if token_count is not None:
