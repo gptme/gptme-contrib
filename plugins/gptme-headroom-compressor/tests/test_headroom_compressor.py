@@ -122,6 +122,13 @@ class TestGenerationPreHook:
     def _setup(self, monkeypatch):
         monkeypatch.setenv("GPTME_HEADROOM_ENABLED", "1")
 
+    def test_get_crusher_cached_import_failure_returns_none(self, monkeypatch):
+        """Cached import failure sentinel does not get called as a class."""
+        from headroom_compressor.hooks import compressor
+
+        monkeypatch.setattr(compressor, "_SmartCrusher", False)
+        assert compressor._get_crusher() is None
+
     def test_hook_enabled_flag(self, monkeypatch):
         """Feature flag gates the hook."""
         from headroom_compressor.hooks.compressor import generation_pre_hook
@@ -151,6 +158,36 @@ class TestGenerationPreHook:
         msgs = [msg]
         list(generation_pre_hook(msgs))
         assert "[Headroom compressed" not in msgs[0].content
+
+    def test_hook_compresses_structured_tool_output(self, monkeypatch):
+        """Structured tool output is compressed and keeps its command prefix."""
+        from dataclasses import dataclass
+
+        from headroom_compressor.hooks import compressor
+
+        @dataclass
+        class FakeResult:
+            was_modified: bool = True
+            strategy: str = "test"
+            compressed: str = '{"items":"compressed"}'
+
+        class FakeCrusher:
+            def crush(self, data: str) -> FakeResult:
+                assert data.startswith("[")
+                assert not data.startswith("Ran command:")
+                return FakeResult()
+
+        monkeypatch.setattr(compressor, "_get_crusher", lambda: FakeCrusher())
+        content = _build_json_array(200)
+        msg = _tool_message(content)
+        msgs = [msg]
+
+        list(compressor.generation_pre_hook(msgs))
+
+        assert msgs[0].content.startswith("[Headroom compressed")
+        assert "strategy=test" in msgs[0].content
+        assert "Ran command: `curl https://example.com/api/items/`" in msgs[0].content
+        assert '{"items":"compressed"}' in msgs[0].content
 
     def test_small_message_not_compressed(self, monkeypatch):
         """Small messages are not touched."""
