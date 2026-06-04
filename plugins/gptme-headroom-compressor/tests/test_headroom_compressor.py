@@ -234,6 +234,23 @@ class TestGetCompressorConfig:
         finally:
             del os.environ["GPTME_HEADROOM_ENABLED"]
 
+    def test_env_var_false_overrides_config_file_enabled(self, monkeypatch):
+        """GPTME_HEADROOM_ENABLED=0 must override enabled=true from config (fallback path).
+
+        Regression: the old fallback mapped '0'/'false'/'no' to None instead of
+        False, so it could not suppress a config-file-enabled plugin.
+        """
+        from types import SimpleNamespace
+
+        fake_user = SimpleNamespace(plugin={"headroom_compressor": {"enabled": True}})
+        fake_config = SimpleNamespace(user=fake_user, project=None)
+        monkeypatch.setattr(
+            "headroom_compressor.hooks.compressor.get_config", lambda: fake_config
+        )
+        monkeypatch.setenv("GPTME_HEADROOM_ENABLED", "0")
+        cfg = self._get_config()
+        assert not cfg.enabled
+
     def test_file_empty_settings_stays_disabled(self):
         """Config file with no plugin section → disabled (but doesn't crash)."""
         cfg = self._get_config()

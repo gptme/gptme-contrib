@@ -126,7 +126,12 @@ def get_compressor_config() -> HeadroomCompressorConfig:
         env_enabled = config.get_env_bool(ENABLED_ENV_VAR)
     else:
         raw = os.environ.get(ENABLED_ENV_VAR, "").strip().lower()
-        env_enabled = True if raw in ("1", "true", "yes") else None
+        if raw in ("1", "true", "yes"):
+            env_enabled: bool | None = True
+        elif raw in ("0", "false", "no"):
+            env_enabled = False
+        else:
+            env_enabled = None
     file_enabled = bool(settings.get("enabled"))
     enabled = env_enabled if env_enabled is not None else file_enabled
 
