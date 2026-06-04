@@ -276,8 +276,15 @@ class TestGetCompressorConfig:
 
         self._get_config = get_compressor_config
 
-    def test_default_config_disabled(self):
+    def test_default_config_disabled(self, monkeypatch):
         """No env var, no config file → disabled."""
+        from types import SimpleNamespace
+
+        fake_config = SimpleNamespace(user=SimpleNamespace(plugin={}), project=None)
+        monkeypatch.setattr(
+            "headroom_compressor.hooks.compressor.get_config", lambda: fake_config
+        )
+        monkeypatch.delenv("GPTME_HEADROOM_ENABLED", raising=False)
         cfg = self._get_config()
         assert not cfg.enabled
         assert cfg.min_compress_chars == 2000
@@ -322,8 +329,15 @@ class TestGetCompressorConfig:
         cfg = self._get_config()
         assert not cfg.enabled
 
-    def test_file_empty_settings_stays_disabled(self):
+    def test_file_empty_settings_stays_disabled(self, monkeypatch):
         """Config file with no plugin section → disabled (but doesn't crash)."""
+        from types import SimpleNamespace
+
+        fake_config = SimpleNamespace(user=SimpleNamespace(plugin={}), project=None)
+        monkeypatch.setattr(
+            "headroom_compressor.hooks.compressor.get_config", lambda: fake_config
+        )
+        monkeypatch.delenv("GPTME_HEADROOM_ENABLED", raising=False)
         cfg = self._get_config()
         # Should not crash; default is disabled
         assert not cfg.enabled
@@ -579,3 +593,82 @@ class TestGenerationPreHook:
         assert len(matching) == 1
         assert matching[0].priority == 201
         assert matching[0].enabled is True
+
+    def test_hook_records_savings_to_cost_tracker(self, monkeypatch):
+        """When compression happens, savings are reported to CostTracker."""
+        from dataclasses import dataclass
+
+        from headroom_compressor.hooks import compressor
+
+        @dataclass
+        class FakeResult:
+            was_modified: bool = True
+            strategy: str = "test"
+            compressed: str = '{"items":"compressed"}'
+
+        class FakeCrusher:
+            def crush(self, data: str) -> FakeResult:
+                return FakeResult()
+
+        recorded: list[dict] = []
+
+        class FakeTracker:
+            def record_extra(self, **kwargs):
+                recorded.append(kwargs)
+
+        class FakeCostTracker:
+            @staticmethod
+            def get_session_costs():
+                return FakeTracker()
+
+        monkeypatch.setattr(compressor, "_get_crusher", lambda: FakeCrusher())
+        monkeypatch.setattr(compressor, "CostTracker", FakeCostTracker)
+
+        msg = _tool_message(_build_json_array(200))
+        msgs = [msg]
+        list(compressor.generation_pre_hook(msgs))
+
+        assert len(recorded) == 1
+        assert recorded[0]["key"] == "headroom_compressor"
+        assert recorded[0]["compressed_count"] == 1
+        assert recorded[0]["chars_saved"] > 0
+
+    def test_hook_swallows_cost_tracker_failure(self, monkeypatch):
+        """A failing record_extra must not break compression (graceful degrade).
+
+        Older gptme releases lack ``SessionCosts.record_extra``; the call raises
+        ``AttributeError``. Compression must still apply — cost tracking is
+        best-effort telemetry, never a hard dependency of the hook.
+        """
+        from dataclasses import dataclass
+
+        from headroom_compressor.hooks import compressor
+
+        @dataclass
+        class FakeResult:
+            was_modified: bool = True
+            strategy: str = "test"
+            compressed: str = '{"items":"compressed"}'
+
+        class FakeCrusher:
+            def crush(self, data: str) -> FakeResult:
+                return FakeResult()
+
+        class BrokenTracker:
+            def record_extra(self, **kwargs):
+                raise AttributeError("record_extra not available in this gptme")
+
+        class FakeCostTracker:
+            @staticmethod
+            def get_session_costs():
+                return BrokenTracker()
+
+        monkeypatch.setattr(compressor, "_get_crusher", lambda: FakeCrusher())
+        monkeypatch.setattr(compressor, "CostTracker", FakeCostTracker)
+
+        msg = _tool_message(_build_json_array(200))
+        msgs = [msg]
+        # Must not raise despite the tracker failure.
+        list(compressor.generation_pre_hook(msgs))
+
+        assert msgs[0].content.startswith("[Headroom compressed")
