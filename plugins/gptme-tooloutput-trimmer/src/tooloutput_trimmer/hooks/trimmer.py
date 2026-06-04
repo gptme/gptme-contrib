@@ -46,6 +46,7 @@ DEFAULT_PRESSURE_CHARS = 100_000
 ANTHROPIC_CACHE_TTL_SECS = 5 * 60
 TOOL_OUTPUT_PREFIXES = ("Ran command: `", "Executed code block.")
 TRIMMED_MARKER = "[Tool output trimmed"
+HEADROOM_MARKER = "[Headroom compressed"  # skip messages already losslessly compressed
 BYPASS_ENV_VAR = "GPTME_TRIM_BYPASS"
 
 
@@ -220,6 +221,9 @@ def _is_tool_output_message(
     if message.role != "system" or message.pinned:
         return False
     if message.content.startswith(TRIMMED_MARKER):
+        return False
+    # Skip messages already losslessly compressed by headroom-compressor
+    if message.content.startswith(HEADROOM_MARKER):
         return False
     if len(message.content) <= max_output_chars:
         return False
