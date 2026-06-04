@@ -906,3 +906,29 @@ def test_post_session_smell_score_none_without_journal(tmp_path: Path):
         duration_seconds=60,
     )
     assert result.record.smell_score is None
+
+
+def test_post_session_smell_score_zero_for_clean_journal(tmp_path: Path):
+    """Clean technical prose with no LLM-smell hits produces smell_score=0.0, not None."""
+    store = SessionStore(sessions_dir=tmp_path)
+    journal = tmp_path / "session.md"
+    journal.write_text(
+        "Fixed the IndexError in parse_tokens by checking slice bounds before access. "
+        "Added a unit test covering the empty-list path. "
+        "CI passes on Python 3.10, 3.11, and 3.12. Pushed the fix.",
+        encoding="utf-8",
+    )
+
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        duration_seconds=60,
+        journal_path=str(journal),
+    )
+
+    assert result.record.smell_score == 0.0
+
+    # Persists through store reload — 0.0 is stored, not collapsed to None.
+    records = SessionStore(sessions_dir=tmp_path).load_all()
+    assert records[0].smell_score == 0.0
