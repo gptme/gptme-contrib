@@ -865,3 +865,44 @@ def test_caller_sha_in_traj():
     assert _caller_sha_in_traj("dead123456789abcdef0000000000000000000", prefixes) is True
     assert _caller_sha_in_traj("cafe000000000000000000000000000000000", prefixes) is False
     assert _caller_sha_in_traj("ABC1234567890ABCDEF", prefixes) is True  # case-insensitive
+
+
+def test_post_session_populates_smell_score(tmp_path: Path):
+    """post_session computes a smell_score from the journal prose and persists it."""
+    store = SessionStore(sessions_dir=tmp_path)
+    journal = tmp_path / "session.md"
+    journal.write_text(
+        "It's worth noting that this is a testament to our ever-evolving "
+        "tapestry of solutions. Let's delve into the realm of possibilities. "
+        "It's not just a feature, it's a game-changer. In conclusion, I'd be "
+        "happy to help. Great question! Moreover, this showcases a comprehensive "
+        "approach.",
+        encoding="utf-8",
+    )
+
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        duration_seconds=60,
+        journal_path=str(journal),
+    )
+
+    assert result.record.smell_score is not None
+    assert 0.0 < result.record.smell_score <= 1.0
+
+    # Persists through store reload.
+    records = SessionStore(sessions_dir=tmp_path).load_all()
+    assert records[0].smell_score == result.record.smell_score
+
+
+def test_post_session_smell_score_none_without_journal(tmp_path: Path):
+    """No journal_path means smell_score stays None (no crash)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        duration_seconds=60,
+    )
+    assert result.record.smell_score is None
