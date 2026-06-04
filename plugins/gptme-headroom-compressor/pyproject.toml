@@ -1,0 +1,27 @@
+[project]
+name = "gptme-headroom-compressor"
+version = "0.1.0"
+description = "Headroom SmartCrusher lossless compression hook for gptme tool outputs"
+requires-python = ">=3.10"
+dependencies = [
+    "gptme>=0.29.0",
+]
+
+[project.optional-dependencies]
+headroom = [
+    "headroom-ai>=0.1.0",
+]
+test = [
+    "pytest>=8.0.0",
+    "headroom-ai>=0.1.0",
+]
+
+[project.entry-points."gptme.plugins"]
+headroom_compressor = "headroom_compressor:plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/headroom_compressor"]
