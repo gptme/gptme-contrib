@@ -40,6 +40,8 @@ def _get_crusher():
     """Lazy-init SmartCrusher. Returns None if headroom not available."""
     global _SmartCrusher
     if _SmartCrusher is not None:
+        if _SmartCrusher is False:  # sentinel — import previously failed
+            return None
         return _SmartCrusher()
 
     try:
