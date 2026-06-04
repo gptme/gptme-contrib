@@ -6,17 +6,41 @@ unchanged and are handled by the trimmer.
 
 SmartCrusher is imported lazily — if headroom-ai is not installed, the hook
 gracefully disables itself with a warning.
+
+Configuration via gptme.toml:
+
+    [plugin.headroom_compressor]
+    enabled = true
+    raw_tool_prefixes = ["cat ", "echo "]
+    min_compress_chars = 2000
+
+Or via env: GPTME_HEADROOM_ENABLED=1
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Generator
+from dataclasses import dataclass, field
 from typing import Any
 
+from gptme.config import get_config
 from gptme.hooks import HookType, StopPropagation
 from gptme.message import Message
+
+try:
+    from gptme.util.cost_tracker import CostTracker
+except ModuleNotFoundError:
+
+    class CostTracker:  # type: ignore
+        """Compatibility shim for older gptme releases."""
+
+        @staticmethod
+        def get_session_costs() -> None:
+            return None
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +56,101 @@ TOOL_OUTPUT_PREFIXES = ("Ran command: `", "Executed code block.")
 # Sentinel string prepended to compressed content
 COMPRESSED_MARKER = "[Headroom compressed"
 
-# Lazy-loaded SmartCrusher
+# Session-level stats accumulator
+_compressed_count: int = 0
+_total_savings: int = 0
+
+
+@dataclass(frozen=True)
+class HeadroomCompressorConfig:
+    """Configuration for the headroom compressor plugin.
+
+    Read from [plugin.headroom_compressor] in gptme config + env var override.
+    """
+
+    enabled: bool = False
+    min_compress_chars: int = DEFAULT_MIN_COMPRESS_CHARS
+    # Commands/prefixes whose shell output should skip SmartCrusher compression.
+    # Only applies to "Ran command: `...`" messages.
+    raw_tool_prefixes: tuple[str, ...] = field(default_factory=tuple)
+
+
 _SmartCrusher = None  # type: ignore
+_config_cache: HeadroomCompressorConfig | None = None
+
+
+def _coerce_int(value: Any, default: int, *, minimum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, parsed)
+
+
+def _coerce_raw_tool_prefixes(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if not isinstance(value, list | tuple):
+        logger.warning(
+            "headroom_compressor: ignoring invalid raw_tool_prefixes=%r; "
+            "expected string or list[str]",
+            value,
+        )
+        return ()
+    prefixes = tuple(p for p in value if isinstance(p, str))
+    if len(prefixes) != len(value):
+        logger.warning(
+            "headroom_compressor: ignoring non-string raw_tool_prefixes entries: %r",
+            value,
+        )
+    return prefixes
+
+
+def get_compressor_config() -> HeadroomCompressorConfig:
+    """Read compressor config from env + [plugin.headroom_compressor]."""
+    global _config_cache
+    if _config_cache is not None:
+        return _config_cache
+    config = get_config()
+
+    # Read plugin settings from gptme config
+    settings: dict[str, Any] = {}
+    if config.user and hasattr(config.user, "plugin"):
+        settings = getattr(config.user, "plugin", {}).get("headroom_compressor", {})
+    if config.project and hasattr(config.project, "plugin"):
+        project_settings = getattr(config.project, "plugin", {}).get(
+            "headroom_compressor", {}
+        )
+        settings = {**settings, **project_settings}
+
+    # Env var overrides config file
+    if hasattr(config, "get_env_bool"):
+        env_enabled = config.get_env_bool(ENABLED_ENV_VAR)
+    else:
+        raw = os.environ.get(ENABLED_ENV_VAR, "").strip().lower()
+        if raw in ("1", "true", "yes"):
+            env_enabled: bool | None = True
+        elif raw in ("0", "false", "no"):
+            env_enabled = False
+        else:
+            env_enabled = None
+    file_enabled = bool(settings.get("enabled"))
+    enabled = env_enabled if env_enabled is not None else file_enabled
+
+    _config_cache = HeadroomCompressorConfig(
+        enabled=enabled,
+        min_compress_chars=_coerce_int(
+            settings.get("min_compress_chars"),
+            DEFAULT_MIN_COMPRESS_CHARS,
+            minimum=1,
+        ),
+        raw_tool_prefixes=_coerce_raw_tool_prefixes(
+            settings.get("raw_tool_prefixes", [])
+        ),
+    )
+    return _config_cache
 
 
 def _get_crusher():
@@ -63,14 +180,23 @@ def _get_crusher():
         return None
 
 
-def _check_enabled() -> bool:
-    val = os.environ.get(ENABLED_ENV_VAR, "").strip().lower()
-    return val in ("1", "true", "yes")
+def _content_matches_raw_prefix(content: str, raw_prefixes: tuple[str, ...]) -> bool:
+    """Check if a shell tool-output message's command matches a raw prefix."""
+    if not raw_prefixes:
+        return False
+    first_line = content.splitlines()[0] if content else ""
+    if m := re.search(r"`([^`]+)`", first_line):
+        cmd = m.group(1)
+        for prefix in raw_prefixes:
+            if cmd.startswith(prefix):
+                return True
+    return False
 
 
 def _is_compressible_message(
     message: Message,
     min_chars: int = DEFAULT_MIN_COMPRESS_CHARS,
+    raw_prefixes: tuple[str, ...] = (),
 ) -> bool:
     """Check if a message is a tool output worth attempting compression on."""
     if message.role != "system" or message.pinned:
@@ -82,6 +208,8 @@ def _is_compressible_message(
     if not message.content.startswith(TOOL_OUTPUT_PREFIXES):
         return False
     if len(message.content) < min_chars:
+        return False
+    if _content_matches_raw_prefix(message.content, raw_prefixes):
         return False
     return True
 
@@ -99,6 +227,25 @@ def _split_tool_output(content: str) -> tuple[str, str]:
     return content[: idx + 1], content[idx + 1 :]
 
 
+# Matches a markdown code fence block: ```lang\n<content>\n```
+# gptme wraps tool outputs in ```stdout...``` fences; SmartCrusher needs the raw content.
+_FENCE_RE = re.compile(
+    r"^(\s*```\w*\n)(.*?)(\n```)(\s*)$",
+    re.DOTALL,
+)
+
+
+def _unwrap_fence(data: str) -> tuple[str, str, str, str] | None:
+    """If data is a single markdown code fence, return (open, content, close, trailing).
+
+    Returns None if data is not a single fenced block.
+    """
+    m = _FENCE_RE.match(data)
+    if m:
+        return m.group(1), m.group(2), m.group(3), m.group(4)
+    return None
+
+
 def generation_pre_hook(
     messages: list[Message],
     **kwargs: Any,
@@ -109,7 +256,10 @@ def generation_pre_hook(
     structured tool outputs losslessly. Unstructured/passthrough outputs
     are left for the trimmer.
     """
-    if not _check_enabled():
+    global _compressed_count, _total_savings
+
+    config = get_compressor_config()
+    if not config.enabled:
         return
 
     crusher = _get_crusher()
@@ -117,20 +267,37 @@ def generation_pre_hook(
         return
 
     rewritten: list[Message] = []
-    compressed_count = 0
-    total_savings = 0
+    session_compressed = 0
+    session_savings = 0
 
     for message in messages:
-        if _is_compressible_message(message):
+        if _is_compressible_message(
+            message,
+            min_chars=config.min_compress_chars,
+            raw_prefixes=config.raw_tool_prefixes,
+        ):
             try:
                 prefix, data = _split_tool_output(message.content)
-                result = crusher.crush(data)
+                # gptme wraps tool outputs in ```stdout...``` fences.
+                # Unwrap to give SmartCrusher raw content, then rewrap after.
+                fence_parts = _unwrap_fence(data)
+                if fence_parts:
+                    fence_open, inner_data, fence_close, fence_trailing = fence_parts
+                    result = crusher.crush(inner_data)
+                    compressed_data = (
+                        fence_open + result.compressed + fence_close + fence_trailing
+                        if result.was_modified
+                        else data
+                    )
+                else:
+                    result = crusher.crush(data)
+                    compressed_data = result.compressed if result.was_modified else data
                 if result.was_modified:
                     original_len = len(message.content)
-                    compressed_len = len(prefix) + len(result.compressed)
+                    compressed_len = len(prefix) + len(compressed_data)
                     savings_pct = round((1 - compressed_len / original_len) * 100)
-                    total_savings += original_len - compressed_len
-                    compressed_count += 1
+                    session_savings += original_len - compressed_len
+                    session_compressed += 1
                     rewritten.append(
                         message.replace(
                             content=(
@@ -138,7 +305,7 @@ def generation_pre_hook(
                                 f"(orig={original_len}, "
                                 f"strategy={result.strategy}, "
                                 f"savings={savings_pct}%)]\n"
-                                f"{prefix}{result.compressed}"
+                                f"{prefix}{compressed_data}"
                             )
                         )
                     )
@@ -150,12 +317,33 @@ def generation_pre_hook(
                 )
         rewritten.append(message)
 
-    if compressed_count > 0:
+    if session_compressed > 0:
         messages[:] = rewritten
+        _compressed_count += session_compressed
+        _total_savings += session_savings
+
+        # Record to cost tracker
+        try:
+            tracker = CostTracker.get_session_costs()
+            if tracker is not None:
+                tracker.record_extra(
+                    key="headroom_compressor",
+                    compressed_count=session_compressed,
+                    chars_saved=session_savings,
+                )
+        except Exception:
+            logger.debug(
+                "headroom_compressor: CostTracker.record_extra() failed",
+                exc_info=True,
+            )
+
         logger.info(
-            "headroom_compressor: compressed %d message(s), saved %d chars",
-            compressed_count,
-            total_savings,
+            "headroom_compressor: compressed %d message(s), saved %d chars "
+            "(total this process: %d messages, %d chars)",
+            session_compressed,
+            session_savings,
+            _compressed_count,
+            _total_savings,
         )
 
     yield from ()
