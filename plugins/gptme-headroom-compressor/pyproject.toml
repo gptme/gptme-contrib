@@ -8,8 +8,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+headroom = [
+    "headroom-ai>=0.1.0",
+]
 test = [
     "pytest>=8.0.0",
+    "headroom-ai>=0.1.0",
 ]
 
 [project.entry-points."gptme.plugins"]

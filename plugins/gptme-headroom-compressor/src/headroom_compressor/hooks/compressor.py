@@ -86,6 +86,19 @@ def _is_compressible_message(
     return True
 
 
+def _split_tool_output(content: str) -> tuple[str, str]:
+    """Split tool output into (prefix_line, data).
+
+    The first line (command prefix like "Ran command: `...`") is separated
+    from the remaining data. SmartCrusher needs pure data to recognize
+    structured content types (JSON, tables, etc.).
+    """
+    idx = content.find("\n")
+    if idx == -1:
+        return content, ""
+    return content[: idx + 1], content[idx + 1 :]
+
+
 def generation_pre_hook(
     messages: list[Message],
     **kwargs: Any,
@@ -110,10 +123,11 @@ def generation_pre_hook(
     for message in messages:
         if _is_compressible_message(message):
             try:
-                result = crusher.crush(message.content)
+                prefix, data = _split_tool_output(message.content)
+                result = crusher.crush(data)
                 if result.was_modified:
-                    original_len = len(result.original)
-                    compressed_len = len(result.compressed)
+                    original_len = len(message.content)
+                    compressed_len = len(prefix) + len(result.compressed)
                     savings_pct = round((1 - compressed_len / original_len) * 100)
                     total_savings += original_len - compressed_len
                     compressed_count += 1
@@ -124,7 +138,7 @@ def generation_pre_hook(
                                 f"(orig={original_len}, "
                                 f"strategy={result.strategy}, "
                                 f"savings={savings_pct}%)]\n"
-                                f"{result.compressed}"
+                                f"{prefix}{result.compressed}"
                             )
                         )
                     )
