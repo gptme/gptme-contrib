@@ -9,8 +9,6 @@ action:
   run: python3 scripts/vent.py "message describing friction" --resolution-owner <owner>
 owner_paths:
   - scripts/vent.py
-  - packages/metaproductivity/src/metaproductivity/friction.py
-  - knowledge/analysis/
 entrypoints:
   - cli
   - agent
@@ -58,14 +56,9 @@ Resolution-owner values:
 - `upstream` — blocked on a dependency Bob doesn't control
 - `architectural` — not solvable in the current stack without redesign
 
-The ledger is shared across harnesses (`gptme`, Claude Code, Codex, web), so a
-vent recorded here will also show up in metaproductivity analysis.
+The ledger file is at `~/.local/share/gptme/friction-ledger.jsonl`. Each entry
+is a JSON line with timestamp, workspace, message, resolution_owner, and
+harness fields — suitable for direct inspection or piping into analysis tools.
 
-Useful follow-up:
-
-```bash
-uv run python3 -m metaproductivity.friction --journal-dir journal --last-n-sessions 20 --format summary --with-alerts
-```
-
-That turns raw vent events into aggregate friction summaries, blocker patterns,
-and actionable alerts for future sessions.
+The same ledger path is used by the native `vent` tool in gptme, so signals are
+shared across all tooling that writes to the same file.
