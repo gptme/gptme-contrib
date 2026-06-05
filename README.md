@@ -8,6 +8,7 @@ This repository contains:
 - **[`plugins/`](./plugins/)** - Extend gptme with custom functionality ([gptme docs](https://gptme.org/docs/plugins.html))
 - **[`packages/`](./packages/)** - Reusable Python packages
 - **[`scripts/`](./scripts/)** - Standalone scripts for automation
+- **[`commands/`](./commands/)** - Thin command-catalog entries for runtime procedure discovery
 - **[`lessons/`](./lessons/)** - Shared lessons for prompts and workflows
 
 ## Plugins
