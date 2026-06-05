@@ -190,6 +190,9 @@ def _read_cache(cache_key: str) -> dict[str, object] | None:
         age = time.time() - float(cached_ts)
         if age > _CACHE_TTL_DAYS * 86400:
             return None
+    else:
+        # Missing _cached_at → can't verify freshness, reject
+        return None
 
     # Version compatibility
     if entry.get("version") != ARTIFACT_VERSION:
@@ -223,17 +226,31 @@ def generate_map(
     expensive tree-sitter pipeline when source files haven't changed. Set
     ``use_cache=False`` to force a full rebuild.
     """
+    # Pre-compute stat fingerprint and cache key once so we can reuse them
+    # on the slow path and avoid a TOCTOU window (build_repo_map can take
+    # seconds, and the second _stat_fingerprint call could see different
+    # mtime values).
+    stat_fp: str | None = None
+    cache_key: str | None = None
     if use_cache:
-        # Fast path: stat-only fingerprint. If it matches a cached entry, skip
-        # the expensive source_digest (file-content reads) + tree-sitter build.
         stat_fp, _ = _stat_fingerprint(directory)
         if stat_fp is not None:
             cache_key = _repo_cache_key(directory)
             cached = _read_cache(cache_key)
             if cached is not None and cached.get("_stat_fingerprint") == stat_fp:
                 # Cache hit: stat fingerprint matched, so source content hasn't
-                # changed. Return cached tree-sitter result + metadata as-is,
-                # only updating the generation timestamp.
+                # changed. Return cached tree-sitter result + metadata, with a
+                # refreshed _cached_at timestamp so frequently-accessed repos
+                # stay warm while the 7-day TTL still acts as a safety net for
+                # repos that aren't accessed.
+                _write_cache(
+                    cache_key,
+                    {
+                        k: v
+                        for k, v in cached.items()
+                        if k not in ("_cached_at", "_stat_fingerprint")
+                    },
+                )
                 return {
                     **{k: v for k, v in cached.items() if not k.startswith("_")},
                     "generated": datetime.now(timezone.utc).isoformat(),
@@ -267,16 +284,14 @@ def generate_map(
         "max_symbols_per_file": max_symbols_per_file,
     }
 
-    if use_cache:
-        # Cache the result keyed on stat-fingerprint so the next run on
-        # unchanged source can skip the tree-sitter pipeline.
-        stat_fp, _ = _stat_fingerprint(directory)
-        if stat_fp is not None:
-            cache_key = _repo_cache_key(directory)
-            _write_cache(
-                cache_key,
-                {**result, "_stat_fingerprint": stat_fp},
-            )
+    if use_cache and stat_fp is not None and cache_key is not None:
+        # Reuse the stat fingerprint already computed before the tree-sitter
+        # build — avoids a TOCTOU window where the second call could see
+        # different mtime values (parallel writes, editor auto-save).
+        _write_cache(
+            cache_key,
+            {**result, "_stat_fingerprint": stat_fp},
+        )
 
     return result
 

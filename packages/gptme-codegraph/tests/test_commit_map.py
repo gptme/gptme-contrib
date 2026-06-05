@@ -302,8 +302,7 @@ def test_generate_map_fingerprint_mismatch_does_full_build(tmp_path):
 
 
 def test_generate_map_cache_hit_writes_back_timestamp(tmp_path):
-    # Even on cache hit, the timestamp is refreshed so the entry doesn't
-    # expire before the next run.
+    """Cache hit refreshes the _cached_at timestamp (keep-warm pattern)."""
     cache_key = commit_map._repo_cache_key(tmp_path)
     old_ts = commit_map.time.time() - 3600
     cached = {
@@ -317,7 +316,11 @@ def test_generate_map_cache_hit_writes_back_timestamp(tmp_path):
         "_stat_fingerprint": "match",
         "_cached_at": old_ts,
     }
-    commit_map._write_cache(cache_key, cached)
+    # Write the cache file directly — _write_cache would overwrite _cached_at
+    # with time.time(), defeating the test.
+    cache_path = commit_map._CACHE_DIR / f"{cache_key}.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cached))
 
     with (
         patch.object(commit_map, "_stat_fingerprint", return_value=("match", 1)),
