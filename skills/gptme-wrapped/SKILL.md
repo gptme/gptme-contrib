@@ -1,3 +1,16 @@
+---
+name: gptme-wrapped
+description: Analyze your gptme conversation history for insights like token usage, costs, model preferences, and usage patterns — inspired by Spotify Wrapped.
+license: MIT
+compatibility: "Requires gptme"
+metadata:
+  author: bob
+  version: "1.0.0"
+  tags: [analytics, conversations, tokens, costs, usage-patterns]
+  requires_tools: []
+  requires_skills: []
+---
+
 # gptme Wrapped - Conversation Analytics
 
 **Description:** Analyze your gptme conversation history for insights like token usage, costs, model preferences, and usage patterns - inspired by Spotify Wrapped.

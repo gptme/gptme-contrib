@@ -1,3 +1,16 @@
+---
+name: plugin-development
+description: Guide to creating gptme plugins with tools, hooks, and commands — covers ToolSpec, lifecycle hooks, custom /commands, testing, and pyproject.toml setup.
+license: MIT
+compatibility: "Requires gptme>=0.27.0"
+metadata:
+  author: bob
+  version: "1.0.0"
+  tags: [plugins, tools, hooks, commands, development]
+  requires_tools: []
+  requires_skills: []
+---
+
 # gptme Plugin Development
 
 **Description:** Guide to creating gptme plugins with tools, hooks, and commands.
