@@ -567,6 +567,12 @@ class GptmeToolBridge:
                 )
             except asyncio.TimeoutError:
                 process.kill()
+                # on_completed is never called by the subprocess path when
+                # Python's asyncio.wait_for fires, so pending.returncode stays
+                # None.  Set it explicitly so _handle_subagent_result records
+                # "timed_out" rather than "error" in recent_completions.
+                if on_completed:
+                    on_completed(124, time.monotonic())
                 return ToolResult(
                     success=False,
                     output="",

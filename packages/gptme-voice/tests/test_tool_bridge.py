@@ -833,6 +833,53 @@ def test_subagent_status_shows_recent_timeout() -> None:
     asyncio.run(_exercise())
 
 
+def test_subagent_status_shows_asyncio_timeout() -> None:
+    """Python asyncio.TimeoutError path records 'timed_out', not 'error'.
+
+    When asyncio.wait_for fires (Python-side timeout), on_completed is never
+    called by the subprocess path, so pending.returncode stays None without the
+    fix.  Verify the explicit on_completed(124, ...) call in the handler makes
+    the status surface correctly.
+    """
+
+    async def _exercise() -> None:
+        class _SlowProcess(_FakeProcess):
+            async def wait(self) -> int:
+                await asyncio.sleep(1000)
+                return 0  # never reached
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            # Very short timeout so asyncio.wait_for fires immediately
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=0.01)
+
+            dispatch = await bridge.handle_function_call(
+                "subagent",
+                {"task": "slow task that triggers asyncio timeout", "mode": "fast"},
+            )
+            task_id = dispatch["task_id"]
+
+            # Let the background task run and hit the timeout
+            for _ in range(50):
+                await asyncio.sleep(0.001)
+
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["pending_count"] == 0
+            recent = status["recent_completions"]
+            assert len(recent) == 1
+            entry = recent[0]
+            assert entry["task_id"] == task_id
+            assert (
+                entry["status"] == "timed_out"
+            ), f"expected timed_out, got {entry['status']}"
+            assert entry["returncode"] == 124
+
+    asyncio.run(_exercise())
+
+
 def test_subagent_dispatch_defaults_to_fast_mode() -> None:
     """Missing mode should still dispatch on the fast live-call path."""
 
