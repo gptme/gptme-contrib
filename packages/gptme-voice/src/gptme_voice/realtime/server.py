@@ -478,6 +478,38 @@ _PROVIDER_GROK = "grok"
 _VALID_PROVIDERS = (_PROVIDER_OPENAI, _PROVIDER_GROK)
 _VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
+# Friendly provider descriptions for truthful runtime self-reporting. The
+# realtime voice model otherwise confabulates an unrelated identity (observed
+# 2026-06-05: claiming "Claude 3.5 Sonnet" on a Grok-powered call) when a caller
+# asks what is powering the conversation.
+_PROVIDER_DISPLAY = {
+    _PROVIDER_OPENAI: "OpenAI's realtime voice API",
+    _PROVIDER_GROK: "xAI's Grok realtime voice API",
+}
+
+
+def _build_runtime_identity_instructions(provider: str, model: str | None) -> str:
+    """Return a truthful runtime-identity block for the active voice provider.
+
+    The realtime model has no inherent knowledge of which provider/model is
+    serving the live call, so when asked "what model are you running on?" it
+    confabulates. This block states the ground truth so the model answers
+    honestly instead of guessing an unrelated vendor.
+    """
+    display = _PROVIDER_DISPLAY.get(provider, f"the {provider} realtime voice API")
+    model_clause = f" (model: {model})" if model else ""
+    return (
+        "RUNTIME IDENTITY:\n"
+        f"- This live voice conversation is served by {display}{model_clause}.\n"
+        "- If the caller asks what model or provider is powering this call, answer "
+        "truthfully with that. Do NOT claim to be Claude, GPT, or any other model "
+        "unless it matches the provider above.\n"
+        "- Your text-based gptme persona and code-lookup subagent may run on a "
+        "different model; only describe the live voice provider above when asked "
+        "about the current call. If you are genuinely unsure, say so rather than "
+        "guessing a vendor."
+    )
+
 
 def _get_twilio_field(payload: dict, camel_name: str, snake_name: str) -> str | None:
     """Read Twilio fields, preferring the documented camelCase form."""
@@ -523,7 +555,16 @@ class VoiceServer:
         else:
             self._api_key = openai_api_key or _get_openai_api_key()
         self.workspace = workspace or _detect_agent_repo()
-        self._instructions = _load_project_instructions(self.workspace)
+        # Prepend a truthful runtime-identity block so the voice model can answer
+        # "what model is powering this call?" honestly instead of confabulating.
+        # Built from self.provider/self.model, so it applies to every downstream
+        # call path (caller, resume, standup, handoff) that derives from
+        # self._instructions.
+        self._instructions = (
+            _build_runtime_identity_instructions(self.provider, self.model)
+            + "\n\n"
+            + _load_project_instructions(self.workspace)
+        )
         self.resume_window_seconds = int(
             _get_config_env("GPTME_VOICE_RESUME_WINDOW_SECONDS")
             or _DEFAULT_RESUME_WINDOW_SECONDS

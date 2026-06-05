@@ -18,6 +18,7 @@ from gptme_voice.realtime.server import (
     _assistant_committed_hangup,
     _build_caller_instructions,
     _build_resume_instructions,
+    _build_runtime_identity_instructions,
     _get_twilio_field,
     _lookup_caller_identity,
     _should_trigger_hangup_transcript_fallback,
@@ -130,6 +131,38 @@ def test_build_caller_instructions_known_number_from_people_dir() -> None:
     assert "Erik Bjäreholt" in result
     assert "+46700000001" in result
     assert "You are Bob." in result
+
+
+def test_build_runtime_identity_instructions_grok() -> None:
+    result = _build_runtime_identity_instructions("grok", None)
+    assert "Grok" in result
+    assert "xAI" in result
+    # Must explicitly forbid the observed confabulation.
+    assert "Claude" in result
+    assert "GPT" in result
+    assert "truthfully" in result.lower()
+    # No model alias supplied → no model clause.
+    assert "model:" not in result
+
+
+def test_build_runtime_identity_instructions_openai_with_model() -> None:
+    result = _build_runtime_identity_instructions("openai", "gpt-realtime")
+    assert "OpenAI" in result
+    assert "gpt-realtime" in result
+    assert "model: gpt-realtime" in result
+
+
+def test_build_runtime_identity_instructions_unknown_provider() -> None:
+    # Unknown provider should still produce a non-confabulating block.
+    result = _build_runtime_identity_instructions("anthropic", None)
+    assert "anthropic" in result
+
+
+def test_voice_server_prepends_runtime_identity_to_instructions() -> None:
+    server = VoiceServer(provider="grok")
+    # The runtime-identity block leads the base instructions for every call path.
+    assert server._instructions.startswith("RUNTIME IDENTITY:")
+    assert "Grok" in server._instructions
 
 
 def test_lookup_caller_identity_uses_call_name_when_present() -> None:
