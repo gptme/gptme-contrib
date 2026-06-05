@@ -250,6 +250,8 @@ def test_generate_map_hit_returns_cached_result(tmp_path):
         "files": [{"path": "a.py", "symbols": [{"name": "f", "kind": "function"}]}],
         "git_sha": "cached-sha",
         "generated": "2025-01-01T00:00:00+00:00",
+        "max_files": 20,
+        "max_symbols_per_file": 12,
         "_stat_fingerprint": "match",
         "_cached_at": commit_map.time.time(),
     }
@@ -313,6 +315,8 @@ def test_generate_map_cache_hit_writes_back_timestamp(tmp_path):
         "files_shown": 0,
         "git_sha": "sha",
         "generated": "2025-01-01T00:00:00+00:00",
+        "max_files": 20,
+        "max_symbols_per_file": 12,
         "_stat_fingerprint": "match",
         "_cached_at": old_ts,
     }
@@ -402,6 +406,56 @@ def test_cmd_refresh_no_cache_skips_cache(tmp_path):
     cache_key = commit_map._repo_cache_key(tmp_path)
     cached = commit_map._read_cache(cache_key)
     assert cached is None
+
+
+def test_generate_map_cache_miss_on_param_change(tmp_path):
+    """Cache hit is rejected when max_files or max_symbols_per_file differ."""
+    cache_key = commit_map._repo_cache_key(tmp_path)
+    cached = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "source_digest": "digest",
+        "source_file_count": 1,
+        "files": list(range(20)),  # 20-file result
+        "files_shown": 20,
+        "symbols_shown": 0,
+        "git_sha": "sha",
+        "generated": "2025-01-01T00:00:00+00:00",
+        "max_files": 20,
+        "max_symbols_per_file": 12,
+        "_stat_fingerprint": "match",
+        "_cached_at": commit_map.time.time(),
+    }
+    cache_path = commit_map._CACHE_DIR / f"{cache_key}.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cached))
+
+    fresh = {"files": list(range(5)), "files_shown": 5, "symbols_shown": 0}
+    with (
+        patch.object(commit_map, "_stat_fingerprint", return_value=("match", 1)),
+        patch.object(commit_map, "_source_digest", return_value=("digest", 1)),
+        patch.object(commit_map, "_git_sha", return_value="sha"),
+        patch.object(commit_map, "build_repo_map", return_value=fresh),
+    ):
+        result = commit_map.generate_map(tmp_path, max_files=5)
+
+    # Should have rebuilt — 5 files, not 20.
+    assert result["files_shown"] == 5
+
+
+def test_generate_map_cache_write_failure_non_fatal(tmp_path):
+    """OSError during cache write must not propagate out of generate_map."""
+    fresh = {"files": [], "files_shown": 7, "symbols_shown": 0}
+    with (
+        patch.object(commit_map, "_stat_fingerprint", return_value=("fp", 1)),
+        patch.object(commit_map, "_source_digest", return_value=("digest", 1)),
+        patch.object(commit_map, "_git_sha", return_value="sha"),
+        patch.object(commit_map, "build_repo_map", return_value=fresh),
+        patch.object(commit_map, "_write_cache", side_effect=OSError("disk full")),
+    ):
+        result = commit_map.generate_map(tmp_path)
+
+    # The computed result should still be returned despite the write failure.
+    assert result["files_shown"] == 7
 
 
 def test_stat_fingerprint_changes_on_mtime(tmp_path):

@@ -237,16 +237,24 @@ def generate_map(
         if stat_fp is not None:
             cache_key = _repo_cache_key(directory)
             cached = _read_cache(cache_key)
-            if cached is not None and cached.get("_stat_fingerprint") == stat_fp:
-                # Cache hit: stat fingerprint matched, so source content hasn't
-                # changed. Return cached tree-sitter result + metadata, with a
-                # refreshed _cached_at timestamp so frequently-accessed repos
-                # stay warm while the 7-day TTL still acts as a safety net for
-                # repos that aren't accessed.
-                _write_cache(
-                    cache_key,
-                    {k: v for k, v in cached.items() if k != "_cached_at"},
-                )
+            if (
+                cached is not None
+                and cached.get("_stat_fingerprint") == stat_fp
+                and cached.get("max_files") == max_files
+                and cached.get("max_symbols_per_file") == max_symbols_per_file
+            ):
+                # Cache hit: stat fingerprint and generation parameters matched.
+                # Return cached tree-sitter result + metadata, with a refreshed
+                # _cached_at timestamp so frequently-accessed repos stay warm
+                # while the 7-day TTL still acts as a safety net for repos that
+                # aren't accessed.
+                try:
+                    _write_cache(
+                        cache_key,
+                        {k: v for k, v in cached.items() if k != "_cached_at"},
+                    )
+                except OSError:
+                    pass  # cache write-back is optional; don't discard the hit
                 return {
                     **{k: v for k, v in cached.items() if not k.startswith("_")},
                     "generated": datetime.now(timezone.utc).isoformat(),
@@ -284,10 +292,13 @@ def generate_map(
         # Reuse the stat fingerprint already computed before the tree-sitter
         # build — avoids a TOCTOU window where the second call could see
         # different mtime values (parallel writes, editor auto-save).
-        _write_cache(
-            cache_key,
-            {**result, "_stat_fingerprint": stat_fp},
-        )
+        try:
+            _write_cache(
+                cache_key,
+                {**result, "_stat_fingerprint": stat_fp},
+            )
+        except OSError:
+            pass  # cache write is optional; caller still gets the computed result
 
     return result
 
