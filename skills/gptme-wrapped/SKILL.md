@@ -2,7 +2,7 @@
 name: gptme-wrapped
 description: Analyze your gptme conversation history for insights like token usage, costs, model preferences, and usage patterns — inspired by Spotify Wrapped.
 license: MIT
-compatibility: "Requires gptme"
+compatibility: "Requires gptme>=0.27.0"
 metadata:
   author: bob
   version: "1.0.0"
