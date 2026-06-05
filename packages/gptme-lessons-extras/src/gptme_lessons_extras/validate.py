@@ -100,6 +100,26 @@ class LessonValidator:
         self.warnings: List[str] = []
         self.format_type: str | None = None
         self.is_skill = self._detect_skill()
+        self.status = self._parse_status()
+
+    def _parse_status(self) -> str | None:
+        """Parse the lifecycle ``status`` field from frontmatter.
+
+        Returns the status string (e.g. ``active``, ``archived``) or ``None`` if
+        the file has no parseable frontmatter or no ``status`` field. Used to
+        skip soft (warning-level) checks on frozen lessons.
+        """
+        if not self.content.startswith("---"):
+            return None
+        try:
+            end_idx = self.content.index("---", 3)
+            frontmatter = yaml.safe_load(self.content[3:end_idx])
+        except (ValueError, yaml.YAMLError):
+            return None
+        if not isinstance(frontmatter, dict):
+            return None
+        status = frontmatter.get("status")
+        return status if isinstance(status, str) else None
 
     def _detect_skill(self) -> bool:
         """Detect whether this file is a skill (SKILL.md format).
@@ -487,6 +507,10 @@ class LessonValidator:
 
     def _check_companion_doc(self):
         """Check for companion doc existence and linking."""
+        # Archived lessons are frozen historical guidance — don't nag about
+        # companion linking or length on superseded files.
+        if self.status == "archived":
+            return
         # Check if companion doc exists (search subdirectories too)
         companion_matches = list(COMPANION_DIR.rglob(f"{self.filepath.stem}.md"))
         has_companion = len(companion_matches) > 0
@@ -522,6 +546,9 @@ class LessonValidator:
 
     def _check_length(self):
         """Check primary lesson length."""
+        # Archived lessons are frozen — skip the soft length target.
+        if self.status == "archived":
+            return
         lines = self.content.split("\n")
 
         # Calculate body lines (exclude frontmatter)
