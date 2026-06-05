@@ -26,8 +26,8 @@ Resolution owners (axis 1 — who/what unblocks this):
 --type is kept as a deprecated alias (Type1->self, Type2a->tooling, Type2b->architectural).
 Type0 is Bob's extension, mapping to operator.
 
-For Axis 2 (theme/cause) see analysis-time clustering in
-packages/metaproductivity/src/metaproductivity/friction.py.
+For Axis 2 (theme/cause) see analysis-time clustering — the ledger format
+is compatible with any JSONL-capable analysis tool.
 
 Examples:
     python3 scripts/vent.py "pytest exits 0 but finds no tests"
@@ -39,6 +39,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -116,7 +117,7 @@ def _detect_harness(env: Mapping[str, str] | None = None) -> str:
 
 
 def _last_vent_path(workspace: Path) -> Path:
-    slug = str(workspace).replace("/", "_").lstrip("_")
+    slug = hashlib.sha256(str(workspace).encode()).hexdigest()[:12]
     return _STATE_DIR / f"vent-last-{slug}.txt"
 
 
