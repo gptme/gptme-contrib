@@ -400,6 +400,18 @@ def effective(task_id: str):
     help="Filter by context tag (e.g., @coding, @research)",
 )
 @click.option(
+    "--assigned-to",
+    type=str,
+    default=None,
+    help="Filter by assigned_to field (e.g., bob, erik, alice)",
+)
+@click.option(
+    "--waiting-for-person",
+    type=str,
+    default=None,
+    help="Filter tasks waiting on a specific person (matches waiting_for field)",
+)
+@click.option(
     "--json",
     "output_json",
     is_flag=True,
@@ -411,7 +423,7 @@ def effective(task_id: str):
     is_flag=True,
     help="Output as JSONL (one task per line) - compact for LLM consumption",
 )
-def list_(sort, active_only, context, output_json, output_jsonl):
+def list_(sort, active_only, context, assigned_to, waiting_for_person, output_json, output_jsonl):
     """List all tasks in a table format."""
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -470,6 +482,44 @@ def list_(sort, active_only, context, output_json, output_jsonl):
             return
         if not output_json and not output_jsonl:
             console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
+
+    # Filter by assigned_to if specified
+    if assigned_to:
+        normalized = assigned_to.lower()
+        tasks = [task for task in tasks if (task.assigned_to or "").lower() == normalized]
+        if not tasks:
+            if output_json:
+                print(f"No tasks found assigned to '{assigned_to}'", file=sys.stderr)
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print(f"No tasks found assigned to '{assigned_to}'", file=sys.stderr)
+                return
+            console.print(f"[yellow]No tasks found assigned to '{assigned_to}'[/]")
+            return
+        if not output_json and not output_jsonl:
+            console.print(f"[blue]Showing tasks assigned to '{assigned_to}'[/]\n")
+
+    # Filter by waiting_for_person if specified
+    if waiting_for_person:
+        normalized = waiting_for_person.lower()
+        tasks = [
+            task
+            for task in tasks
+            if normalized in (task.metadata.get("waiting_for", "") or "").lower()
+        ]
+        if not tasks:
+            if output_json:
+                print(f"No tasks found waiting on '{waiting_for_person}'", file=sys.stderr)
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print(f"No tasks found waiting on '{waiting_for_person}'", file=sys.stderr)
+                return
+            console.print(f"[yellow]No tasks found waiting on '{waiting_for_person}'[/]")
+            return
+        if not output_json and not output_jsonl:
+            console.print(f"[blue]Showing tasks waiting on '{waiting_for_person}'[/]\n")
 
     # Sort tasks for display based on option
     if sort == "state":
