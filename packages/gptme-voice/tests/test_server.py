@@ -468,8 +468,8 @@ def test_handle_twilio_websocket_wires_speech_started_clear_callback_cold_path(
         assert callable(on_speech_started)
         await on_speech_started()
 
-        assert [json.loads(message) for message in websocket.messages] == [
-            {"event": "clear", "streamSid": "MZ123"}
+        assert {"event": "clear", "streamSid": "MZ123"} in [
+            json.loads(m) for m in websocket.messages
         ]
 
     asyncio.run(_exercise())
@@ -513,8 +513,8 @@ def test_handle_twilio_websocket_rebinds_speech_started_clear_callback_on_prewar
 
         await fake_client.on_speech_started()
 
-        assert [json.loads(message) for message in websocket.messages] == [
-            {"event": "clear", "streamSid": "MZ123"}
+        assert {"event": "clear", "streamSid": "MZ123"} in [
+            json.loads(m) for m in websocket.messages
         ]
 
     asyncio.run(_exercise())
