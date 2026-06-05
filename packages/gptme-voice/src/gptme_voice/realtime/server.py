@@ -1558,7 +1558,18 @@ class VoiceServer:
 
                         return _on_audio
 
+                    def _make_on_speech_started(_stream_sid: str):
+                        async def _on_speech_started() -> None:
+                            logger.debug(
+                                "Caller speech detected; clearing Twilio playback buffer for %s",
+                                _stream_sid,
+                            )
+                            await self._send_twilio_clear(websocket, _stream_sid)
+
+                        return _on_speech_started
+
                     on_audio = _make_on_audio(stream_sid)
+                    on_speech_started = _make_on_speech_started(stream_sid)
                     on_ai_transcript, on_user_transcript, _twilio_hangup = (
                         self._make_transcript_callbacks(
                             transcript=transcript,
@@ -1581,6 +1592,7 @@ class VoiceServer:
                         realtime_client.on_audio = on_audio
                         realtime_client.on_ai_transcript = on_ai_transcript
                         realtime_client.on_user_transcript = on_user_transcript
+                        realtime_client.on_speech_started = on_speech_started
                     else:
                         # Cold path: build session from scratch
                         bootstrap = await self._build_session_bootstrap(
@@ -1604,6 +1616,7 @@ class VoiceServer:
                             on_audio=on_audio,
                             on_ai_transcript=on_ai_transcript,
                             on_user_transcript=on_user_transcript,
+                            on_speech_started=on_speech_started,
                         )
 
                     # Wire tool bridge BEFORE connect/activate so on_function_call
@@ -1679,6 +1692,13 @@ class VoiceServer:
             "media": {"payload": audio_b64},
         }
         await websocket.send_text(json.dumps(message))
+
+    async def _send_twilio_clear(self, websocket, stream_sid: str) -> None:
+        """Flush any queued assistant audio from Twilio's playback buffer."""
+
+        await websocket.send_text(
+            json.dumps({"event": "clear", "streamSid": stream_sid})
+        )
 
     def _build_session_config(
         self,
