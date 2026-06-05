@@ -763,6 +763,76 @@ def test_subagent_status_lists_pending_dispatch() -> None:
     asyncio.run(_exercise())
 
 
+def test_subagent_status_shows_recent_completion_on_success() -> None:
+    """After a task completes, subagent_status should list it in recent_completions."""
+
+    async def _exercise() -> None:
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(
+                returncode=0, stdout="Dashboard has 3 sub-dashboards.\n"
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "list dashboards", "mode": "fast"}
+            )
+            task_id = dispatch["task_id"]
+
+            # Let the background task finish
+            for _ in range(20):
+                await asyncio.sleep(0)
+
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["pending_count"] == 0
+            recent = status["recent_completions"]
+            assert len(recent) == 1
+            entry = recent[0]
+            assert entry["task_id"] == task_id
+            assert entry["status"] == "success"
+            assert entry["returncode"] == 0
+            assert entry["elapsed_seconds"] is not None
+            assert "list dashboards" in entry["task"]
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_status_shows_recent_timeout() -> None:
+    """A timed-out task (returncode=124) should appear as 'timed_out' in recent_completions."""
+
+    async def _exercise() -> None:
+        # Simulate a timeout: process exits immediately with rc=124 (UNIX timeout cmd)
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(returncode=124, stdout="partial result\n")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "explore dashboard portal", "mode": "fast"}
+            )
+            task_id = dispatch["task_id"]
+
+            # Let the background task finish
+            for _ in range(20):
+                await asyncio.sleep(0)
+
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["pending_count"] == 0
+            recent = status["recent_completions"]
+            assert len(recent) == 1
+            entry = recent[0]
+            assert entry["task_id"] == task_id
+            assert entry["status"] == "timed_out"
+            assert entry["returncode"] == 124
+            assert "explore dashboard portal" in entry["task"]
+
+    asyncio.run(_exercise())
+
+
 def test_subagent_dispatch_defaults_to_fast_mode() -> None:
     """Missing mode should still dispatch on the fast live-call path."""
 

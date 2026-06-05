@@ -16,6 +16,7 @@ import logging
 import os
 import tempfile
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Sequence
@@ -48,6 +49,9 @@ _IGNORABLE_ERROR_SUBSTRINGS = ("terminated by signal 13",)
 # These mean "ran out of time", not a generic crash.
 _TIMEOUT_RETURNCODES = frozenset({124, 143})
 _KILLED_RETURNCODE = 137  # 128 + SIGKILL (timeout kill-after or OOM kill)
+# How many recently-completed task records to keep for subagent_status queries.
+# The model can see these to understand whether a task succeeded, timed out, or errored.
+_MAX_RECENT_COMPLETIONS = 5
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
@@ -132,6 +136,9 @@ class GptmeToolBridge:
         self._pending_tasks: dict[str, PendingTask] = {}
         self._task_counter = 0
         self._completed_timings: list[dict[str, object]] = []
+        # Short-lived buffer of recently-completed tasks so subagent_status can
+        # distinguish "timed out" from "succeeded" from "never started".
+        self._recent_completions: deque[dict] = deque(maxlen=_MAX_RECENT_COMPLETIONS)
 
     @staticmethod
     def _parse_env_int(name: str, *, default: int, minimum: int = 0) -> int:
@@ -440,6 +447,34 @@ class GptmeToolBridge:
 
         logger.info(f"Task {task_id} complete: {response_text[:100]}...")
 
+        # Record completion for subagent_status queries so the model can
+        # distinguish timed-out tasks from successful ones.
+        completion_status = (
+            "success"
+            if result.success
+            else (
+                "timed_out"
+                if (pending is not None and pending.returncode in _TIMEOUT_RETURNCODES)
+                else "error"
+            )
+        )
+        self._recent_completions.append(
+            {
+                "task_id": task_id,
+                "task": task[:_MAX_TASK_PREVIEW],
+                "status": completion_status,
+                "returncode": pending.returncode if pending is not None else None,
+                "elapsed_seconds": round(
+                    (pending.completed_at or time.monotonic()) - pending.started_at, 1
+                )
+                if pending is not None
+                else None,
+                "output_preview": (result.output or "")[:200]
+                if result.success
+                else None,
+            }
+        )
+
         # Inject result into conversation
         if self.on_result:
             await self.on_result(response_text)
@@ -707,10 +742,12 @@ class GptmeToolBridge:
                 for tid, entry in self._pending_tasks.items()
                 if not entry.task.done()
             ]
+            recent = list(self._recent_completions)
             return {
                 "status": "ok",
                 "pending_count": len(pending),
                 "pending": pending,
+                "recent_completions": recent,
             }
 
         if name == "subagent_cancel":
