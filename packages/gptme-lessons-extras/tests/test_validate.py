@@ -418,3 +418,71 @@ def test_confound_note_wrong_type_rejected():
         validator.validate()
         confound_errors = [e for e in validator.errors if "confound_note" in e]
         assert confound_errors, "Non-string confound_note should produce an error"
+
+
+# An archived lesson that is long AND has no companion link — would normally
+# trigger both the companion-doc and length soft warnings.
+_ARCHIVED_LONG_LESSON = (
+    """\
+---
+match:
+  keywords:
+    - "test keyword phrase"
+status: archived
+---
+
+# Archived Test Lesson
+
+## Rule
+Test rule.
+
+## Context
+Test context.
+
+## Detection
+- Signal 1
+- Signal 2
+
+## Pattern
+```txt
+example
+```
+
+## Outcome
+"""
+    + "\n".join(f"- Benefit {i}" for i in range(120))
+    + "\n"
+)
+
+
+def test_archived_lesson_skips_length_warning():
+    """Archived lessons are frozen — no length nag even when over target."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), _ARCHIVED_LONG_LESSON)
+        validator = LessonValidator(path)
+        validator.validate()
+        length_warnings = [w for w in validator.warnings if "lines (target" in w]
+        assert not length_warnings, f"Unexpected length warnings: {length_warnings}"
+
+
+def test_archived_lesson_skips_companion_warning():
+    """Archived lessons should not warn about missing/unlinked companion docs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), _ARCHIVED_LONG_LESSON)
+        validator = LessonValidator(path)
+        validator.validate()
+        companion_warnings = [w for w in validator.warnings if "companion" in w.lower()]
+        assert (
+            not companion_warnings
+        ), f"Unexpected companion warnings: {companion_warnings}"
+
+
+def test_active_long_lesson_still_warns():
+    """Guard: the skip is archived-only — active lessons still get the length nag."""
+    active = _ARCHIVED_LONG_LESSON.replace("status: archived", "status: active")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), active)
+        validator = LessonValidator(path)
+        validator.validate()
+        length_warnings = [w for w in validator.warnings if "lines (target" in w]
+        assert length_warnings, "Active long lesson should still warn about length"
