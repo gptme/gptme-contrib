@@ -245,11 +245,7 @@ def generate_map(
                 # repos that aren't accessed.
                 _write_cache(
                     cache_key,
-                    {
-                        k: v
-                        for k, v in cached.items()
-                        if k not in ("_cached_at", "_stat_fingerprint")
-                    },
+                    {k: v for k, v in cached.items() if k != "_cached_at"},
                 )
                 return {
                     **{k: v for k, v in cached.items() if not k.startswith("_")},

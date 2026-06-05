@@ -331,6 +331,9 @@ def test_generate_map_cache_hit_writes_back_timestamp(tmp_path):
     reloaded = commit_map._read_cache(cache_key)
     assert reloaded is not None
     assert reloaded["_cached_at"] > old_ts + 3500  # within ~100s slack
+    # Fingerprint must survive the write-back — otherwise the next run sees
+    # None != stat_fp and falls through to a full rebuild on every other hit.
+    assert reloaded["_stat_fingerprint"] == "match"
 
 
 def test_generate_map_no_cache_skips_cache(tmp_path):

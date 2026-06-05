@@ -7,6 +7,14 @@ optional extra: ``pip install gptme-codegraph[treesitter]``).
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_cache_dir(tmp_path, monkeypatch):
+    """Redirect _CACHE_DIR so tests never write to the real ~/.cache."""
+    from gptme_codegraph import commit_map
+
+    monkeypatch.setattr(commit_map, "_CACHE_DIR", tmp_path / "gptme-codegraph-cache")
+
+
 def pytest_collection_modifyitems(config, items):
     try:
         import tree_sitter  # type: ignore[import-untyped]  # noqa: F401
