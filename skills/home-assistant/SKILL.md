@@ -1,6 +1,7 @@
 ---
 name: home-assistant
 description: Query a Home Assistant instance for presence, sensor data, calendar events, and cameras
+category: Agent Infrastructure
 tags: [home-assistant, iot, context, location, presence]
 license: MIT
 compatibility: "Requires HA_HOST and HA_API_KEY env vars"
