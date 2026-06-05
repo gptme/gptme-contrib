@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Generate, save, and refresh committed gptme-codegraph repo-map artifacts.
+"""Generate, save, and refresh gptme-codegraph repo-map artifacts.
 
-A committed ``.gptme-codegraph-map.json`` lets teammates and agents read a
-repo's structural outline without re-running the tree-sitter pipeline
-("analyze once, commit the graph"). Freshness is keyed off a digest of the
-tracked source files, so a pre-commit-generated artifact stays fresh after the
-commit lands (unlike a naive ``git_sha == HEAD`` check, which goes stale the
-instant the commit that contains it is created).
+Generates a structural repo outline via tree-sitter, with stat-fingerprint
+caching (~/.cache/gptme-codegraph/) so repeated runs on unchanged source are
+near-instant (stat-only fingerprint match). The artifact is on-the-fly
+generated — not committed to git — and cached for speed.
 
 Usage:
     python3 -m gptme_codegraph.commit_map <repo-dir> [--output FILE]
     python3 -m gptme_codegraph.commit_map <repo-dir> --check
     python3 -m gptme_codegraph.commit_map <repo-dir> --refresh
     python3 -m gptme_codegraph.commit_map <repo-dir> --refresh --force
+    python3 -m gptme_codegraph.commit_map <repo-dir> --refresh --no-cache
     python3 -m gptme_codegraph.commit_map <repo-dir> --stale-after-days N
 
 Or via the installed console script:
@@ -28,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,8 +35,15 @@ from .core import build_repo_map, format_repo_map
 
 DEFAULT_OUTPUT_FILE = ".gptme-codegraph-map.json"
 DEFAULT_STALE_DAYS = 1
-ARTIFACT_VERSION = 1
+ARTIFACT_VERSION = 2
 SOURCE_PATTERNS = ("*.py", "*.ts", "*.tsx", "*.js", "*.rs")
+
+# Stat-fingerprint cache: avoids re-running tree-sitter when source is unchanged.
+# Located outside the repo so it never shows up in git status / committed artifacts.
+_CACHE_DIR = Path.home() / ".cache" / "gptme-codegraph"
+# Cache entries older than this are treated as stale even if the fingerprint matches,
+# so tree-sitter library upgrades and mapping improvements are picked up eventually.
+_CACHE_TTL_DAYS = 7
 
 
 def _git_sha(directory: Path) -> str | None:
@@ -129,13 +136,131 @@ def _source_digest(directory: Path) -> tuple[str | None, int]:
     return digest.hexdigest(), count
 
 
+def _stat_fingerprint(directory: Path) -> tuple[str | None, int]:
+    """Return a stat-only fingerprint of tracked source files + file count.
+
+    Uses (relative_path, mtime_ns, size) tuples — no file content reads.
+    This is ~100x faster than _source_digest() for large repos because it
+    only needs inode metadata, not full file reads.
+
+    Returns (sha256_hex, file_count) or (None, 0) on failure.
+    """
+    result = _tracked_source_files(directory)
+    if result is None:
+        return None, 0
+
+    tracked, repo_root = result
+    digest = hashlib.sha256()
+    count = 0
+    for path in tracked:
+        try:
+            stat_info = path.stat()
+            rel_path = path.relative_to(repo_root).as_posix()
+            # Canonicalise: path + mtime_ns + size — no content read.
+            fingerprint_line = (
+                f"{rel_path}\0{stat_info.st_mtime_ns}\0{stat_info.st_size}"
+            )
+            digest.update(fingerprint_line.encode("utf-8"))
+            digest.update(b"\0")
+            count += 1
+        except OSError:
+            return None, 0
+
+    return digest.hexdigest(), count
+
+
+def _repo_cache_key(directory: Path) -> str:
+    """Return a stable cache key for a repo directory (sha256 of resolved path)."""
+    return hashlib.sha256(str(directory.resolve()).encode()).hexdigest()[:16]
+
+
+def _read_cache(cache_key: str) -> dict[str, object] | None:
+    """Read a cached map entry, returning None if missing, stale, or unparseable."""
+    cache_path = _CACHE_DIR / f"{cache_key}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        entry = json.loads(cache_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    # Check cache TTL
+    cached_ts = entry.get("_cached_at")
+    if isinstance(cached_ts, int | float):
+        age = time.time() - float(cached_ts)
+        if age > _CACHE_TTL_DAYS * 86400:
+            return None
+    else:
+        # Missing _cached_at → can't verify freshness, reject
+        return None
+
+    # Version compatibility
+    if entry.get("version") != ARTIFACT_VERSION:
+        return None
+
+    return entry  # type: ignore[no-any-return]
+
+
+def _write_cache(cache_key: str, map_data: dict[str, object]) -> None:
+    """Write a map result to the stat-fingerprint cache atomically."""
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _CACHE_DIR / f"{cache_key}.json"
+    tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+
+    entry = {**map_data, "_cached_at": time.time()}
+    with open(tmp_path, "w") as f:
+        json.dump(entry, f, indent=2, sort_keys=True, default=str)
+    os.replace(tmp_path, cache_path)
+
+
 def generate_map(
     directory: Path,
     *,
     max_files: int = 20,
     max_symbols_per_file: int = 12,
+    use_cache: bool = True,
 ) -> dict[str, object]:
-    """Generate a repo map with metadata, matching build_repo_map() output."""
+    """Generate a repo map with metadata, matching build_repo_map() output.
+
+    Uses a stat-fingerprint cache (~/.cache/gptme-codegraph/) to skip the
+    expensive tree-sitter pipeline when source files haven't changed. Set
+    ``use_cache=False`` to force a full rebuild.
+    """
+    # Pre-compute stat fingerprint and cache key once so we can reuse them
+    # on the slow path and avoid a TOCTOU window (build_repo_map can take
+    # seconds, and the second _stat_fingerprint call could see different
+    # mtime values).
+    stat_fp: str | None = None
+    cache_key: str | None = None
+    if use_cache:
+        stat_fp, _ = _stat_fingerprint(directory)
+        if stat_fp is not None:
+            cache_key = _repo_cache_key(directory)
+            cached = _read_cache(cache_key)
+            if (
+                cached is not None
+                and cached.get("_stat_fingerprint") == stat_fp
+                and cached.get("max_files") == max_files
+                and cached.get("max_symbols_per_file") == max_symbols_per_file
+            ):
+                # Cache hit: stat fingerprint and generation parameters matched.
+                # Return cached tree-sitter result + metadata, with a refreshed
+                # _cached_at timestamp so frequently-accessed repos stay warm
+                # while the 7-day TTL still acts as a safety net for repos that
+                # aren't accessed.
+                try:
+                    _write_cache(
+                        cache_key,
+                        {k: v for k, v in cached.items() if k != "_cached_at"},
+                    )
+                except OSError:
+                    pass  # cache write-back is optional; don't discard the hit
+                return {
+                    **{k: v for k, v in cached.items() if not k.startswith("_")},
+                    "generated": datetime.now(timezone.utc).isoformat(),
+                }
+
+    # Slow path: full content digest + tree-sitter build.
     source_digest, source_file_count = _source_digest(directory)
     repo_map = build_repo_map(
         str(directory),
@@ -143,7 +268,7 @@ def generate_map(
         max_symbols_per_file=max_symbols_per_file,
     )
 
-    return {
+    result: dict[str, object] = {
         **repo_map,
         # The committed artifact lives in the repo it maps, so the absolute
         # build path from build_repo_map() is non-portable: it leaks the
@@ -162,6 +287,20 @@ def generate_map(
         "max_files": max_files,
         "max_symbols_per_file": max_symbols_per_file,
     }
+
+    if use_cache and stat_fp is not None and cache_key is not None:
+        # Reuse the stat fingerprint already computed before the tree-sitter
+        # build — avoids a TOCTOU window where the second call could see
+        # different mtime values (parallel writes, editor auto-save).
+        try:
+            _write_cache(
+                cache_key,
+                {**result, "_stat_fingerprint": stat_fp},
+            )
+        except OSError:
+            pass  # cache write is optional; caller still gets the computed result
+
+    return result
 
 
 def _load_existing_map(path: Path) -> dict[str, object] | None:
@@ -237,10 +376,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return 1
 
     output_path = directory / (args.output or DEFAULT_OUTPUT_FILE)
+    use_cache = not getattr(args, "no_cache", False)
     map_data = generate_map(
         directory,
         max_files=args.max_files,
         max_symbols_per_file=args.max_symbols_per_file,
+        use_cache=use_cache,
     )
     save_map(directory, output_path, map_data)
 
@@ -338,6 +479,11 @@ def main() -> None:
         "--force",
         action="store_true",
         help="Force refresh even if fresh (use with --refresh)",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Skip the stat-fingerprint cache; always run the full tree-sitter pipeline",
     )
 
     args = parser.parse_args()

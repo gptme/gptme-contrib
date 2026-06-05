@@ -233,3 +233,257 @@ def test_cmd_refresh_force_regenerates_fresh_map(tmp_path):
     loaded = commit_map._load_existing_map(output)
     assert loaded is not None
     assert loaded.get("source_file_count") == 1
+
+
+# ── Stat-fingerprint cache tests ──────────────────────────────────────
+
+
+def test_generate_map_hit_returns_cached_result(tmp_path):
+    cache_key = commit_map._repo_cache_key(tmp_path)
+    cached = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "source_digest": "cached-digest",
+        "source_file_count": 3,
+        "directory": str(tmp_path),
+        "files_shown": 1,
+        "symbols_shown": 5,
+        "files": [{"path": "a.py", "symbols": [{"name": "f", "kind": "function"}]}],
+        "git_sha": "cached-sha",
+        "generated": "2025-01-01T00:00:00+00:00",
+        "max_files": 20,
+        "max_symbols_per_file": 12,
+        "_stat_fingerprint": "match",
+        "_cached_at": commit_map.time.time(),
+    }
+    commit_map._write_cache(cache_key, cached)
+
+    # fingerprint matches → cache hit, build_repo_map should NOT be called
+    with (
+        patch.object(commit_map, "_stat_fingerprint", return_value=("match", 3)),
+        patch.object(commit_map, "_source_digest", return_value=("fresh-digest", 3)),
+        patch.object(commit_map, "build_repo_map") as mock_build,
+    ):
+        result = commit_map.generate_map(tmp_path)
+
+    mock_build.assert_not_called()
+    # The result is the cached map minus internal cache key
+    assert result["source_digest"] == "cached-digest"
+    assert "_cached_at" not in result
+
+
+def test_generate_map_fingerprint_mismatch_does_full_build(tmp_path):
+    cache_key = commit_map._repo_cache_key(tmp_path)
+    cached = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "source_digest": "old-digest",
+        "source_file_count": 1,
+        "files": [],
+        "files_shown": 0,
+        "git_sha": "old-sha",
+        "generated": "2025-01-01T00:00:00+00:00",
+        "_stat_fingerprint": "old-fp",
+        "_cached_at": commit_map.time.time(),
+    }
+    commit_map._write_cache(cache_key, cached)
+
+    fresh = {
+        "files": [{"path": "b.py", "symbols": []}],
+        "files_shown": 1,
+        "symbols_shown": 2,
+    }
+    with (
+        patch.object(commit_map, "_stat_fingerprint", return_value=("new-fp", 1)),
+        patch.object(commit_map, "_source_digest", return_value=("new-digest", 1)),
+        patch.object(commit_map, "_git_sha", return_value="new-sha"),
+        patch.object(commit_map, "build_repo_map", return_value=fresh),
+    ):
+        result = commit_map.generate_map(tmp_path)
+
+    assert result["source_digest"] == "new-digest"
+    assert result["files_shown"] == 1
+
+
+def test_generate_map_cache_hit_writes_back_timestamp(tmp_path):
+    """Cache hit refreshes the _cached_at timestamp (keep-warm pattern)."""
+    cache_key = commit_map._repo_cache_key(tmp_path)
+    old_ts = commit_map.time.time() - 3600
+    cached = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "source_digest": "digest",
+        "source_file_count": 1,
+        "files": [],
+        "files_shown": 0,
+        "git_sha": "sha",
+        "generated": "2025-01-01T00:00:00+00:00",
+        "max_files": 20,
+        "max_symbols_per_file": 12,
+        "_stat_fingerprint": "match",
+        "_cached_at": old_ts,
+    }
+    # Write the cache file directly — _write_cache would overwrite _cached_at
+    # with time.time(), defeating the test.
+    cache_path = commit_map._CACHE_DIR / f"{cache_key}.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cached))
+
+    with (
+        patch.object(commit_map, "_stat_fingerprint", return_value=("match", 1)),
+        patch.object(commit_map, "_source_digest", return_value=("digest", 1)),
+    ):
+        commit_map.generate_map(tmp_path)
+
+    reloaded = commit_map._read_cache(cache_key)
+    assert reloaded is not None
+    assert reloaded["_cached_at"] > old_ts + 3500  # within ~100s slack
+    # Fingerprint must survive the write-back — otherwise the next run sees
+    # None != stat_fp and falls through to a full rebuild on every other hit.
+    assert reloaded["_stat_fingerprint"] == "match"
+
+
+def test_generate_map_no_cache_skips_cache(tmp_path):
+    cache_key = commit_map._repo_cache_key(tmp_path)
+    cached = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "source_digest": "cached-digest",
+        "source_file_count": 1,
+        "files": [],
+        "files_shown": 0,
+        "git_sha": "old-sha",
+        "generated": "2025-01-01T00:00:00+00:00",
+        "_cached_at": commit_map.time.time(),
+    }
+    commit_map._write_cache(cache_key, cached)
+
+    fresh = {"files": [], "files_shown": 3, "symbols_shown": 4}
+    with (
+        patch.object(commit_map, "_source_digest", return_value=("fresh-digest", 2)),
+        patch.object(commit_map, "_git_sha", return_value="fresh-sha"),
+        patch.object(commit_map, "build_repo_map", return_value=fresh),
+    ):
+        result = commit_map.generate_map(tmp_path, use_cache=False)
+
+    assert result["source_digest"] == "fresh-digest"
+
+
+def test_cmd_refresh_no_cache_skips_cache(tmp_path):
+    output = tmp_path / commit_map.DEFAULT_OUTPUT_FILE
+
+    # Write an existing map so refresh finds what to replace.
+    existing = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "generated": "2025-01-01T00:00:00+00:00",
+        "source_digest": "old-digest",
+        "git_sha": "old-sha",
+        "files": [],
+        "files_shown": 0,
+    }
+    output.write_text(json.dumps(existing))
+
+    args = argparse.Namespace(
+        directory=str(tmp_path),
+        output=commit_map.DEFAULT_OUTPUT_FILE,
+        stale_after_days=1,
+        max_files=20,
+        max_symbols_per_file=12,
+        force=True,
+        no_cache=True,
+    )
+
+    with (
+        patch.object(commit_map, "_source_digest", return_value=("fresh-digest", 3)),
+        patch.object(commit_map, "_git_sha", return_value="fresh-sha"),
+        patch.object(
+            commit_map,
+            "build_repo_map",
+            return_value={"files": [], "files_shown": 5, "symbols_shown": 6},
+        ),
+        patch.object(commit_map, "format_repo_map", return_value=""),
+    ):
+        result = commit_map.cmd_refresh(args)
+
+    assert result == 0
+    # Cache should NOT have been written (no-cache mode).
+    cache_key = commit_map._repo_cache_key(tmp_path)
+    cached = commit_map._read_cache(cache_key)
+    assert cached is None
+
+
+def test_generate_map_cache_miss_on_param_change(tmp_path):
+    """Cache hit is rejected when max_files or max_symbols_per_file differ."""
+    cache_key = commit_map._repo_cache_key(tmp_path)
+    cached = {
+        "version": commit_map.ARTIFACT_VERSION,
+        "source_digest": "digest",
+        "source_file_count": 1,
+        "files": list(range(20)),  # 20-file result
+        "files_shown": 20,
+        "symbols_shown": 0,
+        "git_sha": "sha",
+        "generated": "2025-01-01T00:00:00+00:00",
+        "max_files": 20,
+        "max_symbols_per_file": 12,
+        "_stat_fingerprint": "match",
+        "_cached_at": commit_map.time.time(),
+    }
+    cache_path = commit_map._CACHE_DIR / f"{cache_key}.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cached))
+
+    fresh = {"files": list(range(5)), "files_shown": 5, "symbols_shown": 0}
+    with (
+        patch.object(commit_map, "_stat_fingerprint", return_value=("match", 1)),
+        patch.object(commit_map, "_source_digest", return_value=("digest", 1)),
+        patch.object(commit_map, "_git_sha", return_value="sha"),
+        patch.object(commit_map, "build_repo_map", return_value=fresh),
+    ):
+        result = commit_map.generate_map(tmp_path, max_files=5)
+
+    # Should have rebuilt — 5 files, not 20.
+    assert result["files_shown"] == 5
+
+
+def test_generate_map_cache_write_failure_non_fatal(tmp_path):
+    """OSError during cache write must not propagate out of generate_map."""
+    fresh = {"files": [], "files_shown": 7, "symbols_shown": 0}
+    with (
+        patch.object(commit_map, "_stat_fingerprint", return_value=("fp", 1)),
+        patch.object(commit_map, "_source_digest", return_value=("digest", 1)),
+        patch.object(commit_map, "_git_sha", return_value="sha"),
+        patch.object(commit_map, "build_repo_map", return_value=fresh),
+        patch.object(commit_map, "_write_cache", side_effect=OSError("disk full")),
+    ):
+        result = commit_map.generate_map(tmp_path)
+
+    # The computed result should still be returned despite the write failure.
+    assert result["files_shown"] == 7
+
+
+def test_stat_fingerprint_changes_on_mtime(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    (d / "a.py").write_text("x = 1")
+    (d / "b.ts").write_text("const y = 2;")
+
+    with patch.object(
+        commit_map,
+        "_tracked_source_files",
+        return_value=([d / "a.py", d / "b.ts"], tmp_path),
+    ):
+        fp1, count1 = commit_map._stat_fingerprint(d)
+        fp2, count2 = commit_map._stat_fingerprint(d)
+
+    assert fp1 is not None
+    assert count1 == 2
+    assert fp1 == fp2  # stable when nothing changes
+
+    # Touch a file — fingerprint must change.
+    (d / "a.py").write_text("x = 2")
+    with patch.object(
+        commit_map,
+        "_tracked_source_files",
+        return_value=([d / "a.py", d / "b.ts"], tmp_path),
+    ):
+        fp3, count3 = commit_map._stat_fingerprint(d)
+
+    assert fp3 != fp1  # mtime/size changed
+    assert count3 == 2
