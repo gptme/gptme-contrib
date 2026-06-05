@@ -260,6 +260,7 @@ class OpenAIRealtimeClient:
         on_ai_transcript: Callable[[str], None] | None = None,
         on_user_transcript: Callable[[str], None] | None = None,
         on_function_call: Callable[[str, dict], Any] | None = None,
+        on_speech_started: Callable[[], None] | None = None,
         hold_initial_response: bool = False,
     ):
         self.api_key = api_key or _get_openai_api_key()
@@ -275,6 +276,7 @@ class OpenAIRealtimeClient:
         self.on_ai_transcript = on_ai_transcript
         self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call
+        self.on_speech_started = on_speech_started
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._receive_task: asyncio.Task | None = None
@@ -834,6 +836,8 @@ class OpenAIRealtimeClient:
         # VAD events
         elif event_type == "input_audio_buffer.speech_started":
             logger.debug("Speech detected")
+            if self.on_speech_started:
+                await self._call_callback(self.on_speech_started)
         elif event_type == "input_audio_buffer.speech_stopped":
             logger.debug("Speech ended")
 

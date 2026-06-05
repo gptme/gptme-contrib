@@ -701,6 +701,25 @@ def test_disconnect_drains_late_transcript_events_without_sending_late_audio() -
     asyncio.run(_exercise())
 
 
+def test_speech_started_event_invokes_callback() -> None:
+    async def _exercise() -> None:
+        callback_hits: list[str] = []
+
+        async def _on_speech_started() -> None:
+            callback_hits.append("speech")
+
+        client = OpenAIRealtimeClient(
+            api_key="test-key",
+            on_speech_started=_on_speech_started,
+        )
+
+        await client._handle_event({"type": "input_audio_buffer.speech_started"})
+
+        assert callback_hits == ["speech"]
+
+    asyncio.run(_exercise())
+
+
 def test_hold_initial_response_suppresses_greeting() -> None:
     """_hold_initial_response=True must block the initial greeting even after session ready."""
 
