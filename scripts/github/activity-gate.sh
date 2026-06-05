@@ -49,6 +49,15 @@
 #   Merge conflicts: NOT state-tracked (intentionally). A conflicting PR should
 #   nag every run until resolved.
 #
+#   Assigned issues: resolution is keyed on the LAST ACTOR, not the timestamp
+#   watermark used elsewhere. An assigned issue keeps surfacing until AUTHOR is
+#   the last commenter — so it does NOT follow the "seed on first sight, don't
+#   report" rule above (first sight with someone else holding the ball emits
+#   immediately). This self-heals dropped sessions: a watermark would mark the
+#   issue handled the moment it emitted, so one missed session silenced it
+#   forever. Re-nag cooldown (1h) prevents flooding. Costs 1 REST call per open
+#   assigned issue to read the last commenter.
+#
 #   Greptile score sweep: Proactively finds PRs with low Greptile scores (< 5/5)
 #   that need code fixes. Greptile updates comments in-place, so updatedAt never
 #   bumps — without this sweep, low-scored PRs sit indefinitely. State-tracked
@@ -457,25 +466,50 @@ check_assigned_issues() {
         "[]")
     [ "$issues" = "[]" ] || [ -z "$issues" ] && return 0
 
+    # Re-nag cooldown: when an issue is still awaiting our reply but its activity
+    # hasn't advanced, re-emit at most this often so a dropped monitoring session
+    # gets another chance without flooding every run.
+    local now cooldown_seconds
+    now=$(date +%s)
+    cooldown_seconds=3600
+
     echo "$issues" | jq -c '.[]' | while read -r issue_data; do
-        local issue_number updated_at state_file
+        local issue_number updated_at issue_title state_file last_actor
         issue_number=$(echo "$issue_data" | jq -r '.number')
         updated_at=$(echo "$issue_data" | jq -r '.updatedAt')
+        issue_title=$(echo "$issue_data" | jq -r '.title')
         state_file="$STATE_DIR/${repo//\//-}-issue-${issue_number}.state"
 
-        if [ -f "$state_file" ]; then
-            local last_check
-            last_check=$(cat "$state_file")
-            if [[ "$updated_at" > "$last_check" ]]; then
-                local issue_title
-                issue_title=$(echo "$issue_data" | jq -r '.title')
-                emit_item "assigned_issue" "$repo" "$issue_number" "$issue_title" "updated: $updated_at"
-                echo "$updated_at" > "$state_file"
-            fi
-        else
-            # First time seeing this issue — seed state, don't report
-            echo "$updated_at" > "$state_file"
+        # Resolution is keyed on the LAST ACTOR, not a timestamp watermark. An
+        # assigned issue is "handled" only once AUTHOR is the last commenter.
+        # This self-heals dropped sessions: a pending non-AUTHOR comment keeps
+        # surfacing until it's actually answered, instead of going permanently
+        # silent the moment the gate first emits (or silently seeding on first
+        # sight when someone else already holds the ball). See alice#55.
+        last_actor=$(gh api "repos/$repo/issues/$issue_number/comments" \
+            --paginate --jq 'last.user.login // empty' 2>/dev/null | tail -1 || true)
+        [ -z "$last_actor" ] && last_actor=$(gh api "repos/$repo/issues/$issue_number" \
+            --jq '.user.login' 2>/dev/null || true)
+
+        if [ "$last_actor" = "$AUTHOR" ]; then
+            # Loop closed — record current activity so a future non-AUTHOR comment
+            # re-triggers, and suppress emitting.
+            echo "${updated_at}|${now}" > "$state_file"
+            continue
         fi
+
+        # Someone else is awaiting our reply. Emit on first sight or when activity
+        # advances; otherwise re-nag once the cooldown elapses.
+        if [ -f "$state_file" ]; then
+            local last_updated last_emit
+            IFS='|' read -r last_updated last_emit < "$state_file"
+            if [ "$updated_at" = "$last_updated" ]; then
+                local elapsed=$(( now - ${last_emit:-0} ))
+                [ "$elapsed" -lt "$cooldown_seconds" ] && continue
+            fi
+        fi
+        emit_item "assigned_issue" "$repo" "$issue_number" "$issue_title" "awaiting your reply (last: $last_actor)"
+        echo "${updated_at}|${now}" > "$state_file"
     done
 }
 
