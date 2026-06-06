@@ -106,8 +106,11 @@ check_repo() {
                 echo "  $workflow_url"
             fi
             ;;
-        "cancelled"|"skipped")
-            echo -e "${YELLOW}⚠${NC} $label: $conclusion${suffix}${stale_suffix}"
+        "cancelled")
+            echo -e "${YELLOW}⚠${NC} $label: Cancelled${suffix}${stale_suffix}"
+            ;;
+        "skipped")
+            echo -e "${YELLOW}⊘${NC} $label: Skipped${suffix}${stale_suffix}"
             ;;
         "")
             # No previous run to fall back on
