@@ -49,6 +49,12 @@ _IGNORABLE_ERROR_SUBSTRINGS = ("terminated by signal 13",)
 # These mean "ran out of time", not a generic crash.
 _TIMEOUT_RETURNCODES = frozenset({124, 143})
 _KILLED_RETURNCODE = 137  # 128 + SIGKILL (timeout kill-after or OOM kill)
+# Subprocess-level timeout for each mode.  The asyncio-level safety net
+# (``self.timeout``, default 300 s) should rarely fire when these are set
+# correctly — it only catches pathological hangs where ``timeout(1)`` itself
+# fails to terminate the child.
+_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS = 30
+_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS = 120
 # How many recently-completed task records to keep for subagent_status queries.
 # The model can see these to understand whether a task succeeded, timed out, or errored.
 _MAX_RECENT_COMPLETIONS = 5
@@ -504,7 +510,17 @@ class GptmeToolBridge:
         )
         logger.debug(f"Response file: {response_file}")
 
+        subprocess_timeout_seconds = (
+            _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS
+            if mode == "fast"
+            else _SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS
+        )
+
         cmd = [
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            f"{subprocess_timeout_seconds}s",
             self.gptme_path,
             "--non-interactive",
             "--context",
@@ -576,7 +592,10 @@ class GptmeToolBridge:
                 return ToolResult(
                     success=False,
                     output="",
-                    error=f"Subagent timed out after {self.timeout}s",
+                    error=(
+                        "Subagent timed out at the emergency safety limit before it "
+                        "could finish. Try a narrower, more specific question."
+                    ),
                 )
             except asyncio.CancelledError:
                 process.kill()

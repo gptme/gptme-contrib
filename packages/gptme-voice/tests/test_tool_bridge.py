@@ -136,7 +136,14 @@ def test_execute_uses_legacy_env_override_for_smart_model() -> None:
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
 
         assert result.success is True
-        assert tuple(captured["args"])[:7] == (
+        args = tuple(captured["args"])
+        assert args[:4] == (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "120s",
+        )
+        assert args[4:11] == (
             "gptme",
             "--non-interactive",
             "--context",
@@ -145,7 +152,7 @@ def test_execute_uses_legacy_env_override_for_smart_model() -> None:
             "openai-subscription/gpt-5.4",
             "--tool-format",
         )
-        assert tuple(captured["args"])[7] == "tool"
+        assert args[11] == "tool"
 
     asyncio.run(_exercise())
 
@@ -167,9 +174,16 @@ def test_execute_uses_fast_model_override_without_touching_smart() -> None:
             result = await bridge._execute("Inspect recent voice changes", mode="fast")
 
         assert result.success is True
-        assert "--model" in tuple(captured["args"])
-        model_index = tuple(captured["args"]).index("--model") + 1
-        assert tuple(captured["args"])[model_index] == "openai/gpt-5-mini"
+        args = tuple(captured["args"])
+        assert args[:4] == (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "30s",
+        )
+        assert "--model" in args
+        model_index = args.index("--model") + 1
+        assert args[model_index] == "openai/gpt-5-mini"
 
     asyncio.run(_exercise())
 
@@ -191,7 +205,14 @@ def test_execute_uses_smart_model_override_without_touching_fast() -> None:
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
 
         assert result.success is True
-        assert tuple(captured["args"])[:7] == (
+        args = tuple(captured["args"])
+        assert args[:4] == (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "120s",
+        )
+        assert args[4:11] == (
             "gptme",
             "--non-interactive",
             "--context",
@@ -200,7 +221,7 @@ def test_execute_uses_smart_model_override_without_touching_fast() -> None:
             "openai-subscription/gpt-5.4",
             "--tool-format",
         )
-        assert tuple(captured["args"])[7] == "tool"
+        assert args[11] == "tool"
 
     asyncio.run(_exercise())
 
@@ -221,7 +242,14 @@ def test_execute_uses_env_override_for_gptme_path() -> None:
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
 
         assert result.success is True
-        assert tuple(captured["args"])[0] == "/fake/bin/gptme"
+        args = tuple(captured["args"])
+        assert args[:5] == (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "120s",
+            "/fake/bin/gptme",
+        )
 
     asyncio.run(_exercise())
 
@@ -243,6 +271,12 @@ def test_execute_fast_mode_keeps_context_files() -> None:
             await bridge._execute("quick lookup", mode="fast")
 
         args = tuple(captured["args"])
+        assert args[:4] == (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "30s",
+        )
         assert "--context" in args
         assert "files" in args
         assert "--non-interactive" in args
@@ -267,8 +301,66 @@ def test_execute_smart_mode_keeps_context_loading() -> None:
             await bridge._execute("detailed analysis", mode="smart")
 
         args = tuple(captured["args"])
-        assert "--context" in args
-        assert "files" in args
+        assert args[:8] == (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "120s",
+            "gptme",
+            "--non-interactive",
+            "--context",
+            "files",
+        )
+
+    asyncio.run(_exercise())
+
+
+def test_execute_fast_mode_uses_subprocess_timeout_wrapper() -> None:
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
+            await bridge._execute("quick lookup", mode="fast")
+
+        args = tuple(captured["args"])
+        assert args[:4] == (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "30s",
+        )
+
+    asyncio.run(_exercise())
+
+
+def test_execute_smart_mode_uses_subprocess_timeout_wrapper() -> None:
+    async def _exercise() -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace")
+            await bridge._execute("deep lookup", mode="smart")
+
+        args = tuple(captured["args"])
+        assert args[:4] == (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "120s",
+        )
 
     asyncio.run(_exercise())
 
