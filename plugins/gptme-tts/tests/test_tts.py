@@ -174,6 +174,59 @@ def test_request_timeout_configurable(monkeypatch):
     assert _request_timeout() == DEFAULT_REQUEST_TIMEOUT
 
 
+def test_backend_selection(monkeypatch):
+    """GPTME_TTS_BACKEND selects the backend (default 'server')."""
+    import gptme_tts.tts as tts_mod
+
+    monkeypatch.delenv("GPTME_TTS_BACKEND", raising=False)
+    assert tts_mod._backend() == "server"
+    monkeypatch.setenv("GPTME_TTS_BACKEND", "OpenRouter")
+    assert tts_mod._backend() == "openrouter"
+
+
+def test_synthesize_openrouter_builds_request_and_decodes_pcm(monkeypatch):
+    """OpenRouter backend posts the right body and decodes pcm bytes to int16."""
+    import gptme_tts.tts as tts_mod
+    import numpy as np
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    monkeypatch.setenv("GPTME_TTS_MODEL", "x-ai/grok-voice-tts-1.0")
+    monkeypatch.setenv("GPTME_TTS_VOICE", "ringo")
+
+    pcm_bytes = np.array([0, 100, -100, 32767], dtype="<i2").tobytes()
+    captured: dict = {}
+
+    class FakeResp:
+        status_code = 200
+        content = pcm_bytes
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(url=url, headers=headers, json=json)
+        return FakeResp()
+
+    monkeypatch.setattr(tts_mod.requests, "post", fake_post)
+
+    sample_rate, data = tts_mod._synthesize_openrouter("Hello")
+
+    assert sample_rate == 24000
+    assert list(data) == [0, 100, -100, 32767]
+    assert captured["url"] == "https://openrouter.ai/api/v1/audio/speech"
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    body = captured["json"]
+    assert body["model"] == "x-ai/grok-voice-tts-1.0"
+    assert body["input"] == "Hello"
+    assert body["voice"] == "ringo"
+    assert body["response_format"] == "pcm"
+
+
+def test_synthesize_openrouter_no_api_key(monkeypatch):
+    """OpenRouter backend skips (returns None) when no API key is available."""
+    import gptme_tts.tts as tts_mod
+
+    monkeypatch.setattr(tts_mod, "_get_openrouter_api_key", lambda: None)
+    assert tts_mod._synthesize_openrouter("hi") is None
+
+
 def test_hooks_registered():
     """Test that TTS hooks are properly registered in the tool spec."""
     from gptme_tts.tts import tool

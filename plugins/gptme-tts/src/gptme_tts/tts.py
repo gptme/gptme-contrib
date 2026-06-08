@@ -23,6 +23,8 @@ Uses Kokoro for local TTS generation.
 - ``GPTME_TTS_SPEED``: Playback speed multiplier (default ``1.0``).
 - ``GPTME_VOICE_FINISH``: If set to "true" or "1", waits for speech to finish before exiting. This is useful when you want to ensure the full message is spoken.
 - ``GPTME_TTS_TIMEOUT``: Per-request timeout in seconds (default ``30``). Increase for slow backends like chatterbox.
+- ``GPTME_TTS_BACKEND``: ``server`` (default, uses the local tts_server.py) or ``openrouter`` (calls OpenRouter speech models directly, no local server needed — requires ``OPENROUTER_API_KEY``).
+- ``GPTME_TTS_MODEL``: OpenRouter speech model when ``GPTME_TTS_BACKEND=openrouter`` (default ``x-ai/grok-voice-tts-1.0``; e.g. ``microsoft/mai-voice-2``). Set ``GPTME_TTS_VOICE`` to a voice the model supports (Grok: ``Ara``, ``Eve``, ``Rex``, ``Gork``, ``Leo``; default ``Ara``).
 """
 
 import io
@@ -72,6 +74,7 @@ def _request_timeout() -> float:
 # Check for TTS-specific imports
 has_tts_imports = False
 try:
+    import numpy as np  # fmt: skip
     import scipy.io.wavfile as wavfile  # fmt: skip
 
     has_tts_imports = True
@@ -79,12 +82,53 @@ except (ImportError, OSError):
     has_tts_imports = False
 
 
+# --- Backend selection -------------------------------------------------------
+# "server"     -> local tts_server.py on localhost:8765 (kokoro/chatterbox/...)
+# "openrouter" -> OpenRouter speech models directly (no local server needed)
+
+OPENROUTER_TTS_URL = "https://openrouter.ai/api/v1/audio/speech"
+# Default to Grok voice TTS. Valid voices include Ara, Eve, Rex, Gork, Leo,
+# default. Override with GPTME_TTS_MODEL / GPTME_TTS_VOICE for other models
+# (e.g. microsoft/mai-voice-2 with voice en-US-Harper:MAI-Voice-2). Note: the
+# pcm response format is required here, so mp3-only models (e.g. Mistral Voxtral)
+# are not yet supported.
+DEFAULT_OPENROUTER_MODEL = "x-ai/grok-voice-tts-1.0"
+DEFAULT_OPENROUTER_VOICE = "Ara"
+# OpenRouter "pcm" output is uncompressed mono signed-16-bit little-endian @ 24kHz.
+OPENROUTER_PCM_SAMPLE_RATE = 24000
+
+
+def _backend() -> str:
+    """Active TTS backend: 'server' (default) or 'openrouter'."""
+    return (os.getenv("GPTME_TTS_BACKEND") or "server").lower()
+
+
+def _openrouter_model() -> str:
+    return os.getenv("GPTME_TTS_MODEL") or DEFAULT_OPENROUTER_MODEL
+
+
+def _get_openrouter_api_key() -> str | None:
+    """Resolve the OpenRouter API key from env or gptme config."""
+    if key := os.getenv("OPENROUTER_API_KEY"):
+        return key
+    try:
+        from gptme.config import get_config
+
+        return get_config().get_env("OPENROUTER_API_KEY")
+    except Exception:
+        return None
+
+
 def is_available() -> bool:
-    """Check if the TTS server is available."""
+    """Check whether TTS can run with the active backend."""
     if not has_tts_imports or not is_audio_available():
         return False
 
-    # available if a server is running on localhost:8765
+    if _backend() == "openrouter":
+        # No local server needed — just an API key.
+        return bool(_get_openrouter_api_key())
+
+    # server backend: available if a server is running on localhost:8765
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         server_available = sock.connect_ex((host, port)) == 0
@@ -110,10 +154,14 @@ def init() -> ToolSpec:
             console.log(f"Warning: Invalid GPTME_TTS_SPEED={speed_env}, using default")
 
     if is_available():
-        if speed_env:
-            console.log(f"Using TTS (speed: {current_speed:.2f}x)")
+        backend = _backend()
+        suffix = f" (speed: {current_speed:.2f}x)" if speed_env else ""
+        if backend == "openrouter":
+            console.log(f"Using TTS via OpenRouter [{_openrouter_model()}]{suffix}")
         else:
-            console.log("Using TTS")
+            console.log(f"Using TTS{suffix}")
+    elif _backend() == "openrouter":
+        console.log("TTS disabled: OPENROUTER_API_KEY not set")
     else:
         console.log("TTS disabled: server not available")
     return tool
@@ -335,6 +383,95 @@ def clean_for_speech(content: str) -> str:
     return content.strip()
 
 
+def _synthesize_server(chunk: str):
+    """Synthesize a chunk via the local tts_server.py. Returns (sample_rate, data)."""
+    url = f"http://{host}:{port}/tts"
+    params: dict[str, str | float] = {"text": chunk, "speed": current_speed}
+    if voice := os.getenv("GPTME_TTS_VOICE"):
+        params["voice"] = voice
+
+    try:
+        response = requests.get(url, params=params, timeout=_request_timeout())
+    except requests.exceptions.Timeout:
+        # Not a dead server — the backend (e.g. chatterbox) was slower than the
+        # request timeout. Raise GPTME_TTS_TIMEOUT for slow backends.
+        log.warning(
+            f"TTS request timed out after {_request_timeout():.0f}s "
+            f"(slow backend?); skipping chunk. "
+            f"Set GPTME_TTS_TIMEOUT to increase the limit."
+        )
+        return None
+    except requests.exceptions.ConnectionError:
+        log.warning(f"TTS server unavailable at {url}")
+        return None
+
+    if response.status_code != 200:
+        log.error(f"TTS server returned status {response.status_code}")
+        if response.content:
+            log.error(f"Error content: {response.content.decode()} for {chunk}")
+        return None
+
+    return wavfile.read(io.BytesIO(response.content))
+
+
+def _synthesize_openrouter(chunk: str):
+    """Synthesize a chunk via OpenRouter's speech API. Returns (sample_rate, data).
+
+    Uses the ``pcm`` response format (uncompressed 16-bit mono @ 24kHz) so no
+    audio decoder is needed and latency stays low.
+    """
+    api_key = _get_openrouter_api_key()
+    if not api_key:
+        log.warning("OpenRouter TTS backend selected but OPENROUTER_API_KEY is not set")
+        return None
+
+    payload: dict[str, str | float] = {
+        "model": _openrouter_model(),
+        "input": chunk,
+        "voice": os.getenv("GPTME_TTS_VOICE") or DEFAULT_OPENROUTER_VOICE,
+        "response_format": "pcm",
+        "speed": current_speed,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.post(
+            OPENROUTER_TTS_URL,
+            headers=headers,
+            json=payload,
+            timeout=_request_timeout(),
+        )
+    except requests.exceptions.Timeout:
+        log.warning(
+            f"OpenRouter TTS timed out after {_request_timeout():.0f}s; skipping chunk. "
+            f"Set GPTME_TTS_TIMEOUT to increase the limit."
+        )
+        return None
+    except requests.exceptions.ConnectionError:
+        log.warning("OpenRouter TTS unreachable (connection error); skipping chunk")
+        return None
+
+    if response.status_code != 200:
+        # Non-200 responses carry a JSON error body (e.g. invalid voice/model).
+        log.error(f"OpenRouter TTS returned status {response.status_code}")
+        if response.content:
+            log.error(f"Error content: {response.content.decode(errors='replace')}")
+        return None
+
+    data = np.frombuffer(response.content, dtype="<i2")
+    return OPENROUTER_PCM_SAMPLE_RATE, data
+
+
+def _synthesize(chunk: str):
+    """Synthesize a chunk with the active backend. Returns (sample_rate, data) or None."""
+    if _backend() == "openrouter":
+        return _synthesize_openrouter(chunk)
+    return _synthesize_server(chunk)
+
+
 def _tts_processor_thread_fn():
     """Background thread for processing TTS requests."""
     log.debug("TTS processor ready")
@@ -350,43 +487,12 @@ def _tts_processor_thread_fn():
                     pass  # stop() may have already reset unfinished_tasks to 0
                 break
 
-            # Make request to the TTS server
-            url = f"http://{host}:{port}/tts"
-            params: dict[str, str | float] = {
-                "text": chunk,
-                "speed": current_speed,
-            }
-            if voice := os.getenv("GPTME_TTS_VOICE"):
-                params["voice"] = voice
-
-            try:
-                response = requests.get(url, params=params, timeout=_request_timeout())
-            except requests.exceptions.Timeout:
-                # Not a dead server — the backend (e.g. chatterbox) was slower
-                # than the request timeout. Raise GPTME_TTS_TIMEOUT for slow backends.
-                log.warning(
-                    f"TTS request timed out after {_request_timeout():.0f}s "
-                    f"(slow backend?); skipping chunk. "
-                    f"Set GPTME_TTS_TIMEOUT to increase the limit."
-                )
-                tts_request_queue.task_done()
-                continue
-            except requests.exceptions.ConnectionError:
-                log.warning(f"TTS server unavailable at {url}")
+            result = _synthesize(chunk)
+            if result is None:
                 tts_request_queue.task_done()
                 continue
 
-            if response.status_code != 200:
-                log.error(f"TTS server returned status {response.status_code}")
-                if response.content:
-                    log.error(f"Error content: {response.content.decode()} for {chunk}")
-                tts_request_queue.task_done()
-                continue
-
-            # Process audio response
-            audio_data = io.BytesIO(response.content)
-            sample_rate, data = wavfile.read(audio_data)
-
+            sample_rate, data = result
             # Play audio using the sound utility
             play_audio_data(data, sample_rate, block=False)
             tts_request_queue.task_done()
