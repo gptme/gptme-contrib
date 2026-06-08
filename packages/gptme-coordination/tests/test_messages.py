@@ -73,3 +73,41 @@ class TestHistory:
         history = bus.history(channel="announce")
         assert len(history) == 1
         assert history[0].body == "announce"
+
+
+class TestHMACVerification:
+    def test_verified_false_without_secrets(self, bus: MessageBus) -> None:
+        """Messages with a stored HMAC are NOT verified until inbox() compares against a secret."""
+        secret = b"s3cr3t"
+        bus.send("agent-1", "hello", secret=secret)
+        # history() and inbox() without secrets must not claim verified=True
+        history = bus.history()
+        assert len(history) == 1
+        assert history[0].hmac is not None, "HMAC should be stored"
+        assert history[0].verified is False, "stored HMAC ≠ verified"
+
+    def test_inbox_without_secrets_not_verified(self, bus: MessageBus) -> None:
+        """inbox() without a secrets dict must leave verified=False on HMAC'd messages."""
+        bus.send("agent-1", "hi", recipient="agent-2", secret=b"s3cr3t")
+        msgs = bus.inbox("agent-2")
+        assert msgs[0].verified is False
+
+    def test_inbox_with_correct_secret_verified(self, bus: MessageBus) -> None:
+        """inbox() with the correct secret marks the message verified=True."""
+        secret = b"s3cr3t"
+        bus.send("agent-1", "hi", recipient="agent-2", secret=secret)
+        msgs = bus.inbox("agent-2", secrets={"agent-1": secret})
+        assert msgs[0].verified is True
+
+    def test_inbox_with_wrong_secret_not_verified(self, bus: MessageBus) -> None:
+        """inbox() with the wrong secret marks the message verified=False."""
+        bus.send("agent-1", "hi", recipient="agent-2", secret=b"correct")
+        msgs = bus.inbox("agent-2", secrets={"agent-1": b"wrong"})
+        assert msgs[0].verified is False
+
+    def test_no_hmac_message_not_verified(self, bus: MessageBus) -> None:
+        """Messages sent without a secret have no HMAC and must be verified=False."""
+        bus.send("agent-1", "unauthenticated")
+        history = bus.history()
+        assert history[0].hmac is None
+        assert history[0].verified is False

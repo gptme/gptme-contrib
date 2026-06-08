@@ -22,6 +22,7 @@ members = [
     "gptme-consortium",
     "gptme-contrib-lib",
     "gptme-contrib-workspace",
+    "gptme-coordination",
     "gptme-daily-briefing",
     "gptme-dashboard",
     "gptme-forum",
@@ -1536,6 +1537,20 @@ dev = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "types-pyyaml", specifier = ">=6.0" },
 ]
+
+[[package]]
+name = "gptme-coordination"
+version = "0.1.0"
+source = { editable = "packages/gptme-coordination" }
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" }]
+provides-extras = ["test"]
 
 [[package]]
 name = "gptme-daily-briefing"

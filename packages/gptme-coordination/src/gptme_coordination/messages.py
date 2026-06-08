@@ -155,5 +155,6 @@ def _row_to_message(row: Any) -> Message:
         body=row["body"],
         created_at=datetime.fromisoformat(row["created_at"]),
         hmac=row["hmac"] if "hmac" in row.keys() else None,
-        verified=bool(row["hmac"]) if "hmac" in row.keys() and row["hmac"] else False,
+        verified="hmac"
+        not in row.keys(),  # True only for legacy DBs without HMAC column
     )

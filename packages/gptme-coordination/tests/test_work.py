@@ -135,3 +135,87 @@ class TestList:
         assert len(claimed) == 2
         claimed_a = work.list_claimed(agent_id="agent-a")
         assert len(claimed_a) == 1
+
+
+class TestVacuumExpired:
+    def test_vacuum_completed_uses_completed_at(self, work: WorkClaimManager) -> None:
+        """vacuum_expired for completed tasks must age by completed_at, not claimed_at."""
+        work.claim("agent-a", "task-old")
+        work.complete("agent-a", "task-old")
+
+        # Backdating claimed_at to > 24h ago while completed_at is recent
+        work.db.conn.execute(
+            "UPDATE work SET claimed_at = datetime('now', '-48 hours') WHERE task_id = ?",
+            ("task-old",),
+        )
+        work.db.conn.commit()
+
+        # Should NOT delete — completed_at is recent (< 24h)
+        counts = work.vacuum_expired(completed_age_hours=24)
+        assert counts.get("completed_older_than_24h", 0) == 0
+        assert work.get("task-old") is not None
+
+    def test_vacuum_completed_respects_completed_at_age(
+        self, work: WorkClaimManager
+    ) -> None:
+        """Tasks completed long ago ARE swept when completed_at is old enough."""
+        work.claim("agent-a", "task-old")
+        work.complete("agent-a", "task-old")
+
+        # Backdate completed_at
+        work.db.conn.execute(
+            "UPDATE work SET completed_at = datetime('now', '-48 hours') WHERE task_id = ?",
+            ("task-old",),
+        )
+        work.db.conn.commit()
+
+        counts = work.vacuum_expired(completed_age_hours=24)
+        assert counts.get("completed_older_than_24h", 0) == 1
+        assert work.get("task-old") is None
+
+
+class TestHMACStaleOnReclaim:
+    def test_reclaim_without_secret_clears_hmac(self, work: WorkClaimManager) -> None:
+        """Reclaiming a task without a secret must clear any stale HMAC."""
+        secret = b"mysecret"
+        work.claim("agent-a", "task-1", secret=secret)
+        work.complete("agent-a", "task-1")
+
+        # Reclaim without a secret — stale HMAC must be cleared
+        reclaimed = work.claim("agent-b", "task-1")
+        assert reclaimed is not None
+        assert (
+            reclaimed.hmac is None
+        ), "stale HMAC should be cleared on secretless reclaim"
+        assert reclaimed.verified is False
+
+    def test_reclaim_with_secret_refreshes_hmac(self, work: WorkClaimManager) -> None:
+        """Reclaiming with a secret computes a fresh HMAC over the new claim fields."""
+        secret = b"mysecret"
+        work.claim("agent-a", "task-1", secret=secret)
+        work.complete("agent-a", "task-1")
+
+        new_secret = b"newsecret"
+        reclaimed = work.claim("agent-b", "task-1", secret=new_secret)
+        assert reclaimed is not None
+        assert reclaimed.hmac is not None
+
+    def test_extend_without_secret_clears_hmac(self, work: WorkClaimManager) -> None:
+        """Extending our own claim without a secret must not keep the stale HMAC."""
+        secret = b"mysecret"
+        work.claim("agent-a", "task-1", secret=secret)
+
+        # Extend without a secret
+        extended = work.claim("agent-a", "task-1")
+        assert extended is not None
+        assert (
+            extended.hmac is None
+        ), "stale HMAC should be cleared on secretless extend"
+
+    def test_verified_false_on_read(self, work: WorkClaimManager) -> None:
+        """Claims read from DB are never marked verified=True; only verify_claim() does that."""
+        secret = b"mysecret"
+        work.claim("agent-a", "task-1", secret=secret)
+        claim = work.get("task-1")
+        assert claim is not None
+        assert claim.verified is False

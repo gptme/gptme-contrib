@@ -302,7 +302,7 @@ class WorkClaimManager:
                         result = NULL,
                         completed_at = NULL,
                         metadata = COALESCE(?, metadata),
-                        hmac = COALESCE(?, hmac)
+                        hmac = ?
                     WHERE task_id = ? AND status = 'completed'""",
                     (agent_id, str(ttl), metadata, hmac_val, task_id),
                 )
@@ -344,7 +344,7 @@ class WorkClaimManager:
                         result = NULL,
                         completed_at = NULL,
                         metadata = COALESCE(?, metadata),
-                        hmac = COALESCE(?, hmac)
+                        hmac = ?
                     WHERE task_id = ?
                         AND (status IN ('available', 'abandoned')
                              OR (status = 'claimed'
@@ -356,8 +356,8 @@ class WorkClaimManager:
                     return None
             elif row["status"] == "claimed" and row["claimer"] == agent_id:
                 # We already hold it — extend the claim
-                # Recompute HMAC when we have a secret since expiry changes
-                hmac_val = row["hmac"] if "hmac" in row.keys() else None
+                # Recompute HMAC when we have a secret (expiry changes, so old HMAC is stale)
+                hmac_val = None
                 if secret is not None:
                     py_expires = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
                         "%Y-%m-%d %H:%M:%S"
@@ -382,7 +382,7 @@ class WorkClaimManager:
                     """UPDATE work
                     SET expires_at = datetime('now', ? || ' minutes'),
                         metadata = COALESCE(?, metadata),
-                        hmac = COALESCE(?, hmac)
+                        hmac = ?
                     WHERE task_id = ? AND claimer = ?""",
                     (str(ttl), metadata, hmac_val, task_id, agent_id),
                 )
@@ -453,8 +453,8 @@ class WorkClaimManager:
             result = conn.execute(
                 """DELETE FROM work
                 WHERE status = 'completed'
-                  AND claimed_at IS NOT NULL
-                  AND claimed_at < datetime('now', ? || ' hours')""",
+                  AND completed_at IS NOT NULL
+                  AND completed_at < datetime('now', ? || ' hours')""",
                 (str(-completed_age_hours),),
             )
             counts[f"completed_older_than_{completed_age_hours}h"] = result.rowcount
@@ -595,5 +595,5 @@ def _row_to_work_claim(row: Any) -> WorkClaim:
         if "completed_at" in row.keys() and row["completed_at"]
         else None,
         hmac=row["hmac"] if "hmac" in row.keys() else None,
-        verified=bool(row["hmac"]) if "hmac" in row.keys() and row["hmac"] else False,
+        verified=False,
     )
