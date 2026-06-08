@@ -241,7 +241,9 @@ class TestHMACStaleOnReclaim:
 
 
 class TestAuthCompatibility:
-    def test_verify_hmac_matches_work_claim_manager(self, work: WorkClaimManager) -> None:
+    def test_verify_hmac_matches_work_claim_manager(
+        self, work: WorkClaimManager
+    ) -> None:
         """auth.verify_hmac must validate signatures produced by WorkClaimManager."""
         from gptme_coordination.auth import verify_hmac
 
@@ -253,7 +255,9 @@ class TestAuthCompatibility:
 
         # auth.verify_hmac uses the same JSON encoding as WorkClaimManager.compute_hmac;
         # epoch is int and expires_at is str (as stored in the managers)
-        expires_at_str = claim.expires_at.strftime("%Y-%m-%d %H:%M:%S") if claim.expires_at else None
-        assert verify_hmac(secret, claim.hmac, "agent-a", "task-1", claim.epoch, expires_at_str), (
-            "auth.verify_hmac encoding must match WorkClaimManager.compute_hmac"
+        expires_at_str = (
+            claim.expires_at.strftime("%Y-%m-%d %H:%M:%S") if claim.expires_at else None
         )
+        assert verify_hmac(
+            secret, claim.hmac, "agent-a", "task-1", claim.epoch, expires_at_str
+        ), "auth.verify_hmac encoding must match WorkClaimManager.compute_hmac"

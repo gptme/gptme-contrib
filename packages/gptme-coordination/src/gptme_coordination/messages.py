@@ -16,7 +16,6 @@ from datetime import datetime
 from typing import Any
 
 from gptme_coordination.auth import compute_hmac as _compute_hmac
-
 from gptme_coordination.db import CoordinationDB
 
 
