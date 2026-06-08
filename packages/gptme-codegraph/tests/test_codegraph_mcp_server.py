@@ -100,6 +100,7 @@ def test_tools_registered():
         "codegraph_refs",
         "codegraph_blast",
         "codegraph_impact",
+        "codegraph_search",
     }
     assert names == expected
 
@@ -487,3 +488,54 @@ def test_cross_file_blast_missing_symbol(sample_dir):
 
     d = _run(_check())
     assert "error" in d
+
+
+def test_codegraph_search(sample_dir):
+    """codegraph_search returns ranked results for a query."""
+
+    async def _check():
+        r = await _MOD.mcp.call_tool(
+            "codegraph_search",
+            {"query": "add compute", "directory": sample_dir, "limit": 5},
+        )
+        return json.loads(_content(r))
+
+    d = _run(_check())
+    assert "error" not in d, d.get("error", "")
+    assert d["backend"] == "lexical"
+    assert len(d["results"]) >= 1
+    # Results should have the expected shape
+    for res in d["results"]:
+        assert "score" in res
+        assert "qualified_id" in res
+        assert "name" in res
+        assert res["score"] > 0
+
+
+def test_codegraph_search_missing_dir():
+    """codegraph_search returns error for nonexistent directory."""
+
+    async def _check():
+        r = await _MOD.mcp.call_tool(
+            "codegraph_search",
+            {"query": "test", "directory": "/nonexistent/path", "limit": 5},
+        )
+        return json.loads(_content(r))
+
+    d = _run(_check())
+    assert "error" in d
+
+
+def test_codegraph_search_empty_query(sample_dir):
+    """codegraph_search with no-matching query returns empty results."""
+
+    async def _check():
+        r = await _MOD.mcp.call_tool(
+            "codegraph_search",
+            {"query": "xyznonexistent2024", "directory": sample_dir, "limit": 5},
+        )
+        return json.loads(_content(r))
+
+    d = _run(_check())
+    assert "error" not in d, d.get("error", "")
+    assert len(d["results"]) == 0
