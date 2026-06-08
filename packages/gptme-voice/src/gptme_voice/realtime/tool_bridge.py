@@ -14,6 +14,7 @@ conversation when ready.
 import asyncio
 import logging
 import os
+import shutil
 import tempfile
 import time
 from collections import deque
@@ -55,6 +56,9 @@ _KILLED_RETURNCODE = 137  # 128 + SIGKILL (timeout kill-after or OOM kill)
 # fails to terminate the child.
 _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS = 30
 _SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS = 120
+# ``timeout(1)`` is a GNU coreutils binary available on Linux but not macOS.
+# When it is missing we fall back to Python-level asyncio timeout handling.
+_TIMEOUT_BINARY_AVAILABLE = shutil.which("timeout") is not None
 # How many recently-completed task records to keep for subagent_status queries.
 # The model can see these to understand whether a task succeeded, timed out, or errored.
 _MAX_RECENT_COMPLETIONS = 5
@@ -516,16 +520,24 @@ class GptmeToolBridge:
             else _SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS
         )
 
-        cmd = [
-            "timeout",
-            "--signal=TERM",
-            "--kill-after=5s",
-            f"{subprocess_timeout_seconds}s",
-            self.gptme_path,
-            "--non-interactive",
-            "--context",
-            "files",
-        ]
+        if _TIMEOUT_BINARY_AVAILABLE:
+            cmd = [
+                "timeout",
+                "--signal=TERM",
+                "--kill-after=5s",
+                f"{subprocess_timeout_seconds}s",
+                self.gptme_path,
+                "--non-interactive",
+                "--context",
+                "files",
+            ]
+        else:
+            cmd = [
+                self.gptme_path,
+                "--non-interactive",
+                "--context",
+                "files",
+            ]
         # Keep project prompt files but skip context_cmd. This avoids pulling in
         # scripts/context.sh while still giving the subagent its runtime rules.
         if model:
@@ -579,7 +591,11 @@ class GptmeToolBridge:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(_read_stdout(), _read_stderr(), process.wait()),
-                    timeout=self.timeout,
+                    timeout=(
+                        self.timeout
+                        if _TIMEOUT_BINARY_AVAILABLE
+                        else subprocess_timeout_seconds
+                    ),
                 )
             except asyncio.TimeoutError:
                 process.kill()
@@ -589,13 +605,20 @@ class GptmeToolBridge:
                 # "timed_out" rather than "error" in recent_completions.
                 if on_completed:
                     on_completed(124, time.monotonic())
+                if _TIMEOUT_BINARY_AVAILABLE:
+                    error_msg = (
+                        "Subagent timed out at the emergency safety limit before it "
+                        "could finish. Try a narrower, more specific question."
+                    )
+                else:
+                    error_msg = (
+                        "Subagent timed out before it could finish. "
+                        "Try a narrower, more specific question."
+                    )
                 return ToolResult(
                     success=False,
                     output="",
-                    error=(
-                        "Subagent timed out at the emergency safety limit before it "
-                        "could finish. Try a narrower, more specific question."
-                    ),
+                    error=error_msg,
                 )
             except asyncio.CancelledError:
                 process.kill()

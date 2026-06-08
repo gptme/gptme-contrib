@@ -3,7 +3,10 @@ import logging
 from pathlib import Path
 
 import pytest
-from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+from gptme_voice.realtime.tool_bridge import (
+    _TIMEOUT_BINARY_AVAILABLE,
+    GptmeToolBridge,
+)
 
 
 class _FakeStream:
@@ -330,12 +333,15 @@ def test_execute_fast_mode_uses_subprocess_timeout_wrapper() -> None:
             await bridge._execute("quick lookup", mode="fast")
 
         args = tuple(captured["args"])
-        assert args[:4] == (
-            "timeout",
-            "--signal=TERM",
-            "--kill-after=5s",
-            "30s",
-        )
+        if _TIMEOUT_BINARY_AVAILABLE:
+            assert args[:4] == (
+                "timeout",
+                "--signal=TERM",
+                "--kill-after=5s",
+                "30s",
+            )
+        else:
+            assert args[0] == bridge.gptme_path
 
     asyncio.run(_exercise())
 
@@ -355,12 +361,15 @@ def test_execute_smart_mode_uses_subprocess_timeout_wrapper() -> None:
             await bridge._execute("deep lookup", mode="smart")
 
         args = tuple(captured["args"])
-        assert args[:4] == (
-            "timeout",
-            "--signal=TERM",
-            "--kill-after=5s",
-            "120s",
-        )
+        if _TIMEOUT_BINARY_AVAILABLE:
+            assert args[:4] == (
+                "timeout",
+                "--signal=TERM",
+                "--kill-after=5s",
+                "120s",
+            )
+        else:
+            assert args[0] == bridge.gptme_path
 
     asyncio.run(_exercise())
 

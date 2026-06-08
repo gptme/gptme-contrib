@@ -364,6 +364,11 @@ class SearchBackend(Protocol):
 # SQLite search-document cache
 # ---------------------------------------------------------------------------
 
+# TODO(phase-2): Cache helpers are wired but not yet integrated into the
+# CLI search path (core.py) or the MCP tool (mcp_server.py). Every
+# search invocation currently rebuilds the BM25 index from disk. This
+# will be connected once the local embedding backend lands.
+
 
 def _ensure_search_tables(conn: sqlite3.Connection) -> None:
     """Create search-document cache tables if they don't exist."""

@@ -612,10 +612,11 @@ def codegraph_search(
     directory: str,
     limit: int = 10,
 ) -> str:
-    """Search indexed symbols by concept/query using local lexical search.
+    """Find code symbols by concept when you don't know the exact name.
 
-    Uses a dependency-free BM25 scorer over symbol names, docstrings, and
-    source snippets. No external embeddings or API calls required.
+    Use this tool to locate functions, classes, or methods that handle a
+    specific concept (e.g. "retry logic", "session persistence"). It
+    searches indexed symbols using a local BM25 scorer — no external APIs.
 
     Args:
         query: Natural-language search query (e.g. "where is retry logic?").
