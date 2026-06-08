@@ -4,15 +4,35 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from gptme_subscription.routing import (
     clear_rebalance_state,
+    combine_window_pacing_snapshots,
+    compute_pacing_snapshot,
     compute_rebalance_hold_seconds,
     compute_window_pacing,
+    compute_window_pacing_snapshot,
     load_rebalance_state,
     save_rebalance_state,
 )
 
 WEEK = 7 * 24 * 3600
+
+
+class TestComputePacingSnapshot:
+    def test_keeps_positive_gap_for_overuse(self) -> None:
+        result = compute_pacing_snapshot(0.8, elapsed_fraction=0.5)
+        assert result.pace_gap == pytest.approx(0.3)
+        assert result.headroom == pytest.approx(0.2)
+        assert result.status == "overusing"
+
+    def test_supports_custom_target_policy(self) -> None:
+        result = compute_pacing_snapshot(
+            0.5, elapsed_fraction=0.5, target_utilization=0.9
+        )
+        assert result.target_utilization == pytest.approx(0.45)
+        assert result.pace_gap == pytest.approx(0.05)
+        assert result.status == "on_track"
 
 
 class TestComputeWindowPacing:
@@ -51,6 +71,20 @@ class TestComputeWindowPacing:
     def test_returns_none_for_invalid_inputs(self) -> None:
         assert compute_window_pacing(0.5, 0, WEEK) is None
         assert compute_window_pacing(0.5, 3600, 0) is None
+
+    def test_window_snapshot_exposes_headroom(self) -> None:
+        result = compute_window_pacing_snapshot(0.7, int(WEEK * 0.25), WEEK)
+        assert result is not None
+        assert result.headroom == pytest.approx(0.3)
+        assert result.target_utilization == pytest.approx(0.75)
+
+    def test_combine_prefers_most_over_budget_window(self) -> None:
+        result = combine_window_pacing_snapshots(
+            [(0.2, 3600, 18000), (0.6, 302400, 604800)]
+        )
+        assert result is not None
+        assert result.pace_gap > 0
+        assert result.status == "overusing"
 
 
 class TestComputeRebalanceHoldSeconds:

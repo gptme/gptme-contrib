@@ -26,12 +26,16 @@ from gptme_subscription.observation import (
     subscription_pressure_from_usage,
 )
 from gptme_subscription.routing import (
+    PacingSnapshot,
     RebalanceState,
     best_lower_pressure_fallback,
     capacity_aware_fallback_order,
     clear_rebalance_state,
+    combine_window_pacing_snapshots,
+    compute_pacing_snapshot,
     compute_rebalance_hold_seconds,
     compute_window_pacing,
+    compute_window_pacing_snapshot,
     load_rebalance_state,
     save_rebalance_state,
     soonest_resetting_fallback,
@@ -48,6 +52,10 @@ __all__ = [
     "pressure_from_observation",
     "SubscriptionObservation",
     # Routing
+    "PacingSnapshot",
+    "compute_pacing_snapshot",
+    "compute_window_pacing_snapshot",
+    "combine_window_pacing_snapshots",
     "compute_window_pacing",
     "compute_rebalance_hold_seconds",
     "capacity_aware_fallback_order",
