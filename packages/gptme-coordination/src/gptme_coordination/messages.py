@@ -10,13 +10,12 @@ Every message includes an HMAC-SHA256 over the canonical
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import hmac
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from gptme_coordination.auth import compute_hmac as _compute_hmac
 
 from gptme_coordination.db import CoordinationDB
 
@@ -47,14 +46,8 @@ class MessageBus:
         body: str,
         secret: bytes,
     ) -> str:
-        """HMAC-SHA256 over canonical (sender|recipient|channel|body) JSON."""
-        canonical = json.dumps(
-            [sender, recipient, channel, body],
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        mac = hmac.new(secret, canonical, hashlib.sha256).digest()
-        return base64.b64encode(mac).decode("ascii")
+        """HMAC-SHA256 over canonical (sender, recipient, channel, body) JSON."""
+        return _compute_hmac(secret, sender, recipient, channel, body)
 
     def send(
         self,

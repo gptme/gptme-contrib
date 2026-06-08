@@ -16,15 +16,12 @@ by agents asserting another agent's identity.
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 
+from gptme_coordination.auth import compute_hmac as _compute_hmac
 from gptme_coordination.db import CoordinationDB
 
 DEFAULT_WORK_TTL_MINUTES = 60
@@ -172,14 +169,8 @@ class WorkClaimManager:
         expires_at: str | None,
         secret: bytes,
     ) -> str:
-        """HMAC-SHA256 over canonical (claimer|task_id|epoch|expires_at) JSON."""
-        canonical = json.dumps(
-            [claimer, task_id, epoch, expires_at],
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        mac = hmac.new(secret, canonical, hashlib.sha256).digest()
-        return base64.b64encode(mac).decode("ascii")
+        """HMAC-SHA256 over canonical (claimer, task_id, epoch, expires_at) JSON."""
+        return _compute_hmac(secret, claimer, task_id, epoch, expires_at)
 
     def submit(
         self,
@@ -431,7 +422,7 @@ class WorkClaimManager:
         """Abandon a claimed task, making it available again. Returns True if successful."""
         rows = self.db.conn.execute(
             """UPDATE work SET status = 'abandoned', claimer = NULL,
-                expires_at = NULL, completed_at = NULL, result = ?
+                expires_at = NULL, completed_at = NULL, hmac = NULL, result = ?
             WHERE task_id = ? AND claimer = ? AND status = 'claimed'""",
             (reason, task_id, agent_id),
         )

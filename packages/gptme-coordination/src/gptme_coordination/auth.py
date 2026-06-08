@@ -11,15 +11,25 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 SECRETS_DIR = Path("secrets/coordination")
 
 
-def compute_hmac(secret: bytes, *fields: str) -> str:
-    """HMAC-SHA256 over pipe-joined fields, base64-encoded."""
-    data = "|".join(fields).encode("utf-8")
+def compute_hmac(secret: bytes, *fields: Any) -> str:
+    """HMAC-SHA256 over compact JSON-array-encoded fields, base64-encoded.
+
+    Uses ``json.dumps(list(fields), sort_keys=True, separators=(",", ":"))``
+    — the canonical encoding used by WorkClaimManager and MessageBus —
+    so verify_hmac can validate signatures produced by either manager.
+    Fields may be str, int, or None; types are preserved in JSON serialization.
+    """
+    data = json.dumps(list(fields), sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return base64.b64encode(hmac.new(secret, data, hashlib.sha256).digest()).decode(
         "ascii"
     )

@@ -219,3 +219,41 @@ class TestHMACStaleOnReclaim:
         claim = work.get("task-1")
         assert claim is not None
         assert claim.verified is False
+
+    def test_abandon_clears_hmac(self, work: WorkClaimManager) -> None:
+        """abandon() must clear the HMAC so the row doesn't carry a stale signature."""
+        secret = b"mysecret"
+        work.claim("agent-a", "task-1", secret=secret)
+
+        # Verify the HMAC was stored
+        claimed = work.get("task-1")
+        assert claimed is not None
+        assert claimed.hmac is not None
+
+        # Abandon the task
+        assert work.abandon("agent-a", "task-1") is True
+
+        # HMAC must be cleared on the abandoned row
+        abandoned = work.get("task-1")
+        assert abandoned is not None
+        assert abandoned.status == "abandoned"
+        assert abandoned.hmac is None, "abandon() must clear stale HMAC"
+
+
+class TestAuthCompatibility:
+    def test_verify_hmac_matches_work_claim_manager(self, work: WorkClaimManager) -> None:
+        """auth.verify_hmac must validate signatures produced by WorkClaimManager."""
+        from gptme_coordination.auth import verify_hmac
+
+        secret = b"testsecret"
+        work.claim("agent-a", "task-1", secret=secret)
+        claim = work.get("task-1")
+        assert claim is not None
+        assert claim.hmac is not None
+
+        # auth.verify_hmac uses the same JSON encoding as WorkClaimManager.compute_hmac;
+        # epoch is int and expires_at is str (as stored in the managers)
+        expires_at_str = claim.expires_at.strftime("%Y-%m-%d %H:%M:%S") if claim.expires_at else None
+        assert verify_hmac(secret, claim.hmac, "agent-a", "task-1", claim.epoch, expires_at_str), (
+            "auth.verify_hmac encoding must match WorkClaimManager.compute_hmac"
+        )
