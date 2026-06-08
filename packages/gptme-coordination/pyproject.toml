@@ -1,0 +1,36 @@
+[project]
+name = "gptme-coordination"
+version = "0.1.0"
+description = "Generic inter-agent coordination via SQLite: work claims, message bus"
+authors = [
+    {name = "gptme contributors", email = "gptme@superuserlabs.org"}
+]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["coordination", "multi-agent", "gptme", "sqlite", "work-claims"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = []
+
+[project.scripts]
+gptme-coordination = "gptme_coordination.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
