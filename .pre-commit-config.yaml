@@ -98,7 +98,7 @@ repos:
     description: Detects copy-paste code duplication across the codebase.
     entry: jscpd
     language: node
-    additional_dependencies: ['jscpd']
+    additional_dependencies: ['jscpd@3.5.10']
     pass_filenames: false
     always_run: true
     types_or: [python, javascript, shell, markdown]
