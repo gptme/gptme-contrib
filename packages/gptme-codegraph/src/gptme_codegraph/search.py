@@ -77,7 +77,7 @@ _DOCSTRING_MAX_CHARS = 500
 
 def _extract_snippet(symbol_lines: list[str]) -> str:
     """Extract first N non-empty lines from a symbol body, capped."""
-    non_empty = [l for l in symbol_lines if l.strip()]
+    non_empty = [ln for ln in symbol_lines if ln.strip()]
     snippet_lines = non_empty[:_SNIPPET_MAX_LINES]
     snippet = "\n".join(snippet_lines).strip()
     if len(snippet) > _SNIPPET_MAX_CHARS:
