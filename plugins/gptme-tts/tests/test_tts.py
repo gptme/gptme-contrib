@@ -163,10 +163,69 @@ def test_hooks_registered():
 
     assert "speak_on_generation" in tool.hooks
     assert "wait_on_session_end" in tool.hooks
+    assert "speak_on_chunk" in tool.hooks
+    assert "reset_stream" in tool.hooks
 
-    # Check hook types
-    assert tool.hooks["speak_on_generation"][0] == "generation_post"
-    assert tool.hooks["wait_on_session_end"][0] == "session_end"
+    # Hook types use the current dot-notation HookType values.
+    assert tool.hooks["reset_stream"][0] == "generation.pre"
+    assert tool.hooks["speak_on_chunk"][0] == "generation.chunk"
+    assert tool.hooks["speak_on_generation"][0] == "generation.post"
+    assert tool.hooks["wait_on_session_end"][0] == "session.end"
+
+
+def test_speak_on_chunk_streams_sentences():
+    """speak_on_chunk voices complete sentences as they stream, skipping code."""
+    import gptme_tts.tts as tts_mod
+    from gptme_tts.tts import (
+        reset_stream_on_generation,
+        speak_on_chunk,
+        speak_on_generation,
+    )
+
+    spoken: list[tuple[str, bool]] = []
+
+    def fake_speak(text, block=False, interrupt=True, clean=True):
+        spoken.append((text, interrupt))
+
+    with patch.object(tts_mod, "speak", fake_speak):
+        list(reset_stream_on_generation())
+        for chunk in [
+            "Hi there!\n",
+            "How are you?\n",
+            "```python\n",
+            "print(1)\n",
+            "```\n",
+            "All done now.",
+        ]:
+            list(speak_on_chunk(chunk))
+
+        msg = MagicMock()
+        msg.role = "assistant"
+        list(speak_on_generation(message=msg))
+
+    texts = [t for t, _ in spoken]
+    # Sentences voiced incrementally; the code block is never spoken.
+    assert "Hi there!" in texts
+    assert "How are you?" in texts
+    assert not any("print(1)" in t for t in texts)
+    assert any("All done now." in t for t in texts)
+    # The very first segment interrupts prior speech; later ones queue.
+    assert spoken[0][1] is True
+    assert all(interrupt is False for _, interrupt in spoken[1:])
+
+
+def test_speak_on_generation_non_streamed_speaks_whole_message():
+    """Without prior chunks, generation.post speaks the full message (fallback)."""
+    import gptme_tts.tts as tts_mod
+    from gptme_tts.tts import reset_stream_on_generation, speak_on_generation
+
+    with patch.object(tts_mod, "speak") as mock_speak:
+        list(reset_stream_on_generation())  # no chunks streamed
+        msg = MagicMock()
+        msg.role = "assistant"
+        msg.content = "Hello, world!"
+        list(speak_on_generation(message=msg))
+        mock_speak.assert_called_once_with("Hello, world!")
 
 
 @pytest.mark.skipif(not _has_gptme(), reason="gptme not installed")

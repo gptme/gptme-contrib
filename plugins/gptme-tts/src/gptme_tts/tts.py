@@ -104,6 +104,13 @@ tts_request_queue: queue.Queue[str | None] = queue.Queue()
 tts_processor_thread: threading.Thread | None = None
 current_speed = 1.0
 
+# Streaming-speech state (see speak_on_chunk). Tracks the raw text streamed so
+# far this generation and how many characters of its *cleaned* form have already
+# been spoken, so we can voice complete sentences as they arrive.
+_stream_raw = ""
+_stream_spoken_chars = 0
+_stream_first_segment = True
+
 
 # Regular expressions for cleaning text
 re_thinking = re.compile(r"<think(ing)?>.*?(\n</think(ing)?>|$)", flags=re.DOTALL)
@@ -487,18 +494,82 @@ def speak(text, block=False, interrupt=True, clean=True):
 
 # Hook functions for automatic TTS integration
 
+# Matches a sentence end (.!?  not followed by another word char, so decimals
+# like "3.14" are left intact) or a line break — both are natural speech flush
+# points while streaming.
+_re_speak_boundary = re.compile(r"[.!?](?=\s|$)|\n")
+
+
+def _last_speak_boundary(text: str) -> int:
+    """Return the index just past the last sentence/line boundary, or -1."""
+    last = -1
+    for match in _re_speak_boundary.finditer(text):
+        last = match.end()
+    return last
+
+
+def _reset_stream_state() -> None:
+    global _stream_raw, _stream_spoken_chars, _stream_first_segment
+    _stream_raw = ""
+    _stream_spoken_chars = 0
+    _stream_first_segment = True
+
+
+def reset_stream_on_generation(*args, **kwargs):
+    """Hook: Reset streaming-speech state before each generation.
+
+    Registered for GENERATION_PRE so a new response interrupts leftover speech
+    and starts buffering from scratch.
+    """
+    _reset_stream_state()
+    yield  # Hooks must be generators
+
+
+def speak_on_chunk(chunk, **kwargs):
+    """Hook: Speak complete sentences as the response streams in.
+
+    Registered for GENERATION_CHUNK. Accumulates streamed text, cleans it (which
+    strips tool blocks / markup, including blocks still being streamed), and
+    voices each newly-completed sentence. The remainder is voiced at
+    generation.post by speak_on_generation.
+    """
+    global _stream_raw, _stream_spoken_chars, _stream_first_segment
+    _stream_raw += chunk
+    cleaned = clean_for_speech(_stream_raw)
+    boundary = _last_speak_boundary(cleaned)
+    if boundary > _stream_spoken_chars:
+        segment = cleaned[_stream_spoken_chars:boundary].strip()
+        _stream_spoken_chars = boundary
+        if segment:
+            speak(segment, interrupt=_stream_first_segment, clean=False)
+            _stream_first_segment = False
+    yield  # Hooks must be generators
+
 
 def speak_on_generation(message, workspace=None, **kwargs):
     """Hook: Speak assistant messages after generation.
 
-    Registered for GENERATION_POST hook.
+    Registered for GENERATION_POST hook. When the response was streamed,
+    speak_on_chunk has already voiced most of it, so only the trailing
+    not-yet-spoken remainder is flushed here. For non-streamed responses
+    (no chunks seen), the whole message is spoken.
     """
     # Only speak assistant messages
     if message.role != "assistant":
         return
 
-    # Speak the message content
-    speak(message.content)
+    global _stream_raw, _stream_spoken_chars, _stream_first_segment
+    if _stream_raw:
+        # Streamed: flush whatever sentence tail wasn't voiced during streaming.
+        cleaned = clean_for_speech(_stream_raw)
+        if len(cleaned) > _stream_spoken_chars:
+            tail = cleaned[_stream_spoken_chars:].strip()
+            if tail:
+                speak(tail, interrupt=_stream_first_segment, clean=False)
+        _reset_stream_state()
+    else:
+        # Non-streamed fallback: speak the whole message.
+        speak(message.content)
     yield  # Hooks must be generators
 
 
@@ -536,6 +607,16 @@ tool = ToolSpec(
     functions=[speak, set_speed, set_volume, stop],
     init=init,
     hooks={
+        "reset_stream": (
+            "generation.pre",
+            reset_stream_on_generation,
+            0,  # Normal priority
+        ),
+        "speak_on_chunk": (
+            "generation.chunk",
+            speak_on_chunk,
+            0,  # Normal priority
+        ),
         "speak_on_generation": (
             "generation.post",
             speak_on_generation,
