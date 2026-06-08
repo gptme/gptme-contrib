@@ -10,6 +10,9 @@ dependencies = [
     "sounddevice>=0.5.1",
 ]
 
+[project.entry-points."gptme.plugins"]
+gptme-tts = "gptme_tts:plugin"
+
 [project.optional-dependencies]
 test = [
     "pytest>=8.0.0",

@@ -21,3 +21,11 @@ try:
     from .tts import tool  # noqa: F401
 except ImportError:
     pass
+
+from gptme.plugins import GptmePlugin
+
+# Entry-point plugin manifest. Registered via the ``gptme.plugins`` group in
+# pyproject.toml so an installed package is discovered without configuring
+# plugin search paths. The tool module is imported lazily by gptme's tool
+# discovery, so heavy/optional deps don't break plugin registration.
+plugin = GptmePlugin(name="gptme-tts", tool_modules=["gptme_tts.tts"])

@@ -537,12 +537,12 @@ tool = ToolSpec(
     init=init,
     hooks={
         "speak_on_generation": (
-            "generation_post",
+            "generation.post",
             speak_on_generation,
             0,  # Normal priority
         ),
         "wait_on_session_end": (
-            "session_end",
+            "session.end",
             wait_on_session_end,
             0,  # Normal priority
         ),
