@@ -3943,13 +3943,13 @@ def main():
         cache = SqliteIndexCache(str(index_dir))
         cached = cache.load()
         if cached is not None:
-            index = cached
+            search_index = cached
         else:
-            index = build_index(index_dir)
-            cache.save(index)
+            search_index = build_index(index_dir)
+            cache.save(search_index)
         cache.close()
 
-        if not index or not index.all_names():
+        if not search_index or not search_index.all_names():
             sys.exit("No symbols found in directory")
 
         # Extract search documents
@@ -3958,7 +3958,7 @@ def main():
             extract_search_documents,
         )
 
-        docs = extract_search_documents(index, index_dir)
+        docs = extract_search_documents(search_index, index_dir)
         scorer = LexicalScorer()
         scorer.index(docs)
         results = scorer.search(args.query, limit=args.limit)
