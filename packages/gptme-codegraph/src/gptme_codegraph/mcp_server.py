@@ -52,6 +52,10 @@ from gptme_codegraph.core import (
     extract_symbols,
     impact_radius,
 )
+from gptme_codegraph.search import (
+    LexicalScorer,
+    extract_search_documents,
+)
 
 mcp = FastMCP("codegraph", log_level="WARNING")
 
@@ -600,6 +604,62 @@ def codegraph_blast(
             result["definitions"] = len(index.lookup(name))
 
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def codegraph_search(
+    query: str,
+    directory: str,
+    limit: int = 10,
+) -> str:
+    """Search indexed symbols by concept/query using local lexical search.
+
+    Uses a dependency-free BM25 scorer over symbol names, docstrings, and
+    source snippets. No external embeddings or API calls required.
+
+    Args:
+        query: Natural-language search query (e.g. "where is retry logic?").
+        directory: Directory for cross-file index.
+        limit: Maximum results (default: 10).
+
+    Returns:
+        JSON with directory, query, backend, and ranked results.
+    """
+    dir_path = Path(directory)
+    if not dir_path.exists():
+        return json.dumps({"error": f"Directory not found: {directory}"})
+
+    index = _get_or_build_index(directory)
+    if not index or not index.all_names():
+        return json.dumps({"error": "No symbols found in directory"})
+
+    docs = extract_search_documents(index, dir_path)
+    scorer = LexicalScorer()
+    scorer.index(docs)
+    results = scorer.search(query, limit=limit)
+
+    return json.dumps(
+        {
+            "directory": directory,
+            "query": query,
+            "backend": "lexical",
+            "results": [
+                {
+                    "score": r.score,
+                    "qualified_id": r.qualified_id,
+                    "name": r.name,
+                    "kind": r.kind,
+                    "file": r.file,
+                    "start_line": r.start_line,
+                    "end_line": r.end_line,
+                    "parent_class": r.parent_class,
+                    "why": r.why,
+                }
+                for r in results
+            ],
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()

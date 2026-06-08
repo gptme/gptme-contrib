@@ -3900,11 +3900,104 @@ def main():
         help="Maximum symbols per file (default: 12)",
     )
 
+    p_search = sub.add_parser(
+        "search",
+        help="Search indexed symbols by concept/query (local-first lexical search)",
+    )
+    p_search.add_argument("query", help="Natural-language search query")
+    p_search.add_argument(
+        "--backend",
+        default="lexical",
+        choices=["lexical"],
+        help="Search backend (default: lexical; semantic coming in Phase 2)",
+    )
+    p_search.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Maximum results (default: 10)",
+    )
+    p_search.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
+    )
+
     args = parser.parse_args()
     filepath = Path(args.file)
 
     if not filepath.exists():
         sys.exit(f"File not found: {filepath}")
+
+    if args.command == "search":
+        search_dir = (
+            Path(args.directory)
+            if args.directory
+            else (filepath if filepath.is_dir() else filepath.parent)
+        )
+        if not search_dir.is_dir():
+            sys.exit(f"Directory not found: {search_dir}")
+
+        # Build index
+        index_dir = search_dir
+        cache = SqliteIndexCache(str(index_dir))
+        cached = cache.load()
+        if cached is not None:
+            index = cached
+        else:
+            index = build_index(index_dir)
+            cache.save(index)
+        cache.close()
+
+        if not index or not index.all_names():
+            sys.exit("No symbols found in directory")
+
+        # Extract search documents
+        from gptme_codegraph.search import (
+            LexicalScorer,
+            extract_search_documents,
+        )
+
+        docs = extract_search_documents(index, index_dir)
+        scorer = LexicalScorer()
+        scorer.index(docs)
+        results = scorer.search(args.query, limit=args.limit)
+
+        if args.json:
+            print(
+                format_json(
+                    {
+                        "directory": str(index_dir),
+                        "query": args.query,
+                        "backend": "lexical",
+                        "results": [
+                            {
+                                "score": r.score,
+                                "qualified_id": r.qualified_id,
+                                "name": r.name,
+                                "kind": r.kind,
+                                "file": r.file,
+                                "start_line": r.start_line,
+                                "end_line": r.end_line,
+                                "parent_class": r.parent_class,
+                                "why": r.why,
+                            }
+                            for r in results
+                        ],
+                    }
+                )
+            )
+        else:
+            print(f"Search results for '{args.query}' (lexical, {len(results)} found):")
+            print()
+            for r in results:
+                qual = f" ({r.parent_class})" if r.parent_class else ""
+                print(f"  {r.score:.4f}  {r.kind} {r.name}{qual}")
+                print(f"        {r.file}:L{r.start_line}-L{r.end_line}")
+                if r.why:
+                    print(f"        matched: {r.why}")
+                print()
+        return
 
     if args.command == "map":
         map_dir = (
