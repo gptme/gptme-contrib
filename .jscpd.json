@@ -5,6 +5,9 @@
   "ignore": [
     "worktree/**",
     "worktrees/**",
+    "**/worktree/**",
+    "**/worktrees/**",
+    "**/.claude/**",
     "**/__pycache__/**",
     "**/node_modules/**",
     "**/.venv/**",

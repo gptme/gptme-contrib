@@ -157,16 +157,145 @@ def test_clean_for_speech():
     assert re_tool_use.sub("", "```tool\ncontents\n```\nRan tool").strip() == "Ran tool"
 
 
+def test_request_timeout_configurable(monkeypatch):
+    """Per-request timeout defaults to 30s and is overridable via env."""
+    from gptme_tts.tts import DEFAULT_REQUEST_TIMEOUT, _request_timeout
+
+    monkeypatch.delenv("GPTME_TTS_TIMEOUT", raising=False)
+    assert _request_timeout() == DEFAULT_REQUEST_TIMEOUT
+
+    monkeypatch.setenv("GPTME_TTS_TIMEOUT", "60")
+    assert _request_timeout() == 60.0
+
+    # Invalid / non-positive values fall back to the default.
+    monkeypatch.setenv("GPTME_TTS_TIMEOUT", "not-a-number")
+    assert _request_timeout() == DEFAULT_REQUEST_TIMEOUT
+    monkeypatch.setenv("GPTME_TTS_TIMEOUT", "0")
+    assert _request_timeout() == DEFAULT_REQUEST_TIMEOUT
+
+
+def test_backend_selection(monkeypatch):
+    """GPTME_TTS_BACKEND selects the backend (default 'server')."""
+    import gptme_tts.tts as tts_mod
+
+    monkeypatch.delenv("GPTME_TTS_BACKEND", raising=False)
+    assert tts_mod._backend() == "server"
+    monkeypatch.setenv("GPTME_TTS_BACKEND", "OpenRouter")
+    assert tts_mod._backend() == "openrouter"
+
+
+def test_synthesize_openrouter_builds_request_and_decodes_pcm(monkeypatch):
+    """OpenRouter backend posts the right body and decodes pcm bytes to int16."""
+    import gptme_tts.tts as tts_mod
+    import numpy as np
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    monkeypatch.setenv("GPTME_TTS_MODEL", "x-ai/grok-voice-tts-1.0")
+    monkeypatch.setenv("GPTME_TTS_VOICE", "ringo")
+
+    pcm_bytes = np.array([0, 100, -100, 32767], dtype="<i2").tobytes()
+    captured: dict = {}
+
+    class FakeResp:
+        status_code = 200
+        content = pcm_bytes
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(url=url, headers=headers, json=json)
+        return FakeResp()
+
+    monkeypatch.setattr(tts_mod.requests, "post", fake_post)
+
+    sample_rate, data = tts_mod._synthesize_openrouter("Hello")
+
+    assert sample_rate == 24000
+    assert list(data) == [0, 100, -100, 32767]
+    assert captured["url"] == "https://openrouter.ai/api/v1/audio/speech"
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    body = captured["json"]
+    assert body["model"] == "x-ai/grok-voice-tts-1.0"
+    assert body["input"] == "Hello"
+    assert body["voice"] == "ringo"
+    assert body["response_format"] == "pcm"
+
+
+def test_synthesize_openrouter_no_api_key(monkeypatch):
+    """OpenRouter backend skips (returns None) when no API key is available."""
+    import gptme_tts.tts as tts_mod
+
+    monkeypatch.setattr(tts_mod, "_get_openrouter_api_key", lambda: None)
+    assert tts_mod._synthesize_openrouter("hi") is None
+
+
 def test_hooks_registered():
     """Test that TTS hooks are properly registered in the tool spec."""
     from gptme_tts.tts import tool
 
     assert "speak_on_generation" in tool.hooks
     assert "wait_on_session_end" in tool.hooks
+    assert "speak_on_chunk" in tool.hooks
+    assert "reset_stream" in tool.hooks
 
-    # Check hook types
-    assert tool.hooks["speak_on_generation"][0] == "generation_post"
-    assert tool.hooks["wait_on_session_end"][0] == "session_end"
+    # Hook types use the current dot-notation HookType values.
+    assert tool.hooks["reset_stream"][0] == "generation.pre"
+    assert tool.hooks["speak_on_chunk"][0] == "generation.chunk"
+    assert tool.hooks["speak_on_generation"][0] == "generation.post"
+    assert tool.hooks["wait_on_session_end"][0] == "session.end"
+
+
+def test_speak_on_chunk_streams_sentences():
+    """speak_on_chunk voices complete sentences as they stream, skipping code."""
+    import gptme_tts.tts as tts_mod
+    from gptme_tts.tts import (
+        reset_stream_on_generation,
+        speak_on_chunk,
+        speak_on_generation,
+    )
+
+    spoken: list[tuple[str, bool]] = []
+
+    def fake_speak(text, block=False, interrupt=True, clean=True):
+        spoken.append((text, interrupt))
+
+    with patch.object(tts_mod, "speak", fake_speak):
+        list(reset_stream_on_generation())
+        for chunk in [
+            "Hi there!\n",
+            "How are you?\n",
+            "```python\n",
+            "print(1)\n",
+            "```\n",
+            "All done now.",
+        ]:
+            list(speak_on_chunk(chunk))
+
+        msg = MagicMock()
+        msg.role = "assistant"
+        list(speak_on_generation(message=msg))
+
+    texts = [t for t, _ in spoken]
+    # Sentences voiced incrementally; the code block is never spoken.
+    assert "Hi there!" in texts
+    assert "How are you?" in texts
+    assert not any("print(1)" in t for t in texts)
+    assert any("All done now." in t for t in texts)
+    # The very first segment interrupts prior speech; later ones queue.
+    assert spoken[0][1] is True
+    assert all(interrupt is False for _, interrupt in spoken[1:])
+
+
+def test_speak_on_generation_non_streamed_speaks_whole_message():
+    """Without prior chunks, generation.post speaks the full message (fallback)."""
+    import gptme_tts.tts as tts_mod
+    from gptme_tts.tts import reset_stream_on_generation, speak_on_generation
+
+    with patch.object(tts_mod, "speak") as mock_speak:
+        list(reset_stream_on_generation())  # no chunks streamed
+        msg = MagicMock()
+        msg.role = "assistant"
+        msg.content = "Hello, world!"
+        list(speak_on_generation(message=msg))
+        mock_speak.assert_called_once_with("Hello, world!")
 
 
 @pytest.mark.skipif(not _has_gptme(), reason="gptme not installed")
