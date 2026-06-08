@@ -22,6 +22,7 @@ Uses Kokoro for local TTS generation.
 - ``GPTME_TTS_VOICE``: Set the voice to use for TTS. Available voices depend on the TTS server.
 - ``GPTME_TTS_SPEED``: Playback speed multiplier (default ``1.0``).
 - ``GPTME_VOICE_FINISH``: If set to "true" or "1", waits for speech to finish before exiting. This is useful when you want to ensure the full message is spoken.
+- ``GPTME_TTS_TIMEOUT``: Per-request timeout in seconds (default ``30``). Increase for slow backends like chatterbox.
 """
 
 import io
@@ -48,6 +49,25 @@ log = logging.getLogger(__name__)
 
 host = "localhost"
 port = 8765
+
+# Per-request timeout (seconds). The chatterbox backend proxies to a remote
+# gradio service and can take well over the old hardcoded 10s, especially on a
+# cold start. Configurable via GPTME_TTS_TIMEOUT.
+DEFAULT_REQUEST_TIMEOUT = 30.0
+
+
+def _request_timeout() -> float:
+    """Per-request TTS timeout in seconds (env GPTME_TTS_TIMEOUT, default 30)."""
+    raw = os.getenv("GPTME_TTS_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return DEFAULT_REQUEST_TIMEOUT
+
 
 # Check for TTS-specific imports
 has_tts_imports = False
@@ -340,8 +360,18 @@ def _tts_processor_thread_fn():
                 params["voice"] = voice
 
             try:
-                response = requests.get(url, params=params, timeout=10)
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                response = requests.get(url, params=params, timeout=_request_timeout())
+            except requests.exceptions.Timeout:
+                # Not a dead server — the backend (e.g. chatterbox) was slower
+                # than the request timeout. Raise GPTME_TTS_TIMEOUT for slow backends.
+                log.warning(
+                    f"TTS request timed out after {_request_timeout():.0f}s "
+                    f"(slow backend?); skipping chunk. "
+                    f"Set GPTME_TTS_TIMEOUT to increase the limit."
+                )
+                tts_request_queue.task_done()
+                continue
+            except requests.exceptions.ConnectionError:
                 log.warning(f"TTS server unavailable at {url}")
                 tts_request_queue.task_done()
                 continue

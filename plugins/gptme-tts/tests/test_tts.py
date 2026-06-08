@@ -157,6 +157,23 @@ def test_clean_for_speech():
     assert re_tool_use.sub("", "```tool\ncontents\n```\nRan tool").strip() == "Ran tool"
 
 
+def test_request_timeout_configurable(monkeypatch):
+    """Per-request timeout defaults to 30s and is overridable via env."""
+    from gptme_tts.tts import DEFAULT_REQUEST_TIMEOUT, _request_timeout
+
+    monkeypatch.delenv("GPTME_TTS_TIMEOUT", raising=False)
+    assert _request_timeout() == DEFAULT_REQUEST_TIMEOUT
+
+    monkeypatch.setenv("GPTME_TTS_TIMEOUT", "60")
+    assert _request_timeout() == 60.0
+
+    # Invalid / non-positive values fall back to the default.
+    monkeypatch.setenv("GPTME_TTS_TIMEOUT", "not-a-number")
+    assert _request_timeout() == DEFAULT_REQUEST_TIMEOUT
+    monkeypatch.setenv("GPTME_TTS_TIMEOUT", "0")
+    assert _request_timeout() == DEFAULT_REQUEST_TIMEOUT
+
+
 def test_hooks_registered():
     """Test that TTS hooks are properly registered in the tool spec."""
     from gptme_tts.tts import tool
