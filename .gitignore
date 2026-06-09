@@ -2,6 +2,10 @@
 __pycache__
 *.egg-info
 
+# Python build artifacts
+build/
+dist/
+
 # Secrets - never commit
 scripts/discord/logs/*
 scripts/*/.env
