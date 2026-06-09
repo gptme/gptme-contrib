@@ -145,7 +145,7 @@ def combine_window_pacing_snapshots(
     target_utilization: float = 1.0,
     threshold: float = 0.05,
 ) -> PacingSnapshot | None:
-    """Return the most over-budget pacing snapshot across multiple windows."""
+    """Return the pacing snapshot with the highest pace_gap across multiple windows."""
 
     snapshots: list[PacingSnapshot] = []
     for utilization, resets_in_seconds, window_seconds in windows:
