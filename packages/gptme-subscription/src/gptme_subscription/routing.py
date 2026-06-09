@@ -171,7 +171,7 @@ def compute_window_pacing(
     target_utilization: float = 1.0,
     threshold: float = 0.05,
 ) -> tuple[float, float, str] | None:
-    """Compute pacing (elapsed_frac, gap, status) for a quota window.
+    """Compute pacing (target_utilization, gap, status) for a quota window.
 
     Uses the headroom model: if remaining budget is less than remaining time,
     the gap is positive (overusing). Returns None for invalid inputs.
