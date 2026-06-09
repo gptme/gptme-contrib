@@ -7,8 +7,8 @@ and how to manage persistent rebalance state.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,12 +55,123 @@ class RebalanceState:
 # --- Window pacing ---
 
 
+@dataclass(frozen=True)
+class PacingSnapshot:
+    """Normalized pacing view for a subscription quota window.
+
+    Canonical convention:
+    - ``headroom = 1 - utilization``
+    - ``pace_gap = utilization - target_utilization``
+    - ``pace_gap > 0`` means ahead of the target burn curve / overusing
+    - ``pace_gap < 0`` means behind the target burn curve / underusing
+    """
+
+    utilization: float
+    headroom: float
+    elapsed_fraction: float
+    target_utilization: float
+    pace_gap: float
+    status: str
+
+    def as_dict(self) -> dict[str, float | str]:
+        return dict(asdict(self))
+
+
+def _clamp_unit(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def compute_pacing_snapshot(
+    utilization: float,
+    *,
+    elapsed_fraction: float,
+    target_utilization: float = 1.0,
+    threshold: float = 0.05,
+) -> PacingSnapshot:
+    """Return a canonical pacing snapshot for a quota window.
+
+    ``target_utilization`` is a policy knob, not part of the sign convention.
+    For a plain "use quota evenly until reset" curve, keep it at ``1.0``.
+    Dashboard/rebalance surfaces can pass lower values such as ``0.95`` or
+    ``0.90`` while still getting the same ``headroom`` / ``pace_gap`` meaning.
+    """
+
+    utilization_clamped = _clamp_unit(utilization)
+    elapsed_clamped = _clamp_unit(elapsed_fraction)
+    target_fraction = max(0.0, target_utilization)
+    target = _clamp_unit(elapsed_clamped * target_fraction)
+    gap = utilization_clamped - target
+    if gap > threshold:
+        status = "overusing"
+    elif gap < -threshold:
+        status = "underusing"
+    else:
+        status = "on_track"
+    return PacingSnapshot(
+        utilization=utilization_clamped,
+        headroom=_clamp_unit(1.0 - utilization_clamped),
+        elapsed_fraction=elapsed_clamped,
+        target_utilization=target,
+        pace_gap=gap,
+        status=status,
+    )
+
+
+def compute_window_pacing_snapshot(
+    utilization: float,
+    resets_in_seconds: int,
+    window_seconds: int,
+    *,
+    target_utilization: float = 1.0,
+    threshold: float = 0.05,
+) -> PacingSnapshot | None:
+    """Compute a pacing snapshot from utilization and reset countdown."""
+
+    if window_seconds <= 0 or resets_in_seconds <= 0:
+        return None
+    remaining_time_frac = _clamp_unit(resets_in_seconds / window_seconds)
+    elapsed_frac = 1.0 - remaining_time_frac
+    return compute_pacing_snapshot(
+        utilization,
+        elapsed_fraction=elapsed_frac,
+        target_utilization=target_utilization,
+        threshold=threshold,
+    )
+
+
+def combine_window_pacing_snapshots(
+    windows: Sequence[tuple[float, int, int]],
+    *,
+    target_utilization: float = 1.0,
+    threshold: float = 0.05,
+) -> PacingSnapshot | None:
+    """Return the pacing snapshot with the highest pace_gap across multiple windows."""
+
+    snapshots: list[PacingSnapshot] = []
+    for utilization, resets_in_seconds, window_seconds in windows:
+        snapshot = compute_window_pacing_snapshot(
+            utilization,
+            resets_in_seconds,
+            window_seconds,
+            target_utilization=target_utilization,
+            threshold=threshold,
+        )
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    if not snapshots:
+        return None
+    return max(snapshots, key=lambda snapshot: snapshot.pace_gap)
+
+
 def compute_window_pacing(
     utilization: float,
     resets_in_seconds: int,
     window_seconds: int,
+    *,
+    target_utilization: float = 1.0,
+    threshold: float = 0.05,
 ) -> tuple[float, float, str] | None:
-    """Compute pacing (elapsed_frac, gap, status) for a quota window.
+    """Compute pacing (target_utilization, gap, status) for a quota window.
 
     Uses the headroom model: if remaining budget is less than remaining time,
     the gap is positive (overusing). Returns None for invalid inputs.
@@ -71,22 +182,20 @@ def compute_window_pacing(
         window_seconds: Total window duration in seconds.
 
     Returns:
-        ``(elapsed_frac, gap, status)`` or None.
+        ``(target_utilization, gap, status)`` or None.
         gap > 0 = overusing, gap < 0 = underusing, ≈ 0 = on track.
         Status is ``"overusing"``, ``"underusing"``, or ``"on_track"``.
     """
-    if window_seconds <= 0 or resets_in_seconds <= 0:
+    snapshot = compute_window_pacing_snapshot(
+        utilization,
+        resets_in_seconds,
+        window_seconds,
+        target_utilization=target_utilization,
+        threshold=threshold,
+    )
+    if snapshot is None:
         return None
-    remaining_time_frac = min(1.0, resets_in_seconds / window_seconds)
-    elapsed_frac = 1.0 - remaining_time_frac
-    gap = utilization - elapsed_frac
-    if gap > 0.05:
-        status = "overusing"
-    elif gap < -0.05:
-        status = "underusing"
-    else:
-        status = "on_track"
-    return elapsed_frac, gap, status
+    return snapshot.target_utilization, snapshot.pace_gap, snapshot.status
 
 
 def compute_rebalance_hold_seconds(
