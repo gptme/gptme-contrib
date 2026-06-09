@@ -362,7 +362,14 @@ def parse_pr_target(
         if "#" in pr:
             repo_part, number_part = pr.split("#", 1)
             return repo_part, int(number_part)
-        raise ValueError(f"Unrecognized PR specifier: {pr}")
+        # Two-positional `owner/repo <number>` form: pr is the repo, the PR
+        # number was supplied as the separate positional argument.
+        if pr.count("/") == 1 and number is not None:
+            return pr, number
+        raise ValueError(
+            f"Unrecognized PR specifier: {pr!r}. "
+            f"Use a PR URL, 'owner/repo#number', or 'owner/repo <number>'."
+        )
     if repo and number is not None:
         return repo, number
     raise ValueError("Provide a PR URL/specifier or --repo with PR number")

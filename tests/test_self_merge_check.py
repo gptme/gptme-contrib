@@ -106,6 +106,32 @@ def test_parse_pr_target_strips_fragment() -> None:
     assert number == 504
 
 
+def test_parse_pr_target_accepts_repo_hash_number() -> None:
+    """The documented 'owner/repo#number' specifier must parse."""
+    repo, number = self_merge_check.parse_pr_target(
+        "ActivityWatch/activitywatch.github.io#54", None, None
+    )
+    assert repo == "ActivityWatch/activitywatch.github.io"
+    assert number == 54
+
+
+def test_parse_pr_target_accepts_repo_and_positional_number() -> None:
+    """Two-positional 'owner/repo <number>' form must parse, not raise."""
+    repo, number = self_merge_check.parse_pr_target(
+        "ActivityWatch/activitywatch.github.io", None, 54
+    )
+    assert repo == "ActivityWatch/activitywatch.github.io"
+    assert number == 54
+
+
+def test_parse_pr_target_repo_without_number_raises_with_hint() -> None:
+    """A bare 'owner/repo' (no number anywhere) must raise a guiding error."""
+    import pytest
+
+    with pytest.raises(ValueError, match="owner/repo#number"):
+        self_merge_check.parse_pr_target("gptme/gptme", None, None)
+
+
 def test_evaluate_pr_blocks_changes_requested() -> None:
     pr_data = {
         "author": {"login": "TimeToBuildBob"},
