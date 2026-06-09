@@ -182,7 +182,7 @@ def compute_window_pacing(
         window_seconds: Total window duration in seconds.
 
     Returns:
-        ``(elapsed_frac, gap, status)`` or None.
+        ``(target_utilization, gap, status)`` or None.
         gap > 0 = overusing, gap < 0 = underusing, ≈ 0 = on track.
         Status is ``"overusing"``, ``"underusing"``, or ``"on_track"``.
     """
