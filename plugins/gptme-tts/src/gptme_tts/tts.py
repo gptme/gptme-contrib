@@ -744,7 +744,7 @@ _TTS_UNAVAILABLE_HINT = (
 )
 _hint_kwargs = (
     {"available_hint": _TTS_UNAVAILABLE_HINT}
-    if "available_hint" in getattr(ToolSpec, "__dataclass_fields__", {})
+    if hasattr(ToolSpec, "available_hint")
     else {}
 )
 
