@@ -1116,7 +1116,10 @@ def main() -> int:
     )
     parser.add_argument("pr", nargs="?", help="PR URL, repo#num, or PR number")
     parser.add_argument(
-        "number", nargs="?", type=int, help="PR number when using --repo"
+        "number",
+        nargs="?",
+        type=int,
+        help="PR number when using --repo or 'owner/repo <number>' form",
     )
     parser.add_argument("--repo", help="Repository in owner/name form")
     parser.add_argument("--json", action="store_true", help="Output JSON")
