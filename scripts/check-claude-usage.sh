@@ -425,7 +425,7 @@ if not result:
         # /usage TUI shows usage breakdowns (50% of usage was while 4+
         # sessions) but no model-level utilization percentages.
         # Try fallback chain before giving up.
-        for _attempt_path in ['$FALLBACK_CACHE_FILE', '/home/bob/bob/state/subscription-reset-times.json', '/home/bob/bob/state/subscription-reset-times.json']:
+        for _attempt_path in ['$FALLBACK_CACHE_FILE']:
             try:
                 with open(_attempt_path) as _f:
                     fb = json.load(_f)

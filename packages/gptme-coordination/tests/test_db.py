@@ -35,7 +35,10 @@ class TestResolveCoordinationDbPath:
             git_root = Path(tmp) / "gitrepo"
             git_root.mkdir()
             subprocess.run(["git", "init"], cwd=git_root, capture_output=True)
-            result = resolve_coordination_db_path(cwd=git_root)
+            # Use a subdirectory as cwd so git-discovery result differs from fallback.
+            subdir = git_root / "sub"
+            subdir.mkdir()
+            result = resolve_coordination_db_path(cwd=subdir)
             assert result == git_root / "state/coordination/coord.db"
 
     def test_fallback_when_not_in_git_repo(self):
@@ -137,6 +140,7 @@ class TestCoordinationDB:
             db = CoordinationDB(str(db_path))
             _ = db.conn
             db.close()
+            assert db._conn is None
             # Accessing .conn after close should create a new connection
             conn2 = db.conn
             assert conn2 is not None
