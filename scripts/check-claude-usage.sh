@@ -336,15 +336,15 @@ for line in model_lines:
     # 'Opus              ████████░░░░░░░░░░  86% used · Resets Thu, 9pm'
     # 'Claude 3.5 Sonnet ██████░░░░░░░░░░░░░░  55% used · Resets ...'
     # 'Opus              ████████████████████  100% used · Resets ...'
-    
+
     pct_m = re.search(r'(\d+)%\s*used', line)
     reset_m = re.search(r'Resets\s+(.+)', line)
     if not pct_m:
         continue
-    
+
     pct = int(pct_m.group(1)) / 100
     reset_str = reset_m.group(1).strip() if reset_m else None
-    
+
     # Identify the model name (text before the bar or percentage)
     # Strip the bar characters and percentage to extract model name
     # Pattern: <model_name> <optional bar> <percentage>
@@ -359,11 +359,11 @@ for line in model_lines:
         model_name = before_pct
     else:
         model_name = 'unknown'
-    
+
     # Skip very short names (noise)
     if len(model_name) < 2:
         continue
-    
+
     # Map model names to keys
     name_lower = model_name.lower()
     if 'opus' in name_lower or 'sonnet' in name_lower:
@@ -372,7 +372,7 @@ for line in model_lines:
     else:
         key = 'seven_day'
         label = model_name
-    
+
     result[key] = {
         'model': label,
         'utilization': pct,
@@ -395,12 +395,12 @@ if not result:
         weekly_reset = weekly_reset.replace(hour=0, minute=0, second=0, microsecond=0)
         weekly_secs = max(0, int((weekly_reset - now).total_seconds()))
         weekly_reset_str = weekly_reset.strftime('%a, %-I%p')
-        
+
         # 5h window reset is ~5h from now (sliding, but approximate)
         five_hour_reset = now + timedelta(hours=5)
         five_hour_secs = int((five_hour_reset - now).total_seconds())
         five_hour_reset_str = five_hour_reset.strftime('%-I:%M%p').lower()
-        
+
         result['five_hour'] = {
             'utilization': 0.0,
             'resets': five_hour_reset_str,
@@ -466,10 +466,10 @@ if not result:
 # as a fraction of the session cost / cap, or use the session usage data.
 if 'five_hour' not in result:
     # Estimate based on what we know from the session section
-    # Claude Max session cap is ~$15-20 per session. If session_cost is available
+    # Claude Max session cap is ~\$15-20 per session. If session_cost is available
     # and non-zero, calculate utilization as proportion.
     if session_cost is not None and session_cost > 0:
-        # Assume ~$15 per session cap (approximate for Claude Max)
+        # Assume ~\$15 per session cap (approximate for Claude Max)
         est_cap = 15.0
         est_util = min(1.0, session_cost / est_cap)
         result['five_hour'] = {
