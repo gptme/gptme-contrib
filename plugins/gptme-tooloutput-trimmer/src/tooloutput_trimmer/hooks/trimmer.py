@@ -25,6 +25,20 @@ from gptme.hooks import HookType, StopPropagation, register_hook
 from gptme.message import Message
 
 try:
+    from gptme.llm import _chat_complete, get_default_model_summary, len_tokens
+except ModuleNotFoundError:
+
+    def _chat_complete(messages, model, tools=None, **kwargs):  # type: ignore
+        raise RuntimeError("LLM summarization not available (old gptme)")
+
+    def get_default_model_summary():  # type: ignore
+        return None
+
+    def len_tokens(*args, **kwargs):  # type: ignore
+        return 0
+
+
+try:
     from gptme.util.cost_tracker import CostTracker, SessionCosts
 except ModuleNotFoundError:
     SessionCosts = Any
@@ -47,7 +61,11 @@ ANTHROPIC_CACHE_TTL_SECS = 5 * 60
 TOOL_OUTPUT_PREFIXES = ("Ran command: `", "Executed code block.")
 TRIMMED_MARKER = "[Tool output trimmed"
 HEADROOM_MARKER = "[Headroom compressed"  # skip messages already losslessly compressed
+SUMMARIZATION_MARKER = (
+    "[Summarized previous tool outputs]"  # marker for summarization inserts
+)
 BYPASS_ENV_VAR = "GPTME_TRIM_BYPASS"
+SUMMARIZE_ENV_VAR = "GPTME_SUMMARIZE_TOOL_OUTPUTS"
 
 
 @dataclass(frozen=True)
