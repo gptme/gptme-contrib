@@ -52,7 +52,7 @@ _creds_fingerprint() {
     local resolved
     resolved=$(readlink -f "$CREDS_FILE" 2>/dev/null || echo "$CREDS_FILE")
     if [ -f "$resolved" ]; then
-        echo "$(stat -c '%i:%Y' "$resolved" 2>/dev/null || echo '0:0')"
+        stat -c '%i:%Y' "$resolved" 2>/dev/null || stat -f '%i:%m' "$resolved" 2>/dev/null || echo '0:0'
     else
         echo "0:0"
     fi
@@ -61,7 +61,7 @@ _creds_fingerprint() {
 # --- Cache check (JSON and human-readable modes only, not --raw) ---
 if [ "$MODE" != "raw" ] && [ "$NO_CACHE" = false ] && [ -f "$CACHE_FILE" ]; then
     # Check cache freshness: mtime <= CACHE_TTL seconds ago
-    cache_mtime=$(stat -c '%Y' "$CACHE_FILE" 2>/dev/null || echo 0)
+    cache_mtime=$(stat -c '%Y' "$CACHE_FILE" 2>/dev/null || stat -f '%m' "$CACHE_FILE" 2>/dev/null || echo 0)
     now_epoch=$(date +%s)
     cache_age=$((now_epoch - cache_mtime))
     fp="$(_creds_fingerprint)"
@@ -74,7 +74,26 @@ with open('$CACHE_FILE') as f:
 fresh = $cache_age < $CACHE_TTL
 fp_match = cached.get('_cred_fingerprint', '') == '$fp'
 if fresh and fp_match:
-    print(json.dumps(cached, indent=2) if '$MODE' == 'json' else 'cached')
+    if '$MODE' == 'json':
+        print(json.dumps(cached, indent=2))
+    else:
+        print('Claude Max Subscription Usage')
+        print('=' * 60)
+        for key, label in [('five_hour', 'Session (5h)'), ('seven_day', 'Weekly (all)'), ('seven_day_sonnet', 'Weekly (Sonnet)')]:
+            info = cached.get(key)
+            if info and isinstance(info, dict):
+                util = info.get('utilization', 0)
+                remaining = 1 - util
+                bar_width = 30
+                filled = int(util * bar_width)
+                bar = '█' * filled + '░' * (bar_width - filled)
+                time_left = info.get('time_left', '')
+                resets = info.get('resets', 'unknown')
+                print(f'  {label:20s} [{bar}] {util*100:4.0f}% used ({remaining*100:.0f}% left)')
+                print(f'  {\"\":20s} resets {resets}  ({time_left})')
+            else:
+                print(f'  {label:20s} N/A')
+        print()
     sys.exit(0)
 sys.exit(1)
 " && exit 0
@@ -378,9 +397,7 @@ for line in model_lines:
         'utilization': pct,
         'resets': reset_str if reset_str else 'unknown',
     }
-    # Also use the first non-Sonnet model for seven_day if not already set
-    if key == 'seven_day' and 'seven_day' not in result:
-        pass  # Already set above
+
 
 # If no model lines found but we detected low usage, return zeros
 if not result:
@@ -438,22 +455,25 @@ if not result:
                     result['_warning'] = 'CC v2.1.168+ TUI no longer shows utilization percentages \u2014 using cached values (may be stale)'
                     print('Warning: using fallback cache (CC v2.1.168 TUI does not show quota data).', file=sys.stderr)
                     break
-                # Try subscription-reset-times format (has slot keys like 'bob')
-                if isinstance(fb, dict) and 'bob' in fb:
-                    _bt = fb.get('bob', {})
+                # Try subscription-reset-times format (slot keys like 'bob' or any username)
+                _bt = next(
+                    (v for v in fb.values()
+                     if isinstance(v, dict) and any(k in v for k in ('weekly_utilization', 'five_hour_utilization'))),
+                    None,
+                )
+                if _bt is not None:
                     _wu = _bt.get('weekly_utilization', 0)
                     _fh = _bt.get('five_hour_utilization', 0)
                     _su = _bt.get('sonnet_weekly_utilization', 0)
-                    if True:  # Always use subscription-reset-times fallback (even if zeros)
-                        result = {
-                            'seven_day': {'utilization': float(_wu), 'resets': 'unknown'},
-                            'five_hour': {'utilization': float(_fh), 'resets': 'unknown'},
-                            'seven_day_sonnet': {'utilization': float(_su), 'resets': 'unknown'},
-                            '_source': 'subscription-reset-times',
-                            '_warning': 'CC v2.1.168 TUI does not show quota data \u2014 using stale values from subscription-reset-times.json',
-                        }
-                        print('Warning: using subscription-reset-times fallback (CC v2.1.168 TUI issue).', file=sys.stderr)
-                        break
+                    result = {
+                        'seven_day': {'utilization': float(_wu), 'resets': 'unknown'},
+                        'five_hour': {'utilization': float(_fh), 'resets': 'unknown'},
+                        'seven_day_sonnet': {'utilization': float(_su), 'resets': 'unknown'},
+                        '_source': 'subscription-reset-times',
+                        '_warning': 'CC v2.1.168 TUI does not show quota data \u2014 using stale values from subscription-reset-times.json',
+                    }
+                    print('Warning: using subscription-reset-times fallback (CC v2.1.168 TUI issue).', file=sys.stderr)
+                    break
             except (OSError, json.JSONDecodeError):
                 continue
         if not result:
