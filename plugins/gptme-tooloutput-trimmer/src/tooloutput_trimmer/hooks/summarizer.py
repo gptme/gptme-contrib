@@ -40,6 +40,7 @@ from .trimmer import (
     TrimmerConfig,
     _coerce_int,
     _is_tool_output_message,
+    determine_trigger,
     get_trimmer_config,
 )
 
@@ -256,11 +257,19 @@ def generation_pre_hook(
 ) -> Generator[Message | StopPropagation, None, None]:
     """Summarize evicted tool outputs before the trimmer runs.
 
-    Registered at priority 199 (before trimmer at 200). When summarization is
+    Registered at priority 199 (before trimmer at 200). Only fires when the
+    trimmer's trigger conditions are met (cache-cold or pressure-exceeded), to
+    avoid making unnecessary LLM calls on idle turns. When summarization is
     enabled, replaces W evicted tool output pairs with a single LLM-generated
-    summary. Otherwise, acts as a no-op and the trimmer handles truncation.
+    summary; otherwise acts as a no-op.
     """
-    rewritten, n_replaced = apply_summarization(messages)
+    trimmer_config = get_trimmer_config()
+    trigger = determine_trigger(
+        messages, model=kwargs.get("model"), config=trimmer_config
+    )
+    if not trigger.active:
+        return
+    rewritten, n_replaced = apply_summarization(messages, trimmer_config=trimmer_config)
     if n_replaced > 0:
         messages[:] = rewritten
         logger.info("summarizer: replaced %d evicted pairs with summary", n_replaced)
