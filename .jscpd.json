@@ -5,6 +5,8 @@
   "ignore": [
     "worktree/**",
     "worktrees/**",
+    "**/build/**",
+    "**/dist/**",
     "**/worktree/**",
     "**/worktrees/**",
     "**/.claude/**",
