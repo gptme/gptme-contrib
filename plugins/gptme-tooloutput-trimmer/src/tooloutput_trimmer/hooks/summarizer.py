@@ -36,7 +36,10 @@ except ModuleNotFoundError:
 
 from .trimmer import (
     SUMMARIZATION_MARKER,
+    SUMMARIZE_ENV_VAR,
     TrimmerConfig,
+    _coerce_int,
+    _get_plugin_settings,
     _is_tool_output_message,
     get_trimmer_config,
 )
@@ -74,24 +77,10 @@ def _get_summarization_enabled() -> bool:
     """Check if summarization is enabled via env var or plugin config."""
     settings = _get_plugin_settings()
     config = get_config()
-    env_val = config.get_env_bool("GPTME_SUMMARIZE_TOOL_OUTPUTS")
+    env_val = config.get_env_bool(SUMMARIZE_ENV_VAR)
     if env_val is not None:
         return env_val
     return bool(settings.get("summarize", DEFAULT_SUMMARIZATION_ENABLED))
-
-
-def _get_plugin_settings() -> dict[str, Any]:
-    """Read summarization settings from plugin config."""
-    config = get_config()
-    user_cfg = {}
-    project_cfg = {}
-    if config.user and hasattr(config.user, "plugin"):
-        user_cfg = getattr(config.user, "plugin", {}).get("tooloutput_trimmer", {})
-    if config.project and hasattr(config.project, "plugin"):
-        project_cfg = getattr(config.project, "plugin", {}).get(
-            "tooloutput_trimmer", {}
-        )
-    return {**user_cfg, **project_cfg}
 
 
 def get_summarizer_config() -> SummarizerConfig:
@@ -104,14 +93,6 @@ def get_summarizer_config() -> SummarizerConfig:
             minimum=1,
         ),
     )
-
-
-def _coerce_int(value: Any, default: int, *, minimum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(minimum, parsed)
 
 
 def _find_evictable_tool_output_indices(
@@ -265,17 +246,16 @@ def generation_pre_hook(
     enabled, replaces W evicted tool output pairs with a single LLM-generated
     summary. Otherwise, acts as a no-op and the trimmer handles truncation.
     """
+    # Capture count before in-place update so the scan sees the original list
+    n_evictable = len(
+        _find_evictable_tool_output_indices(messages, get_trimmer_config())
+    )
     rewritten, did_summarize = apply_summarization(messages)
     if did_summarize:
         messages[:] = rewritten
         logger.info(
             "summarizer: replaced %d evicted pairs with summary",
-            min(
-                get_summarizer_config().window,
-                len(
-                    _find_evictable_tool_output_indices(messages, get_trimmer_config())
-                ),
-            ),
+            min(get_summarizer_config().window, n_evictable),
         )
     yield from ()
 

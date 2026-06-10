@@ -130,10 +130,14 @@ def test_apply_summarization_noop_when_disabled() -> None:
         _msg("user", "u1"),
         _msg("assistant", "a1"),
     ]
-    rewritten, did_summarize = apply_summarization(
-        messages,
-        trimmer_config=_default_trimmer_config(),
-    )
+    with patch(
+        "tooloutput_trimmer.hooks.summarizer.get_config",
+        return_value=_make_config(summarize_enabled=False),
+    ):
+        rewritten, did_summarize = apply_summarization(
+            messages,
+            trimmer_config=_default_trimmer_config(),
+        )
     assert not did_summarize
     assert len(rewritten) == len(messages)
 
