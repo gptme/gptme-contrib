@@ -735,11 +735,25 @@ def wait_on_session_end(manager, **kwargs):
     yield  # Hooks must be generators
 
 
+# Specific guidance shown when 'tts' is explicitly requested but unavailable.
+# Guarded so it works on gptme builds that predate ToolSpec.available_hint.
+_TTS_UNAVAILABLE_HINT = (
+    "TTS is unavailable. For the local server backend, start tts_server.py "
+    "(e.g. `uv run tts_server.py --backend kokoro`); for OpenRouter, set "
+    "GPTME_TTS_BACKEND=openrouter and OPENROUTER_API_KEY."
+)
+_hint_kwargs = (
+    {"available_hint": _TTS_UNAVAILABLE_HINT}
+    if hasattr(ToolSpec, "available_hint")
+    else {}
+)
+
 tool = ToolSpec(
     "tts",
     desc="Text-to-speech (TTS) tool for generating audio from text.",
     instructions="Automatically voices your responses to the user. Use speak() to add spoken emphasis or deliver important messages audibly. Note: you cannot hear the output, so do not rely on it for confirmation.",
     available=is_available,
+    **_hint_kwargs,
     functions=[speak, set_speed, set_volume, stop],
     init=init,
     hooks={
