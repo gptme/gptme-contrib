@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/gptme/gptme-contrib/blob/master/schemas/gptme-heartbeat-event.schema.json",
+  "$id": "https://raw.githubusercontent.com/gptme/gptme-contrib/master/schemas/gptme-heartbeat-event.schema.json",
   "title": "GPTME_HEARTBEAT event envelope",
   "description": "One append-only status/cost event emitted by a gptme-compatible agent run. See docs/protocols/gptme-heartbeat.md.",
   "type": "object",
@@ -75,6 +75,7 @@
   "allOf": [
     {
       "if": {
+        "required": ["type"],
         "properties": { "type": { "const": "status" } }
       },
       "then": {
@@ -102,6 +103,7 @@
     },
     {
       "if": {
+        "required": ["type"],
         "properties": { "type": { "const": "invocation.finished" } }
       },
       "then": {
@@ -120,6 +122,7 @@
     },
     {
       "if": {
+        "required": ["type"],
         "properties": { "type": { "const": "cost" } }
       },
       "then": {

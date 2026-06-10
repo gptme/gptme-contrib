@@ -92,6 +92,8 @@ def _validate_event(event: dict, line_no: int) -> list[str]:
     for fname in REQUIRED_ENVELOPE_FIELDS:
         if fname not in event:
             err(f"missing required field '{fname}'")
+        elif event[fname] is None:
+            err(f"field '{fname}' must not be null")
         elif isinstance(event[fname], str) and not event[fname]:
             err(f"field '{fname}' must not be empty")
 

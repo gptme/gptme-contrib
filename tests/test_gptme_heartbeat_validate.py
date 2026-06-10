@@ -54,7 +54,9 @@ def test_valid_event_accepted():
 
 
 def test_example_files_accepted():
-    for path in sorted(EXAMPLES_DIR.glob("*.jsonl")):
+    paths = sorted(EXAMPLES_DIR.glob("*.jsonl"))
+    assert paths, f"No example .jsonl files found in {EXAMPLES_DIR}"
+    for path in paths:
         with open(path, encoding="utf-8") as fh:
             result = validator.validate_stream(fh)
         assert result.ok, f"{path.name}: {result.errors}"
@@ -73,6 +75,15 @@ def test_empty_required_field_rejected():
     result = _check(_valid_event(agent_id=""))
     assert not result.ok
     assert any("agent_id" in e for e in result.errors)
+
+
+def test_null_required_field_rejected():
+    for fname in ("type", "protocol", "event_id", "invocation_id", "agent_id"):
+        result = _check(_valid_event(**{fname: None}))
+        assert not result.ok, f"null {fname!r} should be rejected"
+        assert any(
+            fname in e for e in result.errors
+        ), f"expected error mentioning {fname!r}"
 
 
 def test_wrong_protocol_rejected():
