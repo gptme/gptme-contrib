@@ -84,3 +84,28 @@ def test_main_returns_2_when_all_repo_fetches_fail(
     assert code == 2
     captured = capsys.readouterr()
     assert "failed to fetch prs for all tracked repositories" in captured.err.lower()
+
+
+def _pr_with_checks(*conclusions: str) -> dict[str, object]:
+    return {"statusCheckRollup": [{"conclusion": c} for c in conclusions]}
+
+
+@pytest.mark.parametrize(
+    "conclusions,expected",
+    [
+        ((), "none"),
+        (("SUCCESS", "SUCCESS"), "passing"),
+        (("SUCCESS", "SKIPPED"), "passing"),
+        (("SUCCESS", "NEUTRAL"), "passing"),
+        (("SKIPPED", "NEUTRAL"), "passing"),
+        (("FAILURE", "SUCCESS"), "failing"),
+        (("FAILURE", "SKIPPED"), "failing"),
+        (("SUCCESS", "PENDING"), "pending"),
+        (("SUCCESS", "IN_PROGRESS"), "pending"),
+        (("SUCCESS", "ACTION_REQUIRED"), "mixed"),
+    ],
+)
+def test_get_ci_status_treats_skipped_neutral_as_passing(
+    conclusions: tuple[str, ...], expected: str
+) -> None:
+    assert pr_queue_health.get_ci_status(_pr_with_checks(*conclusions)) == expected

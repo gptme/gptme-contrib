@@ -161,7 +161,12 @@ def parse_datetime(dt_str: str) -> datetime | None:
 
 
 def get_ci_status(pr: dict[str, Any]) -> str:
-    """Extract CI status from PR check rollup."""
+    """Extract CI status from PR check rollup.
+
+    SKIPPED and NEUTRAL checks are treated as acceptable (not failures):
+    GitHub does not let them block a PR from being mergeable, so a PR whose
+    only non-SUCCESS checks are SKIPPED/NEUTRAL is classified as "passing".
+    """
     checks = pr.get("statusCheckRollup") or []
     if not checks:
         return "none"
@@ -171,7 +176,7 @@ def get_ci_status(pr: dict[str, Any]) -> str:
         return "failing"
     if any(s in ("PENDING", "IN_PROGRESS", "QUEUED") for s in states):
         return "pending"
-    if all(s == "SUCCESS" for s in states):
+    if all(s in ("SUCCESS", "SKIPPED", "NEUTRAL") for s in states):
         return "passing"
     return "mixed"
 
