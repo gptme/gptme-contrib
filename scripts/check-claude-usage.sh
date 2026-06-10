@@ -296,9 +296,6 @@ lines = text.split('\\n')
 # First check for the 'Nothing over 10%' empty state
 low_usage = 'Nothing over 10%' in text
 
-# Check if we're in week view or day view
-is_week_view = 'w to week' not in text and ('w to' not in text)
-
 # --- Strategy: find usage bars per model ---
 # Look for lines that contain a model name, a usage bar (unicode blocks),
 # a percentage, and optionally 'Resets'.
@@ -385,10 +382,11 @@ for line in model_lines:
 
     # Map model names to keys
     name_lower = model_name.lower()
-    if 'opus' in name_lower or 'sonnet' in name_lower:
+    if 'sonnet' in name_lower:
         key = 'seven_day_sonnet'
         label = model_name
     else:
+        # Opus and any other model → weekly Opus/general quota
         key = 'seven_day'
         label = model_name
 
