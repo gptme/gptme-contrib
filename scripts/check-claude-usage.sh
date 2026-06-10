@@ -402,11 +402,11 @@ if not result:
     if low_usage:
         # No usage to report — set all to 0
         now = datetime.now(timezone.utc)
-        # Estimate next weekly reset (Wed night / Thu morning UTC)
-        days_until_wed = (2 - now.weekday()) % 7  # Mon=0, Wed=2
-        if days_until_wed == 0 and now.hour >= 0:
-            days_until_wed = 7
-        weekly_reset = now + timedelta(days=days_until_wed)
+        # Estimate next weekly reset (Thu 00:00 UTC = "Wed night / Thu morning")
+        days_until_thu = (3 - now.weekday()) % 7  # Mon=0, Thu=3
+        if days_until_thu == 0:  # today IS Thursday; midnight already passed
+            days_until_thu = 7
+        weekly_reset = now + timedelta(days=days_until_thu)
         weekly_reset = weekly_reset.replace(hour=0, minute=0, second=0, microsecond=0)
         weekly_secs = max(0, int((weekly_reset - now).total_seconds()))
         weekly_reset_str = weekly_reset.strftime('%a, %-I%p')
