@@ -111,6 +111,14 @@ def test_bad_terminal_state_rejected():
     assert any("invocation.finished" in e for e in result.errors)
 
 
+def test_cost_event_without_data_rejected():
+    event = _valid_event(type="cost")
+    del event["data"]
+    result = _check(event)
+    assert not result.ok
+    assert any("cost" in e for e in result.errors)
+
+
 def test_cost_event_requires_provider_and_model():
     event = _valid_event(type="cost", data={"provider": "anthropic"})
     result = _check(event)

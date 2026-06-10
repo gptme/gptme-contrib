@@ -126,6 +126,7 @@
         "properties": { "type": { "const": "cost" } }
       },
       "then": {
+        "required": ["data"],
         "properties": {
           "data": {
             "type": "object",

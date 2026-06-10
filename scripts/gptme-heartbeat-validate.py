@@ -124,10 +124,13 @@ def _validate_event(event: dict, line_no: int) -> list[str]:
                 f"not in {sorted(TERMINAL_STATES)}"
             )
 
-    if etype == "cost" and isinstance(data, dict):
-        for required in ("provider", "model"):
-            if not data.get(required):
-                err(f"cost event missing required data field '{required}'")
+    if etype == "cost":
+        if not isinstance(data, dict):
+            err("cost event requires a 'data' object with 'provider' and 'model'")
+        else:
+            for required in ("provider", "model"):
+                if not data.get(required):
+                    err(f"cost event missing required data field '{required}'")
 
     return errors
 
