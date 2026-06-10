@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gptme/gptme-contrib/blob/master/schemas/gptme-heartbeat-event.schema.json",
+  "title": "GPTME_HEARTBEAT event envelope",
+  "description": "One append-only status/cost event emitted by a gptme-compatible agent run. See docs/protocols/gptme-heartbeat.md.",
+  "type": "object",
+  "required": [
+    "protocol",
+    "version",
+    "event_id",
+    "invocation_id",
+    "agent_id",
+    "type",
+    "occurred_at"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "gptme-heartbeat",
+      "description": "Protocol discriminator. Always the literal string."
+    },
+    "version": {
+      "type": "string",
+      "description": "Protocol version, e.g. \"0.1\".",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique within the invocation. Consumers must tolerate duplicates by event_id."
+    },
+    "invocation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable ID for the run this event belongs to."
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable ID for the agent being invoked."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Runtime session ID, if known. Optional."
+    },
+    "task_id": {
+      "type": "string",
+      "description": "Local task ID, GitHub issue key, or external work key. Optional."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "invocation.started",
+        "status",
+        "cost",
+        "cancellation.requested",
+        "invocation.finished"
+      ],
+      "description": "Lifecycle event type."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 timestamp for when the event occurred."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Per-invocation sequence number starting at 1. Optional."
+    },
+    "data": {
+      "type": "object",
+      "description": "Event-type-specific payload. Unknown fields are allowed and must be ignored by strict consumers."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "type": { "const": "status" } }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "starting",
+                  "running",
+                  "waiting",
+                  "cancelling",
+                  "succeeded",
+                  "failed",
+                  "cancelled"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "invocation.finished" } }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": ["succeeded", "failed", "cancelled"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "cost" } }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["provider", "model"],
+            "properties": {
+              "provider": { "type": "string" },
+              "model": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
