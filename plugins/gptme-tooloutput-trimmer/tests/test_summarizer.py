@@ -130,11 +130,11 @@ def test_apply_summarization_noop_when_disabled() -> None:
         _msg("user", "u1"),
         _msg("assistant", "a1"),
     ]
-    rewritten, did_summarize = apply_summarization(
+    rewritten, n_replaced = apply_summarization(
         messages,
         trimmer_config=_default_trimmer_config(),
     )
-    assert not did_summarize
+    assert n_replaced == 0
     assert len(rewritten) == len(messages)
 
 
@@ -156,12 +156,12 @@ def test_apply_summarization_skips_when_summarizer_fails() -> None:
             "tooloutput_trimmer.hooks.summarizer.get_config",
             return_value=_make_config(summarize_enabled=True),
         ):
-            rewritten, did_summarize = apply_summarization(
+            rewritten, n_replaced = apply_summarization(
                 messages,
                 trimmer_config=_default_trimmer_config(),
             )
 
-    assert not did_summarize
+    assert n_replaced == 0
     assert len(rewritten) == len(messages)
 
 
@@ -191,12 +191,12 @@ def test_apply_summarization_replaces_evicted_pairs_with_summary() -> None:
                 "tooloutput_trimmer.hooks.summarizer.get_config",
                 return_value=_make_config(summarize_enabled=True),
             ):
-                rewritten, did_summarize = apply_summarization(
+                rewritten, n_replaced = apply_summarization(
                     messages,
                     trimmer_config=_default_trimmer_config(),
                 )
 
-    assert did_summarize
+    assert n_replaced > 0
     # Evicted pairs at idx 2 and idx 4 → replaced with 1 summary at idx 2
     # New order: idx 2 = summary, idx 3 = u1, idx 4 = a1 (was idx 5),
     # idx 5 = u2 (was idx 6), idx 6 = a2 (was idx 7) = total 7
@@ -232,12 +232,12 @@ def test_apply_summarization_noop_when_no_evictable_pairs() -> None:
             "tooloutput_trimmer.hooks.summarizer.get_config",
             return_value=_make_config(summarize_enabled=True),
         ):
-            rewritten, did_summarize = apply_summarization(
+            rewritten, n_replaced = apply_summarization(
                 messages,
                 trimmer_config=tc,
             )
 
-    assert not did_summarize
+    assert n_replaced == 0
     assert len(rewritten) == len(messages)
 
 
@@ -346,12 +346,12 @@ def test_apply_summarization_respects_window_limit() -> None:
                 "tooloutput_trimmer.hooks.summarizer.get_config",
                 return_value=_make_config(summarize_enabled=True),
             ):
-                rewritten, did_summarize = apply_summarization(
+                rewritten, n_replaced = apply_summarization(
                     messages,
                     trimmer_config=_default_trimmer_config(),
                 )
 
-    assert did_summarize
+    assert n_replaced > 0
     # W=3, evicted=[2,4,6,8], recent_evicted=[4,6,8] (3 most recent)
     # Indices 4,6,8 → replaced with 1 summary at idx 4
     # Net: -2 messages (12 → 10)
