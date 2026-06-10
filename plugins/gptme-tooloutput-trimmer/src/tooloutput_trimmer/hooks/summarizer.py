@@ -39,10 +39,28 @@ from .trimmer import (
     SUMMARIZE_ENV_VAR,
     TrimmerConfig,
     _coerce_int,
-    _get_plugin_settings,
     _is_tool_output_message,
     get_trimmer_config,
 )
+
+
+def _get_plugin_settings() -> dict[str, Any]:
+    """Read tooloutput_trimmer plugin settings, merging user and project config.
+
+    Defined locally (not imported from trimmer) so that patching
+    `summarizer.get_config` in tests correctly intercepts this lookup.
+    """
+    config = get_config()
+    user_cfg: dict[str, Any] = {}
+    project_cfg: dict[str, Any] = {}
+    if config.user and hasattr(config.user, "plugin"):
+        user_cfg = getattr(config.user, "plugin", {}).get("tooloutput_trimmer", {})
+    if config.project and hasattr(config.project, "plugin"):
+        project_cfg = getattr(config.project, "plugin", {}).get(
+            "tooloutput_trimmer", {}
+        )
+    return {**user_cfg, **project_cfg}
+
 
 logger = logging.getLogger(__name__)
 
