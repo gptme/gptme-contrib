@@ -187,6 +187,8 @@ def cli(verbose, tasks_dir):
         waiting_since: date (GTD)
         parent: string (parent task ID)
         success_criterion: string (verifiable "done" gate)
+        tracking_issue: string (human URL of the live coordination issue/PR)
+        upstream_coordination_id: string (machine claim key, e.g. github:OWNER/REPO#NUM)
         depends: list (deprecated, use requires)
         requires: list (dependency references)
         tags: list
@@ -1486,6 +1488,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         "recur": {"type": "string"},  # Recurrence interval (7d, 24h, weekly, monthly)
         "parent": {"type": "string"},  # Parent task ID (for subtasks)
         "success_criterion": {"type": "string"},  # Verifiable "done" gate
+        "tracking_issue": {"type": "string"},  # Human URL of the live coordination issue/PR
+        "upstream_coordination_id": {"type": "string"},  # Machine claim key (github:OWNER/REPO#NUM)
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
         "depends": {"type": "list"},  # Deprecated, use requires instead
