@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from gptme.message import Message
 
 # Add plugin source to path once at module load.
@@ -20,6 +21,7 @@ from tooloutput_trimmer.hooks.summarizer import (  # noqa: E402
     _call_summarizer,
     _find_evictable_tool_output_indices,
     apply_summarization,
+    generation_pre_hook,
     get_summarizer_config,
 )
 from tooloutput_trimmer.hooks.trimmer import (  # noqa: E402
@@ -363,3 +365,25 @@ def test_apply_summarization_respects_window_limit() -> None:
 
     # The oldest evicted pair (idx 2) should still be there as-is
     assert rewritten[2].content == messages[2].content
+
+
+def test_generation_pre_hook_noop_when_bypass_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When GPTME_TRIM_BYPASS is set the summarizer hook must not fire."""
+    monkeypatch.setenv("GPTME_TRIM_BYPASS", "1")
+
+    messages = [
+        _msg("user", "u0"),
+        _msg("assistant", "a0"),
+        _msg("system", _big_shell_output("bypass-test")),
+        _msg("user", "u1"),
+        _msg("assistant", "a1"),
+    ]
+    original = list(messages)
+
+    # generation_pre_hook is a generator; exhaust it
+    list(generation_pre_hook(messages, model="test-model"))
+
+    # messages must be unchanged — no LLM call, no summarization
+    assert messages == original

@@ -38,6 +38,7 @@ from .trimmer import (
     SUMMARIZATION_MARKER,
     SUMMARIZE_ENV_VAR,
     TrimmerConfig,
+    _check_bypass_env,
     _coerce_int,
     _is_tool_output_message,
     determine_trigger,
@@ -263,6 +264,8 @@ def generation_pre_hook(
     enabled, replaces W evicted tool output pairs with a single LLM-generated
     summary; otherwise acts as a no-op.
     """
+    if _check_bypass_env():
+        return
     trimmer_config = get_trimmer_config()
     trigger = determine_trigger(
         messages, model=kwargs.get("model"), config=trimmer_config
