@@ -30,6 +30,9 @@ all = [
 [project.scripts]
 gptme-imagen = "gptme_imagen.cli:main"
 
+[project.entry-points."gptme.plugins"]
+gptme-imagen = "gptme_imagen.tools.image_gen:image_gen_tool"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
