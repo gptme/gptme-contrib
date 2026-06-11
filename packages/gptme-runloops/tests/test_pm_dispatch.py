@@ -23,6 +23,7 @@ from gptme_runloops.pm_dispatch import (
     derive_slot_key,
     dispatch_grouped_items,
     partition_items,
+    resolve_lane_model,
 )
 
 # --- Fixtures ---
@@ -150,6 +151,27 @@ class TestPartitionItems:
         fast, slow = partition_items(items)
         assert len(fast) == 2
         assert len(slow) == 2
+
+
+class TestResolveLaneModel:
+    def test_no_fast_model_preserves_base(self):
+        # Default-off: every lane gets the base model (prior behavior).
+        assert resolve_lane_model("fast", "sonnet") == "sonnet"
+        assert resolve_lane_model("slow", "sonnet") == "sonnet"
+
+    def test_fast_lane_uses_fast_model(self):
+        assert resolve_lane_model("fast", "sonnet", "haiku") == "haiku"
+
+    def test_slow_lane_ignores_fast_model(self):
+        assert resolve_lane_model("slow", "sonnet", "haiku") == "sonnet"
+
+    def test_none_base_model_passthrough(self):
+        assert resolve_lane_model("slow", None, "haiku") is None
+        assert resolve_lane_model("fast", None, "haiku") == "haiku"
+
+    def test_empty_fast_model_is_noop(self):
+        # An empty string is falsy — treated as unset, not an override.
+        assert resolve_lane_model("fast", "sonnet", "") == "sonnet"
 
 
 # --- DispatchLedger ---
@@ -766,6 +788,66 @@ class TestLaneDispatcher:
         # Slow lane second
         assert callback_calls[1]["lane"] == "slow"
         assert callback_calls[1]["slot_key"] == "a/b#2"
+
+    def test_dispatch_fast_model_routes_per_lane(self, ld_no_slots):
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        ld = LaneDispatcher(
+            slot_manager=ld_no_slots.slot_manager,
+            dispatch_callback=cb,
+        )
+
+        items = [
+            make_item(repo="a/b", number=1, types=["assigned_issue"]),  # fast
+            make_item(repo="a/b", number=2, types=["pr_update"]),  # slow
+        ]
+        ld.dispatch(items, model="sonnet", fast_model="haiku")
+        # Fast lane gets the cheaper model, slow lane keeps the base model.
+        assert callback_calls[0]["lane"] == "fast"
+        assert callback_calls[0]["model"] == "haiku"
+        assert callback_calls[1]["lane"] == "slow"
+        assert callback_calls[1]["model"] == "sonnet"
+
+    def test_dispatch_fast_model_from_env(self, ld_no_slots, monkeypatch):
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        monkeypatch.setenv("BOB_PM_FAST_LANE_MODEL", "haiku")
+        ld = LaneDispatcher(
+            slot_manager=ld_no_slots.slot_manager,
+            dispatch_callback=cb,
+        )
+        items = [make_item(repo="a/b", number=1, types=["assigned_issue"])]
+        ld.dispatch(items, model="sonnet")
+        assert callback_calls[0]["model"] == "haiku"
+
+    def test_dispatch_no_fast_model_preserves_single_model(
+        self, ld_no_slots, monkeypatch
+    ):
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        monkeypatch.delenv("BOB_PM_FAST_LANE_MODEL", raising=False)
+        ld = LaneDispatcher(
+            slot_manager=ld_no_slots.slot_manager,
+            dispatch_callback=cb,
+        )
+        items = [
+            make_item(repo="a/b", number=1, types=["assigned_issue"]),  # fast
+            make_item(repo="a/b", number=2, types=["pr_update"]),  # slow
+        ]
+        ld.dispatch(items, model="sonnet")
+        assert all(c["model"] == "sonnet" for c in callback_calls)
 
     def test_dispatch_respects_cap(self, ld_no_slots):
         callback_calls = []

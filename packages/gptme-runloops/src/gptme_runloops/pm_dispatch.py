@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
@@ -285,6 +286,28 @@ def partition_items(items: list[SlotItem]) -> tuple[list[SlotItem], list[SlotIte
     return fast, slow
 
 
+def resolve_lane_model(
+    lane: str,
+    base_model: str | None,
+    fast_model: str | None = None,
+) -> str | None:
+    """Resolve the model to use for a dispatch *lane*.
+
+    Per-lane model routing (ErikBjare/bob#860): the fast lane (notifications,
+    assigned-issue triage — everything not in ``SLOW_LANE_TYPES``) is the
+    low-intelligence-needed partition, so it can run on a cheaper model while
+    the slow lane (PR reviews, CI diagnostics, Greptile, merge conflicts) keeps
+    the capable model.
+
+    Opt-in and default-off: with ``fast_model`` unset (``None``), every lane
+    gets ``base_model`` — identical to the prior single-model behavior. The
+    bash runtime mirrors this via the ``BOB_PM_FAST_LANE_MODEL`` env var.
+    """
+    if lane == "fast" and fast_model:
+        return fast_model
+    return base_model
+
+
 # --- DispatchLedger ---
 
 
@@ -360,6 +383,7 @@ class LaneDispatcher:
         backend: str = "claude-code",
         model: str | None = None,
         script_path: str | None = None,
+        fast_model: str | None = None,
     ) -> tuple[int, int]:
         """Dispatch items via transient systemd units.
 
@@ -367,11 +391,18 @@ class LaneDispatcher:
         - derives a slot key and unit name
         - skips if the slot is already busy
         - checks slot availability (cap + burst)
+        - resolves the per-lane model (see ``resolve_lane_model``)
         - launches via ``dispatch_callback`` or default systemd-run
+
+        ``fast_model`` (falling back to the ``BOB_PM_FAST_LANE_MODEL`` env var)
+        opts the fast lane onto a cheaper model; unset preserves the single
+        ``model`` for every lane (ErikBjare/bob#860).
 
         Returns:
             (launched_count, deferred_count)
         """
+        if fast_model is None:
+            fast_model = os.environ.get("BOB_PM_FAST_LANE_MODEL") or None
         fast_items, slow_items = partition_items(items)
 
         launched = 0
@@ -407,7 +438,7 @@ class LaneDispatcher:
                     deferred += 1
                     continue
 
-                # Launch
+                # Launch (fast lane may run on a cheaper model)
                 success = self._launch_unit(
                     unit_name=unit_name,
                     legacy_name=legacy_name,
@@ -415,7 +446,7 @@ class LaneDispatcher:
                     lane=lane,
                     item=item,
                     backend=backend,
-                    model=model,
+                    model=resolve_lane_model(lane, model, fast_model),
                     script_path=script_path,
                 )
 
