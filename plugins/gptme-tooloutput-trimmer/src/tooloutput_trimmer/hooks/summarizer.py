@@ -38,6 +38,7 @@ from .trimmer import (
     SUMMARIZATION_MARKER,
     SUMMARIZE_ENV_VAR,
     TrimmerConfig,
+    _check_bypass_env,
     _coerce_int,
     _is_tool_output_message,
     get_trimmer_config,
@@ -264,6 +265,8 @@ def generation_pre_hook(
     enabled, replaces W evicted tool output pairs with a single LLM-generated
     summary. Otherwise, acts as a no-op and the trimmer handles truncation.
     """
+    if _check_bypass_env():
+        return
     # Capture count before in-place update so the scan sees the original list
     n_evictable = len(
         _find_evictable_tool_output_indices(messages, get_trimmer_config())

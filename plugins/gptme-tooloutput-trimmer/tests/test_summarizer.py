@@ -15,11 +15,13 @@ _plugin_src = str(Path(__file__).parent.parent / "src")
 if _plugin_src not in sys.path:
     sys.path.insert(0, _plugin_src)
 
+import pytest  # noqa: E402
 from tooloutput_trimmer.hooks.summarizer import (  # noqa: E402
     _build_summarization_context,
     _call_summarizer,
     _find_evictable_tool_output_indices,
     apply_summarization,
+    generation_pre_hook,
     get_summarizer_config,
 )
 from tooloutput_trimmer.hooks.trimmer import (  # noqa: E402
@@ -367,3 +369,25 @@ def test_apply_summarization_respects_window_limit() -> None:
 
     # The oldest evicted pair (idx 2) should still be there as-is
     assert rewritten[2].content == messages[2].content
+
+
+def test_generation_pre_hook_noop_when_bypass_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When GPTME_TRIM_BYPASS is set the summarizer hook must not fire."""
+    monkeypatch.setenv("GPTME_TRIM_BYPASS", "1")
+
+    messages = [
+        _msg("user", "u0"),
+        _msg("assistant", "a0"),
+        _msg("system", _big_shell_output("bypass-test")),
+        _msg("user", "u1"),
+        _msg("assistant", "a1"),
+    ]
+    original = list(messages)
+
+    # generation_pre_hook is a generator; exhaust it
+    list(generation_pre_hook(messages, model="test-model"))
+
+    # messages must be unchanged — no LLM call, no summarization
+    assert messages == original
