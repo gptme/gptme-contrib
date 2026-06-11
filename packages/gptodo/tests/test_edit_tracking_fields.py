@@ -94,3 +94,25 @@ def test_edit_clear_tracking_issue(tmp_path: Path, monkeypatch) -> None:
     tasks = load_tasks(tasks_dir)
     assert len(tasks) == 1
     assert tasks[0].metadata.get("tracking_issue") in (None, "")
+
+
+def test_edit_clear_upstream_coordination_id(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    task_with = TASK.replace(
+        "created: 2026-06-11T00:00:00+00:00\n",
+        "created: 2026-06-11T00:00:00+00:00\nupstream_coordination_id: github:gptme/gptme#2837\n",
+    )
+    (tasks_dir / "cross-repo.md").write_text(task_with)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["edit", "cross-repo", "--set", "upstream_coordination_id", "none"],
+    )
+
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    assert tasks[0].metadata.get("upstream_coordination_id") in (None, "")
