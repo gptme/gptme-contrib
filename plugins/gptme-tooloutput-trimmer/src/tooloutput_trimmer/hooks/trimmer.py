@@ -47,7 +47,11 @@ ANTHROPIC_CACHE_TTL_SECS = 5 * 60
 TOOL_OUTPUT_PREFIXES = ("Ran command: `", "Executed code block.")
 TRIMMED_MARKER = "[Tool output trimmed"
 HEADROOM_MARKER = "[Headroom compressed"  # skip messages already losslessly compressed
+SUMMARIZATION_MARKER = (
+    "[Summarized previous tool outputs]"  # marker for summarization inserts
+)
 BYPASS_ENV_VAR = "GPTME_TRIM_BYPASS"
+SUMMARIZE_ENV_VAR = "GPTME_SUMMARIZE_TOOL_OUTPUTS"
 
 
 @dataclass(frozen=True)

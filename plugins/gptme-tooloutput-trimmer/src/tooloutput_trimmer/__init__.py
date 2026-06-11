@@ -18,9 +18,10 @@ except ModuleNotFoundError:
 
 
 def _register_hooks() -> None:
-    from .hooks import register
+    from .hooks import register_summarizer, register_trimmer
 
-    register()
+    register_trimmer()
+    register_summarizer()
 
 
 plugin = GptmePlugin(
