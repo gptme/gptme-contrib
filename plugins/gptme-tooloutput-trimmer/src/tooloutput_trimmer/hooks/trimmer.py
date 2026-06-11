@@ -25,20 +25,6 @@ from gptme.hooks import HookType, StopPropagation, register_hook
 from gptme.message import Message
 
 try:
-    from gptme.llm import _chat_complete, get_default_model_summary, len_tokens
-except ModuleNotFoundError:
-
-    def _chat_complete(messages, model, tools=None, **kwargs):  # type: ignore
-        raise RuntimeError("LLM summarization not available (old gptme)")
-
-    def get_default_model_summary():  # type: ignore
-        return None
-
-    def len_tokens(*args, **kwargs):  # type: ignore
-        return 0
-
-
-try:
     from gptme.util.cost_tracker import CostTracker, SessionCosts
 except ModuleNotFoundError:
     SessionCosts = Any
