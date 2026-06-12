@@ -20,6 +20,11 @@ Usage:
 State persists to state/pm-dispatch/bandit-state.json with atomic writes
 and .bak recovery (mirrors LessonBandit persistence).
 
+Note: No cross-process file locking. When multiple dispatch workers run
+concurrently, simultaneous record_outcome() calls can silently overwrite
+each other's posterior updates. Add file-level locking (e.g. fcntl or a
+lock file) before wiring into active dispatch.
+
 Reference: https://github.com/gptme/gptme-contrib/pull/1075
 """
 
@@ -45,11 +50,6 @@ PM_WORK_TYPES: set[str] = {
     "notification-triage",
 }
 
-PM_MODELS: set[str] = {
-    "sonnet",
-    "haiku",
-    "opus",
-}
 
 DEFAULT_STATE_DIR = "state/pm-dispatch"
 DEFAULT_STATE_FILE = "bandit-state.json"
@@ -68,7 +68,7 @@ class BanditArm:
         return self.alpha / (self.alpha + self.beta)
 
     def sample(self, rng: random.Random | None = None) -> float:
-        if rng:
+        if rng is not None:
             return rng.betavariate(self.alpha, self.beta)
         return random.betavariate(self.alpha, self.beta)
 
