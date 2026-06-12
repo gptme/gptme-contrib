@@ -18,17 +18,48 @@ if "gptme" not in sys.modules:
     _gptme_tools = MagicMock()
     _gptme_tools_vision = MagicMock()
     _gptme_tools_base = MagicMock()
+    _gptme_tools_python = MagicMock()
     _gptme_config = MagicMock()
+    _gptme_message = MagicMock()
+    _gptme_hooks = MagicMock()
+    _gptme_constants = MagicMock()
+
     # Link the hierarchy so attribute traversal works correctly
     _gptme.tools = _gptme_tools
     _gptme_tools.vision = _gptme_tools_vision
     _gptme_tools.base = _gptme_tools_base
+    _gptme_tools.python = _gptme_tools_python
     _gptme.config = _gptme_config
+    _gptme.message = _gptme_message
+    _gptme.hooks = _gptme_hooks
+    _gptme.constants = _gptme_constants
+
+    # Set up ConfirmAction enum-like mock
+    _confirm_action = MagicMock()
+    _confirm_action.CONFIRM = "confirm"
+    _gptme_hooks.ConfirmAction = _confirm_action
+
+    # Set up DECLINED_CONTENT
+    _gptme_constants.DECLINED_CONTENT = "Declined."
+
+    # Set up a minimal Message class (not MagicMock) so isinstance() works
+    class _MessageStub:
+        def __init__(self, role: str, content: str, files=None, **kwargs):
+            self.role = role
+            self.content = content
+            self.files = files
+
+    _gptme_message.Message = _MessageStub
+
     sys.modules["gptme"] = _gptme
     sys.modules["gptme.tools"] = _gptme_tools
     sys.modules["gptme.tools.vision"] = _gptme_tools_vision
     sys.modules["gptme.tools.base"] = _gptme_tools_base
+    sys.modules["gptme.tools.python"] = _gptme_tools_python
     sys.modules["gptme.config"] = _gptme_config
+    sys.modules["gptme.message"] = _gptme_message
+    sys.modules["gptme.hooks"] = _gptme_hooks
+    sys.modules["gptme.constants"] = _gptme_constants
 
 if "openai" not in sys.modules:
     sys.modules["openai"] = MagicMock()
