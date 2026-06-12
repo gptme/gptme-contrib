@@ -706,7 +706,7 @@ check_greptile_scores() {
 # Routing:
 #   greptile < 4 (significant findings)   → greptile_needs_fix
 #   greptile = 4 (minor improvements)     → greptile_needs_improvement
-#   greptile >= 5 + CLEAN/MERGEABLE       → skip (check_merge_ready handles this)
+#   greptile >= 5                         → skip (perfect review is non-actionable here)
 #   DIRTY / CONFLICTING                   → skip (check_merge_conflicts handles)
 #   BLOCKED / UNKNOWN                     → skip (CI not yet settled)
 #
@@ -747,8 +747,9 @@ check_own_pr_review_state() {
         # No Greptile review on file yet — skip
         [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
 
-        # Greptile 5/5 + CLEAN/MERGEABLE → check_merge_ready already covers this
-        if [ "$greptile_score" -ge 5 ] 2>/dev/null && [ "$merge_state" = "CLEAN" ]; then
+        # Greptile 5/5 is already a perfect review. Whether the PR is ready to
+        # merge is handled separately by check_merge_ready / merge-status checks.
+        if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
             continue
         fi
 
