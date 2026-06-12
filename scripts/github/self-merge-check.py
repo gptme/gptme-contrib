@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, cast
 
 MAX_GRAPHQL_PAGE_SIZE = 100
+DEFAULT_MIN_GREPTILE_SCORE = 5
 
 DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
 SPEC_LIKE_DOCS = {
@@ -100,6 +101,19 @@ SENSITIVE_PATH_PREFIXES = (
     "scripts/session_bandit",
     "scripts/state-delta",
     "scripts/state_delta",
+    # Loop-orchestration entrypoints: the control path that selects work and
+    # drives autonomous/monitoring runs (and can itself trigger self-merges).
+    # A change here can alter how the loop gates its own merges, so it must go
+    # through human review. Prefixes (no extension) catch hyphen/underscore and
+    # nested layouts: scripts/autonomous-run.sh, scripts/autonomous-run-cc.sh,
+    # scripts/runs/autonomous/autonomous-loop.sh, scripts/runs/github/project-monitoring.sh.
+    "scripts/autonomous-run",
+    "scripts/autonomous_run",
+    "scripts/autonomous-loop",
+    "scripts/autonomous_loop",
+    "scripts/runs/autonomous/",
+    "scripts/runs/github/project-monitoring",
+    "scripts/runs/github/project_monitoring",
     "infra/",
     "k8s/",
     "secrets/",
@@ -987,6 +1001,52 @@ def _check_workspace_repo(
     return [], []
 
 
+def greptile_summary_score(repo: str, pr_number: int) -> int | None:
+    """Latest Greptile summary score via the shared greptile-merge-signal evaluator.
+
+    Returns the parsed score (0-5), or None if Greptile posted no parseable summary score.
+
+    Note on env-var precedence: this function only extracts the raw score from the
+    subprocess JSON. The floor comparison uses SELF_MERGE_MIN_GREPTILE_SCORE (parsed
+    by _parse_self_merge_min_greptile_score). The subprocess's own threshold
+    GREPTILE_MERGE_SIGNAL_MIN_SCORE has no effect on the gate — setting it does not
+    soften or tighten the floor here.
+    """
+    signal = Path(__file__).with_name("greptile-merge-signal.py")
+    if not signal.exists():
+        return None
+    try:
+        env = os.environ.copy()
+        # The self-merge gate owns its own enable/disable policy; don't let the
+        # standalone signal tool's disable flag silently neuter the floor.
+        env.pop("GREPTILE_MERGE_SIGNAL_DISABLED", None)
+        proc = subprocess.run(
+            [sys.executable, str(signal), "--repo", repo, str(pr_number)],
+            capture_output=True,
+            env=env,
+            text=True,
+            timeout=30,
+        )
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+    score = data.get("score")
+    return int(score) if isinstance(score, int) else None
+
+
+def _parse_self_merge_min_greptile_score() -> int:
+    raw = os.environ.get("SELF_MERGE_MIN_GREPTILE_SCORE", "").strip()
+    if not raw:
+        return DEFAULT_MIN_GREPTILE_SCORE
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MIN_GREPTILE_SCORE
+    if 0 <= value <= 5:
+        return value
+    return DEFAULT_MIN_GREPTILE_SCORE
+
+
 def evaluate_pr(
     repo: str, number: int, *, workspace_repos: list[str] | None
 ) -> CheckResult:
@@ -1044,6 +1104,18 @@ def evaluate_pr(
         result.reasons.append(
             f"Greptile has {greptile['unresolved']} unresolved review thread(s)"
         )
+
+    # Score floor (defense in depth): require the Greptile summary score >= floor
+    # (default 5/5, override via SELF_MERGE_MIN_GREPTILE_SCORE). Without this, resolving
+    # threads alone could let a low-score PR self-merge — the alice#61 (4/5) and #63 (3/5)
+    # incidents where buggy control-path code shipped. Reuses the shared greptile-merge-signal
+    # evaluator (upstreamed from Bob). Parse failure (score None) does NOT block — the
+    # thread/category gates still apply; this only catches a clear sub-floor score.
+    if greptile["has_review"]:
+        min_score = _parse_self_merge_min_greptile_score()
+        score = greptile_summary_score(repo, number)
+        if score is not None and score < min_score:
+            result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
 
     human_threads = fetch_unresolved_human_threads(
         repo, number, review_data=shared_review_data
