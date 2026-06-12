@@ -658,6 +658,7 @@ def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
             "fetch_greptile_status",
             return_value={"has_review": True, "unresolved": 0, "total": 1},
         ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=5),
     ):
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-contrib",
