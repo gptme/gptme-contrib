@@ -113,10 +113,11 @@ def make_headline(
         "agent": agent,
         "title": title,
         "value": value,
-        "trend": trend,
         "status": status,
         "generated_at": generated_at or utcnow_rfc3339(),
     }
+    if trend is not None:
+        headline["trend"] = trend
     if detail is not None:
         headline["detail"] = detail
     if link is not None:
@@ -124,17 +125,31 @@ def make_headline(
     return headline
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    """Write ``content`` atomically via a temp file in the same directory."""
+    tmp = path.parent / (path.name + ".tmp")
+    tmp.write_text(content)
+    tmp.rename(path)
+
+
 def emit(vitals_dir: str | Path, core: dict, headline: dict | None = None) -> None:
     """Write ``core.json`` (and optional ``headline.json``) into ``vitals_dir``.
 
     Creates the directory if needed. This is the one place that decides file
     names, so every agent's layout stays identical for the SSH-pull aggregator.
+    Writes are atomic (write-to-temp + rename) so the aggregator never reads a
+    partial file. A stale ``headline.json`` is removed when headline is None so
+    ``core.json`` and ``headline.json`` stay in sync.
     """
     d = Path(vitals_dir)
     d.mkdir(parents=True, exist_ok=True)
-    (d / "core.json").write_text(json.dumps(core, indent=2) + "\n")
+    _atomic_write(d / "core.json", json.dumps(core, indent=2) + "\n")
     if headline is not None:
-        (d / "headline.json").write_text(json.dumps(headline, indent=2) + "\n")
+        _atomic_write(d / "headline.json", json.dumps(headline, indent=2) + "\n")
+    else:
+        stale = d / "headline.json"
+        if stale.exists():
+            stale.unlink()
 
 
 if __name__ == "__main__":
