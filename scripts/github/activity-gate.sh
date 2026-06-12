@@ -694,6 +694,103 @@ check_greptile_scores() {
     done
 }
 
+# Surface own-PR Greptile review results that are invisible to the notification path.
+#
+# Bob opening his own PR and receiving a bot (Greptile/Codecov) review does NOT
+# generate a review_requested/mention notification. check_greptile_scores seeds
+# (and does NOT emit) on first discovery to avoid flooding when a repo is first
+# onboarded — so a new PR's first Greptile result is silently recorded and only
+# re-emitted after the 1-hour cooldown. This function closes that gap by emitting
+# on first discovery of a changed signature for bot-authored PRs.
+#
+# Routing:
+#   greptile < 4 (significant findings)   → greptile_needs_fix
+#   greptile = 4 (minor improvements)     → greptile_needs_improvement
+#   greptile >= 5                         → skip (perfect review is non-actionable here)
+#   DIRTY / CONFLICTING                   → skip (check_merge_conflicts handles)
+#   BLOCKED / UNKNOWN                     → skip (CI not yet settled)
+#
+# State tracking: $STATE_DIR/${repo_safe}-pr-${number}-own-pr-review.state
+#   Format: "${head_sha}:${greptile_score}:${merge_state}:${timestamp}"
+#   Emit exactly once per (head_sha, greptile_score, merge_state) signature.
+#   No timed cooldown re-emit — only re-emits when the signature changes.
+#
+# API cost: zero — reads Greptile state files written by check_greptile_scores.
+# Requires: live PR data (fresh mergeStateStatus/headRefOid).
+check_own_pr_review_state() {
+    local repo=$1
+    local prs=$2  # live PR data (fetch_live_pr_data)
+    [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
+
+    local repo_safe="${repo//\//-}"
+
+    echo "$prs" | jq -c '.[]' | while read -r pr_data; do
+        local pr_number pr_title head_sha merge_state
+        pr_number=$(echo "$pr_data" | jq -r '.number')
+        pr_title=$(echo "$pr_data" | jq -r '.title')
+        head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
+        merge_state=$(echo "$pr_data" | jq -r '.mergeStateStatus // "UNKNOWN"')
+
+        # Skip conflict/unsettled states — handled by other checks
+        case "$merge_state" in
+            DIRTY|CONFLICTING) continue ;;
+            BLOCKED|UNKNOWN) continue ;;
+        esac
+
+        # Read Greptile score and reviewed SHA from state file written by check_greptile_scores
+        # Format: score:timestamp:sha
+        local greptile_state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
+        local greptile_score="" greptile_reviewed_sha=""
+        if [ -f "$greptile_state_file" ]; then
+            greptile_score=$(cut -d: -f1 < "$greptile_state_file")
+            greptile_reviewed_sha=$(cut -d: -f3 < "$greptile_state_file")
+        fi
+
+        # No Greptile review on file yet — skip
+        [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
+
+        # Skip if the cached score is for a different SHA — Greptile hasn't reviewed
+        # the current HEAD yet. Without this guard, a push within the 8-min pr_data
+        # cache window produces a spurious dispatch pairing the new SHA with a stale score.
+        if [ -n "$greptile_reviewed_sha" ] && [ "$greptile_reviewed_sha" != "$head_sha" ]; then
+            continue
+        fi
+
+        # Greptile 5/5 is already a perfect review. Whether the PR is ready to
+        # merge is handled separately by check_merge_ready / merge-status checks.
+        if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
+            continue
+        fi
+
+        # Determine item type from Greptile score
+        local item_type
+        if [ "$greptile_score" -lt 4 ] 2>/dev/null; then
+            item_type="greptile_needs_fix"
+        else
+            item_type="greptile_needs_improvement"
+        fi
+
+        # Emit once per (head_sha, greptile_score, merge_state) signature.
+        # The last colon-delimited field is the timestamp; strip it for comparison.
+        local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-own-pr-review.state"
+        local signature="${head_sha}:${greptile_score}:${merge_state}"
+        local now
+        now=$(date +%s)
+
+        if [ -f "$state_file" ]; then
+            local last_state last_sig
+            last_state=$(cat "$state_file")
+            last_sig="${last_state%:*}"  # drop trailing :timestamp
+            [ "$last_sig" = "$signature" ] && continue  # same state — already dispatched
+        fi
+
+        # New or changed signature — record and emit
+        echo "${signature}:${now}" > "$state_file"
+        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" \
+            "own-PR review: Greptile ${greptile_score}/5 (merge_state: ${merge_state})"
+    done
+}
+
 # Check if the bot account has already posted a maintainer-facing status comment
 # on this PR indicating that the ball is in the maintainer's court.
 #
@@ -949,6 +1046,11 @@ for repo in $all_repos; do
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         items=$(check_greptile_scores "$repo" "$pr_data" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
+
+        # Must run AFTER check_greptile_scores (reads its state files) and with
+        # live_pr_data (needs fresh mergeStateStatus for routing decisions).
+        items=$(check_own_pr_review_state "$repo" "$live_pr_data" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         items=$(check_merge_ready "$repo" "$live_pr_data" 2>/dev/null || true)
