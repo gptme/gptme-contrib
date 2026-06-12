@@ -59,6 +59,10 @@ if argv[0] == "api" and len(argv) > 1 and argv[1] == "notifications":
     sys.exit(0)
 
 if argv[0] == "api":
+    # When --jq is passed, simulate real jq-filtered output: no greptile comments
+    # means the filter produces empty output (not the raw "[]" array).
+    if "--jq" in argv:
+        sys.exit(0)
     print("[]")
     sys.exit(0)
 
@@ -107,6 +111,27 @@ def _run_gate(
         text=True,
         env=env,
     )
+
+
+def test_stale_greptile_sha_does_not_emit_for_new_head() -> None:
+    """Greptile state for an old SHA must not dispatch against the new HEAD."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        old_sha = "oldsha0000"
+        ts = int(time.time()) - 60
+        # State file records a review for old_sha, but live PR is at TEST_HEAD_SHA
+        _greptile_state_file(state_dir).write_text(f"3:{ts}:{old_sha}")
+
+        result = _run_gate(tmp, state_dir, merge_state="CLEAN")
+        assert result.returncode in (0, 1), result.stderr
+        # check_own_pr_review_state must NOT emit — checked via the specific detail string
+        # and the absence of its state file. (check_greptile_scores may emit separately
+        # for the SHA change; that's expected and not what this test covers.)
+        assert "own-PR review" not in result.stdout, result.stdout
+        assert not _own_review_state_file(state_dir).exists()
 
 
 def test_perfect_greptile_review_does_not_emit_improvement_for_behind_pr() -> None:

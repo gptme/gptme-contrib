@@ -737,15 +737,24 @@ check_own_pr_review_state() {
             BLOCKED|UNKNOWN) continue ;;
         esac
 
-        # Read Greptile score from state file written by check_greptile_scores
+        # Read Greptile score and reviewed SHA from state file written by check_greptile_scores
+        # Format: score:timestamp:sha
         local greptile_state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
-        local greptile_score=""
+        local greptile_score="" greptile_reviewed_sha=""
         if [ -f "$greptile_state_file" ]; then
             greptile_score=$(cut -d: -f1 < "$greptile_state_file")
+            greptile_reviewed_sha=$(cut -d: -f3 < "$greptile_state_file")
         fi
 
         # No Greptile review on file yet — skip
         [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
+
+        # Skip if the cached score is for a different SHA — Greptile hasn't reviewed
+        # the current HEAD yet. Without this guard, a push within the 8-min pr_data
+        # cache window produces a spurious dispatch pairing the new SHA with a stale score.
+        if [ -n "$greptile_reviewed_sha" ] && [ "$greptile_reviewed_sha" != "$head_sha" ]; then
+            continue
+        fi
 
         # Greptile 5/5 is already a perfect review. Whether the PR is ready to
         # merge is handled separately by check_merge_ready / merge-status checks.
