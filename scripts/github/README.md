@@ -2,6 +2,38 @@
 
 Scripts for integrating GitHub context and repository management into AI agent workflows.
 
+## ⚠️ Self-merge / Greptile / PR-monitoring toolchain — READ BEFORE BUILDING
+
+If you're about to build PR monitoring, a Greptile review loop ("greploop"), self-merge logic,
+a stale-PR sweep, or a Greptile score check — **it already exists here.** This toolchain is shared
+across agents (Alice, Bob) and is hardened for scale. Don't rebuild a parallel; use or extend these.
+(Origin of this note: 2026-06 an agent rebuilt greploop + a sweep + a score parser that all already
+existed. See `scripts/workflow/read-the-task-before-reinvestigating` patterns.)
+
+**The canonical flow — drive a PR to merge ("greploop"):**
+
+| Step | Tool | Notes |
+|------|------|-------|
+| Discover stalled PRs | `activity-gate.sh` (has a Greptile score sweep) · `pr-queue-health.py` | event-driven; surfaces low-scored / stuck PRs |
+| Trigger / re-trigger review | `greptile-helper.sh` (anti-spam: flock, ack-detect, max-retriggers) · `pr-greptile-trigger.py` (batch) | NEVER post raw `@greptileai review` |
+| Read the score signal | `greptile-merge-signal.py` (summary score ≥ threshold + "Safe to merge") | reusable; default 5/5 |
+| Address findings, push | (agent session) | fix the code |
+| **Resolve addressed threads** | `resolve-greptile-threads.py` *(Alice-contributed)* | the `resolveReviewThread` mutation; fix-first |
+| Gate the merge | `self-merge-check.py` | CI green + Greptile present + no unresolved threads + **score floor** (`SELF_MERGE_MIN_GREPTILE_SCORE`, default 5/5) + category/sensitive-path filter |
+| Merge | `self-merge-if-eligible.sh` / `pr-address-wait-and-merge.sh` *(Bob)* | bounded poll-budget wait → merge |
+
+**Robustness patterns (tuned at scale — reuse, don't reinvent):**
+- **Rate limits**: gate on `github-rate-limit-health.sh` (`GH_RATE_LIMIT_HELPER`; `self-merge-check.py`
+  defers with exit 76). Re-check before expensive sub-steps, not just at cycle start.
+- **Fewer API calls**: fetch Greptile review data ONCE per PR and reuse (see `self-merge-check.py`'s
+  `_fetch_greptile_review_data` passed to both helpers). Don't spawn a per-PR subprocess that re-fetches.
+- **Caching**: key Greptile status by PR head-SHA — unchanged PRs skip the fetch.
+- **Pagination**: paginate `reviewThreads` (avoids silently undercounting unresolved threads).
+- **GraphQL attribution**: wrap GraphQL calls for consumption accounting.
+
+See also: `knowledge/research/2026-06-12-monitoring-robustness-alice-vs-bob.md` (Alice repo) and the
+greploop skill (greptileai/skills, MIT) for the upstream pattern this implements.
+
 ## Scripts
 
 ### context-gh.sh
@@ -285,6 +317,17 @@ python3 scripts/github/self-merge-check.py --workspace-repo myorg/myrepo <pr-url
 **Requirements:**
 - `gh` (GitHub CLI) installed and authenticated
 - Greptile installed on the target repo for review checking
+
+### greptile-merge-signal.py
+
+Evaluates whether a Greptile **summary comment** is strong enough for fast-path merge use:
+allowlisted bot login + "Safe to merge" + score ≥ threshold (default 5/5). A reusable score signal —
+`self-merge-check.py` wires it in as the **score floor** so resolving threads alone can't merge a
+low-scored PR. Parse failure does not block (the thread/category gates still apply).
+
+```bash
+python3 scripts/github/greptile-merge-signal.py --repo owner/repo 123   # JSON; exit 0 eligible, 1 not
+```
 
 ## Related
 
