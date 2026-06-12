@@ -180,7 +180,9 @@ class TestExecuteImageGenBlock:
         assert len(messages) == 1
         assert messages[0].content == "Declined."
 
-    def test_view_image_failure_does_not_abort_successful_result(self, fake_image: Path):
+    def test_view_image_failure_does_not_abort_successful_result(
+        self, fake_image: Path
+    ):
         """A failing view_image() call must not undo the successful attachment message."""
         image_result = _make_image_result(fake_image)
 
