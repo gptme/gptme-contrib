@@ -1087,7 +1087,10 @@ def evaluate_pr(
     # evaluator (upstreamed from Bob). Parse failure (score None) does NOT block — the
     # thread/category gates still apply; this only catches a clear sub-floor score.
     if greptile["has_review"]:
-        min_score = int(os.environ.get("SELF_MERGE_MIN_GREPTILE_SCORE", "5"))
+        try:
+            min_score = int(os.environ.get("SELF_MERGE_MIN_GREPTILE_SCORE", "5"))
+        except ValueError:
+            min_score = 5
         score = greptile_summary_score(repo, number)
         if score is not None and score < min_score:
             result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
