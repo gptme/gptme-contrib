@@ -14,8 +14,6 @@ import pytest
 # traversing .b.c via attribute access — NOT via sys.modules["a.b.c"] directly.
 # So the mock objects must be properly linked: sys.modules["a"].b must be sys.modules["a.b"].
 if "gptme" not in sys.modules:
-    from unittest.mock import MagicMock
-
     _gptme = MagicMock()
     _gptme_tools = MagicMock()
     _gptme_tools_vision = MagicMock()

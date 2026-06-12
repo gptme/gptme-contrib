@@ -73,6 +73,35 @@ def _run_execute(code: str, ipy_result_value, stdout_content: str = "", ipy_erro
         return list(_execute_image_gen_block(code, [], {}))
 
 
+def _run_execute_with_action(
+    code: str, ipy_result_value, action: str, stdout_content: str = "", ipy_error=None
+):
+    """Helper to run _execute_image_gen_block with a custom confirmation action."""
+    from gptme_imagen.tools.image_gen import _execute_image_gen_block
+
+    mock_ipy_result = MagicMock()
+    mock_ipy_result.result = ipy_result_value
+    mock_ipy_result.error_in_exec = ipy_error
+
+    mock_ipython = MagicMock()
+    mock_ipython.run_cell.return_value = mock_ipy_result
+
+    mock_confirm = MagicMock()
+    mock_confirm.action = action
+
+    with (
+        patch("gptme.hooks.get_confirmation", return_value=mock_confirm),
+        patch("gptme.hooks.ConfirmAction") as mock_action_cls,
+        patch("gptme.tools.python._get_ipython", return_value=mock_ipython),
+        patch(
+            "gptme.tools.python.capture_and_display",
+            side_effect=lambda: _mock_capture_and_display(stdout_content),
+        ),
+    ):
+        mock_action_cls.CONFIRM = "confirm"
+        return list(_execute_image_gen_block(code, [], {}))
+
+
 class TestExecuteImageGenBlock:
     """Tests for _execute_image_gen_block."""
 
@@ -139,3 +168,30 @@ class TestExecuteImageGenBlock:
         messages = list(_execute_image_gen_block(None, [], {}))
         assert len(messages) == 1
         assert "No code" in messages[0].content
+
+    def test_declined_confirmation_yields_declined_message(self):
+        """Execute function should stop immediately when confirmation is declined."""
+        messages = _run_execute_with_action(
+            "generate_image('test')",
+            None,
+            action="skip",
+        )
+
+        assert len(messages) == 1
+        assert messages[0].content == "Declined."
+
+    def test_view_image_failure_does_not_abort_successful_result(
+        self, fake_image: Path
+    ):
+        """A failing view_image() call must not undo the successful attachment message."""
+        image_result = _make_image_result(fake_image)
+
+        with patch(
+            "gptme.tools.vision.view_image",
+            side_effect=RuntimeError("bad image preview"),
+        ):
+            messages = _run_execute("generate_image('sunset')", image_result)
+
+        assert len(messages) == 1
+        assert messages[0].files is not None
+        assert fake_image.absolute() in [Path(f) for f in messages[0].files]
