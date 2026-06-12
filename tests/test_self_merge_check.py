@@ -621,6 +621,14 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
         "scripts/session_bandit.py",
         "scripts/state-delta.py",
         "scripts/state_delta.py",
+        # autonomous/monitoring orchestration entrypoints (the self-merge control path)
+        "scripts/autonomous-run.sh",
+        "scripts/autonomous-run-cc.sh",
+        "scripts/autonomous_run.py",
+        "scripts/autonomous-loop.sh",
+        "scripts/runs/autonomous/autonomous-loop.sh",
+        "scripts/runs/github/project-monitoring.sh",
+        "scripts/runs/github/project_monitoring.py",
     ],
 )
 def test_classify_loop_control_paths_blocked(path: str) -> None:

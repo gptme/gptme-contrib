@@ -100,6 +100,19 @@ SENSITIVE_PATH_PREFIXES = (
     "scripts/session_bandit",
     "scripts/state-delta",
     "scripts/state_delta",
+    # Loop-orchestration entrypoints: the control path that selects work and
+    # drives autonomous/monitoring runs (and can itself trigger self-merges).
+    # A change here can alter how the loop gates its own merges, so it must go
+    # through human review. Prefixes (no extension) catch hyphen/underscore and
+    # nested layouts: scripts/autonomous-run.sh, scripts/autonomous-run-cc.sh,
+    # scripts/runs/autonomous/autonomous-loop.sh, scripts/runs/github/project-monitoring.sh.
+    "scripts/autonomous-run",
+    "scripts/autonomous_run",
+    "scripts/autonomous-loop",
+    "scripts/autonomous_loop",
+    "scripts/runs/autonomous/",
+    "scripts/runs/github/project-monitoring",
+    "scripts/runs/github/project_monitoring",
     "infra/",
     "k8s/",
     "secrets/",
