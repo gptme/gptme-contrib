@@ -148,9 +148,18 @@ def test_evaluate_pr_blocks_changes_requested() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
             self_merge_check,
             "fetch_greptile_status",
             return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=None),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
         ),
     ):
         result = self_merge_check.evaluate_pr(
@@ -654,11 +663,19 @@ def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
             self_merge_check,
             "fetch_greptile_status",
             return_value={"has_review": True, "unresolved": 0, "total": 1},
         ),
         patch.object(self_merge_check, "greptile_summary_score", return_value=5),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
     ):
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-contrib",
