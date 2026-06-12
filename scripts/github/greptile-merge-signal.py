@@ -63,9 +63,10 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _env_enabled(name: str) -> bool:
+def _env_var_is_active(name: str) -> bool:
+    """Return True if the env var is set to a truthy value ("1", "true", "yes", "on")."""
     value = os.environ.get(name, "")
-    return value.strip().lower() not in {"1", "true", "yes", "on"}
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_bot_allowlist() -> set[str]:
@@ -166,7 +167,7 @@ def _latest_allowlisted_summary(
 
 def evaluate_summary_signal(repo: str, pr_number: int) -> SignalResult:
     threshold = _parse_threshold()
-    if not _env_enabled(DISABLE_ENV):
+    if _env_var_is_active(DISABLE_ENV):
         return SignalResult(
             eligible=False,
             repo=repo,

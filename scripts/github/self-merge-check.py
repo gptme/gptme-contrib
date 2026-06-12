@@ -1005,6 +1005,12 @@ def greptile_summary_score(repo: str, pr_number: int) -> int | None:
     """Latest Greptile summary score via the shared greptile-merge-signal evaluator.
 
     Returns the parsed score (0-5), or None if Greptile posted no parseable summary score.
+
+    Note on env-var precedence: this function only extracts the raw score from the
+    subprocess JSON. The floor comparison uses SELF_MERGE_MIN_GREPTILE_SCORE (parsed
+    by _parse_self_merge_min_greptile_score). The subprocess's own threshold
+    GREPTILE_MERGE_SIGNAL_MIN_SCORE has no effect on the gate — setting it does not
+    soften or tighten the floor here.
     """
     signal = Path(__file__).with_name("greptile-merge-signal.py")
     if not signal.exists():
