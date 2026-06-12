@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, cast
 
 MAX_GRAPHQL_PAGE_SIZE = 100
+DEFAULT_MIN_GREPTILE_SCORE = 5
 
 DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
 SPEC_LIKE_DOCS = {
@@ -1009,9 +1010,14 @@ def greptile_summary_score(repo: str, pr_number: int) -> int | None:
     if not signal.exists():
         return None
     try:
+        env = os.environ.copy()
+        # The self-merge gate owns its own enable/disable policy; don't let the
+        # standalone signal tool's disable flag silently neuter the floor.
+        env.pop("GREPTILE_MERGE_SIGNAL_DISABLED", None)
         proc = subprocess.run(
             [sys.executable, str(signal), "--repo", repo, str(pr_number)],
             capture_output=True,
+            env=env,
             text=True,
             timeout=30,
         )
@@ -1020,6 +1026,19 @@ def greptile_summary_score(repo: str, pr_number: int) -> int | None:
         return None
     score = data.get("score")
     return int(score) if isinstance(score, int) else None
+
+
+def _parse_self_merge_min_greptile_score() -> int:
+    raw = os.environ.get("SELF_MERGE_MIN_GREPTILE_SCORE", "").strip()
+    if not raw:
+        return DEFAULT_MIN_GREPTILE_SCORE
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MIN_GREPTILE_SCORE
+    if 0 <= value <= 5:
+        return value
+    return DEFAULT_MIN_GREPTILE_SCORE
 
 
 def evaluate_pr(
@@ -1087,7 +1106,7 @@ def evaluate_pr(
     # evaluator (upstreamed from Bob). Parse failure (score None) does NOT block — the
     # thread/category gates still apply; this only catches a clear sub-floor score.
     if greptile["has_review"]:
-        min_score = int(os.environ.get("SELF_MERGE_MIN_GREPTILE_SCORE", "5"))
+        min_score = _parse_self_merge_min_greptile_score()
         score = greptile_summary_score(repo, number)
         if score is not None and score < min_score:
             result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")

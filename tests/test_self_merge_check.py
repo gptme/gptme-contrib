@@ -672,6 +672,73 @@ def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
     ), f"Explicit opt-out should not disqualify; reasons: {result.reasons}"
 
 
+def test_greptile_summary_score_ignores_signal_disable_env() -> None:
+    completed = subprocess.CompletedProcess(
+        args=["python3"],
+        returncode=1,
+        stdout='{"score": 4}',
+        stderr="",
+    )
+
+    with (
+        patch.dict(
+            self_merge_check.os.environ,
+            {"GREPTILE_MERGE_SIGNAL_DISABLED": "1"},
+            clear=False,
+        ),
+        patch.object(
+            self_merge_check.subprocess, "run", return_value=completed
+        ) as mock_run,
+    ):
+        score = self_merge_check.greptile_summary_score("gptme/gptme-contrib", 1080)
+
+    assert score == 4
+    assert "GREPTILE_MERGE_SIGNAL_DISABLED" not in mock_run.call_args.kwargs["env"]
+
+
+def test_evaluate_pr_invalid_min_score_falls_back_to_default() -> None:
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+    }
+
+    with (
+        patch.dict(
+            self_merge_check.os.environ,
+            {"SELF_MERGE_MIN_GREPTILE_SCORE": "five"},
+            clear=False,
+        ),
+        patch.object(self_merge_check, "_fetch_greptile_review_data", return_value={}),
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=4),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "authors": []},
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+    assert not result.eligible
+    assert "Greptile score 4/5 below floor 5/5" in result.reasons
+
+
 def test_evaluate_pr_disqualified_when_workspace_repos_unknown() -> None:
     """Detection failure (workspace_repos=None) must disqualify the PR."""
     pr_data = {
