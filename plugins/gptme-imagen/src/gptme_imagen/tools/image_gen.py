@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import os
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -899,6 +900,87 @@ def get_generation_history(
     return tracker.get_generation_history(limit, provider)
 
 
+def _execute_image_gen_block(
+    content: str | None,
+    args: list[str] | None,
+    kwargs: dict[str, str] | None,
+) -> Generator[Any, None, None]:
+    """Execute an image_gen block, yielding output with image file attachments."""
+    if not _HAS_GPTME:
+        return
+
+    from gptme.constants import DECLINED_CONTENT  # type: ignore[import-untyped]
+    from gptme.hooks import (  # type: ignore[import-untyped]
+        ConfirmAction,
+        get_confirmation,
+    )
+    from gptme.message import Message  # type: ignore[import-untyped]
+    from gptme.tools.python import (  # type: ignore[import-untyped]
+        _get_ipython,
+        capture_and_display,
+    )
+
+    if content is None:
+        yield Message("system", "No code to execute")
+        return
+
+    code = content.strip()
+
+    confirm = get_confirmation()
+    if confirm.action != ConfirmAction.CONFIRM:
+        yield Message("system", DECLINED_CONTENT)
+        return
+
+    ipython = _get_ipython()
+
+    with capture_and_display() as (stdout_capture, _stderr_capture):
+        result = ipython.run_cell(code, silent=False, store_history=False)
+
+    captured_stdout = stdout_capture.getvalue()
+
+    if result.error_in_exec:
+        error_text = f"Error: {result.error_in_exec}"
+        if captured_stdout:
+            error_text = f"{captured_stdout.strip()}\n{error_text}"
+        yield Message("system", error_text)
+        return
+
+    # If the code returned a Message (e.g. from view_image), yield it directly
+    if isinstance(result.result, Message):
+        yield result.result
+        return
+
+    # Collect image paths from ImageResult return values for inline preview
+    image_files: list[Path] = []
+    if isinstance(result.result, ImageResult):
+        image_files.append(result.result.image_path.absolute())
+    elif isinstance(result.result, list):
+        for r in result.result:
+            if isinstance(r, ImageResult):
+                image_files.append(r.image_path.absolute())
+
+    output = captured_stdout.strip()
+    if not output:
+        if image_files:
+            names = ", ".join(p.name for p in image_files)
+            output = f"Generated {len(image_files)} image(s): {names}"
+        else:
+            output = "Executed image_gen block"
+
+    # Yield the text result with image files attached (webui renders these inline)
+    yield Message("system", output, files=image_files if image_files else None)
+
+    # Also yield view_image messages so the LLM can see the generated images
+    if image_files:
+        try:
+            from gptme.tools.vision import view_image  # type: ignore[import-untyped]
+
+            for path in image_files:
+                yield view_image(path)
+        except ImportError:
+            pass
+
+
 # Tool specification (only available when gptme is installed)
 def _make_tool_spec() -> Any:
     if not _HAS_GPTME:
@@ -1166,6 +1248,7 @@ generate_image(
 > System: 🎨 Generating with gemini (using 1 reference image)...
 > ✅ Image saved: portrait_with_accessories.png
     """,
+        execute=_execute_image_gen_block,
         functions=[
             generate_image,
             generate_variation,
