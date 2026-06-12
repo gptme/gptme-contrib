@@ -987,6 +987,28 @@ def _check_workspace_repo(
     return [], []
 
 
+def greptile_summary_score(repo: str, pr_number: int) -> int | None:
+    """Latest Greptile summary score via the shared greptile-merge-signal evaluator.
+
+    Returns the parsed score (0-5), or None if Greptile posted no parseable summary score.
+    """
+    signal = Path(__file__).with_name("greptile-merge-signal.py")
+    if not signal.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(signal), "--repo", repo, str(pr_number)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+    score = data.get("score")
+    return int(score) if isinstance(score, int) else None
+
+
 def evaluate_pr(
     repo: str, number: int, *, workspace_repos: list[str] | None
 ) -> CheckResult:
@@ -1044,6 +1066,18 @@ def evaluate_pr(
         result.reasons.append(
             f"Greptile has {greptile['unresolved']} unresolved review thread(s)"
         )
+
+    # Score floor (defense in depth): require the Greptile summary score >= floor
+    # (default 5/5, override via SELF_MERGE_MIN_GREPTILE_SCORE). Without this, resolving
+    # threads alone could let a low-score PR self-merge — the alice#61 (4/5) and #63 (3/5)
+    # incidents where buggy control-path code shipped. Reuses the shared greptile-merge-signal
+    # evaluator (upstreamed from Bob). Parse failure (score None) does NOT block — the
+    # thread/category gates still apply; this only catches a clear sub-floor score.
+    if greptile["has_review"]:
+        min_score = int(os.environ.get("SELF_MERGE_MIN_GREPTILE_SCORE", "5"))
+        score = greptile_summary_score(repo, number)
+        if score is not None and score < min_score:
+            result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
 
     human_threads = fetch_unresolved_human_threads(
         repo, number, review_data=shared_review_data
