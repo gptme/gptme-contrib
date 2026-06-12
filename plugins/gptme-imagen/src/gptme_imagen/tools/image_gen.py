@@ -979,6 +979,12 @@ def _execute_image_gen_block(
                 yield view_image(path)
         except ImportError:
             pass
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Failed to display generated image(s) to LLM"
+            )
 
 
 # Tool specification (only available when gptme is installed)
