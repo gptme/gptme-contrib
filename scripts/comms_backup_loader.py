@@ -45,7 +45,7 @@ import os
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from xml.etree.ElementTree import iterparse
+from xml.etree.ElementTree import Element, iterparse
 
 # Call "type" codes used by the app (Android CallLog.Calls.TYPE).
 CALL_TYPES = {
@@ -64,15 +64,20 @@ SMS_SENT = "2"
 def iter_records(path: str | os.PathLike, tag: str) -> Iterator[dict[str, str]]:
     """Stream ``<tag>`` elements' attributes, clearing each so memory stays bounded.
 
-    ``iterparse`` yields elements as they close; we copy the attributes and
-    immediately ``clear()`` the element so the (potentially 40MB+) document never
-    materializes in memory. Yields a plain ``dict`` per record so callers can't
-    accidentally retain live XML nodes.
+    ``iterparse`` yields elements as they close; we copy the attributes,
+    ``clear()`` the element, and purge it from the root so the (potentially
+    40MB+) document never materializes in memory. Yields a plain ``dict`` per
+    record so callers can't accidentally retain live XML nodes.
     """
-    for _event, elem in iterparse(str(path), events=("end",)):
-        if elem.tag == tag:
+    root: Element | None = None
+    for event, elem in iterparse(str(path), events=("start", "end")):
+        if event == "start" and root is None:
+            root = elem
+        elif event == "end" and elem.tag == tag:
             yield dict(elem.attrib)
             elem.clear()
+            if root is not None:
+                del root[:]  # purge cleared child from parent; keeps root list bounded
 
 
 def iter_sent_sms(path: str | os.PathLike) -> Iterator[dict[str, str]]:
@@ -95,7 +100,9 @@ def normalize_number(raw: str | None) -> str:
     """
     if not raw:
         return ""
-    return "".join(ch for ch in raw if ch.isdigit() or ch == "+")
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    prefix = "+" if raw.lstrip().startswith("+") else ""
+    return prefix + digits
 
 
 def epoch_ms_to_day(date_ms: str | None, tz: timezone | None = None) -> str | None:

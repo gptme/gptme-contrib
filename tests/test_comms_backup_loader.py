@@ -111,6 +111,8 @@ def test_iter_sent_sms_filters_to_type_2(tmp_path: Path) -> None:
         (None, ""),
         ("", ""),
         ("no digits here", ""),
+        # Only a single leading + is kept; embedded + from malformed input stripped.
+        ("+1+800+555+1234", "+18005551234"),
     ],
 )
 def test_normalize_number(raw: str | None, expected: str) -> None:
