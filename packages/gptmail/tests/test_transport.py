@@ -81,6 +81,32 @@ def test_send_delegates_to_compose_and_deliver(tmp_path: Path, monkeypatch) -> N
     assert drafts, "expected a composed draft file"
 
 
+def test_send_passes_explicit_references(tmp_path: Path, monkeypatch) -> None:
+    """send(references=...) passes the full chain to compose(), not just reply_to.
+
+    Guards the References-truncation fix: callers that build the ancestor chain
+    themselves can pass it explicitly so deep reply threads reconstruct correctly.
+    """
+    transport = _make_transport(tmp_path)
+    captured: list[dict] = []
+
+    original_compose = transport.email.compose
+
+    def capturing_compose(to, subject, content, reply_to=None, references=None):
+        captured.append({"reply_to": reply_to, "references": references})
+        return original_compose(to, subject, content, reply_to=reply_to, references=references)
+
+    monkeypatch.setattr(transport.email, "compose", capturing_compose)
+    monkeypatch.setattr(transport.email, "send", lambda mid: None)
+
+    full_chain = ["id-grandparent", "id-parent"]
+    transport.send(
+        "bob@example.com", "Re: thread", "body", reply_to="id-parent", references=full_chain
+    )
+
+    assert captured[0]["references"] == full_chain
+
+
 def test_list_and_read_delegate(tmp_path: Path, monkeypatch) -> None:
     transport = _make_transport(tmp_path)
     sentinel_list: list[tuple[str, str, datetime]] = [("m1", "Subject", datetime(2026, 6, 13))]

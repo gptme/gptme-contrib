@@ -51,6 +51,7 @@ class Transport(Protocol):
         content: str,
         *,
         reply_to: str | None = None,
+        references: list[str] | None = None,
     ) -> str:
         """Send a message and return its message ID.
 
@@ -58,7 +59,12 @@ class Transport(Protocol):
             to: Recipient identifier (email address, agent name, …).
             subject: Message subject.
             content: Message body (Markdown).
-            reply_to: Optional message ID this is a reply to (for threading).
+            reply_to: Optional message ID this is a direct reply to.
+            references: Full ancestor chain for the ``References`` header.
+                When replying, pass the parent's ``References`` list with
+                ``reply_to`` appended so MUAs reconstruct the full thread.
+                If omitted and ``reply_to`` is set, defaults to ``[reply_to]``
+                (single-hop — correct for depth-1 replies).
         """
         ...
 

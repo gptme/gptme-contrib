@@ -41,11 +41,14 @@ class EmailTransport:
         content: str,
         *,
         reply_to: str | None = None,
+        references: list[str] | None = None,
     ) -> str:
         """Compose and deliver an email, returning its message ID."""
-        references = [reply_to] if reply_to else None
+        effective_refs = (
+            references if references is not None else ([reply_to] if reply_to else None)
+        )
         message_id = self._email.compose(
-            to, subject, content, reply_to=reply_to, references=references
+            to, subject, content, reply_to=reply_to, references=effective_refs
         )
         self._email.send(message_id)
         return message_id
