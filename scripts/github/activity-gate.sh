@@ -708,12 +708,20 @@ check_greptile_scores() {
 #   greptile = 4 (minor improvements)     → greptile_needs_improvement
 #   greptile >= 5                         → skip (perfect review is non-actionable here)
 #   DIRTY / CONFLICTING                   → skip (check_merge_conflicts handles)
-#   BLOCKED / UNKNOWN                     → skip (CI not yet settled)
+#   UNKNOWN                               → skip (GitHub still computing mergeability — transient)
+#   BLOCKED                               → emit (stable "needs required review/checks" state;
+#                                           a sub-5 Greptile score is actionable regardless of
+#                                           merge-readiness — branch-protected green PRs sit here,
+#                                           and skipping them left only the 1h-cooldown nag)
 #
 # State tracking: $STATE_DIR/${repo_safe}-pr-${number}-own-pr-review.state
 #   Format: "${head_sha}:${greptile_score}:${merge_state}:${timestamp}"
 #   Emit exactly once per (head_sha, greptile_score, merge_state) signature.
 #   No timed cooldown re-emit — only re-emits when the signature changes.
+#   Note: a BLOCKED→CLEAN transition changes merge_state, so a PR that emitted
+#   at BLOCKED will emit again at CLEAN. This is intentional: the Greptile issue
+#   is still unresolved after approval, and the duplicate is handled by the
+#   downstream dispatcher's own dedup logic.
 #
 # API cost: zero — reads Greptile state files written by check_greptile_scores.
 # Requires: live PR data (fresh mergeStateStatus/headRefOid).
@@ -731,10 +739,13 @@ check_own_pr_review_state() {
         head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
         merge_state=$(echo "$pr_data" | jq -r '.mergeStateStatus // "UNKNOWN"')
 
-        # Skip conflict/unsettled states — handled by other checks
+        # Skip conflict / genuinely-transient states — handled elsewhere or not yet settled.
+        # BLOCKED is intentionally NOT skipped: it is the stable state for a branch-protected
+        # green PR awaiting required review/approval, where a sub-5 Greptile score is still
+        # actionable. UNKNOWN means GitHub has not finished computing mergeability (transient).
         case "$merge_state" in
             DIRTY|CONFLICTING) continue ;;
-            BLOCKED|UNKNOWN) continue ;;
+            UNKNOWN) continue ;;
         esac
 
         # Read Greptile score and reviewed SHA from state file written by check_greptile_scores
