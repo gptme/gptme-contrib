@@ -33,6 +33,7 @@ Wiring:
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -46,7 +47,7 @@ from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from gptmail.transport.agent import AgentTransport, Deliver
+from gptmail.transport.agent import AgentTransport, Deliver, meta_of
 
 
 # Inbox messages older than this (days) are assumed handled and no longer
@@ -96,7 +97,10 @@ def _load_agents() -> dict[str, dict[str, str]]:
             err=True,
         )
         return {}
-    return yaml.safe_load(config_path.read_text()) or {}
+    raw = yaml.safe_load(config_path.read_text()) or {}
+    # Normalise keys to lowercase so lookups (which use ``to.lower()``) match
+    # registries that use mixed-case agent names like ``Bob``.
+    return {k.lower(): v for k, v in raw.items()}
 
 
 def _tracker() -> ConversationTracker:
@@ -165,23 +169,8 @@ def _track_sent(transport: AgentTransport, message_id: str, reply_to: str | None
 
 
 # -- frontmatter scan helpers (authoritative pending check) ------------------
-
-
-def _meta_of(path: Path) -> dict | None:
-    try:
-        content = path.read_text()
-    except OSError:
-        return None
-    if not content.startswith("---"):
-        return None
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return None
-    try:
-        meta = yaml.safe_load(parts[1])
-    except yaml.YAMLError:
-        return None
-    return meta if isinstance(meta, dict) else None
+# ``meta_of`` is imported from transport.agent so the CLI and the transport
+# share one frontmatter parser and can never silently diverge.
 
 
 def _age_days(meta: dict, now: datetime) -> float | None:
@@ -219,7 +208,7 @@ def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[d
     replied_to: set[str] = set()
     if outbox.exists():
         for f in outbox.glob("*.md"):
-            m = _meta_of(f)
+            m = meta_of(f)
             if m and m.get("in_reply_to") and m.get("delivered") is not False:
                 replied_to.add(str(m["in_reply_to"]))
 
@@ -227,7 +216,7 @@ def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[d
     if not inbox.exists():
         return pending
     for f in sorted(inbox.glob("*.md")):
-        m = _meta_of(f)
+        m = meta_of(f)
         if not m:
             continue
         if m.get("from") in (None, self_name):
@@ -259,11 +248,11 @@ def _mark_replied(messages_dir: Path, message_id: str) -> None:
     parts = content.split("---", 2)
     if len(parts) < 3:
         return
-    fm = parts[1].replace("read: false", "read: true")
+    fm = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
     if "replied:" not in fm:
         fm = fm.rstrip("\n") + "\nreplied: true\n"
     else:
-        fm = fm.replace("replied: false", "replied: true")
+        fm = re.sub(r"^replied: false$", "replied: true", fm, flags=re.MULTILINE)
     path.write_text("---".join([parts[0], fm, parts[2]]))
 
 
@@ -342,7 +331,7 @@ def read(message_id: str, thread: bool) -> None:
 def reply(message_id: str, content: str | None) -> None:
     """Reply to an inbox message, threading via in_reply_to."""
     messages_dir = _messages_dir()
-    original = _meta_of(messages_dir / "inbox" / message_id)
+    original = meta_of(messages_dir / "inbox" / message_id)
     if original is None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)

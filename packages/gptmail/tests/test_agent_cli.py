@@ -155,6 +155,23 @@ def test_pending_respects_reply_window(workspace: Path, monkeypatch: pytest.Monk
     assert "No messages awaiting reply" in result.output
 
 
+def test_reply_does_not_corrupt_subject_containing_read_false(workspace: Path) -> None:
+    # Regression: _mark_replied must anchor its frontmatter rewrite. A subject
+    # containing the literal "read: false" must survive replying intact.
+    inbox = workspace / "messages" / "inbox"
+    name = "20260613-000000-000000-bob-tricky.md"
+    (inbox / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T00:00:00Z\n"
+        'subject: "Auto-retry if read: false"\nread: false\n---\n\nplease advise\n'
+    )
+    result = CliRunner().invoke(agent, ["reply", name, "advice"])
+    assert result.exit_code == 0, result.output
+    fm = _frontmatter(inbox / name)
+    assert fm["subject"] == "Auto-retry if read: false"  # subject untouched
+    assert fm["read"] is True
+    assert fm["replied"] is True
+
+
 def test_status_reports_counts(workspace: Path) -> None:
     _seed_inbox(workspace)
     result = CliRunner().invoke(agent, ["status"])
