@@ -6,10 +6,11 @@ Provides:
 - Agent SDK credit facts (dates, plan table)
 - Cache pricing multipliers
 
-Agent-specific data (price tables, TPS, model routes, quota sources) should live
-in ~/.config/gptme/harness-quota.toml and be loaded via load_quota_config().
-The module-level globals (HARNESS_PRICE_USD_PER_1M etc.) are kept for backward
-compatibility but agents should prefer config-based lookup.
+Agent-specific data (price tables, TPS, model routes, quota sources) lives in
+~/.config/gptme/harness-quota.toml and is loaded via load_quota_config(). The
+module-level tables (HARNESS_PRICE_USD_PER_1M etc.) ship EMPTY — this package
+carries no single agent's config. Callers pass a loaded config; without one the
+cost/lookup helpers return None/empty. See harness-quota.example.toml.
 """
 
 from __future__ import annotations
@@ -46,7 +47,8 @@ CLAUDE_AGENT_SDK_MONTHLY_CREDIT_USD: dict[str, float] = {
     "enterprise-usage": 20.0,
     "enterprise-premium": 200.0,
 }
-# Default: assume Max 20x (highest credit) for Bob/Alice operations
+# Conservative default credit — callers that have a claude_plan_tier loaded
+# should use CLAUDE_AGENT_SDK_MONTHLY_CREDIT_USD[config.claude_plan_tier] instead.
 CLAUDE_AGENT_SDK_ASSUMED_MONTHLY_CREDIT_USD = CLAUDE_AGENT_SDK_MONTHLY_CREDIT_USD[
     "max-20x"
 ]
@@ -229,30 +231,12 @@ def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
 #   https://openrouter.ai/deepseek/deepseek-v4-flash, https://openrouter.ai/moonshotai/kimi-k2.6)
 # Copilot-backed models use the same underlying provider price floors as their
 # API equivalents so selector ordering stays anchored to real model cost.
-HARNESS_PRICE_USD_PER_1M: dict[tuple[str, str], tuple[float, float]] = {
-    ("claude-code", "opus"): (5.0, 25.0),
-    ("claude-code", "sonnet"): (3.0, 15.0),
-    # xAI does not publish list pricing for Grok Build subscription usage.
-    # Use a conservative Sonnet-like proxy floor so selector routing does not
-    # over-prefer an unevaluated subscription-backed arm.
-    ("grok-build", "grok-build"): (3.0, 15.0),
-    ("codex", "gpt-5.4"): (2.5, 15.0),
-    ("codex", "gpt-5.5"): (5.0, 30.0),
-    ("copilot-cli", "claude-opus-4.6"): (5.0, 25.0),
-    ("copilot-cli", "claude-sonnet-4.6"): (3.0, 15.0),
-    ("copilot-cli", "gpt-5.4"): (2.5, 15.0),
-    ("gptme", "gpt-5.4"): (2.5, 15.0),
-    ("gptme", "gpt-5.5"): (5.0, 30.0),
-    ("gptme", "deepseek-v4-pro"): (1.74, 3.48),
-    ("gptme", "deepseek-v4-flash"): (0.14, 0.28),
-    ("gptme", "kimi-k2.6"): (0.7448, 4.655),
-    ("gptme", "glm-5"): (0.72, 2.30),
-    ("gptme", "gemini-3.5-flash"): (1.50, 9.00),  # OpenRouter, GA 2026-05-19
-    ("gptme", "grok-4.20"): (2.0, 6.0),
-    ("gptme", "minimax-m3"): (0.30, 1.20),  # OpenRouter minimax/minimax-m3
-    ("gptme", "qwen3.7-max"): (1.25, 3.75),  # OpenRouter, GA 2026-05-20
-    ("gptme", "qwen3.6"): (0.01, 0.01),  # Local inference — near-zero marginal cost
-}
+# Per-agent data — supplied via ~/.config/gptme/harness-quota.toml ([prices.*])
+# and loaded into HarnessQuotaConfig.price_table. The module ships EMPTY so it
+# carries no single agent's config (see harness-quota.example.toml for the shape).
+# estimate_session_cost() falls back to this empty default only when called
+# without a config; production callers pass load_quota_config().
+HARNESS_PRICE_USD_PER_1M: dict[tuple[str, str], tuple[float, float]] = {}
 
 
 def blended_token_price(
@@ -282,8 +266,16 @@ HARNESS_COST: dict[tuple[str, str], float] = {
 }
 
 
-def quota_pool_label(harness: str, model: str) -> str:
+def quota_pool_label(
+    harness: str,
+    model: str,
+    config: HarnessQuotaConfig | None = None,
+) -> str:
     """Return the quota/billing pool label for a harness/model pair.
+
+    Reads ``config.quota_sources`` when provided (per-agent), else falls back to
+    the module-level ``GPTME_QUOTA_SOURCE`` (now empty; config must be provided
+    for per-agent quota pool labels).
 
     Note: After CLAUDE_AGENT_SDK_CREDIT_CHANGE_DATE (June 15, 2026), claude-code
     sessions draw from a $200/month Agent SDK credit pool instead of the
@@ -299,7 +291,12 @@ def quota_pool_label(harness: str, model: str) -> str:
     if harness == "codex":
         return "chatgpt-sub (shared)"
     if harness == "gptme":
-        source = GPTME_QUOTA_SOURCE.get(model)
+        sources = (
+            config.quota_sources
+            if (config is not None and config.quota_sources)
+            else GPTME_QUOTA_SOURCE
+        )
+        source = sources.get(model)
         if source == "chatgpt":
             return "chatgpt-sub (shared)"
         if source == "openrouter":
@@ -508,28 +505,9 @@ TIER_RANK = {"high": 3, "medium": 2, "low": 1, "retired": 0}
 # near-100% cost estimation coverage (up from ~35%).
 # Source: analysis of 2,253 sessions across all (harness, model) pairs
 # with >= 10 data points. See knowledge/research/2026-05-01-token-coverage-backfill-analysis.md
-TOKENS_PER_SECOND: dict[tuple[str, str], float] = {
-    ("claude-code", "opus"): 18_899,
-    ("claude-code", "sonnet"): 12_804,
-    (
-        "grok-build",
-        "grok-build",
-    ): 9_000,  # conservative initial estimate until real session data lands
-    ("gptme", "grok-4.20"): 9_242,
-    ("gptme", "glm-5-turbo"): 8_304,
-    ("gptme", "minimax-m3"): 6_442,  # inherit m2.7 TPS until m3 data lands
-    ("gptme", "deepseek-v4-pro"): 9_574,
-    ("gptme", "kimi-k2.6"): 7_105,
-    ("gptme", "deepseek-v4-flash"): 14_248,
-    ("gptme", "glm-5.1"): 4_242,
-    ("gptme", "gpt-5.4"): 7_000,  # sparse data, conservative estimate
-    ("gptme", "gpt-5.5"): 8_000,  # sparse data, conservative estimate
-    ("codex", "gpt-5.4"): 8_000,  # sparse data, conservative estimate
-    ("codex", "gpt-5.5"): 9_000,  # sparse data, conservative estimate
-    ("copilot-cli", "claude-opus-4.6"): 12_000,  # sparse, proxied from cc:opus*0.65
-    ("copilot-cli", "claude-sonnet-4.6"): 8_000,  # sparse, proxied from cc:sonnet*0.65
-    ("copilot-cli", "gpt-5.4"): 6_000,  # sparse data, conservative estimate
-}
+# Per-agent data — supplied via harness-quota.toml ([tps.*]) into
+# HarnessQuotaConfig.tps_table. Ships EMPTY (no agent's config in the package).
+TOKENS_PER_SECOND: dict[tuple[str, str], float] = {}
 
 
 def estimate_tokens_from_duration(
@@ -573,38 +551,18 @@ def estimate_tokens_from_duration(
 # "openrouter" = OpenRouter API key with daily $ limit
 # "chatgpt" = ChatGPT subscription (separate pool)
 # Claude Code models don't appear here (they use CC subscription checks).
-GPTME_QUOTA_SOURCE: dict[str, str] = {
-    "gpt-5.4": "chatgpt",
-    "gpt-5.5": "chatgpt",
-    "deepseek-v4-pro": "openrouter",
-    "deepseek-v4-flash": "openrouter",
-    "kimi-k2.6": "openrouter",
-    "glm-5": "openrouter",
-    "gemini-3.5-flash": "openrouter",
-    "grok-4.20": "openrouter",
-    "minimax-m3": "openrouter",
-    "qwen3.7-max": "openrouter",
-    "qwen3.6": "local",  # LM Studio on erb-s1-win (Strix Halo)
-}
+# Per-agent data — supplied via harness-quota.toml ([quota_sources]) into
+# HarnessQuotaConfig.quota_sources. Ships EMPTY. openrouter_models() /
+# local_models() read the passed config; this default is the unconfigured case.
+GPTME_QUOTA_SOURCE: dict[str, str] = {}
 
 
 # --- Provider-qualified model strings ---
 # Maps short model names to full provider-prefixed strings for gptme.
-# Pin to official subproviders on OpenRouter for reliable inference.
-GPTME_MODEL_ROUTES: dict[str, str] = {
-    "gpt-5.4": "openai-subscription/gpt-5.4",
-    "gpt-5.5": "openai-subscription/gpt-5.5",
-    "deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro@deepseek",
-    "deepseek-v4-flash": "openrouter/deepseek/deepseek-v4-flash@deepseek",
-    "kimi-k2.6": "openrouter/moonshotai/kimi-k2.6@moonshotai",
-    "glm-5": "openrouter/z-ai/glm-5@z-ai",  # @z-ai pins to official z.ai provider
-    "grok-4.20": "openrouter/x-ai/grok-4.20@x-ai",
-    "gemini-3.5-flash": "openrouter/google/gemini-3.5-flash",
-    # minimax-m3: 1M context + multimodal; base slug lets OpenRouter pick a provider
-    "minimax-m3": "openrouter/minimax/minimax-m3",
-    "qwen3.7-max": "openrouter/qwen/qwen3.7-max@qwen",
-    "qwen3.6": "lmstudio/qwen/qwen3.6-35b-a3b",
-}
+# Per-agent data — supplied via harness-quota.toml ([model_routes]) into
+# HarnessQuotaConfig.model_routes. Ships EMPTY; resolve_gptme_model() and
+# pricing_key_for_model() read the passed config.
+GPTME_MODEL_ROUTES: dict[str, str] = {}
 
 
 # --- Claude Code version aliases ---
@@ -635,32 +593,62 @@ CC_MODEL_VERSIONS: dict[str, str] = {
 }
 
 
-def openrouter_models() -> list[str]:
-    """Return list of gptme models that use OpenRouter quota."""
-    return [m for m, src in GPTME_QUOTA_SOURCE.items() if src == "openrouter"]
+def openrouter_models(config: HarnessQuotaConfig | None = None) -> list[str]:
+    """Return list of gptme models that use OpenRouter quota.
+
+    Reads ``config.quota_sources`` when provided (per-agent), else falls back to
+    the module-level ``GPTME_QUOTA_SOURCE``.
+    """
+    sources = (
+        config.quota_sources
+        if (config is not None and config.quota_sources)
+        else GPTME_QUOTA_SOURCE
+    )
+    return [m for m, src in sources.items() if src == "openrouter"]
 
 
-def gptme_openrouter_context(model: str) -> str:
+def gptme_openrouter_context(
+    model: str, config: HarnessQuotaConfig | None = None
+) -> str:
     """Return the OpenRouter key context an autonomous gptme call uses for model.
 
-    Mirrors the runtime refinement in
-    ``scripts/runs/autonomous/autonomous-run.sh``: deepseek models swap to the
-    dedicated ``autonomous_deepseek`` key (separate $/day budget) so their
-    quota is isolated from the shared ``autonomous`` key.
+    When ``config.openrouter_key_contexts`` is provided, look up the model there,
+    falling back to its ``"default"`` entry (or ``"autonomous"``). Without config,
+    use the legacy rule: deepseek models swap to the dedicated
+    ``autonomous_deepseek`` key (separate $/day budget) so their quota is isolated
+    from the shared ``autonomous`` key.
     """
+    if config is not None and config.openrouter_key_contexts:
+        ctx = config.openrouter_key_contexts
+        return ctx.get(model, ctx.get("default", "autonomous"))
     if "deepseek" in model:
         return "autonomous_deepseek"
     return "autonomous"
 
 
-def local_models() -> list[str]:
-    """Return list of gptme models served by local inference (LM Studio)."""
-    return [m for m, src in GPTME_QUOTA_SOURCE.items() if src == "local"]
+def local_models(config: HarnessQuotaConfig | None = None) -> list[str]:
+    """Return list of gptme models served by local inference (LM Studio).
+
+    Reads ``config.quota_sources`` when provided, else ``GPTME_QUOTA_SOURCE``.
+    """
+    sources = (
+        config.quota_sources
+        if (config is not None and config.quota_sources)
+        else GPTME_QUOTA_SOURCE
+    )
+    return [m for m, src in sources.items() if src == "local"]
 
 
-def resolve_gptme_model(short_name: str) -> str:
+def resolve_gptme_model(
+    short_name: str, config: HarnessQuotaConfig | None = None
+) -> str:
     """Resolve short model name to provider-qualified string for gptme."""
-    return GPTME_MODEL_ROUTES.get(short_name, short_name)
+    routes = (
+        config.model_routes
+        if (config is not None and config.model_routes)
+        else GPTME_MODEL_ROUTES
+    )
+    return routes.get(short_name, short_name)
 
 
 COPILOT_MODEL_ALIASES: dict[str, str] = {
