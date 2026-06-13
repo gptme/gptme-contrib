@@ -2022,22 +2022,29 @@ def check_all_quotas(
 
     # Supplement per-backend checks with any crash-loop blocks written by
     # autonomous-run.sh that the per-backend sections above might not catch.
-    # This ensures backends added later (or models not hardcoded above) are blocked.
-    already_blocked = {(r.backend, r.model) for r in results if not r.available}
+    # Build an index over ALL evaluated results (not just unavailable ones) so
+    # we can override an available=True entry when a crash-loop block file exists
+    # for the same model — without creating a second conflicting row.
+    evaluated_idx = {(r.backend, r.model): i for i, r in enumerate(results)}
     explicit_backend_filter = set(all_backends) if backends is not None else None
     for be, model, block_until in _scan_crash_loop_blocks():
         if explicit_backend_filter is not None and be not in explicit_backend_filter:
             continue
-        if (be, model) not in already_blocked:
-            results.append(
-                _build_blocked_quota(
-                    backend=be,
-                    model=model,
-                    block_until=block_until,
-                    source="crash-loop-block-file",
-                    reason="crash loop cooldown — resets in {hours}h {minutes}m",
-                )
-            )
+        blocked = _build_blocked_quota(
+            backend=be,
+            model=model,
+            block_until=block_until,
+            source="crash-loop-block-file",
+            reason="crash loop cooldown — resets in {hours}h {minutes}m",
+        )
+        idx = evaluated_idx.get((be, model))
+        if idx is not None:
+            if results[idx].available:
+                # Per-backend check said available; crash-loop block overrides it.
+                results[idx] = blocked
+            # else: already marked unavailable — per-backend check covers it, skip.
+        else:
+            results.append(blocked)
 
     return QuotaReport(
         backends=results,
