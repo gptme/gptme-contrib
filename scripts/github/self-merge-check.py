@@ -776,7 +776,8 @@ def is_spec_like_doc(path: str) -> bool:
     ``packages/foo/README.md``) is ordinary package documentation, not a spec,
     and shouldn't block self-merge of an otherwise low-risk tooling PR.
     """
-    return "/" not in path.replace("\\", "/") and Path(path).name in SPEC_LIKE_DOCS
+    normalized = path.replace("\\", "/").removeprefix("./")
+    return "/" not in normalized and Path(path).name in SPEC_LIKE_DOCS
 
 
 def is_test_file(path: str) -> bool:

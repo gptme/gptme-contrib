@@ -1286,3 +1286,9 @@ def test_root_readme_still_blocks_self_merge() -> None:
     category, reasons = self_merge_check.classify_category(["README.md"], "gptme/gptme")
     assert category is None
     assert any("spec-like" in r for r in reasons)
+
+
+def test_dot_slash_prefixed_root_readme_is_spec_like() -> None:
+    # GitHub API never produces ./-prefixed paths, but harden against it anyway.
+    assert self_merge_check.is_spec_like_doc("./README.md") is True
+    assert self_merge_check.is_spec_like_doc("./ARCHITECTURE.md") is True
