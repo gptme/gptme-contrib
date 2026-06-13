@@ -407,6 +407,24 @@ class TestNeedsReplyMessages:
         pending = agent_msg.needs_reply_messages("alice", window_days=0)
         assert len(pending) == 1
 
+    def test_failed_delivery_still_shows_pending(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        outbox = msg_dir / "outbox"
+        outbox.mkdir(parents=True)
+        self._inbox_msg(inbox, "m.md", "bob", "2026-06-13T10:00:00Z")
+        # Outbox has an in_reply_to entry but delivery failed (delivered: false).
+        (outbox / "reply.md").write_text(
+            '---\nfrom: alice\nto: bob\nsubject: "Re: hi"\n'
+            "in_reply_to: m.md\ndelivered: false\n---\n\nok"
+        )
+        pending = agent_msg.needs_reply_messages("alice", window_days=0)
+        assert (
+            len(pending) == 1
+        ), "failed-delivery outbox entry must not clear the pending flag"
+
 
 class TestCmdReply:
     def test_replies_and_marks(self, tmp_path, monkeypatch):

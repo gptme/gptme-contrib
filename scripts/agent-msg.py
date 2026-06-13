@@ -174,6 +174,9 @@ def send_message(
     in_reply_to: str | None = None,
 ) -> bool:
     """Send a message to another agent."""
+    # Normalize: message `from:` fields may be capitalized (e.g. "Bob") while the
+    # agent registry keys are lowercase. Reply/send must resolve case-insensitively.
+    recipient = recipient.lower()
     if recipient not in agents:
         print(f"Error: Unknown agent '{recipient}'. Known: {', '.join(agents.keys())}")
         return False
@@ -216,6 +219,7 @@ def send_message(
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         print(f"Error creating remote inbox: {e}")
+        _stamp_delivery_failed(local_path)
         return False
 
     # SCP the message
@@ -238,6 +242,7 @@ def send_message(
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         print(f"Error sending to {recipient}: {e}")
+        _stamp_delivery_failed(local_path)
         return False
 
 
@@ -346,6 +351,22 @@ def mark_replied(filename: str) -> bool:
     return True
 
 
+def _stamp_delivery_failed(local_path: Path) -> None:
+    """Mark an outbox file as delivery-failed so it won't satisfy needs-reply checks."""
+    if not local_path.exists():
+        return
+    content = local_path.read_text()
+    if not content.startswith("---"):
+        return
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return
+    fm = parts[1]
+    if "delivered:" not in fm:
+        fm = fm.rstrip("\n") + "\ndelivered: false\n"
+    local_path.write_text("---".join([parts[0], fm, parts[2]]))
+
+
 # Messages older than this are assumed handled and no longer flagged as
 # awaiting a reply — a "timely reply" SLA, not an unbounded backlog. Override
 # with AGENT_MSG_REPLY_WINDOW_DAYS (0 = no age limit).
@@ -380,7 +401,7 @@ def _addressed_to(meta: dict, self_name: str) -> bool:
     to = meta.get("to")
     if to is None:
         return True
-    if isinstance(to, list | tuple | set):
+    if isinstance(to, (list, tuple, set)):  # noqa: UP038 (union form breaks mypy here)
         return self_name in {str(t) for t in to}
     return str(to) == self_name
 
@@ -402,7 +423,9 @@ def needs_reply_messages(self_name: str, window_days: int | None = None) -> list
     replied_to: set[str] = set()
     for f in outbox.glob("*.md"):
         m = _meta_of(f)
-        if m and m.get("in_reply_to"):
+        # Skip entries whose delivery is known to have failed — they look like
+        # sent replies to the outbox scan but never reached the other agent.
+        if m and m.get("in_reply_to") and m.get("delivered") is not False:
             replied_to.add(str(m["in_reply_to"]))
 
     pending = []
@@ -603,7 +626,7 @@ def main() -> None:
                 sender = msg.get("from", "unknown")
                 subject = msg.get("subject", "(no subject)")
                 print(f"  ⚠ [{ts}] {sender}: {subject}  ({msg['file']})")
-                print(f"    reply with: agent-msg.py reply {msg['file']} \"...\"")
+                print(f'    reply with: agent-msg.py reply {msg["file"]} "..."')
             return
 
         messages = list_inbox(show_all=args.all)
