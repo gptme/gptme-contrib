@@ -431,7 +431,7 @@ def estimate_session_cost(
             instead of the module-level ``HARNESS_PRICE_USD_PER_1M``.
     """
     price_table = (
-        config.price_table
+        {**HARNESS_PRICE_USD_PER_1M, **config.price_table}
         if (config is not None and config.price_table)
         else HARNESS_PRICE_USD_PER_1M
     )
@@ -543,7 +543,7 @@ def estimate_tokens_from_duration(
     if duration_seconds <= 0:
         return None
     tps_table = (
-        config.tps_table
+        {**TOKENS_PER_SECOND, **config.tps_table}
         if (config is not None and config.tps_table)
         else TOKENS_PER_SECOND
     )
