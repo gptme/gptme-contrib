@@ -235,11 +235,13 @@ def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[d
     now = datetime.now(timezone.utc)
 
     replied_to: set[str] = set()
+    my_outbox_ids: set[str] = set()
     if outbox.exists():
         for f in outbox.glob("*.md"):
             m = meta_of(f)
             if m and m.get("in_reply_to") and m.get("delivered") is not False:
                 replied_to.add(str(m["in_reply_to"]))
+            my_outbox_ids.add(f.name)
 
     pending: list[dict] = []
     if not inbox.exists():
@@ -255,6 +257,8 @@ def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[d
         if m.get("replied"):
             continue
         if f.name in replied_to:
+            continue
+        if m.get("in_reply_to") in my_outbox_ids:
             continue
         if window > 0:
             age = _age_days(m, now)

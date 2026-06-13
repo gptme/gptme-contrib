@@ -226,6 +226,31 @@ def test_pending_respects_reply_window(workspace: Path, monkeypatch: pytest.Monk
     assert "No messages awaiting reply" in result.output
 
 
+def test_pending_excludes_replies_to_my_messages(workspace: Path) -> None:
+    """Replies to my own sent messages must not appear in pending.
+
+    If bob replies to something I sent (in_reply_to points at my outbox ID), that
+    message is bob answering me — not a new request requiring my reply. Without this
+    filter, every ack or response from a peer inflates the pending count.
+    """
+    # Alice sends first, producing an outbox message.
+    CliRunner().invoke(agent, ["send", "bob", "Question", "what do you think?"])
+    outbox_files = list((workspace / "messages" / "outbox").glob("*.md"))
+    assert len(outbox_files) == 1
+    my_msg_id = outbox_files[0].name
+
+    # Bob replies — inbox message whose in_reply_to points at alice's outbox message.
+    inbox = workspace / "messages" / "inbox"
+    reply_name = "20260613-120000-000000-bob-Re-Question.md"
+    (inbox / reply_name).write_text(
+        f"---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T12:00:00Z\n"
+        f"subject: Re: Question\nread: false\nin_reply_to: {my_msg_id}\n---\n\nbob's answer\n"
+    )
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert "No messages awaiting reply" in result.output, result.output
+
+
 def test_reply_does_not_corrupt_subject_containing_read_false(workspace: Path) -> None:
     # Regression: _mark_replied must anchor its frontmatter rewrite. A subject
     # containing the literal "read: false" must survive replying intact.
