@@ -330,6 +330,8 @@ from datetime import datetime, timezone, timedelta
 
 text = sys.stdin.read()
 result = {}
+session_cost = None
+low_usage = False  # the old 'Nothing over 10%' empty state no longer exists in CC v2.1.175
 json_mode = '$MODE' == 'json'
 
 # Check for errors
@@ -481,87 +483,48 @@ for label_match, key, label in category_defs:
 
 # If nothing parsed, fall back (auth failure, scanning state, or TUI changed again).
 if not result:
-    low_usage = False  # the old 'Nothing over 10%' empty state no longer exists
-    session_cost = None
-    if low_usage:
-        # No usage to report — set all to 0
-        now = datetime.now(timezone.utc)
-        # Estimate next weekly reset (Thu 00:00 UTC = Wed-night / Thu-morning)
-        days_until_thu = (3 - now.weekday()) % 7  # Mon=0, Thu=3
-        if days_until_thu == 0:  # today IS Thursday; midnight already passed
-            days_until_thu = 7
-        weekly_reset = now + timedelta(days=days_until_thu)
-        weekly_reset = weekly_reset.replace(hour=0, minute=0, second=0, microsecond=0)
-        weekly_secs = max(0, int((weekly_reset - now).total_seconds()))
-        weekly_reset_str = weekly_reset.strftime('%a, %-I%p')
-
-        # 5h window reset is ~5h from now (sliding, but approximate)
-        five_hour_reset = now + timedelta(hours=5)
-        five_hour_secs = int((five_hour_reset - now).total_seconds())
-        five_hour_reset_str = five_hour_reset.strftime('%-I:%M%p').lower()
-
-        result['five_hour'] = {
-            'utilization': 0.0,
-            'resets': five_hour_reset_str,
-            'resets_in_seconds': five_hour_secs,
-            'time_left': format_time_left(five_hour_reset),
-        }
-        result['seven_day'] = {
-            'utilization': 0.0,
-            'resets': weekly_reset_str,
-            'resets_in_seconds': weekly_secs,
-            'time_left': format_time_left(weekly_reset),
-        }
-        result['seven_day_sonnet'] = {
-            'utilization': 0.0,
-            'resets': weekly_reset_str,
-            'resets_in_seconds': weekly_secs,
-            'time_left': format_time_left(weekly_reset),
-        }
-    else:
-        # No model lines found and no low-usage signal.
-        # This is the CC v2.1.168+ characteristics-only format where the
-        # /usage TUI shows usage breakdowns (50% of usage was while 4+
-        # sessions) but no model-level utilization percentages.
-        # Try fallback chain before giving up.
-        for _attempt_path in ['$FALLBACK_CACHE_FILE']:
-            try:
-                with open(_attempt_path) as _f:
-                    fb = json.load(_f)
-                # Try FALLBACK_CACHE format first (has seven_day, five_hour keys)
-                if isinstance(fb, dict) and any(
-                    _k in fb for _k in ('five_hour', 'seven_day', 'seven_day_sonnet')
-                ):
-                    result = fb
-                    result['_source'] = 'fallback_cache'
-                    result['_warning'] = 'CC v2.1.168+ TUI no longer shows utilization percentages \u2014 using cached values (may be stale)'
-                    print('Warning: using fallback cache (CC v2.1.168 TUI does not show quota data).', file=sys.stderr)
-                    break
-                # Try subscription-reset-times format (slot keys like 'bob' or any username)
-                _bt = next(
-                    (v for v in fb.values()
-                     if isinstance(v, dict) and any(k in v for k in ('weekly_utilization', 'five_hour_utilization'))),
-                    None,
-                )
-                if _bt is not None:
-                    _wu = _bt.get('weekly_utilization', 0)
-                    _fh = _bt.get('five_hour_utilization', 0)
-                    _su = _bt.get('sonnet_weekly_utilization', 0)
-                    result = {
-                        'seven_day': {'utilization': float(_wu), 'resets': 'unknown'},
-                        'five_hour': {'utilization': float(_fh), 'resets': 'unknown'},
-                        'seven_day_sonnet': {'utilization': float(_su), 'resets': 'unknown'},
-                        '_source': 'subscription-reset-times',
-                        '_warning': 'CC v2.1.168 TUI does not show quota data \u2014 using stale values from subscription-reset-times.json',
-                    }
-                    print('Warning: using subscription-reset-times fallback (CC v2.1.168 TUI issue).', file=sys.stderr)
-                    break
-            except (OSError, json.JSONDecodeError):
-                continue
-        if not result:
-            print('Error: Could not parse usage data, and no fallback available.', file=sys.stderr)
-            print('Run with --raw to see raw output.', file=sys.stderr)
-            sys.exit(1)
+    # No model lines found (parse failed or TUI format changed again).
+    # This is the CC v2.1.168+ characteristics-only format where the
+    # /usage TUI shows usage breakdowns but no model-level utilization %.
+    # Try fallback chain before giving up.
+    for _attempt_path in ['$FALLBACK_CACHE_FILE']:
+        try:
+            with open(_attempt_path) as _f:
+                fb = json.load(_f)
+            # Try FALLBACK_CACHE format first (has seven_day, five_hour keys)
+            if isinstance(fb, dict) and any(
+                _k in fb for _k in ('five_hour', 'seven_day', 'seven_day_sonnet')
+            ):
+                result = fb
+                result['_source'] = 'fallback_cache'
+                result['_warning'] = 'CC v2.1.168+ TUI no longer shows utilization percentages \u2014 using cached values (may be stale)'
+                print('Warning: using fallback cache (CC v2.1.168 TUI does not show quota data).', file=sys.stderr)
+                break
+            # Try subscription-reset-times format (slot keys like 'bob' or any username)
+            _bt = next(
+                (v for v in fb.values()
+                 if isinstance(v, dict) and any(k in v for k in ('weekly_utilization', 'five_hour_utilization'))),
+                None,
+            )
+            if _bt is not None:
+                _wu = _bt.get('weekly_utilization', 0)
+                _fh = _bt.get('five_hour_utilization', 0)
+                _su = _bt.get('sonnet_weekly_utilization', 0)
+                result = {
+                    'seven_day': {'utilization': float(_wu), 'resets': 'unknown'},
+                    'five_hour': {'utilization': float(_fh), 'resets': 'unknown'},
+                    'seven_day_sonnet': {'utilization': float(_su), 'resets': 'unknown'},
+                    '_source': 'subscription-reset-times',
+                    '_warning': 'CC v2.1.168 TUI does not show quota data \u2014 using stale values from subscription-reset-times.json',
+                }
+                print('Warning: using subscription-reset-times fallback (CC v2.1.168 TUI issue).', file=sys.stderr)
+                break
+        except (OSError, json.JSONDecodeError):
+            continue
+    if not result:
+        print('Error: Could not parse usage data, and no fallback available.', file=sys.stderr)
+        print('Run with --raw to see raw output.', file=sys.stderr)
+        sys.exit(1)
 
 # Estimate five_hour (session) utilization from session cost data.
 # In CC Max billing, the 5-hour window cost is capped. We estimate utilization
@@ -578,9 +541,6 @@ if 'five_hour' not in result:
             'utilization': round(est_util, 2),
             'resets': 'session_end',
         }
-    elif low_usage:
-        # Already handled above, but double-check
-        pass
 
 # Add time_left and resets_in_seconds to all entries
 for key in list(result.keys()):
