@@ -9,12 +9,8 @@ See: categories.py for the same pattern applied to work categories.
 
 from __future__ import annotations
 
-import os
 import re
-import sqlite3
-from collections import defaultdict
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TypedDict
 
 # Approximate agent-session token mix used to blend input/output list prices into
@@ -560,5 +556,3 @@ _TIER_STRIP_PREFIXES: list[str] = [
     "google/",
     "claude-",
 ]
-
-
