@@ -219,6 +219,10 @@ def merge_permission(repo: str) -> bool | None:
         return None
     if not isinstance(perms, dict):
         return None
+    # If none of the expected keys are present the payload shape is unexpected —
+    # treat as unknown so a future API schema change doesn't false-disqualify.
+    if not any(k in perms for k in ("push", "maintain", "admin")):
+        return None
     return bool(perms.get("push") or perms.get("maintain") or perms.get("admin"))
 
 

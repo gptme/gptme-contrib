@@ -787,6 +787,13 @@ def test_merge_permission_raw_helper() -> None:
         assert raw("gptme/gptme-contrib") is None
     with patch.object(self_merge_check, "run_gh", return_value="not json"):
         assert raw("gptme/gptme-contrib") is None
+    # Dict present but all three expected keys absent — unknown, not disqualified
+    with patch.object(
+        self_merge_check,
+        "run_gh",
+        return_value='{"pull": true, "triage": true}',
+    ):
+        assert raw("gptme/gptme-contrib") is None
 
 
 def test_greptile_summary_score_ignores_signal_disable_env() -> None:
