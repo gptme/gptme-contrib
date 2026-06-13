@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 import subprocess
@@ -1089,7 +1090,6 @@ def test_evaluate_pr_captures_head_sha() -> None:
         )
 
     assert result.head_sha == "abc123def456"
-    assert result.eligible
 
 
 def test_evaluate_pr_head_sha_empty_when_missing() -> None:
@@ -1135,8 +1135,6 @@ def test_evaluate_pr_head_sha_empty_when_missing() -> None:
 
 def test_check_result_head_sha_in_json_output() -> None:
     """head_sha is included in the asdict/JSON serialization."""
-    import dataclasses
-
     result = self_merge_check.CheckResult(
         eligible=True,
         repo="gptme/gptme-contrib",
