@@ -226,7 +226,6 @@ CACHE_CREATION_MULTIPLIER: dict[str, float] = {
 _CACHE_PRICING_PROVIDER: dict[tuple[str, str], str] = {
     ("claude-code", "opus"): "anthropic",
     ("claude-code", "sonnet"): "anthropic",
-    ("grok-build", "grok-build"): "anthropic",
     ("copilot-cli", "claude-opus-4.6"): "anthropic",
     ("copilot-cli", "claude-sonnet-4.6"): "anthropic",
     ("codex", "gpt-5.4"): "openai",
