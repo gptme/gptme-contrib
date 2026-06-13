@@ -123,7 +123,7 @@ def _ssh_deliver(agents: dict[str, dict[str, str]]) -> Deliver:
                 err=True,
             )
             return False
-        missing = [k for k in ("ssh", "workspace") if k not in agent]
+        missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
         if missing:
             click.echo(
                 f"Error: agent '{recipient}' config missing required key(s): {', '.join(missing)}",

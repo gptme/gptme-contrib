@@ -82,6 +82,27 @@ def test_send_unknown_agent_errors(workspace: Path) -> None:
     assert "unknown agent" in result.output.lower()
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"workspace": "/tmp/bob"},  # missing ssh
+        {"ssh": "bob@bob"},  # missing workspace
+        {"ssh": "", "workspace": "/tmp/bob"},  # present-but-empty ssh
+    ],
+)
+def test_ssh_deliver_missing_key_returns_false(tmp_path: Path, entry: dict) -> None:
+    """A registry entry missing (or empty) ssh/workspace returns False, not KeyError.
+
+    Guards the deliver contract: a malformed agents.yaml stamps ``delivered: false``
+    rather than raising an uncaught KeyError that aborts the whole send (greptile
+    P1, #1097). Covers the empty-value case the bare ``k not in agent`` guard missed.
+    """
+    deliver = agent_cli._ssh_deliver({"bob": entry})
+    msg = tmp_path / "msg.md"
+    msg.write_text("---\nto: bob\n---\n")
+    assert deliver(msg, "bob") is False
+
+
 def test_send_stamps_tracker_channel_agent(workspace: Path) -> None:
     CliRunner().invoke(agent, ["send", "bob", "Hello", "body"])
     tracker = ConversationTracker(workspace / "messages" / ".tracking")
