@@ -37,20 +37,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Find the API key. Always go through the helper so --context keeps working
-# even when a shared OPENROUTER_API_KEY is already exported in the environment.
+# Find the API key. Use the helper if it exists (supports --context for
+# multi-account lookups); otherwise fall back to the OPENROUTER_API_KEY env var.
 REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
-OPENROUTER_API_KEY=$(python3 "$REPO_ROOT/scripts/openrouter_keys.py" "$CONTEXT" 2>/dev/null || true)
+_HELPER="$REPO_ROOT/scripts/openrouter_keys.py"
+if [ -f "$_HELPER" ]; then
+    OPENROUTER_API_KEY=$(python3 "$_HELPER" "${CONTEXT:-}" 2>/dev/null || true)
+fi
+OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
 
 if [ -z "$OPENROUTER_API_KEY" ]; then
     echo '{"error": "OPENROUTER_API_KEY not found"}' >&2
     exit 1
 fi
 
-python3 -c "
-import json, sys, urllib.request
+# Pass key and mode via env vars — never interpolate into Python string literals
+OPENROUTER_API_KEY="$OPENROUTER_API_KEY" OPENROUTER_MODE="$MODE" python3 -c "
+import json, os, sys, urllib.request
 
-key = '$OPENROUTER_API_KEY'
+key = os.environ['OPENROUTER_API_KEY']
 req = urllib.request.Request(
     'https://openrouter.ai/api/v1/auth/key',
     headers={'Authorization': f'Bearer {key}'}
@@ -74,7 +79,7 @@ result = {
     'source': 'api',
 }
 
-if '$MODE' == 'json':
+if os.environ.get('OPENROUTER_MODE') == 'json':
     print(json.dumps(result, indent=2))
 else:
     avail = 'available' if result['available'] else 'EXHAUSTED'

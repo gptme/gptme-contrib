@@ -8,7 +8,7 @@
 # Prerequisites:
 #   1. Logged in to Codex CLI
 #   2. tmux must be available
-#   3. codex binary reachable via tmux login shell (/home/bob/.npm-global/bin/codex)
+#   3. codex binary reachable via $HOME/.npm-global/bin/codex (or set CODEX_BIN)
 #
 # Usage:
 #   ./scripts/check-codex-usage.sh          # Human-readable summary
@@ -44,7 +44,7 @@ CACHE_TTL="${CODEX_USAGE_CACHE_TTL:-180}"
 
 # --- Cache check ---
 if [ "$NO_CACHE" = false ] && [ -f "$CACHE_FILE" ]; then
-    cache_age=$(( $(date +%s) - $(stat -c '%Y' "$CACHE_FILE" 2>/dev/null || echo 0) ))
+    cache_age=$(( $(date +%s) - $(stat -c '%Y' "$CACHE_FILE" 2>/dev/null || stat -f '%m' "$CACHE_FILE" 2>/dev/null || echo 0) ))
     if [ "$cache_age" -lt "$CACHE_TTL" ]; then
         case "$MODE" in
             json) cat "$CACHE_FILE" ;;
@@ -78,7 +78,7 @@ if ! command -v tmux &>/dev/null; then
     exit 1
 fi
 
-CODEX_BIN="${CODEX_BIN:-/home/bob/.npm-global/bin/codex}"
+CODEX_BIN="${CODEX_BIN:-$HOME/.npm-global/bin/codex}"
 if [ ! -x "$CODEX_BIN" ]; then
     echo "Error: codex binary not found at $CODEX_BIN" >&2
     exit 1
@@ -92,13 +92,14 @@ fi
 VERSION_FILE="$HOME/.codex/version.json"
 if [ -f "$VERSION_FILE" ]; then
     python3 - <<'PYEOF'
-import json, sys
-vf = open(sys.argv[1] if len(sys.argv) > 1 else __import__('os').path.expanduser("~/.codex/version.json"))
-data = json.load(vf); vf.close()
+import json, os
+vf_path = os.path.expanduser("~/.codex/version.json")
+with open(vf_path) as vf:
+    data = json.load(vf)
 latest = data.get("latest_version", "")
 if latest and data.get("dismissed_version") != latest:
     data["dismissed_version"] = latest
-    with open(__import__('os').path.expanduser("~/.codex/version.json"), "w") as f:
+    with open(vf_path, "w") as f:
         json.dump(data, f, indent=2)
 PYEOF
 fi
