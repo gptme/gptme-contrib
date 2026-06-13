@@ -718,6 +718,10 @@ check_greptile_scores() {
 #   Format: "${head_sha}:${greptile_score}:${merge_state}:${timestamp}"
 #   Emit exactly once per (head_sha, greptile_score, merge_state) signature.
 #   No timed cooldown re-emit — only re-emits when the signature changes.
+#   Note: a BLOCKED→CLEAN transition changes merge_state, so a PR that emitted
+#   at BLOCKED will emit again at CLEAN. This is intentional: the Greptile issue
+#   is still unresolved after approval, and the duplicate is handled by the
+#   downstream dispatcher's own dedup logic.
 #
 # API cost: zero — reads Greptile state files written by check_greptile_scores.
 # Requires: live PR data (fresh mergeStateStatus/headRefOid).
