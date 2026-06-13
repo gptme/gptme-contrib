@@ -366,6 +366,22 @@ def _msg_age_days(meta: dict, now: datetime) -> float | None:
     return (now - dt).total_seconds() / 86400.0
 
 
+def _addressed_to(meta: dict, self_name: str) -> bool:
+    """Whether a message is addressed to us.
+
+    Accepts a string `to` (single recipient) or a list (broadcast). A message
+    with no `to` field is treated as addressed to us — older messages and
+    manually-authored notes may omit it, and we prefer to over-flag (surface
+    for reply) rather than silently drop a real message.
+    """
+    to = meta.get("to")
+    if to is None:
+        return True
+    if isinstance(to, list | tuple | set):
+        return self_name in {str(t) for t in to}
+    return str(to) == self_name
+
+
 def needs_reply_messages(self_name: str, window_days: int | None = None) -> list[dict]:
     """Recent inbox messages addressed to us that we haven't replied to yet.
 
@@ -393,6 +409,8 @@ def needs_reply_messages(self_name: str, window_days: int | None = None) -> list
             continue
         sender = m.get("from")
         if sender in (None, self_name):  # skip self-sent / malformed
+            continue
+        if not _addressed_to(m, self_name):  # not actually for us
             continue
         if m.get("replied"):
             continue
@@ -432,8 +450,16 @@ def cmd_reply(
 
     ok = send_message(agents, self_name, sender, re_subject, body, in_reply_to=filename)
     if ok:
-        mark_replied(filename)
-        print(f"Replied to {sender} and marked {filename} as replied.")
+        if mark_replied(filename):
+            print(f"Replied to {sender} and marked {filename} as replied.")
+        else:
+            # Reply was delivered, but the inbox stamp failed (file became
+            # unreadable/removed mid-call). The outbox `in_reply_to` still
+            # satisfies needs-reply tracking, so warn rather than fail.
+            print(
+                f"Replied to {sender}, but could not stamp {filename} as replied "
+                "(outbox in_reply_to still records the reply)."
+            )
     return ok
 
 

@@ -366,6 +366,47 @@ class TestNeedsReplyMessages:
         self._inbox_msg(inbox, "old.md", "bob", "2025-01-01T10:00:00Z")
         assert agent_msg.needs_reply_messages("alice", window_days=7) == []
 
+    def test_skips_message_addressed_to_other(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # A stray file in the inbox addressed to someone else — not our reply.
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: gordon\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        assert agent_msg.needs_reply_messages("alice", window_days=0) == []
+
+    def test_flags_broadcast_addressed_to_us(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # Broadcast with a list `to` that includes us still needs a reply.
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: [alice, gordon]\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        pending = agent_msg.needs_reply_messages("alice", window_days=0)
+        assert len(pending) == 1
+
+    def test_flags_message_without_to_field(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # Missing `to` — we over-flag rather than silently drop a real message.
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        pending = agent_msg.needs_reply_messages("alice", window_days=0)
+        assert len(pending) == 1
+
 
 class TestCmdReply:
     def test_replies_and_marks(self, tmp_path, monkeypatch):
