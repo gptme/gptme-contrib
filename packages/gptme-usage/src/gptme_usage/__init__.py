@@ -22,6 +22,7 @@ Primary API::
 
 from __future__ import annotations
 
+from gptme_usage.config import merge_with_module_defaults
 from gptme_usage.harness_models import (
     HarnessQuotaConfig,
     estimate_session_cost,
@@ -35,6 +36,7 @@ __all__ = [
     "load_quota_config",
     "estimate_session_cost",
     "estimate_tokens_from_duration",
+    "merge_with_module_defaults",
     "pricing_key_for_model",
 ]
 

@@ -1,11 +1,13 @@
-"""Tests for HarnessQuotaConfig and load_quota_config."""
+"""Tests for HarnessQuotaConfig, load_quota_config, and merge_with_module_defaults."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+from gptme_usage.config import merge_with_module_defaults
 from gptme_usage.harness_models import (
+    HARNESS_PRICE_USD_PER_1M,
     HarnessQuotaConfig,
     estimate_session_cost,
     estimate_tokens_from_duration,
@@ -248,3 +250,55 @@ def test_config_aware_model_source_helpers() -> None:
     # No config -> legacy deepseek heuristic still applies.
     assert gptme_openrouter_context("deepseek-v4-pro") == "autonomous_deepseek"
     assert gptme_openrouter_context("kimi-k2.6") == "autonomous"
+
+
+# ---------------------------------------------------------------------------
+# merge_with_module_defaults
+# ---------------------------------------------------------------------------
+
+
+def test_merge_with_module_defaults_caller_wins() -> None:
+    """Caller-supplied entries take priority over module defaults."""
+    custom_price: dict[tuple[str, str], tuple[float, float]] = {
+        ("claude-code", "opus"): (99.0, 99.0),
+    }
+    cfg = HarnessQuotaConfig(price_table=custom_price)
+    merged = merge_with_module_defaults(cfg)
+
+    # Caller's override must survive.
+    assert merged.price_table[("claude-code", "opus")] == (99.0, 99.0)
+    # Module defaults for other models must also be present.
+    assert len(merged.price_table) >= len(HARNESS_PRICE_USD_PER_1M)
+
+
+def test_merge_with_module_defaults_fallback_for_unlisted() -> None:
+    """Module defaults appear for models NOT in the caller's config."""
+    cfg = HarnessQuotaConfig()  # empty custom config
+    merged = merge_with_module_defaults(cfg)
+
+    # The merged table should contain everything from the module defaults.
+    for key, val in HARNESS_PRICE_USD_PER_1M.items():
+        assert merged.price_table[key] == val, f"missing/wrong default for {key}"
+
+
+def test_merge_with_module_defaults_preserves_caller_metadata() -> None:
+    """Non-table fields (openrouter_key_contexts, claude_plan_tier) pass through."""
+    cfg = HarnessQuotaConfig(
+        openrouter_key_contexts={"default": "my-ctx", "special": "other-ctx"},
+        claude_plan_tier="max-5x",
+    )
+    merged = merge_with_module_defaults(cfg)
+
+    assert merged.claude_plan_tier == "max-5x"
+    assert merged.openrouter_key_contexts == {
+        "default": "my-ctx",
+        "special": "other-ctx",
+    }
+
+
+def test_merge_with_module_defaults_does_not_mutate_input() -> None:
+    """merge_with_module_defaults returns a new object; it must not mutate *config*."""
+    cfg = HarnessQuotaConfig()
+    original_len = len(cfg.price_table)
+    merge_with_module_defaults(cfg)
+    assert len(cfg.price_table) == original_len, "input config was mutated"
