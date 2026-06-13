@@ -306,7 +306,11 @@ def quota_pool_label(harness: str, model: str) -> str:
     return "unknown"
 
 
-def pricing_key_for_model(harness: str, model: str) -> tuple[str, str]:
+def pricing_key_for_model(
+    harness: str,
+    model: str,
+    config: HarnessQuotaConfig | None = None,
+) -> tuple[str, str]:
     """Normalize harness/model identifiers to the canonical pricing table key."""
     normalized_model = model
     if harness == "claude-code":
@@ -318,7 +322,12 @@ def pricing_key_for_model(harness: str, model: str) -> tuple[str, str]:
         else:
             normalized_model = resolved
     elif harness == "gptme":
-        for short_name, provider_model in GPTME_MODEL_ROUTES.items():
+        routes = (
+            {**GPTME_MODEL_ROUTES, **config.model_routes}
+            if (config is not None and config.model_routes)
+            else GPTME_MODEL_ROUTES
+        )
+        for short_name, provider_model in routes.items():
             if model == provider_model:
                 normalized_model = short_name
                 break
@@ -426,7 +435,7 @@ def estimate_session_cost(
         if (config is not None and config.price_table)
         else HARNESS_PRICE_USD_PER_1M
     )
-    key = pricing_key_for_model(harness, model)
+    key = pricing_key_for_model(harness, model, config)
     prices = price_table.get(key)
     if prices is None:
         return None
@@ -538,7 +547,7 @@ def estimate_tokens_from_duration(
         if (config is not None and config.tps_table)
         else TOKENS_PER_SECOND
     )
-    key = pricing_key_for_model(harness, model)
+    key = pricing_key_for_model(harness, model, config)
     tps = tps_table.get(key)
     if tps is None:
         tps = tps_table.get((harness, model))

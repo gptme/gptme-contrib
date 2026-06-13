@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -150,7 +149,6 @@ def test_estimate_tokens_from_duration_empty_config() -> None:
     assert tokens > 0
 
 
-@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib requires Python 3.11+")
 def test_load_quota_config_toml_round_trip(tmp_path: Path) -> None:
     p = tmp_path / "harness-quota.toml"
     p.write_text(TOML_FIXTURE, encoding="utf-8")
