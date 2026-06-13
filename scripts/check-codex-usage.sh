@@ -60,7 +60,7 @@ fi
 # cached result (even if stale) rather than duplicating the work.
 SCRAPE_LOCK="${CODEX_USAGE_SCRAPE_LOCK:-/tmp/codex-usage-scrape.lock}"
 exec 9>"$SCRAPE_LOCK"
-if ! flock -n 9; then
+if command -v flock &>/dev/null && ! flock -n 9; then
     if [ -f "$CACHE_FILE" ]; then
         case "$MODE" in
             json) cat "$CACHE_FILE" ;;

@@ -68,11 +68,14 @@ except Exception as e:
     print(json.dumps({'error': str(e)}))
     sys.exit(1)
 
+limit = raw.get('limit') or 1
+limit_remaining = raw.get('limit_remaining') or 0
+usage_daily = raw.get('usage_daily', 0)
 result = {
-    'available': raw.get('limit_remaining', 0) > 0.5,
-    'utilization': round(raw.get('usage_daily', 0) / max(raw.get('limit', 1), 0.01), 3),
+    'available': limit_remaining > 0.5,
+    'utilization': round(usage_daily / max(limit, 0.01), 3),
     'limit': raw.get('limit'),
-    'limit_remaining': round(raw.get('limit_remaining', 0), 2),
+    'limit_remaining': round(limit_remaining, 2),
     'usage_daily': round(raw.get('usage_daily', 0), 2),
     'usage_weekly': round(raw.get('usage_weekly', 0), 2),
     'limit_reset': raw.get('limit_reset', 'unknown'),
