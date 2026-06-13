@@ -20,6 +20,7 @@ sys.modules[spec.name] = resolve_greptile_threads
 spec.loader.exec_module(resolve_greptile_threads)
 
 parse_pr = resolve_greptile_threads.parse_pr
+resolve_thread = resolve_greptile_threads.resolve_thread
 
 
 def test_parse_pr_hash_form() -> None:
@@ -52,6 +53,24 @@ def test_parse_pr_non_numeric_second_exits_2() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_pr("gptme/gptme-contrib", "foo")
     assert exc.value.code == 2
+
+
+def test_parse_pr_non_numeric_hash_exits_2() -> None:
+    """Hash form with non-numeric number should exit 2 via _die(), not raise ValueError."""
+    with pytest.raises(SystemExit) as exc:
+        parse_pr("gptme/gptme-contrib#abc", None)
+    assert exc.value.code == 2
+
+
+def test_resolve_thread_unexpected_shape_returns_false(monkeypatch) -> None:
+    """rc==0 with a valid-but-unexpected body (null thread node) must return False,
+    not raise out of the caller's loop."""
+    monkeypatch.setattr(
+        resolve_greptile_threads,
+        "_run_gh",
+        lambda args: (0, '{"data": {"resolveReviewThread": null}}', ""),
+    )
+    assert resolve_thread("THREAD_ID") is False
 
 
 def test_targeting_excludes_resolved() -> None:

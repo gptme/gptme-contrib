@@ -70,7 +70,10 @@ def parse_pr(spec: str, second: str | None) -> tuple[str, str, int]:
     if "#" in spec:
         repo, num = spec.split("#", 1)
         owner, name = repo.split("/", 1)
-        return owner, name, int(num)
+        try:
+            return owner, name, int(num)
+        except ValueError:
+            _die(f"PR number must be an integer, got {num!r}.")
     if second and "/" in spec:
         owner, name = spec.split("/", 1)
         try:
