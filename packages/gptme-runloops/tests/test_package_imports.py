@@ -58,5 +58,6 @@ def test_run_as_module_emits_no_runpy_warning():
         text=True,
     )
     combined = proc.stdout + proc.stderr
+    assert proc.returncode in (0, 1), proc.stderr
     assert "RuntimeWarning" not in combined, combined
     assert "found in sys.modules" not in combined, combined
