@@ -39,12 +39,16 @@ for arg in "$@"; do
     esac
 done
 
-CACHE_FILE="/tmp/claude-usage-cache.json"
-FALLBACK_CACHE_FILE="/tmp/claude-usage-stale-fallback.json"
+CACHE_FILE="${CLAUDE_USAGE_CACHE_FILE:-/tmp/claude-usage-cache.json}"
+FALLBACK_CACHE_FILE="${CLAUDE_USAGE_FALLBACK_CACHE_FILE:-/tmp/claude-usage-stale-fallback.json}"
 CACHE_TTL="${CLAUDE_USAGE_CACHE_TTL:-600}"
 
-# Determine credential file for fingerprinting
-CREDS_FILE="$HOME/.claude/credentials.json"
+# Determine credential file for fingerprinting.
+# NOTE: the real file is `.credentials.json` (dot-prefixed) — the old default
+# `credentials.json` (no dot) never existed, so the fingerprint was always the
+# missing-file sentinel and the cache was ALWAYS judged invalid → every periodic
+# caller did a full ~1-core /usage scrape instead of reusing the 10-min cache.
+CREDS_FILE="${CLAUDE_USAGE_CREDS_FILE:-$HOME/.claude/.credentials.json}"
 
 _creds_fingerprint() {
     # Emit a cache-busting fingerprint for the current credential slot.
@@ -98,6 +102,70 @@ if fresh and fp_match:
 sys.exit(1)
 " && exit 0
 fi
+
+# --- Single-scrape concurrency guard (thundering-herd protection) ---
+# Multiple periodic callers (bob-vitals, subscription-check, the telemetry
+# exporter) can all miss the cache in the same window and each launch a full
+# ~60-140s /usage scrape. Each scrape is a heavy claude TUI; piled up they
+# starve a small box (observed 2026-06-08: 12 concurrent on a 3-core VM, CPU
+# pressure ~70%, sessions timing out). Allow only ONE live scrape at a time; if
+# another holds the lock, serve the most recent cache (even if stale) rather
+# than duplicating the work. fd 9 stays held for the rest of the script and is
+# released automatically on exit.
+SCRAPE_LOCK="${CLAUDE_USAGE_SCRAPE_LOCK:-/tmp/claude-usage-scrape.lock}"
+# flock is Linux-only (util-linux) and absent on macOS. Guard is a no-op there;
+# concurrent scrapes on macOS are benign (no multi-service automated setup).
+# --no-cache explicitly requests a fresh scrape so we skip the guard to avoid
+# silently handing the caller stale data (the documented contract is "Force fresh fetch").
+# --raw is excluded for the same reason the TTL cache check above excludes it:
+# raw callers want the unformatted scrape output, and the lock-held fallback only
+# emits json/human-readable cache — serving that to a raw caller would silently
+# hand back formatted data instead of raw.
+if [ "$MODE" != "raw" ] && [ "$NO_CACHE" = false ] && command -v flock >/dev/null 2>&1; then
+    exec 9>"$SCRAPE_LOCK"
+    if ! flock -n 9; then
+        # Another scrape is running — serve the most recent cache (even if stale)
+        # rather than queuing up.
+        if [ -f "$CACHE_FILE" ]; then
+            fp="$(_creds_fingerprint)"
+            python3 -c "
+import json, sys
+with open('$CACHE_FILE') as f:
+    cached = json.load(f)
+if cached.get('_cred_fingerprint', '') == '$fp':
+    if '$MODE' == 'json':
+        print(json.dumps(cached, indent=2))
+    else:
+        print('Claude Max Subscription Usage')
+        print('=' * 60)
+        for key, label in [('five_hour', 'Session (5h)'), ('seven_day', 'Weekly (all)'), ('seven_day_sonnet', 'Weekly (Sonnet)')]:
+            info = cached.get(key)
+            if info and isinstance(info, dict):
+                util = info.get('utilization', 0)
+                remaining = 1 - util
+                bar_width = 30
+                filled = int(util * bar_width)
+                bar = '█' * filled + '░' * (bar_width - filled)
+                time_left = info.get('time_left', '')
+                resets = info.get('resets', 'unknown')
+                print(f'  {label:20s} [{bar}] {util*100:4.0f}% used ({remaining*100:.0f}% left)')
+                print(f'  {\"\":20s} resets {resets}  ({time_left})')
+            else:
+                print(f'  {label:20s} N/A')
+        print()
+    sys.exit(0)
+else:
+    sys.exit(1)  # cred mismatch
+" && exit 0
+            # Cache exists but credential fingerprint does not match the current slot.
+            echo "Warning: a usage scrape is already running; cached data belongs to a different credential slot." >&2
+            exit 1
+        fi
+        # No cache at all — warn but exit cleanly (don't pile on).
+        echo "Warning: a usage scrape is already running and no cache is available." >&2
+        exit 0
+    fi
+fi  # command -v flock
 
 SESSION_NAME="claude-usage-check-$$"
 TIMEOUT=25
@@ -169,32 +237,67 @@ for _ in $(seq 1 "$TIMEOUT"); do
     fi
     sleep 1
 done
-sleep 1  # extra settle time for full render
-
-# If the TUI is still loading ("Scanning local sessions"), wait longer
-for _ in $(seq 1 10); do
-    content=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
-    if ! echo "$content" | grep -qi 'Scanning local sessions'; then
+# Capture the "Current session / Current week" usage bars.
+#
+# Quirk (CC v2.1.168): the usage bars render *alongside* a "Scanning local
+# sessions…" pass that runs continuously and periodically redraws the pane,
+# briefly wiping the bars — so they visibly blink. Worse, the three windows
+# (Current session = 5h, Current week (all models) = 7d, Current week (Sonnet
+# only) = 7d Sonnet) paint progressively, so a single capture often catches only
+# the first one or two before the redraw (the intermittent "quota bars don't
+# show" / "Sonnet window missing" bug). No single fixed delay reliably catches
+# all three.
+#
+# Robust approach: tab away and back (Usage -> Stats -> Usage) to force fresh
+# renders, sample the pane many times, and ACCUMULATE every frame that contains
+# a bar into one buffer. The parser takes the last occurrence of each window
+# (later frames are more fully rendered), so all three are assembled across
+# frames even when no single frame has all of them. Stop early once all three
+# labels have been seen.
+# Do NOT use the 'w' week toggle — it can retrigger the scan.
+OUTPUT=""
+ACCUM=""
+for _outer in $(seq 1 12); do
+    tmux send-keys -t "$SESSION_NAME" Right   # away to Stats
+    sleep 0.5
+    tmux send-keys -t "$SESSION_NAME" Left    # back to Usage -> forces fresh render
+    sleep 0.8
+    for _inner in $(seq 1 8); do
+        content=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
+        if echo "$content" | grep -qE '[0-9]+% used'; then
+            ACCUM="${ACCUM}"$'\n'"${content}"
+        fi
+        if echo "$content" | grep -qi 'Nothing over 10%'; then
+            ACCUM="${ACCUM}"$'\n'"${content}"
+            break
+        fi
+        sleep 0.3
+    done
+    # Stop once all three window labels have been accumulated.
+    if echo "$ACCUM" | grep -qi 'Current session' \
+        && echo "$ACCUM" | grep -qi 'Current week (all models)' \
+        && echo "$ACCUM" | grep -qi 'Current week (Sonnet only)'; then
         break
     fi
-    sleep 2
+    if echo "$ACCUM" | grep -qi 'Nothing over 10%'; then
+        break
+    fi
 done
-
-# Switch to week view (default is day view, we need weekly for monitoring)
-tmux send-keys -t "$SESSION_NAME" "w"
-sleep 3
-
-# Capture output (after week toggle)
-OUTPUT=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
+OUTPUT="$ACCUM"
+# Fall back to whatever is on screen if no bars were ever captured.
+[ -z "$OUTPUT" ] && OUTPUT=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
 
 if [ "$MODE" = "raw" ]; then
     echo "$OUTPUT"
     exit 0
 fi
 
-# Check if still scanning (auth failure — token revoked or network issue)
-if echo "$OUTPUT" | grep -qi 'Scanning local sessions'; then
-    echo "Warning: CC /usage still scanning (likely auth failure). Using fallback data." >&2
+# The "Scanning local sessions…" line coexists with the rendered bars (it is a
+# continuous background pass), so it is NOT on its own an error. Only warn when
+# we captured no usage bars at all — that's the genuine stuck/auth-failure case.
+if ! echo "$OUTPUT" | grep -qE '[0-9]+% used' \
+    && echo "$OUTPUT" | grep -qi 'Scanning local sessions'; then
+    echo "Warning: CC /usage produced no usage bars (still scanning / likely auth failure). Using fallback data." >&2
 fi
 
 # Parse the TUI output
@@ -564,7 +667,10 @@ try:
     _st = _os.stat('$CREDS_FILE')  # follows symlinks by default
     result['_cred_fingerprint'] = f'{_st.st_ino}:{int(_st.st_mtime)}'
 except OSError:
-    result['_cred_fingerprint'] = ''
+    # Must match the bash _creds_fingerprint() missing-file sentinel ('0:0'),
+    # not '' — otherwise the cache-read fp comparison never matches and the
+    # cache is permanently bypassed (every caller re-scrapes).
+    result['_cred_fingerprint'] = '0:0'
 
 # Write cache file (always, for both modes)
 cache_path = '$CACHE_FILE'
@@ -587,7 +693,18 @@ try:
         (_five.get('utilization', 0) if isinstance(_five, dict) else 0),
         (_sonnet.get('utilization', 0) if isinstance(_sonnet, dict) else 0),
     )
-    if _max_util > 0.05 and result.get('_source') not in ('fallback_cache', 'subscription-reset-times'):
+    # Only save fallback when at least 2 of the 3 live windows have data
+    # above noise threshold, to avoid persisting a partially-captured state.
+    _live_windows = sum(
+        1 for k in ('five_hour', 'seven_day', 'seven_day_sonnet')
+        if isinstance(result.get(k), dict)
+        and result[k].get('utilization', 0) > 0.05
+    )
+    if (
+        _max_util > 0.05
+        and result.get('_source') not in ('fallback_cache', 'subscription-reset-times')
+        and _live_windows >= 2
+    ):
         with open('$FALLBACK_CACHE_FILE', 'w') as _f:
             json.dump(result, _f, indent=2)
 except OSError:
