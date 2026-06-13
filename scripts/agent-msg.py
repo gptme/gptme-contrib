@@ -349,7 +349,10 @@ def mark_replied(filename: str) -> bool:
 # Messages older than this are assumed handled and no longer flagged as
 # awaiting a reply — a "timely reply" SLA, not an unbounded backlog. Override
 # with AGENT_MSG_REPLY_WINDOW_DAYS (0 = no age limit).
-REPLY_WINDOW_DAYS = int(os.environ.get("AGENT_MSG_REPLY_WINDOW_DAYS", "7"))
+try:
+    REPLY_WINDOW_DAYS = int(os.environ.get("AGENT_MSG_REPLY_WINDOW_DAYS", "7"))
+except ValueError:
+    REPLY_WINDOW_DAYS = 7
 
 
 def _msg_age_days(meta: dict, now: datetime) -> float | None:
