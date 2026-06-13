@@ -171,7 +171,7 @@ class AgentTransport:
         if len(parts) < 3:
             return
         fm = parts[1]
-        if "delivered:" not in fm:
+        if not re.search(r"^delivered:", fm, flags=re.MULTILINE):
             fm = fm.rstrip("\n") + "\ndelivered: false\n"
         local_path.write_text("---".join([parts[0], fm, parts[2]]))
 

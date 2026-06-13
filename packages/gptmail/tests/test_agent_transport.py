@@ -65,8 +65,10 @@ def test_send_with_deliver_hook_places_in_recipient_inbox(tmp_path: Path) -> Non
 
 def test_send_stamps_delivery_failure(tmp_path: Path) -> None:
     t = _transport(tmp_path, deliver=lambda path, recipient: False)
-    mid = t.send("bob", "Hi", "hello")
-    assert _frontmatter(t.outbox / mid)["delivered"] is False
+    mid = t.send("bob", "task delivered: complete", "hello")
+    meta = _frontmatter(t.outbox / mid)
+    assert meta["delivered"] is False
+    assert meta["subject"] == "task delivered: complete"
 
 
 def test_list_inbox_returns_id_subject_timestamp(tmp_path: Path) -> None:
