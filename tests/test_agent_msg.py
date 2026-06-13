@@ -237,6 +237,36 @@ class TestSendMessage:
         assert "from: bob" in content
         assert "to: alice" in content
 
+    def test_recipient_resolved_case_insensitively(self, tmp_path, monkeypatch):
+        """Capitalized recipient (e.g. "Alice" from a message `from:` field)
+        resolves to the lowercase agent key and is normalized in the outbox.
+
+        Regression for the reply path: message `from:` fields are often
+        capitalized while the agent registry keys are lowercase. An outbox
+        file written at all proves the recipient was resolved rather than
+        rejected as unknown (which returns early before writing anything).
+        """
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+
+        agents = {
+            "alice": {"ssh": "alice@unreachable.test", "workspace": "/home/alice"}
+        }
+
+        def fake_run(cmd, **kwargs):
+            raise subprocess.CalledProcessError(255, cmd)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = agent_msg.send_message(agents, "bob", "Alice", "Test", "Body")
+
+        # SSH fails (no network), but the outbox copy proves resolution succeeded.
+        assert result is False
+        outbox_files = list((msg_dir / "outbox").glob("*.md"))
+        assert (
+            len(outbox_files) == 1
+        ), "capitalized recipient must resolve, not be rejected"
+        assert "to: alice" in outbox_files[0].read_text()
+
 
 class TestGetSelf:
     def test_from_agent_name(self, monkeypatch):
@@ -247,3 +277,266 @@ class TestGetSelf:
         monkeypatch.delenv("AGENT_NAME", raising=False)
         monkeypatch.setenv("USER", "alice")
         assert agent_msg.get_self() == "alice"
+
+
+class TestFormatMessageReply:
+    def test_in_reply_to_added(self):
+        msg = agent_msg.format_message(
+            "alice", "bob", "Re: hi", "Body", in_reply_to="20260613-100000-bob-hi.md"
+        )
+        assert "in_reply_to: 20260613-100000-bob-hi.md" in msg
+
+    def test_in_reply_to_omitted_by_default(self):
+        msg = agent_msg.format_message("alice", "bob", "hi", "Body")
+        assert "in_reply_to" not in msg
+
+
+class TestMarkReplied:
+    def _write(self, inbox, name, fm):
+        (inbox / name).write_text(f"---\n{fm}\n---\n\nBody")
+
+    def test_stamps_replied_and_read(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        self._write(inbox, "m.md", "from: bob\nsubject: hi\nread: false")
+        assert agent_msg.mark_replied("m.md") is True
+        content = (inbox / "m.md").read_text()
+        assert "read: true" in content
+        assert "replied: true" in content
+
+    def test_idempotent(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        self._write(inbox, "m.md", "from: bob\nsubject: hi\nread: false")
+        agent_msg.mark_replied("m.md")
+        agent_msg.mark_replied("m.md")
+        # Only one replied flag, not duplicated
+        assert (inbox / "m.md").read_text().count("replied: true") == 1
+
+    def test_body_preserved(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (inbox / "m.md").write_text(
+            "---\nfrom: bob\nsubject: hi\nread: false\n---\n\nthis says read: false"
+        )
+        agent_msg.mark_replied("m.md")
+        assert "this says read: false" in (inbox / "m.md").read_text()
+
+    def test_path_traversal_rejected(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        (msg_dir / "inbox").mkdir(parents=True)
+        (tmp_path / "secret.md").write_text("---\nfrom: x\nread: false\n---\nsecret")
+        assert agent_msg.mark_replied("../../secret.md") is False
+
+
+class TestNeedsReplyMessages:
+    def _inbox_msg(self, inbox, name, sender, ts, replied=False):
+        fm = f'from: {sender}\nto: alice\ntimestamp: "{ts}"\nsubject: hi\nread: false'
+        if replied:
+            fm += "\nreplied: true"
+        (inbox / name).write_text(f"---\n{fm}\n---\n\nBody")
+
+    def test_flags_unreplied(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        self._inbox_msg(inbox, "m.md", "bob", "2026-06-13T10:00:00Z")
+        pending = agent_msg.needs_reply_messages("alice", window_days=0)
+        assert len(pending) == 1
+        assert pending[0]["from"] == "bob"
+        assert pending[0]["file"] == "m.md"
+
+    def test_replied_stamp_satisfies(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        self._inbox_msg(inbox, "m.md", "bob", "2026-06-13T10:00:00Z", replied=True)
+        assert agent_msg.needs_reply_messages("alice", window_days=0) == []
+
+    def test_outbox_in_reply_to_satisfies(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        outbox = msg_dir / "outbox"
+        outbox.mkdir(parents=True)
+        self._inbox_msg(inbox, "m.md", "bob", "2026-06-13T10:00:00Z")
+        (outbox / "reply.md").write_text(
+            '---\nfrom: alice\nto: bob\nsubject: "Re: hi"\nin_reply_to: m.md\n---\n\nok'
+        )
+        assert agent_msg.needs_reply_messages("alice", window_days=0) == []
+
+    def test_skips_self_sent(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        self._inbox_msg(inbox, "m.md", "alice", "2026-06-13T10:00:00Z")
+        assert agent_msg.needs_reply_messages("alice", window_days=0) == []
+
+    def test_window_excludes_old(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # Year-old message — outside any reasonable window
+        self._inbox_msg(inbox, "old.md", "bob", "2025-01-01T10:00:00Z")
+        assert agent_msg.needs_reply_messages("alice", window_days=7) == []
+
+    def test_skips_message_addressed_to_other(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # A stray file in the inbox addressed to someone else — not our reply.
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: gordon\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        assert agent_msg.needs_reply_messages("alice", window_days=0) == []
+
+    def test_flags_broadcast_addressed_to_us(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # Broadcast with a list `to` that includes us still needs a reply.
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: [alice, gordon]\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        pending = agent_msg.needs_reply_messages("alice", window_days=0)
+        assert len(pending) == 1
+
+    def test_flags_message_without_to_field(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # Missing `to` — we over-flag rather than silently drop a real message.
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        pending = agent_msg.needs_reply_messages("alice", window_days=0)
+        assert len(pending) == 1
+
+    def test_failed_delivery_still_shows_pending(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        outbox = msg_dir / "outbox"
+        outbox.mkdir(parents=True)
+        self._inbox_msg(inbox, "m.md", "bob", "2026-06-13T10:00:00Z")
+        # Outbox has an in_reply_to entry but delivery failed (delivered: false).
+        (outbox / "reply.md").write_text(
+            '---\nfrom: alice\nto: bob\nsubject: "Re: hi"\n'
+            "in_reply_to: m.md\ndelivered: false\n---\n\nok"
+        )
+        pending = agent_msg.needs_reply_messages("alice", window_days=0)
+        assert (
+            len(pending) == 1
+        ), "failed-delivery outbox entry must not clear the pending flag"
+
+
+class TestCmdReply:
+    def test_replies_and_marks(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: alice\nsubject: "hi"\nread: false\n---\n\nHello'
+        )
+        agents = {"bob": {"ssh": "bob@x", "workspace": "/home/bob"}}
+        sent: dict = {}
+
+        def fake_send(agents, sender, recipient, subject, body, in_reply_to=None):
+            sent.update(recipient=recipient, subject=subject, in_reply_to=in_reply_to)
+            return True
+
+        monkeypatch.setattr(agent_msg, "send_message", fake_send)
+        assert agent_msg.cmd_reply(agents, "alice", "m.md", "Got it") is True
+        assert sent["recipient"] == "bob"
+        assert sent["subject"] == "Re: hi"
+        assert sent["in_reply_to"] == "m.md"
+        assert "replied: true" in (inbox / "m.md").read_text()
+
+    def test_no_double_re_prefix(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: alice\nsubject: "Re: hi"\nread: false\n---\n\nHello'
+        )
+        captured: dict = {}
+        monkeypatch.setattr(
+            agent_msg,
+            "send_message",
+            lambda a, s, r, subj, b, in_reply_to=None: captured.update(subject=subj)
+            or True,
+        )
+        agent_msg.cmd_reply({}, "alice", "m.md", "ok")
+        assert captured["subject"] == "Re: hi"
+
+    def test_missing_message(self, tmp_path, monkeypatch):
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        (msg_dir / "inbox").mkdir(parents=True)
+        assert agent_msg.cmd_reply({}, "alice", "nope.md", "ok") is False
+
+    def test_case_insensitive_self_name(self, tmp_path, monkeypatch):
+        """Mixed-case self_name (e.g. 'Alice' from AGENT_NAME) must still
+        match the lowercased `to:` field stored by send_message.
+
+        Regression for Greptile P1: _addressed_to compared self_name verbatim
+        against the stored lowercase `to:` field, silently dropping all
+        pending-reply output for agents with capitalized names.
+        """
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # Message to 'alice' (lowercase, as send_message normalizes it)
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: alice\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        # self_name is 'Alice' (mixed-case, as AGENT_NAME=Alice would give)
+        pending = agent_msg.needs_reply_messages("Alice", window_days=0)
+        assert len(pending) == 1
+
+    def test_case_insensitive_broadcast(self, tmp_path, monkeypatch):
+        """Mixed-case self_name must match a broadcast list with lowercase entries."""
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: [alice, gordon]\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        pending = agent_msg.needs_reply_messages("Alice", window_days=0)
+        assert len(pending) == 1
