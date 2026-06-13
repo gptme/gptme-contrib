@@ -338,7 +338,12 @@ def read(message_id: str, thread: bool) -> None:
 def reply(message_id: str, content: str | None) -> None:
     """Reply to an inbox message, threading via in_reply_to."""
     messages_dir = _messages_dir()
-    original = meta_of(messages_dir / "inbox" / message_id)
+    inbox_dir = (messages_dir / "inbox").resolve()
+    msg_path = (messages_dir / "inbox" / message_id).resolve()
+    if not str(msg_path).startswith(str(inbox_dir) + os.sep):
+        click.echo(f"Error: message not found: {message_id}", err=True)
+        sys.exit(1)
+    original = meta_of(msg_path)
     if original is None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)
