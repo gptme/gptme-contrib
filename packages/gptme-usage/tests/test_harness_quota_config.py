@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from gptme_subscription.harness_models import (
+from gptme_usage.harness_models import (
     HarnessQuotaConfig,
     estimate_session_cost,
     estimate_tokens_from_duration,
@@ -164,7 +164,7 @@ def test_config_model_routes_replace_not_merge() -> None:
     configured agent silently inherited Bob's routes. An agent's config should be
     authoritative — provider models only in Bob's globals must not resolve.
     """
-    from gptme_subscription.harness_models import (
+    from gptme_usage.harness_models import (
         GPTME_MODEL_ROUTES,
         pricing_key_for_model,
     )
