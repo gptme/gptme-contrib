@@ -68,16 +68,18 @@ except Exception as e:
     print(json.dumps({'error': str(e)}))
     sys.exit(1)
 
-limit = raw.get('limit') or 1
-limit_remaining = raw.get('limit_remaining') or 0
-usage_daily = raw.get('usage_daily', 0)
+limit = raw.get('limit')
+limit_remaining = raw.get('limit_remaining')
+usage_daily = raw.get('usage_daily') or 0
+usage_weekly = raw.get('usage_weekly') or 0
+is_unlimited = limit is None and limit_remaining is None
 result = {
-    'available': limit_remaining > 0.5,
-    'utilization': round(usage_daily / max(limit, 0.01), 3),
-    'limit': raw.get('limit'),
-    'limit_remaining': round(limit_remaining, 2),
-    'usage_daily': round(raw.get('usage_daily', 0), 2),
-    'usage_weekly': round(raw.get('usage_weekly', 0), 2),
+    'available': True if is_unlimited else (limit_remaining or 0) > 0.5,
+    'utilization': 0.0 if limit is None else round(usage_daily / max(limit, 0.01), 3),
+    'limit': limit,
+    'limit_remaining': None if limit_remaining is None else round(limit_remaining, 2),
+    'usage_daily': round(usage_daily, 2),
+    'usage_weekly': round(usage_weekly, 2),
     'limit_reset': raw.get('limit_reset', 'unknown'),
     'source': 'api',
 }
@@ -86,8 +88,12 @@ if os.environ.get('OPENROUTER_MODE') == 'json':
     print(json.dumps(result, indent=2))
 else:
     avail = 'available' if result['available'] else 'EXHAUSTED'
-    print(f'OpenRouter: {avail}')
-    print(f'  Daily: \${result[\"usage_daily\"]:.2f} / \${result[\"limit\"]} ({result[\"utilization\"]*100:.0f}%)')
-    print(f'  Remaining: \${result[\"limit_remaining\"]:.2f}')
+    if is_unlimited:
+        print(f'OpenRouter: {avail} (unlimited)')
+        print(f'  Daily: \${result[\"usage_daily\"]:.2f}')
+    else:
+        print(f'OpenRouter: {avail}')
+        print(f'  Daily: \${result[\"usage_daily\"]:.2f} / \${result[\"limit\"]} ({result[\"utilization\"]*100:.0f}%)')
+        print(f'  Remaining: \${result[\"limit_remaining\"]:.2f}')
     print(f'  Weekly: \${result[\"usage_weekly\"]:.2f}')
 "
