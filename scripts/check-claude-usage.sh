@@ -115,7 +115,9 @@ fi
 SCRAPE_LOCK="${CLAUDE_USAGE_SCRAPE_LOCK:-/tmp/claude-usage-scrape.lock}"
 # flock is Linux-only (util-linux) and absent on macOS. Guard is a no-op there;
 # concurrent scrapes on macOS are benign (no multi-service automated setup).
-if command -v flock >/dev/null 2>&1; then
+# --no-cache explicitly requests a fresh scrape so we skip the guard to avoid
+# silently handing the caller stale data (the documented contract is "Force fresh fetch").
+if [ "$NO_CACHE" = false ] && command -v flock >/dev/null 2>&1; then
 exec 9>"$SCRAPE_LOCK"
 if ! flock -n 9; then
     # Another scrape is running — serve the most recent cache (even if stale)
@@ -148,6 +150,8 @@ if cached.get('_cred_fingerprint', '') == '$fp':
                 print(f'  {label:20s} N/A')
         print()
     sys.exit(0)
+else:
+    sys.exit(1)  # cred mismatch — don't silently exit 0 with empty stdout
 " && exit 0
     fi
     # No cache at all — warn but exit cleanly (don't pile on).
