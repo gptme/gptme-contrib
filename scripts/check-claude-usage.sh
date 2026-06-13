@@ -118,13 +118,13 @@ SCRAPE_LOCK="${CLAUDE_USAGE_SCRAPE_LOCK:-/tmp/claude-usage-scrape.lock}"
 # --no-cache explicitly requests a fresh scrape so we skip the guard to avoid
 # silently handing the caller stale data (the documented contract is "Force fresh fetch").
 if [ "$NO_CACHE" = false ] && command -v flock >/dev/null 2>&1; then
-exec 9>"$SCRAPE_LOCK"
-if ! flock -n 9; then
-    # Another scrape is running — serve the most recent cache (even if stale)
-    # rather than queuing up.
-    if [ -f "$CACHE_FILE" ]; then
-        fp="$(_creds_fingerprint)"
-        python3 -c "
+    exec 9>"$SCRAPE_LOCK"
+    if ! flock -n 9; then
+        # Another scrape is running — serve the most recent cache (even if stale)
+        # rather than queuing up.
+        if [ -f "$CACHE_FILE" ]; then
+            fp="$(_creds_fingerprint)"
+            python3 -c "
 import json, sys
 with open('$CACHE_FILE') as f:
     cached = json.load(f)
@@ -151,13 +151,16 @@ if cached.get('_cred_fingerprint', '') == '$fp':
         print()
     sys.exit(0)
 else:
-    sys.exit(1)  # cred mismatch — don't silently exit 0 with empty stdout
+    sys.exit(1)  # cred mismatch
 " && exit 0
+            # Cache exists but credential fingerprint does not match the current slot.
+            echo "Warning: a usage scrape is already running; cached data belongs to a different credential slot." >&2
+            exit 1
+        fi
+        # No cache at all — warn but exit cleanly (don't pile on).
+        echo "Warning: a usage scrape is already running and no cache is available." >&2
+        exit 0
     fi
-    # No cache at all — warn but exit cleanly (don't pile on).
-    echo "Warning: a usage scrape is already running and no cache is available." >&2
-    exit 0
-fi
 fi  # command -v flock
 
 SESSION_NAME="claude-usage-check-$$"
@@ -243,9 +246,10 @@ done
 #
 # Robust approach: tab away and back (Usage -> Stats -> Usage) to force fresh
 # renders, sample the pane many times, and ACCUMULATE every frame that contains
-# a bar into one buffer. The parser takes the first fully-rendered occurrence of
-# each window, so all three are assembled across frames even when no single
-# frame has all of them. Stop early once all three labels have been seen.
+# a bar into one buffer. The parser takes the last occurrence of each window
+# (later frames are more fully rendered), so all three are assembled across
+# frames even when no single frame has all of them. Stop early once all three
+# labels have been seen.
 # Do NOT use the 'w' week toggle — it can retrigger the scan.
 OUTPUT=""
 ACCUM=""
