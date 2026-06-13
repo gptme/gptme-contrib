@@ -9,6 +9,7 @@ Parity target: ``scripts/agent-msg.py`` (send/broadcast/list/read/reply/pending)
 See task: fold-agent-msg-into-gptmail-single-comms-tool.
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -92,19 +93,21 @@ def test_send_stamps_tracker_channel_agent(workspace: Path) -> None:
 def _seed_inbox(workspace: Path, sender: str = "bob", subject: str = "Q") -> str:
     """Drop a message from ``sender`` into alice's inbox; return its filename."""
     inbox = workspace / "messages" / "inbox"
-    name = "20260613-000000-000000-bob-Q.md"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    name = f"{ts}-000000-{sender}-{subject}.md"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     (inbox / name).write_text(
         f"---\nfrom: {sender}\nto: alice\n"
-        f"timestamp: 2026-06-13T00:00:00Z\nsubject: {subject}\nread: false\n---\n\nplease advise\n"
+        f"timestamp: {timestamp}\nsubject: {subject}\nread: false\n---\n\nplease advise\n"
     )
     return name
 
 
 def test_list_shows_inbox(workspace: Path) -> None:
-    _seed_inbox(workspace)
+    name = _seed_inbox(workspace)
     result = CliRunner().invoke(agent, ["list"])
     assert result.exit_code == 0
-    assert "20260613-000000-000000-bob-Q.md" in result.output
+    assert name in result.output
 
 
 def test_read_marks_read(workspace: Path) -> None:
