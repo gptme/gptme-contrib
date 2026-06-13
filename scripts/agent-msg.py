@@ -11,10 +11,16 @@ Usage:
     # List unread messages
     python3 scripts/agent-msg.py list
 
+    # List only messages awaiting a reply from you
+    python3 scripts/agent-msg.py list --needs-reply
+
+    # Reply to an inbox message (sends to sender, marks it replied)
+    python3 scripts/agent-msg.py reply <inbox-filename> "Reply body"
+
     # Send to all agents
     python3 scripts/agent-msg.py broadcast "Subject" "Message body"
 
-    # Check connectivity
+    # Check connectivity (and how many messages await a reply)
     python3 scripts/agent-msg.py status
 
 Configuration:
@@ -123,24 +129,38 @@ def make_message_filename(sender: str, subject: str) -> str:
     return f"{ts}-{safe_sender}-{safe_subject}.md"
 
 
-def format_message(sender: str, recipient: str, subject: str, body: str) -> str:
-    """Format a message as YAML frontmatter + markdown body."""
+def format_message(
+    sender: str,
+    recipient: str,
+    subject: str,
+    body: str,
+    in_reply_to: str | None = None,
+) -> str:
+    """Format a message as YAML frontmatter + markdown body.
+
+    in_reply_to, when set, is the inbox filename of the message being answered.
+    It lets the sender's outbox record which incoming message a reply closes out.
+    """
     if not HAS_YAML:
         raise RuntimeError(
             "PyYAML is required to send messages. Install with: pip install pyyaml"
         )
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    meta: dict[str, object] = {
+        "from": sender,
+        "to": recipient,
+        "timestamp": ts,
+        "subject": subject,
+        "read": False,
+    }
+    if in_reply_to:
+        meta["in_reply_to"] = in_reply_to
     # Use yaml.dump to safely escape special characters in all fields
     frontmatter = yaml.dump(
-        {
-            "from": sender,
-            "to": recipient,
-            "timestamp": ts,
-            "subject": subject,
-            "read": False,
-        },
+        meta,
         default_flow_style=False,
         allow_unicode=True,
+        sort_keys=False,
     ).rstrip()
     return f"---\n{frontmatter}\n---\n\n{body}\n"
 
@@ -151,6 +171,7 @@ def send_message(
     recipient: str,
     subject: str,
     body: str,
+    in_reply_to: str | None = None,
 ) -> bool:
     """Send a message to another agent."""
     if recipient not in agents:
@@ -164,7 +185,7 @@ def send_message(
     ensure_dirs()
 
     filename = make_message_filename(self_name, subject)
-    msg_content = format_message(self_name, recipient, subject, body)
+    msg_content = format_message(self_name, recipient, subject, body, in_reply_to)
 
     # Save to local outbox
     outbox = get_messages_dir() / "outbox"
@@ -279,6 +300,143 @@ def read_message(filename: str) -> str | None:
     return content
 
 
+def _meta_of(f: Path) -> dict | None:
+    """Parse a message file's frontmatter into a dict (None if unparseable)."""
+    if not HAS_YAML:
+        return None
+    try:
+        content = f.read_text()
+    except OSError:
+        return None
+    if not content.startswith("---"):
+        return None
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return None
+    try:
+        meta = yaml.safe_load(parts[1])
+    except Exception:
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def mark_replied(filename: str) -> bool:
+    """Stamp an inbox message as replied (and read). Idempotent."""
+    inbox = get_messages_dir() / "inbox"
+    filepath = (inbox / filename).resolve()
+    if (
+        not str(filepath).startswith(str(inbox.resolve()) + "/")
+        or not filepath.exists()
+    ):
+        return False
+    content = filepath.read_text()
+    if not content.startswith("---"):
+        return False
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return False
+    fm = parts[1]
+    fm = fm.replace("read: false", "read: true")
+    if "replied:" not in fm:
+        # Append before the trailing newline of the frontmatter block.
+        fm = fm.rstrip("\n") + "\nreplied: true\n"
+    else:
+        fm = fm.replace("replied: false", "replied: true")
+    filepath.write_text("---".join([parts[0], fm, parts[2]]))
+    return True
+
+
+# Messages older than this are assumed handled and no longer flagged as
+# awaiting a reply — a "timely reply" SLA, not an unbounded backlog. Override
+# with AGENT_MSG_REPLY_WINDOW_DAYS (0 = no age limit).
+REPLY_WINDOW_DAYS = int(os.environ.get("AGENT_MSG_REPLY_WINDOW_DAYS", "7"))
+
+
+def _msg_age_days(meta: dict, now: datetime) -> float | None:
+    """Age of a message in days from its `timestamp` field (None if unparseable)."""
+    ts = meta.get("timestamp")
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt).total_seconds() / 86400.0
+
+
+def needs_reply_messages(self_name: str, window_days: int | None = None) -> list[dict]:
+    """Recent inbox messages addressed to us that we haven't replied to yet.
+
+    A reply requirement is satisfied either by stamping the inbox message
+    `replied: true` (the `reply` command does this) or by any outbox message
+    whose `in_reply_to` points at it (manual replies still count). Messages
+    older than the reply window are treated as handled (timely-reply SLA).
+    """
+    ensure_dirs()
+    inbox = get_messages_dir() / "inbox"
+    outbox = get_messages_dir() / "outbox"
+    window = REPLY_WINDOW_DAYS if window_days is None else window_days
+    now = datetime.now(timezone.utc)
+
+    replied_to: set[str] = set()
+    for f in outbox.glob("*.md"):
+        m = _meta_of(f)
+        if m and m.get("in_reply_to"):
+            replied_to.add(str(m["in_reply_to"]))
+
+    pending = []
+    for f in sorted(inbox.glob("*.md")):
+        m = _meta_of(f)
+        if not m:
+            continue
+        sender = m.get("from")
+        if sender in (None, self_name):  # skip self-sent / malformed
+            continue
+        if m.get("replied"):
+            continue
+        if f.name in replied_to:
+            continue
+        if window > 0:
+            age = _msg_age_days(m, now)
+            if age is not None and age > window:
+                continue
+        m["file"] = f.name
+        pending.append(m)
+    return pending
+
+
+def cmd_reply(
+    agents: dict[str, dict[str, str]], self_name: str, filename: str, body: str
+) -> bool:
+    """Reply to an inbox message: send back to its sender and mark it replied."""
+    inbox = get_messages_dir() / "inbox"
+    filepath = (inbox / filename).resolve()
+    if (
+        not str(filepath).startswith(str(inbox.resolve()) + "/")
+        or not filepath.exists()
+    ):
+        print(f"Error: Message not found: {filename}")
+        return False
+    meta = _meta_of(filepath)
+    if not meta:
+        print(f"Error: Could not parse {filename}")
+        return False
+    sender = meta.get("from")
+    if not sender or sender == self_name:
+        print(f"Error: No valid sender to reply to in {filename}")
+        return False
+    subject = str(meta.get("subject", ""))
+    re_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+    ok = send_message(agents, self_name, sender, re_subject, body, in_reply_to=filename)
+    if ok:
+        mark_replied(filename)
+        print(f"Replied to {sender} and marked {filename} as replied.")
+    return ok
+
+
 def cmd_status(agents: dict[str, dict[str, str]], self_name: str) -> None:
     """Show messaging status and connectivity."""
     ensure_dirs()
@@ -295,10 +453,14 @@ def cmd_status(agents: dict[str, dict[str, str]], self_name: str) -> None:
 
     unread = len([f for f in inbox.glob("*.md") if _is_unread(f)])
     outbox_count = len(list(outbox.glob("*.md")))
+    pending = needs_reply_messages(self_name)
 
     print(f"Agent: {self_name}")
     print(f"Inbox: {inbox_count} messages ({unread} unread)")
     print(f"Outbox: {outbox_count} sent")
+    print(f"Needs reply: {len(pending)}")
+    for m in pending:
+        print(f"  ⚠ {m.get('from')}: {m.get('subject')}  ({m['file']})")
 
     if not agents:
         print("\nNo agents configured. Create messages/agents.yaml.")
@@ -359,6 +521,20 @@ def main() -> None:
     read_parser = subparsers.add_parser("read", help="Read a specific message")
     read_parser.add_argument("filename", help="Message filename")
 
+    # reply
+    reply_parser = subparsers.add_parser(
+        "reply", help="Reply to an inbox message (sends to sender, marks it replied)"
+    )
+    reply_parser.add_argument("filename", help="Inbox message filename to reply to")
+    reply_parser.add_argument("body", help="Reply body")
+
+    # list
+    list_parser.add_argument(
+        "--needs-reply",
+        action="store_true",
+        help="Show only messages awaiting a reply from you",
+    )
+
     # status
     subparsers.add_parser("status", help="Show messaging status")
 
@@ -367,7 +543,11 @@ def main() -> None:
 
     # Only load agents config for commands that need remote delivery
     # (list/read work on local inbox — no need to warn about missing agents.yaml)
-    agents = load_agents() if args.command in ("send", "broadcast", "status") else {}
+    agents = (
+        load_agents()
+        if args.command in ("send", "broadcast", "status", "reply")
+        else {}
+    )
 
     if args.command == "send":
         success = send_message(
@@ -384,6 +564,19 @@ def main() -> None:
         sys.exit(1 if failures else 0)
 
     elif args.command == "list":
+        if getattr(args, "needs_reply", False):
+            messages = needs_reply_messages(self_name)
+            if not messages:
+                print("No messages awaiting a reply.")
+                return
+            for msg in messages:
+                ts = msg.get("timestamp", "unknown")
+                sender = msg.get("from", "unknown")
+                subject = msg.get("subject", "(no subject)")
+                print(f"  ⚠ [{ts}] {sender}: {subject}  ({msg['file']})")
+                print(f"    reply with: agent-msg.py reply {msg['file']} \"...\"")
+            return
+
         messages = list_inbox(show_all=args.all)
         if not messages:
             print("No unread messages." if not args.all else "No messages.")
@@ -400,6 +593,10 @@ def main() -> None:
         content = read_message(args.filename)
         if content:
             print(content)
+
+    elif args.command == "reply":
+        success = cmd_reply(agents, self_name, args.filename, args.body)
+        sys.exit(0 if success else 1)
 
     elif args.command == "status":
         cmd_status(agents, self_name)
