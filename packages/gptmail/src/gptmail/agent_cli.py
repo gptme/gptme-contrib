@@ -145,7 +145,7 @@ def _ssh_deliver(agents: dict[str, dict[str, str]]) -> Deliver:
                     "scp",
                     *ssh_opts,
                     str(local_path),
-                    f"{ssh_target}:{shlex.quote(remote_inbox + local_path.name)}",
+                    f"{ssh_target}:{remote_inbox}{local_path.name}",
                 ],
                 check=True,
                 capture_output=True,
