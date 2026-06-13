@@ -237,6 +237,36 @@ class TestSendMessage:
         assert "from: bob" in content
         assert "to: alice" in content
 
+    def test_recipient_resolved_case_insensitively(self, tmp_path, monkeypatch):
+        """Capitalized recipient (e.g. "Alice" from a message `from:` field)
+        resolves to the lowercase agent key and is normalized in the outbox.
+
+        Regression for the reply path: message `from:` fields are often
+        capitalized while the agent registry keys are lowercase. An outbox
+        file written at all proves the recipient was resolved rather than
+        rejected as unknown (which returns early before writing anything).
+        """
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+
+        agents = {
+            "alice": {"ssh": "alice@unreachable.test", "workspace": "/home/alice"}
+        }
+
+        def fake_run(cmd, **kwargs):
+            raise subprocess.CalledProcessError(255, cmd)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = agent_msg.send_message(agents, "bob", "Alice", "Test", "Body")
+
+        # SSH fails (no network), but the outbox copy proves resolution succeeded.
+        assert result is False
+        outbox_files = list((msg_dir / "outbox").glob("*.md"))
+        assert (
+            len(outbox_files) == 1
+        ), "capitalized recipient must resolve, not be rejected"
+        assert "to: alice" in outbox_files[0].read_text()
+
 
 class TestGetSelf:
     def test_from_agent_name(self, monkeypatch):
