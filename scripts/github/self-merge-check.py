@@ -172,6 +172,9 @@ class CheckResult:
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
+    head_sha: str = (
+        ""  # HEAD commit OID at time of check — callers should re-verify before merging
+    )
 
 
 def run_gh(args: list[str], timeout: int = 30) -> str:
@@ -435,7 +438,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid",
         ]
     )
     if not raw:
@@ -1064,6 +1067,7 @@ def evaluate_pr(
         title=title,
         author=author,
         files=files,
+        head_sha=pr.get("headRefOid", ""),
     )
 
     current_user = get_gh_user()
