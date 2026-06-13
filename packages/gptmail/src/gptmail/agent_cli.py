@@ -123,6 +123,13 @@ def _ssh_deliver(agents: dict[str, dict[str, str]]) -> Deliver:
                 err=True,
             )
             return False
+        missing = [k for k in ("ssh", "workspace") if k not in agent]
+        if missing:
+            click.echo(
+                f"Error: agent '{recipient}' config missing required key(s): {', '.join(missing)}",
+                err=True,
+            )
+            return False
         ssh_target = agent["ssh"]
         remote_inbox = f"{agent['workspace']}/messages/inbox/"
         ssh_opts = ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
