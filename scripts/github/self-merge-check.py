@@ -769,7 +769,14 @@ def is_doc_file(path: str) -> bool:
 
 
 def is_spec_like_doc(path: str) -> bool:
-    return Path(path).name in SPEC_LIKE_DOCS
+    """Spec-like identity docs (README/ARCHITECTURE/CLAUDE/…) require human review.
+
+    Only matches at the REPOSITORY ROOT. These filenames denote a project's
+    top-level identity/spec docs; a *nested* package README (e.g.
+    ``packages/foo/README.md``) is ordinary package documentation, not a spec,
+    and shouldn't block self-merge of an otherwise low-risk tooling PR.
+    """
+    return "/" not in path.replace("\\", "/") and Path(path).name in SPEC_LIKE_DOCS
 
 
 def is_test_file(path: str) -> bool:

@@ -1252,3 +1252,37 @@ def test_check_result_head_sha_in_json_output() -> None:
     d = dataclasses.asdict(result)
     assert d["head_sha"] == "deadbeef1234"
     assert "head_sha" in json.dumps(d)
+
+
+# --- spec-like docs are root-only (nested package READMEs are ordinary docs) ---
+def test_root_identity_docs_are_spec_like() -> None:
+    for name in ("README.md", "ARCHITECTURE.md", "CLAUDE.md", "AGENTS.md", "GOALS.md"):
+        assert self_merge_check.is_spec_like_doc(name) is True
+
+
+def test_nested_package_readme_is_not_spec_like() -> None:
+    # A nested package README is package docs, not a top-level spec.
+    assert self_merge_check.is_spec_like_doc("packages/gptme-usage/README.md") is False
+    assert self_merge_check.is_spec_like_doc("gptme/server/README.md") is False
+    assert self_merge_check.is_spec_like_doc("docs/ARCHITECTURE.md") is False
+
+
+def test_nested_readme_does_not_disqualify_low_risk_pr() -> None:
+    # Regression: a clean tooling PR touching a nested package README + code +
+    # tests must classify into an allowed category, not be blocked as spec-like.
+    paths = [
+        "packages/gptme-usage/README.md",
+        "packages/gptme-usage/harness-quota.example.toml",
+        "packages/gptme-usage/src/gptme_usage/harness_models.py",
+        "packages/gptme-usage/tests/test_harness_quota_config.py",
+        "scripts/check-quota.py",
+    ]
+    category, reasons = self_merge_check.classify_category(paths, "gptme/gptme-contrib")
+    assert category is not None, reasons
+    assert reasons == []
+
+
+def test_root_readme_still_blocks_self_merge() -> None:
+    category, reasons = self_merge_check.classify_category(["README.md"], "gptme/gptme")
+    assert category is None
+    assert any("spec-like" in r for r in reasons)
