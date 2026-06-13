@@ -113,6 +113,9 @@ fi
 # than duplicating the work. fd 9 stays held for the rest of the script and is
 # released automatically on exit.
 SCRAPE_LOCK="${CLAUDE_USAGE_SCRAPE_LOCK:-/tmp/claude-usage-scrape.lock}"
+# flock is Linux-only (util-linux) and absent on macOS. Guard is a no-op there;
+# concurrent scrapes on macOS are benign (no multi-service automated setup).
+if command -v flock >/dev/null 2>&1; then
 exec 9>"$SCRAPE_LOCK"
 if ! flock -n 9; then
     # Another scrape is running — serve the most recent cache (even if stale)
@@ -151,6 +154,7 @@ if cached.get('_cred_fingerprint', '') == '$fp':
     echo "Warning: a usage scrape is already running and no cache is available." >&2
     exit 0
 fi
+fi  # command -v flock
 
 SESSION_NAME="claude-usage-check-$$"
 TIMEOUT=25
