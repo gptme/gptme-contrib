@@ -229,6 +229,20 @@ class AgentTransport:
                 path.write_text(content)
         return content
 
+    def _lookup_meta(self, message_id: str) -> dict | None:
+        for folder in (self.inbox, self.outbox):
+            path = self._resolve_within(folder, message_id)
+            if path is not None:
+                return self._meta_of(path)
+        return None
+
+    def _lookup_content(self, message_id: str) -> str | None:
+        for folder in (self.inbox, self.outbox):
+            path = self._resolve_within(folder, message_id)
+            if path is not None:
+                return path.read_text()
+        return None
+
     def _thread_chain(self, message_id: str) -> list[str]:
         """Ancestor message bodies (oldest first), following in_reply_to links."""
         chain: list[str] = []
@@ -247,24 +261,6 @@ class AgentTransport:
             current = str(parent)
         chain.reverse()
         return chain
-
-    def _lookup_meta(self, message_id: str) -> dict | None:
-        for folder in (self.inbox, self.outbox):
-            path = (folder / message_id).resolve()
-            if not str(path).startswith(str(folder.resolve()) + "/"):
-                return None
-            if path.exists():
-                return self._meta_of(path)
-        return None
-
-    def _lookup_content(self, message_id: str) -> str | None:
-        for folder in (self.inbox, self.outbox):
-            path = (folder / message_id).resolve()
-            if not str(path).startswith(str(folder.resolve()) + "/"):
-                return None
-            if path.exists():
-                return path.read_text()
-        return None
 
     def conversation_id_for(self, message_id: str) -> str:
         """Conversation ID for the unified tracker: the agent pair, order-free.

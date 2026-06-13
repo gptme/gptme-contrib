@@ -87,6 +87,14 @@ def test_list_inbox_empty_when_no_folder(tmp_path: Path) -> None:
     assert _transport(tmp_path).list_inbox("archive") == []
 
 
+def test_list_inbox_rejects_path_traversal(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("---\nsubject: nope\ntimestamp: 2026-01-01T00:00:00Z\n---\n")
+    with pytest.raises(ValueError):
+        _transport(tmp_path).list_inbox("../../outside")
+
+
 def test_read_marks_message_read(tmp_path: Path) -> None:
     t = _transport(tmp_path)
     bob = AgentTransport(
@@ -97,6 +105,18 @@ def test_read_marks_message_read(tmp_path: Path) -> None:
     content = t.read(mid)
     assert "content here" in content
     assert _frontmatter(t.inbox / mid)["read"] is True
+
+
+def test_read_only_updates_read_field(tmp_path: Path) -> None:
+    t = _transport(tmp_path)
+    bob = AgentTransport(
+        tmp_path / "messages", "bob", deliver=AgentTransport.local_deliver(t.inbox)
+    )
+    mid = bob.send("alice", "read: false alarm", "content here")
+    t.read(mid)
+    meta = _frontmatter(t.inbox / mid)
+    assert meta["read"] is True
+    assert meta["subject"] == "read: false alarm"
 
 
 def test_read_missing_raises(tmp_path: Path) -> None:
@@ -125,6 +145,19 @@ def test_read_include_thread_prepends_ancestor(tmp_path: Path) -> None:
     assert "the answer" in threaded
     # ancestor comes first
     assert threaded.index("the original question") < threaded.index("the answer")
+
+
+def test_read_include_thread_rejects_parent_path_traversal(tmp_path: Path) -> None:
+    alice = _transport(tmp_path)
+    bob = AgentTransport(
+        tmp_path / "bob-messages", "bob", deliver=AgentTransport.local_deliver(alice.inbox)
+    )
+    (tmp_path / "secret.md").write_text("TOP SECRET\n")
+    reply_id = bob.send("alice", "Re: Original", "the answer", reply_to="../../secret.md")
+
+    threaded = alice.read(reply_id, include_thread=True)
+    assert "the answer" in threaded
+    assert "TOP SECRET" not in threaded
 
 
 def test_conversation_id_is_order_free_pair(tmp_path: Path) -> None:
