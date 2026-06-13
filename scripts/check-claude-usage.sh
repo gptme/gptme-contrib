@@ -117,7 +117,11 @@ SCRAPE_LOCK="${CLAUDE_USAGE_SCRAPE_LOCK:-/tmp/claude-usage-scrape.lock}"
 # concurrent scrapes on macOS are benign (no multi-service automated setup).
 # --no-cache explicitly requests a fresh scrape so we skip the guard to avoid
 # silently handing the caller stale data (the documented contract is "Force fresh fetch").
-if [ "$NO_CACHE" = false ] && command -v flock >/dev/null 2>&1; then
+# --raw is excluded for the same reason the TTL cache check above excludes it:
+# raw callers want the unformatted scrape output, and the lock-held fallback only
+# emits json/human-readable cache — serving that to a raw caller would silently
+# hand back formatted data instead of raw.
+if [ "$MODE" != "raw" ] && [ "$NO_CACHE" = false ] && command -v flock >/dev/null 2>&1; then
     exec 9>"$SCRAPE_LOCK"
     if ! flock -n 9; then
         # Another scrape is running — serve the most recent cache (even if stale)
