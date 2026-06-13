@@ -707,6 +707,51 @@ def print_summary(console: Console, results: Dict[str, List[TaskInfo]], config: 
         console.print(f"\n{config.emoji} Summary: {total} total ({', '.join(summary_parts)})")
 
 
+def _build_status_json(dir_type: str, results: Dict[str, List[TaskInfo]]) -> Dict[str, Any]:
+    """Build a JSON-serializable status payload for one directory type.
+
+    Shape:
+        {
+          "type": "tasks",
+          "tasks": [<task_to_dict>, ...],   # every task, all states
+          "summary": {
+            "total": int,
+            "by_state": {"active": int, "backlog": int, ...},
+            "issues": int,      # tasks with validation problems
+            "untracked": int,   # files with no state
+          }
+        }
+
+    Each task in check_all() lands in exactly one bucket, so the flattened
+    "tasks" list has no duplicates and `total` equals its length.
+    """
+    config = CONFIGS[dir_type]
+    by_state: Dict[str, int] = {}
+    tasks: List[Dict[str, Any]] = []
+
+    for state in config.states:
+        items = results.get(state, [])
+        if items:
+            by_state[state] = len(items)
+            tasks.extend(task_to_dict(t) for t in items)
+
+    issues = results.get("issues", [])
+    untracked = results.get("untracked", [])
+    tasks.extend(task_to_dict(t) for t in issues)
+    tasks.extend(task_to_dict(t) for t in untracked)
+
+    return {
+        "type": dir_type,
+        "tasks": tasks,
+        "summary": {
+            "total": len(tasks),
+            "by_state": by_state,
+            "issues": len(issues),
+            "untracked": len(untracked),
+        },
+    }
+
+
 def check_directory(
     console: Console, dir_type: str, repo_root: Path, compact: bool = False
 ) -> Dict[str, List[TaskInfo]]:
@@ -907,10 +952,32 @@ def _show_github_issues(
     default=None,
     help="GitHub repo for --github (default: auto-detect via gh CLI)",
 )
-def status(type, all, compact, summary, issues, github, github_repo):
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Emit machine-readable JSON instead of rendered output (stable contract for scripts)",
+)
+def status(type, all, compact, summary, issues, github, github_repo, output_json):
     """Show status of tasks and other tracked items."""
     console = Console()
     repo_root = find_repo_root(Path.cwd())
+
+    # Machine-readable output: stable contract for scripts (avoids grepping
+    # rich-rendered human output, which depends on emoji/formatting). The
+    # display-only flags (--compact/--summary/--issues/--github) are ignored;
+    # consumers filter the full task list themselves.
+    if output_json:
+        if all:
+            payload: Dict[str, Any] = {"all": True, "types": {}}
+            for type_name in CONFIGS.keys():
+                results = StateChecker(repo_root, CONFIGS[type_name]).check_all()
+                payload["types"][type_name] = _build_status_json(type_name, results)
+        else:
+            results = StateChecker(repo_root, CONFIGS[type]).check_all()
+            payload = _build_status_json(type, results)
+        print(json.dumps(payload, indent=2))
+        return
 
     # Collect results from all directories
     all_results = {}

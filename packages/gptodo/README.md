@@ -60,6 +60,38 @@ gptodo list --priority high
 gptodo list --state active
 ```
 
+### Machine-Readable Output (`--json`)
+
+Scripts should parse `--json` rather than grep the rendered human output (the
+emoji/formatting are not a stable contract).
+
+```bash
+# Detect whether any task is active (used by autonomous-run gates)
+gptodo status --json | jq -e 'any(.tasks[]; .state == "active")'
+
+# Per-state counts
+gptodo status --json | jq '.summary.by_state'
+```
+
+Single-type shape (default):
+
+```json
+{
+  "type": "tasks",
+  "tasks": [ { "id": "...", "state": "active", "priority": "high", ... } ],
+  "summary": {
+    "total": 12,
+    "by_state": { "active": 1, "backlog": 11 },
+    "issues": 0,
+    "untracked": 0
+  }
+}
+```
+
+With `--all`, results are grouped under `types` keyed by directory type, each
+holding the same `{type, tasks, summary}` shape. `gptodo list`, `ready`, and
+`next` also support `--json` (and `--jsonl`).
+
 ### Generate Work Queue
 
 ```bash
