@@ -255,7 +255,7 @@ tmux send-keys -t "$SESSION_NAME" Enter
 # 'Usage' tab, so we wait for the category labels or the footer to appear.
 for _ in $(seq 1 "$TIMEOUT"); do
     content=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
-    if echo "$content" | grep -qiE '(Esc to cancel|d to day|w to week|Current week|% used)'; then
+    if echo "$content" | grep -qiE '(Esc to cancel|Current week|% used)'; then
         break
     fi
     sleep 1
