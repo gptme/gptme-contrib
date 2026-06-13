@@ -740,6 +740,13 @@ def _build_status_json(dir_type: str, results: Dict[str, List[TaskInfo]]) -> Dic
     tasks.extend(task_to_dict(t) for t in issues)
     tasks.extend(task_to_dict(t) for t in untracked)
 
+    # Tasks with validation issues are bucketed separately in check_all() and
+    # excluded from state buckets, so we count them into by_state here to keep
+    # by_state consistent with tasks[] (both should reflect actual task state).
+    for task in issues:
+        if task.state:
+            by_state[task.state] = by_state.get(task.state, 0) + 1
+
     return {
         "type": dir_type,
         "tasks": tasks,

@@ -100,6 +100,36 @@ def test_status_json_all_groups_by_type(tmp_path: Path, monkeypatch) -> None:
     assert payload["types"]["tasks"]["summary"]["total"] == 1
 
 
+def test_status_json_by_state_consistent_with_tasks_for_issue_tasks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """by_state must count active tasks even when they have validation issues.
+
+    A task with state="active" but a missing 'created' field lands in the
+    "issues" bucket in check_all(), not the "active" bucket. Without the fix,
+    by_state["active"] would be 0 while tasks[] has an entry with state="active",
+    making by_state inconsistent with tasks[].
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    # Valid task
+    write_task(tasks_dir, "clean", state="active", created="2026-03-28T00:00:00")
+    # Task with validation issue (missing 'created') but state="active"
+    write_task(tasks_dir, "broken", state="active")
+
+    payload = _run_status_json(tmp_path, monkeypatch)
+
+    # Both tasks appear in tasks[]
+    task_states = {t["id"]: t["state"] for t in payload["tasks"]}
+    assert task_states.get("clean") == "active"
+    assert task_states.get("broken") == "active"
+
+    # by_state["active"] must count both (clean + broken)
+    assert payload["summary"]["by_state"].get("active", 0) == 2
+    # issues counter reflects the broken task
+    assert payload["summary"]["issues"] == 1
+
+
 def test_status_json_includes_serialized_task_fields(tmp_path: Path, monkeypatch) -> None:
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
