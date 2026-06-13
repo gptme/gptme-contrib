@@ -1,16 +1,24 @@
-"""Centralized harness model registry for Bob's autonomous system.
+"""Harness model registry and per-agent quota configuration.
 
-Single source of truth for which models are available, their capability tiers,
-relative costs, and quota sources. All scripts that need model constants should
-import from here instead of defining their own.
+Provides:
+- Generic cost math (estimate_session_cost, estimate_tokens_from_duration)
+- HarnessQuotaConfig dataclass + load_quota_config() for per-agent model config
+- Agent SDK credit facts (dates, plan table)
+- Cache pricing multipliers
 
-See: categories.py for the same pattern applied to work categories.
+Agent-specific data (price tables, TPS, model routes, quota sources) should live
+in ~/.config/gptme/harness-quota.toml and be loaded via load_quota_config().
+The module-level globals (HARNESS_PRICE_USD_PER_1M etc.) are kept for backward
+compatibility but agents should prefer config-based lookup.
 """
 
 from __future__ import annotations
 
 import re
+import sys
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TypedDict
 
 # Approximate agent-session token mix used to blend input/output list prices into
@@ -49,6 +57,154 @@ def is_post_agent_sdk_credit_change(now: datetime | None = None) -> bool:
     if now is None:
         now = datetime.now(UTC)
     return now >= CLAUDE_AGENT_SDK_CREDIT_CHANGE_DATE
+
+
+# ---------------------------------------------------------------------------
+# Per-agent quota configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HarnessQuotaConfig:
+    """Per-agent quota configuration loaded from harness-quota.toml.
+
+    Holds the agent-specific model registry: prices, TPS estimates,
+    quota source map, model routing, and OpenRouter key contexts.
+    Cost functions (estimate_session_cost, estimate_tokens_from_duration)
+    accept an optional HarnessQuotaConfig and fall back to the module-level
+    defaults when None is passed.
+
+    Load via load_quota_config(); do not construct directly in most cases.
+    """
+
+    price_table: dict[tuple[str, str], tuple[float, float]] = field(
+        default_factory=dict
+    )
+    tps_table: dict[tuple[str, str], float] = field(default_factory=dict)
+    quota_sources: dict[str, str] = field(default_factory=dict)
+    model_routes: dict[str, str] = field(default_factory=dict)
+    openrouter_key_contexts: dict[str, str] = field(default_factory=dict)
+    claude_plan_tier: str = "max-20x"
+
+
+def _resolve_config_path(path: Path | None) -> Path:
+    """Return the harness-quota.toml path, consulting gptme config dir when path is None."""
+    if path is not None:
+        return path
+    config_dir: Path | None = None
+    try:
+        from gptme.config import get_config
+
+        raw = getattr(get_config(), "config_dir", None)
+        if raw is not None:
+            config_dir = Path(str(raw))
+    except Exception:
+        pass
+    if config_dir is None:
+        config_dir = Path.home() / ".config" / "gptme"
+    return config_dir / "harness-quota.toml"
+
+
+def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
+    """Load per-agent quota configuration from a TOML file.
+
+    Looks for ``~/.config/gptme/harness-quota.toml`` by default (or the path
+    returned by ``gptme.config.get_config().config_dir``).  Returns an empty
+    HarnessQuotaConfig when the file is absent, unreadable, or Python < 3.11
+    (no stdlib tomllib) and tomli is not installed.
+
+    TOML schema::
+
+        claude_plan_tier = "max-20x"  # optional; default "max-20x"
+
+        [prices.claude-code]
+        opus    = [5.0, 25.0]   # [input_$/1M, output_$/1M]
+        sonnet  = [3.0, 15.0]
+
+        [prices.gptme]
+        "deepseek-v4-pro" = [1.74, 3.48]
+
+        [tps.claude-code]
+        opus   = 18899          # tokens per second (empirical)
+        sonnet = 12804
+
+        [quota_sources]
+        "gpt-5.4"          = "chatgpt"
+        "deepseek-v4-pro"  = "openrouter"
+        "qwen3.6"          = "local"
+
+        [model_routes]
+        "deepseek-v4-pro" = "openrouter/deepseek/deepseek-v4-pro@deepseek"
+
+        [openrouter_key_contexts]
+        default           = "autonomous"
+        "deepseek-v4-pro" = "autonomous_deepseek"
+    """
+    toml_path = _resolve_config_path(path)
+
+    if not toml_path.exists():
+        return HarnessQuotaConfig()
+
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        try:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+        except ModuleNotFoundError:
+            return HarnessQuotaConfig()
+
+    try:
+        with open(toml_path, "rb") as fh:
+            raw = tomllib.load(fh)
+    except Exception:
+        return HarnessQuotaConfig()
+
+    price_table: dict[tuple[str, str], tuple[float, float]] = {}
+    for backend, models in (raw.get("prices") or {}).items():
+        if not isinstance(models, dict):
+            continue
+        for model, pair in models.items():
+            if isinstance(pair, list) and len(pair) == 2:
+                try:
+                    price_table[(backend, model)] = (float(pair[0]), float(pair[1]))
+                except (TypeError, ValueError):
+                    pass
+
+    tps_table: dict[tuple[str, str], float] = {}
+    for backend, models in (raw.get("tps") or {}).items():
+        if not isinstance(models, dict):
+            continue
+        for model, tps in models.items():
+            try:
+                tps_table[(backend, model)] = float(tps)
+            except (TypeError, ValueError):
+                pass
+
+    quota_sources: dict[str, str] = {}
+    for model, src in (raw.get("quota_sources") or {}).items():
+        if isinstance(src, str):
+            quota_sources[model] = src
+
+    model_routes: dict[str, str] = {}
+    for model, route in (raw.get("model_routes") or {}).items():
+        if isinstance(route, str):
+            model_routes[model] = route
+
+    openrouter_key_contexts: dict[str, str] = {}
+    for key, ctx in (raw.get("openrouter_key_contexts") or {}).items():
+        if isinstance(ctx, str):
+            openrouter_key_contexts[key] = ctx
+
+    claude_plan_tier = str(raw.get("claude_plan_tier") or "max-20x")
+
+    return HarnessQuotaConfig(
+        price_table=price_table,
+        tps_table=tps_table,
+        quota_sources=quota_sources,
+        model_routes=model_routes,
+        openrouter_key_contexts=openrouter_key_contexts,
+        claude_plan_tier=claude_plan_tier,
+    )
 
 
 # --- Agent-specific configuration ---
@@ -246,6 +402,7 @@ def estimate_session_cost(
     cache_creation_tokens: int | None = None,
     cache_read_tokens: int | None = None,
     token_count: int | None = None,
+    config: HarnessQuotaConfig | None = None,
 ) -> float | None:
     """Estimate real USD cost from observed token breakdown.
 
@@ -258,9 +415,19 @@ def estimate_session_cost(
     all tokens are cache reads (validated at 99.9%+ for 1,104 CC
     sessions with full breakdowns).  See knowledge/research/
     2026-05-01-token-coverage-backfill-analysis.md.
+
+    Args:
+        config: Optional per-agent quota config.  When provided and its
+            ``price_table`` is non-empty, that table is used for pricing
+            instead of the module-level ``HARNESS_PRICE_USD_PER_1M``.
     """
+    price_table = (
+        config.price_table
+        if (config is not None and config.price_table)
+        else HARNESS_PRICE_USD_PER_1M
+    )
     key = pricing_key_for_model(harness, model)
-    prices = HARNESS_PRICE_USD_PER_1M.get(key)
+    prices = price_table.get(key)
     if prices is None:
         return None
 
@@ -351,19 +518,30 @@ def estimate_tokens_from_duration(
     harness: str,
     model: str,
     duration_seconds: int,
+    *,
+    config: HarnessQuotaConfig | None = None,
 ) -> int | None:
     """Estimate token count from session duration.
 
     Returns None when no TPS data is available for this (harness, model) pair
     or when duration is zero/negative.
+
+    Args:
+        config: Optional per-agent quota config.  When provided and its
+            ``tps_table`` is non-empty, that table is used instead of the
+            module-level ``TOKENS_PER_SECOND``.
     """
     if duration_seconds <= 0:
         return None
+    tps_table = (
+        config.tps_table
+        if (config is not None and config.tps_table)
+        else TOKENS_PER_SECOND
+    )
     key = pricing_key_for_model(harness, model)
-    tps = TOKENS_PER_SECOND.get(key)
+    tps = tps_table.get(key)
     if tps is None:
-        # Try normalized model name directly (for harness_models keys)
-        tps = TOKENS_PER_SECOND.get((harness, model))
+        tps = tps_table.get((harness, model))
     if tps is None:
         return None
     return int(duration_seconds * tps)
