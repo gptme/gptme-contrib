@@ -66,7 +66,17 @@ def _load_agent_group():
     except ImportError:
         src = Path(__file__).resolve().parent.parent / "packages" / "gptmail" / "src"
         sys.path.insert(0, str(src))
-        from gptmail.agent_cli import agent  # type: ignore[import-not-found]
+        try:
+            from gptmail.agent_cli import agent  # type: ignore[import-not-found]
+        except ImportError as e:
+            print(
+                "Error: could not import the gptmail agent CLI.\n"
+                f"Tried an installed gptmail and the source checkout at {src}.\n"
+                "Install it with: pip install -e packages/gptmail\n"
+                "(or run from a gptme-contrib checkout where packages/gptmail exists).",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from e
     return agent
 
 
@@ -75,10 +85,13 @@ def _translate(argv: list[str]) -> list[str]:
 
     The surfaces are near-identical (send/broadcast/list/read/reply/status pass
     through unchanged). The one rename: ``list --needs-reply`` became its own
-    ``pending`` subcommand.
+    ``pending`` subcommand. Any other flags on that invocation are carried over
+    (not silently dropped) so click validates them and errors on anything
+    ``pending`` doesn't accept.
     """
     if argv and argv[0] == "list" and "--needs-reply" in argv[1:]:
-        return ["pending"]
+        rest = [a for a in argv[1:] if a != "--needs-reply"]
+        return ["pending", *rest]
     return argv
 
 
