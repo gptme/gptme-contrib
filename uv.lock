@@ -2004,6 +2004,9 @@ provides-extras = ["test", "all"]
 name = "gptme-usage"
 version = "0.1.0"
 source = { editable = "packages/gptme-usage" }
+dependencies = [
+    { name = "tomli", marker = "python_full_version < '3.11'" },
+]
 
 [package.optional-dependencies]
 test = [
@@ -2015,6 +2018,7 @@ test = [
 requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
 provides-extras = ["test"]
 

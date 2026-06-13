@@ -19,7 +19,11 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Utilities",
 ]
-dependencies = []
+# tomllib is stdlib on 3.11+; tomli is the backport so load_quota_config()
+# actually parses harness-quota.toml on 3.10 (declared in requires-python).
+dependencies = [
+    "tomli>=2.0; python_version < '3.11'",
+]
 
 [project.urls]
 Homepage = "https://github.com/gptme/gptme-contrib"
