@@ -63,6 +63,14 @@ def test_parse_pr_non_numeric_hash_exits_2() -> None:
     assert exc.value.code == 2
 
 
+def test_parse_pr_hash_form_missing_slash_exits_2() -> None:
+    """Hash form without a slash in the repo part should exit 2 via _die(),
+    not raise a raw ValueError from the owner/name unpack."""
+    with pytest.raises(SystemExit) as exc:
+        parse_pr("myrepo#123", None)
+    assert exc.value.code == 2
+
+
 def test_resolve_thread_unexpected_shape_returns_false(monkeypatch) -> None:
     """rc==0 with a valid-but-unexpected body (null thread node) must return False,
     not raise out of the caller's loop."""

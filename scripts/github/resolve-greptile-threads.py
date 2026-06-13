@@ -69,6 +69,8 @@ def parse_pr(spec: str, second: str | None) -> tuple[str, str, int]:
         return m.group(1), m.group(2), int(m.group(3))
     if "#" in spec:
         repo, num = spec.split("#", 1)
+        if "/" not in repo:
+            _die(f"Invalid PR specifier {spec!r}: expected OWNER/REPO#NUM.")
         owner, name = repo.split("/", 1)
         try:
             return owner, name, int(num)
