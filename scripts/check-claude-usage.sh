@@ -21,6 +21,25 @@
 #   The tmux/TUI approach takes ~25s, so caching avoids unnecessary overhead
 #   when called from autonomous loops or monitoring scripts.
 #   Set CLAUDE_USAGE_CACHE_TTL=<seconds> to override, or use --no-cache.
+#
+# JSON contract (--json):
+#   The CC v2.1.175 /usage TUI exposes three categories. They are emitted under
+#   BOTH stable keys (consumed by quota-gate.sh / autonomous-run-cc.sh) and new
+#   descriptive aliases (same dict object):
+#     five_hour        == current_session       (Current session)
+#     seven_day        == current_week_all       (Current week, all models) ← weekly Max limit
+#     seven_day_sonnet == current_week_sonnet     (Current week, Sonnet only)
+#   Each category dict has:
+#     utilization        float 0..1   (fraction of the limit used)
+#     resets             str          (raw reset string, e.g. 'Jun 16, 3:59pm')
+#     resets_in_seconds  int          (seconds until reset)
+#     time_left          str          (e.g. '3.8d left')
+#     model              str          (human label)
+#   Plus top-level: _pacing {pace_gap, status, ...}, _off_peak {...},
+#   _cred_fingerprint, and (on fallback) _source / _warning.
+#   Consumers: quota-gate.sh reads five_hour.utilization, seven_day.utilization,
+#   seven_day_sonnet.utilization, *.time_left; autonomous-run-cc.sh reads
+#   _pacing.pace_gap.
 
 set -euo pipefail
 
@@ -83,20 +102,22 @@ if fresh and fp_match:
     else:
         print('Claude Max Subscription Usage')
         print('=' * 60)
-        for key, label in [('five_hour', 'Session (5h)'), ('seven_day', 'Weekly (all)'), ('seven_day_sonnet', 'Weekly (Sonnet)')]:
+        for key, label in [
+            ('five_hour', 'Current session'),
+            ('seven_day', 'Current week (all models)'),
+            ('seven_day_sonnet', 'Current week (Sonnet only)'),
+        ]:
             info = cached.get(key)
             if info and isinstance(info, dict):
                 util = info.get('utilization', 0)
-                remaining = 1 - util
-                bar_width = 30
-                filled = int(util * bar_width)
-                bar = '█' * filled + '░' * (bar_width - filled)
-                time_left = info.get('time_left', '')
                 resets = info.get('resets', 'unknown')
-                print(f'  {label:20s} [{bar}] {util*100:4.0f}% used ({remaining*100:.0f}% left)')
-                print(f'  {\"\":20s} resets {resets}  ({time_left})')
+                _r = resets.replace('(UTC)', '').strip()
+                resets_disp = resets if resets in ('unknown', 'session_end') else f'{_r} UTC'
+                time_left = info.get('time_left', '')
+                tl = f' ({time_left})' if time_left else ''
+                print(f'  {label}: {util*100:.0f}% used — resets {resets_disp}{tl}')
             else:
-                print(f'  {label:20s} N/A')
+                print(f'  {label}: N/A')
         print()
     sys.exit(0)
 sys.exit(1)
@@ -229,10 +250,12 @@ tmux send-keys -t "$SESSION_NAME" "/usage"
 sleep 2
 tmux send-keys -t "$SESSION_NAME" Enter
 
-# Wait for the /usage TUI to load (CC v2.1.168 tab-based layout)
+# Wait for the /usage TUI to load (CC v2.1.175 tab-based layout).
+# The new layout shows the Session + both weekly categories at once under the
+# 'Usage' tab, so we wait for the category labels or the footer to appear.
 for _ in $(seq 1 "$TIMEOUT"); do
     content=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
-    if echo "$content" | grep -qiE '(Esc to cancel|d to day|w to week|Nothing over 10%)'; then
+    if echo "$content" | grep -qiE '(Esc to cancel|d to day|w to week|Current week|% used)'; then
         break
     fi
     sleep 1
@@ -380,132 +403,90 @@ def format_time_left(reset_dt):
     else:
         return f'{int(total_sec / 60)}m left'
 
-# --- Parser for CC v2.1.168+ TUI ---
-# The new /usage TUI shows per-model usage in a section under 'Usage' tab.
-# Format examples:
-#   Last 24h / This week · these are independent characteristics...
-#   Opus              ████████░░░░░░░░░░  86% used · Resets Thu, 9pm
-#   Opus              ████████████████████  100% used · Resets ...
-#   Claude 3.5 Sonnet ██████░░░░░░░░░░░░░░  55% used · Resets ...
-# Or when usage is very low:
-#   Nothing over 10% in this period — try the other window.
+# --- Parser for CC v2.1.175 TUI ---
+# The /usage TUI now shows three usage categories as BLOCKS of three lines each,
+# all visible at once under the 'Usage' tab (no day/week toggle needed):
 #
-# In the 'Session' section above the usage section, we also find:
-#   Total cost, duration, Usage: input/output tokens
-# The 5-hour session utilization is estimated from the session usage data.
+#   Current session
+#   ███▌                                               7% used
+#   Resets 11:29am (UTC)
+#
+#   Current week (all models)
+#   █▌                                                 3% used
+#   Resets Jun 16, 3:59pm (UTC)
+#
+#   Current week (Sonnet only)
+#   ▌                                                  1% used
+#   Resets Jun 16, 4pm (UTC)
+#
+# A category is: a label line, followed (within a few lines) by a bar+'N% used'
+# line, followed by a 'Resets ...' line.
+#
+# We map the three categories onto the established JSON keys (kept stable for
+# downstream consumers like quota-gate.sh and autonomous-run-cc.sh):
+#   Current session            -> five_hour
+#   Current week (all models)  -> seven_day
+#   Current week (Sonnet only) -> seven_day_sonnet
 
 lines = text.split('\\n')
 
-# First check for the 'Nothing over 10%' empty state
-low_usage = 'Nothing over 10%' in text
+# Category label -> (json key, human label). Matched as a substring (case-insensitive).
+category_defs = [
+    ('current session',            'five_hour',        'Current session'),
+    ('current week (all models)',  'seven_day',        'Current week (all models)'),
+    ('current week (sonnet',       'seven_day_sonnet', 'Current week (Sonnet only)'),
+]
 
-# --- Strategy: find usage bars per model ---
-# Look for lines that contain a model name, a usage bar (unicode blocks),
-# a percentage, and optionally 'Resets'.
-# Common model names: Opus, Sonnet, Claude 3.5, Haiku, Claude 4, etc.
+pct_re = re.compile(r'(\d+)%\s*used')
+reset_re = re.compile(r'Resets\s+(.+)')
 
-# Also extract session-level data from the Session section
-session_cost = None
-session_usage_total = 0  # Will estimate 5h utilization from this
+def find_category(label_match):
+    \"\"\"Find the pct and reset string for the category whose label line contains
+    label_match. Scans the lines after the label until the next category label,
+    picking up the first '% used' and 'Resets' line.\"\"\"
+    other_labels = [m for (m, _k, _l) in category_defs if m != label_match]
+    for i, line in enumerate(lines):
+        low = line.strip().lower()
+        if label_match in low:
+            pct = None
+            reset_str = None
+            # Look ahead a small window for the bar/pct line and the resets line.
+            for j in range(i + 1, min(i + 6, len(lines))):
+                nxt = lines[j].strip()
+                nxt_low = nxt.lower()
+                # Stop if we hit the next category label.
+                if any(ol in nxt_low for ol in other_labels):
+                    break
+                if pct is None:
+                    pm = pct_re.search(nxt)
+                    if pm:
+                        pct = int(pm.group(1)) / 100
+                rm = reset_re.search(nxt)
+                if rm:
+                    reset_str = rm.group(1).strip()
+                if pct is not None and reset_str is not None:
+                    break
+            if pct is not None:
+                return pct, reset_str
+    return None, None
 
-# First pass: find the 'Session' section and extract its data
-in_session = False
-for line in lines:
-    stripped = line.strip()
-    if stripped == 'Session':
-        in_session = True
-        continue
-    if stripped and not stripped.startswith('Total') and not stripped.startswith('Usage:') and not stripped.startswith('  '):
-        # Check if this line is outside Session section
-        if not stripped.startswith('▔') and stripped not in ('', ' '):
-            in_session = False
-            continue
-    if in_session:
-        # Total cost:            $0.0000
-        cm = re.search(r'Total cost:\s+[$]?([\d.]+)', stripped)
-        if cm:
-            session_cost = float(cm.group(1))
-            continue
-        # Usage:                 0 input, 0 output, 0 cache read, 0 cache write
-        um = re.search(r'Usage:\s+(\d+)', stripped)
-        if um:
-            session_usage_total += int(um.group(1))
+for label_match, key, label in category_defs:
+    pct, reset_str = find_category(label_match)
+    if pct is not None:
+        result[key] = {
+            'model': label,
+            'utilization': pct,
+            'resets': reset_str if reset_str else 'unknown',
+        }
 
-# --- Model usage extraction ---
-# Lines in the usage section look like:
-#   ModelName   ████░░  N% used · Resets <time>
-# The bar is made of unicode block chars (▀▁▂▃▄▅▆▇█░▒▓)
-
-# Collect all lines that might be model usage rows
-model_lines = []
-for line in lines:
-    stripped = line.strip()
-    # A model usage line contains a percentage and likely a bar character
-    has_pct = re.search(r'(\d+)%\s*used', stripped)
-    has_bar = bool(re.search(r'[█░▒▓▀▁▂▃▄▅▆▇▉▊▋▌▍▎▏]', stripped))
-    has_resets = 'Resets' in stripped
-    if has_pct and (has_bar or has_resets):
-        model_lines.append(stripped)
-
-# Parse each model line
-for line in model_lines:
-    # Match: model name, percentage, reset time
-    # Model names are at the start of the line, before the bar or percentage
-    # Examples:
-    # 'Opus              ████████░░░░░░░░░░  86% used · Resets Thu, 9pm'
-    # 'Claude 3.5 Sonnet ██████░░░░░░░░░░░░░░  55% used · Resets ...'
-    # 'Opus              ████████████████████  100% used · Resets ...'
-
-    pct_m = re.search(r'(\d+)%\s*used', line)
-    reset_m = re.search(r'Resets\s+(.+)', line)
-    if not pct_m:
-        continue
-
-    pct = int(pct_m.group(1)) / 100
-    reset_str = reset_m.group(1).strip() if reset_m else None
-
-    # Identify the model name (text before the bar or percentage)
-    # Strip the bar characters and percentage to extract model name
-    # Pattern: <model_name> <optional bar> <percentage>
-    stripped_line = re.sub(r'[█░▒▓▀▁▂▃▄▅▆▇▉▊▋▌▍▎▏\s]+', ' ', line)
-    # Now extract text before '%'
-    pct_idx = stripped_line.find('%')
-    if pct_idx > 0:
-        # Get text before the percentage
-        before_pct = stripped_line[:pct_idx].strip()
-        # Remove the number
-        before_pct = re.sub(r'\d+\s*$', '', before_pct).strip()
-        model_name = before_pct
-    else:
-        model_name = 'unknown'
-
-    # Skip very short names (noise)
-    if len(model_name) < 2:
-        continue
-
-    # Map model names to keys
-    name_lower = model_name.lower()
-    if 'sonnet' in name_lower:
-        key = 'seven_day_sonnet'
-        label = model_name
-    else:
-        # Opus and any other model → weekly Opus/general quota
-        key = 'seven_day'
-        label = model_name
-
-    result[key] = {
-        'model': label,
-        'utilization': pct,
-        'resets': reset_str if reset_str else 'unknown',
-    }
-
-
-# If no model lines found but we detected low usage, return zeros
+# If nothing parsed, fall back (auth failure, scanning state, or TUI changed again).
 if not result:
+    low_usage = False  # the old 'Nothing over 10%' empty state no longer exists
+    session_cost = None
     if low_usage:
         # No usage to report — set all to 0
         now = datetime.now(timezone.utc)
-        # Estimate next weekly reset (Thu 00:00 UTC = "Wed night / Thu morning")
+        # Estimate next weekly reset (Thu 00:00 UTC = Wed-night / Thu-morning)
         days_until_thu = (3 - now.weekday()) % 7  # Mon=0, Thu=3
         if days_until_thu == 0:  # today IS Thursday; midnight already passed
             days_until_thu = 7
@@ -659,6 +640,19 @@ if seven_day and seven_day.get('resets_in_seconds') is not None:
         'status': 'underusing' if gap > 0.05 else ('overusing' if gap < -0.05 else 'on_track'),
     }
 
+# Add new-name aliases for the three categories (CC v2.1.175 names), pointing at
+# the SAME dicts as the stable keys. Consumers may read either name.
+#   five_hour        <-> current_session
+#   seven_day        <-> current_week_all
+#   seven_day_sonnet <-> current_week_sonnet
+for _old, _new in [
+    ('five_hour', 'current_session'),
+    ('seven_day', 'current_week_all'),
+    ('seven_day_sonnet', 'current_week_sonnet'),
+]:
+    if _old in result and isinstance(result[_old], dict):
+        result[_new] = result[_old]
+
 # Stamp the credential fingerprint into the cache so a later cache read can
 # detect a credential switch (different slot or rewritten slot) and bypass.
 # Format: '<resolved-target-inode>:<resolved-target-mtime>' (mtime as int).
@@ -715,19 +709,21 @@ if json_mode:
 else:
     print('Claude Max Subscription Usage')
     print('=' * 60)
-    for key, label in [('five_hour', 'Session (5h)'), ('seven_day', 'Weekly (all)'), ('seven_day_sonnet', 'Weekly (Sonnet)')]:
+    for key, label in [
+        ('five_hour', 'Current session'),
+        ('seven_day', 'Current week (all models)'),
+        ('seven_day_sonnet', 'Current week (Sonnet only)'),
+    ]:
         info = result.get(key)
-        if info:
+        if info and isinstance(info, dict):
             util = info['utilization']
-            remaining = 1 - util
-            bar_width = 30
-            filled = int(util * bar_width)
-            bar = '█' * filled + '░' * (bar_width - filled)
+            resets = info.get('resets', 'unknown')
+            _r = resets.replace('(UTC)', '').strip()
+            resets_disp = resets if resets in ('unknown', 'session_end') else f'{_r} UTC'
             time_left = info.get('time_left', '')
-            resets = info['resets']
-            print(f'  {label:20s} [{bar}] {util*100:4.0f}% used ({remaining*100:.0f}% left)')
-            print(f'  {\"\":20s} resets {resets}  ({time_left})')
+            tl = f' ({time_left})' if time_left else ''
+            print(f'  {label}: {util*100:.0f}% used — resets {resets_disp}{tl}')
         else:
-            print(f'  {label:20s} N/A')
+            print(f'  {label}: N/A')
     print()
 "
