@@ -23,6 +23,24 @@ self_merge_check = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = self_merge_check
 spec.loader.exec_module(self_merge_check)
 
+# Real (unpatched) helper, captured before the autouse fixture swaps it for a Mock.
+_REAL_MERGE_PERMISSION = self_merge_check.merge_permission.__wrapped__
+
+
+@pytest.fixture(autouse=True)
+def _stub_merge_permission():
+    """Default merge_permission to True so evaluate_pr tests don't make a live
+    gh call (and aren't sensitive to the test runner's actual repo access).
+
+    merge_permission is @cache'd, so clear the cache around each test to keep
+    per-test patches (True/False/None) isolated. Tests exercising the
+    permission gate itself patch merge_permission explicitly.
+    """
+    self_merge_check.merge_permission.cache_clear()
+    with patch.object(self_merge_check, "merge_permission", return_value=True):
+        yield
+    self_merge_check.merge_permission.cache_clear()
+
 
 def test_checks_green_rejects_indeterminate_check() -> None:
     assert not self_merge_check.checks_green([{"status": None, "conclusion": None}])
@@ -689,6 +707,93 @@ def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
     assert (
         result.eligible
     ), f"Explicit opt-out should not disqualify; reasons: {result.reasons}"
+
+
+def _eligible_pr_data() -> dict:
+    return {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+    }
+
+
+def _evaluate_otherwise_eligible(merge_perm):
+    """Evaluate an otherwise-eligible PR with a given merge_permission result."""
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=_eligible_pr_data()),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=5),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+        patch.object(self_merge_check, "merge_permission", return_value=merge_perm),
+    ):
+        return self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+
+def test_evaluate_pr_blocks_when_no_merge_permission() -> None:
+    """A definitive lack of merge permission disqualifies (would fail the merge)."""
+    result = _evaluate_otherwise_eligible(False)
+    assert not result.eligible
+    assert any("lacks merge permission" in r for r in result.reasons)
+
+
+def test_evaluate_pr_warns_when_merge_permission_unknown() -> None:
+    """An indeterminate merge permission is a warning, not a disqualifier."""
+    result = _evaluate_otherwise_eligible(None)
+    assert result.eligible, f"reasons: {result.reasons}"
+    assert any("determine merge permission" in w for w in result.warnings)
+
+
+def test_evaluate_pr_eligible_with_merge_permission() -> None:
+    """Explicit merge permission keeps an otherwise-eligible PR eligible."""
+    result = _evaluate_otherwise_eligible(True)
+    assert result.eligible, f"reasons: {result.reasons}"
+
+
+def test_merge_permission_raw_helper() -> None:
+    """The underlying helper maps gh permission payloads to a bool/None."""
+    raw = _REAL_MERGE_PERMISSION
+    with patch.object(
+        self_merge_check, "run_gh", return_value='{"push": true, "admin": false}'
+    ):
+        assert raw("gptme/gptme-contrib") is True
+    with patch.object(
+        self_merge_check,
+        "run_gh",
+        return_value='{"push": false, "maintain": false, "admin": false}',
+    ):
+        assert raw("gptme/gptme-contrib") is False
+    with patch.object(self_merge_check, "run_gh", return_value=""):
+        assert raw("gptme/gptme-contrib") is None
+    with patch.object(self_merge_check, "run_gh", return_value="not json"):
+        assert raw("gptme/gptme-contrib") is None
+    # Dict present but all three expected keys absent — unknown, not disqualified
+    with patch.object(
+        self_merge_check,
+        "run_gh",
+        return_value='{"pull": true, "triage": true}',
+    ):
+        assert raw("gptme/gptme-contrib") is None
 
 
 def test_greptile_summary_score_ignores_signal_disable_env() -> None:
