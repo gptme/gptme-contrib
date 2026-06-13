@@ -23,6 +23,7 @@ Two deliberate design choices, both resolved with Bob (see task
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -118,12 +119,23 @@ class AgentTransport:
             return None
         return meta if isinstance(meta, dict) else None
 
-    def _resolve_in_inbox(self, message_id: str) -> Path | None:
-        """Resolve a message_id to an inbox path, rejecting path traversal."""
-        path = (self.inbox / message_id).resolve()
-        if not str(path).startswith(str(self.inbox.resolve()) + "/"):
+    @staticmethod
+    def _resolve_within(folder: Path, message_id: str) -> Path | None:
+        """Resolve ``message_id`` inside ``folder``, rejecting path traversal.
+
+        ``message_id`` may come from a remote agent's frontmatter (e.g. an
+        ``in_reply_to`` link), so an attacker-crafted ``../../etc/passwd`` must
+        not escape ``folder``. ``Path.__truediv__`` does not reject traversal,
+        hence the explicit prefix check after ``resolve()``.
+        """
+        path = (folder / message_id).resolve()
+        if not str(path).startswith(str(folder.resolve()) + "/"):
             return None
         return path if path.exists() else None
+
+    def _resolve_in_inbox(self, message_id: str) -> Path | None:
+        """Resolve a message_id to an inbox path, rejecting path traversal."""
+        return self._resolve_within(self.inbox, message_id)
 
     def send(
         self,
@@ -165,6 +177,8 @@ class AgentTransport:
 
     def list_inbox(self, folder: str = "inbox") -> list[tuple[str, str, datetime]]:
         """List ``(message_id, subject, timestamp)`` for messages in a folder."""
+        if "/" in folder or folder.startswith("."):
+            raise ValueError(f"Invalid folder name: {folder!r}")
         target = self._dir / folder
         if not target.exists():
             return []
@@ -210,7 +224,7 @@ class AgentTransport:
         if content.startswith("---"):
             parts = content.split("---", 2)
             if len(parts) >= 3 and "read: false" in parts[1]:
-                parts[1] = parts[1].replace("read: false", "read: true")
+                parts[1] = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
                 content = "---".join(parts)
                 path.write_text(content)
         return content
@@ -236,14 +250,18 @@ class AgentTransport:
 
     def _lookup_meta(self, message_id: str) -> dict | None:
         for folder in (self.inbox, self.outbox):
-            path = folder / message_id
+            path = (folder / message_id).resolve()
+            if not str(path).startswith(str(folder.resolve()) + "/"):
+                return None
             if path.exists():
                 return self._meta_of(path)
         return None
 
     def _lookup_content(self, message_id: str) -> str | None:
         for folder in (self.inbox, self.outbox):
-            path = folder / message_id
+            path = (folder / message_id).resolve()
+            if not str(path).startswith(str(folder.resolve()) + "/"):
+                return None
             if path.exists():
                 return path.read_text()
         return None
