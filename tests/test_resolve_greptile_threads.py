@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+MODULE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "scripts"
+    / "github"
+    / "resolve-greptile-threads.py"
+)
+spec = importlib.util.spec_from_file_location("resolve_greptile_threads", MODULE_PATH)
+if spec is None or spec.loader is None:
+    pytest.skip(f"Could not load module from {MODULE_PATH}", allow_module_level=True)
+resolve_greptile_threads = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = resolve_greptile_threads
+spec.loader.exec_module(resolve_greptile_threads)
+
+parse_pr = resolve_greptile_threads.parse_pr
+resolve_thread = resolve_greptile_threads.resolve_thread
+filter_targets = resolve_greptile_threads.filter_targets
+
+
+def test_parse_pr_hash_form() -> None:
+    assert parse_pr("gptme/gptme-contrib#123", None) == ("gptme", "gptme-contrib", 123)
+
+
+def test_parse_pr_two_arg_form() -> None:
+    assert parse_pr("gptme/gptme-contrib", "456") == ("gptme", "gptme-contrib", 456)
+
+
+def test_parse_pr_url_form() -> None:
+    url = "https://github.com/gptme/gptme/pull/789"
+    assert parse_pr(url, None) == ("gptme", "gptme", 789)
+
+
+def test_parse_pr_url_takes_precedence_over_second_arg() -> None:
+    # A URL should be parsed as-is even when a stray second arg is present.
+    url = "https://github.com/owner/repo/pull/12"
+    assert parse_pr(url, "99") == ("owner", "repo", 12)
+
+
+def test_parse_pr_invalid_exits_2() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_pr("not-a-pr-spec", None)
+    assert exc.value.code == 2
+
+
+def test_parse_pr_non_numeric_second_exits_2() -> None:
+    """Two-argument form with non-numeric second should exit 2 via _die()."""
+    with pytest.raises(SystemExit) as exc:
+        parse_pr("gptme/gptme-contrib", "foo")
+    assert exc.value.code == 2
+
+
+def test_parse_pr_non_numeric_hash_exits_2() -> None:
+    """Hash form with non-numeric number should exit 2 via _die(), not raise ValueError."""
+    with pytest.raises(SystemExit) as exc:
+        parse_pr("gptme/gptme-contrib#abc", None)
+    assert exc.value.code == 2
+
+
+def test_parse_pr_hash_form_missing_slash_exits_2() -> None:
+    """Hash form without a slash in the repo part should exit 2 via _die(),
+    not raise a raw ValueError from the owner/name unpack."""
+    with pytest.raises(SystemExit) as exc:
+        parse_pr("myrepo#123", None)
+    assert exc.value.code == 2
+
+
+def test_resolve_thread_unexpected_shape_returns_false(monkeypatch) -> None:
+    """rc==0 with a valid-but-unexpected body (null thread node) must return False,
+    not raise out of the caller's loop."""
+    monkeypatch.setattr(
+        resolve_greptile_threads,
+        "_run_gh",
+        lambda args: (0, '{"data": {"resolveReviewThread": null}}', ""),
+    )
+    assert resolve_thread("THREAD_ID") is False
+
+
+def test_targeting_excludes_resolved() -> None:
+    threads = [
+        {"id": "a", "isResolved": True, "isOutdated": True, "path": "x"},
+        {"id": "b", "isResolved": False, "isOutdated": False, "path": "y"},
+        {"id": "c", "isResolved": False, "isOutdated": True, "path": "z"},
+    ]
+    assert {t["id"] for t in filter_targets(threads, outdated_only=False)} == {"b", "c"}
+    assert {t["id"] for t in filter_targets(threads, outdated_only=True)} == {"c"}
