@@ -46,7 +46,10 @@ Design: `ErikBjare/bob knowledge/technical-designs/gptme-usage-package-split.md`
 
 ## Roadmap
 
-- **PR 1 (this)**: scaffold + move `harness_models` out of `gptme-subscription`.
+- **Done**: scaffold + move `harness_models` out of `gptme-subscription`.
+- **Done**: config-driven data. The module ships EMPTY tables; `check-quota.py`
+  loads `load_quota_config()` once and threads it through every call, so each
+  agent's `harness-quota.toml` drives cost/availability. See
+  `harness-quota.example.toml` for the schema.
 - **Next**: move `check-quota.py` + the `check-*-usage` scrapers in behind a
-  `gptme-usage check <backend>` CLI; wire config-driven data so Bob's tables
-  leave the shared module (`bob/config/harness-quota.toml`).
+  `gptme-usage check <backend>` console entry point.
