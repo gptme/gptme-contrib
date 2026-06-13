@@ -1,11 +1,13 @@
-"""Tests for HarnessQuotaConfig and load_quota_config."""
+"""Tests for HarnessQuotaConfig, load_quota_config, and merge_with_module_defaults."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+from gptme_usage.config import merge_with_module_defaults
 from gptme_usage.harness_models import (
+    HARNESS_PRICE_USD_PER_1M,
     HarnessQuotaConfig,
     estimate_session_cost,
     estimate_tokens_from_duration,
@@ -100,7 +102,6 @@ def test_module_ships_no_agent_data() -> None:
     from gptme_usage.harness_models import (
         GPTME_MODEL_ROUTES,
         GPTME_QUOTA_SOURCE,
-        HARNESS_PRICE_USD_PER_1M,
         TOKENS_PER_SECOND,
     )
 
@@ -248,3 +249,79 @@ def test_config_aware_model_source_helpers() -> None:
     # No config -> legacy deepseek heuristic still applies.
     assert gptme_openrouter_context("deepseek-v4-pro") == "autonomous_deepseek"
     assert gptme_openrouter_context("kimi-k2.6") == "autonomous"
+
+
+# ---------------------------------------------------------------------------
+# merge_with_module_defaults
+# ---------------------------------------------------------------------------
+
+
+def test_merge_with_module_defaults_caller_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller-supplied entries take priority over module defaults."""
+    import gptme_usage.config as config_mod
+
+    # Inject non-empty module defaults so the test is non-vacuous.
+    fake_defaults: dict[tuple[str, str], tuple[float, float]] = {
+        ("claude-code", "opus"): (3.0, 15.0),  # will be overridden by caller
+        ("gptme", "base-model"): (1.0, 5.0),  # unlisted in caller's config
+    }
+    monkeypatch.setattr(config_mod, "HARNESS_PRICE_USD_PER_1M", fake_defaults)
+
+    caller_price: dict[tuple[str, str], tuple[float, float]] = {
+        ("claude-code", "opus"): (99.0, 99.0),  # overrides the module default
+    }
+    cfg = HarnessQuotaConfig(price_table=caller_price)
+    merged = merge_with_module_defaults(cfg)
+
+    # Caller's entry must win over the module default.
+    assert merged.price_table[("claude-code", "opus")] == (99.0, 99.0)
+    # Unlisted model from module defaults must also appear.
+    assert merged.price_table[("gptme", "base-model")] == (1.0, 5.0)
+    # Combined table contains both the caller's entry and the module default.
+    assert len(merged.price_table) == len(fake_defaults)
+
+
+def test_merge_with_module_defaults_fallback_for_unlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Module defaults appear for models NOT in the caller's config."""
+    import gptme_usage.config as config_mod
+
+    # Inject non-empty module defaults so the for-loop actually executes.
+    fake_defaults: dict[tuple[str, str], tuple[float, float]] = {
+        ("gptme", "base-model"): (1.0, 5.0),
+        ("claude-code", "sonnet"): (3.0, 15.0),
+    }
+    monkeypatch.setattr(config_mod, "HARNESS_PRICE_USD_PER_1M", fake_defaults)
+
+    cfg = HarnessQuotaConfig()  # caller has no custom prices
+    merged = merge_with_module_defaults(cfg)
+
+    # All module defaults must appear in the merged result.
+    for key, val in fake_defaults.items():
+        assert merged.price_table[key] == val, f"missing/wrong default for {key}"
+
+
+def test_merge_with_module_defaults_preserves_caller_metadata() -> None:
+    """Non-table fields (openrouter_key_contexts, claude_plan_tier) pass through."""
+    cfg = HarnessQuotaConfig(
+        openrouter_key_contexts={"default": "my-ctx", "special": "other-ctx"},
+        claude_plan_tier="max-5x",
+    )
+    merged = merge_with_module_defaults(cfg)
+
+    assert merged.claude_plan_tier == "max-5x"
+    assert merged.openrouter_key_contexts == {
+        "default": "my-ctx",
+        "special": "other-ctx",
+    }
+
+
+def test_merge_with_module_defaults_does_not_mutate_input() -> None:
+    """merge_with_module_defaults returns a new object; it must not mutate *config*."""
+    cfg = HarnessQuotaConfig()
+    original_len = len(cfg.price_table)
+    merge_with_module_defaults(cfg)
+    assert len(cfg.price_table) == original_len, "input config was mutated"
