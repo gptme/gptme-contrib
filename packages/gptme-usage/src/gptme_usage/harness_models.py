@@ -325,8 +325,8 @@ def pricing_key_for_model(
         else:
             normalized_model = resolved
     elif harness == "gptme":
-        # Config replaces the module-level routes entirely (unlike price_table /
-        # tps_table which merge config entries on top of module defaults) so a
+        # Config replaces the module-level routes entirely (consistent with
+        # price_table and tps_table: all three use replace-not-merge) so a
         # configured agent never silently inherits stale routes from the defaults.
         routes = (
             config.model_routes
