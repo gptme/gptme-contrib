@@ -401,9 +401,10 @@ def _addressed_to(meta: dict, self_name: str) -> bool:
     to = meta.get("to")
     if to is None:
         return True
+    self_lower = self_name.lower()
     if isinstance(to, (list, tuple, set)):  # noqa: UP038 (union form breaks mypy here)
-        return self_name in {str(t) for t in to}
-    return str(to) == self_name
+        return self_lower in {str(t).lower() for t in to}
+    return str(to).lower() == self_lower
 
 
 def needs_reply_messages(self_name: str, window_days: int | None = None) -> list[dict]:

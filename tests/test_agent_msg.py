@@ -504,3 +504,39 @@ class TestCmdReply:
         monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
         (msg_dir / "inbox").mkdir(parents=True)
         assert agent_msg.cmd_reply({}, "alice", "nope.md", "ok") is False
+
+    def test_case_insensitive_self_name(self, tmp_path, monkeypatch):
+        """Mixed-case self_name (e.g. 'Alice' from AGENT_NAME) must still
+        match the lowercased `to:` field stored by send_message.
+
+        Regression for Greptile P1: _addressed_to compared self_name verbatim
+        against the stored lowercase `to:` field, silently dropping all
+        pending-reply output for agents with capitalized names.
+        """
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        # Message to 'alice' (lowercase, as send_message normalizes it)
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: alice\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        # self_name is 'Alice' (mixed-case, as AGENT_NAME=Alice would give)
+        pending = agent_msg.needs_reply_messages("Alice", window_days=0)
+        assert len(pending) == 1
+
+    def test_case_insensitive_broadcast(self, tmp_path, monkeypatch):
+        """Mixed-case self_name must match a broadcast list with lowercase entries."""
+        msg_dir = tmp_path / "messages"
+        monkeypatch.setattr(agent_msg, "get_messages_dir", lambda: msg_dir)
+        inbox = msg_dir / "inbox"
+        inbox.mkdir(parents=True)
+        (msg_dir / "outbox").mkdir(parents=True)
+        (inbox / "m.md").write_text(
+            '---\nfrom: bob\nto: [alice, gordon]\ntimestamp: "2026-06-13T10:00:00Z"'
+            "\nsubject: hi\nread: false\n---\n\nBody"
+        )
+        pending = agent_msg.needs_reply_messages("Alice", window_days=0)
+        assert len(pending) == 1
