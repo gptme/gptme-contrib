@@ -713,7 +713,12 @@ def _apply_claude_agent_sdk_credit_budget(
     for entry in results:
         if entry.backend != "claude-code":
             continue
-        entry.available = entry.available and not blocked
+        # Post-June-15: the credit pool is the sole availability gate for Agent
+        # SDK calls. Old 5h/7d limits apply only to interactive (non-agent)
+        # sessions and must not block agent dispatches when credit has headroom.
+        # Overwriting (not AND-ing) entry.available avoids a stale 5h/7d
+        # available=False forcing a ~30-day credit-window wait on the scheduler.
+        entry.available = not blocked
         entry.utilization = utilization
         entry.resets_in_seconds = resets_in
         entry.reason = detail
@@ -959,6 +964,28 @@ def _request_claude_usage_refresh_in_background() -> bool:
     return True
 
 
+def _assumed_claude_code_entries(reason: str) -> list[BackendQuota]:
+    """Build assumed-available entries for both opus and sonnet.
+
+    Every degraded path in check_claude_code_quota (script missing, no cache,
+    nonzero exit, probe exception) must return entries for BOTH models. Opus and
+    sonnet share the subscription, so when the usage probe is unavailable both
+    are "assumed available". Returning only opus would make downstream consumers
+    treat sonnet as unavailable. Mirrors the two-entry block-file early return.
+    """
+    return [
+        BackendQuota(
+            backend="claude-code",
+            model=model,
+            available=True,
+            source="assumed",
+            reason=reason,
+            models_available=[model],
+        )
+        for model in ("opus", "sonnet")
+    ]
+
+
 def check_claude_code_quota(*, fast: bool = False) -> list[BackendQuota]:
     """Check Claude Code quota via check-claude-usage.sh.
 
@@ -1029,46 +1056,19 @@ def check_claude_code_quota(*, fast: bool = False) -> list[BackendQuota]:
             return results
         if not CLAUDE_USAGE_SCRIPT.exists():
             return _apply_claude_agent_sdk_credit_budget(
-                [
-                    BackendQuota(
-                        backend="claude-code",
-                        model="opus",
-                        available=True,
-                        source="assumed",
-                        reason="check-claude-usage.sh not found",
-                        models_available=["opus"],
-                    )
-                ]
+                _assumed_claude_code_entries("check-claude-usage.sh not found")
             )
         refresh_requested = _request_claude_usage_refresh_in_background()
         reason = "no cached Claude quota snapshot available for fast mode"
         if refresh_requested:
             reason += "; background refresh requested"
         return _apply_claude_agent_sdk_credit_budget(
-            [
-                BackendQuota(
-                    backend="claude-code",
-                    model="opus",
-                    available=True,
-                    source="assumed",
-                    reason=reason,
-                    models_available=["opus"],
-                )
-            ]
+            _assumed_claude_code_entries(reason)
         )
 
     if not CLAUDE_USAGE_SCRIPT.exists():
         return _apply_claude_agent_sdk_credit_budget(
-            [
-                BackendQuota(
-                    backend="claude-code",
-                    model="opus",
-                    available=True,
-                    source="assumed",
-                    reason="check-claude-usage.sh not found",
-                    models_available=["opus"],
-                )
-            ]
+            _assumed_claude_code_entries("check-claude-usage.sh not found")
         )
 
     try:
@@ -1089,31 +1089,13 @@ def check_claude_code_quota(*, fast: bool = False) -> list[BackendQuota]:
                 fallback=f"check-claude-usage.sh failed (exit {proc.returncode})",
             )
             return _apply_claude_agent_sdk_credit_budget(
-                [
-                    BackendQuota(
-                        backend="claude-code",
-                        model="opus",
-                        available=True,
-                        source="assumed",
-                        reason=detail,
-                        models_available=["opus"],
-                    )
-                ]
+                _assumed_claude_code_entries(detail)
             )
 
         data = json.loads(proc.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
         return _apply_claude_agent_sdk_credit_budget(
-            [
-                BackendQuota(
-                    backend="claude-code",
-                    model="opus",
-                    available=True,
-                    source="assumed",
-                    reason=f"quota check error: {e}",
-                    models_available=["opus"],
-                )
-            ]
+            _assumed_claude_code_entries(f"quota check error: {e}")
         )
 
     return _augment_claude_results_with_subscription_state(
