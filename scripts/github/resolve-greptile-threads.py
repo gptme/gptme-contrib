@@ -168,6 +168,15 @@ def resolve_thread(thread_id: str) -> bool:
         return False
 
 
+def filter_targets(threads: list[dict], outdated_only: bool) -> list[dict]:
+    """Return unresolved threads eligible for resolution."""
+    return [
+        t
+        for t in threads
+        if not t["isResolved"] and (t["isOutdated"] or not outdated_only)
+    ]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("pr")
@@ -185,11 +194,7 @@ def main() -> int:
 
     owner, name, num = parse_pr(a.pr, a.num)
     threads = fetch_greptile_threads(owner, name, num)
-    targets = [
-        t
-        for t in threads
-        if not t["isResolved"] and (t["isOutdated"] or not a.outdated_only)
-    ]
+    targets = filter_targets(threads, a.outdated_only)
 
     # When emitting JSON, per-thread progress goes to stderr so stdout stays parseable.
     log = sys.stderr if a.json else sys.stdout

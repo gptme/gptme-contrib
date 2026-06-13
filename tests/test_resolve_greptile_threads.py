@@ -21,6 +21,7 @@ spec.loader.exec_module(resolve_greptile_threads)
 
 parse_pr = resolve_greptile_threads.parse_pr
 resolve_thread = resolve_greptile_threads.resolve_thread
+filter_targets = resolve_greptile_threads.filter_targets
 
 
 def test_parse_pr_hash_form() -> None:
@@ -74,18 +75,10 @@ def test_resolve_thread_unexpected_shape_returns_false(monkeypatch) -> None:
 
 
 def test_targeting_excludes_resolved() -> None:
-    # Mirrors main()'s target filter: skip resolved; honor --outdated-only.
     threads = [
         {"id": "a", "isResolved": True, "isOutdated": True, "path": "x"},
         {"id": "b", "isResolved": False, "isOutdated": False, "path": "y"},
         {"id": "c", "isResolved": False, "isOutdated": True, "path": "z"},
     ]
-    all_targets = [
-        t for t in threads if not t["isResolved"] and (t["isOutdated"] or not False)
-    ]
-    assert {t["id"] for t in all_targets} == {"b", "c"}
-
-    outdated_targets = [
-        t for t in threads if not t["isResolved"] and (t["isOutdated"] or not True)
-    ]
-    assert {t["id"] for t in outdated_targets} == {"c"}
+    assert {t["id"] for t in filter_targets(threads, outdated_only=False)} == {"b", "c"}
+    assert {t["id"] for t in filter_targets(threads, outdated_only=True)} == {"c"}
