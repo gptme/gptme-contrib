@@ -148,3 +148,43 @@ def test_perfect_greptile_review_does_not_emit_improvement_for_behind_pr() -> No
         assert "greptile_needs_improvement" not in result.stdout, result.stdout
         assert "greptile_needs_fix" not in result.stdout, result.stdout
         assert not _own_review_state_file(state_dir).exists()
+
+
+def test_blocked_pr_with_low_greptile_emits_improvement() -> None:
+    """A branch-protected green PR sits in BLOCKED while awaiting required review.
+
+    A sub-5 Greptile score there is actionable, so check_own_pr_review_state must
+    emit on first discovery rather than waiting for the 1h check_greptile_scores
+    cooldown nag (the latency window that forced manual @-mentions).
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        ts = int(time.time()) - 60
+        # Greptile 4/5 already on file for the current HEAD.
+        _greptile_state_file(state_dir).write_text(f"4:{ts}:{TEST_HEAD_SHA}")
+
+        result = _run_gate(tmp, state_dir, merge_state="BLOCKED")
+        assert result.returncode in (0, 1), result.stderr
+        assert "greptile_needs_improvement" in result.stdout, result.stdout
+        # The own-PR review path is what fired (identified by its detail string).
+        assert "own-PR review" in result.stdout, result.stdout
+        assert _own_review_state_file(state_dir).exists()
+
+
+def test_unknown_merge_state_still_skips_own_pr_review() -> None:
+    """UNKNOWN means GitHub is still computing mergeability — stay transient-safe."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        ts = int(time.time()) - 60
+        _greptile_state_file(state_dir).write_text(f"4:{ts}:{TEST_HEAD_SHA}")
+
+        result = _run_gate(tmp, state_dir, merge_state="UNKNOWN")
+        assert result.returncode in (0, 1), result.stderr
+        assert "own-PR review" not in result.stdout, result.stdout
+        assert not _own_review_state_file(state_dir).exists()
