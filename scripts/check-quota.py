@@ -1826,7 +1826,14 @@ def configured_backends() -> list[str]:
     """Resolve the agent's available backends from config (QUOTA_BACKENDS env)."""
     raw = os.environ.get("QUOTA_BACKENDS", "").strip()
     if raw:
-        return [b.strip() for b in raw.split(",") if b.strip()]
+        seen: set[str] = set()
+        result: list[str] = []
+        for b in raw.split(","):
+            b = b.strip()
+            if b and b not in seen:
+                seen.add(b)
+                result.append(b)
+        return result
     return list(DEFAULT_BACKENDS)
 
 

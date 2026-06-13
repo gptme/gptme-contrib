@@ -395,11 +395,7 @@ def estimate_session_cost(
         # Empirical validation: 1,104 CC sessions with full breakdowns
         # show 99.9%+ of billed tokens are cache reads, so token_count
         # ≈ cache_read_tokens for these sessions.
-        if (
-            token_count
-            and token_count > 0
-            and (harness, model) in SUBSCRIPTION_BACKED_MODELS
-        ):
+        if token_count and token_count > 0 and key in SUBSCRIPTION_BACKED_MODELS:
             provider = _CACHE_PRICING_PROVIDER.get(key)
             if provider:
                 cache_read_rate = CACHE_READ_MULTIPLIER.get(provider, 1.0)
@@ -761,6 +757,21 @@ def tier_grade_data(
         db_path = _default_db_path()
     if db_path is None or not db_path.exists():
         return {}
+
+    # Allowlist of known float-grade columns in sessions table.
+    # SQLite does not support parameterized column names, so we validate
+    # against this set to prevent SQL injection.
+    _VALID_METRICS: set[str] = {
+        "llm_judge_score",
+        "self_eval_score",
+        "reward",
+        "grade",
+        "productivity_score",
+        "harm_signal",
+        "score",
+    }
+    if metric not in _VALID_METRICS:
+        metric = "llm_judge_score"  # safe default
 
     try:
         conn = sqlite3.connect(str(db_path))
