@@ -82,6 +82,40 @@ def test_send_unknown_agent_errors(workspace: Path) -> None:
     assert "unknown agent" in result.output.lower()
 
 
+def test_send_to_self_blocked(workspace: Path) -> None:
+    """Self-send is rejected (regression: agent-msg.py had this guard, port lost it)."""
+    result = CliRunner().invoke(agent, ["send", "alice", "Hi", "x"])
+    assert result.exit_code == 1
+    assert "yourself" in result.output.lower()
+    # Nothing written to the outbox.
+    assert not list((workspace / "messages" / "outbox").glob("*.md"))
+
+
+def test_send_reports_delivery_failure_and_exits_nonzero(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed delivery must NOT print 'Sent' and must exit non-zero.
+
+    Core-infra reliability: the transport stamps ``delivered: false`` on a failed
+    deliver hook; the CLI must surface that rather than reporting false success.
+    """
+
+    def _failing_deliver(_agents):
+        def _deliver(_local_path: Path, _recipient: str) -> bool:
+            return False
+
+        return _deliver
+
+    monkeypatch.setattr(agent_cli, "_ssh_deliver", _failing_deliver)
+    result = CliRunner().invoke(agent, ["send", "bob", "Hello", "body"])
+    assert result.exit_code == 1, result.output
+    assert "Sent to bob" not in result.output
+    assert "failed" in result.output.lower()
+    # The message is still saved to the outbox, stamped delivered: false.
+    out = _only_outbox_msg(workspace)
+    assert _frontmatter(out)["delivered"] is False
+
+
 @pytest.mark.parametrize(
     "entry",
     [

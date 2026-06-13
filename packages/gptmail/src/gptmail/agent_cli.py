@@ -185,6 +185,24 @@ def _transport(deliver: Deliver | None = None) -> AgentTransport:
     return AgentTransport(_messages_dir(), _self_name(), deliver=deliver)
 
 
+def _delivery_failed(message_id: str) -> bool:
+    """True if the just-sent outbox message was stamped ``delivered: false``.
+
+    The transport stamps that field only when the deliver hook reports failure;
+    a successful send leaves it absent. Lets the CLI report real failures (and
+    exit non-zero) instead of always printing "Sent".
+    """
+    path = _messages_dir() / "outbox" / message_id
+    try:
+        content = path.read_text()
+    except OSError:
+        return False
+    if not content.startswith("---"):
+        return False
+    parts = content.split("---", 2)
+    return len(parts) >= 3 and "delivered: false" in parts[1]
+
+
 def _track_sent(transport: AgentTransport, message_id: str, reply_to: str | None) -> None:
     """Stamp a sent message into the shared tracker (channel='agent')."""
     tracker = _tracker()
@@ -300,12 +318,22 @@ def send(to: str, subject: str, content: str | None) -> None:
     """Send a message to another agent."""
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
+    if to.lower() == _self_name():
+        click.echo("Error: cannot send a message to yourself.", err=True)
+        sys.exit(1)
     if to.lower() not in agents:
         click.echo(f"Error: unknown agent '{to}'. Known: {', '.join(agents)}", err=True)
         sys.exit(1)
     transport = _transport(deliver=_ssh_deliver(agents))
     message_id = transport.send(to, subject, body)
     _track_sent(transport, message_id, reply_to=None)
+    if _delivery_failed(message_id):
+        click.echo(
+            f"Delivery to {to.lower()} FAILED — saved to outbox (delivered: false). "
+            "It was NOT received.",
+            err=True,
+        )
+        sys.exit(1)
     click.echo(f"Sent to {to.lower()}: {subject}")
 
 
@@ -321,10 +349,18 @@ def broadcast(subject: str, content: str | None) -> None:
     if not recipients:
         click.echo("No other agents in registry.", err=True)
         return
+    failures = []
     for name in recipients:
         message_id = transport.send(name, subject, body)
         _track_sent(transport, message_id, reply_to=None)
-        click.echo(f"Sent to {name}: {subject}")
+        if _delivery_failed(message_id):
+            click.echo(f"Delivery to {name} FAILED (delivered: false).", err=True)
+            failures.append(name)
+        else:
+            click.echo(f"Sent to {name}: {subject}")
+    if failures:
+        click.echo(f"Broadcast incomplete: {len(failures)} delivery failure(s).", err=True)
+        sys.exit(1)
 
 
 @agent.command(name="list")
