@@ -17,7 +17,7 @@ a thin adapter over the existing ``lib.AgentEmail`` IMAP/SMTP stack. A future
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-__all__ = ["Transport", "EmailTransport"]
+__all__ = ["Transport", "EmailTransport", "AgentTransport"]
 
 
 @runtime_checkable
@@ -81,7 +81,20 @@ class Transport(Protocol):
         ...
 
 
-# Re-exported so callers import both the seam and its first implementation from
-# one place. EmailTransport satisfies Transport structurally (it does not import
-# it), so there is no circular dependency.
-from .email import EmailTransport  # noqa: E402
+# Re-exported lazily (PEP 562). ``EmailTransport`` and ``AgentTransport`` are
+# importable as ``gptmail.transport.X`` for convenience, but the import is
+# deferred to attribute access so that ``import gptmail.transport.agent`` does
+# NOT eagerly pull in ``.email`` (which imports the IMAP/SMTP stack via
+# ``lib.AgentEmail``). This is what keeps the agent transport usable in isolated
+# LXC sessions with no email infra — the guard test
+# ``test_agent_transport_no_email_imports.py`` enforces it at runtime.
+def __getattr__(name: str):  # noqa: D401
+    if name == "EmailTransport":
+        from .email import EmailTransport
+
+        return EmailTransport
+    if name == "AgentTransport":
+        from .agent import AgentTransport
+
+        return AgentTransport
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
