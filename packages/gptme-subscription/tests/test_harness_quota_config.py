@@ -75,7 +75,7 @@ def test_load_quota_config_empty_file(tmp_path: Path) -> None:
     cfg = load_quota_config(p)
     assert isinstance(cfg, HarnessQuotaConfig)
     assert cfg.price_table == {}
-    assert cfg.claude_plan_tier == "max-20x"  # default
+    assert cfg.claude_plan_tier is None  # unconfigured = unknown, not a Bob default
 
 
 def test_estimate_session_cost_with_config(toml_path: Path) -> None:
@@ -155,3 +155,32 @@ def test_load_quota_config_toml_round_trip(tmp_path: Path) -> None:
     cfg = load_quota_config(p)
     assert ("claude-code", "sonnet") in cfg.price_table
     assert cfg.price_table[("claude-code", "sonnet")] == (3.0, 15.0)
+
+
+def test_config_model_routes_replace_not_merge() -> None:
+    """A non-empty config.model_routes must fully replace GPTME_MODEL_ROUTES.
+
+    Regression guard: earlier code merged the two ({**globals, **config}), so a
+    configured agent silently inherited Bob's routes. An agent's config should be
+    authoritative — provider models only in Bob's globals must not resolve.
+    """
+    from gptme_subscription.harness_models import (
+        GPTME_MODEL_ROUTES,
+        pricing_key_for_model,
+    )
+
+    if not GPTME_MODEL_ROUTES:
+        pytest.skip("no module-level GPTME_MODEL_ROUTES to test replacement against")
+
+    bob_short, bob_provider = next(iter(GPTME_MODEL_ROUTES.items()))
+    # Config with a disjoint route set (does not contain bob_provider).
+    cfg = HarnessQuotaConfig(model_routes={"someagent-model": "openrouter/x/y@z"})
+
+    # With replace semantics, Bob's provider model is unknown to this config, so
+    # it stays unnormalized instead of resolving to Bob's short name.
+    key = pricing_key_for_model("gptme", bob_provider, config=cfg)
+    assert key == ("gptme", bob_provider)
+    assert key != ("gptme", bob_short)
+
+    # Without config, Bob's globals still resolve normally (unchanged behavior).
+    assert pricing_key_for_model("gptme", bob_provider) == ("gptme", bob_short)
