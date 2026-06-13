@@ -27,6 +27,32 @@ def test_email_transport_satisfies_protocol(tmp_path: Path) -> None:
     assert isinstance(transport, Transport)
 
 
+def test_missing_channel_fails_protocol() -> None:
+    """A transport without ``channel`` is rejected by ``isinstance``.
+
+    Regression guard for the ``channel`` declaration: as a bare data attribute
+    (``channel: str``), ``@runtime_checkable`` ``isinstance()`` skips it on
+    Python 3.10/3.11 and this object would wrongly pass. Declaring ``channel``
+    as a ``@property`` on the Protocol makes the structural check verify it on
+    all supported versions. (Per Bob's review of PR #1090.)
+    """
+
+    class NoChannelTransport:
+        def send(self, to, subject, content, *, reply_to=None) -> str:
+            return "id"
+
+        def list_inbox(self, folder: str = "inbox"):
+            return []
+
+        def read(self, message_id: str, include_thread: bool = False) -> str:
+            return ""
+
+        def conversation_id_for(self, message_id: str) -> str:
+            return "x"
+
+    assert not isinstance(NoChannelTransport(), Transport)
+
+
 def test_channel_is_email(tmp_path: Path) -> None:
     assert _make_transport(tmp_path).channel == "email"
 

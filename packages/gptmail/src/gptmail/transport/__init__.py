@@ -31,9 +31,18 @@ class Transport(Protocol):
     queries.
     """
 
-    #: Stable channel identifier stamped onto tracked messages (e.g. ``"email"``,
-    #: ``"agent"``). Used as the ``channel`` field on ``MessageInfo``.
-    channel: str
+    @property
+    def channel(self) -> str:
+        """Stable channel identifier stamped onto tracked messages.
+
+        E.g. ``"email"``, ``"agent"`` — used as the ``channel`` field on
+        ``MessageInfo``. Declared as a property (not a bare data attribute) so
+        ``@runtime_checkable`` ``isinstance()`` checks verify it on Python
+        3.10/3.11, where structural checks only cover method/property members.
+        A concrete class variable (``EmailTransport.channel = "email"``)
+        satisfies it structurally on all supported versions.
+        """
+        ...
 
     def send(
         self,
