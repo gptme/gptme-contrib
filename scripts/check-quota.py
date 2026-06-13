@@ -32,16 +32,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+_usage_pkg_src = str(REPO_ROOT / "packages" / "gptme-usage" / "src")
+if _usage_pkg_src not in sys.path:
+    sys.path.insert(0, _usage_pkg_src)
 _subscription_pkg_src = str(REPO_ROOT / "packages" / "gptme-subscription" / "src")
 if _subscription_pkg_src not in sys.path:
     sys.path.insert(0, _subscription_pkg_src)
 _credential_slots_src = str(REPO_ROOT / "packages" / "credential-slots" / "src")
 if _credential_slots_src not in sys.path:
     sys.path.insert(0, _credential_slots_src)
-# harness_models is the shared model catalog (tiers/prices/routes/quota-sources +
-# generic cost logic), now canonical in gptme-subscription so every agent shares
-# one source of truth. Per-agent availability is configuration (see QUOTA_BACKENDS).
-from gptme_subscription.harness_models import (  # noqa: E402
+# harness_models is the shared model catalog (prices/routes/quota-sources +
+# generic cost logic), canonical in the gptme-usage package (usage/capacity is a
+# separate concern from subscription/slot rotation — see the gptme-usage README).
+# Per-agent availability is configuration (see QUOTA_BACKENDS).
+from gptme_subscription.routing import compute_window_pacing  # noqa: E402
+from gptme_usage.harness_models import (  # noqa: E402
     CLAUDE_AGENT_SDK_ASSUMED_MONTHLY_CREDIT_USD,
     CLAUDE_AGENT_SDK_CREDIT_CHANGE_DATE,
     estimate_session_cost,
@@ -51,7 +56,6 @@ from gptme_subscription.harness_models import (  # noqa: E402
     local_models,
     openrouter_models,
 )
-from gptme_subscription.routing import compute_window_pacing  # noqa: E402
 
 SESSION_RECORDS_FILE = REPO_ROOT / "state" / "sessions" / "session-records.jsonl"
 CLAUDE_CODE_PROJECTS_DIR = Path.home() / ".claude" / "projects"

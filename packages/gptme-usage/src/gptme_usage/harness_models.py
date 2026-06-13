@@ -84,7 +84,9 @@ class HarnessQuotaConfig:
     quota_sources: dict[str, str] = field(default_factory=dict)
     model_routes: dict[str, str] = field(default_factory=dict)
     openrouter_key_contexts: dict[str, str] = field(default_factory=dict)
-    claude_plan_tier: str = "max-20x"
+    # Agent's Claude plan tier (e.g. "max-5x", "max-20x"). None = unconfigured;
+    # callers must not assume a specific agent's plan as a generic default.
+    claude_plan_tier: str | None = None
 
 
 def _resolve_config_path(path: Path | None) -> Path:
@@ -115,7 +117,7 @@ def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
 
     TOML schema::
 
-        claude_plan_tier = "max-20x"  # optional; default "max-20x"
+        claude_plan_tier = "max-20x"  # optional; omit when unknown (default None)
 
         [prices.claude-code]
         opus    = [5.0, 25.0]   # [input_$/1M, output_$/1M]
@@ -195,7 +197,8 @@ def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
         if isinstance(ctx, str):
             openrouter_key_contexts[key] = ctx
 
-    claude_plan_tier = str(raw.get("claude_plan_tier") or "max-20x")
+    raw_tier = raw.get("claude_plan_tier")
+    claude_plan_tier = str(raw_tier) if isinstance(raw_tier, str) and raw_tier else None
 
     return HarnessQuotaConfig(
         price_table=price_table,
@@ -322,8 +325,11 @@ def pricing_key_for_model(
         else:
             normalized_model = resolved
     elif harness == "gptme":
+        # Config replaces the module-level routes entirely (consistent with
+        # price_table and tps_table: all three use replace-not-merge) so a
+        # configured agent never silently inherits stale routes from the defaults.
         routes = (
-            {**GPTME_MODEL_ROUTES, **config.model_routes}
+            config.model_routes
             if (config is not None and config.model_routes)
             else GPTME_MODEL_ROUTES
         )
@@ -430,8 +436,11 @@ def estimate_session_cost(
             ``price_table`` is non-empty, that table is used for pricing
             instead of the module-level ``HARNESS_PRICE_USD_PER_1M``.
     """
+    # A non-empty config.price_table replaces the module-level table outright
+    # (not a merge) so a configured agent never inherits Bob's prices underneath
+    # its own. Consistent with tps_table and model_routes.
     price_table = (
-        {**HARNESS_PRICE_USD_PER_1M, **config.price_table}
+        config.price_table
         if (config is not None and config.price_table)
         else HARNESS_PRICE_USD_PER_1M
     )
@@ -542,8 +551,10 @@ def estimate_tokens_from_duration(
     """
     if duration_seconds <= 0:
         return None
+    # Replace (not merge) the module-level table when config provides one — see
+    # estimate_session_cost for the rationale (no Bob-data leak into agents).
     tps_table = (
-        {**TOKENS_PER_SECOND, **config.tps_table}
+        config.tps_table
         if (config is not None and config.tps_table)
         else TOKENS_PER_SECOND
     )

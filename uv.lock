@@ -40,6 +40,7 @@ members = [
     "gptme-subscription",
     "gptme-tooloutput-trimmer",
     "gptme-tts",
+    "gptme-usage",
     "gptme-user-memories",
     "gptme-voice",
     "gptme-warpgrep",
@@ -1998,6 +1999,28 @@ requires-dist = [
     { name = "sounddevice", specifier = ">=0.5.1" },
 ]
 provides-extras = ["test", "all"]
+
+[[package]]
+name = "gptme-usage"
+version = "0.1.0"
+source = { editable = "packages/gptme-usage" }
+dependencies = [
+    { name = "tomli", marker = "python_full_version < '3.11'" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
+]
+provides-extras = ["test"]
 
 [[package]]
 name = "gptme-user-memories"

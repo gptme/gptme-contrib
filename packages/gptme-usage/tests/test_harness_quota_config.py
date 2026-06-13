@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from gptme_subscription.harness_models import (
+from gptme_usage.harness_models import (
     HarnessQuotaConfig,
     estimate_session_cost,
     estimate_tokens_from_duration,
@@ -75,7 +75,7 @@ def test_load_quota_config_empty_file(tmp_path: Path) -> None:
     cfg = load_quota_config(p)
     assert isinstance(cfg, HarnessQuotaConfig)
     assert cfg.price_table == {}
-    assert cfg.claude_plan_tier == "max-20x"  # default
+    assert cfg.claude_plan_tier is None  # unconfigured = unknown, not a Bob default
 
 
 def test_estimate_session_cost_with_config(toml_path: Path) -> None:
@@ -129,6 +129,39 @@ def test_estimate_session_cost_config_overrides_price(toml_path: Path) -> None:
     ), f"expected 2x ratio, got {cost_custom}/{cost_default}"
 
 
+def test_config_price_table_replaces_not_merges() -> None:
+    """A non-empty config.price_table must fully replace HARNESS_PRICE_USD_PER_1M.
+
+    Regression guard: a model present in Bob's module-level table but absent from
+    the agent's config must NOT be priced from Bob's data (no silent leak).
+    """
+    # Config prices only a made-up model; "claude-code/opus" is in Bob's globals.
+    cfg = HarnessQuotaConfig(price_table={("gptme", "someagent-model"): (1.0, 2.0)})
+    cost = estimate_session_cost(
+        "claude-code", "opus", cache_read_tokens=1_000_000, config=cfg
+    )
+    assert cost is None  # opus not in this agent's config => no price, not Bob's
+    # Sanity: without config, Bob's globals still price opus.
+    assert (
+        estimate_session_cost(
+            "claude-code", "opus", cache_read_tokens=1_000_000, config=None
+        )
+        is not None
+    )
+
+
+def test_config_tps_table_replaces_not_merges() -> None:
+    """A non-empty config.tps_table must fully replace TOKENS_PER_SECOND."""
+    cfg = HarnessQuotaConfig(tps_table={("gptme", "someagent-model"): 1234.0})
+    # opus is in Bob's globals but not this config => no TPS, returns None.
+    assert estimate_tokens_from_duration("claude-code", "opus", 10, config=cfg) is None
+    # Without config, Bob's globals still resolve opus.
+    assert (
+        estimate_tokens_from_duration("claude-code", "opus", 10, config=None)
+        is not None
+    )
+
+
 def test_estimate_tokens_from_duration_with_config(toml_path: Path) -> None:
     cfg = load_quota_config(toml_path)
     tokens = estimate_tokens_from_duration("claude-code", "opus", 10, config=cfg)
@@ -155,3 +188,32 @@ def test_load_quota_config_toml_round_trip(tmp_path: Path) -> None:
     cfg = load_quota_config(p)
     assert ("claude-code", "sonnet") in cfg.price_table
     assert cfg.price_table[("claude-code", "sonnet")] == (3.0, 15.0)
+
+
+def test_config_model_routes_replace_not_merge() -> None:
+    """A non-empty config.model_routes must fully replace GPTME_MODEL_ROUTES.
+
+    Regression guard: earlier code merged the two ({**globals, **config}), so a
+    configured agent silently inherited Bob's routes. An agent's config should be
+    authoritative — provider models only in Bob's globals must not resolve.
+    """
+    from gptme_usage.harness_models import (
+        GPTME_MODEL_ROUTES,
+        pricing_key_for_model,
+    )
+
+    if not GPTME_MODEL_ROUTES:
+        pytest.skip("no module-level GPTME_MODEL_ROUTES to test replacement against")
+
+    bob_short, bob_provider = next(iter(GPTME_MODEL_ROUTES.items()))
+    # Config with a disjoint route set (does not contain bob_provider).
+    cfg = HarnessQuotaConfig(model_routes={"someagent-model": "openrouter/x/y@z"})
+
+    # With replace semantics, Bob's provider model is unknown to this config, so
+    # it stays unnormalized instead of resolving to Bob's short name.
+    key = pricing_key_for_model("gptme", bob_provider, config=cfg)
+    assert key == ("gptme", bob_provider)
+    assert key != ("gptme", bob_short)
+
+    # Without config, Bob's globals still resolve normally (unchanged behavior).
+    assert pricing_key_for_model("gptme", bob_provider) == ("gptme", bob_short)
