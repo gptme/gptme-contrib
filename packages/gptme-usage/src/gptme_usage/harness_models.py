@@ -436,8 +436,11 @@ def estimate_session_cost(
             ``price_table`` is non-empty, that table is used for pricing
             instead of the module-level ``HARNESS_PRICE_USD_PER_1M``.
     """
+    # A non-empty config.price_table replaces the module-level table outright
+    # (not a merge) so a configured agent never inherits Bob's prices underneath
+    # its own. Consistent with tps_table and model_routes.
     price_table = (
-        {**HARNESS_PRICE_USD_PER_1M, **config.price_table}
+        config.price_table
         if (config is not None and config.price_table)
         else HARNESS_PRICE_USD_PER_1M
     )
@@ -548,8 +551,10 @@ def estimate_tokens_from_duration(
     """
     if duration_seconds <= 0:
         return None
+    # Replace (not merge) the module-level table when config provides one — see
+    # estimate_session_cost for the rationale (no Bob-data leak into agents).
     tps_table = (
-        {**TOKENS_PER_SECOND, **config.tps_table}
+        config.tps_table
         if (config is not None and config.tps_table)
         else TOKENS_PER_SECOND
     )

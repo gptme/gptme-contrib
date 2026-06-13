@@ -129,6 +129,39 @@ def test_estimate_session_cost_config_overrides_price(toml_path: Path) -> None:
     ), f"expected 2x ratio, got {cost_custom}/{cost_default}"
 
 
+def test_config_price_table_replaces_not_merges() -> None:
+    """A non-empty config.price_table must fully replace HARNESS_PRICE_USD_PER_1M.
+
+    Regression guard: a model present in Bob's module-level table but absent from
+    the agent's config must NOT be priced from Bob's data (no silent leak).
+    """
+    # Config prices only a made-up model; "claude-code/opus" is in Bob's globals.
+    cfg = HarnessQuotaConfig(price_table={("gptme", "someagent-model"): (1.0, 2.0)})
+    cost = estimate_session_cost(
+        "claude-code", "opus", cache_read_tokens=1_000_000, config=cfg
+    )
+    assert cost is None  # opus not in this agent's config => no price, not Bob's
+    # Sanity: without config, Bob's globals still price opus.
+    assert (
+        estimate_session_cost(
+            "claude-code", "opus", cache_read_tokens=1_000_000, config=None
+        )
+        is not None
+    )
+
+
+def test_config_tps_table_replaces_not_merges() -> None:
+    """A non-empty config.tps_table must fully replace TOKENS_PER_SECOND."""
+    cfg = HarnessQuotaConfig(tps_table={("gptme", "someagent-model"): 1234.0})
+    # opus is in Bob's globals but not this config => no TPS, returns None.
+    assert estimate_tokens_from_duration("claude-code", "opus", 10, config=cfg) is None
+    # Without config, Bob's globals still resolve opus.
+    assert (
+        estimate_tokens_from_duration("claude-code", "opus", 10, config=None)
+        is not None
+    )
+
+
 def test_estimate_tokens_from_duration_with_config(toml_path: Path) -> None:
     cfg = load_quota_config(toml_path)
     tokens = estimate_tokens_from_duration("claude-code", "opus", 10, config=cfg)
