@@ -33,6 +33,7 @@ Wiring:
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -259,11 +260,11 @@ def _mark_replied(messages_dir: Path, message_id: str) -> None:
     parts = content.split("---", 2)
     if len(parts) < 3:
         return
-    fm = parts[1].replace("read: false", "read: true")
-    if "replied:" not in fm:
-        fm = fm.rstrip("\n") + "\nreplied: true\n"
+    fm = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
+    if re.search(r"^replied:", fm, flags=re.MULTILINE):
+        fm = re.sub(r"^replied: false$", "replied: true", fm, flags=re.MULTILINE)
     else:
-        fm = fm.replace("replied: false", "replied: true")
+        fm = fm.rstrip("\n") + "\nreplied: true\n"
     path.write_text("---".join([parts[0], fm, parts[2]]))
 
 

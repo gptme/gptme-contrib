@@ -162,3 +162,35 @@ def test_status_reports_counts(workspace: Path) -> None:
     assert "Agent:    alice" in result.output
     assert "Inbox:    1" in result.output
     assert "Pending:  1" in result.output
+
+
+def test_reply_with_subject_containing_replied_false(workspace: Path) -> None:
+    """Regression: reply to a message whose subject contains 'replied: false' or 'read: false'.
+
+    The ``_mark_replied`` helper originally used unanchored ``.replace()`` calls
+    that could corrupt frontmatter when the subject line happened to contain
+    those literal strings (Greptile P1, gptme/gptme-contrib#1097).
+    """
+    inbox = workspace / "messages" / "inbox"
+    name = "20260613-000000-000000-bob-cmd.md"
+    subject = "run command with replied: false and read: false status"
+    (inbox / name).write_text(
+        "---\n"
+        "from: bob\n"
+        "to: alice\n"
+        "timestamp: 2026-06-13T00:00:00Z\n"
+        f"subject: '{subject}'\n"
+        "read: false\n"
+        "---\n\n"
+        "please run the command\n"
+    )
+
+    reply = CliRunner().invoke(agent, ["reply", name, "done"])
+    assert reply.exit_code == 0, reply.output
+
+    fm = _frontmatter(inbox / name)
+    # read and replied must be true
+    assert fm["read"] is True
+    assert fm["replied"] is True
+    # subject must NOT be corrupted by the replace
+    assert fm["subject"] == subject
