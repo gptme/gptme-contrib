@@ -164,6 +164,20 @@ def test_list_rejects_path_traversal_folder(workspace: Path) -> None:
     assert "Invalid folder name" in result.output
 
 
+def test_list_rejects_symlink_escaping_messages_dir(workspace: Path) -> None:
+    """A plainly-named symlink inside messages/ that points outside is rejected.
+
+    The old ``"/" in folder`` string check passed this (the name has no slash);
+    the resolve-based guard follows the link and sees it escapes messages/.
+    """
+    secret = workspace / "secret"
+    secret.mkdir()
+    (workspace / "messages" / "escape").symlink_to(secret, target_is_directory=True)
+    result = CliRunner().invoke(agent, ["list", "escape"])
+    assert result.exit_code != 0
+    assert "Invalid folder name" in result.output
+
+
 def test_read_marks_read(workspace: Path) -> None:
     name = _seed_inbox(workspace)
     result = CliRunner().invoke(agent, ["read", name])
