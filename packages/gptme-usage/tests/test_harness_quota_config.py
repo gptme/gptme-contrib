@@ -102,7 +102,6 @@ def test_module_ships_no_agent_data() -> None:
     from gptme_usage.harness_models import (
         GPTME_MODEL_ROUTES,
         GPTME_QUOTA_SOURCE,
-        HARNESS_PRICE_USD_PER_1M,
         TOKENS_PER_SECOND,
     )
 
@@ -257,27 +256,51 @@ def test_config_aware_model_source_helpers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_merge_with_module_defaults_caller_wins() -> None:
+def test_merge_with_module_defaults_caller_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Caller-supplied entries take priority over module defaults."""
-    custom_price: dict[tuple[str, str], tuple[float, float]] = {
-        ("claude-code", "opus"): (99.0, 99.0),
+    import gptme_usage.config as config_mod
+
+    # Inject non-empty module defaults so the test is non-vacuous.
+    fake_defaults: dict[tuple[str, str], tuple[float, float]] = {
+        ("claude-code", "opus"): (3.0, 15.0),  # will be overridden by caller
+        ("gptme", "base-model"): (1.0, 5.0),  # unlisted in caller's config
     }
-    cfg = HarnessQuotaConfig(price_table=custom_price)
+    monkeypatch.setattr(config_mod, "HARNESS_PRICE_USD_PER_1M", fake_defaults)
+
+    caller_price: dict[tuple[str, str], tuple[float, float]] = {
+        ("claude-code", "opus"): (99.0, 99.0),  # overrides the module default
+    }
+    cfg = HarnessQuotaConfig(price_table=caller_price)
     merged = merge_with_module_defaults(cfg)
 
-    # Caller's override must survive.
+    # Caller's entry must win over the module default.
     assert merged.price_table[("claude-code", "opus")] == (99.0, 99.0)
-    # Module defaults for other models must also be present.
-    assert len(merged.price_table) >= len(HARNESS_PRICE_USD_PER_1M)
+    # Unlisted model from module defaults must also appear.
+    assert merged.price_table[("gptme", "base-model")] == (1.0, 5.0)
+    # Combined table contains both the caller's entry and the module default.
+    assert len(merged.price_table) == len(fake_defaults)
 
 
-def test_merge_with_module_defaults_fallback_for_unlisted() -> None:
+def test_merge_with_module_defaults_fallback_for_unlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Module defaults appear for models NOT in the caller's config."""
-    cfg = HarnessQuotaConfig()  # empty custom config
+    import gptme_usage.config as config_mod
+
+    # Inject non-empty module defaults so the for-loop actually executes.
+    fake_defaults: dict[tuple[str, str], tuple[float, float]] = {
+        ("gptme", "base-model"): (1.0, 5.0),
+        ("claude-code", "sonnet"): (3.0, 15.0),
+    }
+    monkeypatch.setattr(config_mod, "HARNESS_PRICE_USD_PER_1M", fake_defaults)
+
+    cfg = HarnessQuotaConfig()  # caller has no custom prices
     merged = merge_with_module_defaults(cfg)
 
-    # The merged table should contain everything from the module defaults.
-    for key, val in HARNESS_PRICE_USD_PER_1M.items():
+    # All module defaults must appear in the merged result.
+    for key, val in fake_defaults.items():
         assert merged.price_table[key] == val, f"missing/wrong default for {key}"
 
 
