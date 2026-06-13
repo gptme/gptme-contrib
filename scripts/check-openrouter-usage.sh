@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2140,SC2154
 # Check OpenRouter API key usage and limits.
 #
 # Uses the /api/v1/auth/key endpoint — proper API, no tmux scraping needed.
@@ -94,6 +95,10 @@ else:
     else:
         print(f'OpenRouter: {avail}')
         print(f'  Daily: \${result[\"usage_daily\"]:.2f} / \${result[\"limit\"]} ({result[\"utilization\"]*100:.0f}%)')
-        print(f'  Remaining: \${result[\"limit_remaining\"]:.2f}')
+        remaining = result[\"limit_remaining\"]
+        if remaining is not None:
+            print(f'  Remaining: \${remaining:.2f}')
+        else:
+            print(f'  Remaining: unknown')
     print(f'  Weekly: \${result[\"usage_weekly\"]:.2f}')
 "
