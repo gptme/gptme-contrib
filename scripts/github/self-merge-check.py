@@ -172,9 +172,8 @@ class CheckResult:
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
-    head_sha: str = (
-        ""  # HEAD commit OID at time of check — callers should re-verify before merging
-    )
+    # HEAD commit OID at time of check — callers should re-verify before merging
+    head_sha: str = ""
 
 
 def run_gh(args: list[str], timeout: int = 30) -> str:
