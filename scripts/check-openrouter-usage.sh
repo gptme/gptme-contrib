@@ -75,7 +75,7 @@ usage_daily = raw.get('usage_daily') or 0
 usage_weekly = raw.get('usage_weekly') or 0
 is_unlimited = limit is None and limit_remaining is None
 result = {
-    'available': True if is_unlimited else (limit_remaining or 0) > 0.5,
+    'available': True if is_unlimited else (limit_remaining is None or limit_remaining > 0.5),
     'utilization': 0.0 if limit is None else round(usage_daily / max(limit, 0.01), 3),
     'limit': limit,
     'limit_remaining': None if limit_remaining is None else round(limit_remaining, 2),
