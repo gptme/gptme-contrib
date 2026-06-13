@@ -308,15 +308,36 @@ def broadcast(subject: str, content: str | None) -> None:
 
 @agent.command(name="list")
 @click.argument("folder", default="inbox")
-def list_cmd(folder: str) -> None:
-    """List messages in a folder (default: inbox)."""
+@click.option("--all", "-a", "show_all", is_flag=True, help="Include already-read messages.")
+def list_cmd(folder: str, show_all: bool) -> None:
+    """List messages in a folder (default: inbox, unread only).
+
+    Mirrors ``agent-msg.py list``: the inbox shows only unread messages by
+    default (each line prefixed ``*``); pass ``--all`` to include read ones.
+    Non-inbox folders (outbox/sent) always list everything. The line format
+    ``  {marker} [{ts}] {sender}: {subject}  ({file})`` matches agent-msg.py so
+    the planned thin shim is a faithful drop-in.
+    """
+    if "/" in folder or folder.startswith("."):
+        raise click.ClickException(f"Invalid folder name: {folder!r}")
     transport = _transport()
     rows = transport.list_inbox(folder)
-    if not rows:
-        click.echo(f"No messages in {folder}.")
-        return
-    for message_id, subject, ts in rows:
-        click.echo(f"{ts:%Y-%m-%d %H:%M}  {message_id}  {subject}")
+    folder_dir = _messages_dir() / folder
+    unread_only = folder == "inbox" and not show_all
+    shown = 0
+    for message_id, _subject, _ts in rows:
+        meta = meta_of(folder_dir / message_id) or {}
+        is_read = bool(meta.get("read"))
+        if unread_only and is_read:
+            continue
+        ts = meta.get("timestamp", "unknown")
+        sender = str(meta.get("from", "unknown"))
+        subject = str(meta.get("subject", "(no subject)"))
+        marker = " " if is_read else "*"
+        click.echo(f"  {marker} [{ts}] {sender}: {subject}  ({message_id})")
+        shown += 1
+    if shown == 0:
+        click.echo("No unread messages." if unread_only else f"No messages in {folder}.")
 
 
 @agent.command()
