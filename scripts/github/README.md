@@ -18,7 +18,7 @@ existed. See `scripts/workflow/read-the-task-before-reinvestigating` patterns.)
 | Trigger / re-trigger review | `greptile-helper.sh` (anti-spam: flock, ack-detect, max-retriggers) · `pr-greptile-trigger.py` (batch) | NEVER post raw `@greptileai review` |
 | Read the score signal | `greptile-merge-signal.py` (summary score ≥ threshold + "Safe to merge") | reusable; default 5/5 |
 | Address findings, push | (agent session) | fix the code |
-| **Resolve addressed threads** | `resolve-greptile-threads.py` *(Alice-contributed)* | the `resolveReviewThread` mutation; fix-first |
+| **Resolve addressed threads** | `resolve-greptile-threads.py` | the `resolveReviewThread` mutation; fix-first; resolves Greptile-bot threads only |
 | Gate the merge | `self-merge-check.py` | CI green + Greptile present + no unresolved threads + **score floor** (`SELF_MERGE_MIN_GREPTILE_SCORE`, default 5/5) + category/sensitive-path filter |
 | Merge | `self-merge-if-eligible.sh` / `pr-address-wait-and-merge.sh` *(Bob)* | bounded poll-budget wait → merge |
 
@@ -328,6 +328,29 @@ low-scored PR. Parse failure does not block (the thread/category gates still app
 ```bash
 python3 scripts/github/greptile-merge-signal.py --repo owner/repo 123   # JSON; exit 0 eligible, 1 not
 ```
+
+### resolve-greptile-threads.py
+
+Resolves **addressed** Greptile review threads via the `resolveReviewThread` GraphQL mutation —
+the gap that blocks `self-merge-check.py` (it requires *no unresolved threads*, but we reply to
+nitpicks rather than resolve them, so the deterministic merge path never fires on nitpick-laden
+PRs). Call it **after** addressing findings (fix-first), or with `--outdated-only` for the
+conservative "code changed since the comment" heuristic. **Safety:** only ever resolves
+Greptile-bot-authored threads — never touches human threads. Paginates `reviewThreads` so it
+can't silently undercount; per-thread resolve failures are non-fatal (the loop continues).
+
+```bash
+# Dry-run first — list what would be resolved
+python3 scripts/github/resolve-greptile-threads.py owner/repo#123 --dry-run
+
+# Resolve all addressed Greptile threads (JSON summary on stdout, progress on stderr)
+python3 scripts/github/resolve-greptile-threads.py owner/repo#123 --json
+
+# Conservative: only resolve threads whose code changed since the comment
+python3 scripts/github/resolve-greptile-threads.py owner/repo 123 --outdated-only
+```
+
+**Exit codes:** 0 = ok (prints count resolved), 2 = arg/gh error.
 
 ## Related
 
