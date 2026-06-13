@@ -32,6 +32,7 @@ Wiring:
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shlex
@@ -61,8 +62,14 @@ def _reply_window_days() -> int:
         return 7
 
 
+@functools.lru_cache(maxsize=1)
 def _repo_root() -> Path:
-    """Workspace root via ``git rev-parse --show-toplevel`` (symlink-correct)."""
+    """Workspace root via ``git rev-parse --show-toplevel`` (symlink-correct).
+
+    Cached: a CLI invocation calls this several times (``_messages_dir`` is hit
+    by both the command body and ``_transport``) but cwd is fixed for the
+    process, so one ``git rev-parse`` per run suffices.
+    """
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -80,6 +87,21 @@ def _repo_root() -> Path:
 def _messages_dir() -> Path:
     """Messages directory for the current agent (``<repo>/messages``)."""
     return _repo_root() / "messages"
+
+
+def _within(base: Path, *parts: str) -> Path | None:
+    """Resolve ``base/parts`` and return it only if it stays inside ``base``.
+
+    Resolve-based containment: defeats both ``..`` traversal and symlinks whose
+    names look benign but point outside ``base``. Returns ``None`` when the
+    resolved path escapes ``base`` (callers decide whether that's a silent skip
+    or a hard error).
+    """
+    base_resolved = base.resolve()
+    candidate = base.joinpath(*parts).resolve()
+    if str(candidate).startswith(str(base_resolved) + os.sep):
+        return candidate
+    return None
 
 
 def _self_name() -> str:
@@ -245,9 +267,8 @@ def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[d
 
 def _mark_replied(messages_dir: Path, message_id: str) -> None:
     """Stamp an inbox message ``replied: true`` (and ``read: true``). Idempotent."""
-    path = (messages_dir / "inbox" / message_id).resolve()
-    inbox = (messages_dir / "inbox").resolve()
-    if not str(path).startswith(str(inbox) + os.sep) or not path.exists():
+    path = _within(messages_dir / "inbox", message_id)
+    if path is None or not path.exists():
         return
     content = path.read_text()
     if not content.startswith("---"):
@@ -308,15 +329,36 @@ def broadcast(subject: str, content: str | None) -> None:
 
 @agent.command(name="list")
 @click.argument("folder", default="inbox")
-def list_cmd(folder: str) -> None:
-    """List messages in a folder (default: inbox)."""
+@click.option("--all", "-a", "show_all", is_flag=True, help="Include already-read messages.")
+def list_cmd(folder: str, show_all: bool) -> None:
+    """List messages in a folder (default: inbox, unread only).
+
+    Mirrors ``agent-msg.py list``: the inbox shows only unread messages by
+    default (each line prefixed ``*``); pass ``--all`` to include read ones.
+    Non-inbox folders (outbox/sent) always list everything. The line format
+    ``  {marker} [{ts}] {sender}: {subject}  ({file})`` matches agent-msg.py so
+    the planned thin shim is a faithful drop-in.
+    """
+    folder_dir = _within(_messages_dir(), folder)
+    if folder_dir is None:
+        raise click.ClickException(f"Invalid folder name: {folder!r}")
     transport = _transport()
     rows = transport.list_inbox(folder)
-    if not rows:
-        click.echo(f"No messages in {folder}.")
-        return
-    for message_id, subject, ts in rows:
-        click.echo(f"{ts:%Y-%m-%d %H:%M}  {message_id}  {subject}")
+    unread_only = folder == "inbox" and not show_all
+    shown = 0
+    for message_id, _subject, _ts in rows:
+        meta = meta_of(folder_dir / message_id) or {}
+        is_read = bool(meta.get("read"))
+        if unread_only and is_read:
+            continue
+        ts = meta.get("timestamp", "unknown")
+        sender = str(meta.get("from", "unknown"))
+        subject = str(meta.get("subject", "(no subject)"))
+        marker = " " if is_read else "*"
+        click.echo(f"  {marker} [{ts}] {sender}: {subject}  ({message_id})")
+        shown += 1
+    if shown == 0:
+        click.echo("No unread messages." if unread_only else f"No messages in {folder}.")
 
 
 @agent.command()
@@ -338,9 +380,8 @@ def read(message_id: str, thread: bool) -> None:
 def reply(message_id: str, content: str | None) -> None:
     """Reply to an inbox message, threading via in_reply_to."""
     messages_dir = _messages_dir()
-    inbox_dir = (messages_dir / "inbox").resolve()
-    msg_path = (messages_dir / "inbox" / message_id).resolve()
-    if not str(msg_path).startswith(str(inbox_dir) + os.sep):
+    msg_path = _within(messages_dir / "inbox", message_id)
+    if msg_path is None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)
     original = meta_of(msg_path)
