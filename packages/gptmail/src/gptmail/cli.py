@@ -76,6 +76,14 @@ def cli() -> None:
     pass
 
 
+# Inter-agent SSH messaging lives in its own email-free module so it stays
+# importable/testable in isolated LXC sessions with no email infra. Registered
+# here only as a subgroup for muscle-memory ergonomics (`gptmail agent …`).
+from gptmail.agent_cli import agent as _agent_group  # noqa: E402
+
+cli.add_command(_agent_group)
+
+
 @cli.command()
 @click.argument("to")
 @click.argument("subject")

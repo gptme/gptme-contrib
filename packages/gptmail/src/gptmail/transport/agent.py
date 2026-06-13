@@ -37,6 +37,28 @@ import yaml
 Deliver = Callable[[Path, str], bool]
 
 
+def meta_of(path: Path) -> dict | None:
+    """Parse the YAML frontmatter of a message file (``None`` if absent/invalid).
+
+    Shared by ``AgentTransport`` and the ``gptmail agent`` CLI so the two never
+    diverge. Email-stack-free, preserving the agent transport's isolation.
+    """
+    try:
+        content = path.read_text()
+    except OSError:
+        return None
+    if not content.startswith("---"):
+        return None
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return None
+    try:
+        meta = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
 class AgentTransport:
     """Transport over a filesystem ``messages/{inbox,outbox}`` directory.
 
@@ -104,20 +126,7 @@ class AgentTransport:
         return f"---\n{frontmatter}\n---\n\n{body}\n"
 
     def _meta_of(self, path: Path) -> dict | None:
-        try:
-            content = path.read_text()
-        except OSError:
-            return None
-        if not content.startswith("---"):
-            return None
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return None
-        try:
-            meta = yaml.safe_load(parts[1])
-        except yaml.YAMLError:
-            return None
-        return meta if isinstance(meta, dict) else None
+        return meta_of(path)
 
     @staticmethod
     def _resolve_within(folder: Path, message_id: str) -> Path | None:
