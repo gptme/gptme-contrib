@@ -435,7 +435,6 @@ def reply(message_id: str, content: str | None) -> None:
     agents = _load_agents()
     transport = _transport(deliver=_ssh_deliver(agents))
     reply_id = transport.send(recipient, subject, body, reply_to=message_id)
-    _track_sent(transport, reply_id, reply_to=message_id)
     if _delivery_failed(reply_id):
         click.echo(
             f"Delivery to {recipient} FAILED — saved to outbox (delivered: false). "
@@ -443,6 +442,7 @@ def reply(message_id: str, content: str | None) -> None:
             err=True,
         )
         sys.exit(1)
+    _track_sent(transport, reply_id, reply_to=message_id)
     _mark_replied(messages_dir, message_id)
     click.echo(f"Replied to {recipient}: {subject}")
 

@@ -140,6 +140,12 @@ def test_reply_reports_delivery_failure_and_keeps_pending(
     # The original inbox message must NOT be marked replied — it stays in pending.
     fm = _frontmatter(workspace / "messages" / "inbox" / name)
     assert not fm.get("replied"), "inbox message must stay unreplied on delivery failure"
+    # The ConversationTracker must NOT mark the original as COMPLETED — delivery never happened.
+    tracker = ConversationTracker(workspace / "messages" / ".tracking")
+    state = tracker.get_message_state("agent:alice|bob", name)
+    assert (
+        state is None or state.state != MessageState.COMPLETED
+    ), "tracker must not mark original as COMPLETED when delivery failed"
 
 
 @pytest.mark.parametrize(
