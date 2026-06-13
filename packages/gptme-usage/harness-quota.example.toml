@@ -1,0 +1,44 @@
+# Example per-agent quota configuration for gptme-usage.
+#
+# Copy to ~/.config/gptme/harness-quota.toml and edit for your agent. The
+# gptme-usage package ships NO agent's real data — every agent supplies its own
+# model set, prices, throughput, routes, and quota sources here. Loaded by
+# gptme_usage.harness_models.load_quota_config(); a missing file degrades
+# gracefully to "no models configured".
+#
+# These values are illustrative placeholders, not live pricing — replace them.
+
+# Your Claude plan tier: "pro" | "max-5x" | "max-20x" | ... (optional).
+# Drives Agent SDK monthly-credit math. Omit if unknown.
+claude_plan_tier = "max-5x"
+
+# --- Model prices (USD per 1M tokens: [input, output]) ---
+# Keyed by [prices.<backend>] then "<model>" = [input, output].
+[prices.claude-code]
+opus   = [5.0, 25.0]
+sonnet = [3.0, 15.0]
+
+[prices.gptme]
+"example-openrouter-model" = [1.0, 3.0]
+
+# --- Tokens per second (empirical throughput; used to estimate tokens from
+#     session duration when token counts are missing) ---
+[tps.claude-code]
+opus   = 18000
+sonnet = 12000
+
+# --- gptme model quota sources: which pool each model draws from ---
+#     "openrouter" | "chatgpt" | "local"
+[quota_sources]
+"example-openrouter-model" = "openrouter"
+"example-local-model"      = "local"
+
+# --- gptme provider-qualified model routes (short name -> full route string) ---
+[model_routes]
+"example-openrouter-model" = "openrouter/vendor/example-model@vendor"
+"example-local-model"      = "lmstudio/vendor/example-local"
+
+# --- OpenRouter key contexts (which scoped API key a model's quota uses) ---
+#     "default" applies to any model not listed explicitly.
+[openrouter_key_contexts]
+default = "autonomous"

@@ -92,73 +92,83 @@ def test_estimate_session_cost_with_config(toml_path: Path) -> None:
     assert abs(cost - 0.5) < 0.001, f"expected ~0.5, got {cost}"
 
 
-def test_estimate_session_cost_falls_back_without_config() -> None:
-    cost = estimate_session_cost(
-        "claude-code",
-        "opus",
-        cache_read_tokens=1_000_000,
-        config=None,
+def test_module_ships_no_agent_data() -> None:
+    """The shared module must ship EMPTY tables — no agent's data baked in.
+
+    Per-agent data lives in harness-quota.toml; the package carries none.
+    """
+    from gptme_usage.harness_models import (
+        GPTME_MODEL_ROUTES,
+        GPTME_QUOTA_SOURCE,
+        HARNESS_PRICE_USD_PER_1M,
+        TOKENS_PER_SECOND,
     )
-    # Should still work using module-level HARNESS_PRICE_USD_PER_1M
-    assert cost is not None
-    assert cost > 0
+
+    assert HARNESS_PRICE_USD_PER_1M == {}
+    assert TOKENS_PER_SECOND == {}
+    assert GPTME_QUOTA_SOURCE == {}
+    assert GPTME_MODEL_ROUTES == {}
+
+
+def test_estimate_session_cost_without_config_returns_none() -> None:
+    """With no config and an empty module table, there is no price -> None."""
+    cost = estimate_session_cost(
+        "claude-code", "opus", cache_read_tokens=1_000_000, config=None
+    )
+    assert cost is None
 
 
 def test_estimate_session_cost_config_overrides_price(toml_path: Path) -> None:
-    # Modify the config with a custom price and verify it's used
-    cfg = load_quota_config(toml_path)
-    # Patch price_table with a custom price for testing
-    cfg.price_table[("claude-code", "opus")] = (10.0, 50.0)  # 2x normal
-    cost_custom = estimate_session_cost(
-        "claude-code",
-        "opus",
-        cache_read_tokens=1_000_000,
-        config=cfg,
-    )
-    cost_default = estimate_session_cost(
-        "claude-code",
-        "opus",
-        cache_read_tokens=1_000_000,
-        config=None,
-    )
-    assert cost_custom is not None
-    assert cost_default is not None
-    # Custom price is 2x, so cost should be ~2x default
-    assert (
-        abs(cost_custom / cost_default - 2.0) < 0.01
-    ), f"expected 2x ratio, got {cost_custom}/{cost_default}"
-
-
-def test_config_price_table_replaces_not_merges() -> None:
-    """A non-empty config.price_table must fully replace HARNESS_PRICE_USD_PER_1M.
-
-    Regression guard: a model present in Bob's module-level table but absent from
-    the agent's config must NOT be priced from Bob's data (no silent leak).
-    """
-    # Config prices only a made-up model; "claude-code/opus" is in Bob's globals.
-    cfg = HarnessQuotaConfig(price_table={("gptme", "someagent-model"): (1.0, 2.0)})
-    cost = estimate_session_cost(
+    # Compare two configs (the module ships no default to compare against).
+    cfg = load_quota_config(toml_path)  # opus = [5, 25]
+    cfg_2x = load_quota_config(toml_path)
+    cfg_2x.price_table[("claude-code", "opus")] = (10.0, 50.0)  # 2x
+    cost_base = estimate_session_cost(
         "claude-code", "opus", cache_read_tokens=1_000_000, config=cfg
     )
-    assert cost is None  # opus not in this agent's config => no price, not Bob's
-    # Sanity: without config, Bob's globals still price opus.
+    cost_2x = estimate_session_cost(
+        "claude-code", "opus", cache_read_tokens=1_000_000, config=cfg_2x
+    )
+    assert cost_base is not None and cost_2x is not None
+    assert (
+        abs(cost_2x / cost_base - 2.0) < 0.01
+    ), f"expected 2x ratio, got {cost_2x}/{cost_base}"
+
+
+def test_config_price_table_replaces_not_merges(toml_path: Path) -> None:
+    """A non-empty config.price_table is authoritative — no other data leaks in.
+
+    A model absent from the agent's config gets no price (None), even though the
+    config does price other models.
+    """
+    cfg = load_quota_config(toml_path)  # prices opus, sonnet, deepseek-v4-pro...
+    # opus IS in this config -> priced.
     assert (
         estimate_session_cost(
-            "claude-code", "opus", cache_read_tokens=1_000_000, config=None
+            "claude-code", "opus", cache_read_tokens=1_000_000, config=cfg
         )
         is not None
     )
-
-
-def test_config_tps_table_replaces_not_merges() -> None:
-    """A non-empty config.tps_table must fully replace TOKENS_PER_SECOND."""
-    cfg = HarnessQuotaConfig(tps_table={("gptme", "someagent-model"): 1234.0})
-    # opus is in Bob's globals but not this config => no TPS, returns None.
-    assert estimate_tokens_from_duration("claude-code", "opus", 10, config=cfg) is None
-    # Without config, Bob's globals still resolve opus.
+    # A model NOT in this config -> None (no fallback to any other table).
     assert (
-        estimate_tokens_from_duration("claude-code", "opus", 10, config=None)
-        is not None
+        estimate_session_cost(
+            "claude-code", "nonexistent-model", cache_read_tokens=1_000_000, config=cfg
+        )
+        is None
+    )
+
+
+def test_config_tps_table_replaces_not_merges(toml_path: Path) -> None:
+    """A non-empty config.tps_table is authoritative; unlisted models -> None."""
+    cfg = load_quota_config(toml_path)  # has claude-code/opus TPS
+    assert (
+        estimate_tokens_from_duration("claude-code", "opus", 10, config=cfg) is not None
+    )
+    assert (
+        estimate_tokens_from_duration(
+            "claude-code", "nonexistent-model", 10, config=cfg
+        )
+        is None
     )
 
 
@@ -168,18 +178,15 @@ def test_estimate_tokens_from_duration_with_config(toml_path: Path) -> None:
     assert tokens == 100_000  # 10s * 10000 TPS
 
 
-def test_estimate_tokens_from_duration_falls_back_without_config() -> None:
-    tokens = estimate_tokens_from_duration("claude-code", "opus", 10, config=None)
-    assert tokens is not None
-    assert tokens > 0
+def test_estimate_tokens_from_duration_without_config_returns_none() -> None:
+    """Empty module table + no config -> no TPS data -> None."""
+    assert estimate_tokens_from_duration("claude-code", "opus", 10, config=None) is None
 
 
-def test_estimate_tokens_from_duration_empty_config() -> None:
+def test_estimate_tokens_from_duration_empty_config_returns_none() -> None:
+    """An empty config has no TPS table and the module ships none -> None."""
     cfg = HarnessQuotaConfig()  # empty
-    # Should fall back to module-level TOKENS_PER_SECOND
-    tokens = estimate_tokens_from_duration("claude-code", "opus", 10, config=cfg)
-    assert tokens is not None
-    assert tokens > 0
+    assert estimate_tokens_from_duration("claude-code", "opus", 10, config=cfg) is None
 
 
 def test_load_quota_config_toml_round_trip(tmp_path: Path) -> None:
@@ -190,30 +197,54 @@ def test_load_quota_config_toml_round_trip(tmp_path: Path) -> None:
     assert cfg.price_table[("claude-code", "sonnet")] == (3.0, 15.0)
 
 
-def test_config_model_routes_replace_not_merge() -> None:
-    """A non-empty config.model_routes must fully replace GPTME_MODEL_ROUTES.
+def test_config_model_routes_drive_pricing_key() -> None:
+    """config.model_routes resolves a provider string back to its short name.
 
-    Regression guard: earlier code merged the two ({**globals, **config}), so a
-    configured agent silently inherited Bob's routes. An agent's config should be
-    authoritative — provider models only in Bob's globals must not resolve.
+    The module ships no routes, so resolution is fully config-driven; a provider
+    string absent from the config stays unnormalized.
     """
-    from gptme_usage.harness_models import (
-        GPTME_MODEL_ROUTES,
-        pricing_key_for_model,
+    from gptme_usage.harness_models import pricing_key_for_model
+
+    cfg = HarnessQuotaConfig(
+        model_routes={"deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro@deepseek"}
+    )
+    # The configured provider string normalizes to the short name.
+    assert pricing_key_for_model(
+        "gptme", "openrouter/deepseek/deepseek-v4-pro@deepseek", config=cfg
+    ) == ("gptme", "deepseek-v4-pro")
+    # A provider string not in the config stays unnormalized.
+    assert pricing_key_for_model("gptme", "openrouter/other/model", config=cfg) == (
+        "gptme",
+        "openrouter/other/model",
     )
 
-    if not GPTME_MODEL_ROUTES:
-        pytest.skip("no module-level GPTME_MODEL_ROUTES to test replacement against")
 
-    bob_short, bob_provider = next(iter(GPTME_MODEL_ROUTES.items()))
-    # Config with a disjoint route set (does not contain bob_provider).
-    cfg = HarnessQuotaConfig(model_routes={"someagent-model": "openrouter/x/y@z"})
+def test_config_aware_model_source_helpers() -> None:
+    """openrouter_models / local_models / gptme_openrouter_context read config."""
+    from gptme_usage.harness_models import (
+        gptme_openrouter_context,
+        local_models,
+        openrouter_models,
+    )
 
-    # With replace semantics, Bob's provider model is unknown to this config, so
-    # it stays unnormalized instead of resolving to Bob's short name.
-    key = pricing_key_for_model("gptme", bob_provider, config=cfg)
-    assert key == ("gptme", bob_provider)
-    assert key != ("gptme", bob_short)
-
-    # Without config, Bob's globals still resolve normally (unchanged behavior).
-    assert pricing_key_for_model("gptme", bob_provider) == ("gptme", bob_short)
+    cfg = HarnessQuotaConfig(
+        quota_sources={
+            "deepseek-v4-pro": "openrouter",
+            "kimi-k2.6": "openrouter",
+            "qwen3.6": "local",
+        },
+        openrouter_key_contexts={
+            "default": "autonomous",
+            "deepseek-v4-pro": "autonomous_deepseek",
+        },
+    )
+    assert set(openrouter_models(cfg)) == {"deepseek-v4-pro", "kimi-k2.6"}
+    assert local_models(cfg) == ["qwen3.6"]
+    assert gptme_openrouter_context("deepseek-v4-pro", cfg) == "autonomous_deepseek"
+    assert gptme_openrouter_context("kimi-k2.6", cfg) == "autonomous"  # default
+    # Empty/no config: module ships no sources -> empty lists.
+    assert openrouter_models() == []
+    assert local_models() == []
+    # No config -> legacy deepseek heuristic still applies.
+    assert gptme_openrouter_context("deepseek-v4-pro") == "autonomous_deepseek"
+    assert gptme_openrouter_context("kimi-k2.6") == "autonomous"

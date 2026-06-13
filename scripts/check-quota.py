@@ -53,9 +53,17 @@ from gptme_usage.harness_models import (  # noqa: E402
     estimate_tokens_from_duration,
     gptme_openrouter_context,
     is_post_agent_sdk_credit_change,
+    load_quota_config,
     local_models,
     openrouter_models,
 )
+
+# Per-agent quota config (prices, TPS, model routes, quota sources) from
+# ~/.config/gptme/harness-quota.toml. Loaded once and threaded through every
+# harness_models call so THIS agent's config drives cost/availability — the
+# shared package ships no agent's data. Empty config (no file) degrades
+# gracefully to "no models configured".
+QUOTA_CONFIG = load_quota_config()
 
 SESSION_RECORDS_FILE = REPO_ROOT / "state" / "sessions" / "session-records.jsonl"
 CLAUDE_CODE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -499,6 +507,7 @@ def _estimate_claude_agent_sdk_credit_usage_from_records(
                     cache_creation_tokens=rec.get("cache_creation_tokens"),
                     cache_read_tokens=rec.get("cache_read_tokens"),
                     token_count=rec.get("token_count"),
+                    config=QUOTA_CONFIG,
                 )
                 estimated = False
                 if cost is None:
@@ -508,12 +517,14 @@ def _estimate_claude_agent_sdk_credit_usage_from_records(
                             str(rec.get("harness") or ""),
                             str(rec.get("model") or ""),
                             int(duration),
+                            config=QUOTA_CONFIG,
                         )
                         if est_tokens is not None:
                             cost = estimate_session_cost(
                                 str(rec.get("harness") or ""),
                                 str(rec.get("model") or ""),
                                 token_count=est_tokens,
+                                config=QUOTA_CONFIG,
                             )
                             estimated = cost is not None
                 if cost is None:
@@ -590,6 +601,7 @@ def _estimate_claude_agent_sdk_credit_usage_from_logs(
                         output_tokens=usage.get("output_tokens"),
                         cache_creation_tokens=usage.get("cache_creation_input_tokens"),
                         cache_read_tokens=usage.get("cache_read_input_tokens"),
+                        config=QUOTA_CONFIG,
                     )
                     if cost is None:
                         session_uncosted = True
@@ -1923,9 +1935,9 @@ def check_all_quotas(
                 # its own daily $ budget (e.g. deepseek has a dedicated key).
                 # Cache per-context lookups so we don't re-shell-out per model.
                 or_quota_by_context: dict[str, dict] = {}
-                or_models = openrouter_models()
+                or_models = openrouter_models(QUOTA_CONFIG)
                 for model in or_models:
-                    ctx = gptme_openrouter_context(model)
+                    ctx = gptme_openrouter_context(model, QUOTA_CONFIG)
                     if ctx not in or_quota_by_context:
                         or_quota_by_context[ctx] = check_openrouter_quota(
                             ctx, fast=fast
@@ -1943,7 +1955,7 @@ def check_all_quotas(
                         )
                     )
                 # Local models (LM Studio) — zero cost, availability via API ping
-                for model in local_models():
+                for model in local_models(QUOTA_CONFIG):
                     results.append(check_local_model_quota(model, fast=fast))
             elif backend == "codex":
                 # gpt-5.4 and gpt-5.5 both use the ChatGPT Codex subscription
