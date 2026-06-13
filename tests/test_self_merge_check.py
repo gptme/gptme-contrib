@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 import subprocess
@@ -1048,3 +1049,101 @@ def test_classify_repo_allowlisted_path_is_repo_scoped() -> None:
         )
         assert category is None
         assert any("allowed self-merge category" in reason for reason in reasons)
+
+
+def test_evaluate_pr_captures_head_sha() -> None:
+    """CheckResult.head_sha reflects the headRefOid from fetch_pr."""
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+        "headRefOid": "abc123def456",
+    }
+
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=5),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+    assert result.head_sha == "abc123def456"
+
+
+def test_evaluate_pr_head_sha_empty_when_missing() -> None:
+    """head_sha is empty string when fetch_pr returns no headRefOid."""
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+        # no headRefOid key
+    }
+
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 0},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=5),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+    assert result.head_sha == ""
+
+
+def test_check_result_head_sha_in_json_output() -> None:
+    """head_sha is included in the asdict/JSON serialization."""
+    result = self_merge_check.CheckResult(
+        eligible=True,
+        repo="gptme/gptme-contrib",
+        number=999,
+        url="https://github.com/gptme/gptme-contrib/pull/999",
+        title="Test",
+        author="TimeToBuildBob",
+        head_sha="deadbeef1234",
+    )
+    d = dataclasses.asdict(result)
+    assert d["head_sha"] == "deadbeef1234"
+    assert "head_sha" in json.dumps(d)
