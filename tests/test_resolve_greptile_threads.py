@@ -47,6 +47,13 @@ def test_parse_pr_invalid_exits_2() -> None:
     assert exc.value.code == 2
 
 
+def test_parse_pr_non_numeric_second_exits_2() -> None:
+    """Two-argument form with non-numeric second should exit 2 via _die()."""
+    with pytest.raises(SystemExit) as exc:
+        parse_pr("gptme/gptme-contrib", "foo")
+    assert exc.value.code == 2
+
+
 def test_targeting_excludes_resolved() -> None:
     # Mirrors main()'s target filter: skip resolved; honor --outdated-only.
     threads = [

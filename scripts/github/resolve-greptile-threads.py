@@ -73,7 +73,10 @@ def parse_pr(spec: str, second: str | None) -> tuple[str, str, int]:
         return owner, name, int(num)
     if second and "/" in spec:
         owner, name = spec.split("/", 1)
-        return owner, name, int(second)
+        try:
+            return owner, name, int(second)
+        except ValueError:
+            _die(f"PR number must be an integer, got {second!r}.")
     _die(f"Unrecognized PR specifier: {spec!r}. Use OWNER/REPO#NUM or OWNER/REPO NUM.")
 
 
@@ -152,7 +155,14 @@ def resolve_thread(thread_id: str) -> bool:
             file=sys.stderr,
         )
         return False
-    return bool(body["data"]["resolveReviewThread"]["thread"]["isResolved"])
+    try:
+        return bool(body["data"]["resolveReviewThread"]["thread"]["isResolved"])
+    except (KeyError, TypeError) as exc:
+        print(
+            f"  ! resolve {thread_id}: unexpected response shape: {exc}",
+            file=sys.stderr,
+        )
+        return False
 
 
 def main() -> int:
