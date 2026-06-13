@@ -198,6 +198,30 @@ def get_gh_user() -> str:
     return run_gh(["api", "user", "-q", ".login"]) or ""
 
 
+@cache
+def merge_permission(repo: str) -> bool | None:
+    """Whether the authenticated user can merge PRs in ``repo``.
+
+    Returns True if the user has push/maintain/admin on the repo, False if they
+    explicitly lack it, or None if the permission could not be determined (gh
+    error / unexpected payload). None is treated as "unknown" by the caller —
+    a warning, not a disqualifier — so a transient API hiccup doesn't block a
+    legitimate self-merge. A definitive False does disqualify: it means the
+    merge attempt would fail with a permissions error (e.g. an agent that
+    contributes to an upstream repo via a fork has pull-only access).
+    """
+    raw = run_gh(["api", f"repos/{repo}", "-q", ".permissions"])
+    if not raw:
+        return None
+    try:
+        perms = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(perms, dict):
+        return None
+    return bool(perms.get("push") or perms.get("maintain") or perms.get("admin"))
+
+
 def _resolve_gate_helper(script_path: Path | None = None) -> str | None:
     """Resolve the optional GitHub API rate-limit gate helper."""
 
@@ -1082,6 +1106,23 @@ def evaluate_pr(
     )
     result.reasons.extend(cross_repo_reasons)
     result.warnings.extend(cross_repo_warnings)
+
+    # Merge-permission check: an allowlisted repo the agent cannot actually merge
+    # (pull-only access, e.g. an upstream repo contributed to via a fork) would
+    # otherwise report eligible=YES and then fail the merge with a GitHub
+    # permissions error. Disqualify on a definitive lack of permission; treat an
+    # indeterminate result (gh error) as a non-blocking warning.
+    can_merge = merge_permission(repo)
+    if can_merge is False:
+        result.reasons.append(
+            f"Authenticated user lacks merge permission on {repo} "
+            "(pull-only access; merge would fail). Open a PR for a maintainer to merge."
+        )
+    elif can_merge is None:
+        result.warnings.append(
+            f"Could not determine merge permission on {repo}; "
+            "merge may fail if access is pull-only."
+        )
 
     if pr.get("isDraft"):
         result.reasons.append("PR is still a draft")
