@@ -37,6 +37,7 @@ class MessageInfo:
     error: str | None = None
     reason: str | None = None
     reply_id: str | None = None
+    channel: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -164,6 +165,7 @@ class ConversationTracker:
         conversation_id: str,
         message_id: str,
         in_reply_to: str | None = None,
+        channel: str | None = None,
     ) -> MessageInfo:
         """
         Start tracking a new message.
@@ -172,6 +174,9 @@ class ConversationTracker:
             conversation_id: Conversation identifier
             message_id: Message identifier
             in_reply_to: Optional parent message ID
+            channel: Optional transport channel (e.g. "email", "agent") so a
+                single tracker store can serve multiple transports and answer
+                cross-channel "what do I owe a reply to" queries.
 
         Returns:
             Created MessageInfo
@@ -193,6 +198,7 @@ class ConversationTracker:
                 in_reply_to=in_reply_to,
                 state=MessageState.PENDING,
                 created_at=datetime.now().isoformat(),
+                channel=channel,
             )
 
             data["messages"][message_id] = message_info.to_dict()
