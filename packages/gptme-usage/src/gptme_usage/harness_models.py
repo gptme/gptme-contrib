@@ -47,7 +47,8 @@ CLAUDE_AGENT_SDK_MONTHLY_CREDIT_USD: dict[str, float] = {
     "enterprise-usage": 20.0,
     "enterprise-premium": 200.0,
 }
-# Default: assume Max 20x (highest credit) for Bob/Alice operations
+# Conservative default credit — callers that have a claude_plan_tier loaded
+# should use CLAUDE_AGENT_SDK_MONTHLY_CREDIT_USD[config.claude_plan_tier] instead.
 CLAUDE_AGENT_SDK_ASSUMED_MONTHLY_CREDIT_USD = CLAUDE_AGENT_SDK_MONTHLY_CREDIT_USD[
     "max-20x"
 ]
@@ -265,8 +266,16 @@ HARNESS_COST: dict[tuple[str, str], float] = {
 }
 
 
-def quota_pool_label(harness: str, model: str) -> str:
+def quota_pool_label(
+    harness: str,
+    model: str,
+    config: HarnessQuotaConfig | None = None,
+) -> str:
     """Return the quota/billing pool label for a harness/model pair.
+
+    Reads ``config.quota_sources`` when provided (per-agent), else falls back to
+    the module-level ``GPTME_QUOTA_SOURCE`` (now empty; config must be provided
+    for per-agent quota pool labels).
 
     Note: After CLAUDE_AGENT_SDK_CREDIT_CHANGE_DATE (June 15, 2026), claude-code
     sessions draw from a $200/month Agent SDK credit pool instead of the
@@ -282,7 +291,12 @@ def quota_pool_label(harness: str, model: str) -> str:
     if harness == "codex":
         return "chatgpt-sub (shared)"
     if harness == "gptme":
-        source = GPTME_QUOTA_SOURCE.get(model)
+        sources = (
+            config.quota_sources
+            if (config is not None and config.quota_sources)
+            else GPTME_QUOTA_SOURCE
+        )
+        source = sources.get(model)
         if source == "chatgpt":
             return "chatgpt-sub (shared)"
         if source == "openrouter":
