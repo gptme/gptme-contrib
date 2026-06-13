@@ -116,6 +116,32 @@ def test_send_reports_delivery_failure_and_exits_nonzero(
     assert _frontmatter(out)["delivered"] is False
 
 
+def test_reply_reports_delivery_failure_and_keeps_pending(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed reply delivery must NOT mark the original as replied and must exit non-zero.
+
+    Mirror of test_send_reports_delivery_failure_and_exits_nonzero for the reply command.
+    The inbox message must stay in ``pending`` so the sender still has a reminder to follow up.
+    """
+
+    def _failing_deliver(_agents):
+        def _deliver(_local_path: Path, _recipient: str) -> bool:
+            return False
+
+        return _deliver
+
+    name = _seed_inbox(workspace)
+    monkeypatch.setattr(agent_cli, "_ssh_deliver", _failing_deliver)
+    result = CliRunner().invoke(agent, ["reply", name, "here is my advice"])
+    assert result.exit_code == 1, result.output
+    assert "Replied to bob" not in result.output
+    assert "failed" in result.output.lower()
+    # The original inbox message must NOT be marked replied — it stays in pending.
+    fm = _frontmatter(workspace / "messages" / "inbox" / name)
+    assert not fm.get("replied"), "inbox message must stay unreplied on delivery failure"
+
+
 @pytest.mark.parametrize(
     "entry",
     [
