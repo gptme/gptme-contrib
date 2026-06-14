@@ -67,18 +67,18 @@ with warnings.catch_warnings():
     import tweepy
 
 from dotenv import load_dotenv
-from gptmail.communication_utils.auth import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.auth import (
     refresh_twitter_token_if_needed,
     run_oauth_callback,
     save_tokens_to_env,
 )
-from gptmail.communication_utils.auth.oauth import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.auth.oauth import (
     OAuthManager,
 )
-from gptmail.communication_utils.auth.tokens import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.auth.tokens import (
     TokenInfo,
 )
-from gptmail.communication_utils.messaging import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.messaging import (
     split_thread,
 )
 from rich.console import Console

@@ -4,7 +4,7 @@ from threading import Lock
 from typing import Dict
 
 import discord
-from gptmail.communication_utils.rate_limiting.limiters import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.rate_limiting.limiters import (
     RateLimiter,
 )
 

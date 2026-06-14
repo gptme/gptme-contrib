@@ -67,7 +67,7 @@ def _load_agent_group():
         src = Path(__file__).resolve().parent.parent / "packages" / "gptmail" / "src"
         sys.path.insert(0, str(src))
         try:
-            from gptmail.agent_cli import agent  # type: ignore[import-not-found]
+            from gptmail.agent_cli import agent
         except ImportError as e:
             print(
                 "Error: could not import the gptmail agent CLI.\n"

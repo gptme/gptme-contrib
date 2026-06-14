@@ -42,12 +42,3 @@ ignore = [
     "UP006",   # non-pep585-annotation: bulk-fix separately
     "UP035",   # deprecated-import: bulk-fix separately
 ]
-
-[tool.mypy]
-check_untyped_defs = true
-
-[[tool.mypy.overrides]]
-module = [
-    "frontmatter",        # third-party; no stubs or py.typed marker
-]
-ignore_missing_imports = true

@@ -55,7 +55,7 @@ import yaml
 from dotenv import load_dotenv
 
 # Import monitoring utilities
-from gptmail.communication_utils.monitoring import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.monitoring import (
     MetricsCollector,
     get_logger,
 )
