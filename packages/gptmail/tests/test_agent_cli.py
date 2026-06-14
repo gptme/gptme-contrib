@@ -241,9 +241,10 @@ def test_pending_excludes_replies_to_my_messages(workspace: Path) -> None:
 
     # Bob replies — inbox message whose in_reply_to points at alice's outbox message.
     inbox = workspace / "messages" / "inbox"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     reply_name = "20260613-120000-000000-bob-Re-Question.md"
     (inbox / reply_name).write_text(
-        f"---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T12:00:00Z\n"
+        f"---\nfrom: bob\nto: alice\ntimestamp: {now_iso}\n"
         f"subject: Re: Question\nread: false\nin_reply_to: {my_msg_id}\n---\n\nbob's answer\n"
     )
 
