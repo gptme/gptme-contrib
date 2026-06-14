@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 try:
-    from gptme.tools.base import ToolSpec
+    from gptme.tools.base import ToolFunction, ToolSpec
 
     _HAS_GPTME = True
 except ImportError:
@@ -1256,10 +1256,10 @@ generate_image(
     """,
         execute=_execute_image_gen_block,
         functions=[
-            generate_image,
-            generate_variation,
-            batch_generate,
-            compare_providers,
+            ToolFunction.from_callable(generate_image),
+            ToolFunction.from_callable(generate_variation),
+            ToolFunction.from_callable(batch_generate),
+            ToolFunction.from_callable(compare_providers),
         ],
         block_types=["image_gen"],
     )
