@@ -127,20 +127,44 @@ _has_greptile_review() {
 
 # --- Helper: check if re-review is needed (new commits since latest review) ---
 # Returns 0 = re-review needed, 1 = no re-review needed
+#
+# PRIMARY (robust): compare the commit Greptile actually reviewed (the latest
+# greptile PR-review's commit_id) against the current PR head SHA. This is immune
+# to the timestamp/timezone and in-place comment-update quirks the date heuristic
+# below missed — e.g. ErikBjare/bob#890 (2026-06-14): a fix commit landed after
+# the review but the date compare skipped the re-trigger, leaving a hardened PR
+# stuck on a stale low score. A SHA mismatch is unambiguous and loop-safe: once
+# Greptile reviews the head, reviewed_sha == head_sha → it stops re-triggering.
+#
+# FALLBACK (date-based): when Greptile posted only an issue comment and no PR
+# review object carries a commit_id, fall back to the original committer.date
+# heuristic so behaviour is unchanged for that case.
 _needs_re_review() {
-    local info reviewed_at new_commits
+    local reviewed_sha head_sha info reviewed_at new_commits
+    reviewed_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate 2>/dev/null \
+        | jq -rs '[.[][]
+              | select((.user.login // "") | test("greptile"; "i"))
+              | select((.commit_id // "") != "")]
+            | sort_by(.submitted_at) | last | (.commit_id // "")' 2>/dev/null) || reviewed_sha=""
+
+    if [ -n "$reviewed_sha" ]; then
+        head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || head_sha=""
+        if [ -n "$head_sha" ]; then
+            # Re-review needed iff Greptile's last review was on a different commit.
+            [ "$reviewed_sha" != "$head_sha" ]
+            return
+        fi
+    fi
+
+    # Fallback: no PR-review commit_id available → use the date heuristic.
     info=$(_greptile_review_info) || return 1
     reviewed_at=$(echo "$info" | _json_field "reviewed_at") || reviewed_at=""
-
-    # No review timestamp → can't determine whether review is stale.
     if [ -z "$reviewed_at" ]; then
         return 1
     fi
-
     new_commits=$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" --paginate \
         2>/dev/null | jq -s "[.[][] | select(.commit.committer.date > \"$reviewed_at\")] | length" \
         2>/dev/null) || new_commits="0"
-
     [ "${new_commits:-0}" -gt 0 ]
 }
 
