@@ -446,6 +446,16 @@ def _strip_anthropic_prefix(model: str) -> str:
     return model.removeprefix("anthropic/") if model.startswith("anthropic/") else model
 
 
+# Models that require temperature=1.0 (Anthropic extended-thinking variants).
+_EXTENDED_THINKING_PREFIXES = ("claude-3-7-",)
+
+
+def _is_extended_thinking_model(model: str) -> bool:
+    """Return True for models that require temperature=1.0 (extended-thinking API constraint)."""
+    bare = _strip_anthropic_prefix(model)
+    return any(bare.startswith(p) for p in _EXTENDED_THINKING_PREFIXES)
+
+
 def _judge_backend(model: str) -> str:
     if _is_anthropic_direct_model(model):
         return "anthropic-direct"
@@ -587,6 +597,16 @@ def _judge_via_anthropic_direct(
         logger.warning("No Anthropic API key found; direct judge unavailable")
         return None
 
+    # Extended-thinking models require temperature=1.0; guard against future
+    # DEFAULT_JUDGE_MODEL changes that would otherwise cause an API 400.
+    effective_temperature = 1.0 if _is_extended_thinking_model(model) else temperature
+    if effective_temperature != temperature:
+        logger.debug(
+            "Extended-thinking model %s requires temperature=1.0; overriding %.2f",
+            model,
+            temperature,
+        )
+
     try:
         client = anthropic.Anthropic(api_key=key)
         response = client.messages.create(
@@ -594,7 +614,7 @@ def _judge_via_anthropic_direct(
             max_tokens=150,
             system=JUDGE_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
+            temperature=effective_temperature,
         )
         text = getattr(response.content[0], "text", "").strip()
     except Exception as exc:
