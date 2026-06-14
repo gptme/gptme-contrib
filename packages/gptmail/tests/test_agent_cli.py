@@ -9,6 +9,7 @@ Parity target: ``scripts/agent-msg.py`` (send/broadcast/list/read/reply/pending)
 See task: fold-agent-msg-into-gptmail-single-comms-tool.
 """
 
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -342,3 +343,99 @@ def test_status_reports_counts(workspace: Path) -> None:
     assert "Agent:    alice" in result.output
     assert "Inbox:    1" in result.output
     assert "Pending:  1" in result.output
+
+
+@pytest.fixture
+def multi_peer_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A workspace with two peers (bob, gordon) plus self (alice) in the registry.
+
+    Delivery is routed locally per-recipient so ``broadcast`` can be exercised
+    without SSH or spamming real agents (the task's stated reason it went
+    untested live). ``alice`` appears in agents.yaml to verify self-exclusion.
+    """
+    messages = tmp_path / "messages"
+    (messages / "inbox").mkdir(parents=True)
+    (messages / "outbox").mkdir(parents=True)
+
+    peers = ["bob", "gordon"]
+    inboxes = {}
+    registry = {"alice": {"ssh": "alice@alice", "workspace": str(tmp_path)}}
+    for name in peers:
+        inbox = tmp_path / name / "messages" / "inbox"
+        inbox.mkdir(parents=True)
+        inboxes[name] = inbox
+        registry[name] = {"ssh": f"{name}@{name}", "workspace": str(tmp_path / name)}
+    (messages / "agents.yaml").write_text(yaml.dump(registry))
+
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+
+    def _routing_deliver(_agents):
+        def _deliver(local_path: Path, recipient: str) -> bool:
+            dest = inboxes.get(recipient)
+            if dest is None:
+                return False
+            shutil.copy2(local_path, dest / local_path.name)
+            return True
+
+        return _deliver
+
+    monkeypatch.setattr(agent_cli, "_ssh_deliver", _routing_deliver)
+    return tmp_path
+
+
+def test_broadcast_delivers_to_all_peers_except_self(multi_peer_workspace: Path) -> None:
+    """Broadcast reaches every registry peer but not self; outbox has one per peer."""
+    result = CliRunner().invoke(agent, ["broadcast", "Standup", "all hands"])
+    assert result.exit_code == 0, result.output
+    assert "Sent to bob: Standup" in result.output
+    assert "Sent to gordon: Standup" in result.output
+
+    # One outbox record per peer (bob + gordon), none addressed to self.
+    outbox = list((multi_peer_workspace / "messages" / "outbox").glob("*.md"))
+    assert len(outbox) == 2
+    recipients = {_frontmatter(f)["to"] for f in outbox}
+    assert recipients == {"bob", "gordon"}
+    assert "alice" not in recipients
+
+    # Each peer inbox received exactly one message.
+    for name in ("bob", "gordon"):
+        delivered = list((multi_peer_workspace / name / "messages" / "inbox").glob("*.md"))
+        assert len(delivered) == 1, name
+        assert "delivered" not in _frontmatter(delivered[0])  # no failure stamp
+
+
+def test_broadcast_reports_partial_delivery_failure(
+    multi_peer_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If one recipient's delivery fails, broadcast exits non-zero and names it.
+
+    Core-infra reliability: a partially-failed broadcast must not look like full
+    success. The reachable peer still gets the message; the failed one is stamped
+    ``delivered: false`` and surfaced.
+    """
+
+    def _bob_only_deliver(_agents):
+        def _deliver(local_path: Path, recipient: str) -> bool:
+            if recipient != "bob":
+                return False  # gordon unreachable
+            dest = multi_peer_workspace / "bob" / "messages" / "inbox"
+            shutil.copy2(local_path, dest / local_path.name)
+            return True
+
+        return _deliver
+
+    monkeypatch.setattr(agent_cli, "_ssh_deliver", _bob_only_deliver)
+    result = CliRunner().invoke(agent, ["broadcast", "Standup", "all hands"])
+    assert result.exit_code == 1, result.output
+    assert "Sent to bob: Standup" in result.output
+    assert "Delivery to gordon FAILED" in result.output
+    assert "Broadcast incomplete: 1 delivery failure(s)." in result.output
+
+    # gordon's outbox record is stamped delivered: false; bob's is not.
+    by_to = {
+        _frontmatter(f)["to"]: _frontmatter(f)
+        for f in (multi_peer_workspace / "messages" / "outbox").glob("*.md")
+    }
+    assert by_to["gordon"]["delivered"] is False
+    assert "delivered" not in by_to["bob"]
