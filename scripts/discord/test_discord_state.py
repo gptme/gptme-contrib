@@ -10,7 +10,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from gptmail.communication_utils.state import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.state import (
     ConversationTracker,
     MessageState,
 )

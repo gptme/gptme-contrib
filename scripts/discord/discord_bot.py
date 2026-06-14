@@ -39,10 +39,10 @@ from discord.ext import commands
 # Import per-user rate limiting and state management
 from discord.rate_limiting import PerUserRateLimiter
 from dotenv import load_dotenv
-from gptmail.communication_utils.monitoring.metrics import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.monitoring.metrics import (
     MetricsCollector,
 )
-from gptmail.communication_utils.state.tracking import (  # type: ignore[import-not-found]
+from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
