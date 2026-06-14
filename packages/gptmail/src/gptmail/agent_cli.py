@@ -200,7 +200,9 @@ def _delivery_failed(message_id: str) -> bool:
     if not content.startswith("---"):
         return False
     parts = content.split("---", 2)
-    return len(parts) >= 3 and "delivered: false" in parts[1]
+    return len(parts) >= 3 and any(
+        line.strip() == "delivered: false" for line in parts[1].splitlines()
+    )
 
 
 def _track_sent(transport: AgentTransport, message_id: str, reply_to: str | None) -> None:
