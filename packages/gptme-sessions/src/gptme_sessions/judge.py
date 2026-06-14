@@ -63,7 +63,8 @@ class JudgeVerdict(TypedDict, total=False):
 JUDGE_SYSTEM = """\
 You are evaluating an AI agent's work session for strategic value.
 Return ONLY a JSON object with two keys: "score" (float 0.0-1.0) and "reason" (string, 1 sentence).
-Do not wrap in markdown code blocks."""
+Do not wrap in markdown code blocks.
+IMPORTANT: Use the FULL 0.0-1.0 range. Do not cluster scores at 0.7-0.8. Reserve 0.9+ for exceptional sessions; assign 0.1-0.3 for minimal or blocked sessions."""
 
 JUDGE_PROMPT_TEMPLATE = """\
 ## Session Category
@@ -141,9 +142,27 @@ scores ~0.72 because:
   automated verification — the impact is mediated through future sessions'
   ability to use the insight.
 
-Key principle across all three: the grade follows from *within-category*
+**Example 4 (code, ~0.92)**: A session ships a new subagent cancellation API
+(``subagent_cancel()``), adds 12 unit tests covering normal completion and
+timeout, gets Greptile 5/5, and merges cleanly. This session scores ~0.92 because:
+- It directly advances a top-priority goal (subagent reliability, a P1 feature).
+- The artifact is self-verifying (tests), durable (merged), and has no rework.
+- 0.92 rather than 1.0 because no end-to-end integration test was added.
+
+**Example 5 (infrastructure, ~0.15)**: A session starts planning a memory
+cleanup, but every file it tries to modify is locked by a parallel session's
+git stash. It re-checks task state, finds the work already done, writes a
+one-line journal entry, and ends. This session scores ~0.15 because:
+- No artifact was produced — the work was already done by someone else.
+- The only output is a journal entry acknowledging the NOOP.
+- 0.15 rather than 0.0 because the loose-end check and duplicate detection
+  were correct agent behavior — pure NOOP would be 0.0.
+
+Key principle across all five: the grade follows from *within-category*
 execution quality, compounding value, and durability — not from whether the
-category number matches a top goal.
+category number matches a top goal. Use scores below 0.5 when output is
+minimal, blocked, or duplicated, and scores above 0.85 only for sessions
+that ship a durable, high-impact deliverable.
 
 ## Forbidden Constructions
 Do NOT invoke any of the following as a penalty rationale:
@@ -554,6 +573,7 @@ def _judge_via_anthropic_direct(
     *,
     model: str,
     api_key: str | None,
+    temperature: float = 0.3,
 ) -> dict | None:
     """Call the judge via the direct Anthropic SDK (legacy path)."""
     try:
@@ -574,6 +594,7 @@ def _judge_via_anthropic_direct(
             max_tokens=150,
             system=JUDGE_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
         )
         text = getattr(response.content[0], "text", "").strip()
     except Exception as exc:
@@ -584,7 +605,13 @@ def _judge_via_anthropic_direct(
 
 
 def _judge_via_gptme(prompt: str, *, model: str) -> dict | None:
-    """Call the judge via ``gptme.llm.reply`` for non-Anthropic-direct models."""
+    """Call the judge via ``gptme.llm.reply`` for non-Anthropic-direct models.
+
+    Temperature is not explicitly set here — gptme.llm.reply defaults to the
+    model API default (typically 1.0 for Claude), which already provides
+    sufficient variance. The caller's ``temperature`` param is applied by
+    the anthropic-direct path only.
+    """
     try:
         from gptme.init import init as init_gptme
         from gptme.llm import reply
@@ -633,6 +660,7 @@ def judge_session(
     api_key: str | None = None,
     cascade_context: dict | None = None,
     intent: dict | None = None,
+    temperature: float = 0.3,
 ) -> dict | None:
     """Score a session's strategic value using an LLM judge.
 
@@ -663,6 +691,9 @@ def judge_session(
             Expected keys: ``session_id``, ``lane``, ``objective``,
             ``expected_artifact``, and optionally ``outcome_alignment``
             (self-assigned pre-closeout verdict).
+        temperature: Sampling temperature for the judge model (default 0.3).
+            Higher values increase score variance; 0.0 produces near-constant
+            scores that undermine calibration.
 
     Returns:
         Dict with keys ``score`` (float), ``reason`` (str), ``model`` (str),
@@ -685,7 +716,9 @@ def judge_session(
     )
 
     if _is_anthropic_direct_model(model):
-        return _judge_via_anthropic_direct(prompt, model=model, api_key=api_key)
+        return _judge_via_anthropic_direct(
+            prompt, model=model, api_key=api_key, temperature=temperature
+        )
     return _judge_via_gptme(prompt, model=model)
 
 
@@ -699,6 +732,7 @@ def judge_session_with_fallback(
     api_key: str | None = None,
     cascade_context: dict | None = None,
     intent: dict | None = None,
+    temperature: float = 0.3,
 ) -> dict | None:
     """Score a session, trying fallback models if the primary is unavailable.
 
@@ -711,6 +745,7 @@ def judge_session_with_fallback(
         api_key: Anthropic API key (Anthropic-direct path only).
         cascade_context: Optional CASCADE selector payload. See :func:`judge_session`.
         intent: Optional pre-session intent dict. See :func:`judge_session`.
+        temperature: Sampling temperature forwarded to :func:`judge_session`.
 
     Returns:
         Dict with keys ``score``, ``reason``, ``model`` or ``None`` if all models fail.
@@ -731,6 +766,7 @@ def judge_session_with_fallback(
             api_key=api_key,
             cascade_context=cascade_context,
             intent=intent,
+            temperature=temperature,
         )
         if result is not None:
             return result
@@ -879,6 +915,7 @@ def judge_and_writeback(
     api_key: str | None = None,
     cascade_context: dict | None = None,
     intent: dict | None = None,
+    temperature: float = 0.3,
 ) -> dict[str, Any]:
     """Judge a session and persist the verdict via SessionStore.
 
@@ -895,6 +932,7 @@ def judge_and_writeback(
             api_key=api_key,
             cascade_context=cascade_context,
             intent=intent,
+            temperature=temperature,
         )
     else:
         verdict = judge_session(
@@ -905,6 +943,7 @@ def judge_and_writeback(
             api_key=api_key,
             cascade_context=cascade_context,
             intent=intent,
+            temperature=temperature,
         )
     if verdict is None:
         return {"status": "failed"}
