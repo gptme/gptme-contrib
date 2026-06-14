@@ -81,6 +81,8 @@ elif endpoint.endswith(f"/issues/{pr_number}/comments"):
     data = fixture.get("raw_comments", [])
 elif endpoint.endswith(f"/pulls/{pr_number}/commits"):
     data = fixture.get("raw_commits", [])
+elif endpoint.endswith(f"/pulls/{pr_number}/reviews"):
+    data = fixture.get("raw_reviews", [])
 elif endpoint.endswith(f"/pulls/{pr_number}"):
     data = fixture.get("raw_pr", {"created_at": "2020-01-01T00:00:00Z"})
 elif endpoint.endswith("/reactions"):
@@ -314,6 +316,78 @@ def test_rereview_ignores_old_trigger_from_previous_review_cycle():
 
     status = _run_helper("status", fixture)
     assert status.stdout.strip() == "needs-re-review"
+
+
+def _make_greptile_review(commit_id: str, submitted_at: str) -> dict:
+    return {
+        "user": {"login": "greptile-apps[bot]"},
+        "commit_id": commit_id,
+        "submitted_at": submitted_at,
+        "state": "COMMENTED",
+        "body": "Greptile review",
+    }
+
+
+def test_sha_mismatch_forces_re_review_even_when_date_says_no():
+    """SHA-based primary: a fix commit after Greptile's review must re-trigger even
+    when the date heuristic would skip it (regression for ErikBjare/bob#890).
+
+    Greptile reviewed commit OLDSHA; PR head is now NEWSHA. raw_commits has only an
+    OLD commit (date BEFORE the review), so the date fallback alone would say "no
+    re-review" — but the SHA mismatch correctly forces it.
+    """
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at, updated_at=reviewed_at),
+        ],
+        "raw_reviews": [_make_greptile_review("OLDSHA", reviewed_at)],
+        "raw_pr": {"head": {"sha": "NEWSHA"}, "created_at": _iso_ago(minutes=120)},
+        # Date heuristic would NOT fire: the only commit predates the review.
+        "raw_commits": [_make_commit(_iso_ago(minutes=90))],
+        "bot_reaction_count": 1,
+    }
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+
+
+def test_sha_match_skips_re_review_even_when_date_says_yes():
+    """SHA-based primary is loop-safe: when Greptile already reviewed the current
+    head, do NOT re-trigger even if the date heuristic sees "new" commits."""
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [
+            _make_greptile_comment(5, reviewed_at=reviewed_at, updated_at=reviewed_at),
+        ],
+        "raw_reviews": [_make_greptile_review("HEADSHA", reviewed_at)],
+        "raw_pr": {"head": {"sha": "HEADSHA"}, "created_at": _iso_ago(minutes=120)},
+        # A "new" commit (after the review) — date heuristic would say re-review,
+        # but the SHA already matches head, so we must NOT re-trigger (loop-safe).
+        "raw_commits": [_make_commit(_iso_ago(minutes=5))],
+        "bot_reaction_count": 1,
+    }
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
+
+
+def test_no_pr_review_object_falls_back_to_date_heuristic():
+    """When Greptile posted only an issue comment (no PR review with commit_id),
+    fall back to the date heuristic — behaviour unchanged for that case."""
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at, updated_at=reviewed_at),
+        ],
+        "raw_reviews": [],  # no PR-review commit_id → fallback
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=5))],  # new commit → re-review
+        "bot_reaction_count": 1,
+    }
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
 
 
 def test_fresh_pr_awaits_initial_review():
