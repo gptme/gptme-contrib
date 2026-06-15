@@ -145,6 +145,12 @@ def _ssh_deliver(agents: dict[str, dict[str, str]]) -> Deliver:
                 err=True,
             )
             return False
+        # Pull-only recipients (e.g. humans who poll the outbox) have no SSH
+        # target — write the message to the outbox and report success so the
+        # message is NOT stamped ``delivered: false`` (which would make every
+        # poll re-compose a fresh, duplicate reply).
+        if agent.get("delivery") == "pull-only":
+            return True
         missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
         if missing:
             click.echo(

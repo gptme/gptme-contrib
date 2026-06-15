@@ -12,10 +12,9 @@ See task: fold-agent-msg-into-gptmail-single-comms-tool.
 from pathlib import Path
 
 import pytest
-import yaml
 
 from gptmail.transport import Transport
-from gptmail.transport.agent import AgentTransport
+from gptmail.transport.agent import AgentTransport, meta_of
 
 
 def _transport(tmp_path: Path, deliver=None) -> AgentTransport:
@@ -23,8 +22,9 @@ def _transport(tmp_path: Path, deliver=None) -> AgentTransport:
 
 
 def _frontmatter(path: Path) -> dict:
-    parts = path.read_text().split("---", 2)
-    return yaml.safe_load(parts[1])
+    meta = meta_of(path)
+    assert meta is not None, f"No valid YAML frontmatter in {path}"
+    return meta
 
 
 def test_satisfies_protocol(tmp_path: Path) -> None:
@@ -170,3 +170,66 @@ def test_conversation_id_is_order_free_pair(tmp_path: Path) -> None:
 
 def test_conversation_id_falls_back_when_unknown(tmp_path: Path) -> None:
     assert _transport(tmp_path).conversation_id_for("ghost.md") == "agent:ghost.md"
+
+
+# -- Regression: naive str.split("---") splits inside YAML values ------------
+
+
+def test_meta_of_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
+    """meta_of must not be confused by '---' appearing inside a YAML value.
+
+    Inbox filenames are sanitised from message subjects and can contain long
+    runs of dashes (e.g. '...blog-candidate----gptma.md').  Storing such a
+    filename in the ``in_reply_to`` field and then splitting the whole file
+    content on the literal string '---' truncates the value and corrupts
+    threading.  The fix: split only on '---' that occupies an entire line.
+    """
+    tricky_id = "20260615-120000-000000-erik-ty-vs-mypy-eval--blog-candidate----gptma.md"
+    msg_path = tmp_path / "tricky.md"
+    msg_path.write_text(
+        f"---\nfrom: bob\nto: alice\ntimestamp: 2026-06-15T12:00:00Z\n"
+        f"subject: Reply\nread: false\nin_reply_to: {tricky_id}\n---\n\nbody\n"
+    )
+    meta = meta_of(msg_path)
+    assert meta is not None
+    assert (
+        meta["in_reply_to"] == tricky_id
+    ), f"in_reply_to was truncated: {meta.get('in_reply_to')!r}"
+    assert meta["from"] == "bob"
+
+
+def test_delivery_failure_stamp_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
+    """_stamp_delivery_failed must not corrupt frontmatter with '---' in values."""
+    tricky_id = "20260615-120000-000000-erik-ty-vs-mypy-eval--blog-candidate----gptma.md"
+    t = _transport(tmp_path)
+    # Write a pre-formed outbox file with the tricky in_reply_to
+    out_path = t.outbox / "reply.md"
+    out_path.write_text(
+        f"---\nfrom: alice\nto: bob\ntimestamp: 2026-06-15T12:00:00Z\n"
+        f"subject: Reply\nread: false\nin_reply_to: {tricky_id}\n---\n\nbody\n"
+    )
+    t._stamp_delivery_failed(out_path)
+    meta = _frontmatter(out_path)
+    assert (
+        meta["in_reply_to"] == tricky_id
+    ), f"in_reply_to was corrupted: {meta.get('in_reply_to')!r}"
+    assert meta["delivered"] is False
+
+
+def test_mark_read_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
+    """_mark_read must not corrupt frontmatter with '---' inside a value."""
+    tricky_id = "20260615-120000-000000-erik-ty-vs-mypy-eval--blog-candidate----gptma.md"
+    t = _transport(tmp_path)
+    # Manually place a message with the tricky in_reply_to in alice's inbox
+    inbox_path = t.inbox / "tricky.md"
+    inbox_path.write_text(
+        f"---\nfrom: bob\nto: alice\ntimestamp: 2026-06-15T12:00:00Z\n"
+        f"subject: Reply\nread: false\nin_reply_to: {tricky_id}\n---\n\nbody\n"
+    )
+    content = t.read("tricky.md")
+    assert "body" in content
+    meta = _frontmatter(inbox_path)
+    assert meta["read"] is True
+    assert (
+        meta["in_reply_to"] == tricky_id
+    ), f"in_reply_to was corrupted: {meta.get('in_reply_to')!r}"

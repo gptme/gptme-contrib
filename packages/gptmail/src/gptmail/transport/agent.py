@@ -36,6 +36,12 @@ import yaml
 # delivery succeeded. None means local-only (tests, single-host).
 Deliver = Callable[[Path, str], bool]
 
+# YAML frontmatter delimiter: "---" on its own line.  A plain str.split("---")
+# would also split on "---" inside YAML values, e.g. inbox filenames whose
+# sanitised subjects contain long runs of dashes (like "...candidate----gptma.md").
+# The correct delimiter is three dashes occupying an entire line.
+_FM_DELIM = re.compile(r"^---[ \t]*$", re.MULTILINE)
+
 
 def meta_of(path: Path) -> dict | None:
     """Parse the YAML frontmatter of a message file (``None`` if absent/invalid).
@@ -49,7 +55,7 @@ def meta_of(path: Path) -> dict | None:
         return None
     if not content.startswith("---"):
         return None
-    parts = content.split("---", 2)
+    parts = _FM_DELIM.split(content, maxsplit=2)
     if len(parts) < 3:
         return None
     try:
@@ -176,7 +182,7 @@ class AgentTransport:
         content = local_path.read_text()
         if not content.startswith("---"):
             return
-        parts = content.split("---", 2)
+        parts = _FM_DELIM.split(content, maxsplit=2)
         if len(parts) < 3:
             return
         fm = parts[1]
@@ -231,7 +237,7 @@ class AgentTransport:
     def _mark_read(self, path: Path) -> str:
         content = path.read_text()
         if content.startswith("---"):
-            parts = content.split("---", 2)
+            parts = _FM_DELIM.split(content, maxsplit=2)
             if len(parts) >= 3 and "read: false" in parts[1]:
                 parts[1] = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
                 content = "---".join(parts)
