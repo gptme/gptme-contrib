@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from gptmail.transport import Transport
-from gptmail.transport.agent import AgentTransport
+from gptmail.transport.agent import AgentTransport, meta_of
 
 
 def _transport(tmp_path: Path, deliver=None) -> AgentTransport:
@@ -170,3 +170,48 @@ def test_conversation_id_is_order_free_pair(tmp_path: Path) -> None:
 
 def test_conversation_id_falls_back_when_unknown(tmp_path: Path) -> None:
     assert _transport(tmp_path).conversation_id_for("ghost.md") == "agent:ghost.md"
+
+
+# A parent filename whose subject slug contains ``---`` — e.g. a subject like
+# "Comms test — please ack" slugs to ``...Comms-test---please-ack...``. Replying
+# to it puts ``---`` inside the reply's ``in_reply_to`` value. A frontmatter
+# parser that splits on the bare ``---`` substring truncates the value mid-line
+# and corrupts the file. These pin the line-anchored delimiter parse.
+_DASHED_PARENT_ID = "20260615-130649-erik-Comms-test---please-ack--gptmail-agent-c.md"
+
+
+def test_reply_to_with_triple_dash_in_filename_round_trips(tmp_path: Path) -> None:
+    t = _transport(tmp_path)
+    mid = t.send("bob", "Re: Comms test", "ack body", reply_to=_DASHED_PARENT_ID)
+    meta = meta_of(t.outbox / mid)
+    assert meta is not None
+    # The full filename survives — not truncated at the first ``---``.
+    assert meta["in_reply_to"] == _DASHED_PARENT_ID
+    assert meta["subject"] == "Re: Comms test"
+    assert meta["from"] == "alice"
+    assert meta["to"] == "bob"
+
+
+def test_delivery_failure_stamp_preserves_dashed_in_reply_to(tmp_path: Path) -> None:
+    t = _transport(tmp_path, deliver=lambda path, recipient: False)
+    mid = t.send("bob", "Re: Comms test", "ack body", reply_to=_DASHED_PARENT_ID)
+    meta = meta_of(t.outbox / mid)
+    assert meta is not None
+    assert meta["delivered"] is False
+    # Stamping must not corrupt the dashed in_reply_to or drop other fields.
+    assert meta["in_reply_to"] == _DASHED_PARENT_ID
+    assert meta["subject"] == "Re: Comms test"
+    assert "ack body" in (t.outbox / mid).read_text()
+
+
+def test_read_preserves_dashed_in_reply_to(tmp_path: Path) -> None:
+    alice = _transport(tmp_path)
+    bob = AgentTransport(
+        tmp_path / "bob-messages", "bob", deliver=AgentTransport.local_deliver(alice.inbox)
+    )
+    mid = bob.send("alice", "Re: Comms test", "ack body", reply_to=_DASHED_PARENT_ID)
+    alice.read(mid)
+    meta = meta_of(alice.inbox / mid)
+    assert meta is not None
+    assert meta["read"] is True
+    assert meta["in_reply_to"] == _DASHED_PARENT_ID

@@ -36,6 +36,28 @@ import yaml
 # delivery succeeded. None means local-only (tests, single-host).
 Deliver = Callable[[Path, str], bool]
 
+# Matches a leading frontmatter block, capturing the YAML between the opening
+# ``---`` line and the next ``---`` that is *alone on its own line*. Using the
+# line-anchored delimiter (``\n---`` then end-of-line) instead of a bare ``---``
+# substring is load-bearing: a frontmatter *value* can legitimately contain
+# ``---`` — e.g. an ``in_reply_to`` filename whose subject slug has ``---`` in it
+# ("Re: x — y" → ``...x---y.md``). Splitting on the bare substring truncated the
+# value mid-line and corrupted every subsequent field.
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---(?:\n|$)", re.DOTALL)
+
+
+def _split_frontmatter(content: str) -> tuple[str, str] | None:
+    """Split ``content`` into ``(frontmatter_yaml, body)``.
+
+    ``body`` is everything after the closing delimiter line, so the original file
+    is reconstructed losslessly as ``f"---\\n{fm}\\n---\\n{body}"``. Returns None
+    when there's no well-formed leading frontmatter block.
+    """
+    m = _FRONTMATTER_RE.match(content)
+    if not m:
+        return None
+    return m.group(1), content[m.end() :]
+
 
 def meta_of(path: Path) -> dict | None:
     """Parse the YAML frontmatter of a message file (``None`` if absent/invalid).
@@ -47,13 +69,11 @@ def meta_of(path: Path) -> dict | None:
         content = path.read_text()
     except OSError:
         return None
-    if not content.startswith("---"):
-        return None
-    parts = content.split("---", 2)
-    if len(parts) < 3:
+    split = _split_frontmatter(content)
+    if split is None:
         return None
     try:
-        meta = yaml.safe_load(parts[1])
+        meta = yaml.safe_load(split[0])
     except yaml.YAMLError:
         return None
     return meta if isinstance(meta, dict) else None
@@ -174,15 +194,13 @@ class AgentTransport:
     def _stamp_delivery_failed(self, local_path: Path) -> None:
         """Mark an outbox file ``delivered: false`` so reply-tracking skips it."""
         content = local_path.read_text()
-        if not content.startswith("---"):
+        split = _split_frontmatter(content)
+        if split is None:
             return
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return
-        fm = parts[1]
+        fm, body = split
         if not re.search(r"^delivered:", fm, flags=re.MULTILINE):
-            fm = fm.rstrip("\n") + "\ndelivered: false\n"
-        local_path.write_text("---".join([parts[0], fm, parts[2]]))
+            fm = fm.rstrip("\n") + "\ndelivered: false"
+        local_path.write_text(f"---\n{fm}\n---\n{body}")
 
     def list_inbox(self, folder: str = "inbox") -> list[tuple[str, str, datetime]]:
         """List ``(message_id, subject, timestamp)`` for messages in a folder."""
@@ -230,12 +248,11 @@ class AgentTransport:
 
     def _mark_read(self, path: Path) -> str:
         content = path.read_text()
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 3 and "read: false" in parts[1]:
-                parts[1] = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
-                content = "---".join(parts)
-                path.write_text(content)
+        split = _split_frontmatter(content)
+        if split is not None and re.search(r"^read: false$", split[0], flags=re.MULTILINE):
+            fm = re.sub(r"^read: false$", "read: true", split[0], flags=re.MULTILINE)
+            content = f"---\n{fm}\n---\n{split[1]}"
+            path.write_text(content)
         return content
 
     def _lookup_meta(self, message_id: str) -> dict | None:
