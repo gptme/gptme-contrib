@@ -109,15 +109,16 @@ def _self_name() -> str:
     return os.environ.get("AGENT_NAME", os.environ.get("USER", "unknown")).lower()
 
 
-def _load_agents() -> dict[str, dict[str, str]]:
+def _load_agents(*, warn_missing: bool = True) -> dict[str, dict[str, str]]:
     """Load the agent registry from ``messages/agents.yaml`` ({} if absent)."""
     config_path = _messages_dir() / "agents.yaml"
     if not config_path.exists():
-        click.echo(
-            f"Warning: no agent registry at {config_path}\n"
-            "Create messages/agents.yaml with agent SSH targets.",
-            err=True,
-        )
+        if warn_missing:
+            click.echo(
+                f"Warning: no agent registry at {config_path}\n"
+                "Create messages/agents.yaml with agent SSH targets.",
+                err=True,
+            )
         return {}
     raw = yaml.safe_load(config_path.read_text()) or {}
     # Normalise keys to lowercase so lookups (which use ``to.lower()``) match
@@ -259,7 +260,12 @@ def _is_push_reachable(recipient: str, agents: dict[str, dict[str, str]]) -> boo
     return all(agent.get(k) for k in ("ssh", "workspace"))
 
 
-def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[dict]:
+def _pending_messages(
+    messages_dir: Path,
+    self_name: str,
+    window: int,
+    agents: dict[str, dict[str, str]] | None = None,
+) -> list[dict]:
     """Inbox messages addressed to us that we haven't replied to (timely SLA).
 
     A reply requirement is satisfied by an inbox ``replied: true`` stamp or by an
@@ -273,7 +279,8 @@ def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[d
     inbox = messages_dir / "inbox"
     outbox = messages_dir / "outbox"
     now = datetime.now(timezone.utc)
-    agents = _load_agents()
+    if agents is None:
+        agents = _load_agents(warn_missing=False)
 
     replied_to: set[str] = set()
     my_outbox_ids: set[str] = set()
@@ -497,7 +504,7 @@ def status() -> None:
     agents = _load_agents()
     inbox = transport.list_inbox("inbox")
     outbox = transport.list_inbox("outbox")
-    pend = _pending_messages(messages_dir, _self_name(), _reply_window_days())
+    pend = _pending_messages(messages_dir, _self_name(), _reply_window_days(), agents=agents)
     click.echo(f"Agent:    {_self_name()}")
     click.echo(f"Registry: {', '.join(agents) or '(none)'}")
     click.echo(f"Inbox:    {len(inbox)}")

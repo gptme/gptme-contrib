@@ -395,6 +395,35 @@ def test_status_reports_counts(workspace: Path) -> None:
     assert "Pending:  1" in result.output
 
 
+def test_pending_stays_silent_without_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    messages = tmp_path / "messages"
+    (messages / "inbox").mkdir(parents=True)
+    (messages / "outbox").mkdir(parents=True)
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0
+    assert "Warning: no agent registry" not in result.output
+    assert "No messages awaiting reply." in result.output
+
+
+def test_status_warns_once_without_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    messages = tmp_path / "messages"
+    (messages / "inbox").mkdir(parents=True)
+    (messages / "outbox").mkdir(parents=True)
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+
+    result = CliRunner().invoke(agent, ["status"])
+    assert result.exit_code == 0
+    assert result.output.count("Warning: no agent registry") == 1
+
+
 @pytest.fixture
 def multi_peer_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A workspace with two peers (bob, gordon) plus self (alice) in the registry.
