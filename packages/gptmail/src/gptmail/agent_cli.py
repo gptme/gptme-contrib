@@ -426,23 +426,18 @@ def reply(message_id: str, content: str | None) -> None:
     if msg_path is None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)
-    # Idempotency guard: if this message already carries replied:true (from a
-    # prior reply by this or another concurrent session), do not send a
-    # duplicate.  This protects against the inbox handler reprocessing the same
-    # inbound message on multiple cascade passes or convergent autonomous
-    # sessions — the reply-once property lives at the messaging layer, not in
-    # the cascade scheduling layer.
-    precheck = meta_of(msg_path)
-    if precheck and precheck.get("replied"):
+    original = meta_of(msg_path)
+    if original is None:
+        click.echo(f"Error: message not found: {message_id}", err=True)
+        sys.exit(1)
+    # Idempotency guard: skip if a prior session already stamped replied:true.
+    # Protects against cascade reprocessing sending duplicate replies.
+    if original.get("replied"):
         click.echo(
             f"Skipping {message_id}: already replied (idempotency guard).",
             err=True,
         )
         return
-    original = meta_of(msg_path)
-    if original is None:
-        click.echo(f"Error: message not found: {message_id}", err=True)
-        sys.exit(1)
     recipient = str(original.get("from", "")).lower()
     if not recipient:
         click.echo(f"Error: cannot determine sender of {message_id}", err=True)
