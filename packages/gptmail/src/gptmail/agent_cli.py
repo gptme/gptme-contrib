@@ -430,6 +430,14 @@ def reply(message_id: str, content: str | None) -> None:
     if original is None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)
+    # Idempotency guard: skip if a prior session already stamped replied:true.
+    # Protects against cascade reprocessing sending duplicate replies.
+    if original.get("replied"):
+        click.echo(
+            f"Skipping {message_id}: already replied (idempotency guard).",
+            err=True,
+        )
+        return
     recipient = str(original.get("from", "")).lower()
     if not recipient:
         click.echo(f"Error: cannot determine sender of {message_id}", err=True)
