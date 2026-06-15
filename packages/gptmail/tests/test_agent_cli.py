@@ -170,6 +170,47 @@ def test_ssh_deliver_missing_key_returns_false(tmp_path: Path, entry: dict) -> N
     assert deliver(msg, "bob") is False
 
 
+def test_ssh_deliver_pull_only_returns_true(tmp_path: Path) -> None:
+    """A pull-only registry entry returns True without any SSH/SCP attempt.
+
+    Pull-only recipients (e.g. Erik, who polls outboxes) have no inbound SSH
+    target.  Returning True signals successful 'delivery' so the outbox message
+    is NOT stamped ``delivered: false``.
+    """
+    deliver = agent_cli._ssh_deliver({"erik": {"delivery": "pull-only"}})
+    msg = tmp_path / "msg.md"
+    msg.write_text("---\nto: erik\n---\n\nbody\n")
+    assert deliver(msg, "erik") is True
+
+
+def test_send_to_pull_only_recipient_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``send`` to a pull-only recipient writes to outbox, exits 0, no failure stamp.
+
+    Regression for the 'unknown agent' exit-1 bug: Erik is registered as pull-only
+    (no ssh/workspace keys), so ``send``/``reply`` must write to the outbox and
+    return 0 rather than failing with "unknown agent" or stamping delivered:false.
+    """
+    messages = tmp_path / "messages"
+    (messages / "inbox").mkdir(parents=True)
+    (messages / "outbox").mkdir(parents=True)
+    (messages / "agents.yaml").write_text(yaml.dump({"erik": {"delivery": "pull-only"}}))
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+    # Do NOT patch _ssh_deliver — we want the real pull-only path to run.
+
+    result = CliRunner().invoke(agent, ["send", "erik", "Hello Erik", "body text"])
+    assert result.exit_code == 0, result.output
+    assert "Sent to erik" in result.output
+
+    files = list((messages / "outbox").glob("*.md"))
+    assert len(files) == 1
+    meta = yaml.safe_load(files[0].read_text().split("---", 2)[1])
+    assert meta["to"] == "erik"
+    assert "delivered" not in meta  # pull-only returns True → no failure stamp
+
+
 def test_send_stamps_tracker_channel_agent(workspace: Path) -> None:
     CliRunner().invoke(agent, ["send", "bob", "Hello", "body"])
     tracker = ConversationTracker(workspace / "messages" / ".tracking")
