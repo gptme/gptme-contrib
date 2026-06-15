@@ -12,8 +12,6 @@ See task: fold-agent-msg-into-gptmail-single-comms-tool.
 from pathlib import Path
 
 import pytest
-import yaml
-
 from gptmail.transport import Transport
 from gptmail.transport.agent import AgentTransport, meta_of
 
@@ -23,8 +21,9 @@ def _transport(tmp_path: Path, deliver=None) -> AgentTransport:
 
 
 def _frontmatter(path: Path) -> dict:
-    parts = path.read_text().split("---", 2)
-    return yaml.safe_load(parts[1])
+    result = meta_of(path)
+    assert result is not None
+    return result
 
 
 def test_satisfies_protocol(tmp_path: Path) -> None:
