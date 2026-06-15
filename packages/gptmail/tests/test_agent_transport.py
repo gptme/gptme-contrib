@@ -15,7 +15,13 @@ import pytest
 import yaml
 
 from gptmail.transport import Transport
-from gptmail.transport.agent import AgentTransport
+from gptmail.transport.agent import AgentTransport, meta_of, split_frontmatter
+
+# A message-id (inbox filename) whose sanitized-subject tail leaves a run of
+# dashes plus a ``.md`` suffix — i.e. it literally contains ``---``. Carried
+# verbatim into ``in_reply_to``, this used to truncate the frontmatter via a
+# naive ``content.split("---", 2)``. Erik bug report 2026-06-15.
+DASHRUN_ID = "20260615-123532-377975-erik-ty-vs-mypy-eval--blog-candidate----gptma.md"
 
 
 def _transport(tmp_path: Path, deliver=None) -> AgentTransport:
@@ -23,8 +29,9 @@ def _transport(tmp_path: Path, deliver=None) -> AgentTransport:
 
 
 def _frontmatter(path: Path) -> dict:
-    parts = path.read_text().split("---", 2)
-    return yaml.safe_load(parts[1])
+    meta = meta_of(path)
+    assert meta is not None
+    return meta
 
 
 def test_satisfies_protocol(tmp_path: Path) -> None:
@@ -170,3 +177,58 @@ def test_conversation_id_is_order_free_pair(tmp_path: Path) -> None:
 
 def test_conversation_id_falls_back_when_unknown(tmp_path: Path) -> None:
     assert _transport(tmp_path).conversation_id_for("ghost.md") == "agent:ghost.md"
+
+
+# -- frontmatter ``---``-in-value corruption (Erik bug report 2026-06-15) -----
+
+
+def test_split_frontmatter_value_containing_fence_is_lossless() -> None:
+    # A ``---`` inside the in_reply_to value must NOT end the block, and the
+    # split must rejoin losslessly so rewrite paths don't corrupt the file.
+    doc = f"---\nfrom: bob\nto: erik\nin_reply_to: {DASHRUN_ID}\nread: false\n---\n\nthe body\n"
+    parts = split_frontmatter(doc)
+    assert parts is not None
+    assert "---".join(parts) == doc
+    meta = yaml.safe_load(parts[1])
+    assert meta["in_reply_to"] == DASHRUN_ID
+
+
+def test_split_frontmatter_none_without_block() -> None:
+    assert split_frontmatter("no frontmatter here\n") is None
+    assert split_frontmatter("---\nunterminated: true\n") is None
+
+
+def test_reply_to_with_dashrun_roundtrips(tmp_path: Path) -> None:
+    t = _transport(tmp_path)
+    mid = t.send("bob", "Re: x", "reply body", reply_to=DASHRUN_ID)
+    assert _frontmatter(t.outbox / mid)["in_reply_to"] == DASHRUN_ID
+
+
+def test_read_preserves_dashrun_in_reply_to(tmp_path: Path) -> None:
+    # Marking ``read: false`` -> ``read: true`` must not mangle an in_reply_to
+    # that contains ``---`` (the rewrite path used a naive split).
+    alice = _transport(tmp_path)
+    bob = AgentTransport(
+        tmp_path / "bob-messages", "bob", deliver=AgentTransport.local_deliver(alice.inbox)
+    )
+    mid = bob.send("alice", "Re: thread", "answer", reply_to=DASHRUN_ID)
+    alice.read(mid)
+    meta = _frontmatter(alice.inbox / mid)
+    assert meta["read"] is True
+    assert meta["in_reply_to"] == DASHRUN_ID
+
+
+def test_delivery_failure_preserves_dashrun_in_reply_to(tmp_path: Path) -> None:
+    # The delivered:false stamp rewrites frontmatter too — must stay intact.
+    t = _transport(tmp_path, deliver=lambda path, recipient: False)
+    mid = t.send("bob", "Re: x", "body", reply_to=DASHRUN_ID)
+    meta = _frontmatter(t.outbox / mid)
+    assert meta["delivered"] is False
+    assert meta["in_reply_to"] == DASHRUN_ID
+
+
+def test_make_filename_never_contains_fence(tmp_path: Path) -> None:
+    # New message-ids must never carry a ``---`` run (protects external pollers).
+    t = _transport(tmp_path)
+    mid = t.send("bob", "ty vs mypy eval -- blog candidate -- gptma", "body")
+    assert "---" not in mid

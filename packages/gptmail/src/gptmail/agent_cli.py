@@ -48,7 +48,12 @@ from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from gptmail.transport.agent import AgentTransport, Deliver, meta_of
+from gptmail.transport.agent import (
+    AgentTransport,
+    Deliver,
+    meta_of,
+    split_frontmatter,
+)
 
 
 # Inbox messages older than this (days) are assumed handled and no longer
@@ -197,12 +202,10 @@ def _delivery_failed(message_id: str) -> bool:
         content = path.read_text()
     except OSError:
         return False
-    if not content.startswith("---"):
+    parts = split_frontmatter(content)
+    if parts is None:
         return False
-    parts = content.split("---", 2)
-    return len(parts) >= 3 and any(
-        line.strip() == "delivered: false" for line in parts[1].splitlines()
-    )
+    return any(line.strip() == "delivered: false" for line in parts[1].splitlines())
 
 
 def _track_sent(transport: AgentTransport, message_id: str, reply_to: str | None) -> None:
@@ -295,10 +298,8 @@ def _mark_replied(messages_dir: Path, message_id: str) -> None:
     if path is None or not path.exists():
         return
     content = path.read_text()
-    if not content.startswith("---"):
-        return
-    parts = content.split("---", 2)
-    if len(parts) < 3:
+    parts = split_frontmatter(content)
+    if parts is None:
         return
     fm = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
     if "replied:" not in fm:

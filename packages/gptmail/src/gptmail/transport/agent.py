@@ -36,6 +36,47 @@ import yaml
 # delivery succeeded. None means local-only (tests, single-host).
 Deliver = Callable[[Path, str], bool]
 
+# Matches a ``---`` that occupies its own line (the closing frontmatter fence),
+# so a ``---`` *inside* a value (e.g. an ``in_reply_to`` filename ending in
+# ``----foo.md``) can never be mistaken for the end of the block.
+_CLOSE_FENCE = re.compile(r"\n---[ \t]*(?=\n|$)")
+
+
+def split_frontmatter(content: str) -> list[str] | None:
+    """Split YAML frontmatter on line-anchored ``---`` fences.
+
+    Returns ``["", frontmatter, rest]`` — the same 3-part shape as
+    ``content.split("---", 2)`` and losslessly rejoinable via
+    ``"---".join(parts)`` — but only a ``---`` on its own line ends the block.
+
+    ``content.split("---", 2)`` is wrong for frontmatter: a value containing
+    ``---`` (an ``in_reply_to`` filename like ``...blog-candidate----gptma.md``)
+    truncates the block, and the rewrite paths then reinsert keys into the middle
+    of that value (silent threading corruption). This splitter is fence-anchored
+    so such values stay intact. Returns ``None`` when there is no well-formed
+    block.
+    """
+    # Opening fence must be on its own line.
+    if not (content.startswith("---\n") or content.rstrip("\n") == "---"):
+        return None
+    m = _CLOSE_FENCE.search(content, 3)
+    if m is None:
+        return None
+    close = m.start() + 1  # position of the literal closing "---"
+    return ["", content[3:close], content[close + 3 :]]
+
+
+def _slug(text: str, maxlen: int) -> str:
+    """Filename-safe slug with dash-runs collapsed so it never contains ``---``.
+
+    Message IDs are filenames embedded into the ``in_reply_to`` frontmatter
+    value; collapsing runs of ``-`` guarantees that value never carries a
+    ``---`` a parser could mistake for a fence (defends external consumers too).
+    """
+    s = "".join(c if c.isalnum() or c in "-_" else "-" for c in text)
+    s = re.sub(r"-{2,}", "-", s)
+    return s[:maxlen].strip("-")
+
 
 def meta_of(path: Path) -> dict | None:
     """Parse the YAML frontmatter of a message file (``None`` if absent/invalid).
@@ -47,10 +88,8 @@ def meta_of(path: Path) -> dict | None:
         content = path.read_text()
     except OSError:
         return None
-    if not content.startswith("---"):
-        return None
-    parts = content.split("---", 2)
-    if len(parts) < 3:
+    parts = split_frontmatter(content)
+    if parts is None:
         return None
     try:
         meta = yaml.safe_load(parts[1])
@@ -96,10 +135,8 @@ class AgentTransport:
     @staticmethod
     def _make_filename(sender: str, subject: str) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-        safe_sender = "".join(c if c.isalnum() or c in "-_" else "-" for c in sender)
-        safe_sender = safe_sender[:20].strip("-")
-        safe_subject = "".join(c if c.isalnum() or c in "-_" else "-" for c in subject)
-        safe_subject = safe_subject[:40].strip("-")
+        safe_sender = _slug(sender, 20)
+        safe_subject = _slug(subject, 40)
         return f"{ts}-{safe_sender}-{safe_subject}.md"
 
     @staticmethod
@@ -174,10 +211,8 @@ class AgentTransport:
     def _stamp_delivery_failed(self, local_path: Path) -> None:
         """Mark an outbox file ``delivered: false`` so reply-tracking skips it."""
         content = local_path.read_text()
-        if not content.startswith("---"):
-            return
-        parts = content.split("---", 2)
-        if len(parts) < 3:
+        parts = split_frontmatter(content)
+        if parts is None:
             return
         fm = parts[1]
         if not re.search(r"^delivered:", fm, flags=re.MULTILINE):
@@ -230,12 +265,11 @@ class AgentTransport:
 
     def _mark_read(self, path: Path) -> str:
         content = path.read_text()
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 3 and "read: false" in parts[1]:
-                parts[1] = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
-                content = "---".join(parts)
-                path.write_text(content)
+        parts = split_frontmatter(content)
+        if parts is not None and "read: false" in parts[1]:
+            parts[1] = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
+            content = "---".join(parts)
+            path.write_text(content)
         return content
 
     def _lookup_meta(self, message_id: str) -> dict | None:
