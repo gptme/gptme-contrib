@@ -20,6 +20,10 @@ from click.testing import CliRunner
 from gptmail import agent_cli
 from gptmail.agent_cli import agent
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
+from gptmail.transport.agent import meta_of
+
+
+DASHRUN_ID = "20260615-123532-377975-erik-ty-vs-mypy-eval--blog-candidate----gptma.md"
 
 
 @pytest.fixture
@@ -52,7 +56,9 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _frontmatter(path: Path) -> dict:
-    return yaml.safe_load(path.read_text().split("---", 2)[1])
+    meta = meta_of(path)
+    assert meta is not None
+    return meta
 
 
 def _only_outbox_msg(workspace: Path) -> Path:
@@ -144,9 +150,9 @@ def test_reply_reports_delivery_failure_and_keeps_pending(
     # The ConversationTracker must NOT mark the original as COMPLETED — delivery never happened.
     tracker = ConversationTracker(workspace / "messages" / ".tracking")
     state = tracker.get_message_state("agent:alice|bob", name)
-    assert (
-        state is None or state.state != MessageState.COMPLETED
-    ), "tracker must not mark original as COMPLETED when delivery failed"
+    assert state is None or state.state != MessageState.COMPLETED, (
+        "tracker must not mark original as COMPLETED when delivery failed"
+    )
 
 
 @pytest.mark.parametrize(
@@ -334,6 +340,23 @@ def test_reply_does_not_corrupt_subject_containing_read_false(workspace: Path) -
     assert fm["subject"] == "Auto-retry if read: false"  # subject untouched
     assert fm["read"] is True
     assert fm["replied"] is True
+
+
+def test_reply_preserves_dashrun_in_reply_to_when_marking_replied(workspace: Path) -> None:
+    # Regression: _mark_replied rewrites inbox frontmatter too. An in_reply_to
+    # containing ``---`` must survive the replied/read stamp intact.
+    inbox = workspace / "messages" / "inbox"
+    name = "20260615-000000-000000-bob-dashrun.md"
+    (inbox / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-06-15T00:00:00Z\n"
+        f'subject: "Re: dashrun"\nread: false\nin_reply_to: {DASHRUN_ID}\n---\n\nplease advise\n'
+    )
+    result = CliRunner().invoke(agent, ["reply", name, "advice"])
+    assert result.exit_code == 0, result.output
+    fm = _frontmatter(inbox / name)
+    assert fm["read"] is True
+    assert fm["replied"] is True
+    assert fm["in_reply_to"] == DASHRUN_ID
 
 
 def test_status_reports_counts(workspace: Path) -> None:
