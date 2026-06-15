@@ -48,7 +48,7 @@ from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from gptmail.transport.agent import AgentTransport, Deliver, meta_of
+from gptmail.transport.agent import AgentTransport, Deliver, _FM_DELIM, meta_of
 
 
 # Inbox messages older than this (days) are assumed handled and no longer
@@ -205,7 +205,7 @@ def _delivery_failed(message_id: str) -> bool:
         return False
     if not content.startswith("---"):
         return False
-    parts = content.split("---", 2)
+    parts = _FM_DELIM.split(content, maxsplit=2)
     return len(parts) >= 3 and any(
         line.strip() == "delivered: false" for line in parts[1].splitlines()
     )
@@ -303,7 +303,7 @@ def _mark_replied(messages_dir: Path, message_id: str) -> None:
     content = path.read_text()
     if not content.startswith("---"):
         return
-    parts = content.split("---", 2)
+    parts = _FM_DELIM.split(content, maxsplit=2)
     if len(parts) < 3:
         return
     fm = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
