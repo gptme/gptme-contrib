@@ -319,6 +319,56 @@ def test_pending_excludes_replies_to_my_messages(workspace: Path) -> None:
     assert "No messages awaiting reply" in result.output, result.output
 
 
+def test_pending_reply_once_for_pull_based_recipient(workspace: Path) -> None:
+    """An undelivered reply to a pull-based recipient satisfies reply-once.
+
+    Regression for the duplicate-reply bug: a recipient absent from the registry
+    (e.g. Erik, who polls the outbox) can never be delivered to, so replies stay
+    ``delivered: false`` permanently. Counting only delivered replies made every
+    poll re-compose a fresh, non-identical reply. A draft reply to a pull-based
+    recipient must clear the inbound message from pending.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    inbox = workspace / "messages" / "inbox"
+    msg = "20260615-120000-000000-erik-question.md"
+    (inbox / msg).write_text(
+        f"---\nfrom: erik\nto: alice\ntimestamp: {now_iso}\n"
+        "subject: question\nread: false\n---\n\nplease advise\n"
+    )
+    # We drafted a reply, but delivery is impossible (erik is not in the registry).
+    outbox = workspace / "messages" / "outbox"
+    (outbox / "20260615-120100-000000-alice-Re-question.md").write_text(
+        f"---\nfrom: alice\nto: erik\ntimestamp: {now_iso}\n"
+        f"subject: 'Re: question'\nin_reply_to: {msg}\ndelivered: false\n---\n\nmy reply\n"
+    )
+    result = CliRunner().invoke(agent, ["pending"])
+    assert "No messages awaiting reply" in result.output, result.output
+
+
+def test_pending_keeps_undelivered_reply_to_push_recipient(workspace: Path) -> None:
+    """An undelivered reply to a push-reachable recipient stays pending (retry).
+
+    ``bob`` is registered with ssh+workspace, so ``delivered: false`` means a
+    transient delivery failure, not a permanent pull-based state — the message
+    must remain pending so the next cycle retries delivery.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    inbox = workspace / "messages" / "inbox"
+    msg = "20260615-120000-000000-bob-question.md"
+    (inbox / msg).write_text(
+        f"---\nfrom: bob\nto: alice\ntimestamp: {now_iso}\n"
+        "subject: question\nread: false\n---\n\nplease advise\n"
+    )
+    outbox = workspace / "messages" / "outbox"
+    (outbox / "20260615-120100-000000-alice-Re-question.md").write_text(
+        f"---\nfrom: alice\nto: bob\ntimestamp: {now_iso}\n"
+        f"subject: 'Re: question'\nin_reply_to: {msg}\ndelivered: false\n---\n\nmy reply\n"
+    )
+    result = CliRunner().invoke(agent, ["pending"])
+    assert "1 message(s) awaiting reply" in result.output, result.output
+    assert msg in result.output
+
+
 def test_reply_does_not_corrupt_subject_containing_read_false(workspace: Path) -> None:
     # Regression: _mark_replied must anchor its frontmatter rewrite. A subject
     # containing the literal "read: false" must survive replying intact.
@@ -343,6 +393,35 @@ def test_status_reports_counts(workspace: Path) -> None:
     assert "Agent:    alice" in result.output
     assert "Inbox:    1" in result.output
     assert "Pending:  1" in result.output
+
+
+def test_pending_stays_silent_without_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    messages = tmp_path / "messages"
+    (messages / "inbox").mkdir(parents=True)
+    (messages / "outbox").mkdir(parents=True)
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0
+    assert "Warning: no agent registry" not in result.output
+    assert "No messages awaiting reply." in result.output
+
+
+def test_status_warns_once_without_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    messages = tmp_path / "messages"
+    (messages / "inbox").mkdir(parents=True)
+    (messages / "outbox").mkdir(parents=True)
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+
+    result = CliRunner().invoke(agent, ["status"])
+    assert result.exit_code == 0
+    assert result.output.count("Warning: no agent registry") == 1
 
 
 @pytest.fixture

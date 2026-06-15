@@ -109,15 +109,16 @@ def _self_name() -> str:
     return os.environ.get("AGENT_NAME", os.environ.get("USER", "unknown")).lower()
 
 
-def _load_agents() -> dict[str, dict[str, str]]:
+def _load_agents(*, warn_missing: bool = True) -> dict[str, dict[str, str]]:
     """Load the agent registry from ``messages/agents.yaml`` ({} if absent)."""
     config_path = _messages_dir() / "agents.yaml"
     if not config_path.exists():
-        click.echo(
-            f"Warning: no agent registry at {config_path}\n"
-            "Create messages/agents.yaml with agent SSH targets.",
-            err=True,
-        )
+        if warn_missing:
+            click.echo(
+                f"Warning: no agent registry at {config_path}\n"
+                "Create messages/agents.yaml with agent SSH targets.",
+                err=True,
+            )
         return {}
     raw = yaml.safe_load(config_path.read_text()) or {}
     # Normalise keys to lowercase so lookups (which use ``to.lower()``) match
@@ -244,23 +245,53 @@ def _addressed_to(meta: dict, self_name: str) -> bool:
     return str(to).lower() == self_name
 
 
-def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[dict]:
+def _is_push_reachable(recipient: str, agents: dict[str, dict[str, str]]) -> bool:
+    """True if ``recipient`` has a working push transport in the registry.
+
+    Mirrors the ``_ssh_deliver`` contract: a recipient is push-reachable only if
+    it is registered with non-empty ``ssh`` and ``workspace`` keys. Pull-based
+    recipients (not in the registry, or missing those keys — e.g. Erik, who polls
+    the outbox) can never be delivered to, so their replies stay ``delivered:
+    false`` permanently rather than as a transient, retryable failure.
+    """
+    agent = agents.get(recipient.lower())
+    if not agent:
+        return False
+    return all(agent.get(k) for k in ("ssh", "workspace"))
+
+
+def _pending_messages(
+    messages_dir: Path,
+    self_name: str,
+    window: int,
+    agents: dict[str, dict[str, str]] | None = None,
+) -> list[dict]:
     """Inbox messages addressed to us that we haven't replied to (timely SLA).
 
-    A reply requirement is satisfied by an inbox ``replied: true`` stamp or by
-    any successfully-delivered outbox message whose ``in_reply_to`` points at it.
+    A reply requirement is satisfied by an inbox ``replied: true`` stamp or by an
+    outbox message whose ``in_reply_to`` points at it. Reply-once: a draft reply
+    counts even when stamped ``delivered: false`` **if the recipient is
+    pull-based** (no push transport), where that stamp is the permanent steady
+    state — otherwise every poll re-composes a fresh, non-identical reply (the
+    duplicate-reply bug). For push-reachable recipients, ``delivered: false``
+    still means a transient failure, so the message stays pending to retry.
     """
     inbox = messages_dir / "inbox"
     outbox = messages_dir / "outbox"
     now = datetime.now(timezone.utc)
+    if agents is None:
+        agents = _load_agents(warn_missing=False)
 
     replied_to: set[str] = set()
     my_outbox_ids: set[str] = set()
     if outbox.exists():
         for f in outbox.glob("*.md"):
             m = meta_of(f)
-            if m and m.get("in_reply_to") and m.get("delivered") is not False:
-                replied_to.add(str(m["in_reply_to"]))
+            if m and m.get("in_reply_to"):
+                recipient = str(m.get("to") or "")
+                delivered_ok = m.get("delivered") is not False
+                if delivered_ok or not _is_push_reachable(recipient, agents):
+                    replied_to.add(str(m["in_reply_to"]))
             my_outbox_ids.add(f.name)
 
     pending: list[dict] = []
@@ -481,7 +512,7 @@ def status() -> None:
     agents = _load_agents()
     inbox = transport.list_inbox("inbox")
     outbox = transport.list_inbox("outbox")
-    pend = _pending_messages(messages_dir, _self_name(), _reply_window_days())
+    pend = _pending_messages(messages_dir, _self_name(), _reply_window_days(), agents=agents)
     click.echo(f"Agent:    {_self_name()}")
     click.echo(f"Registry: {', '.join(agents) or '(none)'}")
     click.echo(f"Inbox:    {len(inbox)}")
