@@ -244,23 +244,47 @@ def _addressed_to(meta: dict, self_name: str) -> bool:
     return str(to).lower() == self_name
 
 
+def _is_push_reachable(recipient: str, agents: dict[str, dict[str, str]]) -> bool:
+    """True if ``recipient`` has a working push transport in the registry.
+
+    Mirrors the ``_ssh_deliver`` contract: a recipient is push-reachable only if
+    it is registered with non-empty ``ssh`` and ``workspace`` keys. Pull-based
+    recipients (not in the registry, or missing those keys — e.g. Erik, who polls
+    the outbox) can never be delivered to, so their replies stay ``delivered:
+    false`` permanently rather than as a transient, retryable failure.
+    """
+    agent = agents.get(recipient.lower())
+    if not agent:
+        return False
+    return all(agent.get(k) for k in ("ssh", "workspace"))
+
+
 def _pending_messages(messages_dir: Path, self_name: str, window: int) -> list[dict]:
     """Inbox messages addressed to us that we haven't replied to (timely SLA).
 
-    A reply requirement is satisfied by an inbox ``replied: true`` stamp or by
-    any successfully-delivered outbox message whose ``in_reply_to`` points at it.
+    A reply requirement is satisfied by an inbox ``replied: true`` stamp or by an
+    outbox message whose ``in_reply_to`` points at it. Reply-once: a draft reply
+    counts even when stamped ``delivered: false`` **if the recipient is
+    pull-based** (no push transport), where that stamp is the permanent steady
+    state — otherwise every poll re-composes a fresh, non-identical reply (the
+    duplicate-reply bug). For push-reachable recipients, ``delivered: false``
+    still means a transient failure, so the message stays pending to retry.
     """
     inbox = messages_dir / "inbox"
     outbox = messages_dir / "outbox"
     now = datetime.now(timezone.utc)
+    agents = _load_agents()
 
     replied_to: set[str] = set()
     my_outbox_ids: set[str] = set()
     if outbox.exists():
         for f in outbox.glob("*.md"):
             m = meta_of(f)
-            if m and m.get("in_reply_to") and m.get("delivered") is not False:
-                replied_to.add(str(m["in_reply_to"]))
+            if m and m.get("in_reply_to"):
+                recipient = str(m.get("to") or "")
+                delivered_ok = m.get("delivered") is not False
+                if delivered_ok or not _is_push_reachable(recipient, agents):
+                    replied_to.add(str(m["in_reply_to"]))
             my_outbox_ids.add(f.name)
 
     pending: list[dict] = []
