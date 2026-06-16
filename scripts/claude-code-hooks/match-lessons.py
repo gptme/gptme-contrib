@@ -261,7 +261,9 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
 
             # Skip archived lessons — but still register their name so that
             # contrib copies are also suppressed (local archive wins over contrib).
-            if "archive" in f.parts:
+            # Use relative_to(lesson_dir) so parent path segments (e.g. a workspace
+            # living under /home/alice/archive/…) don't trigger false suppression.
+            if "archive" in f.relative_to(lesson_dir).parts:
                 if f.name != "SKILL.md":
                     seen_names.add(f.name)
                 continue
