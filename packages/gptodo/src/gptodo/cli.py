@@ -1812,7 +1812,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
             op == "set" and field == "state" and value == "waiting" for op, field, value in changes
         )
         waiting_for_present = post.metadata.get("waiting_for") or any(
-            op == "set" and field == "waiting_for" for op, field, value in changes
+            op == "set" and field == "waiting_for" and value is not None
+            for op, field, value in changes
         )
         if (
             transitioning_to_waiting

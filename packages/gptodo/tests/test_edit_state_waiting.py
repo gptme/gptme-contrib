@@ -165,6 +165,9 @@ def test_edit_state_waiting_explicit_waiting_since_wins(tmp_path: Path, monkeypa
             "state",
             "waiting",
             "--set",
+            "waiting_for",
+            "some-blocker",
+            "--set",
             "waiting_since",
             "2026-06-10",
         ],
@@ -176,3 +179,30 @@ def test_edit_state_waiting_explicit_waiting_since_wins(tmp_path: Path, monkeypa
     assert len(tasks) == 1
     # Explicit date stored as date string; YAML may parse back as datetime.date
     assert str(tasks[0].metadata["waiting_since"]) == "2026-06-10", "explicit date should win"
+
+
+def test_edit_clearing_waiting_for_does_not_inject_waiting_since(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """--set waiting_for none (clearing) must NOT trigger waiting_since injection.
+
+    The any(...) guard must check value is not None so that clearing waiting_for
+    is not mistaken for setting it.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(ACTIVE_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["edit", "my-task", "--set", "state", "waiting", "--set", "waiting_for", "none"],
+    )
+
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    assert (
+        "waiting_since" not in tasks[0].metadata
+    ), "clearing waiting_for must not trigger waiting_since injection"
