@@ -265,7 +265,16 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
             # living under /home/alice/archive/…) don't trigger false suppression.
             if "archive" in f.relative_to(lesson_dir).parts:
                 if f.name != "SKILL.md":
-                    seen_names.add(f.name)
+                    # Only suppress if no active (non-archived) copy exists in this
+                    # lesson_dir. Lexicographic sort puts archive/foo.md before foo.md
+                    # so naively registering here would suppress the active copy.
+                    active_copy = next(
+                        (p for p in lesson_dir.rglob(f.name)
+                         if "archive" not in p.relative_to(lesson_dir).parts),
+                        None,
+                    )
+                    if active_copy is None:
+                        seen_names.add(f.name)
                 continue
 
             # Dedup by filename (first lesson dir wins — local overrides contrib).
