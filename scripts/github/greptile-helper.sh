@@ -5,12 +5,12 @@
 #   greptile-helper.sh check <repo> <pr_number>   # Check status, exit 0=ok-to-trigger 1=skip
 #   greptile-helper.sh trigger <repo> <pr_number> # Trigger once if safe, else skip
 #   greptile-helper.sh status <repo> <pr_number>  # Print status string:
-#     already-reviewed | needs-re-review | in-progress | awaiting-initial-review | stale | error
+#     already-reviewed | needs-re-review | in-progress | awaiting-initial-review | stale | backoff | error
 #
 # Exit codes for 'check':
 #   0 = safe to trigger (re-review needed: new commits since the last Greptile review)
 #   1 = skip: no review yet (awaiting Greptile auto-review), or re-review trigger in-flight
-#   2 = skip: reviewed by greptile-apps[bot], and no new commits since review
+#   2 = skip: reviewed by greptile-apps[bot], and no new commits since review (or ceiling hit)
 #   3 = api error (fail-safe = skip)
 #
 # Erik's requests (ErikBjare/bob#434):
@@ -34,6 +34,13 @@ PR_NUMBER="${3:-}"
 TRIGGER_GRACE_SECONDS="${TRIGGER_GRACE_SECONDS:-900}"
 ACK_GRACE_SECONDS="${ACK_GRACE_SECONDS:-1200}"
 MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-3}"  # Max re-review triggers per review cycle before backing off
+# Hard ceiling on TOTAL trigger comments we've ever posted on a PR, independent of
+# review cycles. MAX_RE_TRIGGERS resets to 0 every time Greptile posts a fresh review,
+# so a PR stuck in a fix→re-review→trigger loop (e.g. a mergeable-but-human-gated
+# product PR that keeps getting polish commits) can be triggered unboundedly — one per
+# PM run, indefinitely. This cap counts our lifetime triggers and backs off + escalates
+# once exceeded. Incident: 2026-06-16, cloud#401 hit 25 triggers, #2906 25, #408 19.
+MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-8}"
 GITHUB_AUTHOR="${GITHUB_AUTHOR:-$(gh api user --jq .login 2>/dev/null || echo "")}"
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
@@ -52,6 +59,30 @@ _json_field() {
     trap - EXIT
     local field="$1"
     python3 -c "import json, sys; data = json.load(sys.stdin); v = data.get('$field'); print(v if v is not None else '')" 2>/dev/null
+}
+
+_no_new_commit_since_our_last_trigger() {
+    # Returns 0 (true) when the PR head commit is NOT newer than our most recent
+    # `@greptileai review` trigger — i.e. we already triggered for the current head
+    # and nothing has been pushed since. Re-triggering then is exactly the "re-reviewing
+    # without pushing anything" spam Erik flagged on gptme#2908: the SHA-based
+    # _needs_re_review stays true forever when Greptile acks a trigger but never advances
+    # its review commit_id to head, so without this guard each grace window re-fires.
+    # Gating on OUR last trigger (not the last review) makes a re-review with no new
+    # commit structurally impossible — the lifetime ceiling is only a backstop above this.
+    # Fail-OPEN to 1 (allow) when there's no prior trigger or head can't be read, so a
+    # transient API failure never permanently suppresses a legitimate re-review.
+    local head_date last_trigger_date
+    head_date=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" 2>/dev/null \
+        | jq -rs '[.[][] | .commit.committer.date] | sort | last // ""' 2>/dev/null) || head_date=""
+    last_trigger_date=$(_issue_comments_json \
+        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) | .created_at] | sort | last // \"\"" 2>/dev/null) || last_trigger_date=""
+    [ -z "$last_trigger_date" ] && return 1   # no prior trigger → allow
+    [ -z "$head_date" ] && return 1           # can't read head → allow (fail-open)
+    if _timestamp_gt "$head_date" "$last_trigger_date" 2>/dev/null; then
+        return 1   # a commit landed AFTER our last trigger → re-review is legitimate
+    fi
+    return 0       # nothing pushed since our last trigger → suppress
 }
 
 _timestamp_gt() {
@@ -84,7 +115,8 @@ PY
 # Cache review info via temp file to avoid redundant API calls.
 # Shell variable caching doesn't work here because callers use $() subshells.
 _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
-trap 'rm -f "$_REVIEW_CACHE_FILE"' EXIT
+_ISSUE_COMMENTS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-$$.json"
+trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE"' EXIT
 
 # Shared hash for per-PR state files (lock + trigger timestamp).
 # Used across trigger and _our_trigger_status to coordinate without the GitHub API.
@@ -96,6 +128,30 @@ _PR_HASH=$(printf '%s#%s' "$REPO" "$PR_NUMBER" | (md5sum 2>/dev/null || md5 -q) 
 # See: 2026-03-19 INCIDENT #5 (gptme-contrib#504/#505 got 2-3 triggers each
 # because the 00:15Z trigger wasn't visible in API at 00:20Z check).
 _TRIGGER_TS_FILE="${TMPDIR:-/tmp}/greptile-trigger-ts-${_PR_HASH}.txt"
+_issue_comments_json() {
+    # Cache the paginated issue-comments payload once per process; several guards
+    # derive different fields from the same endpoint and should not each spend a
+    # separate full traversal of the PR comment history.
+    trap - EXIT
+    if [ -f "$_ISSUE_COMMENTS_CACHE_FILE" ]; then
+        cat "$_ISSUE_COMMENTS_CACHE_FILE"
+        return
+    fi
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate 2>/dev/null \
+        | jq -s '.' > "$_ISSUE_COMMENTS_CACHE_FILE" 2>/dev/null \
+        || echo '[]' > "$_ISSUE_COMMENTS_CACHE_FILE"
+    cat "$_ISSUE_COMMENTS_CACHE_FILE"
+}
+
+_total_trigger_count() {
+    # Count ALL our `@greptileai review` trigger comments on this PR (lifetime).
+    # Fail-open to 0 on API error so a transient failure never blocks a legit trigger.
+    local count
+    count=$(_issue_comments_json \
+        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | length" 2>/dev/null) || count=0
+    printf '%s\n' "${count:-0}"
+}
+
 _greptile_review_info() {
     # Reset EXIT trap in subshell context — callers use $() which inherits
     # the parent trap and would delete the cache file immediately on return.
@@ -212,8 +268,7 @@ _our_trigger_status() {
     local comment_info
     # Paginate first, then filter (--paginate + --jq applies per-page).
     # Also compute count_since_review = number of our triggers after review_cutoff (for max-retries guard).
-    comment_info=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        2>/dev/null | jq -s '
+    comment_info=$(_issue_comments_json | jq '
           [.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("greptileai"; "i")))]
           | sort_by(.created_at)
           | {
@@ -292,11 +347,25 @@ check)
     if _has_greptile_review; then
         # Already reviewed — check if re-review is needed (new commits since review)
         if _needs_re_review; then
+            # Hard lifetime ceiling: if hit, skip just like "no new commits" (exit 2)
+            _total_triggers=$(_total_trigger_count)
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+                echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Skipping." >&2
+                exit 2  # Ceiling hit — skip (same as "already reviewed, nothing to do")
+            fi
             reviewed_at=$( _greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
-            # Eligible for re-review — but check trigger isn't in-flight
+            # Check trigger status BEFORE the no-new-commit guard. If stale (Greptile acked
+            # but never posted a review), allow re-trigger even without new commits so the
+            # acked-but-not-reviewed failure mode (gptme#1651) can escape.
             trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
             if [ "$trigger_status" = "in-progress" ]; then
                 exit 1  # Re-review trigger in-flight
+            fi
+            # Root guard: no new commit since our last trigger → not safe to trigger.
+            # Exception: trigger_status=stale means Greptile acked but never reviewed —
+            # skip this guard so the stale-retry path can fire and recover the stuck PR.
+            if [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger; then
+                exit 2  # Nothing pushed since our last trigger — treat as up-to-date.
             fi
             exit 0  # Re-review needed
         fi
@@ -324,10 +393,31 @@ trigger)
 
     if _has_greptile_review; then
         if _needs_re_review; then
+            # Hard total-trigger ceiling (does NOT reset per review cycle). A PR that keeps
+            # accruing commits → re-reviews can otherwise be triggered forever. Past this cap,
+            # the PR is pathological (stuck loop, or mergeable-but-human-gated) — stop
+            # triggering and escalate to a human instead of adding more spam.
+            _total_triggers=$(_total_trigger_count)
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+                echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER already has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Not re-triggering — this PR is stuck or human-gated; escalate to merge/close/intervene."
+                exit 0
+            fi
             reviewed_at=$( _greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
+            # Check trigger status BEFORE the no-new-commit guard. If stale (Greptile acked
+            # but never posted a review), allow re-trigger even without new commits so the
+            # acked-but-not-reviewed failure mode (gptme#1651) can escape.
             trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
             if [ "$trigger_status" = "in-progress" ]; then
                 echo "  [greptile] Re-review trigger in-flight on $REPO#$PR_NUMBER. Skipping."
+                exit 0
+            fi
+            # ROOT GUARD: never re-review without a new commit since OUR last trigger.
+            # _needs_re_review (SHA-based) stays true when Greptile acks but doesn't advance
+            # its review commit_id to head, so this catches the "re-reviewing without pushing"
+            # spam (gptme#2908). Exception: trigger_status=stale means Greptile acked but
+            # never reviewed — skip the guard and allow re-trigger to escape the stuck state.
+            if [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger; then
+                echo "  [greptile] SKIP: $REPO#$PR_NUMBER has no new commits since our last @greptileai review trigger. Not re-reviewing (nothing was pushed)."
                 exit 0
             fi
             echo "  [greptile] Re-triggering @greptileai review on $REPO#$PR_NUMBER (new commits landed after the last review)..."
@@ -358,12 +448,23 @@ trigger)
 status)
     if _has_greptile_review; then
         if _needs_re_review; then
-            reviewed_at=$(_greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
-            trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
-            if [ "$trigger_status" = "in-progress" ]; then
-                echo "in-progress"
+            # Hard lifetime ceiling: report "backoff" so callers/dashboards see the true state
+            _total_triggers=$(_total_trigger_count)
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+                echo "backoff"
             else
-                echo "needs-re-review"
+                reviewed_at=$(_greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
+                # Check trigger status BEFORE the no-new-commit guard (mirrors check/trigger ordering).
+                trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
+                if [ "$trigger_status" = "in-progress" ]; then
+                    echo "in-progress"
+                # Root guard: no new commit since our last trigger → report as up-to-date.
+                # Exception: stale means Greptile acked but never reviewed → needs-re-review.
+                elif [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger; then
+                    echo "already-reviewed"
+                else
+                    echo "needs-re-review"
+                fi
             fi
         else
             echo "already-reviewed"
