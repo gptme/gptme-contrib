@@ -1627,6 +1627,16 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                     value = parsed.isoformat()
                 else:
                     value = parsed.isoformat()
+            elif field == "waiting_since":
+                # waiting_since is a date-only field (YYYY-MM-DD), not a datetime
+                try:
+                    from datetime import date as _date
+
+                    parsed_date = _date.fromisoformat(value[:10])  # accept YYYY-MM-DD prefix
+                    value = parsed_date.isoformat()
+                except ValueError:
+                    console.print(f"[red]Invalid {field} format. Use YYYY-MM-DD[/]")
+                    return
             else:
                 try:
                     created_dt = datetime.fromisoformat(value)
@@ -1797,6 +1807,12 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                         value = normalize_state(value, warn=False)
 
                     post.metadata[field] = value
+        # Auto-set waiting_since when transitioning to waiting state
+        if post.metadata.get("state") == "waiting" and not post.metadata.get("waiting_since"):
+            from datetime import date as _date
+
+            post.metadata["waiting_since"] = _date.today().isoformat()
+
         # Save changes
         with open(task.path, "w") as f:
             f.write(frontmatter.dumps(post))
