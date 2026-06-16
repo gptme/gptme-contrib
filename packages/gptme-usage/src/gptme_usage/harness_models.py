@@ -683,7 +683,7 @@ def resolve_cc_version(model: str) -> str:
     Unknown inputs pass through unchanged.
 
     Examples:
-        resolve_cc_version("opus")                      -> "opus-4-7"
+        resolve_cc_version("opus")                      -> "opus-4-8"
         resolve_cc_version("opus-4-7")                  -> "opus-4-7"
         resolve_cc_version("claude-opus-4-7")           -> "opus-4-7"
         resolve_cc_version("claude-opus-4-7-20251014")  -> "opus-4-7"
