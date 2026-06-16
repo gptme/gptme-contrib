@@ -54,6 +54,14 @@ def test_send_records_reply_to(tmp_path: Path) -> None:
     assert _frontmatter(t.outbox / mid)["in_reply_to"] == "parent.md"
 
 
+def test_send_named_mailbox_writes_under_mailbox_root(tmp_path: Path) -> None:
+    t = AgentTransport(tmp_path / "messages", "alice", mailbox="ops")
+    mid = t.send("bob", "Hello", "body text")
+    out = tmp_path / "messages" / "mailboxes" / "ops" / "outbox" / mid
+    assert out.exists()
+    assert _frontmatter(out)["mailbox"] == "ops"
+
+
 def test_send_with_deliver_hook_places_in_recipient_inbox(tmp_path: Path) -> None:
     bob_inbox = tmp_path / "bob" / "messages" / "inbox"
     t = _transport(tmp_path, deliver=AgentTransport.local_deliver(bob_inbox))

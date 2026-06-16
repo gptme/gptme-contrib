@@ -20,6 +20,7 @@ from click.testing import CliRunner
 from gptmail import agent_cli
 from gptmail.agent_cli import agent
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
+from gptmail.transport.agent import meta_of
 
 
 @pytest.fixture
@@ -42,10 +43,19 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
 
     # Replace SSH/SCP delivery with a local copy into the peer's inbox.
-    def _local_deliver(agents):
+    def _local_deliver(agents, *, mailbox="default"):
         from gptmail.transport.agent import AgentTransport
 
-        return AgentTransport.local_deliver(peer_inbox)
+        def _deliver(local_path: Path, _recipient: str) -> bool:
+            meta = meta_of(local_path) or {}
+            target_mailbox = str(meta.get("mailbox", mailbox))
+            if target_mailbox == "default":
+                destination = peer_inbox
+            else:
+                destination = tmp_path / "bob" / "messages" / "mailboxes" / target_mailbox / "inbox"
+            return AgentTransport.local_deliver(destination)(local_path, _recipient)
+
+        return _deliver
 
     monkeypatch.setattr(agent_cli, "_ssh_deliver", _local_deliver)
     return tmp_path
@@ -101,7 +111,7 @@ def test_send_reports_delivery_failure_and_exits_nonzero(
     deliver hook; the CLI must surface that rather than reporting false success.
     """
 
-    def _failing_deliver(_agents):
+    def _failing_deliver(_agents, *, mailbox="default"):
         def _deliver(_local_path: Path, _recipient: str) -> bool:
             return False
 
@@ -126,7 +136,7 @@ def test_reply_reports_delivery_failure_and_keeps_pending(
     The inbox message must stay in ``pending`` so the sender still has a reminder to follow up.
     """
 
-    def _failing_deliver(_agents):
+    def _failing_deliver(_agents, *, mailbox="default"):
         def _deliver(_local_path: Path, _recipient: str) -> bool:
             return False
 
@@ -219,15 +229,24 @@ def test_send_stamps_tracker_channel_agent(workspace: Path) -> None:
     assert pending[0].channel == "agent"
 
 
-def _seed_inbox(workspace: Path, sender: str = "bob", subject: str = "Q") -> str:
+def _seed_inbox(
+    workspace: Path,
+    sender: str = "bob",
+    subject: str = "Q",
+    *,
+    mailbox: str = "default",
+) -> str:
     """Drop a message from ``sender`` into alice's inbox; return its filename."""
     inbox = workspace / "messages" / "inbox"
+    if mailbox != "default":
+        inbox = workspace / "messages" / "mailboxes" / mailbox / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     name = f"{ts}-000000-{sender}-{subject}.md"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     (inbox / name).write_text(
         f"---\nfrom: {sender}\nto: alice\n"
-        f"timestamp: {timestamp}\nsubject: {subject}\nread: false\n---\n\nplease advise\n"
+        f"timestamp: {timestamp}\nsubject: {subject}\nread: false\nmailbox: {mailbox}\n---\n\nplease advise\n"
     )
     return name
 
@@ -436,6 +455,64 @@ def test_status_reports_counts(workspace: Path) -> None:
     assert "Pending:  1" in result.output
 
 
+def test_send_named_mailbox_writes_mailbox_outbox_and_list_shows_it(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["send", "--mailbox", "ops", "bob", "Hello", "body text"])
+    assert result.exit_code == 0, result.output
+
+    outbox = workspace / "messages" / "mailboxes" / "ops" / "outbox"
+    files = list(outbox.glob("*.md"))
+    assert len(files) == 1
+    meta = _frontmatter(files[0])
+    assert meta["mailbox"] == "ops"
+
+    listed = CliRunner().invoke(agent, ["list", "outbox", "--mailbox", "ops", "--all"])
+    assert listed.exit_code == 0, listed.output
+    assert files[0].name in listed.output
+    assert "[ops]" in listed.output
+
+
+def test_pending_named_mailbox_reply_preserves_mailbox_and_clears_only_that_mailbox(
+    workspace: Path,
+) -> None:
+    default_msg = _seed_inbox(workspace, subject="Default")
+    ops_msg = _seed_inbox(workspace, subject="Ops", mailbox="ops")
+
+    before = CliRunner().invoke(agent, ["pending", "--mailbox", "ops"])
+    assert before.exit_code == 0, before.output
+    assert ops_msg in before.output
+    assert default_msg not in before.output
+
+    reply = CliRunner().invoke(agent, ["reply", ops_msg, "handled"])
+    assert reply.exit_code == 0, reply.output
+    assert "Replied to bob: Re: Ops" in reply.output
+
+    ops_inbox = workspace / "messages" / "mailboxes" / "ops" / "inbox" / ops_msg
+    assert _frontmatter(ops_inbox)["replied"] is True
+
+    ops_outbox = list((workspace / "messages" / "mailboxes" / "ops" / "outbox").glob("*.md"))
+    assert len(ops_outbox) == 1
+    assert _frontmatter(ops_outbox[0])["mailbox"] == "ops"
+
+    after_ops = CliRunner().invoke(agent, ["pending", "--mailbox", "ops"])
+    assert "No messages awaiting reply" in after_ops.output
+
+    after_default = CliRunner().invoke(agent, ["pending"])
+    assert default_msg in after_default.output
+
+
+def test_pending_all_mailboxes_combines_default_and_named(workspace: Path) -> None:
+    default_msg = _seed_inbox(workspace, subject="Default")
+    ops_msg = _seed_inbox(workspace, subject="Ops", mailbox="ops")
+
+    result = CliRunner().invoke(agent, ["pending", "--all-mailboxes"])
+    assert result.exit_code == 0, result.output
+    assert "2 message(s) awaiting reply" in result.output
+    assert default_msg in result.output
+    assert ops_msg in result.output
+    assert "[default]" in result.output
+    assert "[ops]" in result.output
+
+
 def test_pending_stays_silent_without_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -490,12 +567,21 @@ def multi_peer_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     monkeypatch.setenv("AGENT_NAME", "alice")
     monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
 
-    def _routing_deliver(_agents):
+    def _routing_deliver(_agents, *, mailbox="default"):
         def _deliver(local_path: Path, recipient: str) -> bool:
             dest = inboxes.get(recipient)
             if dest is None:
                 return False
-            shutil.copy2(local_path, dest / local_path.name)
+            meta = meta_of(local_path) or {}
+            target_mailbox = str(meta.get("mailbox", mailbox))
+            if target_mailbox == "default":
+                final_dest = dest
+            else:
+                final_dest = (
+                    tmp_path / recipient / "messages" / "mailboxes" / target_mailbox / "inbox"
+                )
+            final_dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local_path, final_dest / local_path.name)
             return True
 
         return _deliver
@@ -535,11 +621,24 @@ def test_broadcast_reports_partial_delivery_failure(
     ``delivered: false`` and surfaced.
     """
 
-    def _bob_only_deliver(_agents):
+    def _bob_only_deliver(_agents, *, mailbox="default"):
         def _deliver(local_path: Path, recipient: str) -> bool:
             if recipient != "bob":
                 return False  # gordon unreachable
-            dest = multi_peer_workspace / "bob" / "messages" / "inbox"
+            meta = meta_of(local_path) or {}
+            target_mailbox = str(meta.get("mailbox", mailbox))
+            if target_mailbox == "default":
+                dest = multi_peer_workspace / "bob" / "messages" / "inbox"
+            else:
+                dest = (
+                    multi_peer_workspace
+                    / "bob"
+                    / "messages"
+                    / "mailboxes"
+                    / target_mailbox
+                    / "inbox"
+                )
+                dest.mkdir(parents=True, exist_ok=True)
             shutil.copy2(local_path, dest / local_path.name)
             return True
 
