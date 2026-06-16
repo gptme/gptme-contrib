@@ -9,6 +9,7 @@ Parity target: ``scripts/agent-msg.py`` (send/broadcast/list/read/reply/pending)
 See task: fold-agent-msg-into-gptmail-single-comms-tool.
 """
 
+import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -247,6 +248,29 @@ def _seed_inbox(
     (inbox / name).write_text(
         f"---\nfrom: {sender}\nto: alice\n"
         f"timestamp: {timestamp}\nsubject: {subject}\nread: false\nmailbox: {mailbox}\n---\n\nplease advise\n"
+    )
+    return name
+
+
+def _seed_outbox(
+    workspace: Path,
+    recipient: str,
+    subject: str,
+    *,
+    mailbox: str = "default",
+    sender: str = "alice",
+) -> str:
+    """Drop a sent message into the outbox; return its filename."""
+    outbox = workspace / "messages" / "outbox"
+    if mailbox != "default":
+        outbox = workspace / "messages" / "mailboxes" / mailbox / "outbox"
+        outbox.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    name = f"{ts}-000000-{sender}-{subject}.md"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (outbox / name).write_text(
+        f"---\nfrom: {sender}\nto: {recipient}\n"
+        f"timestamp: {timestamp}\nsubject: {subject}\nread: false\nmailbox: {mailbox}\n---\n\nbody\n"
     )
     return name
 
@@ -511,6 +535,76 @@ def test_pending_all_mailboxes_combines_default_and_named(workspace: Path) -> No
     assert ops_msg in result.output
     assert "[default]" in result.output
     assert "[ops]" in result.output
+
+
+def test_pending_for_recipient_scans_local_outbox_across_mailboxes(workspace: Path) -> None:
+    default_msg = _seed_outbox(workspace, "erik", "Default")
+    ops_msg = _seed_outbox(workspace, "erik", "Ops", mailbox="ops")
+
+    result = CliRunner().invoke(agent, ["pending", "--for", "erik", "--all-mailboxes"])
+    assert result.exit_code == 0, result.output
+    assert "2 message(s) pending for erik" in result.output
+    assert default_msg in result.output
+    assert ops_msg in result.output
+    assert "[default]" in result.output
+    assert "[ops]" in result.output
+    assert "alice " in result.output
+
+
+def test_pending_for_recipient_json_emits_machine_readable_rows(workspace: Path) -> None:
+    default_msg = _seed_outbox(workspace, "erik", "Default")
+    ops_msg = _seed_outbox(workspace, "erik", "Ops", mailbox="ops")
+
+    result = CliRunner().invoke(
+        agent,
+        ["pending", "--for", "erik", "--all-mailboxes", "--json", "--local-only"],
+    )
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)
+    assert [row["file"] for row in rows] == [default_msg, ops_msg]
+    assert rows[0]["agent"] == "alice"
+    assert rows[0]["workspace"] == str(workspace)
+    assert rows[0]["mailbox"] == "default"
+    assert rows[1]["mailbox"] == "ops"
+
+
+def test_pending_for_recipient_fleet_merges_remote_rows(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local_msg = _seed_outbox(workspace, "erik", "Local")
+    ops_msg = _seed_outbox(workspace, "erik", "Ops", mailbox="ops")
+
+    def _fake_remote_pending_rows(
+        agent_name: str,
+        agent_cfg: dict[str, str],
+        *,
+        recipient: str,
+        mailboxes: list[str],
+    ) -> list[dict]:
+        assert agent_name == "bob"
+        assert recipient == "erik"
+        assert mailboxes == ["default", "ops"]
+        return [
+            {
+                "agent": "bob",
+                "file": "20260616-remote.md",
+                "mailbox": "ops",
+                "subject": "Remote",
+                "timestamp": "2026-06-16T12:00:00Z",
+                "to": "erik",
+                "workspace": agent_cfg["workspace"],
+            }
+        ]
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake_remote_pending_rows)
+    result = CliRunner().invoke(
+        agent,
+        ["pending", "--for", "erik", "--fleet", "--all-mailboxes", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)
+    assert {row["agent"] for row in rows} == {"alice", "bob"}
+    assert {row["file"] for row in rows} == {local_msg, ops_msg, "20260616-remote.md"}
 
 
 def test_pending_stays_silent_without_registry(
