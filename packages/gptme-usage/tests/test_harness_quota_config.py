@@ -325,3 +325,74 @@ def test_merge_with_module_defaults_does_not_mutate_input() -> None:
     original_len = len(cfg.price_table)
     merge_with_module_defaults(cfg)
     assert len(cfg.price_table) == original_len, "input config was mutated"
+
+
+# ---------------------------------------------------------------------------
+# resolve_cc_version
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "input_model,expected",
+    [
+        # Short aliases
+        ("opus", "opus-4-8"),
+        ("sonnet", "sonnet-4-6"),
+        ("haiku", "haiku-4-5"),
+        # Fable aliases
+        ("fable", "fable-5"),
+        ("fable-5", "fable-5"),
+        ("claude-fable-5", "fable-5"),
+        # claude- prefix stripped
+        ("claude-opus", "opus-4-8"),
+        ("claude-sonnet", "sonnet-4-6"),
+        # Concrete versioned IDs from the docstring
+        ("claude-opus-4-7-20251014", "opus-4-7"),
+        ("claude-opus-4-7", "opus-4-7"),
+        ("opus-4-7", "opus-4-7"),
+        # Already-resolved version passes through
+        ("opus-4-8", "opus-4-8"),
+        ("sonnet-4-6", "sonnet-4-6"),
+        # Unknown input passes through unchanged
+        ("gpt-5.4", "gpt-5.4"),
+        ("unknown-model-xyz", "unknown-model-xyz"),
+    ],
+)
+def test_resolve_cc_version(input_model: str, expected: str) -> None:
+    from gptme_usage.harness_models import resolve_cc_version
+
+    assert (
+        resolve_cc_version(input_model) == expected
+    ), f"resolve_cc_version({input_model!r}) -> {resolve_cc_version(input_model)!r}, want {expected!r}"
+
+
+# ---------------------------------------------------------------------------
+# is_post_agent_sdk_credit_change
+# ---------------------------------------------------------------------------
+
+
+def test_is_post_agent_sdk_credit_change_before_cutover() -> None:
+    from datetime import datetime, timezone
+
+    from gptme_usage.harness_models import is_post_agent_sdk_credit_change
+
+    before = datetime(2026, 6, 14, 23, 59, 59, tzinfo=timezone.utc)
+    assert not is_post_agent_sdk_credit_change(before)
+
+
+def test_is_post_agent_sdk_credit_change_at_exact_cutover() -> None:
+    from datetime import datetime, timezone
+
+    from gptme_usage.harness_models import is_post_agent_sdk_credit_change
+
+    cutover = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
+    assert is_post_agent_sdk_credit_change(cutover)
+
+
+def test_is_post_agent_sdk_credit_change_after_cutover() -> None:
+    from datetime import datetime, timezone
+
+    from gptme_usage.harness_models import is_post_agent_sdk_credit_change
+
+    after = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    assert is_post_agent_sdk_credit_change(after)
