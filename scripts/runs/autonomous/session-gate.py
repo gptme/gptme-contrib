@@ -212,7 +212,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--github-command",
         default=os.environ.get("SESSION_GATE_GITHUB_COMMAND"),
-        help="Optional local command; non-empty successful output triggers a run.",
+        help=(
+            "Optional trusted local shell command; non-empty successful output "
+            "triggers a run."
+        ),
     )
     parser.add_argument(
         "--github-timeout-seconds",
