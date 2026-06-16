@@ -119,16 +119,17 @@ def _known_mailboxes() -> list[str]:
 
 def _selected_mailboxes(mailbox: str, all_mailboxes: bool) -> list[str]:
     if all_mailboxes:
+        if mailbox not in (None, "default"):
+            raise click.BadParameter(
+                "--mailbox and --all-mailboxes are mutually exclusive",
+                param_hint="--mailbox",
+            )
         return _known_mailboxes()
     return [_normalize_mailbox(mailbox)]
 
 
-def _mailbox_label(mailbox: str) -> str:
-    return mailbox if mailbox != "default" else "default"
-
-
 def _format_mailbox_prefix(mailbox: str, *, show: bool) -> str:
-    return f"[{_mailbox_label(mailbox)}] " if show else ""
+    return f"[{mailbox}] " if show else ""
 
 
 def _within(base: Path, *parts: str) -> Path | None:
@@ -379,6 +380,8 @@ def _pending_messages(
 
 def _mark_replied(path: Path) -> None:
     """Stamp an inbox message ``replied: true`` (and ``read: true``). Idempotent."""
+    if not path.exists():
+        return
     content = path.read_text()
     if not content.startswith("---"):
         return
@@ -646,8 +649,7 @@ def status(mailbox: str, all_mailboxes: bool) -> None:
     click.echo(f"Agent:    {_self_name()}")
     click.echo(f"Registry: {', '.join(agents) or '(none)'}")
     click.echo(
-        "Mailbox:  "
-        + (_mailbox_label(mailboxes[0]) if len(mailboxes) == 1 else ", ".join(mailboxes))
+        f"Mailbox:  {mailboxes[0] if len(mailboxes) == 1 else ', '.join(mailboxes)}"
     )
     click.echo(f"Inbox:    {inbox_count}")
     click.echo(f"Outbox:   {outbox_count}")
