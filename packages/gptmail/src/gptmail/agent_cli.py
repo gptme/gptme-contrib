@@ -33,6 +33,7 @@ Wiring:
 from __future__ import annotations
 
 import functools
+import json
 import os
 import re
 import shlex
@@ -430,6 +431,124 @@ def _pending_for_mailboxes(
     return pending
 
 
+def _outbox_rows_for_recipient(
+    mailboxes: list[str],
+    *,
+    recipient: str,
+    self_name: str,
+) -> list[dict]:
+    target = recipient.lower()
+    rows: list[dict] = []
+    workspace = str(_repo_root())
+    for mailbox in mailboxes:
+        outbox = _mailbox_root(mailbox) / "outbox"
+        if not outbox.exists():
+            continue
+        for message_path in sorted(outbox.glob("*.md")):
+            meta = meta_of(message_path)
+            if not meta or not _addressed_to(meta, target):
+                continue
+            row = dict(meta)
+            row["agent"] = str(row.get("from") or self_name)
+            row["file"] = message_path.name
+            row["mailbox"] = str(row.get("mailbox") or mailbox)
+            row["workspace"] = workspace
+            rows.append(row)
+    rows.sort(
+        key=lambda meta: (
+            str(meta.get("timestamp", "")),
+            str(meta.get("agent", "")),
+            str(meta.get("mailbox", "")),
+            str(meta.get("file", "")),
+        )
+    )
+    return rows
+
+
+def _remote_pending_rows(
+    agent_name: str,
+    agent: dict[str, str],
+    *,
+    recipient: str,
+    mailboxes: list[str],
+) -> list[dict]:
+    missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
+    if missing:
+        return []
+    cmd = ["uv", "run", "gptmail", "agent", "pending", "--for", recipient, "--json", "--local-only"]
+    if len(mailboxes) == 1:
+        cmd.extend(["--mailbox", mailboxes[0]])
+    else:
+        cmd.append("--all-mailboxes")
+    remote_cmd = " && ".join(
+        [
+            f"cd {shlex.quote(agent['workspace'])}",
+            f"AGENT_NAME={shlex.quote(agent_name)} {shlex.join(cmd)}",
+        ]
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", agent["ssh"], remote_cmd],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=20,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        click.echo(f"Warning: failed to collect pending rows from {agent_name}: {e}", err=True)
+        return []
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as e:
+        click.echo(f"Warning: invalid pending JSON from {agent_name}: {e}", err=True)
+        return []
+    if not isinstance(payload, list):
+        click.echo(f"Warning: invalid pending payload from {agent_name}: expected a list", err=True)
+        return []
+    rows: list[dict] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row["agent"] = str(row.get("agent") or agent_name)
+        row["workspace"] = str(row.get("workspace") or agent["workspace"])
+        rows.append(row)
+    return rows
+
+
+def _fleet_pending_rows(
+    mailboxes: list[str],
+    *,
+    recipient: str,
+    self_name: str,
+    agents: dict[str, dict[str, str]],
+    fleet: bool,
+) -> list[dict]:
+    rows = _outbox_rows_for_recipient(mailboxes, recipient=recipient, self_name=self_name)
+    if not fleet:
+        return rows
+    for agent_name, agent in agents.items():
+        if agent_name == self_name:
+            continue
+        rows.extend(
+            _remote_pending_rows(
+                agent_name,
+                agent,
+                recipient=recipient,
+                mailboxes=mailboxes,
+            )
+        )
+    rows.sort(
+        key=lambda meta: (
+            str(meta.get("timestamp", "")),
+            str(meta.get("agent", "")),
+            str(meta.get("mailbox", "")),
+            str(meta.get("file", "")),
+        )
+    )
+    return rows
+
+
 # -- CLI ---------------------------------------------------------------------
 
 
@@ -607,13 +726,62 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
 @agent.command()
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
 @click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")
-def pending(mailbox: str, all_mailboxes: bool) -> None:
+@click.option("--for", "for_recipient", default=None, help="Show messages pending for a recipient.")
+@click.option("--fleet", is_flag=True, help="Fan out across all registered agents.")
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
+@click.option("--local-only", is_flag=True, hidden=True, help="Skip fleet fan-out.")
+def pending(
+    mailbox: str,
+    all_mailboxes: bool,
+    for_recipient: str | None,
+    fleet: bool,
+    json_output: bool,
+    local_only: bool,
+) -> None:
     """Show inbox messages awaiting a reply (timely-reply SLA)."""
     agents = _load_agents(warn_missing=False)
     mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
+    self_name = _self_name()
+    if for_recipient:
+        if fleet and local_only:
+            raise click.BadParameter("--fleet and --local-only are mutually exclusive")
+        rows = _fleet_pending_rows(
+            mailboxes,
+            recipient=for_recipient,
+            self_name=self_name,
+            agents=agents,
+            fleet=fleet and not local_only,
+        )
+        if json_output:
+            click.echo(json.dumps(rows, indent=2, sort_keys=True, default=str))
+            return
+        if not rows:
+            click.echo(f"No messages pending for {for_recipient.lower()}.")
+            return
+        click.echo(f"{len(rows)} message(s) pending for {for_recipient.lower()}:")
+        show_prefix = all_mailboxes or any(
+            str(row.get("mailbox", "default")) != "default" for row in rows
+        )
+        for row in rows:
+            prefix = _format_mailbox_prefix(str(row.get("mailbox", "default")), show=show_prefix)
+            timestamp = str(row.get("timestamp", "unknown"))
+            subject = str(row.get("subject", ""))
+            agent_name = str(row.get("agent", "unknown"))
+            file_name = str(row.get("file", ""))
+            workspace = str(row.get("workspace", ""))
+            click.echo(
+                f"  {agent_name} {prefix}[{timestamp}] {subject}  ({file_name} @ {workspace})"
+            )
+        return
+    if fleet:
+        raise click.BadParameter("--fleet requires --for", param_hint="--fleet")
+    if json_output:
+        raise click.BadParameter("--json requires --for", param_hint="--json")
+    if local_only:
+        raise click.BadParameter("--local-only requires --for", param_hint="--local-only")
     msgs = _pending_for_mailboxes(
         mailboxes,
-        self_name=_self_name(),
+        self_name=self_name,
         window=_reply_window_days(),
         agents=agents,
     )
