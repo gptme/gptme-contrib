@@ -27,13 +27,20 @@ from typing import TypedDict
 # to large context and tool transcripts, so we keep output share conservative.
 DEFAULT_OUTPUT_TOKEN_SHARE = 0.05
 
-# --- Agent SDK credit change (June 15, 2026) ---
-# Starting on this date, `claude -p` / Agent SDK usage no longer counts toward
-# Claude Max subscription usage limits. Instead, a separate monthly credit applies:
+# --- Agent SDK credit change (June 15, 2026) — PAUSED ---
+# Originally announced to take effect June 15, 2026: `claude -p` / Agent SDK
+# usage would move from subscription rate limits to a separate monthly credit:
 #   Max 5x:  $100/month
 #   Max 20x: $200/month
 # Source: https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan
+#
+# On June 16, 2026, Anthropic sent an email pausing the change indefinitely:
+# "We're working to update the plan to better support how users build with
+#  Claude subscriptions. Nothing changes for now."
+# CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED must be set to False and the date
+# updated once Anthropic announces a new effective date.
 CLAUDE_AGENT_SDK_CREDIT_CHANGE_DATE = datetime(2026, 6, 15, tzinfo=UTC)
+CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED = True
 
 # Monthly Agent SDK credit by subscription plan (USD).
 # After CLAUDE_AGENT_SDK_CREDIT_CHANGE_DATE, agent sessions draw from this
@@ -55,7 +62,14 @@ CLAUDE_AGENT_SDK_ASSUMED_MONTHLY_CREDIT_USD = CLAUDE_AGENT_SDK_MONTHLY_CREDIT_US
 
 
 def is_post_agent_sdk_credit_change(now: datetime | None = None) -> bool:
-    """Return True if the Anthropic Agent SDK credit change has taken effect."""
+    """Return True if the Anthropic Agent SDK credit change has taken effect.
+
+    Returns False while CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED is True, regardless
+    of the date.  Update PAUSED=False and CREDIT_CHANGE_DATE when Anthropic
+    announces a new effective date.
+    """
+    if CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED:
+        return False
     if now is None:
         now = datetime.now(UTC)
     return now >= CLAUDE_AGENT_SDK_CREDIT_CHANGE_DATE

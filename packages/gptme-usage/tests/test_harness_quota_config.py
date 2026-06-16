@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from gptme_usage.config import merge_with_module_defaults
 from gptme_usage.harness_models import (
+    CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED,
     GPTME_MODEL_ROUTES,
     GPTME_QUOTA_SOURCE,
     HARNESS_PRICE_USD_PER_1M,
@@ -365,16 +366,16 @@ def test_resolve_cc_version(input_model: str, expected: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_is_post_agent_sdk_credit_change_before_cutover() -> None:
+def test_is_post_agent_sdk_credit_change_paused() -> None:
+    """While the credit change is paused, the function must always return False."""
+    assert CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED, (
+        "Update this test when the pause is lifted: set PAUSED=False and "
+        "restore date-based assertions."
+    )
     before = datetime(2026, 6, 14, 23, 59, 59, tzinfo=timezone.utc)
-    assert not is_post_agent_sdk_credit_change(before)
-
-
-def test_is_post_agent_sdk_credit_change_at_exact_cutover() -> None:
-    cutover = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
-    assert is_post_agent_sdk_credit_change(cutover)
-
-
-def test_is_post_agent_sdk_credit_change_after_cutover() -> None:
+    at_cutover = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
     after = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
-    assert is_post_agent_sdk_credit_change(after)
+    for ts in (before, at_cutover, after, None):
+        assert not is_post_agent_sdk_credit_change(
+            ts
+        ), f"Expected False while paused, got True for ts={ts!r}"
