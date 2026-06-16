@@ -269,8 +269,11 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
                     # lesson_dir. Lexicographic sort puts archive/foo.md before foo.md
                     # so naively registering here would suppress the active copy.
                     active_copy = next(
-                        (p for p in lesson_dir.rglob(f.name)
-                         if "archive" not in p.relative_to(lesson_dir).parts),
+                        (
+                            p
+                            for p in lesson_dir.rglob(f.name)
+                            if "archive" not in p.relative_to(lesson_dir).parts
+                        ),
                         None,
                     )
                     if active_copy is None:
