@@ -59,6 +59,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 # PreToolUse throttle: minimum seconds between lesson matches
 PRETOOL_COOLDOWN_SECONDS = 15
@@ -126,196 +127,37 @@ def _trajectory_log_dir() -> Path:
     return get_workspace() / "state" / "lesson-trajectories"
 
 
-# --- Lesson loading ---
+def detect_harness() -> str:
+    """Detect the current runtime harness from environment variables."""
+    if os.environ.get("CLAUDECODE"):
+        return "claude-code"
+    if os.environ.get("CODEX") or os.environ.get("CODEX_INSTALLED"):
+        return "codex"
+    return "gptme"
 
 
-def load_lesson_dirs(workspace: Path) -> list[Path]:
-    """Read lesson dirs from gptme.toml [lessons] dirs."""
-    toml_path = workspace / "gptme.toml"
-    if not toml_path.exists():
-        return [workspace / "lessons"]
-
-    try:
-        import tomllib
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            # tomllib/tomli unavailable — warn and fall back to default lessons dir.
-            # Configured dirs in gptme.toml [lessons] dirs are silently ignored.
-            # Fix: install tomli (Python < 3.11) or upgrade to Python 3.11+.
-            print(
-                "Warning: tomllib/tomli not available; gptme.toml [lessons] dirs ignored,"
-                " using default './lessons' only.",
-                file=sys.stderr,
-            )
-            return [workspace / "lessons"]
-
-    with open(toml_path, "rb") as f:
-        cfg = tomllib.load(f)
-
-    dirs = cfg.get("lessons", {}).get("dirs", ["lessons"])
-    return [workspace / d for d in dirs]
+def filter_by_harness(
+    lessons: list[dict[str, Any]], current_harness: str
+) -> list[dict[str, Any]]:
+    """Keep only lessons whose harness restriction includes this harness."""
+    filtered: list[dict[str, Any]] = []
+    for lesson in lessons:
+        restrict = lesson.get("harness_restrict", [])
+        if not restrict or current_harness in restrict:
+            filtered.append(lesson)
+    return filtered
 
 
-def keyword_to_regex(keyword: str) -> "re.Pattern[str] | None":
-    """Convert a keyword (possibly with wildcards) to a compiled regex.
+def _load_shared_prompt_lessons():
+    """Import the shared prompt-lessons resolver from the workspace package."""
+    workspace = get_workspace()
+    context_src = workspace / "packages" / "context" / "src"
+    if str(context_src) not in sys.path:
+        sys.path.insert(0, str(context_src))
 
-    Same logic as gptme's _keyword_to_pattern:
-    - '*' becomes r'\\w*' (zero or more word chars)
-    - A bare '*' alone returns None (too broad)
-    """
-    keyword = keyword.strip()
-    if not keyword or keyword == "*":
-        return None
+    from context import prompt_lessons  # type: ignore[attr-defined]
 
-    # Escape everything except *, then replace * with \w*
-    parts = keyword.split("*")
-    escaped = r"\w*".join(re.escape(p) for p in parts)
-    try:
-        return re.compile(escaped, re.IGNORECASE)
-    except re.error:
-        return None
-
-
-def match_keyword(keyword: str, text_lower: str) -> bool:
-    """Check if a keyword matches in text (with wildcard support)."""
-    pattern = keyword_to_regex(keyword)
-    if pattern is None:
-        return False
-    return bool(pattern.search(text_lower))
-
-
-def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
-    """Extract YAML frontmatter and body from markdown."""
-    if not content.startswith("---"):
-        return {}, content
-
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return {}, content
-
-    fm_str = parts[1]
-    body = parts[2].strip()
-
-    # Try yaml first, fall back to regex parsing
-    try:
-        import yaml
-
-        fm_yaml = yaml.safe_load(fm_str)
-        return (fm_yaml or {}), body
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    # Regex fallback for keywords and status
-    fm: dict[str, object] = {}
-    keywords: list[str] = []
-    inline = re.search(r"keywords:\s*\[(.*?)\]", fm_str, re.DOTALL)
-    if inline:
-        keywords = [kw.strip() for kw in re.findall(r'"([^"]+)"', inline.group(1))]
-    else:
-        keywords = [
-            kw.strip() for kw in re.findall(r'^\s*-\s*"([^"]+)"', fm_str, re.MULTILINE)
-        ]
-
-    if keywords:
-        fm["match"] = {"keywords": keywords}
-
-    m = re.search(r"status:\s*(\w+)", fm_str)
-    if m:
-        fm["status"] = m.group(1)
-
-    name_m = re.search(r"^name:\s*(.+)$", fm_str, re.MULTILINE)
-    if name_m:
-        fm["name"] = name_m.group(1).strip()
-
-    return fm, body
-
-
-def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
-    """Scan lesson directories for lesson files with keyword frontmatter.
-
-    Deduplication rules (first-dir-wins, matching gptme#1594 behavior):
-    1. By resolved path: handles symlinks pointing to the same file
-    2. By filename: if lessons/X/foo.md exists, gptme-contrib/lessons/X/foo.md is skipped.
-       Local workspace lessons take priority over shared contrib lessons.
-    """
-    lessons = []
-    seen_paths: set[str] = set()
-    seen_names: set[str] = set()  # filename-based dedup: first dir wins
-
-    for lesson_dir in lesson_dirs:
-        if not lesson_dir.exists():
-            continue
-        for f in sorted(lesson_dir.rglob("*.md")):
-            if f.name == "README.md":
-                continue
-
-            # Dedup by resolved path (handles symlinks across dirs)
-            resolved = str(f.resolve())
-            if resolved in seen_paths:
-                continue
-            seen_paths.add(resolved)
-
-            # Dedup by filename (first lesson dir wins — local overrides contrib).
-            # Exception: SKILL.md files are always different skills, not duplicates.
-            if f.name != "SKILL.md" and f.name in seen_names:
-                continue
-            seen_names.add(f.name)
-
-            try:
-                content = f.read_text(encoding="utf-8")
-            except Exception:
-                continue
-
-            fm, body = extract_frontmatter(content)
-
-            status = fm.get("status", "active")
-            if status != "active":
-                continue
-
-            match_data = fm.get("match", {})
-            if isinstance(match_data, dict):
-                raw_keywords = match_data.get("keywords", [])
-                raw_patterns = match_data.get("patterns", [])
-            else:
-                raw_keywords = []
-                raw_patterns = []
-
-            if isinstance(raw_keywords, str):
-                raw_keywords = [raw_keywords]
-            keywords = [k for k in raw_keywords if isinstance(k, str) and k.strip()]
-
-            if isinstance(raw_patterns, str):
-                raw_patterns = [raw_patterns]
-            patterns = [p for p in raw_patterns if isinstance(p, str) and p.strip()]
-
-            skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
-            lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
-
-            # Need at least some way to match
-            if not keywords and not patterns and not skill_name:
-                continue
-
-            # Extract title from first H1
-            title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
-            title = title_match.group(1).strip() if title_match else f.stem
-
-            lessons.append(
-                {
-                    "path": str(f),
-                    "title": title,
-                    "id": lesson_id,
-                    "keywords": keywords,
-                    "patterns": patterns,
-                    "skill_name": skill_name,
-                    "body": body,
-                    "n_keywords": len(keywords),
-                }
-            )
-    return lessons
+    return prompt_lessons
 
 
 # --- Thompson sampling ---
@@ -509,125 +351,26 @@ def get_predicted_lessons(
     return results
 
 
-def score_lessons(lessons: list[dict], prompt: str, max_results: int = 5) -> list[dict]:
-    """Match lessons against prompt text. Returns scored results.
-
-    Scoring: keyword/pattern matches + Thompson sampling posterior mean boost.
-    TS re-ranks by adding TS_WEIGHT * posterior_mean to keyword scores.
-    Lessons without TS data get the default 0.5 (neutral prior).
-    """
-    prompt_lower = prompt.lower()
-    results = []
-
-    for lesson in lessons:
-        score = 0.0
-        matched_by: list[str] = []
-
-        # Keyword matching (with wildcard support)
-        for kw in lesson["keywords"]:
-            if match_keyword(kw, prompt_lower):
-                score += 1.0
-                matched_by.append(kw)
-
-        # Pattern matching (full regex)
-        for pat in lesson["patterns"]:
-            try:
-                if re.search(pat, prompt_lower):
-                    score += 1.0
-                    matched_by.append(f"pattern:{pat[:30]}")
-            except re.error:
-                pass
-
-        # Skill name matching
-        if lesson.get("skill_name"):
-            name_lower = lesson["skill_name"].lower()
-            for variant in [name_lower, name_lower.replace("-", " ")]:
-                if variant in prompt_lower:
-                    score += 1.5
-                    matched_by.append(f"skill:{lesson['skill_name']}")
-                    break
-
-        if score > 0:
-            results.append({**lesson, "score": score, "matched_by": matched_by})
-
-    # Apply Thompson sampling re-ranking (always apply neutral prior for consistency).
-    # If ts_means is empty (no bandit state yet) every lesson gets +0.5, keeping
-    # relative order.  Once partial data exists the guard would produce non-monotonic
-    # ranking — lessons without data would lose the +0.5 boost while lessons with data
-    # gain it, making early bandit accumulation perturb rankings unpredictably.
-    if results:
-        ts_means = load_ts_means([r["path"] for r in results])
-        for r in results:
-            ts_mean = ts_means.get(r["path"], 0.5)  # 0.5 = neutral prior
-            r["score"] += TS_WEIGHT * ts_mean
-            r["ts_score"] = ts_mean
-
-    results.sort(key=lambda x: -x["score"])
-    return results[:max_results]
+_PROMPT_LESSONS = _load_shared_prompt_lessons()
+load_lesson_dirs = _PROMPT_LESSONS.load_lesson_dirs
+scan_lessons = _PROMPT_LESSONS.scan_lessons
+parse_holdout_lessons_env = _PROMPT_LESSONS.parse_holdout_lessons_env
+is_held_out_lesson = _PROMPT_LESSONS.is_held_out_lesson
+filter_held_out_lessons = _PROMPT_LESSONS.filter_held_out_lessons
+parse_dropout_epsilon = _PROMPT_LESSONS.parse_dropout_epsilon
+select_randomized_dropout = _PROMPT_LESSONS.select_randomized_dropout
 
 
-# --- Holdout filtering (A/B testing) ---
-
-
-def parse_holdout_lessons_env(value: str | None = None) -> set[str]:
-    """Parse comma-separated lesson identifiers from HOLDOUT_LESSONS env var.
-
-    Supports multiple identifier formats: file stem, filename, full/partial path,
-    lesson ID (from frontmatter ``id`` field), or parent directory name (for SKILL.md).
-
-    Example::
-
-        HOLDOUT_LESSONS="browser-verification,strategic/scope-discipline.md"
-    """
-    raw = os.environ.get("HOLDOUT_LESSONS", "") if value is None else value
-    if not raw:
-        return set()
-    return {
-        token.strip().lower().replace("\\", "/")
-        for token in raw.split(",")
-        if token.strip()
-    }
-
-
-def is_held_out_lesson(lesson: dict, holdout_lessons: set[str]) -> bool:
-    """Return True if the lesson matches a configured holdout identifier."""
-    if not holdout_lessons:
-        return False
-
-    path = Path(str(lesson["path"]))
-    path_str = str(path).lower().replace("\\", "/")
-    identifiers = {
-        path_str,
-        path.name.lower(),
-        # For SKILL.md files, use parent dir name as identifier; otherwise file stem
-        (path.parent.name if path.name.lower() == "skill.md" else path.stem).lower(),
-    }
-
-    lesson_id = lesson.get("id")
-    if isinstance(lesson_id, str) and lesson_id.strip():
-        identifiers.add(lesson_id.strip().lower())
-
-    for token in holdout_lessons:
-        if token in identifiers:
-            return True
-        # Path suffix matching for partial paths like "strategic/foo.md"
-        if "/" in token or token.endswith(".md"):
-            normalized = token.lstrip("./")
-            if path_str == normalized or path_str.endswith(f"/{normalized}"):
-                return True
-
-    return False
-
-
-def filter_held_out_lessons(
-    lessons: list[dict], holdout_lessons: set[str]
-) -> list[dict]:
-    """Remove lessons selected for holdout from injection output."""
-    if not holdout_lessons:
-        return lessons
-    return [
-        lesson for lesson in lessons if not is_held_out_lesson(lesson, holdout_lessons)
-    ]
+def score_lessons(
+    lessons: list[dict[str, Any]], prompt: str, max_results: int = 5
+) -> list[dict[str, Any]]:
+    """Match lessons via the shared prompt-lessons resolver."""
+    return cast(
+        list[dict[str, Any]],
+        _PROMPT_LESSONS.score_lessons(
+            get_workspace(), lessons, prompt, max_results=max_results
+        ),
+    )
 
 
 # --- Session state for cross-invocation dedup ---
@@ -992,6 +735,8 @@ def main():
     workspace = get_workspace()
     lesson_dirs = load_lesson_dirs(workspace)
     lessons = scan_lessons(lesson_dirs)
+    current_harness = detect_harness()
+    lessons = filter_by_harness(lessons, current_harness)
     holdout_lessons = parse_holdout_lessons_env()
 
     if not lessons:
