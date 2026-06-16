@@ -314,6 +314,7 @@ def _matches_recipient(meta: dict, recipient: str) -> bool:
     to = meta.get("to")
     if to is None:
         return False
+    recipient = recipient.lower()
     if isinstance(to, (list, tuple, set)):  # noqa: UP038
         return recipient in {str(t).lower() for t in to}
     return str(to).lower() == recipient

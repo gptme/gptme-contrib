@@ -580,6 +580,10 @@ def test_pending_for_recipient_ignores_outbox_rows_without_to_field(workspace: P
     assert json.loads(result.output) == []
 
 
+def test_matches_recipient_normalizes_recipient_argument() -> None:
+    assert agent_cli._matches_recipient({"to": ["Erik"]}, "ERIK")
+
+
 def test_pending_for_recipient_fleet_merges_remote_rows(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
