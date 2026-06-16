@@ -2,6 +2,7 @@
 
 import builtins
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -247,6 +248,10 @@ def test_extract_frontmatter_regex_fallback_keeps_multiline_scalars(hook, monkey
             raise ImportError
         return real_import(name, *args, **kwargs)
 
+    # Remove yaml from the import cache so builtins.__import__ is actually called.
+    # Without this, `import yaml` inside extract_frontmatter resolves from sys.modules
+    # without invoking __import__, silently exercising the yaml path instead.
+    monkeypatch.delitem(sys.modules, "yaml", raising=False)
     monkeypatch.setattr(builtins, "__import__", fake_import)
     content = (
         "---\n"
