@@ -259,6 +259,27 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
                 continue
             seen_paths.add(resolved)
 
+            # Skip archived lessons — but still register their name so that
+            # contrib copies are also suppressed (local archive wins over contrib).
+            # Use relative_to(lesson_dir) so parent path segments (e.g. a workspace
+            # living under /home/alice/archive/…) don't trigger false suppression.
+            if "archive" in f.relative_to(lesson_dir).parts:
+                if f.name != "SKILL.md":
+                    # Only suppress if no active (non-archived) copy exists in this
+                    # lesson_dir. Lexicographic sort puts archive/foo.md before foo.md
+                    # so naively registering here would suppress the active copy.
+                    active_copy = next(
+                        (
+                            p
+                            for p in lesson_dir.rglob(f.name)
+                            if "archive" not in p.relative_to(lesson_dir).parts
+                        ),
+                        None,
+                    )
+                    if active_copy is None:
+                        seen_names.add(f.name)
+                continue
+
             # Dedup by filename (first lesson dir wins — local overrides contrib).
             # Exception: SKILL.md files are always different skills, not duplicates.
             if f.name != "SKILL.md" and f.name in seen_names:
