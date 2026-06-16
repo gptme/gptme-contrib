@@ -449,7 +449,8 @@ status)
     if _has_greptile_review; then
         if _needs_re_review; then
             # Hard lifetime ceiling: report "backoff" so callers/dashboards see the true state
-            if [ "$(_total_trigger_count)" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+            _total_triggers=$(_total_trigger_count)
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
                 echo "backoff"
             else
                 reviewed_at=$(_greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
