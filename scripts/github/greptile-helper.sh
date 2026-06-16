@@ -61,26 +61,6 @@ _json_field() {
     python3 -c "import json, sys; data = json.load(sys.stdin); v = data.get('$field'); print(v if v is not None else '')" 2>/dev/null
 }
 
-_total_trigger_count() {
-    # Count ALL our `@greptileai review` trigger comments on this PR (lifetime),
-    # paginated so it stays accurate past the 30-comment default page. Used by the
-    # total-trigger ceiling, which (unlike MAX_RE_TRIGGERS) never resets per review.
-    # Fail-open to 0 on API error so a transient failure never blocks a legit trigger.
-    # Result is cached per-process to avoid a duplicate paginated API call when
-    # both trigger and check/status invoke this in the same script run.
-    trap - EXIT  # subshell inherits parent EXIT trap; clear so it doesn't delete the cache
-    if [ -f "$_TOTAL_TRIGGERS_CACHE_FILE" ]; then
-        cat "$_TOTAL_TRIGGERS_CACHE_FILE"
-        return
-    fi
-    local count
-    count=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
-        --jq "[.[] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | length" \
-        2>/dev/null | awk '{s+=$1} END {print s+0}') || count=0
-    printf '%s\n' "${count:-0}" > "$_TOTAL_TRIGGERS_CACHE_FILE" 2>/dev/null || true
-    printf '%s\n' "${count:-0}"
-}
-
 _no_new_commit_since_our_last_trigger() {
     # Returns 0 (true) when the PR head commit is NOT newer than our most recent
     # `@greptileai review` trigger — i.e. we already triggered for the current head
@@ -95,8 +75,8 @@ _no_new_commit_since_our_last_trigger() {
     local head_date last_trigger_date
     head_date=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" 2>/dev/null \
         | jq -rs '[.[][] | .commit.committer.date] | sort | last // ""' 2>/dev/null) || head_date=""
-    last_trigger_date=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" 2>/dev/null \
-        | jq -rs "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) | .created_at] | sort | last // \"\"" 2>/dev/null) || last_trigger_date=""
+    last_trigger_date=$(_issue_comments_json \
+        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) | .created_at] | sort | last // \"\"" 2>/dev/null) || last_trigger_date=""
     [ -z "$last_trigger_date" ] && return 1   # no prior trigger → allow
     [ -z "$head_date" ] && return 1           # can't read head → allow (fail-open)
     if _timestamp_gt "$head_date" "$last_trigger_date" 2>/dev/null; then
@@ -135,8 +115,8 @@ PY
 # Cache review info via temp file to avoid redundant API calls.
 # Shell variable caching doesn't work here because callers use $() subshells.
 _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
-_TOTAL_TRIGGERS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-total-triggers-$$.txt"
-trap 'rm -f "$_REVIEW_CACHE_FILE" "$_TOTAL_TRIGGERS_CACHE_FILE"' EXIT
+_ISSUE_COMMENTS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-$$.json"
+trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE"' EXIT
 
 # Shared hash for per-PR state files (lock + trigger timestamp).
 # Used across trigger and _our_trigger_status to coordinate without the GitHub API.
@@ -148,6 +128,30 @@ _PR_HASH=$(printf '%s#%s' "$REPO" "$PR_NUMBER" | (md5sum 2>/dev/null || md5 -q) 
 # See: 2026-03-19 INCIDENT #5 (gptme-contrib#504/#505 got 2-3 triggers each
 # because the 00:15Z trigger wasn't visible in API at 00:20Z check).
 _TRIGGER_TS_FILE="${TMPDIR:-/tmp}/greptile-trigger-ts-${_PR_HASH}.txt"
+_issue_comments_json() {
+    # Cache the paginated issue-comments payload once per process; several guards
+    # derive different fields from the same endpoint and should not each spend a
+    # separate full traversal of the PR comment history.
+    trap - EXIT
+    if [ -f "$_ISSUE_COMMENTS_CACHE_FILE" ]; then
+        cat "$_ISSUE_COMMENTS_CACHE_FILE"
+        return
+    fi
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate 2>/dev/null \
+        | jq -s '.' > "$_ISSUE_COMMENTS_CACHE_FILE" 2>/dev/null \
+        || echo '[]' > "$_ISSUE_COMMENTS_CACHE_FILE"
+    cat "$_ISSUE_COMMENTS_CACHE_FILE"
+}
+
+_total_trigger_count() {
+    # Count ALL our `@greptileai review` trigger comments on this PR (lifetime).
+    # Fail-open to 0 on API error so a transient failure never blocks a legit trigger.
+    local count
+    count=$(_issue_comments_json \
+        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | length" 2>/dev/null) || count=0
+    printf '%s\n' "${count:-0}"
+}
+
 _greptile_review_info() {
     # Reset EXIT trap in subshell context — callers use $() which inherits
     # the parent trap and would delete the cache file immediately on return.
@@ -264,8 +268,7 @@ _our_trigger_status() {
     local comment_info
     # Paginate first, then filter (--paginate + --jq applies per-page).
     # Also compute count_since_review = number of our triggers after review_cutoff (for max-retries guard).
-    comment_info=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        2>/dev/null | jq -s '
+    comment_info=$(_issue_comments_json | jq '
           [.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("greptileai"; "i")))]
           | sort_by(.created_at)
           | {
