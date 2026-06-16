@@ -1,6 +1,7 @@
 """Summarization pass for evicted tool outputs.
 
-Runs at priority 199 (before the trimmer at 200). When summarization is enabled
+Runs at priority 202 (before the headroom compressor at 201 and the trimmer at
+200, all of which use higher-priority-runs-first ordering). When summarization is enabled
 and tool output messages are evicted beyond the recency window, the W most
 recently evicted pairs are summarized using an LLM and replaced with a single
 summary message, instead of being preview-truncated by the trimmer.
@@ -261,9 +262,10 @@ def generation_pre_hook(
 ) -> Generator[Message | StopPropagation, None, None]:
     """Summarize evicted tool outputs before the trimmer runs.
 
-    Registered at priority 199 (before trimmer at 200). When summarization is
-    enabled, replaces W evicted tool output pairs with a single LLM-generated
-    summary. Otherwise, acts as a no-op and the trimmer handles truncation.
+    Registered at priority 202 (runs before the headroom compressor at 201 and
+    the trimmer at 200). When summarization is enabled, replaces W evicted tool
+    output pairs with a single LLM-generated summary. Otherwise, acts as a no-op
+    and the trimmer handles truncation.
     """
     if _check_bypass_env():
         return
@@ -282,10 +284,11 @@ def generation_pre_hook(
 
 
 def register() -> None:
-    """Register the summarization hook at priority 199 (before trimmer at 200)."""
+    """Register the summarization hook at priority 202 (runs before the headroom
+    compressor at 201 and the trimmer at 200)."""
     register_hook(
         name="tooloutput_trimmer.summarizer",
         hook_type=HookType.GENERATION_PRE,
         func=generation_pre_hook,
-        priority=199,
+        priority=202,
     )
