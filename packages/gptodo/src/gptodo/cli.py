@@ -1821,6 +1821,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         ):
             from datetime import datetime as _dt, timezone as _tz
 
+            # Full ISO datetime for intra-day resolution (ErikBjare request, 2026-06-16).
+            # validate_task_frontmatter.py's validate_timestamp() accepts both YYYY-MM-DD
+            # and full ISO datetime via datetime.fromisoformat().
             post.metadata["waiting_since"] = _dt.now(_tz.utc).isoformat(timespec="seconds")
 
         # Save changes
