@@ -568,6 +568,18 @@ def test_pending_for_recipient_json_emits_machine_readable_rows(workspace: Path)
     assert rows[1]["mailbox"] == "ops"
 
 
+def test_pending_for_recipient_ignores_outbox_rows_without_to_field(workspace: Path) -> None:
+    outbox = workspace / "messages" / "outbox"
+    malformed = outbox / "20260616-120000-000000-alice-missing-to.md"
+    malformed.write_text(
+        "---\nfrom: alice\ntimestamp: 2026-06-16T12:00:00Z\nsubject: Missing to\n---\n\nbody\n"
+    )
+
+    result = CliRunner().invoke(agent, ["pending", "--for", "erik", "--json", "--local-only"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == []
+
+
 def test_pending_for_recipient_fleet_merges_remote_rows(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -605,6 +617,19 @@ def test_pending_for_recipient_fleet_merges_remote_rows(
     rows = json.loads(result.output)
     assert {row["agent"] for row in rows} == {"alice", "bob"}
     assert {row["file"] for row in rows} == {local_msg, ops_msg, "20260616-remote.md"}
+
+
+def test_remote_pending_rows_warns_on_missing_transport(capsys: pytest.CaptureFixture[str]) -> None:
+    rows = agent_cli._remote_pending_rows(
+        "bob",
+        {"workspace": "/tmp/bob"},
+        recipient="erik",
+        mailboxes=["default"],
+    )
+
+    captured = capsys.readouterr()
+    assert rows == []
+    assert "Warning: skipping bob; missing required key(s): ssh" in captured.err
 
 
 def test_pending_stays_silent_without_registry(

@@ -304,6 +304,21 @@ def _addressed_to(meta: dict, self_name: str) -> bool:
     return str(to).lower() == self_name
 
 
+def _matches_recipient(meta: dict, recipient: str) -> bool:
+    """True only when ``meta['to']`` explicitly targets ``recipient``.
+
+    Inbox scans treat a missing ``to`` as addressed-to-self for legacy
+    frontmatter-free messages. Outbox recipient filtering is stricter: a missing
+    recipient is malformed and must not leak into every ``pending --for`` view.
+    """
+    to = meta.get("to")
+    if to is None:
+        return False
+    if isinstance(to, (list, tuple, set)):  # noqa: UP038
+        return recipient in {str(t).lower() for t in to}
+    return str(to).lower() == recipient
+
+
 def _is_push_reachable(recipient: str, agents: dict[str, dict[str, str]]) -> bool:
     """True if ``recipient`` has a working push transport in the registry.
 
@@ -446,7 +461,7 @@ def _outbox_rows_for_recipient(
             continue
         for message_path in sorted(outbox.glob("*.md")):
             meta = meta_of(message_path)
-            if not meta or not _addressed_to(meta, target):
+            if not meta or not _matches_recipient(meta, target):
                 continue
             row = dict(meta)
             row["agent"] = str(row.get("from") or self_name)
@@ -474,6 +489,10 @@ def _remote_pending_rows(
 ) -> list[dict]:
     missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
     if missing:
+        click.echo(
+            f"Warning: skipping {agent_name}; missing required key(s): {', '.join(missing)}",
+            err=True,
+        )
         return []
     cmd = ["uv", "run", "gptmail", "agent", "pending", "--for", recipient, "--json", "--local-only"]
     if len(mailboxes) == 1:
