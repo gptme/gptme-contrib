@@ -41,6 +41,7 @@ Deliver = Callable[[Path, str], bool]
 # sanitised subjects contain long runs of dashes (like "...candidate----gptma.md").
 # The correct delimiter is three dashes occupying an entire line.
 _FM_DELIM = re.compile(r"^---[ \t]*$", re.MULTILINE)
+_MAILBOX_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def meta_of(path: Path) -> dict | None:
@@ -80,12 +81,40 @@ class AgentTransport:
         messages_dir: str | Path,
         self_name: str,
         *,
+        mailbox: str = "default",
         deliver: Deliver | None = None,
     ) -> None:
-        self._dir = Path(messages_dir)
+        self._root = Path(messages_dir)
+        self._mailbox = self._normalize_mailbox(mailbox)
+        self._dir = self.mailbox_dir(self._root, self._mailbox)
         self._self = self_name.lower()
         self._deliver = deliver
         self._ensure_dirs()
+
+    @staticmethod
+    def _normalize_mailbox(mailbox: str) -> str:
+        name = mailbox.strip().lower()
+        if not name:
+            raise ValueError("Mailbox name cannot be empty.")
+        if name == "default":
+            return name
+        if not _MAILBOX_NAME.fullmatch(name):
+            raise ValueError(
+                f"Invalid mailbox name: {mailbox!r}. Use lowercase letters, digits, '-' or '_'."
+            )
+        return name
+
+    @classmethod
+    def mailbox_dir(cls, messages_dir: str | Path, mailbox: str = "default") -> Path:
+        root = Path(messages_dir)
+        name = cls._normalize_mailbox(mailbox)
+        if name == "default":
+            return root
+        return root / "mailboxes" / name
+
+    @property
+    def mailbox(self) -> str:
+        return self._mailbox
 
     @property
     def inbox(self) -> Path:
@@ -114,6 +143,7 @@ class AgentTransport:
         recipient: str,
         subject: str,
         body: str,
+        mailbox: str = "default",
         in_reply_to: str | None = None,
     ) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -123,6 +153,7 @@ class AgentTransport:
             "timestamp": ts,
             "subject": subject,
             "read": False,
+            "mailbox": mailbox,
         }
         if in_reply_to:
             meta["in_reply_to"] = in_reply_to
@@ -171,7 +202,14 @@ class AgentTransport:
         filename = self._make_filename(self._self, subject)
         local_path = self.outbox / filename
         local_path.write_text(
-            self._format(self._self, to.lower(), subject, content, in_reply_to=reply_to)
+            self._format(
+                self._self,
+                to.lower(),
+                subject,
+                content,
+                mailbox=self.mailbox,
+                in_reply_to=reply_to,
+            )
         )
         if self._deliver is not None and not self._deliver(local_path, to.lower()):
             self._stamp_delivery_failed(local_path)

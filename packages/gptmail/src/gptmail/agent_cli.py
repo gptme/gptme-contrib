@@ -89,6 +89,49 @@ def _messages_dir() -> Path:
     return _repo_root() / "messages"
 
 
+def _normalize_mailbox(mailbox: str) -> str:
+    try:
+        return AgentTransport._normalize_mailbox(mailbox)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--mailbox")
+
+
+def _mailbox_root(mailbox: str = "default") -> Path:
+    return AgentTransport.mailbox_dir(_messages_dir(), _normalize_mailbox(mailbox))
+
+
+def _known_mailboxes() -> list[str]:
+    mailboxes = ["default"]
+    root = _messages_dir() / "mailboxes"
+    if not root.exists():
+        return mailboxes
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        try:
+            name = _normalize_mailbox(child.name)
+        except click.BadParameter:
+            continue
+        if name != "default":
+            mailboxes.append(name)
+    return mailboxes
+
+
+def _selected_mailboxes(mailbox: str, all_mailboxes: bool) -> list[str]:
+    if all_mailboxes:
+        if mailbox not in (None, "default"):
+            raise click.BadParameter(
+                "--mailbox and --all-mailboxes are mutually exclusive",
+                param_hint="--mailbox",
+            )
+        return _known_mailboxes()
+    return [_normalize_mailbox(mailbox)]
+
+
+def _format_mailbox_prefix(mailbox: str, *, show: bool) -> str:
+    return f"[{mailbox}] " if show else ""
+
+
 def _within(base: Path, *parts: str) -> Path | None:
     """Resolve ``base/parts`` and return it only if it stays inside ``base``.
 
@@ -131,7 +174,7 @@ def _tracker() -> ConversationTracker:
     return ConversationTracker(_messages_dir() / ".tracking")
 
 
-def _ssh_deliver(agents: dict[str, dict[str, str]]) -> Deliver:
+def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default") -> Deliver:
     """Build a ``deliver`` hook that SCPs a message into a recipient's inbox.
 
     Returns False (so the transport stamps ``delivered: false``) on unknown
@@ -160,7 +203,11 @@ def _ssh_deliver(agents: dict[str, dict[str, str]]) -> Deliver:
             )
             return False
         ssh_target = agent["ssh"]
-        remote_inbox = f"{agent['workspace']}/messages/inbox/"
+        remote_root = f"{agent['workspace']}/messages"
+        if mailbox == "default":
+            remote_inbox = f"{remote_root}/inbox/"
+        else:
+            remote_inbox = f"{remote_root}/mailboxes/{mailbox}/inbox/"
         ssh_opts = ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
         try:
             subprocess.run(
@@ -188,18 +235,23 @@ def _ssh_deliver(agents: dict[str, dict[str, str]]) -> Deliver:
     return _deliver
 
 
-def _transport(deliver: Deliver | None = None) -> AgentTransport:
-    return AgentTransport(_messages_dir(), _self_name(), deliver=deliver)
+def _transport(*, deliver: Deliver | None = None, mailbox: str = "default") -> AgentTransport:
+    return AgentTransport(
+        _messages_dir(),
+        _self_name(),
+        mailbox=_normalize_mailbox(mailbox),
+        deliver=deliver,
+    )
 
 
-def _delivery_failed(message_id: str) -> bool:
+def _delivery_failed(message_id: str, *, mailbox: str = "default") -> bool:
     """True if the just-sent outbox message was stamped ``delivered: false``.
 
     The transport stamps that field only when the deliver hook reports failure;
     a successful send leaves it absent. Lets the CLI report real failures (and
     exit non-zero) instead of always printing "Sent".
     """
-    path = _messages_dir() / "outbox" / message_id
+    path = _mailbox_root(mailbox) / "outbox" / message_id
     try:
         content = path.read_text()
     except OSError:
@@ -326,10 +378,9 @@ def _pending_messages(
     return pending
 
 
-def _mark_replied(messages_dir: Path, message_id: str) -> None:
+def _mark_replied(path: Path) -> None:
     """Stamp an inbox message ``replied: true`` (and ``read: true``). Idempotent."""
-    path = _within(messages_dir / "inbox", message_id)
-    if path is None or not path.exists():
+    if not path.exists():
         return
     content = path.read_text()
     if not content.startswith("---"):
@@ -345,6 +396,40 @@ def _mark_replied(messages_dir: Path, message_id: str) -> None:
     path.write_text("---".join([parts[0], fm, parts[2]]))
 
 
+def _resolve_message(
+    message_id: str,
+    *,
+    folder: str = "inbox",
+    mailbox: str | None = None,
+) -> tuple[str, Path] | None:
+    mailboxes = [_normalize_mailbox(mailbox)] if mailbox is not None else _known_mailboxes()
+    for mailbox_name in mailboxes:
+        path = _within(_mailbox_root(mailbox_name) / folder, message_id)
+        if path is not None and path.exists():
+            return mailbox_name, path
+    return None
+
+
+def _pending_for_mailboxes(
+    mailboxes: list[str],
+    *,
+    self_name: str,
+    window: int,
+    agents: dict[str, dict[str, str]],
+) -> list[dict]:
+    pending: list[dict] = []
+    for mailbox in mailboxes:
+        messages = _pending_messages(_mailbox_root(mailbox), self_name, window, agents=agents)
+        for meta in messages:
+            row = dict(meta)
+            row["mailbox"] = str(row.get("mailbox") or mailbox)
+            pending.append(row)
+    pending.sort(
+        key=lambda meta: str(meta.get("timestamp", "")),
+    )
+    return pending
+
+
 # -- CLI ---------------------------------------------------------------------
 
 
@@ -357,7 +442,8 @@ def agent() -> None:
 @click.argument("to")
 @click.argument("subject")
 @click.argument("content", required=False)
-def send(to: str, subject: str, content: str | None) -> None:
+@click.option("--mailbox", default="default", show_default=True, help="Mailbox to send from.")
+def send(to: str, subject: str, content: str | None, mailbox: str) -> None:
     """Send a message to another agent."""
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
@@ -367,10 +453,11 @@ def send(to: str, subject: str, content: str | None) -> None:
     if to.lower() not in agents:
         click.echo(f"Error: unknown agent '{to}'. Known: {', '.join(agents)}", err=True)
         sys.exit(1)
-    transport = _transport(deliver=_ssh_deliver(agents))
+    mailbox = _normalize_mailbox(mailbox)
+    transport = _transport(deliver=_ssh_deliver(agents, mailbox=mailbox), mailbox=mailbox)
     message_id = transport.send(to, subject, body)
     _track_sent(transport, message_id, reply_to=None)
-    if _delivery_failed(message_id):
+    if _delivery_failed(message_id, mailbox=mailbox):
         click.echo(
             f"Delivery to {to.lower()} FAILED — saved to outbox (delivered: false). "
             "It was NOT received.",
@@ -383,11 +470,13 @@ def send(to: str, subject: str, content: str | None) -> None:
 @agent.command()
 @click.argument("subject")
 @click.argument("content", required=False)
-def broadcast(subject: str, content: str | None) -> None:
+@click.option("--mailbox", default="default", show_default=True, help="Mailbox to send from.")
+def broadcast(subject: str, content: str | None, mailbox: str) -> None:
     """Send a message to every agent in the registry except self."""
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
-    transport = _transport(deliver=_ssh_deliver(agents))
+    mailbox = _normalize_mailbox(mailbox)
+    transport = _transport(deliver=_ssh_deliver(agents, mailbox=mailbox), mailbox=mailbox)
     recipients = [name for name in agents if name != _self_name()]
     if not recipients:
         click.echo("No other agents in registry.", err=True)
@@ -396,7 +485,7 @@ def broadcast(subject: str, content: str | None) -> None:
     for name in recipients:
         message_id = transport.send(name, subject, body)
         _track_sent(transport, message_id, reply_to=None)
-        if _delivery_failed(message_id):
+        if _delivery_failed(message_id, mailbox=mailbox):
             click.echo(f"Delivery to {name} FAILED (delivered: false).", err=True)
             failures.append(name)
         else:
@@ -409,7 +498,9 @@ def broadcast(subject: str, content: str | None) -> None:
 @agent.command(name="list")
 @click.argument("folder", default="inbox")
 @click.option("--all", "-a", "show_all", is_flag=True, help="Include already-read messages.")
-def list_cmd(folder: str, show_all: bool) -> None:
+@click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
+@click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")
+def list_cmd(folder: str, show_all: bool, mailbox: str, all_mailboxes: bool) -> None:
     """List messages in a folder (default: inbox, unread only).
 
     Mirrors ``agent-msg.py list``: the inbox shows only unread messages by
@@ -418,34 +509,45 @@ def list_cmd(folder: str, show_all: bool) -> None:
     ``  {marker} [{ts}] {sender}: {subject}  ({file})`` matches agent-msg.py so
     the planned thin shim is a faithful drop-in.
     """
-    folder_dir = _within(_messages_dir(), folder)
-    if folder_dir is None:
-        raise click.ClickException(f"Invalid folder name: {folder!r}")
-    transport = _transport()
-    rows = transport.list_inbox(folder)
+    mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
     unread_only = folder == "inbox" and not show_all
     shown = 0
-    for message_id, _subject, _ts in rows:
-        meta = meta_of(folder_dir / message_id) or {}
-        is_read = bool(meta.get("read"))
-        if unread_only and is_read:
-            continue
-        ts = meta.get("timestamp", "unknown")
-        sender = str(meta.get("from", "unknown"))
-        subject = str(meta.get("subject", "(no subject)"))
-        marker = " " if is_read else "*"
-        click.echo(f"  {marker} [{ts}] {sender}: {subject}  ({message_id})")
-        shown += 1
+    show_prefix = all_mailboxes or any(name != "default" for name in mailboxes)
+    for mailbox_name in mailboxes:
+        folder_dir = _within(_mailbox_root(mailbox_name), folder)
+        if folder_dir is None:
+            raise click.ClickException(f"Invalid folder name: {folder!r}")
+        transport = _transport(mailbox=mailbox_name)
+        rows = transport.list_inbox(folder)
+        for message_id, _subject, _ts in rows:
+            meta = meta_of(folder_dir / message_id) or {}
+            is_read = bool(meta.get("read"))
+            if unread_only and is_read:
+                continue
+            ts = meta.get("timestamp", "unknown")
+            sender = str(meta.get("from", "unknown"))
+            subject = str(meta.get("subject", "(no subject)"))
+            marker = " " if is_read else "*"
+            prefix = _format_mailbox_prefix(mailbox_name, show=show_prefix)
+            click.echo(f"  {marker} {prefix}[{ts}] {sender}: {subject}  ({message_id})")
+            shown += 1
     if shown == 0:
-        click.echo("No unread messages." if unread_only else f"No messages in {folder}.")
+        scope = "across mailboxes" if all_mailboxes else f"in {folder}"
+        click.echo("No unread messages." if unread_only else f"No messages {scope}.")
 
 
 @agent.command()
 @click.argument("message_id")
 @click.option("--thread", is_flag=True, help="Include locally-available ancestors.")
-def read(message_id: str, thread: bool) -> None:
+@click.option("--mailbox", default=None, help="Restrict lookup to a specific mailbox.")
+def read(message_id: str, thread: bool, mailbox: str | None) -> None:
     """Read a message (marks it read), optionally with its thread."""
-    transport = _transport()
+    resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
+    if resolved is None:
+        click.echo(f"Error: message not found: {message_id}", err=True)
+        sys.exit(1)
+    mailbox_name, _path = resolved
+    transport = _transport(mailbox=mailbox_name)
     try:
         click.echo(transport.read(message_id, include_thread=thread))
     except FileNotFoundError as e:
@@ -456,13 +558,14 @@ def read(message_id: str, thread: bool) -> None:
 @agent.command()
 @click.argument("message_id")
 @click.argument("content", required=False)
-def reply(message_id: str, content: str | None) -> None:
+@click.option("--mailbox", default=None, help="Restrict lookup to a specific mailbox.")
+def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
     """Reply to an inbox message, threading via in_reply_to."""
-    messages_dir = _messages_dir()
-    msg_path = _within(messages_dir / "inbox", message_id)
-    if msg_path is None:
+    resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
+    if resolved is None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)
+    mailbox_name, msg_path = resolved
     original = meta_of(msg_path)
     if original is None:
         click.echo(f"Error: message not found: {message_id}", err=True)
@@ -484,9 +587,12 @@ def reply(message_id: str, content: str | None) -> None:
         subject = f"Re: {subject}"
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
-    transport = _transport(deliver=_ssh_deliver(agents))
+    transport = _transport(
+        deliver=_ssh_deliver(agents, mailbox=mailbox_name),
+        mailbox=mailbox_name,
+    )
     reply_id = transport.send(recipient, subject, body, reply_to=message_id)
-    if _delivery_failed(reply_id):
+    if _delivery_failed(reply_id, mailbox=mailbox_name):
         click.echo(
             f"Delivery to {recipient} FAILED — saved to outbox (delivered: false). "
             "It was NOT received.",
@@ -494,35 +600,57 @@ def reply(message_id: str, content: str | None) -> None:
         )
         sys.exit(1)
     _track_sent(transport, reply_id, reply_to=message_id)
-    _mark_replied(messages_dir, message_id)
+    _mark_replied(msg_path)
     click.echo(f"Replied to {recipient}: {subject}")
 
 
 @agent.command()
-def pending() -> None:
+@click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
+@click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")
+def pending(mailbox: str, all_mailboxes: bool) -> None:
     """Show inbox messages awaiting a reply (timely-reply SLA)."""
-    msgs = _pending_messages(_messages_dir(), _self_name(), _reply_window_days())
+    agents = _load_agents(warn_missing=False)
+    mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
+    msgs = _pending_for_mailboxes(
+        mailboxes,
+        self_name=_self_name(),
+        window=_reply_window_days(),
+        agents=agents,
+    )
     if not msgs:
         click.echo("No messages awaiting reply.")
         return
     click.echo(f"{len(msgs)} message(s) awaiting reply:")
+    show_prefix = all_mailboxes or any(name != "default" for name in mailboxes)
     for m in msgs:
-        click.echo(f"  {m['file']}  from {m.get('from')}: {m.get('subject', '')}")
+        prefix = _format_mailbox_prefix(str(m.get("mailbox", "default")), show=show_prefix)
+        click.echo(f"  {prefix}{m['file']}  from {m.get('from')}: {m.get('subject', '')}")
 
 
 @agent.command()
-def status() -> None:
+@click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
+@click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")
+def status(mailbox: str, all_mailboxes: bool) -> None:
     """Show messaging status (self, registry, inbox/outbox/pending counts)."""
-    messages_dir = _messages_dir()
-    transport = _transport()
     agents = _load_agents()
-    inbox = transport.list_inbox("inbox")
-    outbox = transport.list_inbox("outbox")
-    pend = _pending_messages(messages_dir, _self_name(), _reply_window_days(), agents=agents)
+    mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
+    inbox_count = 0
+    outbox_count = 0
+    for mailbox_name in mailboxes:
+        transport = _transport(mailbox=mailbox_name)
+        inbox_count += len(transport.list_inbox("inbox"))
+        outbox_count += len(transport.list_inbox("outbox"))
+    pend = _pending_for_mailboxes(
+        mailboxes,
+        self_name=_self_name(),
+        window=_reply_window_days(),
+        agents=agents,
+    )
     click.echo(f"Agent:    {_self_name()}")
     click.echo(f"Registry: {', '.join(agents) or '(none)'}")
-    click.echo(f"Inbox:    {len(inbox)}")
-    click.echo(f"Outbox:   {len(outbox)}")
+    click.echo(f"Mailbox:  {mailboxes[0] if len(mailboxes) == 1 else ', '.join(mailboxes)}")
+    click.echo(f"Inbox:    {inbox_count}")
+    click.echo(f"Outbox:   {outbox_count}")
     click.echo(f"Pending:  {len(pend)}")
 
 
