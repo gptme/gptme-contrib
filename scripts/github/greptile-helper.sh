@@ -5,12 +5,12 @@
 #   greptile-helper.sh check <repo> <pr_number>   # Check status, exit 0=ok-to-trigger 1=skip
 #   greptile-helper.sh trigger <repo> <pr_number> # Trigger once if safe, else skip
 #   greptile-helper.sh status <repo> <pr_number>  # Print status string:
-#     already-reviewed | needs-re-review | in-progress | awaiting-initial-review | stale | error
+#     already-reviewed | needs-re-review | in-progress | awaiting-initial-review | stale | backoff | error
 #
 # Exit codes for 'check':
 #   0 = safe to trigger (re-review needed: new commits since the last Greptile review)
 #   1 = skip: no review yet (awaiting Greptile auto-review), or re-review trigger in-flight
-#   2 = skip: reviewed by greptile-apps[bot], and no new commits since review
+#   2 = skip: reviewed by greptile-apps[bot], and no new commits since review (or ceiling hit)
 #   3 = api error (fail-safe = skip)
 #
 # Erik's requests (ErikBjare/bob#434):
@@ -66,9 +66,19 @@ _total_trigger_count() {
     # paginated so it stays accurate past the 30-comment default page. Used by the
     # total-trigger ceiling, which (unlike MAX_RE_TRIGGERS) never resets per review.
     # Fail-open to 0 on API error so a transient failure never blocks a legit trigger.
-    gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+    # Result is cached per-process to avoid a duplicate paginated API call when
+    # both trigger and check/status invoke this in the same script run.
+    trap - EXIT  # subshell inherits parent EXIT trap; clear so it doesn't delete the cache
+    if [ -f "$_TOTAL_TRIGGERS_CACHE_FILE" ]; then
+        cat "$_TOTAL_TRIGGERS_CACHE_FILE"
+        return
+    fi
+    local count
+    count=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
         --jq "[.[] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | length" \
-        2>/dev/null | awk '{s+=$1} END {print s+0}' || echo 0
+        2>/dev/null | awk '{s+=$1} END {print s+0}') || count=0
+    printf '%s\n' "${count:-0}" > "$_TOTAL_TRIGGERS_CACHE_FILE" 2>/dev/null || true
+    printf '%s\n' "${count:-0}"
 }
 
 _timestamp_gt() {
@@ -101,7 +111,8 @@ PY
 # Cache review info via temp file to avoid redundant API calls.
 # Shell variable caching doesn't work here because callers use $() subshells.
 _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
-trap 'rm -f "$_REVIEW_CACHE_FILE"' EXIT
+_TOTAL_TRIGGERS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-total-triggers-$$.txt"
+trap 'rm -f "$_REVIEW_CACHE_FILE" "$_TOTAL_TRIGGERS_CACHE_FILE"' EXIT
 
 # Shared hash for per-PR state files (lock + trigger timestamp).
 # Used across trigger and _our_trigger_status to coordinate without the GitHub API.
@@ -309,6 +320,12 @@ check)
     if _has_greptile_review; then
         # Already reviewed — check if re-review is needed (new commits since review)
         if _needs_re_review; then
+            # Hard lifetime ceiling: if hit, skip just like "no new commits" (exit 2)
+            _total_triggers=$(_total_trigger_count)
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+                echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Skipping." >&2
+                exit 2  # Ceiling hit — skip (same as "already reviewed, nothing to do")
+            fi
             reviewed_at=$( _greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
             # Eligible for re-review — but check trigger isn't in-flight
             trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
@@ -384,12 +401,18 @@ trigger)
 status)
     if _has_greptile_review; then
         if _needs_re_review; then
-            reviewed_at=$(_greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
-            trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
-            if [ "$trigger_status" = "in-progress" ]; then
-                echo "in-progress"
+            # Hard lifetime ceiling: report "backoff" so callers/dashboards see the true state
+            _total_triggers=$(_total_trigger_count)
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+                echo "backoff"
             else
-                echo "needs-re-review"
+                reviewed_at=$(_greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
+                trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
+                if [ "$trigger_status" = "in-progress" ]; then
+                    echo "in-progress"
+                else
+                    echo "needs-re-review"
+                fi
             fi
         else
             echo "already-reviewed"
