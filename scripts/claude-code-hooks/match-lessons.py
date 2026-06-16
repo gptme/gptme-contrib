@@ -259,6 +259,13 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
                 continue
             seen_paths.add(resolved)
 
+            # Skip archived lessons — but still register their name so that
+            # contrib copies are also suppressed (local archive wins over contrib).
+            if "archive" in f.parts:
+                if f.name != "SKILL.md":
+                    seen_names.add(f.name)
+                continue
+
             # Dedup by filename (first lesson dir wins — local overrides contrib).
             # Exception: SKILL.md files are always different skills, not duplicates.
             if f.name != "SKILL.md" and f.name in seen_names:
