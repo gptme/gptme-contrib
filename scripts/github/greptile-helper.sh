@@ -34,6 +34,13 @@ PR_NUMBER="${3:-}"
 TRIGGER_GRACE_SECONDS="${TRIGGER_GRACE_SECONDS:-900}"
 ACK_GRACE_SECONDS="${ACK_GRACE_SECONDS:-1200}"
 MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-3}"  # Max re-review triggers per review cycle before backing off
+# Hard ceiling on TOTAL trigger comments we've ever posted on a PR, independent of
+# review cycles. MAX_RE_TRIGGERS resets to 0 every time Greptile posts a fresh review,
+# so a PR stuck in a fix→re-review→trigger loop (e.g. a mergeable-but-human-gated
+# product PR that keeps getting polish commits) can be triggered unboundedly — one per
+# PM run, indefinitely. This cap counts our lifetime triggers and backs off + escalates
+# once exceeded. Incident: 2026-06-16, cloud#401 hit 25 triggers, #2906 25, #408 19.
+MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-8}"
 GITHUB_AUTHOR="${GITHUB_AUTHOR:-$(gh api user --jq .login 2>/dev/null || echo "")}"
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
@@ -52,6 +59,16 @@ _json_field() {
     trap - EXIT
     local field="$1"
     python3 -c "import json, sys; data = json.load(sys.stdin); v = data.get('$field'); print(v if v is not None else '')" 2>/dev/null
+}
+
+_total_trigger_count() {
+    # Count ALL our `@greptileai review` trigger comments on this PR (lifetime),
+    # paginated so it stays accurate past the 30-comment default page. Used by the
+    # total-trigger ceiling, which (unlike MAX_RE_TRIGGERS) never resets per review.
+    # Fail-open to 0 on API error so a transient failure never blocks a legit trigger.
+    gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+        --jq "[.[] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | length" \
+        2>/dev/null | awk '{s+=$1} END {print s+0}' || echo 0
 }
 
 _timestamp_gt() {
@@ -324,6 +341,15 @@ trigger)
 
     if _has_greptile_review; then
         if _needs_re_review; then
+            # Hard total-trigger ceiling (does NOT reset per review cycle). A PR that keeps
+            # accruing commits → re-reviews can otherwise be triggered forever. Past this cap,
+            # the PR is pathological (stuck loop, or mergeable-but-human-gated) — stop
+            # triggering and escalate to a human instead of adding more spam.
+            _total_triggers=$(_total_trigger_count)
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+                echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER already has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Not re-triggering — this PR is stuck or human-gated; escalate to merge/close/intervene."
+                exit 0
+            fi
             reviewed_at=$( _greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
             trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
             if [ "$trigger_status" = "in-progress" ]; then
