@@ -81,6 +81,30 @@ _total_trigger_count() {
     printf '%s\n' "${count:-0}"
 }
 
+_no_new_commit_since_our_last_trigger() {
+    # Returns 0 (true) when the PR head commit is NOT newer than our most recent
+    # `@greptileai review` trigger — i.e. we already triggered for the current head
+    # and nothing has been pushed since. Re-triggering then is exactly the "re-reviewing
+    # without pushing anything" spam Erik flagged on gptme#2908: the SHA-based
+    # _needs_re_review stays true forever when Greptile acks a trigger but never advances
+    # its review commit_id to head, so without this guard each grace window re-fires.
+    # Gating on OUR last trigger (not the last review) makes a re-review with no new
+    # commit structurally impossible — the lifetime ceiling is only a backstop above this.
+    # Fail-OPEN to 1 (allow) when there's no prior trigger or head can't be read, so a
+    # transient API failure never permanently suppresses a legitimate re-review.
+    local head_date last_trigger_date
+    head_date=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" 2>/dev/null \
+        | jq -rs '[.[][] | .commit.committer.date] | sort | last // ""' 2>/dev/null) || head_date=""
+    last_trigger_date=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" 2>/dev/null \
+        | jq -rs "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) | .created_at] | sort | last // \"\"" 2>/dev/null) || last_trigger_date=""
+    [ -z "$last_trigger_date" ] && return 1   # no prior trigger → allow
+    [ -z "$head_date" ] && return 1           # can't read head → allow (fail-open)
+    if _timestamp_gt "$head_date" "$last_trigger_date" 2>/dev/null; then
+        return 1   # a commit landed AFTER our last trigger → re-review is legitimate
+    fi
+    return 0       # nothing pushed since our last trigger → suppress
+}
+
 _timestamp_gt() {
     python3 - "$1" "$2" <<'PY'
 from datetime import datetime
@@ -320,6 +344,10 @@ check)
     if _has_greptile_review; then
         # Already reviewed — check if re-review is needed (new commits since review)
         if _needs_re_review; then
+            # Root guard: no new commit since our last trigger → not safe to trigger.
+            if _no_new_commit_since_our_last_trigger; then
+                exit 2  # Nothing pushed since our last trigger — treat as up-to-date.
+            fi
             # Hard lifetime ceiling: if hit, skip just like "no new commits" (exit 2)
             _total_triggers=$(_total_trigger_count)
             if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
@@ -358,6 +386,15 @@ trigger)
 
     if _has_greptile_review; then
         if _needs_re_review; then
+            # ROOT GUARD: never re-review without a new commit since OUR last trigger.
+            # _needs_re_review (SHA-based) stays true when Greptile acks but doesn't advance
+            # its review commit_id to head, so this catches the "re-reviewing without pushing"
+            # spam (gptme#2908) the SHA check structurally cannot. The ceiling below is only a
+            # backstop for the case where commits DO keep landing.
+            if _no_new_commit_since_our_last_trigger; then
+                echo "  [greptile] SKIP: $REPO#$PR_NUMBER has no new commits since our last @greptileai review trigger. Not re-reviewing (nothing was pushed)."
+                exit 0
+            fi
             # Hard total-trigger ceiling (does NOT reset per review cycle). A PR that keeps
             # accruing commits → re-reviews can otherwise be triggered forever. Past this cap,
             # the PR is pathological (stuck loop, or mergeable-but-human-gated) — stop
@@ -401,9 +438,11 @@ trigger)
 status)
     if _has_greptile_review; then
         if _needs_re_review; then
+            # Root guard: no new commit since our last trigger → already up-to-date.
+            if _no_new_commit_since_our_last_trigger; then
+                echo "already-reviewed"
             # Hard lifetime ceiling: report "backoff" so callers/dashboards see the true state
-            _total_triggers=$(_total_trigger_count)
-            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+            elif [ "$(_total_trigger_count)" -ge "$MAX_TOTAL_TRIGGERS" ]; then
                 echo "backoff"
             else
                 reviewed_at=$(_greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
