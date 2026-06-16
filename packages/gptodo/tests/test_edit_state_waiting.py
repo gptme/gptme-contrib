@@ -46,7 +46,7 @@ waiting_for: some-dependency
 
 
 def test_edit_state_waiting_auto_sets_waiting_since(tmp_path: Path, monkeypatch) -> None:
-    """Transitioning to waiting auto-injects waiting_since as a UTC ISO datetime."""
+    """Transitioning to waiting auto-injects waiting_since as a UTC ISO datetime when waiting_for is set."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     (tasks_dir / "my-task.md").write_text(ACTIVE_TASK)
@@ -55,7 +55,7 @@ def test_edit_state_waiting_auto_sets_waiting_since(tmp_path: Path, monkeypatch)
     before = datetime.now(timezone.utc).replace(microsecond=0)
     result = CliRunner().invoke(
         cli,
-        ["edit", "my-task", "--set", "state", "waiting"],
+        ["edit", "my-task", "--set", "state", "waiting", "--set", "waiting_for", "some-blocker"],
     )
     after = datetime.now(timezone.utc)
 
@@ -72,6 +72,33 @@ def test_edit_state_waiting_auto_sets_waiting_since(tmp_path: Path, monkeypatch)
     assert (
         before <= injected <= after
     ), f"waiting_since {injected!r} not between {before!r} and {after!r}"
+
+
+def test_edit_state_waiting_without_waiting_for_does_not_inject_waiting_since(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Transitioning to waiting WITHOUT waiting_for must NOT inject waiting_since.
+
+    Injecting waiting_since when waiting_for is absent would cause the pre-commit
+    hook to reject the commit with 'waiting_since requires waiting_for'.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(ACTIVE_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["edit", "my-task", "--set", "state", "waiting"],
+    )
+
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    assert (
+        "waiting_since" not in tasks[0].metadata
+    ), "waiting_since must not be injected when waiting_for is absent"
 
 
 def test_edit_unrelated_field_on_waiting_task_does_not_inject_waiting_since(

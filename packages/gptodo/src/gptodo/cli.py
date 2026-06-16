@@ -1804,13 +1804,21 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                         value = normalize_state(value, warn=False)
 
                     post.metadata[field] = value
-        # Auto-set waiting_since only when THIS edit explicitly sets state to waiting.
-        # Checking `changes` (not just current state) prevents stamping today's date
-        # when editing an unrelated field on a pre-existing waiting task.
+        # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
+        # AND waiting_for is either already present or being set in the same edit.
+        # Guarding on waiting_for prevents an injected waiting_since from triggering
+        # the pre-commit hook error "waiting_since requires waiting_for".
         transitioning_to_waiting = any(
             op == "set" and field == "state" and value == "waiting" for op, field, value in changes
         )
-        if transitioning_to_waiting and not post.metadata.get("waiting_since"):
+        waiting_for_present = post.metadata.get("waiting_for") or any(
+            op == "set" and field == "waiting_for" for op, field, value in changes
+        )
+        if (
+            transitioning_to_waiting
+            and waiting_for_present
+            and not post.metadata.get("waiting_since")
+        ):
             from datetime import datetime as _dt, timezone as _tz
 
             post.metadata["waiting_since"] = _dt.now(_tz.utc).isoformat(timespec="seconds")
