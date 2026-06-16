@@ -18,18 +18,16 @@ Usage:
     bandit.record_outcome("ci-fix", model, "productive")
 
 State persists to state/pm-dispatch/bandit-state.json with atomic writes
-and .bak recovery (mirrors LessonBandit persistence).
-
-Note: No cross-process file locking. When multiple dispatch workers run
-concurrently, simultaneous record_outcome() calls can silently overwrite
-each other's posterior updates. Add file-level locking (e.g. fcntl or a
-lock file) before wiring into active dispatch.
+and .bak recovery (mirrors LessonBandit persistence). record_outcome() holds
+an exclusive fcntl lock during load+update+save to prevent lost updates when
+multiple dispatch workers run concurrently.
 
 Reference: https://github.com/gptme/gptme-contrib/pull/1075
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import random
@@ -132,16 +130,25 @@ class PmModelBandit:
         model: str,
         outcome: str | float,
     ) -> None:
-        """Record a dispatch outcome and update the posterior."""
+        """Record a dispatch outcome and update the posterior.
+
+        Holds an exclusive fcntl lock during load+update+save so concurrent
+        dispatch workers don't overwrite each other's posterior updates.
+        """
         if isinstance(outcome, str):
             reward = 1.0 if outcome == "productive" else 0.0
         else:
             reward = max(0.0, min(1.0, float(outcome)))
-        aid = _arm_id(work_type, model)
-        if aid not in self.arms:
-            self.arms[aid] = BanditArm()
-        self.arms[aid].update(reward)
-        self._save()
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_file.with_suffix(".json.lock")
+        with open(lock_path, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            self._load()  # re-read under lock to pick up concurrent updates
+            aid = _arm_id(work_type, model)
+            if aid not in self.arms:
+                self.arms[aid] = BanditArm()
+            self.arms[aid].update(reward)
+            self._save()
 
     def known_work_types(self) -> set[str]:
         types: set[str] = set()
