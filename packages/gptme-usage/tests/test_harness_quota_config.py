@@ -370,7 +370,7 @@ def test_is_post_agent_sdk_credit_change_paused() -> None:
     """While the credit change is paused, the function must always return False."""
     assert CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED, (
         "Update this test when the pause is lifted: set PAUSED=False and "
-        "restore date-based assertions."
+        "restore date-based assertions (see skeleton below)."
     )
     before = datetime(2026, 6, 14, 23, 59, 59, tzinfo=timezone.utc)
     at_cutover = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
@@ -379,3 +379,19 @@ def test_is_post_agent_sdk_credit_change_paused() -> None:
         assert not is_post_agent_sdk_credit_change(
             ts
         ), f"Expected False while paused, got True for ts={ts!r}"
+
+
+# Skeleton tests to restore when CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED is set back to False.
+# Uncomment and adjust CREDIT_CHANGE_DATE if the cutover date changes.
+#
+# def test_is_post_agent_sdk_credit_change_before_cutover() -> None:
+#     before = datetime(2026, 6, 14, 23, 59, 59, tzinfo=timezone.utc)
+#     assert not is_post_agent_sdk_credit_change(before)
+#
+# def test_is_post_agent_sdk_credit_change_at_exact_cutover() -> None:
+#     at_cutover = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
+#     assert is_post_agent_sdk_credit_change(at_cutover)
+#
+# def test_is_post_agent_sdk_credit_change_after_cutover() -> None:
+#     after = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+#     assert is_post_agent_sdk_credit_change(after)

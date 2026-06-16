@@ -291,8 +291,9 @@ def quota_pool_label(
     the module-level ``GPTME_QUOTA_SOURCE`` (now empty; config must be provided
     for per-agent quota pool labels).
 
-    Note: After CLAUDE_AGENT_SDK_CREDIT_CHANGE_DATE (June 15, 2026), claude-code
-    sessions draw from a $200/month Agent SDK credit pool instead of the
+    Note: Once the Agent SDK credit change takes effect (originally June 15, 2026,
+    currently paused — see CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED), claude-code
+    sessions will draw from a $200/month Agent SDK credit pool instead of the
     subscription usage limits. The label remains "claude-max" for continuity
     but the underlying budget model changes. See is_post_agent_sdk_credit_change().
     """
