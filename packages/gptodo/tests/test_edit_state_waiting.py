@@ -1,14 +1,14 @@
 """Tests for auto-injection of waiting_since when editing state to waiting.
 
 When `gptodo edit --set state waiting` is called, `waiting_since` should be
-automatically populated with today's date if it is not already present.
-This prevents the pre-commit `validate-task-frontmatter` hook from rejecting
+automatically populated with the current UTC datetime if it is not already set.
+This prevents the `validate-task-frontmatter` pre-commit hook from rejecting
 commits that transition tasks to waiting state.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -35,18 +35,29 @@ waiting_since: 2026-06-01
 # Already Waiting Task
 """
 
+WAITING_WITHOUT_SINCE = """\
+---
+state: waiting
+created: 2026-06-01T00:00:00+00:00
+waiting_for: some-dependency
+---
+# Pre-existing Waiting Task Without waiting_since
+"""
+
 
 def test_edit_state_waiting_auto_sets_waiting_since(tmp_path: Path, monkeypatch) -> None:
-    """Transitioning to waiting auto-injects waiting_since with today's date."""
+    """Transitioning to waiting auto-injects waiting_since as a UTC ISO datetime."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     (tasks_dir / "my-task.md").write_text(ACTIVE_TASK)
 
     monkeypatch.chdir(tmp_path)
+    before = datetime.now(timezone.utc).replace(microsecond=0)
     result = CliRunner().invoke(
         cli,
         ["edit", "my-task", "--set", "state", "waiting"],
     )
+    after = datetime.now(timezone.utc)
 
     assert result.exit_code == 0, f"edit failed: {result.output}"
 
@@ -55,7 +66,35 @@ def test_edit_state_waiting_auto_sets_waiting_since(tmp_path: Path, monkeypatch)
     task = tasks[0]
     assert task.metadata["state"] == "waiting"
     assert "waiting_since" in task.metadata, "waiting_since should be auto-set"
-    assert task.metadata["waiting_since"] == date.today().isoformat()
+    injected = datetime.fromisoformat(str(task.metadata["waiting_since"]))
+    if injected.tzinfo is None:
+        injected = injected.replace(tzinfo=timezone.utc)
+    assert (
+        before <= injected <= after
+    ), f"waiting_since {injected!r} not between {before!r} and {after!r}"
+
+
+def test_edit_unrelated_field_on_waiting_task_does_not_inject_waiting_since(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Editing an unrelated field on a pre-existing waiting task must NOT inject waiting_since."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(WAITING_WITHOUT_SINCE)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["edit", "my-task", "--set", "priority", "high"],
+    )
+
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    assert (
+        "waiting_since" not in tasks[0].metadata
+    ), "waiting_since must not be injected when only editing an unrelated field"
 
 
 def test_edit_state_waiting_does_not_override_existing_waiting_since(

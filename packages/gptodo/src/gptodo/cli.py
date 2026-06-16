@@ -1628,14 +1628,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 else:
                     value = parsed.isoformat()
             elif field == "waiting_since":
-                # waiting_since is a date-only field (YYYY-MM-DD), not a datetime
+                # Accepts YYYY-MM-DD or full ISO datetime (e.g. YYYY-MM-DDTHH:MM:SS+00:00)
                 try:
-                    from datetime import date as _date
-
-                    parsed_date = _date.fromisoformat(value[:10])  # accept YYYY-MM-DD prefix
-                    value = parsed_date.isoformat()
+                    datetime.fromisoformat(value)
                 except ValueError:
-                    console.print(f"[red]Invalid {field} format. Use YYYY-MM-DD[/]")
+                    console.print(f"[red]Invalid {field} format. Use YYYY-MM-DD or ISO datetime[/]")
                     return
             else:
                 try:
@@ -1807,11 +1804,16 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                         value = normalize_state(value, warn=False)
 
                     post.metadata[field] = value
-        # Auto-set waiting_since when transitioning to waiting state
-        if post.metadata.get("state") == "waiting" and not post.metadata.get("waiting_since"):
-            from datetime import date as _date
+        # Auto-set waiting_since only when THIS edit explicitly sets state to waiting.
+        # Checking `changes` (not just current state) prevents stamping today's date
+        # when editing an unrelated field on a pre-existing waiting task.
+        transitioning_to_waiting = any(
+            op == "set" and field == "state" and value == "waiting" for op, field, value in changes
+        )
+        if transitioning_to_waiting and not post.metadata.get("waiting_since"):
+            from datetime import datetime as _dt, timezone as _tz
 
-            post.metadata["waiting_since"] = _date.today().isoformat()
+            post.metadata["waiting_since"] = _dt.now(_tz.utc).isoformat(timespec="seconds")
 
         # Save changes
         with open(task.path, "w") as f:
