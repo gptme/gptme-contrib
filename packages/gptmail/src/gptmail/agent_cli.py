@@ -648,9 +648,7 @@ def status(mailbox: str, all_mailboxes: bool) -> None:
     )
     click.echo(f"Agent:    {_self_name()}")
     click.echo(f"Registry: {', '.join(agents) or '(none)'}")
-    click.echo(
-        f"Mailbox:  {mailboxes[0] if len(mailboxes) == 1 else ', '.join(mailboxes)}"
-    )
+    click.echo(f"Mailbox:  {mailboxes[0] if len(mailboxes) == 1 else ', '.join(mailboxes)}")
     click.echo(f"Inbox:    {inbox_count}")
     click.echo(f"Outbox:   {outbox_count}")
     click.echo(f"Pending:  {len(pend)}")
