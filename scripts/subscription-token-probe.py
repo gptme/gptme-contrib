@@ -117,7 +117,14 @@ def _offline_probe_error(slot: str) -> dict[str, Any] | None:
 
 
 def _probe_slot(slot: str, token: str) -> dict[str, Any]:
-    """Make live API call to verify a slot's token is valid server-side.
+    """Make a direct HTTP probe with an explicit token string.
+
+    This is the unit-testable inner implementation — callers supply the token
+    directly, making it easy to mock HTTP responses in tests.  The production
+    path goes through ``_probe_slot_with_refresh``, which reads credentials from
+    disk and handles stale-token refresh before delegating the live probe to
+    ``probe_credential``.  ``_probe_slot`` is kept separate so test suites can
+    exercise 200/401/403/429/network paths without needing real credential files.
 
     Returns a result dict with:
         slot, status (valid/dead/error), http_code, checked_at, error
@@ -272,13 +279,18 @@ def probe_all(
 
     merged = {r["slot"]: r for r in results}
     for slot_name, record in existing.items():
-        if slot_name not in merged:
+        # Skip the active slot — don't carry forward a stale "dead" record from a
+        # prior cycle where that slot was inactive; it is live now.
+        if slot_name not in merged and slot_name != active:
             merged[slot_name] = record
 
     merged_list = sorted(merged.values(), key=lambda r: r.get("slot", ""))
 
-    # Write TOKEN-DEAD markers for vitals integration
-    _write_dead_markers(merged_list, dead_slot_dir)
+    # Write TOKEN-DEAD markers for vitals integration.
+    # Guard on output so callers that pass output=None get no side effects
+    # (consistent with the documented "results returned but not written" contract).
+    if output is not None:
+        _write_dead_markers(merged_list, dead_slot_dir)
 
     # Write JSON state file
     if output is not None:
@@ -321,6 +333,7 @@ def format_context(results: list[dict[str, Any]]) -> str:
         if status == "valid":
             parts.append(f"{slot}=ok")
         elif status == "expired_offline":
+            # Legacy label from pre-stale-fix; kept for backwards-compatible display of old state files
             parts.append(f"{slot}=expired({at})")
         elif status == "dead":
             parts.append(f"{slot}=DEAD({at})")
@@ -332,7 +345,10 @@ def format_context(results: list[dict[str, Any]]) -> str:
 def _resolve_usage_script(arg: Path | None) -> Path | None:
     """Resolve the usage script path from arg, env var, or common locations."""
     if arg is not None:
-        return arg if arg.exists() else None
+        if not arg.exists():
+            print(f"warning: --usage-script path not found: {arg}", file=sys.stderr)
+            return None
+        return arg
 
     env_val = os.environ.get("GPTME_CLAUDE_USAGE_SCRIPT", "")
     if env_val:
@@ -426,6 +442,7 @@ def main() -> int:
     dead = []
     for r in results:
         status = r.get("status", "?")
+        # expired_offline: legacy label kept for backwards-compatible display of old state files
         icon = {"valid": "✓", "dead": "✗", "expired_offline": "~", "error": "⚠"}.get(
             status, "?"
         )
