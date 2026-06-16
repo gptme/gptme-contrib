@@ -259,6 +259,66 @@ def match_keyword(keyword: str, text_lower: str) -> bool:
     return bool(pattern.search(text_lower))
 
 
+def _extract_scalar_frontmatter_field(fm_str: str, field: str) -> str | None:
+    """Extract a simple top-level YAML scalar or block scalar without PyYAML."""
+    lines = fm_str.splitlines()
+    field_pattern = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
+
+    for index, line in enumerate(lines):
+        match = field_pattern.match(line)
+        if not match:
+            continue
+
+        raw_value = match.group(1).strip()
+        if raw_value and raw_value[0] in "|>":
+            block_lines: list[str] = []
+            for next_line in lines[index + 1 :]:
+                if next_line and not next_line.startswith((" ", "\t")):
+                    break
+                block_lines.append(next_line)
+
+            if not block_lines:
+                return ""
+
+            indents = [
+                len(block_line) - len(block_line.lstrip(" "))
+                for block_line in block_lines
+                if block_line.strip()
+            ]
+            trim = min(indents) if indents else 0
+            normalized = [
+                block_line[trim:] if trim else block_line for block_line in block_lines
+            ]
+            text = "\n".join(normalized).strip()
+            if raw_value[0] == ">":
+                return " ".join(
+                    part.strip() for part in text.splitlines() if part.strip()
+                )
+            return text
+
+        value = raw_value
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value.strip()
+
+    return None
+
+
+def _dedupe_strings(values: list[object]) -> list[str]:
+    """Strip and deduplicate strings while preserving first-seen order."""
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        cleaned = value.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+    return deduped
+
+
 def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     """Extract YAML frontmatter and body from markdown."""
     if not content.startswith("---"):
@@ -300,17 +360,10 @@ def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     if m:
         fm["status"] = m.group(1)
 
-    name_m = re.search(r"^name:\s*(.+)$", fm_str, re.MULTILINE)
-    if name_m:
-        fm["name"] = name_m.group(1).strip()
-
-    description_m = re.search(r'^description:\s*"?(.*?)"?$', fm_str, re.MULTILINE)
-    if description_m:
-        fm["description"] = description_m.group(1).strip()
-
-    when_to_use_m = re.search(r'^when_to_use:\s*"?(.*?)"?$', fm_str, re.MULTILINE)
-    if when_to_use_m:
-        fm["when_to_use"] = when_to_use_m.group(1).strip()
+    for field in ("name", "description", "when_to_use"):
+        value = _extract_scalar_frontmatter_field(fm_str, field)
+        if value is not None:
+            fm[field] = value
 
     return fm, body
 
@@ -460,26 +513,14 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
 
             if isinstance(raw_keywords, str):
                 raw_keywords = [raw_keywords]
-            # Deduplicate: same keyword appearing in both match.keywords and
-            # the top-level keywords field should not double-count in scoring.
-            keywords = list(
-                dict.fromkeys(
-                    k
-                    for k in [*raw_keywords, *_string_list(fm.get("keywords"))]
-                    if isinstance(k, str) and k.strip()
-                )
+            keywords = _dedupe_strings(
+                [*raw_keywords, *_string_list(fm.get("keywords"))]
             )
 
             if isinstance(raw_patterns, str):
                 raw_patterns = [raw_patterns]
-            # Deduplicate: same pattern in both match.patterns and top-level
-            # patterns field should not double-count in scoring.
-            patterns = list(
-                dict.fromkeys(
-                    p
-                    for p in [*raw_patterns, *_string_list(fm.get("patterns"))]
-                    if isinstance(p, str) and p.strip()
-                )
+            patterns = _dedupe_strings(
+                [*raw_patterns, *_string_list(fm.get("patterns"))]
             )
 
             skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
@@ -529,7 +570,7 @@ def detect_harness() -> str:
         return "claude-code"
     if os.environ.get("CODEX") or os.environ.get("CODEX_INSTALLED"):
         return "codex"
-    return "gptme"
+    return "claude-code"
 
 
 def filter_by_harness(lessons: list[dict], harness: str) -> list[dict]:
