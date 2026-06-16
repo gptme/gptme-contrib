@@ -1,5 +1,6 @@
 """Tests for the Claude Code match-lessons hook."""
 
+import builtins
 import importlib.util
 from pathlib import Path
 
@@ -236,6 +237,64 @@ def test_extract_frontmatter_archived_excluded(hook, lesson_dir):
     lessons = hook.scan_lessons([lesson_dir])
     titles = [lesson["title"] for lesson in lessons]
     assert "Archived Lesson" not in titles
+
+
+def test_extract_frontmatter_regex_fallback_keeps_multiline_scalars(hook, monkeypatch):
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    content = (
+        "---\n"
+        "description: |\n"
+        "  First line.\n"
+        "  Second line.\n"
+        "when_to_use: >\n"
+        "  Use this skill\n"
+        "  when routing work.\n"
+        "---\n\n"
+        "# Title\n"
+    )
+
+    fm, _ = hook.extract_frontmatter(content)
+
+    assert fm["description"] == "First line.\nSecond line."
+    assert fm["when_to_use"] == "Use this skill when routing work."
+
+
+def test_scan_lessons_dedupes_top_level_keywords_and_patterns(hook, tmp_path):
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "dedupe.md").write_text(
+        "---\n"
+        "match:\n"
+        '  keywords:\n    - "duplicate keyword"\n'
+        '  patterns:\n    - "duplicate.*pattern"\n'
+        'keywords: ["duplicate keyword", "extra keyword"]\n'
+        'patterns: ["duplicate.*pattern"]\n'
+        "status: active\n"
+        "---\n"
+        "# Dedupe\n"
+    )
+
+    lessons = hook.scan_lessons([lessons_dir])
+    assert lessons[0]["keywords"] == ["duplicate keyword", "extra keyword"]
+    assert lessons[0]["patterns"] == ["duplicate.*pattern"]
+
+    matches = hook.score_lessons(lessons, "duplicate keyword and duplicateXpattern")
+    assert matches[0]["matched_by"].count("duplicate keyword") == 1
+    assert matches[0]["matched_by"].count("pattern:duplicate.*pattern") == 1
+
+
+def test_detect_harness_defaults_to_claude_code(hook, monkeypatch):
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CODEX", raising=False)
+    monkeypatch.delenv("CODEX_INSTALLED", raising=False)
+    assert hook.detect_harness() == "claude-code"
 
 
 # --- build_pretool_match_text ---
