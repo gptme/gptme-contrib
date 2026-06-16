@@ -95,3 +95,60 @@ def test_max_interval_triggers(tmp_path: Path) -> None:
     assert exit_code == session_gate.RUN
     state = json.loads((tmp_path / "state" / "session-gate.json").read_text())
     assert state["last_reasons"] == ["max-interval"]
+
+
+def test_absolute_inbox_path_does_not_crash(tmp_path: Path) -> None:
+    # Regression: path.relative_to(workspace) raises ValueError for absolute paths
+    # outside the workspace — must fall back to str(path) instead.
+    write_state(tmp_path, last_allowed_at=datetime.now(UTC).isoformat())
+    external_inbox = tmp_path / "external-inbox"
+    external_inbox.mkdir()
+    (external_inbox / "msg.md").write_text("---\nneeds_reply: true\n---\n")
+
+    exit_code = run_gate(
+        tmp_path,
+        "--inbox-paths",
+        str(external_inbox),  # absolute path outside workspace subdir
+        "--workspace",
+        str(
+            tmp_path / "workspace-subdir"
+        ),  # different workspace → path not relative to it
+    )
+
+    assert exit_code == session_gate.RUN
+    state = json.loads(
+        (tmp_path / "workspace-subdir" / "state" / "session-gate.json").read_text()
+    )
+    assert any("inbox:" in r for r in state["last_reasons"])
+
+
+def test_blocked_until_suppresses_first_run(tmp_path: Path) -> None:
+    # Regression: blocked_until was checked after first-run was appended to reasons,
+    # so `not reasons` was always False and blocked_until had no effect on first-run.
+    future = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+    write_state(
+        tmp_path, blocked_until=future
+    )  # no last_allowed_at → first-run normally fires
+
+    exit_code = run_gate(tmp_path)
+
+    assert exit_code == session_gate.SKIP
+    state = json.loads((tmp_path / "state" / "session-gate.json").read_text())
+    assert state["last_decision"] == "skip"
+    assert "blocked-until" in state["last_reasons"]
+
+
+def test_blocked_until_suppresses_max_interval(tmp_path: Path) -> None:
+    future = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+    write_state(
+        tmp_path,
+        blocked_until=future,
+        last_allowed_at=(datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+    )
+
+    exit_code = run_gate(tmp_path, "--max-interval-hours", "24")
+
+    assert exit_code == session_gate.SKIP
+    state = json.loads((tmp_path / "state" / "session-gate.json").read_text())
+    assert state["last_decision"] == "skip"
+    assert "blocked-until" in state["last_reasons"]

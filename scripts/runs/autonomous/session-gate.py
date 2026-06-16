@@ -84,7 +84,11 @@ def inbox_triggers(workspace: Path, inbox_paths: list[str]) -> list[str]:
             or "replied: false" in text
             or "unread: true" in text
         ):
-            reasons.append(f"inbox:{path.relative_to(workspace)}")
+            try:
+                label = str(path.relative_to(workspace))
+            except ValueError:
+                label = str(path)
+            reasons.append(f"inbox:{label}")
     return reasons
 
 
@@ -93,7 +97,7 @@ def github_triggers(command: str | None, timeout_seconds: int) -> list[str]:
         return []
     result = subprocess.run(
         command,
-        shell=True,
+        shell=True,  # intentional: command may include pipes/redirects; must come from trusted operator config
         check=False,
         capture_output=True,
         text=True,
@@ -162,16 +166,16 @@ def decide(args: argparse.Namespace) -> tuple[int, list[str], dict[str, Any]]:
         )
     )
 
-    if last_allowed_at is None:
-        reasons.append("first-run")
-    elif now - last_allowed_at >= timedelta(hours=args.max_interval_hours):
-        reasons.append("max-interval")
-
     if blocked_until and now < blocked_until and not reasons:
         state["last_checked_at"] = now.isoformat()
         state["last_decision"] = "skip"
         state["last_reasons"] = ["blocked-until"]
         return SKIP, ["blocked-until"], state
+
+    if last_allowed_at is None:
+        reasons.append("first-run")
+    elif now - last_allowed_at >= timedelta(hours=args.max_interval_hours):
+        reasons.append("max-interval")
 
     if reasons:
         state["last_allowed_at"] = now.isoformat()
