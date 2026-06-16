@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from gptme_usage.config import merge_with_module_defaults
 from gptme_usage.harness_models import (
+    GPTME_MODEL_ROUTES,
+    GPTME_QUOTA_SOURCE,
     HARNESS_PRICE_USD_PER_1M,
+    TOKENS_PER_SECOND,
     HarnessQuotaConfig,
     estimate_session_cost,
     estimate_tokens_from_duration,
+    gptme_openrouter_context,
+    is_post_agent_sdk_credit_change,
     load_quota_config,
+    local_models,
+    openrouter_models,
+    pricing_key_for_model,
+    resolve_cc_version,
 )
 
 TOML_FIXTURE = """\
@@ -99,12 +109,6 @@ def test_module_ships_no_agent_data() -> None:
 
     Per-agent data lives in harness-quota.toml; the package carries none.
     """
-    from gptme_usage.harness_models import (
-        GPTME_MODEL_ROUTES,
-        GPTME_QUOTA_SOURCE,
-        TOKENS_PER_SECOND,
-    )
-
     assert HARNESS_PRICE_USD_PER_1M == {}
     assert TOKENS_PER_SECOND == {}
     assert GPTME_QUOTA_SOURCE == {}
@@ -204,8 +208,6 @@ def test_config_model_routes_drive_pricing_key() -> None:
     The module ships no routes, so resolution is fully config-driven; a provider
     string absent from the config stays unnormalized.
     """
-    from gptme_usage.harness_models import pricing_key_for_model
-
     cfg = HarnessQuotaConfig(
         model_routes={"deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro@deepseek"}
     )
@@ -222,12 +224,6 @@ def test_config_model_routes_drive_pricing_key() -> None:
 
 def test_config_aware_model_source_helpers() -> None:
     """openrouter_models / local_models / gptme_openrouter_context read config."""
-    from gptme_usage.harness_models import (
-        gptme_openrouter_context,
-        local_models,
-        openrouter_models,
-    )
-
     cfg = HarnessQuotaConfig(
         quota_sources={
             "deepseek-v4-pro": "openrouter",
@@ -359,8 +355,6 @@ def test_merge_with_module_defaults_does_not_mutate_input() -> None:
     ],
 )
 def test_resolve_cc_version(input_model: str, expected: str) -> None:
-    from gptme_usage.harness_models import resolve_cc_version
-
     assert (
         resolve_cc_version(input_model) == expected
     ), f"resolve_cc_version({input_model!r}) -> {resolve_cc_version(input_model)!r}, want {expected!r}"
@@ -372,27 +366,15 @@ def test_resolve_cc_version(input_model: str, expected: str) -> None:
 
 
 def test_is_post_agent_sdk_credit_change_before_cutover() -> None:
-    from datetime import datetime, timezone
-
-    from gptme_usage.harness_models import is_post_agent_sdk_credit_change
-
     before = datetime(2026, 6, 14, 23, 59, 59, tzinfo=timezone.utc)
     assert not is_post_agent_sdk_credit_change(before)
 
 
 def test_is_post_agent_sdk_credit_change_at_exact_cutover() -> None:
-    from datetime import datetime, timezone
-
-    from gptme_usage.harness_models import is_post_agent_sdk_credit_change
-
     cutover = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
     assert is_post_agent_sdk_credit_change(cutover)
 
 
 def test_is_post_agent_sdk_credit_change_after_cutover() -> None:
-    from datetime import datetime, timezone
-
-    from gptme_usage.harness_models import is_post_agent_sdk_credit_change
-
     after = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
     assert is_post_agent_sdk_credit_change(after)
