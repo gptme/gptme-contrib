@@ -276,10 +276,16 @@ class AgentTransport:
         content = path.read_text()
         if content.startswith("---"):
             parts = _FM_DELIM.split(content, maxsplit=2)
-            if len(parts) >= 3 and "read: false" in parts[1]:
-                parts[1] = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
-                content = "---".join(parts)
-                path.write_text(content)
+            if len(parts) >= 3:
+                fm = parts[1]
+                if not re.search(r"^read: true$", fm, flags=re.MULTILINE):
+                    if re.search(r"^read:", fm, flags=re.MULTILINE):
+                        fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
+                    else:
+                        fm = fm.rstrip("\n") + "\nread: true\n"
+                    parts[1] = fm
+                    content = "---".join(parts)
+                    path.write_text(content)
         return content
 
     def _lookup_meta(self, message_id: str) -> dict | None:

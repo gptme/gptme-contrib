@@ -405,7 +405,13 @@ def _mark_replied(path: Path) -> None:
     parts = _FM_DELIM.split(content, maxsplit=2)
     if len(parts) < 3:
         return
-    fm = re.sub(r"^read: false$", "read: true", parts[1], flags=re.MULTILINE)
+    fm = parts[1]
+    # Mark read — handles "read: false" flip and missing-key insertion (pull-fetched msgs).
+    if not re.search(r"^read: true$", fm, flags=re.MULTILINE):
+        if re.search(r"^read:", fm, flags=re.MULTILINE):
+            fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
+        else:
+            fm = fm.rstrip("\n") + "\nread: true\n"
     if "replied:" not in fm:
         fm = fm.rstrip("\n") + "\nreplied: true\n"
     else:
