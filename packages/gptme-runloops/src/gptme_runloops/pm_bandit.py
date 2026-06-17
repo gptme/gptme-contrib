@@ -42,8 +42,7 @@ if sys.platform == "linux":
     import fcntl
 elif sys.platform == "win32":
     raise ImportError(
-        "pm_bandit requires POSIX file locking (fcntl). "
-        "Windows is not supported."
+        "pm_bandit requires POSIX file locking (fcntl). Windows is not supported."
     )
 else:
     import fcntl  # assume POSIX

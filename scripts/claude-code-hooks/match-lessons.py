@@ -462,21 +462,25 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
                 raw_keywords = [raw_keywords]
             # Deduplicate: same keyword appearing in both match.keywords and
             # the top-level keywords field should not double-count in scoring.
-            keywords = list(dict.fromkeys(
-                k
-                for k in [*raw_keywords, *_string_list(fm.get("keywords"))]
-                if isinstance(k, str) and k.strip()
-            ))
+            keywords = list(
+                dict.fromkeys(
+                    k
+                    for k in [*raw_keywords, *_string_list(fm.get("keywords"))]
+                    if isinstance(k, str) and k.strip()
+                )
+            )
 
             if isinstance(raw_patterns, str):
                 raw_patterns = [raw_patterns]
             # Deduplicate: same pattern in both match.patterns and top-level
             # patterns field should not double-count in scoring.
-            patterns = list(dict.fromkeys(
-                p
-                for p in [*raw_patterns, *_string_list(fm.get("patterns"))]
-                if isinstance(p, str) and p.strip()
-            ))
+            patterns = list(
+                dict.fromkeys(
+                    p
+                    for p in [*raw_patterns, *_string_list(fm.get("patterns"))]
+                    if isinstance(p, str) and p.strip()
+                )
+            )
 
             skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
             lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
