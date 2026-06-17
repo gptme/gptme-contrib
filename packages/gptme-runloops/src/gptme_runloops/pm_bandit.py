@@ -27,15 +27,26 @@ Reference: https://github.com/gptme/gptme-contrib/pull/1075
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import random
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# POSIX-only locking for concurrent dispatch workers.
+if sys.platform == "linux":
+    import fcntl
+elif sys.platform == "win32":
+    raise ImportError(
+        "pm_bandit requires POSIX file locking (fcntl). "
+        "Windows is not supported."
+    )
+else:
+    import fcntl  # assume POSIX
 
 PM_WORK_TYPES: set[str] = {
     "strategy-reply",
@@ -143,6 +154,7 @@ class PmModelBandit:
         lock_path = self.state_file.with_suffix(".json.lock")
         with open(lock_path, "w") as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
+            self.arms = {}
             self._load()  # re-read under lock to pick up concurrent updates
             aid = _arm_id(work_type, model)
             if aid not in self.arms:

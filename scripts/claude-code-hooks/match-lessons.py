@@ -336,9 +336,18 @@ def _descriptor_tokens(text: str) -> set[str]:
                 continue
             if token not in _DESCRIPTOR_STOPWORDS:
                 tokens.add(token)
-            if token.endswith("s") and len(token) > 3:
+            # Strip trailing "s" for simple plurals, but skip false positives
+            # where the singular is implausibly short or the ending strongly
+            # suggests an irregular/non-plural form (e.g. "status", "access").
+            if (
+                token.endswith("s")
+                and len(token) > 4
+                and not token.endswith("ss")  # "class", "access", "process"
+                and not token.endswith("us")  # "status", "focus"
+                and not token.endswith("is")  # "analysis", "basis"
+            ):
                 singular = token[:-1]
-                if singular and singular not in _DESCRIPTOR_STOPWORDS:
+                if len(singular) >= 3 and singular not in _DESCRIPTOR_STOPWORDS:
                     tokens.add(singular)
     return tokens
 
@@ -451,19 +460,23 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
 
             if isinstance(raw_keywords, str):
                 raw_keywords = [raw_keywords]
-            keywords = [
+            # Deduplicate: same keyword appearing in both match.keywords and
+            # the top-level keywords field should not double-count in scoring.
+            keywords = list(dict.fromkeys(
                 k
                 for k in [*raw_keywords, *_string_list(fm.get("keywords"))]
                 if isinstance(k, str) and k.strip()
-            ]
+            ))
 
             if isinstance(raw_patterns, str):
                 raw_patterns = [raw_patterns]
-            patterns = [
+            # Deduplicate: same pattern in both match.patterns and top-level
+            # patterns field should not double-count in scoring.
+            patterns = list(dict.fromkeys(
                 p
                 for p in [*raw_patterns, *_string_list(fm.get("patterns"))]
                 if isinstance(p, str) and p.strip()
-            ]
+            ))
 
             skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
             lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
