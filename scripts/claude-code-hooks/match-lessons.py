@@ -76,6 +76,10 @@ MIN_PREDICTION_LIFT = 2.0
 MIN_PREDICTION_TS = 0.30
 # State directory for cross-invocation dedup (in /tmp, not workspace)
 STATE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-lesson-match"
+# Directories inside lesson dirs that should never be scanned for lessons.
+# node_modules: npm packages (e.g. Playwright) ship *.agent.md skill files
+# that get injected as harmful lessons when they match on keywords.
+_SKIP_DIR_PARTS = frozenset({"node_modules", ".git", "__pycache__", ".venv"})
 _SHORT_DESCRIPTOR_TOKENS = {
     "ai",
     "api",
@@ -451,11 +455,6 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
     lessons = []
     seen_paths: set[str] = set()
     seen_names: set[str] = set()  # filename-based dedup: first dir wins
-
-    # Directories inside lesson dirs that should never be scanned for lessons.
-    # node_modules: npm packages (e.g. Playwright) ship *.agent.md skill files
-    # that get injected as harmful lessons when they match on keywords.
-    _SKIP_DIR_PARTS = frozenset({"node_modules", ".git", "__pycache__", ".venv"})
 
     for lesson_dir in lesson_dirs:
         if not lesson_dir.exists():
