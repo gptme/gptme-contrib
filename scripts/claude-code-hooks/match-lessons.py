@@ -76,6 +76,79 @@ MIN_PREDICTION_LIFT = 2.0
 MIN_PREDICTION_TS = 0.30
 # State directory for cross-invocation dedup (in /tmp, not workspace)
 STATE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-lesson-match"
+_SHORT_DESCRIPTOR_TOKENS = {
+    "ai",
+    "api",
+    "ci",
+    "cli",
+    "css",
+    "gui",
+    "html",
+    "json",
+    "llm",
+    "pr",
+    "ui",
+    "ux",
+    "vm",
+    "xml",
+    "yaml",
+}
+_DESCRIPTOR_STOPWORDS = {
+    "about",
+    "after",
+    "agent",
+    "agents",
+    "and",
+    "any",
+    "are",
+    "before",
+    "build",
+    "can",
+    "code",
+    "debug",
+    "does",
+    "for",
+    "from",
+    "get",
+    "how",
+    "into",
+    "just",
+    "make",
+    "need",
+    "only",
+    "other",
+    "our",
+    "out",
+    "over",
+    "process",
+    "project",
+    "run",
+    "set",
+    "should",
+    "task",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "there",
+    "these",
+    "this",
+    "those",
+    "through",
+    "tool",
+    "tools",
+    "use",
+    "used",
+    "using",
+    "when",
+    "where",
+    "which",
+    "with",
+    "work",
+    "your",
+}
+_DESCRIPTOR_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_/-]*")
 
 
 # --- Workspace discovery (all state paths derived from here) ---
@@ -231,7 +304,87 @@ def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     if name_m:
         fm["name"] = name_m.group(1).strip()
 
+    description_m = re.search(r'^description:\s*"?(.*?)"?$', fm_str, re.MULTILINE)
+    if description_m:
+        fm["description"] = description_m.group(1).strip()
+
+    when_to_use_m = re.search(r'^when_to_use:\s*"?(.*?)"?$', fm_str, re.MULTILINE)
+    if when_to_use_m:
+        fm["when_to_use"] = when_to_use_m.group(1).strip()
+
     return fm, body
+
+
+def _string_list(value: object) -> list[str]:
+    """Normalize YAML string-or-list fields into a clean list."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _descriptor_tokens(text: str) -> set[str]:
+    """Tokenize routing descriptors from skill name/description/tags."""
+    tokens: set[str] = set()
+    for raw in _DESCRIPTOR_TOKEN_RE.findall(text.lower()):
+        for part in re.split(r"[-_/]", raw):
+            token = part.strip()
+            if not token:
+                continue
+            if len(token) < 3 and token not in _SHORT_DESCRIPTOR_TOKENS:
+                continue
+            if token not in _DESCRIPTOR_STOPWORDS:
+                tokens.add(token)
+            # Strip trailing "s" for simple plurals, but skip false positives
+            # where the singular is implausibly short or the ending strongly
+            # suggests an irregular/non-plural form (e.g. "status", "access").
+            if (
+                token.endswith("s")
+                and len(token) > 4
+                and not token.endswith("ss")  # "class", "access", "process"
+                and not token.endswith("us")  # "status", "focus"
+                and not token.endswith("is")  # "analysis", "basis"
+            ):
+                singular = token[:-1]
+                if len(singular) >= 3 and singular not in _DESCRIPTOR_STOPWORDS:
+                    tokens.add(singular)
+    return tokens
+
+
+def _score_skill_descriptor(lesson: dict, prompt_lower: str) -> tuple[float, list[str]]:
+    """Score skill routing metadata against prompt text."""
+    if not lesson.get("is_skill"):
+        return 0.0, []
+
+    prompt_tokens = _descriptor_tokens(prompt_lower)
+    if not prompt_tokens:
+        return 0.0, []
+
+    skill_name = str(lesson.get("skill_name") or "")
+    routing_text = str(lesson.get("when_to_use") or lesson.get("description") or "")
+    tags = [str(tag).strip() for tag in lesson.get("tags") or [] if str(tag).strip()]
+
+    name_overlap = prompt_tokens & _descriptor_tokens(skill_name)
+    description_overlap = prompt_tokens & _descriptor_tokens(routing_text)
+    tag_overlap = prompt_tokens & _descriptor_tokens(" ".join(tags))
+    total_overlap = name_overlap | description_overlap | tag_overlap
+
+    if len(total_overlap) < 2:
+        return 0.0, []
+
+    score = 0.0
+    matched_by: list[str] = []
+    if name_overlap:
+        score += min(1.2, 0.6 * len(name_overlap))
+        matched_by.append(f"name:{','.join(sorted(name_overlap)[:3])}")
+    if description_overlap:
+        score += min(1.2, 0.35 * len(description_overlap))
+        matched_by.append(f"description:{','.join(sorted(description_overlap)[:4])}")
+    if tag_overlap:
+        score += min(0.9, 0.45 * len(tag_overlap))
+        matched_by.append(f"tags:{','.join(sorted(tag_overlap)[:3])}")
+    return score, matched_by
 
 
 def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
@@ -307,14 +460,40 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
 
             if isinstance(raw_keywords, str):
                 raw_keywords = [raw_keywords]
-            keywords = [k for k in raw_keywords if isinstance(k, str) and k.strip()]
+            # Deduplicate: same keyword appearing in both match.keywords and
+            # the top-level keywords field should not double-count in scoring.
+            keywords = list(
+                dict.fromkeys(
+                    k
+                    for k in [*raw_keywords, *_string_list(fm.get("keywords"))]
+                    if isinstance(k, str) and k.strip()
+                )
+            )
 
             if isinstance(raw_patterns, str):
                 raw_patterns = [raw_patterns]
-            patterns = [p for p in raw_patterns if isinstance(p, str) and p.strip()]
+            # Deduplicate: same pattern in both match.patterns and top-level
+            # patterns field should not double-count in scoring.
+            patterns = list(
+                dict.fromkeys(
+                    p
+                    for p in [*raw_patterns, *_string_list(fm.get("patterns"))]
+                    if isinstance(p, str) and p.strip()
+                )
+            )
 
             skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
             lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
+            description = (
+                fm.get("description") if isinstance(fm.get("description"), str) else ""
+            )
+            when_to_use = (
+                fm.get("when_to_use") if isinstance(fm.get("when_to_use"), str) else ""
+            )
+            metadata_value = fm.get("metadata")
+            metadata = metadata_value if isinstance(metadata_value, dict) else {}
+            tags = _string_list(metadata.get("tags"))
+            harness_restrict = _string_list(metadata.get("harness"))
 
             # Need at least some way to match
             if not keywords and not patterns and not skill_name:
@@ -332,11 +511,39 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
                     "keywords": keywords,
                     "patterns": patterns,
                     "skill_name": skill_name,
+                    "description": description,
+                    "when_to_use": when_to_use,
+                    "tags": tags,
+                    "harness_restrict": harness_restrict,
+                    "is_skill": f.name == "SKILL.md" or skill_name is not None,
                     "body": body,
                     "n_keywords": len(keywords),
                 }
             )
     return lessons
+
+
+def detect_harness() -> str:
+    """Detect the current runtime harness for lesson applicability filters."""
+    if os.environ.get("CLAUDECODE"):
+        return "claude-code"
+    if os.environ.get("CODEX") or os.environ.get("CODEX_INSTALLED"):
+        return "codex"
+    return "gptme"
+
+
+def filter_by_harness(lessons: list[dict], harness: str) -> list[dict]:
+    """Keep unrestricted lessons and lessons explicitly allowed for harness."""
+    filtered = []
+    for lesson in lessons:
+        restrict = lesson.get("harness_restrict") or []
+        if not restrict:
+            filtered.append(lesson)
+            continue
+        allowed = {str(value).strip() for value in restrict if str(value).strip()}
+        if harness in allowed:
+            filtered.append(lesson)
+    return filtered
 
 
 # --- Thompson sampling ---
@@ -567,6 +774,13 @@ def score_lessons(lessons: list[dict], prompt: str, max_results: int = 5) -> lis
                     score += 1.5
                     matched_by.append(f"skill:{lesson['skill_name']}")
                     break
+
+        descriptor_score, descriptor_matches = _score_skill_descriptor(
+            lesson, prompt_lower
+        )
+        if descriptor_score > 0:
+            score += descriptor_score
+            matched_by.extend(descriptor_matches)
 
         if score > 0:
             results.append({**lesson, "score": score, "matched_by": matched_by})
@@ -1013,6 +1227,7 @@ def main():
     workspace = get_workspace()
     lesson_dirs = load_lesson_dirs(workspace)
     lessons = scan_lessons(lesson_dirs)
+    lessons = filter_by_harness(lessons, detect_harness())
     holdout_lessons = parse_holdout_lessons_env()
 
     if not lessons:
