@@ -2,10 +2,8 @@
 match:
   keywords:
   - "python script permission denied"
-  - "bash: script.py: Permission denied"
   - "choose correct python execution method"
   - "shebang python execution"
-  - "ModuleNotFoundError when dependencies should be available"
 status: active
 description: "Choose the correct Python execution method based on script type and context: uv scripts with shebang use direct execution, poetry projects use `poetry run`, standalone scripts use appropriate tooling."
 ---
