@@ -211,6 +211,7 @@ class EvolutionTracker:
     def _save_history(self, history: LessonHistory) -> None:
         """Save lesson history to disk."""
         path = self._history_path(history.lesson_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(history.to_dict(), f, indent=2)
 
@@ -239,6 +240,7 @@ class EvolutionTracker:
 
         # Save
         path = self._refinements_path(lesson_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump([r.to_dict() for r in refinements], f, indent=2)
 
@@ -268,6 +270,7 @@ class EvolutionTracker:
         refinements[suggestion_index].status = new_status
 
         path = self._refinements_path(lesson_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump([r.to_dict() for r in refinements], f, indent=2)
 
