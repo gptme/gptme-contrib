@@ -570,7 +570,7 @@ def detect_harness() -> str:
         return "claude-code"
     if os.environ.get("CODEX") or os.environ.get("CODEX_INSTALLED"):
         return "codex"
-    return "claude-code"
+    return "gptme"
 
 
 def filter_by_harness(lessons: list[dict], harness: str) -> list[dict]:
