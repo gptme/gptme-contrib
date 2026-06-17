@@ -12,9 +12,11 @@ remain the primary dispatch path (see project-monitoring-upstream-overhaul).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
@@ -247,14 +249,42 @@ def append_full_ledger_entry(
 # --- Slot key derivation ---
 
 
-def derive_slot_key(repo: str, number: int | None, types: list[str]) -> str:
+def _slugify_check(name: str) -> str:
+    """Slugify a CI check/workflow name for use in a slot key.
+
+    Lowercases, collapses non-alphanumerics to single dashes, trims dashes.
+    Empty/whitespace-only names fall back to ``"unknown"``.
+    All-punctuation inputs (non-blank but produce an empty slug) use a short
+    hash so they never collide with a check literally named ``"unknown"``.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if slug:
+        return slug
+    if not name.strip():
+        return "unknown"
+    # Non-blank name but all-punctuation: use a hash to avoid collision with
+    # a check literally named "unknown".
+    return "x" + hashlib.sha1(name.encode()).hexdigest()[:6]
+
+
+def derive_slot_key(
+    repo: str, number: int | None, types: list[str], check: str | None = None
+) -> str:
     """Derive a slot key from a work item.
 
     Matches the bash ``derive_slot_key()`` logic:
-      - master_ci_failure types → ``{repo}#master-ci``
+      - master_ci_failure types → ``{repo}#master-ci:{check-slug}`` when a
+        check/workflow name is known, else ``{repo}#master-ci``
       - others → ``{repo}#{number}``
+
+    The per-check slug is what keeps two *concurrent* master-CI failures on the
+    same repo (e.g. ``test-e2e`` and ``Conformance Check``) from collapsing into
+    one slot — a long-running failure on check A must never mask detection or
+    dispatch of a new failure on check B.
     """
     if "master_ci_failure" in types:
+        if check and check.strip():
+            return f"{repo}#master-ci:{_slugify_check(check)}"
         return f"{repo}#master-ci"
     if number is not None:
         return f"{repo}#{number}"
@@ -422,7 +452,9 @@ class LaneDispatcher:
 
         for lane, lane_items in [("fast", fast_items), ("slow", slow_items)]:
             for item in lane_items:
-                slot_key = derive_slot_key(item.repo, item.number, item.types)
+                slot_key = derive_slot_key(
+                    item.repo, item.number, item.types, item.title
+                )
                 unit_name = _derive_unit_name(slot_key, lane)
                 legacy_name = _derive_legacy_unit_name(slot_key)
 
@@ -846,7 +878,7 @@ def dispatch_grouped_items(
 
     for lane, lane_items in [("fast", fast), ("slow", slow)]:
         for item in lane_items:
-            key = derive_slot_key(item.repo, item.number, item.types)
+            key = derive_slot_key(item.repo, item.number, item.types, item.title)
 
             if _is_busy(key):
                 result.skipped_active += 1

@@ -73,6 +73,48 @@ class TestDeriveSlotKey:
     def test_no_number(self):
         assert derive_slot_key("o/r", None, ["pr_update"]) == "o/r#unknown"
 
+    def test_master_ci_with_check_slug(self):
+        assert (
+            derive_slot_key("o/r", 99, ["master_ci_failure"], "test-e2e")
+            == "o/r#master-ci:test-e2e"
+        )
+
+    def test_master_ci_check_slugified(self):
+        # Names with spaces/caps/punctuation collapse to a stable slug.
+        assert (
+            derive_slot_key("o/r", 99, ["master_ci_failure"], "Conformance Check")
+            == "o/r#master-ci:conformance-check"
+        )
+
+    def test_master_ci_blank_check_falls_back(self):
+        # Whitespace-only / empty check name falls back to the bare key.
+        assert (
+            derive_slot_key("o/r", 99, ["master_ci_failure"], "  ") == "o/r#master-ci"
+        )
+
+    def test_master_ci_all_punctuation_check_no_unknown_collision(self):
+        # An all-punctuation name like "---" slugifies to "" but must NOT fall
+        # back to "unknown" — that would collide with a check literally named
+        # "unknown".  Expect a hash-based slug distinct from "unknown".
+        key = derive_slot_key("o/r", 99, ["master_ci_failure"], "---")
+        assert key.startswith("o/r#master-ci:")
+        suffix = key.removeprefix("o/r#master-ci:")
+        assert suffix != "unknown"
+        assert suffix.startswith("x")
+
+    def test_concurrent_master_ci_failures_distinct_slots(self):
+        # Two simultaneous master-CI failures on one repo must NOT collapse into
+        # one slot — a long-running failure on check A never masks check B.
+        key_a = derive_slot_key("o/r", 100, ["master_ci_failure"], "test-e2e")
+        key_b = derive_slot_key("o/r", 101, ["master_ci_failure"], "Conformance Check")
+        assert key_a != key_b
+        assert key_a == "o/r#master-ci:test-e2e"
+        assert key_b == "o/r#master-ci:conformance-check"
+
+    def test_non_master_ci_ignores_check(self):
+        # The check slug only applies to master_ci_failure items.
+        assert derive_slot_key("o/r", 99, ["pr_update"], "test-e2e") == "o/r#99"
+
 
 # --- Lane classification ---
 
@@ -985,10 +1027,27 @@ class TestLaneDispatcher:
         )
 
         items = [
-            make_item(repo="gptme/gptme", number=None, types=["master_ci_failure"]),
+            make_item(
+                repo="gptme/gptme",
+                number=None,
+                types=["master_ci_failure"],
+                title="test-e2e",
+            ),
+            make_item(
+                repo="gptme/gptme",
+                number=None,
+                types=["master_ci_failure"],
+                title="Conformance Check",
+            ),
         ]
         ld.dispatch(items)
-        assert callback_calls[0]["slot_key"] == "gptme/gptme#master-ci"
+        # Two concurrent master-CI failures on one repo get distinct, per-check
+        # slot keys — neither masks the other.
+        slot_keys = {c["slot_key"] for c in callback_calls}
+        assert slot_keys == {
+            "gptme/gptme#master-ci:test-e2e",
+            "gptme/gptme#master-ci:conformance-check",
+        }
 
 
 class TestPartitionJsonlIO:
