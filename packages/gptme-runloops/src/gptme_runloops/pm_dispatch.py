@@ -12,6 +12,7 @@ remain the primary dispatch path (see project-monitoring-upstream-overhaul).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -253,9 +254,17 @@ def _slugify_check(name: str) -> str:
 
     Lowercases, collapses non-alphanumerics to single dashes, trims dashes.
     Empty/whitespace-only names fall back to ``"unknown"``.
+    All-punctuation inputs (non-blank but produce an empty slug) use a short
+    hash so they never collide with a check literally named ``"unknown"``.
     """
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return slug or "unknown"
+    if slug:
+        return slug
+    if not name.strip():
+        return "unknown"
+    # Non-blank name but all-punctuation: use a hash to avoid collision with
+    # a check literally named "unknown".
+    return "x" + hashlib.sha1(name.encode()).hexdigest()[:6]
 
 
 def derive_slot_key(

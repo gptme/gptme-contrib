@@ -92,6 +92,16 @@ class TestDeriveSlotKey:
             derive_slot_key("o/r", 99, ["master_ci_failure"], "  ") == "o/r#master-ci"
         )
 
+    def test_master_ci_all_punctuation_check_no_unknown_collision(self):
+        # An all-punctuation name like "---" slugifies to "" but must NOT fall
+        # back to "unknown" — that would collide with a check literally named
+        # "unknown".  Expect a hash-based slug distinct from "unknown".
+        key = derive_slot_key("o/r", 99, ["master_ci_failure"], "---")
+        assert key.startswith("o/r#master-ci:")
+        suffix = key.removeprefix("o/r#master-ci:")
+        assert suffix != "unknown"
+        assert suffix.startswith("x")
+
     def test_concurrent_master_ci_failures_distinct_slots(self):
         # Two simultaneous master-CI failures on one repo must NOT collapse into
         # one slot — a long-running failure on check A never masks check B.
