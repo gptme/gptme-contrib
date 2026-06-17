@@ -100,6 +100,49 @@ def test_scan_lessons_skips_readme(hook, tmp_path):
     assert result[0]["title"] == "Real"
 
 
+def test_scan_lessons_skips_node_modules(hook, tmp_path):
+    """Files under node_modules must not be included, even with valid frontmatter."""
+    lessons_dir = tmp_path / "skills"
+    lessons_dir.mkdir()
+    # A legitimate skill
+    (lessons_dir / "real-skill.md").write_text(
+        "---\nname: real-skill\ndescription: A real skill\nstatus: active\n---\n# Real Skill\n\nContent.\n"
+    )
+    # An npm package agent file — should be excluded
+    node_agents = (
+        lessons_dir / "my-tool" / "node_modules" / "playwright" / "lib" / "agents"
+    )
+    node_agents.mkdir(parents=True)
+    (node_agents / "playwright-test-generator.agent.md").write_text(
+        "---\nname: playwright-test-generator\ndescription: Use this agent to generate Playwright tests\n---\n# Generator\n\nContent.\n"
+    )
+    result = hook.scan_lessons([lessons_dir])
+    paths = [r["path"] for r in result]
+    assert all(
+        "node_modules" not in p for p in paths
+    ), f"node_modules file leaked into scan: {paths}"
+    assert len(result) == 1
+    assert result[0]["title"] == "Real Skill"
+
+
+def test_scan_lessons_skips_git_and_cache(hook, tmp_path):
+    """Files under .git / __pycache__ / .venv must not be included."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "good.md").write_text(
+        '---\nmatch:\n  keywords:\n    - "good"\nstatus: active\n---\n# Good\n\nContent.\n'
+    )
+    for skip_dir in (".git", "__pycache__", ".venv"):
+        d = lessons_dir / skip_dir
+        d.mkdir()
+        (d / "hidden.md").write_text(
+            '---\nmatch:\n  keywords:\n    - "hidden"\nstatus: active\n---\n# Hidden\n\nContent.\n'
+        )
+    result = hook.scan_lessons([lessons_dir])
+    assert len(result) == 1
+    assert result[0]["title"] == "Good"
+
+
 def test_scan_lessons_dedup_by_filename(hook, tmp_path):
     """First-dir-wins deduplication by filename."""
     dir1 = tmp_path / "dir1"
@@ -295,11 +338,12 @@ def test_scan_lessons_dedupes_top_level_keywords_and_patterns(hook, tmp_path):
     assert matches[0]["matched_by"].count("pattern:duplicate.*pattern") == 1
 
 
-def test_detect_harness_defaults_to_claude_code(hook, monkeypatch):
+def test_detect_harness_defaults_to_gptme(hook, monkeypatch):
+    # No env vars set → fall back to gptme (the primary harness)
     monkeypatch.delenv("CLAUDECODE", raising=False)
     monkeypatch.delenv("CODEX", raising=False)
     monkeypatch.delenv("CODEX_INSTALLED", raising=False)
-    assert hook.detect_harness() == "claude-code"
+    assert hook.detect_harness() == "gptme"
 
 
 # --- build_pretool_match_text ---
