@@ -2,8 +2,6 @@
 match:
   keywords:
     - "sibling tool call errored"
-    - "parallel tool call failed"
-    - "tool call error in batch"
 status: active
 description: "When a tool in a parallel batch reports Sibling tool call errored, find the *real* failing call first — then retry only that one, not all calls in the batch."
 ---
