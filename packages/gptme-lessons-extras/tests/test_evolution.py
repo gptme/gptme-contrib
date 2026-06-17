@@ -286,3 +286,68 @@ def test_evolution_tracker_update_refinement_invalid_index(tmp_path):
 
     with pytest.raises(ValueError, match="Invalid suggestion index"):
         tracker.update_refinement_status("tools/x.md", 99, "accepted")
+
+
+# --- get_contributor_stats ---
+
+
+def test_get_contributor_stats_empty(tmp_path):
+    """Returns empty dict when no lessons exist."""
+    tracker = EvolutionTracker(history_dir=tmp_path / "history")
+    assert tracker.get_contributor_stats() == {}
+
+
+def test_get_contributor_stats_simple_id(tmp_path):
+    """Contributor stats work with flat (non-slashed) lesson IDs."""
+    tracker = EvolutionTracker(history_dir=tmp_path / "history")
+    tracker.initialize_lesson("test-lesson.md", "bob", "content")
+    tracker.track_change("test-lesson.md", "alice", "update", "v2")
+
+    stats = tracker.get_contributor_stats()
+    assert "bob" in stats
+    assert "alice" in stats
+    assert stats["bob"]["lessons_created"] == 1
+    assert stats["bob"]["versions_contributed"] == 1
+    assert stats["alice"]["lessons_created"] == 0
+    assert stats["alice"]["versions_contributed"] == 1
+
+
+def test_get_contributor_stats_slashed_id(tmp_path):
+    """Contributor stats correctly find lessons with slashed IDs (the glob bug)."""
+    tracker = EvolutionTracker(history_dir=tmp_path / "history")
+    tracker.initialize_lesson("tools/some-lesson.md", "bob", "content")
+    tracker.track_change("tools/some-lesson.md", "alice", "update", "v2")
+
+    stats = tracker.get_contributor_stats()
+    assert "bob" in stats, "bob should be found even with slashed lesson ID"
+    assert "alice" in stats, "alice should be found even with slashed lesson ID"
+    assert stats["bob"]["lessons_created"] == 1
+    assert stats["bob"]["versions_contributed"] == 1
+    assert stats["alice"]["versions_contributed"] == 1
+
+
+def test_get_contributor_stats_multiple_slashed_ids(tmp_path):
+    """Stats aggregate across multiple slashed-ID lessons."""
+    tracker = EvolutionTracker(history_dir=tmp_path / "history")
+    tracker.initialize_lesson("tools/x.md", "bob", "v1")
+    tracker.initialize_lesson("workflow/y.md", "bob", "v1")
+    tracker.initialize_lesson("tools/z.md", "alice", "v1")
+
+    stats = tracker.get_contributor_stats()
+    assert stats["bob"]["lessons_created"] == 2
+    assert stats["bob"]["versions_contributed"] == 2
+    assert stats["alice"]["lessons_created"] == 1
+    assert stats["alice"]["versions_contributed"] == 1
+
+
+def test_get_contributor_stats_excludes_refinements(tmp_path):
+    """Refinement JSON files are excluded from contributor stats."""
+    tracker = EvolutionTracker(history_dir=tmp_path / "history")
+    tracker.initialize_lesson("tools/x.md", "bob", "content")
+    tracker.suggest_refinement("tools/x.md", "alice", "clarity", "suggestion")
+
+    stats = tracker.get_contributor_stats()
+    assert "bob" in stats
+    assert stats["bob"]["lessons_created"] == 1
+    # Refinement files should not create phantom entries
+    assert len(stats) == 1

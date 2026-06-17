@@ -304,11 +304,14 @@ class EvolutionTracker:
 
         stats: dict[str, dict[str, Any]] = {}
 
-        for history_file in self.history_dir.glob("*.json"):
-            if history_file.parent.name == "refinements":
+        for history_file in self.history_dir.rglob("*.json"):
+            rel = history_file.relative_to(self.history_dir)
+            if rel.parts[0] == "refinements":
                 continue
 
-            history = self.load_history(history_file.stem)
+            # Reconstruct full lesson ID from relative path (e.g. "tools/some-lesson.md")
+            lesson_id = str(rel.with_suffix(""))
+            history = self.load_history(lesson_id)
             if not history:
                 continue
 
