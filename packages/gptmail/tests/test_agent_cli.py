@@ -337,6 +337,33 @@ def test_read_marks_read(workspace: Path) -> None:
     assert _frontmatter(workspace / "messages" / "inbox" / name)["read"] is True
 
 
+def test_read_marks_read_no_existing_key(workspace: Path) -> None:
+    """read on a pull-fetched msg with no read: key stamps read: true (insert-if-missing)."""
+    inbox = workspace / "messages" / "inbox"
+    name = "20260101-000000-erik-Q.md"
+    (inbox / name).write_text(
+        "---\nfrom: erik\nto: alice\ntimestamp: 2026-01-01T00:00:00Z\n"
+        "subject: Q\n---\n\nplease advise\n"
+    )
+    result = CliRunner().invoke(agent, ["read", name])
+    assert result.exit_code == 0
+    assert _frontmatter(workspace / "messages" / "inbox" / name)["read"] is True
+
+
+def test_reply_marks_read_no_existing_key(workspace: Path) -> None:
+    """reply on a pull-fetched msg with no read: key stamps read: true (insert-if-missing)."""
+    inbox = workspace / "messages" / "inbox"
+    name = "20260101-000000-bob-Q.md"
+    (inbox / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-01-01T00:00:00Z\n"
+        "subject: Q\n---\n\nplease advise\n"
+    )
+    CliRunner().invoke(agent, ["reply", name, "my answer"])
+    fm = _frontmatter(workspace / "messages" / "inbox" / name)
+    assert fm["read"] is True
+    assert fm["replied"] is True
+
+
 def test_pending_lists_unanswered_then_clears_on_reply(workspace: Path) -> None:
     name = _seed_inbox(workspace)
 
