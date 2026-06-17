@@ -395,6 +395,26 @@ def _pending_messages(
     return pending
 
 
+def _mark_read(path: Path) -> None:
+    """Stamp an inbox message ``read: true``. Idempotent. Handles missing key (pull-fetched msgs)."""
+    if not path.exists():
+        return
+    content = path.read_text()
+    if not content.startswith("---"):
+        return
+    parts = _FM_DELIM.split(content, maxsplit=2)
+    if len(parts) < 3:
+        return
+    fm = parts[1]
+    if re.search(r"^read: true$", fm, flags=re.MULTILINE):
+        return
+    if re.search(r"^read:", fm, flags=re.MULTILINE):
+        fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
+    else:
+        fm = fm.rstrip("\n") + "\nread: true\n"
+    path.write_text("---".join([parts[0], fm, parts[2]]))
+
+
 def _mark_replied(path: Path) -> None:
     """Stamp an inbox message ``replied: true`` (and ``read: true``). Idempotent."""
     if not path.exists():
@@ -691,13 +711,14 @@ def read(message_id: str, thread: bool, mailbox: str | None) -> None:
     if resolved is None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)
-    mailbox_name, _path = resolved
+    mailbox_name, msg_path = resolved
     transport = _transport(mailbox=mailbox_name)
     try:
         click.echo(transport.read(message_id, include_thread=thread))
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+    _mark_read(msg_path)
 
 
 @agent.command()
