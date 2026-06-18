@@ -10,7 +10,9 @@ tags:
 - orchestration
 match:
   keywords:
-  - cost optimization
+    - "skip monitoring session"
+    - "rule-based session gate"
+  session_categories: [autonomous, infrastructure]
 ---
 
 # Rule-Driven Session Gating for Monitoring Agents

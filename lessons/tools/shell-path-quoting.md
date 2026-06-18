@@ -2,8 +2,6 @@
 match:
   keywords:
   - path with spaces
-  - quoted path
-  - spaces quoting
 status: active
 description: "Always quote paths that may contain spaces in shell commands."
 ---
