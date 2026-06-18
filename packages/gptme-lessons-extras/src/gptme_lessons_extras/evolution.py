@@ -211,6 +211,7 @@ class EvolutionTracker:
     def _save_history(self, history: LessonHistory) -> None:
         """Save lesson history to disk."""
         path = self._history_path(history.lesson_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(history.to_dict(), f, indent=2)
 
@@ -239,6 +240,7 @@ class EvolutionTracker:
 
         # Save
         path = self._refinements_path(lesson_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump([r.to_dict() for r in refinements], f, indent=2)
 
@@ -268,6 +270,7 @@ class EvolutionTracker:
         refinements[suggestion_index].status = new_status
 
         path = self._refinements_path(lesson_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump([r.to_dict() for r in refinements], f, indent=2)
 
@@ -301,11 +304,14 @@ class EvolutionTracker:
 
         stats: dict[str, dict[str, Any]] = {}
 
-        for history_file in self.history_dir.glob("*.json"):
-            if history_file.parent.name == "refinements":
+        for history_file in self.history_dir.rglob("*.json"):
+            rel = history_file.relative_to(self.history_dir)
+            if rel.parts[0] == "refinements":
                 continue
 
-            history = self.load_history(history_file.stem)
+            # Reconstruct full lesson ID from relative path (e.g. "tools/some-lesson.md")
+            lesson_id = str(rel.with_suffix(""))
+            history = self.load_history(lesson_id)
             if not history:
                 continue
 
