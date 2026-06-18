@@ -1314,6 +1314,26 @@ class TestBanditObservationCount:
     def test_malformed_bandit_returns_zero(self):
         assert _bandit_observation_count(None, "ci-fix") == 0
 
+    def test_model_scoping_excludes_stale_models(self):
+        """Available-model filter must exclude retired/renamed model arms."""
+
+        class _MultiModelStub:
+            def summary(self):  # type: ignore[override]
+                return {
+                    "ci-fix": {
+                        "haiku": {"selections": 5},
+                        "old-sonnet": {"selections": 3},
+                    }
+                }
+
+        bandit = _MultiModelStub()
+        # Unfiltered: counts all historical models
+        assert _bandit_observation_count(bandit, "ci-fix") == 8
+        # Filtered to available: retired arm excluded
+        assert _bandit_observation_count(bandit, "ci-fix", models=["haiku"]) == 5
+        # Entirely different available set: zero (neither arm matches)
+        assert _bandit_observation_count(bandit, "ci-fix", models=["sonnet"]) == 0
+
 
 class TestResolveModelWithBandit:
     def test_no_bandit_delegates_to_static(self):
@@ -1349,6 +1369,24 @@ class TestResolveModelWithBandit:
         bandit = _StubBandit({"ci-fix": 10}, model="sonnet")
         result = _resolve_model_with_bandit(["ci_failure"], "slow", None, None, bandit)
         assert result == "sonnet"
+
+    def test_stale_models_dont_trigger_bandit_early(self):
+        """Stale model observations must not satisfy the MIN_BANDIT_OBSERVATIONS threshold."""
+
+        class _MultiModelStub:
+            def summary(self):  # type: ignore[override]
+                # old-sonnet has 100 observations — retired model
+                return {"ci-fix": {"old-sonnet": {"selections": 100}}}
+
+            def resolve_model(self, work_type: str, available: list) -> str:
+                return available[0]
+
+        bandit = _MultiModelStub()
+        # available=[sonnet, haiku], but old-sonnet doesn't match → below threshold → static
+        result = _resolve_model_with_bandit(
+            ["ci_failure"], "slow", "sonnet", "haiku", bandit
+        )
+        assert result == "sonnet"  # static fallback: slow lane → base model
 
 
 # --- LaneDispatcher with bandit ---
