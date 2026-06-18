@@ -4,11 +4,6 @@ match:
   keywords:
     - blocked period
     - status check
-    - all tasks blocked
-    - nothing to do
-    - waiting for input
-    - strategic pause
-    - productive while blocked
   session_categories: [strategic, self-review, cleanup]
 status: active
 ---
