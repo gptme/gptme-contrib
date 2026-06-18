@@ -10,15 +10,19 @@ import pytest
 from gptme_runloops.pm_dispatch import (
     DEFAULT_FAST_BURST_ALLOWANCE,
     DEFAULT_SLOT_CAP,
+    MIN_BANDIT_OBSERVATIONS,
     SLOW_LANE_TYPES,
     DispatchLedger,
     LaneDispatcher,
     LedgerEntry,
     SlotItem,
     SlotManager,
+    _bandit_observation_count,
     _partition_jsonl_io,
+    _resolve_model_with_bandit,
     append_full_ledger_entry,
     build_full_ledger_entry,
+    classify_item_work_type,
     classify_lane,
     derive_slot_key,
     dispatch_grouped_items,
@@ -1226,3 +1230,211 @@ class TestRecordsAggregateMain:
         rc = _records_aggregate_main(["--records-dir", str(tmp_path / "nope")])
         assert rc == 0
         assert json.loads(capsys.readouterr().out) == []
+
+
+# --- classify_item_work_type ---
+
+
+class TestClassifyItemWorkType:
+    def test_ci_failure(self):
+        assert classify_item_work_type(["ci_failure"]) == "ci-fix"
+
+    def test_master_ci_failure(self):
+        assert classify_item_work_type(["master_ci_failure"]) == "ci-fix"
+
+    def test_greptile_fix(self):
+        assert classify_item_work_type(["greptile_needs_fix"]) == "greptile-fix"
+
+    def test_greptile_improvement(self):
+        assert classify_item_work_type(["greptile_needs_improvement"]) == "greptile-fix"
+
+    def test_merge_conflict(self):
+        assert classify_item_work_type(["merge_conflict"]) == "merge-conflict"
+
+    def test_pr_update(self):
+        assert classify_item_work_type(["pr_update"]) == "pr-review"
+
+    def test_assigned(self):
+        assert classify_item_work_type(["assigned"]) == "assigned-issue"
+
+    def test_strategy(self):
+        assert classify_item_work_type(["strategy"]) == "strategy-reply"
+
+    def test_notification_fallback(self):
+        assert classify_item_work_type(["notification"]) == "notification-triage"
+        assert classify_item_work_type([]) == "notification-triage"
+        assert classify_item_work_type(["unknown_type"]) == "notification-triage"
+
+    def test_ci_beats_pr(self):
+        # A PR with a CI failure should route to ci-fix, not pr-review
+        assert classify_item_work_type(["pr_update", "ci_failure"]) == "ci-fix"
+
+    def test_greptile_beats_pr(self):
+        assert (
+            classify_item_work_type(["pr_update", "greptile_needs_fix"])
+            == "greptile-fix"
+        )
+
+    def test_strategy_highest_priority(self):
+        assert classify_item_work_type(["strategy", "ci_failure"]) == "strategy-reply"
+
+
+# --- _bandit_observation_count and _resolve_model_with_bandit ---
+
+
+class _StubBandit:
+    """Minimal bandit stub for testing dispatch wiring without real PmModelBandit."""
+
+    def __init__(self, counts: dict[str, int], model: str = "haiku"):
+        self._counts = counts
+        self._model = model
+
+    def summary(self) -> dict:
+        return {wt: {"m1": {"selections": cnt}} for wt, cnt in self._counts.items()}
+
+    def resolve_model(self, work_type: str, available: list[str]) -> str:
+        return self._model
+
+
+class TestBanditObservationCount:
+    def test_empty(self):
+        bandit = _StubBandit({})
+        assert _bandit_observation_count(bandit, "ci-fix") == 0
+
+    def test_with_observations(self):
+        bandit = _StubBandit({"ci-fix": 7})
+        assert _bandit_observation_count(bandit, "ci-fix") == 7
+
+    def test_different_work_type(self):
+        bandit = _StubBandit({"ci-fix": 7})
+        assert _bandit_observation_count(bandit, "pr-review") == 0
+
+    def test_malformed_bandit_returns_zero(self):
+        assert _bandit_observation_count(None, "ci-fix") == 0
+
+
+class TestResolveModelWithBandit:
+    def test_no_bandit_delegates_to_static(self):
+        result = _resolve_model_with_bandit(
+            ["ci_failure"], "slow", "sonnet", "haiku", None
+        )
+        # slow lane with no fast_model override → base model
+        assert result == "sonnet"
+
+    def test_bandit_below_threshold_falls_back(self):
+        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS - 1}, model="haiku")
+        result = _resolve_model_with_bandit(
+            ["ci_failure"], "slow", "sonnet", "haiku-fast", bandit
+        )
+        # Below threshold → static resolution (slow lane → base model)
+        assert result == "sonnet"
+
+    def test_bandit_at_threshold_uses_bandit(self):
+        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS}, model="haiku")
+        result = _resolve_model_with_bandit(
+            ["ci_failure"], "slow", "sonnet", "haiku-fast", bandit
+        )
+        assert result == "haiku"
+
+    def test_bandit_above_threshold_uses_bandit(self):
+        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS + 10}, model="sonnet")
+        result = _resolve_model_with_bandit(
+            ["ci_failure"], "fast", "sonnet", "haiku", bandit
+        )
+        assert result == "sonnet"
+
+    def test_bandit_no_available_models_defaults_sonnet(self):
+        bandit = _StubBandit({"ci-fix": 10}, model="sonnet")
+        result = _resolve_model_with_bandit(["ci_failure"], "slow", None, None, bandit)
+        assert result == "sonnet"
+
+
+# --- LaneDispatcher with bandit ---
+
+
+class TestLaneDispatcherWithBandit:
+    def _make_dispatcher(self, launched: list, deferred: list):
+        """Return a LaneDispatcher whose callback captures routing decisions."""
+
+        def callback(slot_unit, slot_key, lane, item, backend, model, script_path):
+            launched.append({"slot_key": slot_key, "lane": lane, "model": model})
+            return True
+
+        mgr = SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        return LaneDispatcher(slot_manager=mgr, dispatch_callback=callback)
+
+    def test_dispatch_without_bandit_uses_static(self):
+        launched = []
+        dispatcher = self._make_dispatcher(launched, [])
+        items = [SlotItem("r/r", 1, ["ci_failure"], "CI fix")]
+        dispatcher.dispatch(items, model="sonnet", fast_model="haiku", bandit=None)
+        assert len(launched) == 1
+        # ci_failure is slow lane → base model (no fast model in slow lane)
+        assert launched[0]["model"] == "sonnet"
+
+    def test_dispatch_with_bandit_below_threshold_uses_static(self):
+        launched = []
+        dispatcher = self._make_dispatcher(launched, [])
+        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS - 1}, model="haiku")
+        items = [SlotItem("r/r", 1, ["ci_failure"], "CI fix")]
+        dispatcher.dispatch(items, model="sonnet", fast_model="haiku-f", bandit=bandit)
+        assert launched[0]["model"] == "sonnet"  # static fallback
+
+    def test_dispatch_with_bandit_above_threshold_uses_bandit(self):
+        launched = []
+        dispatcher = self._make_dispatcher(launched, [])
+        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS + 5}, model="haiku")
+        items = [SlotItem("r/r", 1, ["ci_failure"], "CI fix")]
+        dispatcher.dispatch(items, model="sonnet", fast_model="haiku-f", bandit=bandit)
+        assert launched[0]["model"] == "haiku"  # bandit choice
+
+
+# --- record-bandit-outcome CLI ---
+
+
+class TestRecordBanditOutcomeCLI:
+    def test_record_outcome_persists(self, tmp_path):
+        from gptme_runloops.pm_dispatch import _record_bandit_outcome_main
+
+        rc = _record_bandit_outcome_main(
+            [
+                "--work-type",
+                "ci-fix",
+                "--model",
+                "haiku",
+                "--outcome",
+                "productive",
+                "--state-dir",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        state_file = tmp_path / "bandit-state.json"
+        assert state_file.exists()
+        data = json.loads(state_file.read_text())
+        assert "pm-model:ci-fix:haiku" in data["arms"]
+
+    def test_record_outcome_float(self, tmp_path):
+        from gptme_runloops.pm_dispatch import _record_bandit_outcome_main
+
+        rc = _record_bandit_outcome_main(
+            [
+                "--work-type",
+                "pr-review",
+                "--model",
+                "sonnet",
+                "--outcome",
+                "0.75",
+                "--state-dir",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        data = json.loads((tmp_path / "bandit-state.json").read_text())
+        arm = data["arms"]["pm-model:pr-review:sonnet"]
+        assert arm["alpha"] == pytest.approx(1.75)
