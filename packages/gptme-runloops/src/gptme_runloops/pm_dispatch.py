@@ -1095,6 +1095,14 @@ def _record_bandit_outcome_main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    from gptme_runloops.pm_bandit import PM_WORK_TYPES
+
+    if args.work_type not in PM_WORK_TYPES:
+        parser.error(
+            f"--work-type {args.work_type!r} is not a known PM work type; "
+            f"valid values: {sorted(PM_WORK_TYPES)}"
+        )
+
     _VALID_OUTCOMES = {"productive", "failed"}
     outcome_val: str | float
     try:
