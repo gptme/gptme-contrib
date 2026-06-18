@@ -4,7 +4,7 @@ status: active
 match:
   keywords:
     - named watch task
-    - event-driven decision
+    - watch task structure
   session_categories: [cross-repo, strategic]
 ---
 
