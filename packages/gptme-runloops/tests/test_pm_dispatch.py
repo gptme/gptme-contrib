@@ -1479,6 +1479,47 @@ class TestRecordBanditOutcomeCLI:
         arm = data["arms"]["pm-model:pr-review:sonnet"]
         assert arm["alpha"] == pytest.approx(1.75)
 
+    def test_record_work_type_rejects_unknown(self, tmp_path, capsys):
+        from gptme_runloops.pm_dispatch import _record_bandit_outcome_main
+
+        with pytest.raises(SystemExit) as exc_info:
+            _record_bandit_outcome_main(
+                [
+                    "--work-type",
+                    "ci_fix",  # underscore instead of hyphen — must be rejected
+                    "--model",
+                    "haiku",
+                    "--outcome",
+                    "productive",
+                    "--state-dir",
+                    str(tmp_path),
+                ]
+            )
+        assert exc_info.value.code != 0
+        # Error message should enumerate valid types so the hook author can self-correct
+        captured = capsys.readouterr()
+        assert "valid values" in captured.err
+        assert "ci-fix" in captured.err
+
+    def test_record_work_type_accepts_all_known(self, tmp_path):
+        from gptme_runloops.pm_bandit import PM_WORK_TYPES
+        from gptme_runloops.pm_dispatch import _record_bandit_outcome_main
+
+        for wt in PM_WORK_TYPES:
+            rc = _record_bandit_outcome_main(
+                [
+                    "--work-type",
+                    wt,
+                    "--model",
+                    "haiku",
+                    "--outcome",
+                    "productive",
+                    "--state-dir",
+                    str(tmp_path),
+                ]
+            )
+            assert rc == 0, f"expected {wt!r} to be accepted"
+
     def test_record_outcome_rejects_invalid_string(self, tmp_path):
         from gptme_runloops.pm_dispatch import _record_bandit_outcome_main
 
