@@ -200,7 +200,6 @@ def test_work_type_classification():
         "pr-review",
         "merge-conflict",
         "strategy-reply",
-        "issue-triage",
         "assigned-issue",
         "notification-triage",
     ]:

@@ -1290,10 +1290,12 @@ class _StubBandit:
         self._model = model
 
     def summary(self) -> dict:
-        return {wt: {"m1": {"selections": cnt}} for wt, cnt in self._counts.items()}
+        return {
+            wt: {self._model: {"selections": cnt}} for wt, cnt in self._counts.items()
+        }
 
     def resolve_model(self, work_type: str, available: list[str]) -> str:
-        return self._model
+        return self._model if self._model in available else available[0]
 
 
 class TestBanditObservationCount:
@@ -1330,11 +1332,11 @@ class TestResolveModelWithBandit:
         assert result == "sonnet"
 
     def test_bandit_at_threshold_uses_bandit(self):
-        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS}, model="haiku")
+        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS}, model="haiku-fast")
         result = _resolve_model_with_bandit(
             ["ci_failure"], "slow", "sonnet", "haiku-fast", bandit
         )
-        assert result == "haiku"
+        assert result == "haiku-fast"
 
     def test_bandit_above_threshold_uses_bandit(self):
         bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS + 10}, model="sonnet")
@@ -1388,10 +1390,10 @@ class TestLaneDispatcherWithBandit:
     def test_dispatch_with_bandit_above_threshold_uses_bandit(self):
         launched = []
         dispatcher = self._make_dispatcher(launched, [])
-        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS + 5}, model="haiku")
+        bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS + 5}, model="haiku-f")
         items = [SlotItem("r/r", 1, ["ci_failure"], "CI fix")]
         dispatcher.dispatch(items, model="sonnet", fast_model="haiku-f", bandit=bandit)
-        assert launched[0]["model"] == "haiku"  # bandit choice
+        assert launched[0]["model"] == "haiku-f"  # bandit choice
 
 
 # --- record-bandit-outcome CLI ---
@@ -1438,3 +1440,20 @@ class TestRecordBanditOutcomeCLI:
         data = json.loads((tmp_path / "bandit-state.json").read_text())
         arm = data["arms"]["pm-model:pr-review:sonnet"]
         assert arm["alpha"] == pytest.approx(1.75)
+
+    def test_record_outcome_rejects_invalid_string(self, tmp_path):
+        from gptme_runloops.pm_dispatch import _record_bandit_outcome_main
+
+        with pytest.raises(SystemExit):
+            _record_bandit_outcome_main(
+                [
+                    "--work-type",
+                    "ci-fix",
+                    "--model",
+                    "haiku",
+                    "--outcome",
+                    "Productive",  # capital P — not in allowlist
+                    "--state-dir",
+                    str(tmp_path),
+                ]
+            )

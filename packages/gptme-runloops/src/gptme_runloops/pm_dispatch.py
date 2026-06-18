@@ -332,11 +332,21 @@ def classify_item_work_type(types: list[str]) -> str:
     return "notification-triage"
 
 
-def _bandit_observation_count(bandit: Any, work_type: str) -> int:
-    """Count total recorded outcomes for work_type across all models in bandit."""
+def _bandit_observation_count(
+    bandit: Any, work_type: str, models: list[str] | None = None
+) -> int:
+    """Count recorded outcomes for work_type, optionally filtered to specific models.
+
+    When *models* is provided, only counts observations for those model names.
+    When None, counts across all models (legacy — prefer passing available models
+    to avoid threshold crossings driven by retired model arms).
+    """
     total = 0
     try:
-        for model_data in bandit.summary().get(work_type, {}).values():
+        summary = bandit.summary().get(work_type, {})
+        for model_name, model_data in summary.items():
+            if models is not None and model_name not in models:
+                continue
             total += int(model_data.get("selections", 0))
     except (AttributeError, TypeError):
         pass
@@ -359,11 +369,12 @@ def _resolve_model_with_bandit(
     if bandit is None:
         return resolve_lane_model(lane, model, fast_model)
     work_type = classify_item_work_type(item_types)
-    if _bandit_observation_count(bandit, work_type) < MIN_BANDIT_OBSERVATIONS:
-        return resolve_lane_model(lane, model, fast_model)
     available = [m for m in [model, fast_model] if m]
     if not available:
         available = ["sonnet"]
+    obs = _bandit_observation_count(bandit, work_type, models=available)
+    if obs < MIN_BANDIT_OBSERVATIONS:
+        return resolve_lane_model(lane, model, fast_model)
     return bandit.resolve_model(work_type, available)
 
 
@@ -1084,10 +1095,16 @@ def _record_bandit_outcome_main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    _VALID_OUTCOMES = {"productive", "failed"}
     outcome_val: str | float
     try:
         outcome_val = float(args.outcome)
     except ValueError:
+        if args.outcome not in _VALID_OUTCOMES:
+            parser.error(
+                f"--outcome must be 'productive', 'failed', or a float 0-1; "
+                f"got {args.outcome!r}"
+            )
         outcome_val = args.outcome
 
     bandit = PmModelBandit(state_dir=args.state_dir)
