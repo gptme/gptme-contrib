@@ -3,8 +3,6 @@ description: "When a PR is accidentally closed, recover it cleanly rather than o
 match:
   keywords:
     - closed pr
-    - reopen pr
-    - replace pr
   session_categories: [cross-repo, cleanup]
 status: active
 target_grade: productivity

@@ -3,8 +3,9 @@ description: "When significant upcoming events could change strategy, watch for 
 status: active
 match:
   keywords:
-    - watch task
-    - upcoming event
+    - named watch task
+    - watch task structure
+  session_categories: [cross-repo, strategic]
 ---
 
 # Agent Event Watch Workflow

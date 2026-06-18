@@ -10,8 +10,6 @@ match:
   - "irreversible change"
   - "force push"
   - "rm -rf"
-  - "DROP TABLE"
-  - "production change"
   session_categories: [code, infrastructure, cleanup]
 target_grade: alignment
 status: active

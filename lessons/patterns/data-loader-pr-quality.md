@@ -2,7 +2,6 @@
 match:
   keywords:
   - file not found
-  - assert path
   session_categories: [code]
 status: active
 description: "When writing data loader PRs for any data pipeline, apply these six patterns to produce production-quality code that passes automated review on the first cycle."
