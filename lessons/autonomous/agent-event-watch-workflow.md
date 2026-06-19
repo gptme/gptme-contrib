@@ -24,7 +24,7 @@ Events like trade settlements, deployment completions, PR reviews, or external d
 
 ## Pattern
 
-**Watch task structure** (4 sections):
+**Event watch structure** (4 sections):
 1. **Context**: What the event is, why it matters, baseline metrics
 2. **Trigger**: Exact condition that fires the task (file path, PR state, etc.)
 3. **Analysis**: What to compute once data is in
