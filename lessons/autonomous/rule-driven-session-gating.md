@@ -10,8 +10,9 @@ tags:
 - orchestration
 match:
   keywords:
-    - "skip monitoring session"
-    - "rule-based session gate"
+    - "skip sessions when nothing to do"
+    - "lightweight check before spawning"
+    - "session gating"
   session_categories: [autonomous, infrastructure]
 ---
 

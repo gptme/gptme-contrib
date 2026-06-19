@@ -2,8 +2,9 @@
 description: "When submitting PRs from a fork, secrets in the parent repo are not available — avoid workflows that require them"
 match:
   keywords:
-    - "CI fails on fork PR"
-    - "fork: push directly"
+    - "fork PR secrets"
+    - "fork CI missing secrets"
+    - "push directly to org"
   session_categories: [code, cross-repo]
 status: active
 ---
