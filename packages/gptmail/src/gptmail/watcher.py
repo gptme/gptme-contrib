@@ -41,9 +41,14 @@ def _resolve_workspace_dir(
     env = os.environ if env is None else env
     override = env.get("GPTME_WORKSPACE", "").strip()
     if override:
-        return Path(override).expanduser().resolve()
+        # Expand ~ using HOME from *env* (not os.environ["HOME"]), so test
+        # injection via an explicit env dict is self-contained.
+        if override.startswith("~/") or override == "~":
+            home = env.get("HOME", os.environ.get("HOME", ""))
+            override = home + override[1:]
+        return Path(override).resolve()
     script_dir = SCRIPT_DIR if script_dir is None else script_dir
-    return script_dir.parent.parent.parent.parent
+    return script_dir.parent.parent.parent.parent.resolve()
 
 
 WORKSPACE_DIR = _resolve_workspace_dir()

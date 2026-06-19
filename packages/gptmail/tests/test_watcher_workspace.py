@@ -23,6 +23,14 @@ def test_env_override_expands_user(monkeypatch, tmp_path: Path) -> None:
     assert resolved == (tmp_path / "ws").resolve()
 
 
+def test_env_override_expands_user_from_env_home(tmp_path: Path) -> None:
+    # HOME in the env dict is used — no os.environ patch needed.
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    resolved = _resolve_workspace_dir(env={"GPTME_WORKSPACE": "~/ws", "HOME": str(home_dir)})
+    assert resolved == (home_dir / "ws").resolve()
+
+
 def test_blank_override_falls_back_to_script_dir() -> None:
     # Mirrors the real layout: <ws>/packages/gptmail/src/gptmail -> <ws>
     fake_script_dir = Path("/opt/ws/packages/gptmail/src/gptmail")
