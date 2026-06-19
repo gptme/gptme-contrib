@@ -33,6 +33,10 @@ from typing import Dict, List, Set, Tuple
 
 import frontmatter
 
+# Non-lesson markdown files that live alongside lessons but must be excluded
+# from similarity/staleness analysis.
+NON_LESSON_FILES = ("README.md", "TODO.md", "lesson-template.md")
+
 
 @dataclass
 class SimilarityScore:
@@ -232,7 +236,7 @@ def find_similar_lessons(
 
     # Compare against all other lessons
     for other_path in lessons_dir.rglob("*.md"):
-        if other_path.name in ("README.md", "TODO.md", "lesson-template.md"):
+        if other_path.name in NON_LESSON_FILES:
             continue
         if other_path == lesson_path:
             continue
@@ -341,7 +345,7 @@ def calculate_recency_scores(
     now = datetime.now().astimezone()
 
     for lesson_path in lessons_dir.rglob("*.md"):
-        if lesson_path.name in ("README.md", "TODO.md", "lesson-template.md"):
+        if lesson_path.name in NON_LESSON_FILES:
             continue
 
         # Get git modification date
@@ -402,11 +406,7 @@ def find_duplicates(
     """
     duplicates = []
     lessons = list(lessons_dir.rglob("*.md"))
-    lessons = [
-        lesson
-        for lesson in lessons
-        if lesson.name not in ("README.md", "TODO.md", "lesson-template.md")
-    ]
+    lessons = [lesson for lesson in lessons if lesson.name not in NON_LESSON_FILES]
 
     # Compare all pairs
     for i, lesson1 in enumerate(lessons):
