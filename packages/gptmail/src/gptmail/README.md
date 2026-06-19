@@ -42,7 +42,7 @@ your-agent-workspace/
 
 ## Configuration
 
-The system automatically detects the agent workspace by navigating up from the script location. For custom workspace locations, set environment variables (TODO: implement GPTME_WORKSPACE support).
+The watcher daemon detects the agent workspace from `GPTME_WORKSPACE` if set, otherwise by navigating up from the script location (`packages/gptmail/src/gptmail` -> workspace root). Set `GPTME_WORKSPACE=/path/to/workspace` for installed or symlinked layouts where the source-tree relative path does not hold.
 
 ## External Email Setup
 

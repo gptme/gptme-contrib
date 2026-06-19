@@ -11,27 +11,59 @@
 """Simple email sync and response daemon."""
 
 import logging
+import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from gptmail.communication_utils.state.locks import FileLock, LockError
 from gptmail.lib import AgentEmail
 
 # Configuration
-# Find workspace root: packages/gptmail/src/gptmail -> ../../../../
 SCRIPT_DIR = Path(__file__).parent
-WORKSPACE_DIR = SCRIPT_DIR.parent.parent.parent.parent
+
+
+def _resolve_workspace_dir(
+    env: Mapping[str, str] | None = None,
+    script_dir: Path | None = None,
+) -> Path:
+    """Resolve the workspace root for the email watcher daemon.
+
+    Prefers the ``GPTME_WORKSPACE`` environment override (the watcher runs as a
+    daemon, so cwd-based git resolution like ``agent_cli._repo_root`` is not
+    reliable here). Falls back to the file location:
+    ``packages/gptmail/src/gptmail`` -> ``../../../..``. The fallback only holds
+    when the package lives in the source tree, so the override exists for
+    installed/symlinked layouts.
+    """
+    env = os.environ if env is None else env
+    override = env.get("GPTME_WORKSPACE", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    script_dir = SCRIPT_DIR if script_dir is None else script_dir
+    return script_dir.parent.parent.parent.parent
+
+
+WORKSPACE_DIR = _resolve_workspace_dir()
 EMAIL_DIR = WORKSPACE_DIR / "email"
 INBOX_DIR = EMAIL_DIR / "inbox"
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler(EMAIL_DIR / "watcher.log"), logging.StreamHandler()],
-)
+
+def _setup_logging() -> None:
+    """Configure daemon logging.
+
+    Called from the entry point rather than at import time so the module can be
+    imported (e.g. for tests or tooling) without eagerly opening a log file in a
+    directory that may not exist.
+    """
+    EMAIL_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(EMAIL_DIR / "watcher.log"), logging.StreamHandler()],
+    )
 
 
 def run_mbsync():
@@ -222,6 +254,7 @@ def run_daemon():
 
 
 if __name__ == "__main__":
+    _setup_logging()
     if len(sys.argv) > 1:
         command = sys.argv[1]
         if command == "once":
