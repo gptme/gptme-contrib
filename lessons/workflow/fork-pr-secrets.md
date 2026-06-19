@@ -3,7 +3,7 @@ description: "When submitting PRs from a fork, secrets in the parent repo are no
 match:
   keywords:
     - "fork PR secrets"
-    - "secret is empty"
+    - "fork CI missing secrets"
     - "push directly to org"
   session_categories: [code, cross-repo]
 status: active
