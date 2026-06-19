@@ -31,6 +31,11 @@ logger = logging.getLogger("perplexity")
 
 console = Console()
 
+# Perplexity retired the `llama-3.1-sonar-*` models on 2025-02-22; the current
+# online search models are `sonar` (default) and `sonar-pro`. Override with the
+# PERPLEXITY_MODEL env var.
+DEFAULT_MODEL = "sonar"
+
 
 @dataclass
 class SearchResult:
@@ -41,15 +46,39 @@ class SearchResult:
     query: str
 
 
+def _extract_citations(response: object) -> list[str]:
+    """Pull source URLs from a Perplexity response.
+
+    Perplexity returns citations as extra, non-OpenAI fields on the response.
+    Older responses expose a flat ``citations`` list of URL strings; newer ones
+    use ``search_results`` (objects with a ``url``). Read whichever is present
+    without assuming the OpenAI SDK typed it.
+    """
+    data = response.model_dump() if hasattr(response, "model_dump") else {}
+    citations = data.get("citations")
+    if citations:
+        urls = [c for c in citations if isinstance(c, str)]
+        if urls:
+            return urls
+    results = data.get("search_results") or []
+    return [r["url"] for r in results if isinstance(r, dict) and r.get("url")]
+
+
 class PerplexitySearch:
     """Handles searching with Perplexity's API"""
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: str | None = None, model: str | None = None):
         self.api_key = api_key or self._get_api_key()
+        self.model = model or self._get_model()
         self.client = OpenAI(
             api_key=self.api_key,
             base_url="https://api.perplexity.ai",
         )
+
+    @staticmethod
+    def _get_model() -> str:
+        """Resolve the Perplexity model, honoring the PERPLEXITY_MODEL override."""
+        return os.getenv("PERPLEXITY_MODEL") or DEFAULT_MODEL
 
     def _get_api_key(self) -> str:
         """Get API key from environment or config file"""
@@ -80,7 +109,7 @@ class PerplexitySearch:
         """
         with Live(Spinner("runner", "Researching query..."), refresh_per_second=10):
             response = self.client.chat.completions.create(
-                model="llama-3.1-sonar-large-128k-online",
+                model=self.model,
                 messages=[
                     {
                         "role": "system",
@@ -93,11 +122,12 @@ class PerplexitySearch:
                 ],
             )
         msg = response.choices[0].message
-        assert msg.content
+        if not msg.content:
+            raise RuntimeError("Perplexity returned an empty response")
 
         return SearchResult(
             answer=msg.content,
-            sources=[],
+            sources=_extract_citations(response),
             query=query,
         )
 
