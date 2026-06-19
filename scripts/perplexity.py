@@ -57,7 +57,9 @@ def _extract_citations(response: object) -> list[str]:
     data = response.model_dump() if hasattr(response, "model_dump") else {}
     citations = data.get("citations")
     if citations:
-        return [c for c in citations if isinstance(c, str)]
+        urls = [c for c in citations if isinstance(c, str)]
+        if urls:
+            return urls
     results = data.get("search_results") or []
     return [r["url"] for r in results if isinstance(r, dict) and r.get("url")]
 

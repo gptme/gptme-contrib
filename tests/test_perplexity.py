@@ -66,6 +66,16 @@ def test_extract_citations_falls_back_to_search_results():
     assert mod._extract_citations(resp) == ["https://c.example"]
 
 
+def test_extract_citations_falls_back_when_citations_have_no_urls():
+    resp = _FakeResponse(
+        {
+            "citations": [{"text": "not a url"}],
+            "search_results": [{"url": "https://x.example"}],
+        }
+    )
+    assert mod._extract_citations(resp) == ["https://x.example"]
+
+
 def test_extract_citations_empty_when_no_sources():
     assert mod._extract_citations(_FakeResponse({})) == []
 
