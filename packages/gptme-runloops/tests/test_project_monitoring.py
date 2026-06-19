@@ -209,7 +209,6 @@ def test_discover_repositories_failure(mock_run, workspace):
     assert repos == []
 
 
-@patch("gptme_runloops.project_monitoring.subprocess.run")
 def test_should_post_comment_first_time(workspace):
     """Test posting comment for first time."""
     run = ProjectMonitoringRun(workspace)
