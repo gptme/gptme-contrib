@@ -117,9 +117,14 @@ class TestAnalyzeCosts:
 
     def test_days_filter(self):
         """days= parameter filters records by recency."""
+        import datetime as dt
+
+        now = dt.datetime.now(dt.timezone.utc)
+        old_ts = "2020-01-01T00:00:00+00:00"
+        recent_ts = (now - dt.timedelta(hours=1)).isoformat()
         records = [
-            _make_record(input_tokens=1000, timestamp="2020-01-01T00:00:00+00:00"),  # old
-            _make_record(input_tokens=1000, timestamp="2026-06-20T10:00:00+00:00"),  # recent
+            _make_record(input_tokens=1000, timestamp=old_ts),  # old
+            _make_record(input_tokens=1000, timestamp=recent_ts),  # recent
         ]
         with patch("gptme_sessions.cost.estimate_record_cost", side_effect=self._mock_cost):
             summary = analyze_costs(records, days=7)

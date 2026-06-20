@@ -46,6 +46,19 @@ class CostSummary:
         return self.total_cost / self.priced_count if self.priced_count else 0.0
 
 
+def _load_pricing_config():
+    """Load the pricing config once, returning the HarnessQuotaConfig or None."""
+    try:
+        from gptme_usage.harness_models import load_quota_config
+
+        return load_quota_config()
+    except Exception:
+        return None
+
+
+_PRICING_CONFIG = None
+
+
 def estimate_record_cost(record: "SessionRecord") -> float | None:
     """Estimate USD cost for a single session record.
 
@@ -56,6 +69,10 @@ def estimate_record_cost(record: "SessionRecord") -> float | None:
         from gptme_usage.harness_models import estimate_session_cost
     except ImportError:
         return None
+
+    global _PRICING_CONFIG
+    if _PRICING_CONFIG is None:
+        _PRICING_CONFIG = _load_pricing_config()
 
     harness = record.harness or "unknown"
     model = record.model or "unknown"
@@ -68,6 +85,7 @@ def estimate_record_cost(record: "SessionRecord") -> float | None:
         cache_creation_tokens=record.cache_creation_tokens,
         cache_read_tokens=record.cache_read_tokens,
         token_count=record.token_count,
+        config=_PRICING_CONFIG,
     )
     return float(result) if result is not None else None
 

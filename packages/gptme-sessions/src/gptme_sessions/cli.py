@@ -2849,8 +2849,6 @@ def cost(
     summary = analyze_costs(records, days=days)
 
     if as_json:
-        import dataclasses
-
         click.echo(
             json.dumps(
                 {
@@ -2858,8 +2856,21 @@ def cost(
                     "priced_count": summary.priced_count,
                     "total_cost": summary.total_cost,
                     "avg_cost": summary.avg_cost,
-                    "by_model": {m: dataclasses.asdict(s) for m, s in summary.by_model.items()},
-                    "by_day": {d: dataclasses.asdict(s) for d, s in summary.by_day.items()},
+                    "by_model": {
+                        m: {
+                            "count": s.count,
+                            "total_cost": s.total_cost,
+                            "avg_cost": s.avg_cost,
+                        }
+                        for m, s in summary.by_model.items()
+                    },
+                    "by_day": {
+                        d: {
+                            "count": s.count,
+                            "total_cost": s.total_cost,
+                        }
+                        for d, s in summary.by_day.items()
+                    },
                 },
                 indent=2,
             )
