@@ -6,6 +6,7 @@ Reads raw tmux-captured TUI output from stdin and extracts utilization data.
 """
 
 import json
+import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -227,6 +228,48 @@ def main():
         elif "resets_in_seconds" not in info:
             info["resets_in_seconds"] = 0
             info["time_left"] = ""
+
+    # Compute _off_peak: peak = 8 AM-2 PM ET (12:00-18:00 UTC) weekdays.
+    # Promo windows (CLAUDE_USAGE_PROMO_START / CLAUDE_USAGE_PROMO_END env vars)
+    # can mark off-peak usage as discounted or non-counting against weekly limits.
+    now_utc = datetime.now(timezone.utc)
+    is_weekday = now_utc.weekday() < 5
+    is_peak_hour = is_weekday and 12 <= now_utc.hour < 18
+    promo_start_env = os.environ.get("CLAUDE_USAGE_PROMO_START", "")
+    promo_end_env = os.environ.get("CLAUDE_USAGE_PROMO_END", "")
+    if promo_start_env and promo_end_env:
+        promo_start = datetime.fromisoformat(promo_start_env)
+        promo_end = datetime.fromisoformat(promo_end_env)
+        promo_active = promo_start <= now_utc <= promo_end
+    else:
+        promo_active = False
+    result["_off_peak"] = {
+        "active": promo_active and not is_peak_hour,
+        "promo_active": promo_active,
+        "is_peak_hour": is_peak_hour,
+        "peak_hours_utc": "12:00-18:00 weekdays",
+    }
+
+    # Compute _pacing: weekly utilization pace vs elapsed fraction of the window.
+    seven_day = result.get("seven_day", {})
+    if isinstance(seven_day, dict) and seven_day.get("resets_in_seconds") is not None:
+        total_window = 7 * 24 * 3600
+        remaining_secs = seven_day["resets_in_seconds"]
+        elapsed_frac = max(0.0, 1.0 - remaining_secs / total_window)
+        target = elapsed_frac * 0.9
+        actual = seven_day.get("utilization", 0.0)
+        gap = target - actual
+        result["_pacing"] = {
+            "elapsed_fraction": round(elapsed_frac, 3),
+            "target_utilization": round(target, 3),
+            "actual_utilization": round(actual, 3),
+            "pace_gap": round(gap, 3),
+            "status": (
+                "underusing"
+                if gap > 0.05
+                else ("overusing" if gap < -0.05 else "on_track")
+            ),
+        }
 
     # Write cache if requested (skip on error paths — those exit before reaching here)
     if cache_file:
