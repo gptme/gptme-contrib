@@ -9,11 +9,13 @@ import pytest
 from gptme_usage.config import merge_with_module_defaults
 from gptme_usage.harness_models import (
     CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED,
+    DEFAULT_OUTPUT_TOKEN_SHARE,
     GPTME_MODEL_ROUTES,
     GPTME_QUOTA_SOURCE,
     HARNESS_PRICE_USD_PER_1M,
     TOKENS_PER_SECOND,
     HarnessQuotaConfig,
+    blended_token_price,
     estimate_session_cost,
     estimate_tokens_from_duration,
     gptme_openrouter_context,
@@ -22,7 +24,10 @@ from gptme_usage.harness_models import (
     local_models,
     openrouter_models,
     pricing_key_for_model,
+    quota_pool_label,
     resolve_cc_version,
+    resolve_copilot_version,
+    resolve_gptme_model,
 )
 
 TOML_FIXTURE = """\
@@ -379,6 +384,193 @@ def test_is_post_agent_sdk_credit_change_paused() -> None:
         assert not is_post_agent_sdk_credit_change(
             ts
         ), f"Expected False while paused, got True for ts={ts!r}"
+
+
+# ---------------------------------------------------------------------------
+# blended_token_price
+# ---------------------------------------------------------------------------
+
+
+def test_blended_token_price_pure_input() -> None:
+    assert blended_token_price(10.0, 30.0, output_share=0.0) == 10.0
+
+
+def test_blended_token_price_pure_output() -> None:
+    assert blended_token_price(10.0, 30.0, output_share=1.0) == 30.0
+
+
+def test_blended_token_price_default_share() -> None:
+    expected = round(
+        10.0 * (1 - DEFAULT_OUTPUT_TOKEN_SHARE) + 30.0 * DEFAULT_OUTPUT_TOKEN_SHARE, 3
+    )
+    assert blended_token_price(10.0, 30.0) == expected
+
+
+def test_blended_token_price_clamps_high() -> None:
+    """output_share > 1.0 is clamped to 1.0."""
+    assert blended_token_price(10.0, 30.0, output_share=1.5) == 30.0
+
+
+def test_blended_token_price_clamps_low() -> None:
+    """output_share < 0.0 is clamped to 0.0."""
+    assert blended_token_price(10.0, 30.0, output_share=-0.5) == 10.0
+
+
+# ---------------------------------------------------------------------------
+# quota_pool_label
+# ---------------------------------------------------------------------------
+
+
+def test_quota_pool_label_claude_code() -> None:
+    assert quota_pool_label("claude-code", "sonnet") == "claude-max"
+
+
+def test_quota_pool_label_grok_build() -> None:
+    assert quota_pool_label("grok-build", "heavy") == "supergrok-heavy"
+
+
+def test_quota_pool_label_copilot_cli() -> None:
+    assert quota_pool_label("copilot-cli", "opus") == "copilot"
+
+
+def test_quota_pool_label_codex() -> None:
+    assert quota_pool_label("codex", "gpt-4") == "chatgpt-sub (shared)"
+
+
+def test_quota_pool_label_gptme_openrouter(toml_path: Path) -> None:
+    cfg = load_quota_config(toml_path)
+    assert quota_pool_label("gptme", "deepseek-v4-pro", cfg) == "openrouter"
+
+
+def test_quota_pool_label_gptme_chatgpt(toml_path: Path) -> None:
+    cfg = load_quota_config(toml_path)
+    assert quota_pool_label("gptme", "gpt-5.4", cfg) == "chatgpt-sub (shared)"
+
+
+def test_quota_pool_label_gptme_unknown_model() -> None:
+    assert quota_pool_label("gptme", "no-such-model") == "unknown"
+
+
+def test_quota_pool_label_unknown_harness() -> None:
+    assert quota_pool_label("unknown-harness", "model") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# harness_cost_rows
+# ---------------------------------------------------------------------------
+
+_FAKE_PRICES: dict[tuple[str, str], tuple[float, float]] = {
+    ("claude-code", "opus"): (5.0, 25.0),
+    ("claude-code", "sonnet"): (3.0, 15.0),
+    ("gptme", "deepseek-v4-pro"): (1.74, 3.48),
+}
+
+
+def test_harness_cost_rows_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each row has all required fields."""
+    import gptme_usage.harness_models as hm
+
+    monkeypatch.setattr(hm, "HARNESS_PRICE_USD_PER_1M", _FAKE_PRICES)
+    monkeypatch.setattr(
+        hm,
+        "HARNESS_COST",
+        {k: blended_token_price(i, o) for k, (i, o) in _FAKE_PRICES.items()},
+    )
+    required_keys = {
+        "backend",
+        "model",
+        "input_usd_per_1m",
+        "output_usd_per_1m",
+        "blended_usd_per_1m",
+        "quota_pool",
+    }
+    rows = hm.harness_cost_rows()
+    assert len(rows) == len(_FAKE_PRICES)
+    for row in rows:
+        assert required_keys <= set(row.keys()), f"missing keys in row {row}"
+
+
+def test_harness_cost_rows_blended_matches_computation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """blended_usd_per_1m must equal blended_token_price(input, output)."""
+    import gptme_usage.harness_models as hm
+
+    monkeypatch.setattr(hm, "HARNESS_PRICE_USD_PER_1M", _FAKE_PRICES)
+    monkeypatch.setattr(
+        hm,
+        "HARNESS_COST",
+        {k: blended_token_price(i, o) for k, (i, o) in _FAKE_PRICES.items()},
+    )
+    for row in hm.harness_cost_rows():
+        key = (row["backend"], row["model"])
+        inp, out = _FAKE_PRICES[key]
+        assert row["blended_usd_per_1m"] == blended_token_price(inp, out)
+
+
+def test_harness_cost_rows_sorted_descending_by_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows are sorted by descending blended price."""
+    import gptme_usage.harness_models as hm
+
+    monkeypatch.setattr(hm, "HARNESS_PRICE_USD_PER_1M", _FAKE_PRICES)
+    monkeypatch.setattr(
+        hm,
+        "HARNESS_COST",
+        {k: blended_token_price(i, o) for k, (i, o) in _FAKE_PRICES.items()},
+    )
+    rows = hm.harness_cost_rows()
+    prices = [row["blended_usd_per_1m"] for row in rows]
+    assert prices == sorted(prices, reverse=True), "rows not sorted by descending price"
+
+
+# ---------------------------------------------------------------------------
+# resolve_gptme_model
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_gptme_model_passthrough_when_no_route() -> None:
+    """Unknown short names pass through unchanged when no routes are configured."""
+    assert resolve_gptme_model("short-name") == "short-name"
+
+
+def test_resolve_gptme_model_with_config_routes(toml_path: Path) -> None:
+    cfg = load_quota_config(toml_path)
+    assert (
+        resolve_gptme_model("deepseek-v4-pro", cfg)
+        == "openrouter/deepseek/deepseek-v4-pro@deepseek"
+    )
+
+
+def test_resolve_gptme_model_config_unknown_passthrough(toml_path: Path) -> None:
+    cfg = load_quota_config(toml_path)
+    assert resolve_gptme_model("not-in-routes", cfg) == "not-in-routes"
+
+
+# ---------------------------------------------------------------------------
+# resolve_copilot_version
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("claude-opus-4.6", "opus"),
+        ("claude-opus-4", "opus"),
+        ("claude-sonnet-4.6", "sonnet"),
+        ("claude-sonnet-4", "sonnet"),
+        ("gpt-5.4", "gpt-5.4"),
+        ("opus", "opus"),  # already short — idempotent
+        ("sonnet", "sonnet"),  # already short — idempotent
+        ("  claude-opus-4.6  ", "opus"),  # whitespace stripped
+        ("CLAUDE-OPUS-4.6", "opus"),  # case-insensitive
+    ],
+)
+def test_resolve_copilot_version(model: str, expected: str) -> None:
+    assert (
+        resolve_copilot_version(model) == expected
+    ), f"resolve_copilot_version({model!r}) -> {resolve_copilot_version(model)!r}, want {expected!r}"
 
 
 # Skeleton tests to restore when CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED is set back to False.

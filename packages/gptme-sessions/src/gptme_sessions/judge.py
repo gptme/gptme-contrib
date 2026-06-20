@@ -158,7 +158,24 @@ one-line journal entry, and ends. This session scores ~0.15 because:
 - 0.15 rather than 0.0 because the loose-end check and duplicate detection
   were correct agent behavior — pure NOOP would be 0.0.
 
-Key principle across all five: the grade follows from *within-category*
+**Example 6 (content, ~0.75)**: A session writes, publishes, and promotes a
+technical blog post documenting a real feature with reproduction steps, code
+examples, and published-artifact links. The post is published on the agent's
+blog with an OG image, tweeted from the project account, and linked in the
+relevant GitHub issue. This session scores ~0.75 because:
+- The blog post is a durable, publicly-verifiable artifact that compounds
+  awareness and documents real shipped work.
+- It ships end-to-end (draft editor → publish → social promotion) with no
+  incomplete steps or broken links.
+- It does *not* score higher because the impact is indirect (awareness/
+  knowledge) rather than direct product progress or revenue impact.
+- The "within-category" principle applies: this is high-quality content
+  execution, and the content priority tier is irrelevant — the same
+  execution standard used for infrastructure, cleanup, and research
+  examples applies here. Do not penalize content sessions for being
+  "priority #6" or "lowest priority".
+
+Key principle across all six: the grade follows from *within-category*
 execution quality, compounding value, and durability — not from whether the
 category number matches a top goal. Use scores below 0.5 when output is
 minimal, blocked, or duplicated, and scores above 0.85 only for sessions
