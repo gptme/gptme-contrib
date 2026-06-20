@@ -205,10 +205,12 @@ def main():
             result = build_low_usage_result()
         else:
             print(
-                "Error: Could not parse usage data, and no fallback available.",
+                "Error: Could not parse usage data.\n"
+                "This script requires Claude Code v2.1.183 or later.\n"
+                "If you're on an older version, upgrade with: claude update",
                 file=sys.stderr,
             )
-            print("Run with --raw to see raw output.", file=sys.stderr)
+            print("Run with --raw to see raw output for debugging.", file=sys.stderr)
             sys.exit(1)
 
     # Add time_left and resets_in_seconds to all entries
