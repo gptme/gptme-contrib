@@ -323,18 +323,35 @@ fi
 # Parse the TUI output
 # Use external Python parser (avoids heredoc escaping issues with CC v2.1.183+).
 PARSER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PARSER_ARGS=()
-[ "$MODE" = "json" ] && PARSER_ARGS+=("--json")
 
 # Always capture JSON so we can write the cache (restores TTL short-circuit and
 # check-quota.py fast mode that the heredoc→parser extraction accidentally dropped).
 _fp="$(_creds_fingerprint)"
 _json=$(echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" --json 2>/dev/null || true)
-if [ -n "$_json" ] && [ "$NO_CACHE" = false ]; then
+if [ -z "$_json" ]; then
+    echo "Error: usage parser returned no output" >&2
+    exit 1
+fi
+if [ "$NO_CACHE" = false ]; then
     printf '%s' "$_json" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 data['_cred_fingerprint'] = '${_fp}'
+# Recompute _pacing (weekly window) — was present in the old heredoc, absent
+# from the standalone parser. quota-gate.sh reads _pacing.status and pace_gap.
+try:
+    from gptme_subscription.routing import compute_window_pacing
+    seven_day = data.get('seven_day', {})
+    result = compute_window_pacing(
+        seven_day.get('utilization', 0.0),
+        seven_day.get('resets_in_seconds', 0),
+        7 * 24 * 3600,
+    )
+    if result is not None:
+        _, gap, status = result
+        data['_pacing'] = {'status': status, 'pace_gap': gap}
+except Exception:
+    pass
 with open('${CACHE_FILE}', 'w') as f:
     json.dump(data, f, indent=2)
 " 2>/dev/null || true
