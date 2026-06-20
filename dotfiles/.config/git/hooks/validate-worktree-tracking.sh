@@ -100,8 +100,7 @@ if [ "$upstream" = "origin/master" ] || [ "$upstream" = "origin/main" ]; then
             break
         fi
     done
-    # Also block when stdin was empty (e.g. plain `git push` with no refspecs)
-    if [ "$pushing_to_default" = true ] || [ ${#push_remote_refs[@]} -eq 0 ]; then
+    if [ "$pushing_to_default" = true ]; then
         echo "🚫 ERROR: Branch '$current_branch' tracks '$upstream'!"
         echo ""
         echo "   This will push your feature branch directly to master/main."
