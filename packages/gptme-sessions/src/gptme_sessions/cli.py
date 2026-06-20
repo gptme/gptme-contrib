@@ -2828,10 +2828,7 @@ def cost(
     Requires gptme-usage to be installed for pricing data.
     Install with: pip install gptme-sessions[cost]
     """
-    try:
-        from .cost import analyze_costs, format_cost_summary
-    except ImportError as e:
-        raise click.ClickException(f"cost module unavailable: {e}") from e
+    from .cost import analyze_costs, format_cost_summary
 
     try:
         from gptme_usage.harness_models import estimate_session_cost as _  # noqa: F401

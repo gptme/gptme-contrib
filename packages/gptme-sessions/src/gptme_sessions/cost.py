@@ -56,7 +56,8 @@ def _load_pricing_config():
         return None
 
 
-_PRICING_CONFIG = None
+_UNSET = object()
+_PRICING_CONFIG: object = _UNSET
 
 
 def estimate_record_cost(record: "SessionRecord") -> float | None:
@@ -71,7 +72,7 @@ def estimate_record_cost(record: "SessionRecord") -> float | None:
         return None
 
     global _PRICING_CONFIG
-    if _PRICING_CONFIG is None:
+    if _PRICING_CONFIG is _UNSET:
         _PRICING_CONFIG = _load_pricing_config()
 
     harness = record.harness or "unknown"
