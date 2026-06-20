@@ -348,13 +348,20 @@ try:
         7 * 24 * 3600,
     )
     if result is not None:
-        _, gap, status = result
-        data['_pacing'] = {'status': status, 'pace_gap': gap}
+        target_util, gap, status = result
+        data['_pacing'] = {
+            'status': status,
+            'pace_gap': gap,
+            'target_utilization': target_util,
+            'actual_utilization': seven_day.get('utilization', 0.0),
+        }
+except ImportError:
+    print('Warning: gptme_subscription not installed; _pacing absent from cache', file=sys.stderr)
 except Exception:
     pass
 with open('${CACHE_FILE}', 'w') as f:
     json.dump(data, f, indent=2)
-" 2>/dev/null || true
+" || true
 fi
 
 if [ "$MODE" = "json" ]; then
