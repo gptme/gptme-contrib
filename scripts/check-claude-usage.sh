@@ -325,4 +325,23 @@ fi
 PARSER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARSER_ARGS=()
 [ "$MODE" = "json" ] && PARSER_ARGS+=("--json")
-echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" "${PARSER_ARGS[@]}"
+
+# Always capture JSON so we can write the cache (restores TTL short-circuit and
+# check-quota.py fast mode that the heredoc→parser extraction accidentally dropped).
+_fp="$(_creds_fingerprint)"
+_json=$(echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" --json 2>/dev/null || true)
+if [ -n "$_json" ] && [ "$NO_CACHE" = false ]; then
+    printf '%s' "$_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+data['_cred_fingerprint'] = '${_fp}'
+with open('${CACHE_FILE}', 'w') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null || true
+fi
+
+if [ "$MODE" = "json" ]; then
+    echo "$_json"
+else
+    echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py"
+fi
