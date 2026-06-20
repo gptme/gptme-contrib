@@ -324,12 +324,9 @@ fi
 # Use external Python parser (avoids heredoc escaping issues with CC v2.1.183+).
 PARSER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fp="$(_creds_fingerprint)"
-if [ "$NO_CACHE" = false ]; then
-    echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" \
-        "$([ "$MODE" = "json" ] && echo "--json")" \
-        --cache-file "$CACHE_FILE" \
-        --cred-fingerprint "$fp"
-else
-    echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" \
-        "$([ "$MODE" = "json" ] && echo "--json")"
-fi
+json_args=()
+[ "$MODE" = "json" ] && json_args=(--json)
+echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" \
+    "${json_args[@]}" \
+    --cache-file "$CACHE_FILE" \
+    --cred-fingerprint "$fp"
