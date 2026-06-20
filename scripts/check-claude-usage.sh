@@ -327,7 +327,7 @@ PARSER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Always capture JSON so we can write the cache (restores TTL short-circuit and
 # check-quota.py fast mode that the heredoc→parser extraction accidentally dropped).
 _fp="$(_creds_fingerprint)"
-_json=$(echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" --json 2>/dev/null || true)
+_json=$(echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" --json || true)
 if [ -z "$_json" ]; then
     echo "Error: usage parser returned no output" >&2
     exit 1
