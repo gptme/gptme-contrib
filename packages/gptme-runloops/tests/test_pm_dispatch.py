@@ -55,7 +55,9 @@ def make_item(
         number=number,
         types=types or ["pr_update"],
         title=title,
-        url=f"https://github.com/{repo}/pull/{number}",
+        url=f"https://github.com/{repo}/pull/{number}"
+        if number is not None
+        else f"https://github.com/{repo}",
     )
 
 
