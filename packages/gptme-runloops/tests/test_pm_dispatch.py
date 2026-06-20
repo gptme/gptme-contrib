@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from gptme_runloops.pm_dispatch import (
@@ -45,7 +46,7 @@ def ledger(ledger_path: Path) -> DispatchLedger:
 
 def make_item(
     repo: str = "owner/repo",
-    number: int = 42,
+    number: int | None = 42,
     types: list[str] | None = None,
     title: str = "Test item",
 ) -> SlotItem:
@@ -54,7 +55,9 @@ def make_item(
         number=number,
         types=types or ["pr_update"],
         title=title,
-        url=f"https://github.com/{repo}/pull/{number}",
+        url=f"https://github.com/{repo}/pull/{number}"
+        if number is not None
+        else f"https://github.com/{repo}",
     )
 
 
@@ -1318,7 +1321,7 @@ class TestBanditObservationCount:
         """Available-model filter must exclude retired/renamed model arms."""
 
         class _MultiModelStub:
-            def summary(self):  # type: ignore[override]
+            def summary(self):
                 return {
                     "ci-fix": {
                         "haiku": {"selections": 5},
@@ -1374,11 +1377,11 @@ class TestResolveModelWithBandit:
         """Stale model observations must not satisfy the MIN_BANDIT_OBSERVATIONS threshold."""
 
         class _MultiModelStub:
-            def summary(self):  # type: ignore[override]
+            def summary(self):
                 # old-sonnet has 100 observations — retired model
                 return {"ci-fix": {"old-sonnet": {"selections": 100}}}
 
-            def resolve_model(self, work_type: str, available: list) -> str:
+            def resolve_model(self, work_type: str, available: list[str]) -> str:
                 return available[0]
 
         bandit = _MultiModelStub()
@@ -1409,7 +1412,7 @@ class TestLaneDispatcherWithBandit:
         return LaneDispatcher(slot_manager=mgr, dispatch_callback=callback)
 
     def test_dispatch_without_bandit_uses_static(self):
-        launched = []
+        launched: list[dict[str, Any]] = []
         dispatcher = self._make_dispatcher(launched, [])
         items = [SlotItem("r/r", 1, ["ci_failure"], "CI fix")]
         dispatcher.dispatch(items, model="sonnet", fast_model="haiku", bandit=None)
@@ -1418,7 +1421,7 @@ class TestLaneDispatcherWithBandit:
         assert launched[0]["model"] == "sonnet"
 
     def test_dispatch_with_bandit_below_threshold_uses_static(self):
-        launched = []
+        launched: list[dict[str, Any]] = []
         dispatcher = self._make_dispatcher(launched, [])
         bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS - 1}, model="haiku")
         items = [SlotItem("r/r", 1, ["ci_failure"], "CI fix")]
@@ -1426,7 +1429,7 @@ class TestLaneDispatcherWithBandit:
         assert launched[0]["model"] == "sonnet"  # static fallback
 
     def test_dispatch_with_bandit_above_threshold_uses_bandit(self):
-        launched = []
+        launched: list[dict[str, Any]] = []
         dispatcher = self._make_dispatcher(launched, [])
         bandit = _StubBandit({"ci-fix": MIN_BANDIT_OBSERVATIONS + 5}, model="haiku-f")
         items = [SlotItem("r/r", 1, ["ci_failure"], "CI fix")]

@@ -21,7 +21,7 @@ import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 # Slow-lane item types — items that need deep investigation (PR reviews,
 # CI diagnostics, merge conflicts, Greptile issues). Fast lane is anything
@@ -375,7 +375,7 @@ def _resolve_model_with_bandit(
     obs = _bandit_observation_count(bandit, work_type, models=available)
     if obs < MIN_BANDIT_OBSERVATIONS:
         return resolve_lane_model(lane, model, fast_model)
-    return bandit.resolve_model(work_type, available)
+    return cast(str, bandit.resolve_model(work_type, available))
 
 
 def partition_items(items: list[SlotItem]) -> tuple[list[SlotItem], list[SlotItem]]:
