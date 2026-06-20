@@ -171,6 +171,16 @@ def main():
     lines = text.split("\n")
     json_mode = "--json" in sys.argv
 
+    # Cache args: --cache-file PATH --cred-fingerprint FP
+    cache_file = None
+    cred_fingerprint = ""
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg == "--cache-file" and i + 1 < len(argv):
+            cache_file = argv[i + 1]
+        elif arg == "--cred-fingerprint" and i + 1 < len(argv):
+            cred_fingerprint = argv[i + 1]
+
     # Error checks
     if "Error:" in text and "scope" in text.lower():
         print(
@@ -215,6 +225,16 @@ def main():
         elif "resets_in_seconds" not in info:
             info["resets_in_seconds"] = 0
             info["time_left"] = ""
+
+    # Write cache if requested (skip on error paths — those exit before reaching here)
+    if cache_file:
+        cache_result = dict(result)
+        cache_result["_cred_fingerprint"] = cred_fingerprint
+        try:
+            with open(cache_file, "w") as f:
+                json.dump(cache_result, f, indent=2)
+        except OSError:
+            pass
 
     # Output
     if json_mode:

@@ -320,7 +320,16 @@ if ! echo "$OUTPUT" | grep -qE '[0-9]+% used' \
     echo "Warning: CC /usage produced no usage bars (still scanning / likely auth failure). Using fallback data." >&2
 fi
 
-# Parse the TUI output
+# Parse the TUI output and write result to cache.
 # Use external Python parser (avoids heredoc escaping issues with CC v2.1.183+).
 PARSER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" "$([ "$MODE" = "json" ] && echo "--json")"
+fp="$(_creds_fingerprint)"
+if [ "$NO_CACHE" = false ]; then
+    echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" \
+        "$([ "$MODE" = "json" ] && echo "--json")" \
+        --cache-file "$CACHE_FILE" \
+        --cred-fingerprint "$fp"
+else
+    echo "$OUTPUT" | python3 "$PARSER_DIR/check-claude-usage-parser.py" \
+        "$([ "$MODE" = "json" ] && echo "--json")"
+fi
