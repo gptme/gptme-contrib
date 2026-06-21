@@ -38,6 +38,42 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient);
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Trigger classification
+    trigger_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    -- Event identity (for dedup)
+    external_id TEXT,
+    thread_key TEXT NOT NULL,
+    -- Payload
+    repo TEXT,
+    number INTEGER,
+    title TEXT,
+    url TEXT,
+    payload_json TEXT,
+    -- Lifecycle
+    state TEXT NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    max_retries INTEGER NOT NULL DEFAULT 3,
+    -- Timing
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    claimed_at TEXT,
+    completed_at TEXT,
+    -- Claim
+    claimed_by TEXT,
+    -- Batching
+    batch_id TEXT,
+    -- Result
+    result TEXT,
+    result_detail TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_state ON events(state);
+CREATE INDEX IF NOT EXISTS idx_events_thread ON events(thread_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_priority ON events(state, priority DESC);
 """
 
 
