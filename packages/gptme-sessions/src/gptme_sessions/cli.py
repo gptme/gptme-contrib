@@ -2808,6 +2808,74 @@ def classify_stats(
             click.echo(f"  ✅ Good diversity: {unique}/{diversity_window} categories — {cats_str}")
 
 
+@cli.command()
+@click.option("--days", default=7, show_default=True, help="Include sessions from last N days")
+@click.option("--daily", is_flag=True, help="Show day-by-day cost breakdown")
+@click.option("--by-model", "by_model", is_flag=True, help="Show per-model cost breakdown")
+@click.option("--last-7d", "last_7d", is_flag=True, help="Shorthand for --days 7")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON instead of formatted text")
+@click.pass_context
+def cost(
+    ctx: click.Context,
+    days: int,
+    daily: bool,
+    by_model: bool,
+    last_7d: bool,
+    as_json: bool,
+) -> None:
+    """Show session cost breakdown.
+
+    Requires gptme-usage to be installed for pricing data.
+    Install with: pip install gptme-sessions[cost]
+    """
+    from .cost import analyze_costs, format_cost_summary
+
+    try:
+        from gptme_usage.harness_models import estimate_session_cost as _  # noqa: F401
+    except ImportError:
+        raise click.ClickException(
+            "gptme-usage is required for cost estimation.\n"
+            "Install with: pip install gptme-sessions[cost]"
+        )
+
+    if last_7d:
+        days = 7
+
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.query()
+    summary = analyze_costs(records, days=days)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "session_count": summary.session_count,
+                    "priced_count": summary.priced_count,
+                    "total_cost": summary.total_cost,
+                    "avg_cost": summary.avg_cost,
+                    "by_model": {
+                        m: {
+                            "count": s.count,
+                            "total_cost": s.total_cost,
+                            "avg_cost": s.avg_cost,
+                        }
+                        for m, s in summary.by_model.items()
+                    },
+                    "by_day": {
+                        d: {
+                            "count": s.count,
+                            "total_cost": s.total_cost,
+                        }
+                        for d, s in summary.by_day.items()
+                    },
+                },
+                indent=2,
+            )
+        )
+    else:
+        click.echo(format_cost_summary(summary, daily=daily, by_model=by_model))
+
+
 def main() -> int:
     """Entry point for console_scripts (backward-compatible wrapper).
 

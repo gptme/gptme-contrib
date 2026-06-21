@@ -1908,6 +1908,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+cost = [
+    { name = "gptme-usage" },
+]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
@@ -1919,12 +1922,13 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
+    { name = "gptme-usage", marker = "extra == 'cost'", editable = "packages/gptme-usage" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.0" },
 ]
-provides-extras = ["dev", "test"]
+provides-extras = ["cost", "dev", "test"]
 
 [[package]]
 name = "gptme-subscription"
