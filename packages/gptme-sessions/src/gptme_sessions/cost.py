@@ -9,10 +9,11 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .record import SessionRecord
+    from gptme_usage.harness_models import HarnessQuotaConfig
 
 
 @dataclass
@@ -46,7 +47,7 @@ class CostSummary:
         return self.total_cost / self.priced_count if self.priced_count else 0.0
 
 
-def _load_pricing_config():
+def _load_pricing_config() -> "HarnessQuotaConfig | None":
     """Load the pricing config once, returning the HarnessQuotaConfig or None."""
     try:
         from gptme_usage.harness_models import load_quota_config
@@ -74,6 +75,7 @@ def estimate_record_cost(record: "SessionRecord") -> float | None:
     global _PRICING_CONFIG
     if _PRICING_CONFIG is _UNSET:
         _PRICING_CONFIG = _load_pricing_config()
+    config = cast("HarnessQuotaConfig | None", _PRICING_CONFIG)
 
     harness = record.harness or "unknown"
     model = record.model or "unknown"
@@ -86,7 +88,7 @@ def estimate_record_cost(record: "SessionRecord") -> float | None:
         cache_creation_tokens=record.cache_creation_tokens,
         cache_read_tokens=record.cache_read_tokens,
         token_count=record.token_count,
-        config=_PRICING_CONFIG,
+        config=config,
     )
     return float(result) if result is not None else None
 
