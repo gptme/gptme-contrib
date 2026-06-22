@@ -19,6 +19,7 @@ Python packages for gptme agents.
 | **gptme_lessons_extras** | Lesson format validation and analysis | `uv pip install -e packages/gptme-lessons-extras` |
 | **gptme_contrib_lib** | Shared utilities across packages | `uv pip install -e packages/gptme-contrib-lib` |
 | **gptme_runloops** | Autonomous run loop infrastructure | `uv pip install -e packages/gptme-runloops` |
+| **gptme-cc-memory** | Typed, git-tracked, hook-injected session memory for Claude Code | `uv pip install -e packages/gptme-cc-memory` |
 
 ## Backward Compatibility
 
