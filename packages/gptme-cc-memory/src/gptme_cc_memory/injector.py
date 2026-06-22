@@ -103,13 +103,14 @@ def inject_memories(
     """
     try:
         blocks: list[str] = []
+        one_shot_files_to_clear: list[Path] = []
 
         # 1. Guidance (one-shot, cleared after delivery)
         if guidance_file:
             guidance = read_if_exists(guidance_file)
             if guidance:
                 blocks.append(f"## Guidance\n\n{guidance}\n\n")
-                clear_file(guidance_file)
+                one_shot_files_to_clear.append(guidance_file)
 
         # 2. Pending updates (content with stale-date pruning)
         if pending_updates_file:
@@ -130,7 +131,7 @@ def inject_memories(
             ctx = read_if_exists(pending_session_context_file)
             if ctx:
                 blocks.append(f"## Previous Session Context\n\n{ctx}\n\n")
-                clear_file(pending_session_context_file)
+                one_shot_files_to_clear.append(pending_session_context_file)
 
         # 5. Relevant memory entries (scored against prompt)
         relevant = select_relevant_memories(
@@ -160,6 +161,9 @@ def inject_memories(
                 result = truncated[:last_newline]
             else:
                 result = truncated
+
+        for one_shot_file in one_shot_files_to_clear:
+            clear_file(one_shot_file)
 
         return result
 

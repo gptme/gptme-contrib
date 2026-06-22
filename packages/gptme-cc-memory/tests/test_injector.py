@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 
 from gptme_cc_memory.injector import (
@@ -12,6 +13,17 @@ from gptme_cc_memory.injector import (
     prune_stale_pending_updates,
     read_if_exists,
 )
+
+VALID_FEEDBACK_MD = """\
+---
+name: never-skip-precommit
+description: Never bypass pre-commit hooks with --no-verify
+metadata:
+  type: feedback
+---
+
+Never use --no-verify to bypass pre-commit hooks.
+"""
 
 
 class TestReadIfExists:
@@ -123,3 +135,35 @@ class TestInjectMemories:
         )
         assert result is not None
         assert "Finish the migration" in result
+
+    def test_preserves_one_shot_files_when_recording_injections_fails(
+        self, tmp_path: Path, monkeypatch: Any
+    ):
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        meta_file = tmp_path / "metadata.json"
+        guidance = mem_dir / "guidance.md"
+        pending_context = mem_dir / "pending-session-context.md"
+        guidance.write_text("Remember to check tests first.")
+        pending_context.write_text("Continue the pre-commit hook review.")
+        (mem_dir / "feedback-precommit.md").write_text(VALID_FEEDBACK_MD)
+
+        def raise_recording_error(*args: object, **kwargs: object) -> None:
+            raise OSError("metadata state unavailable")
+
+        monkeypatch.setattr(
+            "gptme_cc_memory.injector.record_memory_injections",
+            raise_recording_error,
+        )
+
+        result = inject_memories(
+            "Don't bypass pre-commit hooks with --no-verify",
+            memory_dir=mem_dir,
+            metadata_file=meta_file,
+            guidance_file=guidance,
+            pending_session_context_file=pending_context,
+        )
+
+        assert result is None
+        assert guidance.read_text() == "Remember to check tests first."
+        assert pending_context.read_text() == "Continue the pre-commit hook review."
