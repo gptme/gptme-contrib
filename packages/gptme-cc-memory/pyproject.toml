@@ -22,6 +22,7 @@ dependencies = [
 [project.scripts]
 gptme-cc-memory-extract = "gptme_cc_memory.extractor:main"
 gptme-cc-memory-prompt-submit = "gptme_cc_memory.hooks.prompt_submit:main"
+gptme-cc-memory-stop-hook = "gptme_cc_memory.hooks.stop_hook:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
