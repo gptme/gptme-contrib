@@ -14,6 +14,11 @@
 
 set -euo pipefail
 
+# Guard: require CC_TRAJECTORY_FILE — graceful degradation if absent
+if [[ -z "${CC_TRAJECTORY_FILE:-}" ]]; then
+  exit 0
+fi
+
 # Resolve this script's directory (works with symlinks via realpath)
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 EXTRACTOR="${SCRIPT_DIR}/../extractor.py"

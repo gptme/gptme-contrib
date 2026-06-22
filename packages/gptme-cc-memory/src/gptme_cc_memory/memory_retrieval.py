@@ -277,8 +277,6 @@ def _entry_referenced(
             overlap = len(set(alias_tokens) & text_tokens)
             if overlap / len(alias_tokens) >= 0.75:
                 return True
-        if len(alias_tokens) >= 3 and set(alias_tokens).issubset(text_tokens):
-            return True
     return False
 
 

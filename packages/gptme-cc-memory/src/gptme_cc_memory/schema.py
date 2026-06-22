@@ -45,6 +45,7 @@ TYPE_INJECTION_PRIORITY: dict[str, int] = {
 # Default confidence by type (used when metadata.json has no entry)
 DEFAULT_CONFIDENCE_BY_TYPE: dict[str, float] = {
     "feedback": 0.88,
+    "user": 0.75,
     "project": 0.78,
     "reference": 0.72,
 }

@@ -13,10 +13,7 @@ Design principles:
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -155,7 +152,14 @@ def inject_memories(
 
         result = "\n".join(blocks).strip()
         if len(result) > max_chars:
-            result = result[:max_chars]
+            # Truncate at the last newline before the limit to avoid cutting
+            # mid-tag or mid-word
+            truncated = result[:max_chars]
+            last_newline = truncated.rfind("\n")
+            if last_newline > 0:
+                result = truncated[:last_newline]
+            else:
+                result = truncated
 
         return result
 
@@ -163,45 +167,11 @@ def inject_memories(
         return None
 
 
-def main() -> None:
-    """CLI entry point for the injector (UserPromptSubmit hook)."""
-    # Read stdin: JSON with {session_id, transcript_path, prompt}
-    try:
-        input_data = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, OSError):
-        return
-
-    prompt = input_data.get("prompt", "")
-    if not prompt:
-        return
-
-    # Resolve paths from environment or defaults
-    workspace = Path(os.environ.get("GPTME_CC_MEMORY_DIR", os.getcwd()))
-    memory_dir = workspace / "memory"
-    state_dir = workspace / "state" / "cc-memory"
-    metadata_file = state_dir / "metadata.json"
-
-    if not memory_dir.is_dir():
-        return
-
-    guidance_file = memory_dir / "guidance.md"
-    pending_updates_file = memory_dir / "pending-updates.md"
-    pending_items_file = memory_dir / "pending-items.md"
-    pending_session_context_file = memory_dir / "pending-session-context.md"
-
-    result = inject_memories(
-        prompt,
-        memory_dir=memory_dir,
-        metadata_file=metadata_file,
-        guidance_file=guidance_file,
-        pending_updates_file=pending_updates_file,
-        pending_items_file=pending_items_file,
-        pending_session_context_file=pending_session_context_file,
-    )
-
-    if result:
-        print(result)
-
-
 if __name__ == "__main__":
-    main()
+    # The canonical CLI entry point is gptme-cc-memory-prompt-submit
+    # (registered in pyproject.toml [project.scripts]), which calls
+    # gptme_cc_memory.hooks.prompt_submit.main(). This __main__ guard
+    # is kept for direct invocation via `python3 -m gptme_cc_memory.injector`.
+    from gptme_cc_memory.hooks.prompt_submit import main as _main
+
+    _main()
