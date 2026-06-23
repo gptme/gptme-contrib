@@ -357,10 +357,10 @@ def main() -> None:
 
     result = extract_memories(trajectory_path)
 
-    # Write to memory directory if configured
+    # Match hooks.prompt_submit: GPTME_CC_MEMORY_DIR points at the workspace root.
     memory_dir_env = os.environ.get("GPTME_CC_MEMORY_DIR")
     if memory_dir_env:
-        memory_dir = Path(memory_dir_env)
+        memory_dir = Path(memory_dir_env) / "memory"
         memory_dir.mkdir(parents=True, exist_ok=True)
 
         updates = format_pending_updates(result)

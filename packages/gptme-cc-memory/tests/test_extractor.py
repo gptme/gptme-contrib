@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 
@@ -131,6 +132,27 @@ class TestExtractMemories:
         result = extract_memories(traj)
         assert len(result.corrections) >= 1
         assert len(result.confirmations) >= 1
+
+    def test_main_writes_pending_files_under_workspace_memory_dir(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from gptme_cc_memory import extractor
+
+        traj = tmp_path / "trajectory.jsonl"
+        workspace = tmp_path / "workspace"
+        memory_dir = workspace / "memory"
+
+        with open(traj, "w", encoding="utf-8") as f:
+            for msg in CORRECTION_TRAJECTORY:
+                f.write(json.dumps(msg) + "\n")
+
+        monkeypatch.setenv("GPTME_CC_MEMORY_DIR", str(workspace))
+        monkeypatch.setattr(sys, "argv", ["extractor", str(traj)])
+
+        extractor.main()
+
+        assert (memory_dir / "pending-updates.md").exists()
+        assert (memory_dir / "pending-session-context.md").exists()
 
 
 class TestFormatOutput:
