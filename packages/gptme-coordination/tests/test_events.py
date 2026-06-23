@@ -248,12 +248,42 @@ class TestStaleClaims:
         assert fetched.state == "pending"
         assert fetched.retry_count == 1  # retry_count is bumped on stale release
 
-    def test_stale_release_retry_count_enables_dead_letter(self, queue):
-        """Crash-looping processor: stale releases bump retry_count so
-        max_retries is eventually reached when the processor fails."""
+    def test_stale_release_dead_letters_when_retries_exhausted(self, queue):
+        """Crash-looping processor: stale release dead-letters directly when
+        retry_count + 1 >= max_retries, without needing an explicit fail()."""
         ev = queue.ingest("pr_update_general", "github", "key1", max_retries=1)
         assert ev is not None
-        # Simulate claim → crash → stale release loop
+        # First stale release: retry_count 0→1, which meets max_retries=1 → dead_letter directly
+        queue.claim_next("agent-1")
+        queue.db.conn.execute(
+            "UPDATE events SET claimed_at = datetime('now', '-3 hours') WHERE id = ?",
+            (ev.id,),
+        )
+        released = queue.release_stale_claims(older_than_minutes=120)
+        assert released == 1
+        fetched = queue.get(ev.id)
+        assert fetched is not None
+        assert (
+            fetched.state == "dead_letter"
+        )  # dead-lettered directly, no fail() needed
+        assert fetched.retry_count == 1
+
+    def test_stale_release_retries_before_exhaustion(self, queue):
+        """Stale release resets to pending while retries remain."""
+        ev = queue.ingest("pr_update_general", "github", "key1", max_retries=3)
+        assert ev is not None
+        # First stale release: retry_count 0→1, still below max_retries=3 → pending
+        queue.claim_next("agent-1")
+        queue.db.conn.execute(
+            "UPDATE events SET claimed_at = datetime('now', '-3 hours') WHERE id = ?",
+            (ev.id,),
+        )
+        queue.release_stale_claims(older_than_minutes=120)
+        fetched = queue.get(ev.id)
+        assert fetched is not None
+        assert fetched.state == "pending"
+        assert fetched.retry_count == 1
+        # Two more stale releases: retry_count 1→2→3, hits max_retries=3 on the last
         for _ in range(2):
             queue.claim_next("agent-1")
             queue.db.conn.execute(
@@ -261,13 +291,7 @@ class TestStaleClaims:
                 (ev.id,),
             )
             queue.release_stale_claims(older_than_minutes=120)
-        # After 2 stale releases, retry_count should be 2 (past max_retries=1)
-        fetched = queue.get(ev.id)
-        assert fetched is not None
-        assert fetched.retry_count == 2
-        # Next claim + explicit fail should dead-letter (retry_count >= max_retries)
-        queue.claim_next("agent-1")
-        queue.fail(ev.id)
         fetched = queue.get(ev.id)
         assert fetched is not None
         assert fetched.state == "dead_letter"
+        assert fetched.retry_count == 3

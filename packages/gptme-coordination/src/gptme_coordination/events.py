@@ -8,7 +8,7 @@ backpressure gating.
 State machine:
     pending → claimed → completed (via complete())
                     └→ pending/retry → dead_letter (via fail(), when retries exhausted)
-                    └→ pending (via release_stale_claims(), crash recovery)
+                    └→ pending/dead_letter (via release_stale_claims(), crash recovery)
     dead_letter → pending (via retry(), manual)
     dead_letter → completed (via discard(), manual)
 """
@@ -362,15 +362,16 @@ class EventQueue:
         """Return stale claimed events to pending (for crashed processors).
 
         Events claimed more than ``older_than_minutes`` ago without completion
-        are assumed abandoned and reset to pending for retry.
-
-        Increments ``retry_count`` so that a consistently crashing processor
-        will eventually hit ``max_retries`` on the next ``fail()`` call and
-        dead-letter the event.
+        are assumed abandoned. If retries remain, the event is reset to
+        pending; if ``retry_count + 1 >= max_retries``, it is dead-lettered
+        directly — ensuring a consistently-crashing processor cannot cycle
+        an event forever without ``fail()`` ever being called.
         """
         rows = self.db.conn.execute(
             """UPDATE events
-            SET state = 'pending', claimed_by = NULL, claimed_at = NULL,
+            SET state = CASE WHEN retry_count + 1 >= max_retries THEN 'dead_letter' ELSE 'pending' END,
+                claimed_by = NULL, claimed_at = NULL,
+                completed_at = CASE WHEN retry_count + 1 >= max_retries THEN datetime('now') ELSE NULL END,
                 retry_count = retry_count + 1
             WHERE state IN ('claimed', 'processing')
               AND claimed_at < datetime('now', ? || ' minutes')""",
