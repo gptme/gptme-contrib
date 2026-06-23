@@ -72,14 +72,14 @@ Add to your `.claude/settings.local.json`:
 ```json
 {
   "hooks": {
-    "PostToolUseSubmit": "gptme-cc-memory-stop-hook"
+    "Stop": "gptme-cc-memory-stop-hook"
   }
 }
 ```
 
 ### 4. The pipeline runs automatically
 
-- **Stop hook**: After each session, the extractor reads the trajectory and writes
+- **Stop hook**: When the session ends, the extractor reads the trajectory and writes
   pending updates, pending items, and new feedback memories.
 - **Prompt injection**: At the next session start, `prompt-inject` reads the memory
   directory, scores each file, and injects the top-N relevant memories.

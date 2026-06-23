@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Claude Code PostToolUseSubmit hook — async memory extraction.
+# Claude Code Stop hook — async memory extraction.
 #
 # Reads the trajectory file from the CC_TRAJECTORY_FILE env var and runs the
 # extractor. Configure in .claude/settings.local.json:
 #
 #   {
 #     "hooks": {
-#       "PostToolUseSubmit": "gptme-cc-memory-stop-hook"
+#       "Stop": "gptme-cc-memory-stop-hook"
 #     }
 #   }
 #
