@@ -2,7 +2,6 @@
 match:
   keywords:
     - "--comments | tail"
-    - "gh issue view --comments"
   session_categories: [cross-repo, code]
 status: active
 description: "NEVER truncate GitHub comment output."
