@@ -38,6 +38,31 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient);
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    thread_key TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    max_retries INTEGER NOT NULL DEFAULT 3,
+    external_id TEXT,
+    repo TEXT,
+    number INTEGER,
+    title TEXT,
+    url TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    claimed_at TEXT,
+    completed_at TEXT,
+    claimed_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_state ON events(state);
+CREATE INDEX IF NOT EXISTS idx_events_thread ON events(thread_key);
+CREATE INDEX IF NOT EXISTS idx_events_priority ON events(priority);
 """
 
 
@@ -116,6 +141,42 @@ class CoordinationDB:
             conn.execute("ALTER TABLE work ADD COLUMN hmac TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists (or work table doesn't exist yet)
+
+        # Create events table if it doesn't exist (pre-schema databases)
+        existing_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "events" not in existing_tables:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trigger_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    thread_key TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    max_retries INTEGER NOT NULL DEFAULT 3,
+                    external_id TEXT,
+                    repo TEXT,
+                    number INTEGER,
+                    title TEXT,
+                    url TEXT,
+                    payload_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    claimed_at TEXT,
+                    completed_at TEXT,
+                    claimed_by TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_state ON events(state);
+                CREATE INDEX IF NOT EXISTS idx_events_thread ON events(thread_key);
+                CREATE INDEX IF NOT EXISTS idx_events_priority ON events(priority);
+                """
+            )
 
     def close(self) -> None:
         if self._conn is not None:
