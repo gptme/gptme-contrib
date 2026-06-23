@@ -4,7 +4,7 @@ status: active
 match:
   keywords:
     - named watch task
-    - watch for event results
+    - upcoming event trigger
   session_categories: [cross-repo, strategic]
 ---
 
