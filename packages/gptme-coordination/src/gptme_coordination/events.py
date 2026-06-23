@@ -49,7 +49,7 @@ class Event:
     trigger_type: str
     source: str
     thread_key: str
-    state: str  # pending, claimed, processing, completed, failed, dead_letter
+    state: str  # pending, claimed, completed, dead_letter (processing is reserved)
     priority: int
     retry_count: int
     max_retries: int
@@ -91,7 +91,6 @@ class QueueStats:
     pending: int
     claimed: int
     completed: int
-    failed: int
     dead_letter: int
     oldest_pending_seconds: float | None
 
@@ -355,7 +354,6 @@ class EventQueue:
             pending=counts.get("pending", 0),
             claimed=counts.get("claimed", 0) + counts.get("processing", 0),
             completed=counts.get("completed", 0),
-            failed=counts.get("failed", 0),
             dead_letter=counts.get("dead_letter", 0),
             oldest_pending_seconds=oldest_pending_seconds,
         )

@@ -195,7 +195,6 @@ def cmd_queue_stats(args: argparse.Namespace) -> int:
         print(f"pending:     {stats.pending}")
         print(f"claimed:     {stats.claimed}")
         print(f"completed:   {stats.completed}")
-        print(f"failed:      {stats.failed}")
         print(f"dead_letter: {stats.dead_letter}")
         if stats.oldest_pending_seconds is not None:
             minutes = int(stats.oldest_pending_seconds / 60)
@@ -339,7 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("queue-list", help="List events in the queue")
     p.add_argument(
         "--state",
-        help="Filter by state (pending, claimed, completed, failed, dead_letter)",
+        help="Filter by state (pending, claimed, completed, dead_letter)",
     )
     p.add_argument("--repo", help="Filter by repo (owner/repo)")
     p.add_argument(
