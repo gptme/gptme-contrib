@@ -246,3 +246,28 @@ class TestStaleClaims:
         fetched = queue.get(ev.id)
         assert fetched is not None
         assert fetched.state == "pending"
+        assert fetched.retry_count == 1  # retry_count is bumped on stale release
+
+    def test_stale_release_retry_count_enables_dead_letter(self, queue):
+        """Crash-looping processor: stale releases bump retry_count so
+        max_retries is eventually reached when the processor fails."""
+        ev = queue.ingest("pr_update_general", "github", "key1", max_retries=1)
+        assert ev is not None
+        # Simulate claim → crash → stale release loop
+        for _ in range(2):
+            queue.claim_next("agent-1")
+            queue.db.conn.execute(
+                "UPDATE events SET claimed_at = datetime('now', '-3 hours') WHERE id = ?",
+                (ev.id,),
+            )
+            queue.release_stale_claims(older_than_minutes=120)
+        # After 2 stale releases, retry_count should be 2 (past max_retries=1)
+        fetched = queue.get(ev.id)
+        assert fetched is not None
+        assert fetched.retry_count == 2
+        # Next claim + explicit fail should dead-letter (retry_count >= max_retries)
+        queue.claim_next("agent-1")
+        queue.fail(ev.id)
+        fetched = queue.get(ev.id)
+        assert fetched is not None
+        assert fetched.state == "dead_letter"

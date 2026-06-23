@@ -6,9 +6,11 @@ priority scoring, deduplication via thread_key, retry with dead-letter, and
 backpressure gating.
 
 State machine:
-    pending → claimed → completed
-                    └→ failed → (retry if retry_count < max_retries)
-                            └→ dead_letter (when retries exhausted)
+    pending → claimed → completed (via complete())
+                    └→ pending/retry → dead_letter (via fail(), when retries exhausted)
+                    └→ pending (via release_stale_claims(), crash recovery)
+    dead_letter → pending (via retry(), manual)
+    dead_letter → completed (via discard(), manual)
 """
 
 from __future__ import annotations
@@ -184,15 +186,15 @@ class EventQueue:
         conn = self.db.conn
         conn.execute("BEGIN IMMEDIATE")
         try:
-            # Select the highest-priority pending event (age-boosted)
-            # SQLite doesn't support computed columns in ORDER BY for this pattern,
-            # so we approximate by ordering by (priority - age_boost_approximation).
-            # The effective priority is computed in Python after fetch.
+            # Select the highest-priority pending event (age-boosted).
+            # Age boost prevents low-priority events from starving: older events
+            # gain a priority bonus of AGE_BOOST_RATE per hour, capped at AGE_BOOST_CAP.
             row = conn.execute(
                 """SELECT id FROM events
                 WHERE state = 'pending'
-                ORDER BY priority DESC, created_at ASC
-                LIMIT 1"""
+                ORDER BY (priority + MIN(CAST((julianday('now') - julianday(created_at)) * 24 * ? AS INTEGER), ?)) DESC, created_at ASC
+                LIMIT 1""",
+                (AGE_BOOST_RATE, AGE_BOOST_CAP),
             ).fetchone()
             if row is None:
                 conn.execute("ROLLBACK")
@@ -277,13 +279,13 @@ class EventQueue:
             raise
 
     def retry(self, event_id: int) -> bool:
-        """Manually retry a dead-lettered or failed event (resets retry count)."""
+        """Manually retry a dead-lettered event (resets retry count)."""
         rows = self.db.conn.execute(
             """UPDATE events
             SET state = 'pending', retry_count = 0, result = NULL,
                 result_detail = NULL, claimed_by = NULL, claimed_at = NULL,
                 completed_at = NULL
-            WHERE id = ? AND state IN ('dead_letter', 'failed')""",
+            WHERE id = ? AND state IN ('dead_letter')""",
             (event_id,),
         )
         return bool(rows.rowcount > 0)
@@ -363,10 +365,15 @@ class EventQueue:
 
         Events claimed more than ``older_than_minutes`` ago without completion
         are assumed abandoned and reset to pending for retry.
+
+        Increments ``retry_count`` so that a consistently crashing processor
+        will eventually hit ``max_retries`` on the next ``fail()`` call and
+        dead-letter the event.
         """
         rows = self.db.conn.execute(
             """UPDATE events
-            SET state = 'pending', claimed_by = NULL, claimed_at = NULL
+            SET state = 'pending', claimed_by = NULL, claimed_at = NULL,
+                retry_count = retry_count + 1
             WHERE state IN ('claimed', 'processing')
               AND claimed_at < datetime('now', ? || ' minutes')""",
             (str(-older_than_minutes),),

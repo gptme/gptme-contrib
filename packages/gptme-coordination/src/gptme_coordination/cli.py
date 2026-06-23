@@ -241,7 +241,7 @@ def cmd_queue_retry(args: argparse.Namespace) -> int:
             print(f"retrying event {args.event_id}")
             return 0
         print(
-            f"FAILED — event {args.event_id} not in dead_letter or failed state",
+            f"FAILED — event {args.event_id} not in dead_letter state",
             file=sys.stderr,
         )
         return 1
@@ -255,7 +255,10 @@ def cmd_queue_discard(args: argparse.Namespace) -> int:
         if ok:
             print(f"discarded event {args.event_id}")
             return 0
-        print(f"FAILED — event {args.event_id} already completed", file=sys.stderr)
+        print(
+            f"FAILED — event {args.event_id} not found or already completed",
+            file=sys.stderr,
+        )
         return 1
 
 
