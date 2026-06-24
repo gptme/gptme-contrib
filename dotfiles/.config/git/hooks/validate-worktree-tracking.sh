@@ -27,6 +27,10 @@ push_remote_refs=()
 all_deletions=true
 any_pushed=false
 while read -r _local_ref local_sha remote_ref _remote_sha; do
+    # Skip blank lines. An up-to-date push ("Everything up-to-date") makes git
+    # invoke the hook with empty stdin; the caller may forward a single empty
+    # line. Treating that as a real ref produced a false "no upstream" error.
+    [ -z "$local_sha$remote_ref" ] && continue
     push_remote_refs+=("$remote_ref")
     any_pushed=true
     if [ "$local_sha" != "$ZERO" ]; then
@@ -34,9 +38,14 @@ while read -r _local_ref local_sha remote_ref _remote_sha; do
     fi
 done
 
+# Nothing actually being pushed (empty stdin / up-to-date) — nothing to validate.
+if [ "$any_pushed" = false ]; then
+    exit 0
+fi
+
 # Skip if push contains only branch deletions (e.g. `git push origin --delete BRANCH`).
 # The current branch's upstream is irrelevant when we're not pushing it.
-if [ "$any_pushed" = true ] && [ "$all_deletions" = true ]; then
+if [ "$all_deletions" = true ]; then
     exit 0
 fi
 
@@ -91,8 +100,7 @@ if [ "$upstream" = "origin/master" ] || [ "$upstream" = "origin/main" ]; then
             break
         fi
     done
-    # Also block when stdin was empty (e.g. plain `git push` with no refspecs)
-    if [ "$pushing_to_default" = true ] || [ ${#push_remote_refs[@]} -eq 0 ]; then
+    if [ "$pushing_to_default" = true ]; then
         echo "🚫 ERROR: Branch '$current_branch' tracks '$upstream'!"
         echo ""
         echo "   This will push your feature branch directly to master/main."
