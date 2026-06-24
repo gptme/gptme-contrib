@@ -2,8 +2,9 @@
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import parseaddr
 
-from gptmail.lib import _is_html, _utf8_qp
+from gptmail.lib import _format_address_header, _is_html, _utf8_qp
 
 
 def test_is_html_detects_html():
@@ -54,3 +55,90 @@ def test_ascii_subject_not_encoded():
     raw = msg.as_string()
     assert "Subject: Daily Update - 2026-02-16" in raw
     assert "=?utf-8?" not in raw
+
+
+# ---------------------------------------------------------------------------
+# Address-header construction (regression: non-ASCII display name → undeliverable)
+# ---------------------------------------------------------------------------
+
+
+def test_format_address_header_ascii_name():
+    """An ASCII ``Name <addr>`` keeps a parseable addr-spec."""
+    value = _format_address_header("Erik Bjareholt <erik@bjareho.lt>")
+    name, addr = parseaddr(value)
+    assert addr == "erik@bjareho.lt"
+
+
+def test_format_address_header_non_ascii_name_keeps_addr_spec():
+    """A non-ASCII display name must NOT swallow the addr-spec.
+
+    Regression for the silent-non-delivery bug: assigning a raw
+    ``"Erik Bjäreholt <erik@bjareho.lt>"`` to an email header makes Python's
+    serializer treat the WHOLE string as one non-ASCII phrase and RFC2047-encode
+    it, producing a To: with no parseable ``<addr>`` → undeliverable.
+    """
+    value = _format_address_header("Erik Bjäreholt <erik@bjareho.lt>")
+    # The addr-spec must survive as a real, parseable address.
+    name, addr = parseaddr(value)
+    assert addr == "erik@bjareho.lt", f"addr-spec lost: {value!r}"
+    # The whole string must NOT be wrapped as a single encoded phrase.
+    assert "<erik@bjareho.lt>" in value, f"angle-addr missing: {value!r}"
+    # Non-ASCII name must be RFC2047-encoded (not raw bytes in the header).
+    assert value.isascii(), f"header not ASCII-safe: {value!r}"
+
+
+def test_format_address_header_bare_address():
+    """A bare address (no display name) is returned usable."""
+    value = _format_address_header("erik@bjareho.lt")
+    _, addr = parseaddr(value)
+    assert addr == "erik@bjareho.lt"
+
+
+def test_send_to_header_non_ascii_name_is_deliverable(tmp_path, monkeypatch):
+    """End-to-end: AgentEmail.send must emit a deliverable To: header.
+
+    Composes a reply to a non-ASCII display-name recipient, stubs out msmtp,
+    and asserts the serialized To: header carries a parseable addr-spec.
+    """
+    from email import message_from_bytes
+    from email.utils import getaddresses
+
+    from gptmail import lib
+
+    sent_payloads: list[bytes] = []
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def _fake_run(cmd, input=None, **kwargs):  # noqa: A002 - mirrors subprocess API
+        sent_payloads.append(input)
+        return _FakeCompleted()
+
+    monkeypatch.setattr(lib.subprocess, "run", _fake_run)
+
+    email_dir = tmp_path / "email"
+    for subdir in ["inbox", "sent", "archive", "drafts", "filters"]:
+        (email_dir / subdir).mkdir(parents=True, exist_ok=True)
+
+    agent = lib.AgentEmail(str(tmp_path), own_email="bob@superuserlabs.org")
+    monkeypatch.setattr(agent, "_validate_msmtp_config", lambda: True)
+    monkeypatch.setattr(
+        agent, "_get_msmtp_account_for_address", lambda addr: "default"
+    )
+    monkeypatch.setattr(agent.rate_limiter, "can_proceed", lambda: True)
+
+    # Markdown body → exercises the MIMEMultipart To path.
+    message_id = agent.compose(
+        "Erik Bjäreholt <erik@bjareho.lt>",
+        "Re: hello",
+        "Thanks for the note!",
+    )
+    agent.send(message_id)
+
+    assert sent_payloads, "msmtp was never invoked"
+    parsed = message_from_bytes(sent_payloads[0])
+    to_header = parsed["To"]
+    addrs = [addr for _, addr in getaddresses([to_header])]
+    assert "erik@bjareho.lt" in addrs, f"To header undeliverable: {to_header!r}"
