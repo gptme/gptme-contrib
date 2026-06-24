@@ -98,7 +98,7 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
     # Validate timestamps
     for field in ["created", "modified"]:
         if field in metadata:
-            if error := validate_timestamp(cast("str | datetime", metadata[field])):
+            if error := validate_timestamp(cast("str | datetime | date", metadata[field])):
                 errors.append(f"Field '{field}': {error}")
 
     # Validate optional fields
@@ -137,7 +137,7 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
     # Validate waiting_since timestamp
     if "waiting_since" in metadata:
         if error := validate_timestamp(
-            cast("str | datetime", metadata["waiting_since"])
+            cast("str | datetime | date", metadata["waiting_since"])
         ):
             errors.append(f"Field 'waiting_since': {error}")
 
