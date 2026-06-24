@@ -24,6 +24,7 @@ from gptme_coordination.db import (
     CoordinationDB,
     resolve_coordination_db_path,
 )
+from gptme_coordination.events import EventQueue
 from gptme_coordination.messages import MessageBus
 from gptme_coordination.work import WorkClaim, WorkClaimManager
 
@@ -167,6 +168,99 @@ def cmd_announce(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_queue_list(args: argparse.Namespace) -> int:
+    db_path = args.db or get_db_path()
+    with CoordinationDB(db_path) as db:
+        queue = EventQueue(db)
+        events = queue.list_events(state=args.state, repo=args.repo, limit=args.limit)
+        if not events:
+            print("(no events)")
+            return 0
+        for ev in events:
+            age = ""
+            if ev.state == "pending":
+                age = f" eff={ev.effective_priority}"
+            title_part = f" — {ev.title}" if ev.title else ""
+            print(
+                f"[{ev.id}] {ev.state:<12} {ev.trigger_type:<22} {ev.thread_key}{title_part}{age}"
+            )
+        return 0
+
+
+def cmd_queue_stats(args: argparse.Namespace) -> int:
+    db_path = args.db or get_db_path()
+    with CoordinationDB(db_path) as db:
+        queue = EventQueue(db)
+        stats = queue.stats()
+        print(f"pending:     {stats.pending}")
+        print(f"claimed:     {stats.claimed}")
+        print(f"completed:   {stats.completed}")
+        print(f"dead_letter: {stats.dead_letter}")
+        if stats.oldest_pending_seconds is not None:
+            minutes = int(stats.oldest_pending_seconds / 60)
+            print(f"oldest_pending: {minutes}m")
+        return 0
+
+
+def cmd_queue_ingest(args: argparse.Namespace) -> int:
+    import json as _json
+
+    db_path = args.db or get_db_path()
+    payload = _json.loads(args.payload) if args.payload else None
+    with CoordinationDB(db_path) as db:
+        queue = EventQueue(db)
+        event = queue.ingest(
+            trigger_type=args.trigger_type,
+            source=args.source,
+            thread_key=args.thread_key,
+            external_id=args.external_id,
+            repo=args.repo,
+            number=args.number,
+            title=args.title,
+            url=args.url,
+            payload=payload,
+            priority=args.priority,
+            dedup_window_minutes=args.dedup_window,
+        )
+        if event is None:
+            print(f"skipped (duplicate within dedup window): {args.thread_key}")
+            return 0
+        print(
+            f"ingested event {event.id} ({event.trigger_type}) thread={event.thread_key}"
+        )
+        return 0
+
+
+def cmd_queue_retry(args: argparse.Namespace) -> int:
+    db_path = args.db or get_db_path()
+    with CoordinationDB(db_path) as db:
+        queue = EventQueue(db)
+        ok = queue.retry(args.event_id)
+        if ok:
+            print(f"retrying event {args.event_id}")
+            return 0
+        print(
+            f"FAILED — event {args.event_id} not in dead_letter state",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def cmd_queue_discard(args: argparse.Namespace) -> int:
+    db_path = args.db or get_db_path()
+    with CoordinationDB(db_path) as db:
+        queue = EventQueue(db)
+        ok = queue.discard(args.event_id)
+        if ok:
+            print(f"discarded event {args.event_id}")
+            return 0
+        print(
+            f"FAILED — event {args.event_id} not found or already completed",
+            file=sys.stderr,
+        )
+        return 1
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     db_path = args.db or get_db_path()
     with CoordinationDB(db_path) as db:
@@ -240,6 +334,51 @@ def build_parser() -> argparse.ArgumentParser:
     # status
     sub.add_parser("status", help="Show coordination DB status")
 
+    # queue list
+    p = sub.add_parser("queue-list", help="List events in the queue")
+    p.add_argument(
+        "--state",
+        help="Filter by state (pending, claimed, completed, dead_letter)",
+    )
+    p.add_argument("--repo", help="Filter by repo (owner/repo)")
+    p.add_argument(
+        "--limit", type=int, default=50, help="Max events to show (default: 50)"
+    )
+
+    # queue stats
+    sub.add_parser("queue-stats", help="Show event queue statistics")
+
+    # queue ingest
+    p = sub.add_parser("queue-ingest", help="Ingest an event into the queue")
+    p.add_argument(
+        "trigger_type", help="Event trigger type (e.g. pr_update, ci_failure_pr)"
+    )
+    p.add_argument("source", help="Event source (e.g. github, systemd)")
+    p.add_argument("thread_key", help="Dedup key (e.g. gptme/gptme:2949)")
+    p.add_argument("--external-id", help="External ID (e.g. GitHub notification ID)")
+    p.add_argument("--repo", help="Repository (owner/repo)")
+    p.add_argument("--number", type=int, help="Issue/PR number")
+    p.add_argument("--title", help="Event title")
+    p.add_argument("--url", help="Event URL")
+    p.add_argument("--payload", help="JSON payload string")
+    p.add_argument(
+        "--priority", type=int, help="Override priority (default: from trigger type)"
+    )
+    p.add_argument(
+        "--dedup-window",
+        type=int,
+        default=30,
+        help="Dedup window in minutes (default: 30)",
+    )
+
+    # queue retry
+    p = sub.add_parser("queue-retry", help="Retry a dead-lettered event")
+    p.add_argument("event_id", type=int, help="Event ID to retry")
+
+    # queue discard
+    p = sub.add_parser("queue-discard", help="Discard an event")
+    p.add_argument("event_id", type=int, help="Event ID to discard")
+
     return parser
 
 
@@ -253,6 +392,11 @@ COMMANDS = {
     "send": cmd_send,
     "announce": cmd_announce,
     "status": cmd_status,
+    "queue-list": cmd_queue_list,
+    "queue-stats": cmd_queue_stats,
+    "queue-ingest": cmd_queue_ingest,
+    "queue-retry": cmd_queue_retry,
+    "queue-discard": cmd_queue_discard,
 }
 
 
