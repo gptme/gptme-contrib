@@ -79,7 +79,7 @@ def _is_html(text: str) -> bool:
 def _format_address_header(value: str) -> str:
     """Build an RFC 5322-valid address-header value from a ``Name <addr>`` string.
 
-    A raw ``"Erik Bjäreholt <erik@bjareho.lt>"`` assigned directly to an email
+    A raw ``"Recipient Name <recipient@example.com>"`` assigned directly to an email
     header is mishandled by Python's serializer when the display name is
     non-ASCII: the *entire* string is treated as one non-ASCII phrase and
     RFC2047-encoded, producing a header with no parseable addr-spec (e.g.
@@ -793,7 +793,7 @@ class AgentEmail:
                 from_value = from_email
 
             # Build an RFC 5322-valid To header. A raw "Name <addr>" with a
-            # non-ASCII display name (e.g. "Erik Bjäreholt <erik@bjareho.lt>")
+            # non-ASCII display name (e.g. "Recipient Name <recipient@example.com>")
             # gets serialized as a single encoded phrase with no parseable
             # addr-spec → accepted by the envelope but undeliverable. Split and
             # re-encode so only the name is RFC2047-encoded and <addr> survives.
