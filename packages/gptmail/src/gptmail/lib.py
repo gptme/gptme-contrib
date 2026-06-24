@@ -46,7 +46,13 @@ from email.message import EmailMessage, Message
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.policy import default
-from email.utils import format_datetime, getaddresses, parseaddr, parsedate_to_datetime
+from email.utils import (
+    format_datetime,
+    formataddr,
+    getaddresses,
+    parseaddr,
+    parsedate_to_datetime,
+)
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, Tuple
 
@@ -68,6 +74,32 @@ def _is_html(text: str) -> bool:
     """Detect if text content is already HTML."""
     stripped = text.strip().lower()
     return stripped.startswith(("<html", "<!doctype"))
+
+
+def _format_address_header(value: str) -> str:
+    """Build an RFC 5322-valid address-header value from a ``Name <addr>`` string.
+
+    A raw ``"Recipient Name <recipient@example.com>"`` assigned directly to an email
+    header is mishandled by Python's serializer when the display name is
+    non-ASCII: the *entire* string is treated as one non-ASCII phrase and
+    RFC2047-encoded, producing a header with no parseable addr-spec (e.g.
+    ``To: =?utf-8?b?...?=``) — which makes the message undeliverable while still
+    being accepted by the SMTP envelope.
+
+    This splits into ``(display-name, addr-spec)`` and re-joins with
+    :func:`email.utils.formataddr`, which RFC2047-encodes only the name and keeps
+    ``<addr>`` intact. Returns the address unchanged when there is no display
+    name.
+    """
+    name, addr = parseaddr(value)
+    if not addr:
+        # parseaddr couldn't find an addr-spec; return input untouched so the
+        # caller's downstream handling/fallbacks still apply.
+        return value
+    if not name:
+        return addr
+    # formataddr handles RFC2047 encoding of a non-ASCII name itself.
+    return formataddr((name, addr))
 
 
 def fix_list_spacing(markdown_text: str) -> str:
@@ -760,6 +792,13 @@ class AgentEmail:
             else:
                 from_value = from_email
 
+            # Build an RFC 5322-valid To header. A raw "Name <addr>" with a
+            # non-ASCII display name (e.g. "Recipient Name <recipient@example.com>")
+            # gets serialized as a single encoded phrase with no parseable
+            # addr-spec → accepted by the envelope but undeliverable. Split and
+            # re-encode so only the name is RFC2047-encoded and <addr> survives.
+            to_value = _format_address_header(recipient)
+
             subject = headers.get("Subject", "")
             date_value = headers.get("Date", format_datetime(datetime.now(timezone.utc)))
             message_id = headers.get("Message-ID", "")
@@ -771,7 +810,7 @@ class AgentEmail:
                 header_lines = [
                     "MIME-Version: 1.0",
                     f"From: {from_value}",
-                    f"To: {recipient}",
+                    f"To: {to_value}",
                     f"Date: {date_value}",
                     f"Subject: {subject}",
                     f"Message-ID: {message_id}",
@@ -789,7 +828,7 @@ class AgentEmail:
                 # plain text and HTML versions.
                 msg = MIMEMultipart("alternative")
                 msg["From"] = from_value
-                msg["To"] = recipient
+                msg["To"] = to_value
                 if subject.isascii():
                     msg["Subject"] = subject
                 else:
