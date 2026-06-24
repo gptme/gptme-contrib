@@ -961,29 +961,67 @@ def _log_dropout(
 
 
 def _apply_lesson_dropout(
-    matches: list[dict], session_id: str, workspace: Path
+    lessons: list[dict], session_id: str, workspace: Path
 ) -> list[dict]:
     """Randomly withhold lessons for causal leave-one-out analysis.
 
     Controlled by LESSON_DROPOUT_EPSILON (float [0,1]). Default 0 = no-op.
-    Withheld lessons are logged to state/lesson-dropout/<session_id>.jsonl.
-    Always logs when epsilon>0 (even if withheld=[]) so the analysis script can
-    distinguish epsilon>0 sessions from epsilon=0 sessions.
+    Does NOT log — logging is done by _apply_lesson_dropout_multi which
+    collects withheld lessons from both pools into one unified record.
     """
     epsilon = _get_dropout_epsilon()
-    if epsilon <= 0.0 or not matches:
-        return matches
+    if epsilon <= 0.0 or not lessons:
+        return lessons
 
     kept: list[dict] = []
-    withheld: list[dict] = []
-    for lesson in matches:
+    for lesson in lessons:
         if random.random() < epsilon:
-            withheld.append({"path": lesson["path"], "title": lesson.get("title", "")})
+            # Withheld — skip
+            pass
         else:
             kept.append(lesson)
 
-    _log_dropout(session_id, epsilon, withheld, workspace)
     return kept
+
+
+def _apply_lesson_dropout_multi(
+    matches: list[dict],
+    predicted: list[dict],
+    session_id: str,
+    workspace: Path,
+) -> tuple[list[dict], list[dict]]:
+    """Apply dropout to both matches and predicted, logging ONE unified record.
+
+    Processes both pools together so that the analysis script receives a
+    single JSONL record per hook invocation containing all withheld lessons,
+    not two split records with partial withheld lists.
+    """
+    epsilon = _get_dropout_epsilon()
+
+    # Always log when epsilon>0, even if both pools are empty, so
+    # lesson-loo-analysis.py can distinguish treatment-group sessions
+    # (epsilon>0, possibly 0 withheld) from control-group sessions (epsilon=0).
+    if epsilon <= 0.0:
+        return matches, predicted
+
+    withheld: list[dict] = []
+
+    def _do_dropout(lessons: list[dict]) -> list[dict]:
+        kept: list[dict] = []
+        for lesson in lessons:
+            if random.random() < epsilon:
+                withheld.append(
+                    {"path": lesson["path"], "title": lesson.get("title", "")}
+                )
+            else:
+                kept.append(lesson)
+        return kept
+
+    kept_matches = _do_dropout(matches)
+    kept_predicted = _do_dropout(predicted)
+
+    _log_dropout(session_id, epsilon, withheld, workspace)
+    return kept_matches, kept_predicted
 
 
 # --- Session state for cross-invocation dedup ---
@@ -1376,8 +1414,9 @@ def main():
     predicted = filter_held_out_lessons(predicted, holdout_lessons)
 
     # --- Randomized dropout for causal LOO (mirrors gptme/lessons/auto_include.py) ---
-    matches = _apply_lesson_dropout(matches, session_id, workspace)
-    predicted = _apply_lesson_dropout(predicted, session_id, workspace)
+    matches, predicted = _apply_lesson_dropout_multi(
+        matches, predicted, session_id, workspace
+    )
 
     context = format_lessons(matches, already_injected, predicted)
 
