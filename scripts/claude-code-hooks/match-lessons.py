@@ -55,6 +55,7 @@ under workspace/state/ and created automatically on first use.
 
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -914,6 +915,115 @@ def filter_held_out_lessons(
     ]
 
 
+# --- Randomized lesson-dropout for causal LOO ---
+# NOTE: Mirrors gptme/lessons/auto_include.py _apply_lesson_dropout / _log_dropout.
+# If dropout logic changes in gptme core, update here too (and vice versa).
+# Future: import from gptme core once the CC hook can safely depend on gptme being installed.
+
+
+def _get_dropout_epsilon() -> float:
+    """Get lesson-dropout probability from LESSON_DROPOUT_EPSILON env var (default 0.0)."""
+    raw = os.environ.get("LESSON_DROPOUT_EPSILON")
+    if raw is None:
+        return 0.0
+    try:
+        epsilon = float(raw)
+    except ValueError:
+        return 0.0
+    if epsilon <= 0.0:
+        return 0.0
+    return min(epsilon, 1.0)
+
+
+def _get_dropout_log_dir(workspace: Path) -> Path:
+    """Dropout log directory (LESSON_DROPOUT_LOG_DIR or workspace/state/lesson-dropout)."""
+    raw = os.environ.get("LESSON_DROPOUT_LOG_DIR")
+    return Path(raw) if raw else workspace / "state" / "lesson-dropout"
+
+
+def _log_dropout(
+    session_id: str, epsilon: float, withheld: list[dict], workspace: Path
+) -> None:
+    """Append a dropout record for causal LOO analysis. Failures are swallowed."""
+    try:
+        log_dir = _get_dropout_log_dir(workspace)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.time(),
+            "session_id": session_id,
+            "epsilon": epsilon,
+            "withheld": withheld,
+        }
+        with open(log_dir / f"{session_id}.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
+def _apply_lesson_dropout(
+    lessons: list[dict], session_id: str, workspace: Path
+) -> list[dict]:
+    """Randomly withhold lessons for causal leave-one-out analysis.
+
+    Controlled by LESSON_DROPOUT_EPSILON (float [0,1]). Default 0 = no-op.
+    Does NOT log — logging is done by _apply_lesson_dropout_multi which
+    collects withheld lessons from both pools into one unified record.
+    """
+    epsilon = _get_dropout_epsilon()
+    if epsilon <= 0.0 or not lessons:
+        return lessons
+
+    kept: list[dict] = []
+    for lesson in lessons:
+        if random.random() < epsilon:
+            # Withheld — skip
+            pass
+        else:
+            kept.append(lesson)
+
+    return kept
+
+
+def _apply_lesson_dropout_multi(
+    matches: list[dict],
+    predicted: list[dict],
+    session_id: str,
+    workspace: Path,
+) -> tuple[list[dict], list[dict]]:
+    """Apply dropout to both matches and predicted, logging ONE unified record.
+
+    Processes both pools together so that the analysis script receives a
+    single JSONL record per hook invocation containing all withheld lessons,
+    not two split records with partial withheld lists.
+    """
+    epsilon = _get_dropout_epsilon()
+
+    # Always log when epsilon>0, even if both pools are empty, so
+    # lesson-loo-analysis.py can distinguish treatment-group sessions
+    # (epsilon>0, possibly 0 withheld) from control-group sessions (epsilon=0).
+    if epsilon <= 0.0:
+        return matches, predicted
+
+    withheld: list[dict] = []
+
+    def _do_dropout(lessons: list[dict]) -> list[dict]:
+        kept: list[dict] = []
+        for lesson in lessons:
+            if random.random() < epsilon:
+                withheld.append(
+                    {"path": lesson["path"], "title": lesson.get("title", "")}
+                )
+            else:
+                kept.append(lesson)
+        return kept
+
+    kept_matches = _do_dropout(matches)
+    kept_predicted = _do_dropout(predicted)
+
+    _log_dropout(session_id, epsilon, withheld, workspace)
+    return kept_matches, kept_predicted
+
+
 # --- Session state for cross-invocation dedup ---
 
 
@@ -1302,6 +1412,11 @@ def main():
     # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
     matches = filter_held_out_lessons(raw_matches, holdout_lessons)
     predicted = filter_held_out_lessons(predicted, holdout_lessons)
+
+    # --- Randomized dropout for causal LOO (mirrors gptme/lessons/auto_include.py) ---
+    matches, predicted = _apply_lesson_dropout_multi(
+        matches, predicted, session_id, workspace
+    )
 
     context = format_lessons(matches, already_injected, predicted)
 
