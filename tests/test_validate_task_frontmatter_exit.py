@@ -48,6 +48,18 @@ def test_exits_zero_on_valid_task(tmp_path: Path) -> None:
     assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
+def test_exits_zero_on_date_only_created(tmp_path: Path) -> None:
+    """A bare `created: 2026-03-02` is parsed by YAML as a datetime.date, not a
+    str or datetime. A date is a valid ISO 8601 timestamp at date precision, so
+    the validator must accept it rather than rejecting the type."""
+    f = _make_task(
+        tmp_path,
+        "---\nstate: active\ncreated: 2026-03-02\n---\n# Task\n",
+    )
+    result = _run([str(f)])
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
 def test_exits_nonzero_on_unparseable_yaml(tmp_path: Path) -> None:
     """Reproducer: unquoted block scalar with `:1` (backtick-colon-digit)
     causes PyYAML to parse the continuation as a mapping."""

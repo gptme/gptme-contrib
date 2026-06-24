@@ -18,7 +18,7 @@ Checks:
 """
 
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import List, cast
 
@@ -49,9 +49,15 @@ VALID_PRIORITIES = ["low", "medium", "high"]
 VALID_TASK_TYPES = ["project", "action"]
 
 
-def validate_timestamp(ts: str | datetime) -> str | None:
-    """Validate an ISO 8601 timestamp or datetime object."""
-    if isinstance(ts, datetime):
+def validate_timestamp(ts: str | datetime | date) -> str | None:
+    """Validate an ISO 8601 timestamp or datetime/date object.
+
+    YAML parses a bare ``2026-06-24`` value into a ``datetime.date`` (not a
+    ``datetime`` or ``str``). A date is a valid ISO 8601 timestamp at date
+    precision, so accept it rather than rejecting it as an invalid type.
+    """
+    # datetime is a subclass of date, so this covers both object forms.
+    if isinstance(ts, date):
         return None
     elif isinstance(ts, str):
         try:
@@ -92,7 +98,9 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
     # Validate timestamps
     for field in ["created", "modified"]:
         if field in metadata:
-            if error := validate_timestamp(cast("str | datetime", metadata[field])):
+            if error := validate_timestamp(
+                cast("str | datetime | date", metadata[field])
+            ):
                 errors.append(f"Field '{field}': {error}")
 
     # Validate optional fields
@@ -131,7 +139,7 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
     # Validate waiting_since timestamp
     if "waiting_since" in metadata:
         if error := validate_timestamp(
-            cast("str | datetime", metadata["waiting_since"])
+            cast("str | datetime | date", metadata["waiting_since"])
         ):
             errors.append(f"Field 'waiting_since': {error}")
 
