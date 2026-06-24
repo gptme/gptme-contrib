@@ -17,6 +17,7 @@ members = [
     "gptme-ace",
     "gptme-activity-summary",
     "gptme-attention-tracker",
+    "gptme-cc-memory",
     "gptme-claude-code",
     "gptme-codegraph",
     "gptme-consortium",
@@ -1388,6 +1389,32 @@ requires-dist = [
     { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
 ]
 provides-extras = ["test"]
+
+[[package]]
+name = "gptme-cc-memory"
+version = "0.1.0"
+source = { editable = "packages/gptme-cc-memory" }
+dependencies = [
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
+]
+provides-extras = ["test", "dev"]
 
 [[package]]
 name = "gptme-claude-code"
