@@ -38,19 +38,20 @@ quota_gate_check() {
         return 0
     fi
 
-    local quota_json quota_err
+    local quota_json quota_err quota_err_file
+    quota_err_file=$(mktemp /tmp/quota-gate-err.XXXXXX)
+    # shellcheck disable=SC2064  # local var: expand now, not when RETURN fires
+    trap "rm -f '${quota_err_file}'" RETURN
     # Capture stderr so a failure window is diagnosable. The first echo MUST keep
     # ending in "proceeding" — standup health-counting greps anchor on
     # `proceeding$` (see scripts/runs/standup/agent-standup.sh). The underlying
     # error goes on a separate continuation line so the anchor stays intact.
-    if ! quota_json=$("$QUOTA_CHECK_SCRIPT" --json 2>/tmp/quota-gate-err.$$); then
-        quota_err=$(head -c 300 /tmp/quota-gate-err.$$ 2>/dev/null | tr '\n' ' ')
-        rm -f /tmp/quota-gate-err.$$
+    if ! quota_json=$("$QUOTA_CHECK_SCRIPT" --json 2>"$quota_err_file"); then
+        quota_err=$(head -c 300 "$quota_err_file" 2>/dev/null | tr '\n' ' ')
         echo "$log_prefix quota check failed (non-fatal), proceeding" >&2
         echo "$log_prefix   └─ underlying error: ${quota_err:-<no stderr captured>}" >&2
         return 0
     fi
-    rm -f /tmp/quota-gate-err.$$ 2>/dev/null
 
     local five_hour_util seven_day_util session_ok weekly_ok
     five_hour_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('five_hour',{}).get('utilization',0))" 2>/dev/null || echo "0")
