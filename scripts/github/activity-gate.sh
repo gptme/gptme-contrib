@@ -952,7 +952,9 @@ check_notifications() {
 
     # Cap emitted notifications per run to avoid flooding the dispatcher when
     # a filter change (e.g. adding new reasons) unlocks a large backlog.
-    # Only emitted notifications get state files — unemitted ones retry next run.
+    # First-seen notifications are always seeded (state written, not emitted).
+    # The cap only gates emit-eligible items (strictly-newer updated_at): those
+    # skipped by the cap get neither emitted nor persisted, so they retry next run.
     local max_notif_per_run=5
 
     # Notification state files store the most recently seen `updated_at`. GitHub
