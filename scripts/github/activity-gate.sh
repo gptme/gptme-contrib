@@ -977,9 +977,17 @@ check_notifications() {
             state_file="$STATE_DIR/notif-${notif_id}.state"
             prior=""
             [ -f "$state_file" ] && prior=$(cat "$state_file" 2>/dev/null || true)
-            # Re-emit if no state file yet OR stored timestamp is older than current.
-            # String comparison works on ISO-8601 timestamps.
-            if [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
+            # Seed-on-first-sight: when there's no prior state (first run, or after the
+            # state dir is reset/cleaned), record the timestamp but do NOT emit. This
+            # matches the documented contract ("On first run, all items are seeded but
+            # NOT reported") and every other check here (check_pr_updates,
+            # check_greptile_scores). Without it, a wiped state dir makes the whole
+            # unread backlog look "new" and fires a noop session investigating already-
+            # resolved threads. Only a strictly-newer updated_at (genuine follow-up
+            # activity) emits. String comparison works on ISO-8601 timestamps.
+            if [ -z "$prior" ]; then
+                printf '%s' "$notif_updated" > "$state_file"
+            elif [ "$prior" \< "$notif_updated" ]; then
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
                     # Emit first so a jq failure leaves the state file untouched and the
@@ -999,7 +1007,12 @@ check_notifications() {
             state_file="$STATE_DIR/notif-${notif_id}.state"
             prior=""
             [ -f "$state_file" ] && prior=$(cat "$state_file" 2>/dev/null || true)
-            if [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
+            # Seed-on-first-sight (see jsonl branch above for rationale): a first-seen
+            # notification is recorded but not counted, so a reset state dir doesn't
+            # report the whole unread backlog as "new" and trigger a noop session.
+            if [ -z "$prior" ]; then
+                printf '%s' "$notif_updated" > "$state_file"
+            elif [ "$prior" \< "$notif_updated" ]; then
                 printf '%s' "$notif_updated" > "$state_file"
                 new_count=$((new_count + 1))
             fi
