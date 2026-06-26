@@ -83,6 +83,21 @@ def test_cancelled_strips_waiting_fields(tmp_path: Path, monkeypatch) -> None:
         assert field not in meta
 
 
+def test_recurring_cancelled_strips_fields(tmp_path: Path, monkeypatch) -> None:
+    """Recurring cancelled is terminal — stale fields must be stripped."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "recurring.md").write_text(RECURRING_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["edit", "recurring", "--set", "state", "cancelled"])
+    assert result.exit_code == 0, result.output
+
+    meta = _meta(tasks_dir, "recurring")
+    assert meta["state"] == "cancelled"
+    assert "next_action" not in meta
+
+
 def test_recurring_done_keeps_fields(tmp_path: Path, monkeypatch) -> None:
     """Recurring tasks reset to todo and must retain next_action."""
     tasks_dir = tmp_path / "tasks"

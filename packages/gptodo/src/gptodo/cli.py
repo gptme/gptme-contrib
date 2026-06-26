@@ -1833,7 +1833,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         # todo further below and must keep these fields, so skip when recur is set.
         # tracking_issue / upstream_coordination_id are intentionally preserved for
         # permanent traceability.
-        if post.metadata.get("state") in ("done", "cancelled") and not post.metadata.get("recur"):
+        # cancelled is terminal regardless of recur; done skips cleanup only when recurring
+        # (recurrence reset below handles it).
+        if post.metadata.get("state") == "cancelled" or (
+            post.metadata.get("state") == "done" and not post.metadata.get("recur")
+        ):
             for _stale_field in ("next_action", "waiting_for", "waiting_since", "wait"):
                 post.metadata.pop(_stale_field, None)
 
