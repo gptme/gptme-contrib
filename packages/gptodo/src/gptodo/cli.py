@@ -1827,6 +1827,20 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
             # and full ISO datetime via datetime.fromisoformat().
             post.metadata["waiting_since"] = _dt.now(_tz.utc).isoformat(timespec="seconds")
 
+        # Strip now-stale actionable/blocker metadata when the edit lands the task
+        # in a terminal state (TASKS.md best-practice #7: terminal tasks must not
+        # keep next_action/waiting_for/waiting_since/wait). Recurring tasks reset to
+        # todo further below and must keep these fields, so skip when recur is set.
+        # tracking_issue / upstream_coordination_id are intentionally preserved for
+        # permanent traceability.
+        # cancelled is terminal regardless of recur; done skips cleanup only when recurring
+        # (recurrence reset below handles it).
+        if post.metadata.get("state") == "cancelled" or (
+            post.metadata.get("state") == "done" and not post.metadata.get("recur")
+        ):
+            for _stale_field in ("next_action", "waiting_for", "waiting_since", "wait"):
+                post.metadata.pop(_stale_field, None)
+
         # Save changes
         with open(task.path, "w") as f:
             f.write(frontmatter.dumps(post))
