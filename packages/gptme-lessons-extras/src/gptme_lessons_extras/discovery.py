@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+from gptme_lessons_extras.similarity import NON_LESSON_FILES
+
 # Try importing sklearn, but provide fallback
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
@@ -282,7 +284,7 @@ class LessonDiscovery:
         # Score all lessons
         scores = []
         for lesson_file in self.lessons_dir.rglob("*.md"):
-            if lesson_file.name == "README.md":
+            if lesson_file.name in NON_LESSON_FILES:
                 continue
 
             features = self.extract_features(lesson_file)
@@ -401,7 +403,7 @@ class LessonDiscovery:
         # Compare with all other lessons
         results = []
         for lesson_file in self.lessons_dir.rglob("*.md"):
-            if lesson_file.name == "README.md" or lesson_file == target_path:
+            if lesson_file.name in NON_LESSON_FILES or lesson_file == target_path:
                 continue
 
             compare_features = self.extract_features(lesson_file)
@@ -452,7 +454,7 @@ class LessonDiscovery:
         processed = set()
 
         lesson_files = [
-            f for f in self.lessons_dir.rglob("*.md") if f.name != "README.md"
+            f for f in self.lessons_dir.rglob("*.md") if f.name not in NON_LESSON_FILES
         ]
 
         for i, lesson_a in enumerate(lesson_files):

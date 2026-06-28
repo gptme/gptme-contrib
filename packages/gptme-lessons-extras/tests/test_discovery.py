@@ -102,6 +102,83 @@ def test_recommend_uses_loaded_metrics_scores(tmp_path: Path) -> None:
     assert recommendations[1].adoption_score == 0.0
 
 
+def test_recommend_excludes_non_lesson_files(tmp_path: Path) -> None:
+    """README, TODO, and lesson-template must not be scored as real lessons."""
+    lessons_dir = tmp_path / "lessons"
+    _write_lesson(lessons_dir / "tools" / "real.md", "Real")
+    # Non-lesson files that share the lesson keyword shape and would otherwise
+    # be picked up by rglob("*.md") and scored as lessons.
+    _write_lesson(lessons_dir / "templates" / "lesson-template.md", "Template")
+    _write_lesson(lessons_dir / "TODO.md", "Todo")
+    _write_lesson(lessons_dir / "README.md", "Readme")
+
+    discovery = LessonDiscovery(
+        lessons_dir=lessons_dir, history_dir=tmp_path / ".lessons-history"
+    )
+
+    ids = [rec.lesson_id for rec in discovery.recommend(keywords=["shell"], top_k=10)]
+
+    assert "real" in ids
+    assert "lesson-template" not in ids
+    assert "TODO" not in ids
+    assert "README" not in ids
+
+
+def test_find_similar_excludes_non_lesson_files(tmp_path: Path) -> None:
+    """Non-lesson files must not appear in find_similar results."""
+    lessons_dir = tmp_path / "lessons"
+    # Target lesson
+    _write_lesson(lessons_dir / "tools" / "reference.md", "Reference")
+    # A similar real lesson (same template → high text similarity)
+    _write_lesson(lessons_dir / "tools" / "similar.md", "Similar")
+    # Non-lesson files sharing the lesson directory
+    _write_lesson(lessons_dir / "templates" / "lesson-template.md", "Template")
+    _write_lesson(lessons_dir / "TODO.md", "Todo")
+    _write_lesson(lessons_dir / "README.md", "Readme")
+
+    discovery = LessonDiscovery(
+        lessons_dir=lessons_dir, history_dir=tmp_path / ".lessons-history"
+    )
+
+    results = discovery.find_similar("reference", threshold=0.0)
+
+    result_ids = [r.lesson_b for r in results]
+    assert "similar" in result_ids
+    assert "lesson-template" not in result_ids
+    assert "TODO" not in result_ids
+    assert "README" not in result_ids
+
+
+def test_find_all_duplicates_excludes_non_lesson_files(tmp_path: Path) -> None:
+    """Non-lesson files must not appear in find_all_duplicates results."""
+    lessons_dir = tmp_path / "lessons"
+    # Two lessons with identical template → high text similarity → duplicate
+    _write_lesson(lessons_dir / "tools" / "dup-a.md", "DupA")
+    _write_lesson(lessons_dir / "tools" / "dup-b.md", "DupB")
+    # Non-lesson files
+    _write_lesson(lessons_dir / "templates" / "lesson-template.md", "Template")
+    _write_lesson(lessons_dir / "TODO.md", "Todo")
+    _write_lesson(lessons_dir / "README.md", "Readme")
+
+    discovery = LessonDiscovery(
+        lessons_dir=lessons_dir, history_dir=tmp_path / ".lessons-history"
+    )
+
+    results = discovery.find_all_duplicates(threshold=0.0)
+
+    # At least one real-lesson pair should be found
+    assert len(results) >= 1
+    result_ids = set()
+    for a, b, _ in results:
+        result_ids.add(a)
+        result_ids.add(b)
+    assert "dup-a" in result_ids
+    assert "dup-b" in result_ids
+    assert "lesson-template" not in result_ids
+    assert "TODO" not in result_ids
+    assert "README" not in result_ids
+
+
 def test_recommend_uses_file_recency_when_metrics_are_missing(tmp_path: Path) -> None:
     """Recent files should get a freshness boost even without metrics data."""
     lessons_dir = tmp_path / "lessons" / "tools"
