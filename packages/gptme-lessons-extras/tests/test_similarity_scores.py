@@ -1,5 +1,6 @@
 """Tests for lesson similarity score parsing."""
 
+import os
 from pathlib import Path
 from textwrap import dedent
 
@@ -344,8 +345,12 @@ class TestSelectBestLesson:
             No scores.
             """,
         )
-        # Ensure mtime ordering
-        newer.touch()  # touch to make newer the most recent
+        # Set explicit, distinct mtimes. Relying on write order + touch() is
+        # flaky: consecutive writes can land in the same filesystem mtime tick,
+        # leaving older/newer with identical mtimes. select_best_lesson's stable
+        # sort then preserves cluster order and returns "Older".
+        older_mtime = older.stat().st_mtime
+        os.utime(newer, (older_mtime + 10, older_mtime + 10))
 
         cluster = [_info(older), _info(newer)]
         chosen = select_best_lesson(cluster)
