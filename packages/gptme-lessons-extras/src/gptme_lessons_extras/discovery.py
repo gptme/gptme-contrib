@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+from gptme_lessons_extras.similarity import NON_LESSON_FILES
+
 # Try importing sklearn, but provide fallback
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
@@ -25,12 +27,6 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     print("Warning: scikit-learn not available. Using simpler similarity metrics.")
-
-
-# Files that live under lessons/ but are not themselves lessons; they must be
-# excluded from recommendation, similarity, and duplicate scoring. Kept in sync
-# with similarity.py's NON_LESSON_FILES.
-NON_LESSON_FILES = ("README.md", "TODO.md", "lesson-template.md")
 
 
 @dataclass
