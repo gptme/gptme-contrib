@@ -102,6 +102,28 @@ def test_recommend_uses_loaded_metrics_scores(tmp_path: Path) -> None:
     assert recommendations[1].adoption_score == 0.0
 
 
+def test_recommend_excludes_non_lesson_files(tmp_path: Path) -> None:
+    """README, TODO, and lesson-template must not be scored as real lessons."""
+    lessons_dir = tmp_path / "lessons"
+    _write_lesson(lessons_dir / "tools" / "real.md", "Real")
+    # Non-lesson files that share the lesson keyword shape and would otherwise
+    # be picked up by rglob("*.md") and scored as lessons.
+    _write_lesson(lessons_dir / "templates" / "lesson-template.md", "Template")
+    _write_lesson(lessons_dir / "TODO.md", "Todo")
+    _write_lesson(lessons_dir / "README.md", "Readme")
+
+    discovery = LessonDiscovery(
+        lessons_dir=lessons_dir, history_dir=tmp_path / ".lessons-history"
+    )
+
+    ids = [rec.lesson_id for rec in discovery.recommend(keywords=["shell"], top_k=10)]
+
+    assert "real" in ids
+    assert "lesson-template" not in ids
+    assert "TODO" not in ids
+    assert "README" not in ids
+
+
 def test_recommend_uses_file_recency_when_metrics_are_missing(tmp_path: Path) -> None:
     """Recent files should get a freshness boost even without metrics data."""
     lessons_dir = tmp_path / "lessons" / "tools"

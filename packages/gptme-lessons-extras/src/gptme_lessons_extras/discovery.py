@@ -27,6 +27,12 @@ except ImportError:
     print("Warning: scikit-learn not available. Using simpler similarity metrics.")
 
 
+# Files that live under lessons/ but are not themselves lessons; they must be
+# excluded from recommendation, similarity, and duplicate scoring. Kept in sync
+# with similarity.py's NON_LESSON_FILES.
+NON_LESSON_FILES = ("README.md", "TODO.md", "lesson-template.md")
+
+
 @dataclass
 class LessonFeatures:
     """Extracted features from a lesson file."""
@@ -282,7 +288,7 @@ class LessonDiscovery:
         # Score all lessons
         scores = []
         for lesson_file in self.lessons_dir.rglob("*.md"):
-            if lesson_file.name == "README.md":
+            if lesson_file.name in NON_LESSON_FILES:
                 continue
 
             features = self.extract_features(lesson_file)
@@ -401,7 +407,7 @@ class LessonDiscovery:
         # Compare with all other lessons
         results = []
         for lesson_file in self.lessons_dir.rglob("*.md"):
-            if lesson_file.name == "README.md" or lesson_file == target_path:
+            if lesson_file.name in NON_LESSON_FILES or lesson_file == target_path:
                 continue
 
             compare_features = self.extract_features(lesson_file)
@@ -452,7 +458,7 @@ class LessonDiscovery:
         processed = set()
 
         lesson_files = [
-            f for f in self.lessons_dir.rglob("*.md") if f.name != "README.md"
+            f for f in self.lessons_dir.rglob("*.md") if f.name not in NON_LESSON_FILES
         ]
 
         for i, lesson_a in enumerate(lesson_files):
