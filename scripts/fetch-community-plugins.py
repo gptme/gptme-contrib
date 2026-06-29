@@ -39,7 +39,14 @@ def search_topic(topic: str) -> list[dict]:
         check=True,
     )
     data: dict = json.loads(result.stdout)
-    return cast(list[dict], data.get("items", []))
+    items = cast(list[dict], data.get("items", []))
+    if len(items) >= 100:
+        print(
+            f"Warning: topic {topic!r} returned 100 results — may be truncated;"
+            " consider adding pagination if the ecosystem grows.",
+            file=sys.stderr,
+        )
+    return items
 
 
 def fetch_all() -> list[dict]:
@@ -94,6 +101,22 @@ def main() -> int:
     print(f"Searching GitHub for topics: {', '.join(TOPICS)}", file=sys.stderr)
     entries = fetch_all()
     print(f"Found {len(entries)} community repos", file=sys.stderr)
+
+    # Refuse to overwrite a non-empty file with an empty result set — all topic
+    # searches failing (rate-limit, auth expiry, outage) must not silently wipe
+    # the dashboard data.
+    if not entries and not args.dry_run and args.output.exists():
+        try:
+            prev = json.loads(args.output.read_text())
+            if prev.get("entries"):
+                print(
+                    "Error: all searches returned 0 results but previous file has entries."
+                    " Refusing to overwrite — check GitHub API access.",
+                    file=sys.stderr,
+                )
+                return 1
+        except (json.JSONDecodeError, KeyError):
+            pass
 
     output = {
         "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
