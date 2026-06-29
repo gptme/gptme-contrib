@@ -42,7 +42,9 @@ example
 - Benefit 1
 """
 
-# A fully valid two-file-format lesson (includes Related section).
+# A fully valid lesson for testing non-companion fields (version, target_grade, etc.).
+# Intentionally has no companion link so tests that expect zero errors pass regardless
+# of whether knowledge/lessons/test-lesson.md exists on disk.
 _VALID_LESSON = """\
 ---
 match:
@@ -73,7 +75,7 @@ example
 - Benefit 1
 
 ## Related
-- Full context: knowledge/lessons/test-lesson.md
+- See also: some-other-resource
 """
 
 
@@ -486,3 +488,63 @@ def test_active_long_lesson_still_warns():
         validator.validate()
         length_warnings = [w for w in validator.warnings if "lines (target" in w]
         assert length_warnings, "Active long lesson should still warn about length"
+
+
+# A concise lesson (<100 lines) that links a companion doc that does not exist.
+_LESSON_WITH_DEAD_COMPANION_LINK = """\
+---
+match:
+  keywords:
+    - "test keyword phrase"
+status: active
+---
+
+# Test Lesson With Dead Companion Link
+
+## Rule
+Test rule.
+
+## Context
+Test context.
+
+## Detection
+- Signal 1
+
+## Pattern
+```txt
+example
+```
+
+## Outcome
+- Benefit 1
+
+## Related
+- Full context: [knowledge/lessons/test-lesson.md](../../knowledge/lessons/test-lesson.md)
+"""
+
+
+def test_dead_companion_link_raises_error():
+    """A lesson that links a companion doc that doesn't exist should error."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), _LESSON_WITH_DEAD_COMPANION_LINK)
+        validator = LessonValidator(path)
+        validator.validate()
+        companion_errors = [e for e in validator.errors if "companion" in e.lower()]
+        assert (
+            companion_errors
+        ), "Lesson linking a nonexistent companion doc should raise an error"
+
+
+def test_dead_companion_link_archived_skips():
+    """Archived lessons skip companion checks, so dead links are not flagged."""
+    content = _LESSON_WITH_DEAD_COMPANION_LINK.replace(
+        "status: active", "status: archived"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        companion_errors = [e for e in validator.errors if "companion" in e.lower()]
+        assert (
+            not companion_errors
+        ), f"Archived lesson should not flag dead companion link: {companion_errors}"
