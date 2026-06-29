@@ -54,6 +54,13 @@ gptme-sessions show a1b2 --json
 gptme-sessions query --model opus --since 7d
 gptme-sessions query --run-type autonomous --outcome productive --json
 
+# --since accepts sub-day windows and natural phrasing (units: s, m, h, d, w).
+# Sub-day windows filter precisely (no rounding up to a whole day).
+gptme-sessions query --since 2h               # last 2 hours
+gptme-sessions query --since 30m --stats      # last 30 minutes
+gptme-sessions query --since "2 hours ago"    # same as 2h
+gptme-sessions query --since all              # no time filter
+
 # Run analytics (duration distribution, NOOP rates, trends)
 gptme-sessions runs --since 14d
 
