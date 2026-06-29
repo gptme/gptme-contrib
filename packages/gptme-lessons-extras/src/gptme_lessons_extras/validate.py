@@ -537,6 +537,13 @@ class LessonValidator:
                 f"Consider creating companion: knowledge/lessons/{self.filepath.stem}.md"
             )
 
+        # If lesson links a companion that does not exist, that is a dead reference
+        if has_companion_link and not has_companion:
+            self.errors.append(
+                f"Links a companion doc that does not exist. Create it or remove the "
+                f"link: knowledge/lessons/{self.filepath.stem}.md"
+            )
+
         # If companion exists but not linked, warn
         if has_companion and not has_companion_link:
             self.warnings.append(
