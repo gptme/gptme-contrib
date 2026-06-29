@@ -140,8 +140,14 @@ class TestSearchDocumentCacheSemantics:
     def test_content_hash_changes_with_content(self):
         conn = _conn()
         save_search_documents(conn, "/proj", [_doc("pkg.mod.f", docstring="v1")])
-        h1 = conn.execute("SELECT content_hash FROM search_documents").fetchone()[0]
+        h1 = conn.execute(
+            "SELECT content_hash FROM search_documents WHERE directory = ? AND qualified_id = ?",
+            ("/proj", "pkg.mod.f"),
+        ).fetchone()[0]
         save_search_documents(conn, "/proj", [_doc("pkg.mod.f", docstring="v2")])
-        h2 = conn.execute("SELECT content_hash FROM search_documents").fetchone()[0]
+        h2 = conn.execute(
+            "SELECT content_hash FROM search_documents WHERE directory = ? AND qualified_id = ?",
+            ("/proj", "pkg.mod.f"),
+        ).fetchone()[0]
 
         assert h1 != h2
