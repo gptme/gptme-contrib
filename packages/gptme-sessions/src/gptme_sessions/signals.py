@@ -46,6 +46,11 @@ _BG_TASK_RE = re.compile(r"Output is being written to: (.+\.output)")
 # This does NOT match _COMMIT_RE (no branch/hash format), so needs separate detection.
 _PR_MERGE_RE = re.compile(r"(?:Squashed and merged|Rebased and merged|Merged) pull request #(\d+)")
 
+# Marker injected by gptme-tooloutput-trimmer's summarization pass
+# (tooloutput_trimmer.hooks.trimmer.SUMMARIZATION_MARKER).  Hardcoded to
+# avoid a hard dep on the plugin; must stay in sync with the plugin string.
+_SUMMARIZATION_MARKER = "[Summarized previous tool outputs]"
+
 # Regex for GitHub CLI interactions that represent productive work but don't
 # produce commits or file writes (PR reviews, issue comments, PR comments).
 # These should count toward session productivity to avoid floor-grading
@@ -304,10 +309,6 @@ def extract_signals(msgs: list[dict]) -> dict:
     timestamps: list[datetime] = []
     steps = 0  # number of assistant turns that yielded to await tool results
     detail_by_value: dict[str, dict[str, object]] = {}
-    # Marker injected by gptme-tooloutput-trimmer's summarization pass
-    # (tooloutput_trimmer.hooks.trimmer.SUMMARIZATION_MARKER).  Hardcoded to
-    # avoid a hard dep on the plugin; must stay in sync with the plugin string.
-    _SUMMARIZATION_MARKER = "[Summarized previous tool outputs]"
     summarizer_fired = False
 
     # Track recent (tool, path) pairs for retry detection
