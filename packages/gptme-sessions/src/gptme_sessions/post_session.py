@@ -372,6 +372,7 @@ def post_session(
     context_peak_bytes: int | None = None
     session_total_bytes: int | None = None
     traj_productive: bool | None = None
+    summarizer_fired: bool | None = None
 
     # --- Extract signals from trajectory ---
     if trajectory_path is not None and trajectory_path.is_file():
@@ -424,6 +425,14 @@ def post_session(
             traj_model = (signals.get("usage") or {}).get("model")
             if traj_model:
                 model = traj_model
+
+        # Detect whether the tool-output summarizer fired.  Only gptme-format
+        # trajectories populate this field (the trimmer plugin runs on gptme
+        # sessions only); CC/Codex/Copilot leave it absent.
+        if signals is not None:
+            sf = signals.get("summarizer_fired")
+            if sf is not None:
+                summarizer_fired = bool(sf)
 
     # Whether the assigned trajectory plausibly covers the whole session. A
     # trajectory spanning far less wall-clock than the caller's duration is
@@ -704,6 +713,8 @@ def post_session(
         record_kwargs["context_peak_bytes"] = context_peak_bytes
     if session_total_bytes is not None:
         record_kwargs["session_total_bytes"] = session_total_bytes
+    if summarizer_fired is not None:
+        record_kwargs["summarizer_fired"] = summarizer_fired
     record = SessionRecord(**record_kwargs)
     if grade is not None:
         record.set_productivity_grade(grade)
