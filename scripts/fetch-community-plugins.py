@@ -49,14 +49,20 @@ def search_topic(topic: str) -> list[dict]:
     return items
 
 
-def fetch_all() -> list[dict]:
-    """Fetch all repos across all gptme topics, deduplicated by full_name."""
+def fetch_all() -> tuple[list[dict], list[str]]:
+    """Fetch all repos across all gptme topics, deduplicated by full_name.
+
+    Returns (entries, failed_topics) — failed_topics is non-empty when any
+    individual topic search raised an error (partial-failure case).
+    """
     seen: dict[str, dict] = {}
+    failed_topics: list[str] = []
     for topic in TOPICS:
         try:
             repos = search_topic(topic)
         except subprocess.CalledProcessError as exc:
             print(f"Warning: failed to search topic {topic}: {exc}", file=sys.stderr)
+            failed_topics.append(topic)
             continue
         for repo in repos:
             name = repo["full_name"]
@@ -80,7 +86,7 @@ def fetch_all() -> list[dict]:
             "topics": topics,
         }
         entries.append(entry)
-    return entries
+    return entries, failed_topics
 
 
 def main() -> int:
@@ -99,19 +105,19 @@ def main() -> int:
     args = parser.parse_args()
 
     print(f"Searching GitHub for topics: {', '.join(TOPICS)}", file=sys.stderr)
-    entries = fetch_all()
+    entries, failed_topics = fetch_all()
     print(f"Found {len(entries)} community repos", file=sys.stderr)
 
-    # Refuse to overwrite a non-empty file with an empty result set — all topic
-    # searches failing (rate-limit, auth expiry, outage) must not silently wipe
-    # the dashboard data.
-    if not entries and not args.dry_run and args.output.exists():
+    # Refuse to overwrite when any topic search failed (partial or total) and the
+    # previous file has entries — a partial failure silently drops repos that are
+    # exclusively tagged with the failing topic, which is just as bad as a total wipe.
+    if failed_topics and not args.dry_run and args.output.exists():
         try:
             prev = json.loads(args.output.read_text())
             if prev.get("entries"):
                 print(
-                    "Error: all searches returned 0 results but previous file has entries."
-                    " Refusing to overwrite — check GitHub API access.",
+                    f"Error: topic search(es) failed: {', '.join(failed_topics)}."
+                    " Refusing to overwrite previous data — check GitHub API access.",
                     file=sys.stderr,
                 )
                 return 1
