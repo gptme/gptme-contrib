@@ -11,7 +11,7 @@
       "topics": ["gptme-plugin"]
     },
     {
-      "name": "gptme/gptme-vim",
+      "name": "gptme/gptme.vim",
       "description": "Vim plugin for gptme — use gptme from within vim/neovim.",
       "url": "https://github.com/gptme/gptme.vim",
       "stars": 7,

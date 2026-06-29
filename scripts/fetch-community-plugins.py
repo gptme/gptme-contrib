@@ -30,33 +30,6 @@ EXCLUDE_NAMES = {"gptme/gptme-contrib"}
 DEFAULT_OUTPUT = Path(__file__).parent.parent / "state" / "community_plugins.json"
 
 
-def gh_api(path: str) -> dict | list:
-    """Call GitHub API via gh CLI."""
-    result = subprocess.run(
-        ["gh", "api", path, "--paginate"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    # --paginate returns multiple JSON objects concatenated; wrap into array if needed
-    raw = result.stdout.strip()
-    # gh --paginate outputs valid JSON arrays that get concatenated, merge them
-    if raw.startswith("[") and raw.endswith("]"):
-        # single page or already merged
-        return cast(list, json.loads(raw))
-    # multiple pages: each line is a JSON array
-    merged: list = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if line:
-            chunk = json.loads(line)
-            if isinstance(chunk, list):
-                merged.extend(chunk)
-            elif isinstance(chunk, dict):
-                merged.append(chunk)
-    return merged
-
-
 def search_topic(topic: str) -> list[dict]:
     """Search GitHub for repos with the given topic."""
     result = subprocess.run(
@@ -84,9 +57,7 @@ def fetch_all() -> list[dict]:
                 continue
             if name not in seen:
                 seen[name] = repo
-            else:
-                # merge topics from duplicate hits
-                seen[name].setdefault("_extra_topics", set()).add(topic)
+            # else: merged topics from duplicate hits tracked by TOPICS
 
     entries = []
     for name, repo in sorted(
