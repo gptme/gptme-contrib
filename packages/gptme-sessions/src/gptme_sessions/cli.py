@@ -266,7 +266,7 @@ def _show_discovery_fallback(since_days: int = 30) -> None:
     click.echo("No session records found in store.")
     if not discovered:
         click.echo(
-            f"No sessions discovered in the last {since_days} day(s) either.\n"
+            f"No sessions discovered in the last {_fmt_since(since_days)} either.\n"
             "To record sessions, run 'gptme-sessions post-session' after each agent run."
         )
         return
@@ -276,7 +276,7 @@ def _show_discovery_fallback(since_days: int = 30) -> None:
     for e in discovered:
         counts[e["harness"]] = counts.get(e["harness"], 0) + 1
 
-    click.echo(f"Discovered {len(discovered)} session(s) in the last {since_days} day(s):\n")
+    click.echo(f"Discovered {len(discovered)} session(s) in the last {_fmt_since(since_days)}:\n")
     for harness, n in sorted(counts.items()):
         click.echo(f"  {harness:14s}  {n} session(s)")
 
@@ -297,7 +297,7 @@ _SINCE_UNIT_DAYS: dict[str, float] = {
     "w": 7.0, "wk": 7.0, "wks": 7.0, "week": 7.0, "weeks": 7.0,
 }  # fmt: skip
 
-_SINCE_RE = re.compile(r"([0-9]*\.?[0-9]+)\s*([a-z]*)")
+_SINCE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([a-z]*)")
 
 
 def _parse_since(since: str | None) -> float | None:
@@ -315,9 +315,14 @@ def _parse_since(since: str | None) -> float | None:
     s = since.strip().lower()
     if s == "all":
         return None
-    if s.endswith("ago"):
-        s = s[:-3].strip()
+
+    # Try direct match first
     match = _SINCE_RE.fullmatch(s)
+    if not match and s.endswith("ago"):
+        # Try after stripping trailing "ago" (handles "2 hours ago", "1d ago")
+        stripped = s[:-3].strip()
+        match = _SINCE_RE.fullmatch(stripped)
+
     if match:
         value = float(match.group(1))
         unit = match.group(2)
@@ -329,6 +334,29 @@ def _parse_since(since: str | None) -> float | None:
         f"invalid value {since!r} (expected e.g. 90s, 30m, 2h, 7d, 2w, '2 hours ago', or 'all')",
         param_hint="'--since'",
     )
+
+
+def _fmt_since(since_days: float | None) -> str:
+    """Format a *since_days* value (float days) for user-facing messages.
+
+    Converts raw floats like ``0.08333`` into ``"2 hours"`` so that sub-day
+    windows display readably.
+    """
+    if since_days is None:
+        return "all time"
+
+    seconds = since_days * 86400
+    if seconds < 120:  # less than 2 minutes
+        return f"{int(round(seconds))} seconds"
+    if seconds < 3600:  # less than 1 hour → minutes
+        return f"{int(round(seconds / 60))} minutes"
+    if seconds < 86400:  # less than 1 day → hours
+        return f"{int(round(seconds / 3600))} hours"
+
+    # Days — show as integer when whole, otherwise one decimal
+    if since_days == int(since_days):
+        return f"{int(since_days)} days"
+    return f"{since_days:.1f} days"
 
 
 def _record_timestamp_sort_key(record: SessionRecord) -> tuple[int, float | str]:
@@ -848,14 +876,14 @@ def stats(
         elif store.load_all():
             # Records exist but all fall outside the implicit 30-day window
             click.echo(
-                f"No records in the last {since_days} days. Use --since all for all-time data."
+                f"No records in the last {_fmt_since(since_days)}. Use --since all for all-time data."
             )
         else:
             _show_discovery_fallback(since_days=30)
             showed_fallback = True
     else:
         if not since:
-            click.echo(f"Last {since_days} days (use --since all for all-time):\n")
+            click.echo(f"Last {_fmt_since(since_days)} (use --since all for all-time):\n")
         format_stats(s)
     if not as_json and not showed_fallback:
         # Check for unsynced sessions regardless of whether stats matched anything —
@@ -891,7 +919,7 @@ def runs(ctx: click.Context, since: str, as_json: bool) -> None:
         # fallback when the store itself is empty, not when the time window
         # simply has no runs.
         if store.query():
-            click.echo(f"No runs found in the last {since_days or 14} day(s).")
+            click.echo(f"No runs found in the last {_fmt_since(since_days or 14)}.")
         else:
             _show_discovery_fallback(since_days=math.ceil(since_days or 14))
     else:
@@ -1501,10 +1529,10 @@ def discover(
         if not discovered:
             if unsynced and total_discovered > 0:
                 click.echo(
-                    f"All {total_discovered} session(s) in the last {since_days} day(s) are already synced."
+                    f"All {total_discovered} session(s) in the last {_fmt_since(since_days)} are already synced."
                 )
             else:
-                click.echo(f"No sessions found in the last {since_days} day(s).")
+                click.echo(f"No sessions found in the last {_fmt_since(since_days)}.")
             return
         harness_width = max(len(e["harness"]) for e in discovered)
         for entry in discovered:
@@ -1941,9 +1969,7 @@ def sync(
     discovered = _discover_all(since_days=since_days_effective, harness_filter=harness)
 
     if not discovered:
-        window_desc = (
-            f"last {since_days_effective} day(s)" if since_days is not None else "all time"
-        )
+        window_desc = f"last {_fmt_since(since_days)}"
         click.echo(f"No sessions found in the {window_desc}.")
         return
 
@@ -1961,7 +1987,7 @@ def sync(
     # This catches accidental wide-window syncs (e.g. --since 90d) that inflate stats.
     new_count_estimate = sum(1 for e in discovered if str(e["path"]) not in existing_by_path)
     if not dry_run and new_count_estimate > 100:
-        window_warn = f"{since_days}d" if since_days is not None else "all time"
+        window_warn = _fmt_since(since_days)
         click.echo(
             f"Warning: {new_count_estimate} new session(s) would be imported "
             f"(window: {window_warn}). Use --dry-run to preview. Proceeding...",

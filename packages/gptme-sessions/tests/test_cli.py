@@ -596,7 +596,7 @@ class TestParseSinceUnits:
         assert _parse_since("  2H  ") == pytest.approx(2 / 24)
         assert _parse_since("ALL") is None
 
-    @pytest.mark.parametrize("bad", ["abc", "2x", "hours", "2 fortnights"])
+    @pytest.mark.parametrize("bad", ["abc", "2x", "hours", "2 fortnights", ".5h"])
     def test_invalid_raises(self, bad: str):
         import click
 
@@ -1395,3 +1395,27 @@ class TestDedupCommand:
         urls = [d["url"] for d in (keeper.deliverable_details or [])]
         assert "https://github.com/org/repo/pull/1" in urls
         assert "https://github.com/org/repo/pull/2" in urls
+
+
+class TestFmtSince:
+    """Tests for _fmt_since: user-facing since-description formatting."""
+
+    @pytest.mark.parametrize(
+        "since_days,expected",
+        [
+            (None, "all time"),
+            (30.0, "30 days"),
+            (7.0, "7 days"),
+            (2 / 24, "2 hours"),  # 2 hours
+            (30 / 1440, "30 minutes"),  # 30 minutes
+            (90 / 86400, "90 seconds"),
+            (12 / 24, "12 hours"),  # 0.5 days
+            (1.5, "1.5 days"),
+            (0 / 86400, "0 seconds"),
+            (60 / 86400, "60 seconds"),  # 1 minute → seconds
+        ],
+    )
+    def test_fmt_since(self, since_days: float | None, expected: str):
+        from gptme_sessions.cli import _fmt_since
+
+        assert _fmt_since(since_days) == expected
