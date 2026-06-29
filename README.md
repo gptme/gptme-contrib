@@ -82,6 +82,32 @@ Standalone scripts for automation. See each directory's README for details.
 
 Shared lessons provide reusable prompts and workflow patterns. See [lessons/README.md](./lessons/README.md).
 
+## Ecosystem
+
+gptme has a broader ecosystem of standalone repos beyond gptme-contrib.
+
+### External Projects
+
+| Project | Description | Status |
+|---------|-------------|--------|
+| [gptme-rag](https://github.com/gptme/gptme-rag) | Local RAG — semantic document search as a CLI or gptme tool | Active |
+| [gptme-tauri](https://github.com/gptme/gptme-tauri) | Desktop app built with Tauri | Archived |
+| [gptme-webui](https://github.com/gptme/gptme-webui) | Web UI for gptme | Archived |
+
+### Discover More
+
+To make your own plugin or skill discoverable, add a GitHub topic to your repo:
+
+| Topic | For |
+|-------|-----|
+| `gptme-plugin` | Python plugin packages |
+| `gptme-skill` | SKILL.md skill bundles |
+| `gptme-mcp-server` | MCP servers for gptme |
+
+```bash
+gh repo edit owner/your-repo --add-topic gptme-plugin
+```
+
 ## Dependencies
 
 Some scripts require additional dependencies:
