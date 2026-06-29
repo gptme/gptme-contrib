@@ -1028,6 +1028,41 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
     return skills
 
 
+def scan_community_plugins(workspace: Path) -> list[dict]:
+    """Load community/external gptme extensions from state/community_plugins.json.
+
+    Returns an empty list when the file is missing (graceful degradation for
+    workspaces that don't run the fetch script).
+
+    The JSON file has this shape::
+
+        {
+            "fetched_at": "2026-06-29T00:00:00Z",
+            "entries": [
+                {
+                    "name": "owner/repo",
+                    "type": "plugin",          # plugin | skill | mcp-server
+                    "description": "...",
+                    "url": "https://github.com/owner/repo",
+                    "stars": 42,
+                    "language": "Python",
+                    "topics": ["gptme-plugin"]
+                },
+                ...
+            ]
+        }
+    """
+    json_path = workspace / "state" / "community_plugins.json"
+    if not json_path.exists():
+        return []
+    try:
+        data = json.loads(json_path.read_text())
+        return list(data.get("entries", []))
+    except Exception as exc:
+        logger.warning("Failed to load community_plugins.json: %s", exc)
+        return []
+
+
 def scan_readme(workspace: Path) -> dict:
     """Read the workspace README.md for display as an About section.
 
@@ -1560,6 +1595,7 @@ def collect_workspace_data(
     plugins = scan_plugins(workspace, enabled_plugins=enabled_plugins)
     packages = scan_packages(workspace)
     skills = scan_skills(workspace)
+    community_plugins = scan_community_plugins(workspace)
 
     # Scan submodules for additional content
     submodules = detect_submodules(workspace)
@@ -1693,6 +1729,7 @@ def collect_workspace_data(
         "task_states": task_states,
         "total_summaries": total_summaries_count,
         "lesson_categories": lesson_categories,
+        "total_community_plugins": len(community_plugins),
     }
 
     workspace_name = config.get("agent_name", workspace.resolve().name)
@@ -1717,6 +1754,7 @@ def collect_workspace_data(
         "submodules": submodule_names,
         "sources": sources,
         "kpi": kpi,
+        "community_plugins": community_plugins,
     }
 
 
