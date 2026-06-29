@@ -98,11 +98,11 @@ gptme has a broader ecosystem of standalone repos beyond gptme-contrib.
 
 To make your own plugin or skill discoverable, add a GitHub topic to your repo:
 
-| Topic | For |
-|-------|-----|
-| `gptme-plugin` | Python plugin packages |
-| `gptme-skill` | SKILL.md skill bundles |
-| `gptme-mcp-server` | MCP servers for gptme |
+| Topic | For | Browse |
+|-------|-----|--------|
+| `gptme-plugin` | Python plugin packages | [↗](https://github.com/topics/gptme-plugin) |
+| `gptme-skill` | SKILL.md skill bundles | [↗](https://github.com/topics/gptme-skill) |
+| `gptme-mcp-server` | MCP servers for gptme | [↗](https://github.com/topics/gptme-mcp-server) |
 
 ```bash
 gh repo edit owner/your-repo --add-topic gptme-plugin
