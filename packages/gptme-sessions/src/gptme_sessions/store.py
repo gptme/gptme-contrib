@@ -187,7 +187,7 @@ class SessionStore:
         category: str | None = None,
         harness: str | None = None,
         outcome: str | None = None,
-        since_days: int | None = None,
+        since_days: float | None = None,
         project: str | None = None,
     ) -> list[SessionRecord]:
         """Filter session records by criteria."""

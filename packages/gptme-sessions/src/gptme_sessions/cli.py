@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -155,7 +156,7 @@ def _judge_fields(
 
 
 def _discover_all(
-    since_days: int = 30,
+    since_days: float = 30,
     harness_filter: str | None = None,
 ) -> list[dict]:
     """Collect discovered sessions across all harnesses, sorted chronologically.
@@ -170,7 +171,8 @@ def _discover_all(
     Used for fallback display and the ``sync`` command.
     """
     today = date.today()
-    start = today - timedelta(days=since_days)
+    # Discovery scans whole-day session dirs; round sub-day windows up to a day.
+    start = today - timedelta(days=math.ceil(since_days))
     discovered: list[dict] = []
 
     if harness_filter in (None, "gptme"):
@@ -284,28 +286,49 @@ def _show_discovery_fallback(since_days: int = 30) -> None:
     )
 
 
-def _parse_since(since: str | None) -> int | None:
-    """Parse a --since value like '7d', '1h', '30', or 'all' into days (None = no filter).
+# Units accepted by --since, expressed as a fraction of a day. Sub-day units are
+# preserved as fractions so timestamp filters (query/runs) get hour/minute
+# precision instead of silently rounding up to a whole day.
+_SINCE_UNIT_DAYS: dict[str, float] = {
+    "s": 1 / 86400, "sec": 1 / 86400, "secs": 1 / 86400, "second": 1 / 86400, "seconds": 1 / 86400,
+    "m": 1 / 1440, "min": 1 / 1440, "mins": 1 / 1440, "minute": 1 / 1440, "minutes": 1 / 1440,
+    "h": 1 / 24, "hr": 1 / 24, "hrs": 1 / 24, "hour": 1 / 24, "hours": 1 / 24,
+    "d": 1.0, "day": 1.0, "days": 1.0,
+    "w": 7.0, "wk": 7.0, "wks": 7.0, "week": 7.0, "weeks": 7.0,
+}  # fmt: skip
 
-    Hours are converted to days (minimum 1 day for store queries).
+_SINCE_RE = re.compile(r"([0-9]*\.?[0-9]+)\s*([a-z]*)")
+
+
+def _parse_since(since: str | None) -> float | None:
+    """Parse a --since value into a number of days (float; None = no filter).
+
+    Accepts compact forms (``90s``, ``30m``, ``2h``, ``7d``, ``2w``), a bare
+    number (interpreted as days for backward compatibility — ``30`` == ``30d``),
+    natural phrases (``"2 hours ago"``, ``"30 minutes"``, ``"1 week ago"``), and
+    ``all`` (no filter). Sub-day windows are returned as fractions of a day, so
+    timestamp filters (``query``, ``runs``) get hour/minute precision rather than
+    rounding up to a whole day. The unit ``m`` means *minutes*.
     """
     if not since:
         return None
-    if since.lower() == "all":
+    s = since.strip().lower()
+    if s == "all":
         return None
-    try:
-        if since.endswith("d"):
-            return int(since[:-1])
-        if since.endswith("h"):
-            import math
-
-            return max(1, math.ceil(int(since[:-1]) / 24))
-        return int(since)
-    except ValueError:
-        raise click.BadParameter(
-            f"invalid value {since!r} (expected e.g. 1h, 7d, 30d, or 'all')",
-            param_hint="'--since'",
-        )
+    if s.endswith("ago"):
+        s = s[:-3].strip()
+    match = _SINCE_RE.fullmatch(s)
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2)
+        if unit == "":
+            return value  # bare number == days (back-compat)
+        if unit in _SINCE_UNIT_DAYS:
+            return value * _SINCE_UNIT_DAYS[unit]
+    raise click.BadParameter(
+        f"invalid value {since!r} (expected e.g. 90s, 30m, 2h, 7d, 2w, '2 hours ago', or 'all')",
+        param_hint="'--since'",
+    )
 
 
 def _record_timestamp_sort_key(record: SessionRecord) -> tuple[int, float | str]:
@@ -637,7 +660,7 @@ def _filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
             click.option(
                 "--since",
                 default=None,
-                help="Filter by recency (e.g. 7d, 30d, or 'all')",
+                help="Filter by recency (e.g. 90s, 30m, 2h, 7d, 2w, '2 hours ago', or 'all')",
             ),
             click.option("--json", "as_json", is_flag=True, help="Output as JSON"),
         ]
@@ -838,7 +861,8 @@ def stats(
         # Check for unsynced sessions regardless of whether stats matched anything —
         # hint is useful even when results exist (import may add more context).
         # Skip when _show_discovery_fallback already printed a sync recommendation.
-        hint_window = since_days if since_days else 30
+        # Discovery is day-granular; round a sub-day window up to whole days.
+        hint_window = math.ceil(since_days) if since_days else 30
         unsynced = _count_unsynced(store, since_days=hint_window)
         if unsynced > 0:
             click.echo(
@@ -851,7 +875,7 @@ def stats(
 
 
 @cli.command()
-@click.option("--since", default="14d", help="Time window (e.g. 7d, 30d)")
+@click.option("--since", default="14d", help="Time window (e.g. 2h, 7d, 2w, or 'all')")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def runs(ctx: click.Context, since: str, as_json: bool) -> None:
@@ -869,7 +893,7 @@ def runs(ctx: click.Context, since: str, as_json: bool) -> None:
         if store.query():
             click.echo(f"No runs found in the last {since_days or 14} day(s).")
         else:
-            _show_discovery_fallback(since_days=since_days or 14)
+            _show_discovery_fallback(since_days=math.ceil(since_days or 14))
     else:
         format_run_analytics(analytics)
 
@@ -1382,7 +1406,8 @@ def discover(
     """
     since_days = _parse_since(since) or 7
     today = date.today()
-    start = today - timedelta(days=since_days)
+    # Discovery scans whole-day session dirs; round sub-day windows up to a day.
+    start = today - timedelta(days=math.ceil(since_days))
 
     discovered: list[dict] = []
 

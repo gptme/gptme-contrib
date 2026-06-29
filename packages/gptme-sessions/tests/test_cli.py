@@ -552,6 +552,85 @@ class TestParseSince:
         assert rc != 0
 
 
+class TestParseSinceUnits:
+    """Direct unit tests for _parse_since: units, granularity, and phrasing."""
+
+    @pytest.mark.parametrize(
+        "value,expected_days",
+        [
+            ("all", None),
+            (None, None),
+            ("7d", 7.0),
+            ("30", 30.0),  # bare number == days (back-compat)
+            ("2w", 14.0),
+            ("1 week ago", 7.0),
+            ("2h", 2 / 24),
+            ("2 hours ago", 2 / 24),
+            ("2 hours", 2 / 24),
+            ("30m", 30 / 1440),
+            ("30 minutes", 30 / 1440),
+            ("90s", 90 / 86400),
+            ("2.5h", 2.5 / 24),
+            ("0.5d", 0.5),
+        ],
+    )
+    def test_units_and_phrases(self, value: str | None, expected_days: float | None):
+        from gptme_sessions.cli import _parse_since
+
+        result = _parse_since(value)
+        if expected_days is None:
+            assert result is None
+        else:
+            assert result == pytest.approx(expected_days)
+
+    def test_sub_day_window_is_fractional_not_rounded(self):
+        """A 2h window must stay sub-day (the old code rounded up to >=1 day)."""
+        from gptme_sessions.cli import _parse_since
+
+        result = _parse_since("2h")
+        assert result is not None and result < 1.0
+
+    def test_case_and_whitespace_insensitive(self):
+        from gptme_sessions.cli import _parse_since
+
+        assert _parse_since("  2H  ") == pytest.approx(2 / 24)
+        assert _parse_since("ALL") is None
+
+    @pytest.mark.parametrize("bad", ["abc", "2x", "hours", "2 fortnights"])
+    def test_invalid_raises(self, bad: str):
+        import click
+
+        from gptme_sessions.cli import _parse_since
+
+        with pytest.raises(click.BadParameter):
+            _parse_since(bad)
+
+    def test_query_since_hours_filters_precisely(self, tmp_path: Path):
+        """End-to-end: --since 2h excludes a record 5h old but keeps a 1h-old one."""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        store = SessionStore(sessions_dir=tmp_path)
+        recent = SessionRecord(
+            session_id="recent",
+            timestamp=(now - timedelta(hours=1)).isoformat(),
+            model="sonnet",
+        )
+        old = SessionRecord(
+            session_id="old",
+            timestamp=(now - timedelta(hours=5)).isoformat(),
+            model="sonnet",
+        )
+        store.append(recent)
+        store.append(old)
+
+        rc, out = _invoke(["query", "--since", "2h", "--json"], tmp_path)
+        assert rc == 0
+        ids = {r["session_id"] for r in json.loads(out)}
+        assert "recent" in ids
+        assert "old" not in ids
+
+
 # -- top-level invocation (no subcommand) ------------------------------------
 
 
