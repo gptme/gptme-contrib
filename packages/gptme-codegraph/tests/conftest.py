@@ -15,6 +15,9 @@ def isolated_cache_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(commit_map, "_CACHE_DIR", tmp_path / "gptme-codegraph-cache")
 
 
+_TREESITTER_FREE = {"test_search_cache"}
+
+
 def pytest_collection_modifyitems(config, items):
     try:
         import tree_sitter  # type: ignore[import-untyped]  # noqa: F401
@@ -24,5 +27,5 @@ def pytest_collection_modifyitems(config, items):
             reason="tree-sitter not installed — run: uv sync --all-extras"
         )
         for item in items:
-            if "codegraph" in str(item.path):
+            if "codegraph" in str(item.path) and item.path.stem not in _TREESITTER_FREE:
                 item.add_marker(skip_mark)
