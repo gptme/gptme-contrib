@@ -2,10 +2,10 @@
 description: "After `git worktree add -b BRANCH origin/master`, push with explicit refspec `git push -u origin BRANCH:BRANCH` — bare `git push -u origin BRANCH` targets master due to push.default=upstream"
 match:
   keywords:
-    - "git worktree add"
     - "git push -u origin"
     - "branch from master"
-    - "push.default=upstream"
+    - "feature branch pushed to master"
+    - "refspec pushes to wrong branch"
   session_categories: [code, cross-repo]
 target_grade: [harm, productivity]
 status: active

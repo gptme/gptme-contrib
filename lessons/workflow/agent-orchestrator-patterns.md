@@ -3,7 +3,6 @@ status: active
 match:
   keywords:
     - "orchestrator"
-    - "multi-agent"
     - "standup missing"
     - "agent coordination"
     - "inference utilization"

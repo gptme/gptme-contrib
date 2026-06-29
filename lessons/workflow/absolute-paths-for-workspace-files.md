@@ -4,7 +4,6 @@ match:
   - "save file to"
   - "write journal entry"
   - "mkdir -p journal"
-  - "file path"
   - "wrong directory"
   - "file ended up in wrong"
   - "journal created in external repo"

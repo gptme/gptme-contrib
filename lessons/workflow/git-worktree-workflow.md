@@ -1,8 +1,6 @@
 ---
 match:
   keywords:
-  - "git worktree"
-  - "worktree"
   - "submit PR to external"
   - "PR to gptme"
   - "branch from origin/master"

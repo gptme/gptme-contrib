@@ -15,7 +15,6 @@ match:
   - churning on low-value tasks
   - looking busy without shipping
   - plateau detector says category_monotony
-  - "idea backlog"
   session_categories: [strategic, self-review]
 status: active
 ---
