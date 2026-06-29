@@ -615,6 +615,7 @@ tr:hover { background: var(--accent-dim); }
       <div class="dashboard-nav-links">
         <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
         <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
+        {% if community_plugins %}<a href="#community-plugins"><span>Community</span><span class="nav-count">{{ stats.total_community_plugins }}</span></a>{% endif %}
         <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
       </div>
     </div>
@@ -943,6 +944,31 @@ tr:hover { background: var(--accent-dim); }
     </table>
   </section>
 </div>
+
+<!-- Community Extensions (third-party repos tagged with gptme topics) -->
+{% if community_plugins %}
+<section id="community-plugins">
+  <h2>Community Extensions <span class="count-badge">({{ community_plugins | length }})</span></h2>
+  <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
+    Third-party repos tagged with <code>gptme-plugin</code>, <code>gptme-skill</code>, or <code>gptme-mcp-server</code> on GitHub.
+    To get listed, <a href="https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/classifying-your-repository-with-topics">add a topic</a> to your repo.
+  </p>
+  <table>
+    <thead><tr><th>Repo</th><th>Type</th><th>Language</th><th>⭐</th><th>Description</th></tr></thead>
+    <tbody>
+    {% for ext in community_plugins %}
+      <tr>
+        <td><strong><a href="{{ ext.url }}" target="_blank" rel="noopener">{{ ext.name }}</a></strong></td>
+        <td>{% for t in ext.topics %}<span class="tag">{{ t | replace("gptme-", "") }}</span> {% endfor %}</td>
+        <td>{{ ext.language or "" }}</td>
+        <td>{{ ext.stars or "" }}</td>
+        <td>{{ ext.description or "" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
 
 <!-- Lessons & Skills (reference — collapsed by default) -->
 <section id="guidance">

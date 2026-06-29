@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Fetch community gptme extensions from GitHub topics and update state/community_plugins.json.
+
+Searches GitHub for repos tagged with gptme-plugin, gptme-skill, or gptme-mcp-server
+topics and writes the results to state/community_plugins.json for use by gptme-dashboard.
+
+Usage:
+    python3 scripts/fetch-community-plugins.py
+    python3 scripts/fetch-community-plugins.py --output path/to/output.json
+    python3 scripts/fetch-community-plugins.py --dry-run
+
+Requires GITHUB_TOKEN env var (or gh CLI auth) for the GitHub search API.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import cast
+
+TOPICS = ["gptme-plugin", "gptme-skill", "gptme-mcp-server"]
+
+# Repos to exclude (the contrib repo itself, which is the host)
+EXCLUDE_NAMES = {"gptme/gptme-contrib"}
+
+DEFAULT_OUTPUT = Path(__file__).parent.parent / "state" / "community_plugins.json"
+
+
+def gh_api(path: str) -> dict | list:
+    """Call GitHub API via gh CLI."""
+    result = subprocess.run(
+        ["gh", "api", path, "--paginate"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # --paginate returns multiple JSON objects concatenated; wrap into array if needed
+    raw = result.stdout.strip()
+    # gh --paginate outputs valid JSON arrays that get concatenated, merge them
+    if raw.startswith("[") and raw.endswith("]"):
+        # single page or already merged
+        return cast(list, json.loads(raw))
+    # multiple pages: each line is a JSON array
+    merged: list = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if line:
+            chunk = json.loads(line)
+            if isinstance(chunk, list):
+                merged.extend(chunk)
+            elif isinstance(chunk, dict):
+                merged.append(chunk)
+    return merged
+
+
+def search_topic(topic: str) -> list[dict]:
+    """Search GitHub for repos with the given topic."""
+    result = subprocess.run(
+        ["gh", "api", f"search/repositories?q=topic:{topic}&per_page=100&sort=stars"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data: dict = json.loads(result.stdout)
+    return cast(list[dict], data.get("items", []))
+
+
+def fetch_all() -> list[dict]:
+    """Fetch all repos across all gptme topics, deduplicated by full_name."""
+    seen: dict[str, dict] = {}
+    for topic in TOPICS:
+        try:
+            repos = search_topic(topic)
+        except subprocess.CalledProcessError as exc:
+            print(f"Warning: failed to search topic {topic}: {exc}", file=sys.stderr)
+            continue
+        for repo in repos:
+            name = repo["full_name"]
+            if name in EXCLUDE_NAMES:
+                continue
+            if name not in seen:
+                seen[name] = repo
+            else:
+                # merge topics from duplicate hits
+                seen[name].setdefault("_extra_topics", set()).add(topic)
+
+    entries = []
+    for name, repo in sorted(
+        seen.items(), key=lambda x: -(x[1].get("stargazers_count") or 0)
+    ):
+        topics = [t for t in repo.get("topics", []) if t in TOPICS]
+        entry = {
+            "name": name,
+            "description": (repo.get("description") or "").strip(),
+            "url": repo["html_url"],
+            "stars": repo.get("stargazers_count", 0),
+            "language": repo.get("language") or "",
+            "topics": topics,
+        }
+        entries.append(entry)
+    return entries
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Fetch community gptme extensions from GitHub"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help="Output JSON file (default: state/community_plugins.json)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print result without writing"
+    )
+    args = parser.parse_args()
+
+    print(f"Searching GitHub for topics: {', '.join(TOPICS)}", file=sys.stderr)
+    entries = fetch_all()
+    print(f"Found {len(entries)} community repos", file=sys.stderr)
+
+    output = {
+        "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": "github-topics: " + ", ".join(TOPICS),
+        "entries": entries,
+    }
+
+    json_str = json.dumps(output, indent=2, ensure_ascii=False)
+
+    if args.dry_run:
+        print(json_str)
+        return 0
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json_str + "\n")
+    print(f"Written {len(entries)} entries to {args.output}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

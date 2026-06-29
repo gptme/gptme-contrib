@@ -9,6 +9,7 @@ on:
       - 'packages/**'
       - 'skills/**'
       - 'gptme.toml'
+      - 'state/community_plugins.json'
       - '.github/workflows/dashboard.yml'
   workflow_dispatch:
 
