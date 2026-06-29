@@ -304,6 +304,11 @@ def extract_signals(msgs: list[dict]) -> dict:
     timestamps: list[datetime] = []
     steps = 0  # number of assistant turns that yielded to await tool results
     detail_by_value: dict[str, dict[str, object]] = {}
+    # Marker injected by gptme-tooloutput-trimmer's summarization pass
+    # (tooloutput_trimmer.hooks.trimmer.SUMMARIZATION_MARKER).  Hardcoded to
+    # avoid a hard dep on the plugin; must stay in sync with the plugin string.
+    _SUMMARIZATION_MARKER = "[Summarized previous tool outputs]"
+    summarizer_fired = False
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -361,6 +366,11 @@ def extract_signals(msgs: list[dict]) -> dict:
         elif role == "system" and ts_str:
             content_stripped = content.strip()
 
+            # Summarizer-fired detection: the trimmer plugin replaces evicted
+            # tool outputs with a system message starting with this marker.
+            if content_stripped.startswith(_SUMMARIZATION_MARKER):
+                summarizer_fired = True
+
             # Error detection (guard applies to all conditions, not just the last)
             if not content_stripped.startswith("Ran command:") and (
                 content_stripped.startswith("Error")
@@ -406,6 +416,7 @@ def extract_signals(msgs: list[dict]) -> dict:
         "retry_count": retry_count,
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
+        "summarizer_fired": summarizer_fired,
     }
 
 

@@ -264,6 +264,12 @@ class SessionRecord:
     # importing gptme_sessions.spans. ``None`` means not yet populated.
     span_aggregates: dict[str, Any] | None = None
 
+    # Whether the tool-output summarizer fired at least once during this session.
+    # Detected by scanning the trajectory for the summarization marker text.
+    # True = summarizer ran; False = summarizer enabled but no eviction happened;
+    # None = trajectory unavailable or pre-dates this field.
+    summarizer_fired: bool | None = None
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``failure_reason``, ``recommended_confidence``, ``notes``).
