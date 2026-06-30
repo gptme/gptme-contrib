@@ -8,8 +8,6 @@ tags:
 - focus
 match:
   keywords:
-
-
   - straying from highest-leverage
   - trapped in maintenance loops
   - churning on low-value tasks
