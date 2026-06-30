@@ -39,6 +39,7 @@ sys.path.insert(0, str(_Path(__file__).parent.parent))
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict
 from datetime import date, datetime
@@ -144,6 +145,8 @@ REJECTED_DIR = TWEETS_DIR / "rejected"
 CACHE_DIR = TWEETS_DIR / "cache"
 MAX_POSTS_PER_CYCLE = 2  # Rate limit to prevent mass posting in auto mode
 DRAFT_FILE_SUFFIXES = (".yml", ".yaml", ".md")
+TWITTER_MAX_CHARS = 280
+TWITTER_URL_WEIGHT = 23  # Twitter shortens all URLs to t.co (23 chars)
 
 # Ensure directories exist
 for dir in [NEW_DIR, REVIEW_DIR, APPROVED_DIR, POSTED_DIR, REJECTED_DIR, CACHE_DIR]:
@@ -802,6 +805,45 @@ def _validate_draft_placeholders(draft: TweetDraft) -> list[str]:
     return list(dict.fromkeys(hits))  # deduplicate, preserve order
 
 
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _strip_url_trailing_punct(url: str) -> str:
+    """Strip trailing punctuation that Twitter's t.co shortener would trim.
+
+    Twitter strips common sentence-ending punctuation from URLs before
+    counting them toward the 23-char t.co limit.  A tweet like
+    \"Great article https://example.com.\" counts the URL as 23 chars,
+    not 24.
+    """
+    return url.rstrip(".,!?);:>\"'")
+
+
+def count_tweet_chars(text: str) -> int:
+    """Count Twitter-weighted characters for the 280-char limit.
+
+    Twitter shortens all http/https URLs to t.co links (23 chars each).
+    Strip trailing punctuation that t.co would remove before counting.
+    """
+    count = len(text)
+    for url in _URL_RE.findall(text):
+        url = _strip_url_trailing_punct(url)
+        count += TWITTER_URL_WEIGHT - len(url)
+    return count
+
+
+def _validate_draft_length(draft: "TweetDraft") -> list[tuple[str, int]]:
+    """Return (text_snippet, weighted_char_count) for any tweet segment over the limit."""
+    over: list[tuple[str, int]] = []
+    for text in [draft.text, *draft.thread]:
+        if not text:
+            continue
+        n = count_tweet_chars(text)
+        if n > TWITTER_MAX_CHARS:
+            over.append((text[:60] + ("..." if len(text) > 60 else ""), n))
+    return over
+
+
 @cli.command()
 @click.argument("text")
 @click.option(
@@ -849,6 +891,17 @@ def draft(
                 )
                 op.complete(success=False, error="bad_url")
                 sys.exit(1)
+
+        char_count = count_tweet_chars(text)
+        if char_count > TWITTER_MAX_CHARS:
+            console.print(
+                f"[red]✗ Tweet is {char_count} chars (limit: {TWITTER_MAX_CHARS})[/red]"
+            )
+            console.print(
+                "[red]Aborting draft — shorten the text before drafting.[/red]"
+            )
+            op.complete(success=False, error="too_long")
+            sys.exit(1)
 
         scheduled_time = datetime.fromisoformat(schedule) if schedule else None
 
@@ -1365,6 +1418,20 @@ def post(
                 )
                 move_draft(path, "rejected")
                 continue
+
+        # Length validation: catch overlong drafts before they hit the API
+        over_limit = _validate_draft_length(draft)
+        if over_limit:
+            for snippet, char_count in over_limit:
+                console.print(
+                    f"[red]✗ Tweet segment is {char_count} chars (limit: {TWITTER_MAX_CHARS}): '{snippet}...'[/red]"
+                )
+            console.print(
+                "[red]Skipping draft — shorten the overlong tweet segment(s).[/red]"
+            )
+            rejected_path = move_draft(path, "rejected")
+            console.print(f"[red]Moved to {rejected_path}[/red]")
+            continue
 
         if yes or Confirm.ask("Post this tweet?", default=True):
             try:

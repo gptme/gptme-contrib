@@ -520,3 +520,82 @@ def test_is_reply_restricted_verified(workflow_module: Any) -> None:
 def test_is_reply_restricted_subscribers(workflow_module: Any) -> None:
     tweet = SimpleNamespace(reply_settings="subscribers")
     assert workflow_module.is_reply_restricted(tweet) is True
+
+
+# ── Tweet length validation ──────────────────────────────────────────────────
+
+
+def test_count_tweet_chars_plain_text(workflow_module: Any) -> None:
+    assert workflow_module.count_tweet_chars("Hello world!") == len("Hello world!")
+
+
+def test_count_tweet_chars_url_counts_as_23(workflow_module: Any) -> None:
+    long_url = "https://example.com/" + "x" * 100
+    text = f"Look at this {long_url}"
+    expected = len("Look at this ") + 23
+    assert workflow_module.count_tweet_chars(text) == expected
+
+
+def test_count_tweet_chars_exactly_280(workflow_module: Any) -> None:
+    text = "a" * 280
+    assert workflow_module.count_tweet_chars(text) == 280
+    assert workflow_module.count_tweet_chars(text) <= workflow_module.TWITTER_MAX_CHARS
+
+
+def test_count_tweet_chars_over_limit(workflow_module: Any) -> None:
+    text = "a" * 281
+    assert workflow_module.count_tweet_chars(text) == 281
+    assert workflow_module.count_tweet_chars(text) > workflow_module.TWITTER_MAX_CHARS
+
+
+def test_count_tweet_chars_long_url_reduces_count(workflow_module: Any) -> None:
+    long_url = "https://" + "x" * 300
+    assert workflow_module.count_tweet_chars(long_url) == 23
+
+
+def test_validate_draft_length_passes_under_limit(workflow_module: Any) -> None:
+    draft = workflow_module.TweetDraft(text="Short tweet", type="tweet")
+    assert workflow_module._validate_draft_length(draft) == []
+
+
+def test_validate_draft_length_fails_over_limit(workflow_module: Any) -> None:
+    over_text = "a" * 281
+    draft = workflow_module.TweetDraft(text=over_text, type="tweet")
+    violations = workflow_module._validate_draft_length(draft)
+    assert len(violations) == 1
+    snippet, count = violations[0]
+    assert count == 281
+    # snippet has "..." appended only when > 60 chars
+    assert snippet.rstrip(".") in over_text
+
+
+def test_validate_draft_length_checks_thread(workflow_module: Any) -> None:
+    draft = workflow_module.TweetDraft(
+        text="Fine tweet",
+        type="thread",
+        thread=["Also fine", "b" * 281],
+    )
+    violations = workflow_module._validate_draft_length(draft)
+    assert len(violations) == 1
+    _, count = violations[0]
+    assert count == 281
+
+
+def test_count_tweet_chars_url_trailing_punctuation(workflow_module: Any) -> None:
+    """Trailing punctuation after a URL should NOT be counted as part of the URL.
+
+    Twitter's t.co shortener strips trailing punctuation, so a URL followed
+    by a period, comma, paren, etc. still counts as 23 chars.
+    """
+    url = "https://example.com/article"
+    text = f"Read {url}."
+    # Without the trailing-punct fix: url = "https://example.com/article." (24 chars weighted)
+    # With the fix:                   url = "https://example.com/article"   (23 chars weighted)
+    weighted = workflow_module.count_tweet_chars(text)
+    expected = len("Read ") + 23 + 1  # "Read " + URL(23) + "."
+    assert weighted == expected, f"Got {weighted}, expected {expected}"
+
+    # Also test comma, closing paren, exclamation mark
+    text2 = f"See {url}, amazing!"
+    weighted2 = workflow_module.count_tweet_chars(text2)
+    assert weighted2 < len(text2), "Punctuation after URL should not inflate count"
