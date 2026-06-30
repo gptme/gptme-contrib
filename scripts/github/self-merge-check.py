@@ -465,7 +465,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus",
         ]
     )
     if not raw:
@@ -1141,6 +1141,12 @@ def evaluate_pr(
 
     if pr.get("state") != "OPEN":
         result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
+
+    merge_state = pr.get("mergeStateStatus", "")
+    if merge_state in ("DIRTY", "CONFLICTING"):
+        result.reasons.append(
+            f"PR has merge conflicts (mergeStateStatus: {merge_state})"
+        )
 
     status_checks = pr.get("statusCheckRollup", [])
     if not status_checks:
