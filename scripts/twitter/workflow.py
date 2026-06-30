@@ -1423,14 +1423,17 @@ def post(
         over_limit = _validate_draft_length(draft)
         if over_limit:
             for snippet, char_count in over_limit:
+                # snippet already includes "..." if truncated, don't add it again
                 console.print(
-                    f"[red]✗ Tweet segment is {char_count} chars (limit: {TWITTER_MAX_CHARS}): '{snippet}...'[/red]"
+                    f"[red]✗ Tweet segment is {char_count} chars (limit: {TWITTER_MAX_CHARS}): '{snippet}'[/red]"
                 )
             console.print(
                 "[red]Skipping draft — shorten the overlong tweet segment(s).[/red]"
             )
             rejected_path = move_draft(path, "rejected")
-            console.print(f"[red]Moved to {rejected_path}[/red]")
+            console.print(
+                f"[red]Moved to {rejected_path.name} — edit and re-run 'post' to try again.[/red]"
+            )
             continue
 
         if yes or Confirm.ask("Post this tweet?", default=True):
