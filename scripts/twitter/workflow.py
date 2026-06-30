@@ -808,13 +808,26 @@ def _validate_draft_placeholders(draft: TweetDraft) -> list[str]:
 _URL_RE = re.compile(r"https?://\S+")
 
 
+def _strip_url_trailing_punct(url: str) -> str:
+    """Strip trailing punctuation that Twitter's t.co shortener would trim.
+
+    Twitter strips common sentence-ending punctuation from URLs before
+    counting them toward the 23-char t.co limit.  A tweet like
+    \"Great article https://example.com.\" counts the URL as 23 chars,
+    not 24.
+    """
+    return url.rstrip(".,!?);:>\"'")
+
+
 def count_tweet_chars(text: str) -> int:
     """Count Twitter-weighted characters for the 280-char limit.
 
     Twitter shortens all http/https URLs to t.co links (23 chars each).
+    Strip trailing punctuation that t.co would remove before counting.
     """
     count = len(text)
     for url in _URL_RE.findall(text):
+        url = _strip_url_trailing_punct(url)
         count += TWITTER_URL_WEIGHT - len(url)
     return count
 
@@ -827,7 +840,7 @@ def _validate_draft_length(draft: "TweetDraft") -> list[tuple[str, int]]:
             continue
         n = count_tweet_chars(text)
         if n > TWITTER_MAX_CHARS:
-            over.append((text[:60], n))
+            over.append((text[:60] + ("..." if len(text) > 60 else ""), n))
     return over
 
 
@@ -1416,7 +1429,8 @@ def post(
             console.print(
                 "[red]Skipping draft — shorten the overlong tweet segment(s).[/red]"
             )
-            move_draft(path, "rejected")
+            rejected_path = move_draft(path, "rejected")
+            console.print(f"[red]Moved to {rejected_path}[/red]")
             continue
 
         if yes or Confirm.ask("Post this tweet?", default=True):

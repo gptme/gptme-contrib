@@ -565,7 +565,8 @@ def test_validate_draft_length_fails_over_limit(workflow_module: Any) -> None:
     assert len(violations) == 1
     snippet, count = violations[0]
     assert count == 281
-    assert snippet in over_text
+    # snippet has "..." appended only when > 60 chars
+    assert snippet.rstrip(".") in over_text
 
 
 def test_validate_draft_length_checks_thread(workflow_module: Any) -> None:
@@ -578,3 +579,23 @@ def test_validate_draft_length_checks_thread(workflow_module: Any) -> None:
     assert len(violations) == 1
     _, count = violations[0]
     assert count == 281
+
+
+def test_count_tweet_chars_url_trailing_punctuation(workflow_module: Any) -> None:
+    """Trailing punctuation after a URL should NOT be counted as part of the URL.
+
+    Twitter's t.co shortener strips trailing punctuation, so a URL followed
+    by a period, comma, paren, etc. still counts as 23 chars.
+    """
+    url = "https://example.com/article"
+    text = f"Read {url}."
+    # Without the trailing-punct fix: url = "https://example.com/article." (24 chars weighted)
+    # With the fix:                   url = "https://example.com/article"   (23 chars weighted)
+    weighted = workflow_module.count_tweet_chars(text)
+    expected = len("Read ") + 23 + 1  # "Read " + URL(23) + "."
+    assert weighted == expected, f"Got {weighted}, expected {expected}"
+
+    # Also test comma, closing paren, exclamation mark
+    text2 = f"See {url}, amazing!"
+    weighted2 = workflow_module.count_tweet_chars(text2)
+    assert weighted2 < len(text2), "Punctuation after URL should not inflate count"
