@@ -15,8 +15,17 @@ DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "gptme" / "wisdom.db"
 
 
 def _normalize_fts_query(query: str) -> str:
-    """Escape FTS5 special characters for safe querying."""
-    return query.replace('"', '""').replace("*", "").replace("^", "")
+    """Escape FTS5 special characters for safe querying.
+
+    Removes FTS5 operator tokens that would cause syntax errors in a
+    bare MATCH query. The search fallback wraps the stripped query in
+    double quotes for a literal phrase match if the unquoted version
+    still fails.
+    """
+    result = query.replace('"', '""')
+    for ch in ("(", ")", "*", "^", "+", "-", "~"):
+        result = result.replace(ch, "")
+    return result
 
 
 class BookIndex:
@@ -75,8 +84,14 @@ class BookIndex:
         )
         self.conn.commit()
 
-    def add(self, doc: BookDocument) -> bool:
-        """Add one book chunk. Returns True if new, False if duplicate."""
+    def add(self, doc: BookDocument, *, commit: bool = True) -> bool:
+        """Add one book chunk. Returns True if new, False if duplicate.
+
+        Args:
+            doc: The book document chunk to index.
+            commit: If True, commit after insert. Set False for batch
+                    insertion via add_many() to avoid per-chunk commits.
+        """
         content_hash = hashlib.sha256(f"{doc.source}\x00{doc.content}".encode("utf-8")).hexdigest()
         try:
             cursor = self.conn.execute(
@@ -106,14 +121,24 @@ class BookIndex:
                 """,
                 (row_id, doc.title, doc.chapter, doc.section, doc.content),
             )
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
             return True
         except sqlite3.IntegrityError:
             return False
 
     def add_many(self, docs: Iterator[BookDocument]) -> int:
-        """Add many book chunks. Returns count of newly-inserted chunks."""
-        return sum(1 for doc in docs if self.add(doc))
+        """Add many book chunks. Returns count of newly-inserted chunks.
+
+        Batches all inserts into a single commit for performance —
+        avoids per-chunk WAL sync overhead for bulk ingestion.
+        """
+        count = 0
+        for doc in docs:
+            if self.add(doc, commit=False):
+                count += 1
+        self.conn.commit()
+        return count
 
     def search(
         self,
@@ -141,12 +166,16 @@ class BookIndex:
             LIMIT ?
         """
         normalized = _normalize_fts_query(query)
-        run_params = [normalized, *params, limit]
-        try:
-            rows = self.conn.execute(sql, run_params).fetchall()
-        except sqlite3.OperationalError:
-            run_params[0] = f'"{normalized}"'
-            rows = self.conn.execute(sql, run_params).fetchall()
+        # First attempt: bare MATCH (supports FTS5 syntax if query is clean)
+        # Fallback: wrap in double quotes for literal phrase match
+        for args in ([normalized, *params, limit], [f'"{normalized}"', *params, limit]):
+            try:
+                rows = self.conn.execute(sql, args).fetchall()
+                break
+            except sqlite3.OperationalError:
+                continue
+        else:
+            rows = []
 
         results = []
         for row in rows:
