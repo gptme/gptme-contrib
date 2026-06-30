@@ -3,6 +3,7 @@ description: "Apply safe operation defaults (claim before execute, verify before
 match:
   keywords:
   - "classify operation before executing"
+  - "classify before executing"
   - "safe to execute autonomously"
   - "requires human approval"
 status: active
