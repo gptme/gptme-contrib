@@ -210,7 +210,7 @@ def _make_clean_pr_data(**overrides: object) -> dict[str, object]:
     return data
 
 
-@pytest.mark.parametrize("merge_state", ["DIRTY", "CONFLICTING"])
+@pytest.mark.parametrize("merge_state", ["DIRTY"])
 def test_evaluate_pr_blocks_merge_conflicts(merge_state: str) -> None:
     pr_data = _make_clean_pr_data(mergeStateStatus=merge_state)
 

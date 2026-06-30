@@ -1143,7 +1143,7 @@ def evaluate_pr(
         result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
 
     merge_state = pr.get("mergeStateStatus", "")
-    if merge_state in ("DIRTY", "CONFLICTING"):
+    if merge_state == "DIRTY":
         result.reasons.append(
             f"PR has merge conflicts (mergeStateStatus: {merge_state})"
         )
