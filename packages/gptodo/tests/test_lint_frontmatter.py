@@ -110,9 +110,7 @@ def test_lint_helper_flags_all_known_deprecated_fields() -> None:
         metadata = {"state": "todo", field_name: "some-value"}
         findings = lint_frontmatter_fields(metadata)
         deprecated = [f for f in findings if f[0] == "warn-deprecated"]
-        assert (
-            len(deprecated) == 1
-        ), f"{field_name} should produce exactly one deprecated warning"
+        assert len(deprecated) == 1, f"{field_name} should produce exactly one deprecated warning"
         assert deprecated[0][1] == field_name
 
 

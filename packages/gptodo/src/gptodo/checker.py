@@ -94,7 +94,12 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
     "active": ["ready_for_review", "waiting", "someday", "done", "cancelled"],
     "ready_for_review": ["active", "done", "cancelled"],  # Can go back to active if review fails
     "waiting": ["active", "someday", "cancelled"],
-    "someday": ["backlog", "todo", "cancelled", "expired"],  # Can be revived back to actionable lanes
+    "someday": [
+        "backlog",
+        "todo",
+        "cancelled",
+        "expired",
+    ],  # Can be revived back to actionable lanes
     "done": [],  # Terminal state
     "cancelled": [],  # Terminal state
     "expired": ["backlog", "todo", "cancelled"],  # Soft-terminal: revive without --force
