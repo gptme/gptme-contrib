@@ -101,6 +101,8 @@ from gptodo.unblock import auto_unblock_with_fan_in
 from gptodo.utils import (
     # Constants
     CONFIGS,
+    DEPRECATED_FRONTMATTER_FIELDS,
+    KNOWN_FRONTMATTER_FIELDS,
     STATE_EMOJIS,
     STATE_STYLES,
     # Data classes
@@ -123,6 +125,7 @@ from gptodo.utils import (
     get_cache_path,
     has_new_activity,
     is_task_ready,
+    lint_frontmatter_fields,
     task_has_waiting_blocker,
     load_cache,
     load_tasks,
@@ -1476,7 +1479,17 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     type=(str, str),
     help="Set subtask state (subtask_text, state). State must be 'done' or 'todo'",
 )
-def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
+@click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Bypass state-transition legality check. Required for illegal transitions "
+        "(e.g. active → todo). Use only when you know what you're doing — the "
+        "transition table exists to catch loop drift like watch-* tasks stuck in "
+        "'active' when they should be 'waiting'."
+    ),
+)
+def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
     """Edit task metadata.
 
     Recurring tasks:
@@ -1612,6 +1625,98 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
                 valid = ", ".join(field_spec["values"])  # type: ignore[arg-type]
                 console.print(f"[red]Invalid {field}: {value}. Valid values: {valid}[/]")
                 return
+
+            # State-transition legality check (Gordon 2026-07-01).
+            #
+            # For each target task, verify the current state can transition to
+            # `value`. Three severity tiers:
+            #
+            #   1. Reopening a terminal state (done/cancelled → anything):
+            #      BLOCK unless --force. Terminal states should be sticky.
+            #   2. Any other illegal transition (per VALID_TRANSITIONS):
+            #      WARN by default, but complete the edit. Set
+            #      GPTODO_STRICT_TRANSITIONS=1 to promote these to BLOCK.
+            #   3. Legal transition: silent (normal case).
+            #
+            # This catches the class of drift where watch-* tasks get flipped
+            # active→todo (should be `waiting`), while not breaking common
+            # shortcuts like todo→done that appear in existing tests + real
+            # workflows.
+            if field == "state":
+                terminal_reopens: list[tuple[str, str, str]] = []
+                other_illegal: list[tuple[str, str, str]] = []
+                strict = os.environ.get("GPTODO_STRICT_TRANSITIONS", "").lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                for task in target_tasks:
+                    current_state = normalize_state(
+                        task.metadata.get("state", "backlog") or "backlog", warn=False
+                    )
+                    if current_state == value:
+                        continue  # no-op
+                    allowed = VALID_TRANSITIONS.get(current_state, [])
+                    if value in allowed:
+                        continue  # legal
+                    entry = (task.name, current_state, value)
+                    # Terminal-state reopens are the strict subset:
+                    # done/cancelled have no allowed transitions.
+                    if not allowed:
+                        terminal_reopens.append(entry)
+                    else:
+                        other_illegal.append(entry)
+
+                if terminal_reopens and not force:
+                    console.print(
+                        "[red]Refusing to reopen terminal state(s) without --force:[/]"
+                    )
+                    for tname, cur, target in terminal_reopens:
+                        console.print(
+                            f"  {tname}: {cur} → {target}. Terminal states are sticky "
+                            "by design; use --force if you really mean it."
+                        )
+                    return
+
+                if other_illegal and strict and not force:
+                    console.print(
+                        "[red]GPTODO_STRICT_TRANSITIONS=1 — refusing illegal "
+                        "transition(s) without --force:[/]"
+                    )
+                    for tname, cur, target in other_illegal:
+                        legal = VALID_TRANSITIONS.get(cur, [])
+                        legal_str = ", ".join(legal) if legal else "(terminal state)"
+                        console.print(
+                            f"  {tname}: {cur} → {target}. Legal from '{cur}': {legal_str}"
+                        )
+                    console.print(
+                        "[yellow]Hint: `gptodo transitions` shows the full table. "
+                        "Common gotcha: watch-* tasks blocked on a gate/signal "
+                        "belong in 'waiting' (with `wait:` / `waiting_for:`), "
+                        "not 'active'.[/]"
+                    )
+                    return
+
+                if other_illegal and not force:
+                    # Non-strict: warn, don't block.
+                    console.print(
+                        "[yellow]Warning: illegal state transition(s) per "
+                        "gptodo transitions table (allowed via --force or "
+                        "GPTODO_STRICT_TRANSITIONS=1):[/]"
+                    )
+                    for tname, cur, target in other_illegal:
+                        legal = VALID_TRANSITIONS.get(cur, [])
+                        legal_str = ", ".join(legal) if legal else "(terminal state)"
+                        console.print(
+                            f"  {tname}: {cur} → {target}. Legal from '{cur}': {legal_str}"
+                        )
+
+                if (terminal_reopens or other_illegal) and force:
+                    console.print(
+                        "[yellow]--force: proceeding with illegal transition(s):[/]"
+                    )
+                    for tname, cur, target in terminal_reopens + other_illegal:
+                        console.print(f"  {tname}: {cur} → {target} (forced)")
         elif field_spec["type"] == "date":
             # wait: accepts YYYY-MM-DD or YYYY-MM-DDTHH:MM; other date fields store full ISO datetime
             if field == "wait":
@@ -5225,6 +5330,127 @@ def transitions_cmd(output_json: bool):
         console.print("\n[dim]State flow: backlog → todo → active → ready_for_review → done[/]")
         console.print("[dim]Alternate: active → waiting → active → done[/]")
         console.print("[dim]Deferred:  any → someday → backlog/todo (revive when ready)[/]")
+
+
+@cli.command("lint")
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Emit findings as JSON",
+)
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Exit non-zero if any warnings are found (for CI use)",
+)
+@click.argument("task_files", nargs=-1, type=click.Path())
+def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> None:
+    """Lint task frontmatter for hallucinated / unknown fields.
+
+    Flags fields not in the known schema (KNOWN_FRONTMATTER_FIELDS) and
+    fields on the deprecated/anti-design list (DEPRECATED_FRONTMATTER_FIELDS).
+    Warnings only — this does not reject tasks, only nudges toward the
+    correct form.
+
+    The specific `modified` field is called out because it's the canonical
+    anti-design-goal example: high-churn, has to be wired into every edit,
+    and file mtime + `git log -1 --format=%ai <file>` already answer
+    "when was this touched?" for free.
+
+    Examples:
+        gptodo lint                          # lint all tasks
+        gptodo lint tasks/foo.md tasks/bar.md # lint specific files
+        gptodo lint --json                   # machine-readable
+        gptodo lint --strict                 # exit 1 if warnings found (CI)
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load task files
+    if task_files:
+        tasks: list[TaskInfo] = []
+        for file in task_files:
+            path = Path(file)
+            if not path.is_absolute():
+                if str(path).startswith("tasks/"):
+                    path = repo_root / path
+                else:
+                    path = tasks_dir / path
+            file_tasks = load_tasks(path.parent, single_file=path)
+            tasks.extend(file_tasks)
+    else:
+        tasks = load_tasks(tasks_dir)
+
+    if not tasks:
+        if output_json:
+            print(json.dumps({"findings": [], "count": 0}))
+        else:
+            console.print("[yellow]No tasks found[/]")
+        return
+
+    # Collect findings across all tasks
+    all_findings: list[dict] = []
+    for task in tasks:
+        findings = lint_frontmatter_fields(task.metadata)
+        for severity, field, message in findings:
+            all_findings.append(
+                {
+                    "task": task.name,
+                    "path": str(task.path.relative_to(repo_root)),
+                    "severity": severity,
+                    "field": field,
+                    "message": message,
+                }
+            )
+
+    if output_json:
+        print(json.dumps({"findings": all_findings, "count": len(all_findings)}, indent=2))
+        if strict and all_findings:
+            sys.exit(1)
+        return
+
+    # Human output — group by task, deprecated first
+    if not all_findings:
+        console.print(
+            f"[green]✓ No frontmatter schema violations across {len(tasks)} task(s).[/]"
+        )
+        return
+
+    deprecated_count = sum(1 for f in all_findings if f["severity"] == "warn-deprecated")
+    unknown_count = sum(1 for f in all_findings if f["severity"] == "warn-unknown")
+
+    console.print(
+        f"\n[bold]Frontmatter lint — {len(all_findings)} finding(s) across "
+        f"{len({f['task'] for f in all_findings})} task(s):[/]"
+    )
+    if deprecated_count:
+        console.print(
+            f"  [red]{deprecated_count}[/] anti-design-goal / deprecated field(s)"
+        )
+    if unknown_count:
+        console.print(f"  [yellow]{unknown_count}[/] unknown field(s)")
+
+    # Group findings by task for readable output
+    by_task: Dict[str, list] = {}
+    for f in all_findings:
+        by_task.setdefault(f["task"], []).append(f)
+
+    for task_name in sorted(by_task.keys()):
+        console.print(f"\n[bold]{task_name}[/] ({by_task[task_name][0]['path']}):")
+        for f in by_task[task_name]:
+            if f["severity"] == "warn-deprecated":
+                console.print(
+                    f"  [red]WARN[/] deprecated field [bold]{f['field']}[/]: {f['message']}"
+                )
+            else:
+                console.print(
+                    f"  [yellow]WARN[/] unknown field [bold]{f['field']}[/]: {f['message']}"
+                )
+
+    if strict:
+        sys.exit(1)
 
 
 # =============================================================================
