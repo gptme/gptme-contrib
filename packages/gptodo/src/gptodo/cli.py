@@ -1701,8 +1701,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     # Non-strict: warn, don't block.
                     console.print(
                         "[yellow]Warning: illegal state transition(s) per "
-                        "gptodo transitions table (allowed via --force or "
-                        "GPTODO_STRICT_TRANSITIONS=1):[/]"
+                        "gptodo transitions table. Proceeding — pass --force "
+                        "to silence this warning; set GPTODO_STRICT_TRANSITIONS=1 "
+                        "to block it instead:[/]"
                     )
                     for tname, cur, target in other_illegal:
                         legal = VALID_TRANSITIONS.get(cur, [])
