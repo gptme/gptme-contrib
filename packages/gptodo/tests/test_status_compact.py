@@ -61,13 +61,20 @@ def test_status_compact_includes_ready_for_review_tasks(tmp_path: Path, monkeypa
 
 
 def test_status_compact_excludes_terminal_states(tmp_path: Path, monkeypatch) -> None:
-    """Compact mode must not show done, cancelled, or someday tasks."""
+    """Compact mode must not show done, cancelled, someday, or waiting tasks."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     write_task(tasks_dir, "active-task", state="active", created="2026-01-01T00:00:00")
     write_task(tasks_dir, "done-task", state="done", created="2026-01-01T00:00:00")
     write_task(tasks_dir, "cancelled-task", state="cancelled", created="2026-01-01T00:00:00")
     write_task(tasks_dir, "someday-task", state="someday", created="2026-01-01T00:00:00")
+    write_task(
+        tasks_dir,
+        "waiting-task",
+        state="waiting",
+        waiting_for="external blocker",
+        created="2026-01-01T00:00:00",
+    )
 
     output = _run_status_compact(tmp_path, monkeypatch)
 
@@ -75,3 +82,4 @@ def test_status_compact_excludes_terminal_states(tmp_path: Path, monkeypatch) ->
     assert "done-task" not in output
     assert "cancelled-task" not in output
     assert "someday-task" not in output
+    assert "waiting-task" not in output, "compact mode must not show waiting tasks"
