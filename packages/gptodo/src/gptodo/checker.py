@@ -81,15 +81,23 @@ class CheckerConfig:
 
 
 # Valid state transitions
+#
+# `expired` (Gordon 2026-07-01) is a *soft-terminal* state — auto-reaped by
+# `gptodo expire` when a task has been quiet in backlog/todo/someday for
+# longer than the expire window. Unlike done/cancelled it CAN be revived
+# without --force (an operator noticing "wait, this is still relevant" is
+# a normal path, not a policy break), but it is excluded from `next`/`ready`
+# so the queue doesn't grow unboundedly.
 VALID_TRANSITIONS: dict[str, list[str]] = {
-    "backlog": ["todo", "someday", "cancelled"],
-    "todo": ["active", "backlog", "someday", "cancelled"],
+    "backlog": ["todo", "someday", "cancelled", "expired"],
+    "todo": ["active", "backlog", "someday", "cancelled", "expired"],
     "active": ["ready_for_review", "waiting", "someday", "done", "cancelled"],
     "ready_for_review": ["active", "done", "cancelled"],  # Can go back to active if review fails
     "waiting": ["active", "someday", "cancelled"],
-    "someday": ["backlog", "todo", "cancelled"],  # Can be revived back to actionable lanes
+    "someday": ["backlog", "todo", "cancelled", "expired"],  # Can be revived back to actionable lanes
     "done": [],  # Terminal state
     "cancelled": [],  # Terminal state
+    "expired": ["backlog", "todo", "cancelled"],  # Soft-terminal: revive without --force
 }
 
 

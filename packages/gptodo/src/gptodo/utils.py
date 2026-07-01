@@ -113,6 +113,7 @@ def get_canonical_states() -> list[str]:
         "someday",
         "done",
         "cancelled",
+        "expired",
     ]
 
 
@@ -141,6 +142,13 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     # Scheduling / recurring / deferral
     "recur",
     "wait",
+    # Auto-expire (Gordon 2026-07-01): stamped by `gptodo expire` when a
+    # long-quiet task auto-transitions to `expired`. `expired_from` records
+    # the state we came from so revival (expired → original state) is a
+    # cheap `gptodo edit --set state <expired_from>`; `expired_at` is the
+    # date the transition fired.
+    "expired_from",
+    "expired_at",
     # GTD / dependency
     "next_action",
     "waiting_for",
@@ -269,6 +277,7 @@ CONFIGS = {
             "someday",
             "done",
             "cancelled",
+            "expired",  # Gordon 2026-07-01: auto-reaped by `gptodo expire`
             # Deprecated aliases accepted for backward compatibility
             "new",
             "paused",
@@ -309,6 +318,7 @@ STATE_STYLES = {
     "someday": ("dim", "someday"),  # canonical: GTD someday/maybe (excluded from next/ready)
     "done": ("green", "done"),
     "cancelled": ("red", "cancelled"),
+    "expired": ("dim red", "expired"),  # auto-reaped stale task
     # Virtual states (computed, not stored in frontmatter)
     "blocked": ("red", "blocked"),
     # Deprecated task states (still accepted, mapped to canonical)
@@ -339,6 +349,7 @@ STATE_EMOJIS = {
     "someday": "💭",  # canonical: GTD someday/maybe
     "done": "✅",
     "cancelled": "❌",
+    "expired": "🕰️",  # auto-reaped stale task (Gordon 2026-07-01)
     # Deprecated task states (still accepted)
     "new": "🆕",  # deprecated → backlog
     "paused": "⚪",  # deprecated → backlog

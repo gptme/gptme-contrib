@@ -58,6 +58,12 @@ gptodo validate
 # List tasks with filters
 gptodo list --priority high
 gptodo list --state active
+
+# Auto-expire long-quiet tasks (default: 90 days since `created`)
+gptodo expire --dry-run          # preview
+gptodo expire                    # apply
+gptodo expire --days 60          # tighter window
+gptodo expire --state backlog    # only reap backlog
 ```
 
 ### Machine-Readable Output (`--json`)
@@ -151,7 +157,7 @@ Task files should use frontmatter metadata:
 
 ```yaml
 ---
-state: active      # backlog, todo, active, ready_for_review, waiting, someday, done, cancelled
+state: active      # backlog, todo, active, ready_for_review, waiting, someday, done, cancelled, expired
 priority: high     # low, medium, high
 task_type: project # project (multi-step) or action (single-step)
 assigned_to: bob   # agent name
@@ -168,7 +174,7 @@ Task description...
 
 ## State Semantics
 
-The eight canonical states and what they *mean* — not just what they're
+The nine canonical states and what they *mean* — not just what they're
 called. The autonomous loop drifts when "active" gets used as an opaque
 "recently touched" tag; enforcing the semantics is the point of the
 `gptodo transitions` table and the `--force` gate on `gptodo edit --set state`.
@@ -183,6 +189,7 @@ called. The autonomous loop drifts when "active" gets used as an opaque
 | `someday`          | Parked idea; may or may not ever be picked up. Explicitly excluded from `next`/`ready` (GTD someday/maybe). | No                 |
 | `done`             | Terminal. Work merged / criterion met.                                                                     | No (terminal)      |
 | `cancelled`        | Terminal. Will not be picked up; rationale in body.                                                        | No (terminal)      |
+| `expired`          | Soft-terminal. Auto-applied by `gptodo expire` when a `backlog`/`todo`/`someday` task has sat quiet longer than the expire window (default 90d since `created`). Revive to `backlog`/`todo` without `--force`. | No |
 
 Legacy deprecated aliases (still accepted with a warning): `new` → `backlog`,
 `paused` → `backlog`.
@@ -233,9 +240,47 @@ stateDiagram-v2
     someday --> backlog : revived
     someday --> todo : revived
     someday --> cancelled
+    backlog --> expired : auto-reap
+    todo --> expired : auto-reap
+    someday --> expired : auto-reap
+    expired --> backlog : revived
+    expired --> todo : revived
+    expired --> cancelled
     done --> [*]
     cancelled --> [*]
+    expired --> [*]
 ```
+
+### Auto-expire
+
+The queue grows without bound if long-quiet tasks never get closed. `gptodo
+expire` walks the tree, finds tasks in eligible states
+(`backlog`/`todo`/`someday` by default) whose `created` date is older than
+`--days N` (default `90`, env `GPTODO_EXPIRE_DAYS`), and transitions them to
+`expired`. `expired_from` and `expired_at` are stamped so revival is a
+one-liner:
+
+```bash
+gptodo expire --dry-run       # preview what would be reaped
+gptodo expire                 # apply
+gptodo expire --days 60       # tighter window
+gptodo expire --state backlog # only reap backlog
+gptodo expire --json          # machine-readable output for cron/CI
+
+# Revive an expired task (no --force needed — expired is soft-terminal)
+gptodo edit <task> --set state backlog
+```
+
+Auto-expire deliberately **skips**:
+
+- Tasks in `active` / `waiting` / `ready_for_review` (live work — age there
+  is a symptom, not queue rot).
+- Tasks with `recur:` set (legitimately dormant between fires).
+- Tasks with a future `wait:` date (intentionally hidden, not stale).
+
+Age is measured from `created`, **not** `modified`, because a task that only
+gets touched by lint/reformat still hasn't been *worked* — using mtime would
+let queue drift hide behind incidental edits.
 
 `gptodo transitions` prints the machine-readable table. `gptodo edit --set state X`
 enforces legality and refuses illegal transitions unless you pass `--force`

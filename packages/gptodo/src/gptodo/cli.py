@@ -127,6 +127,7 @@ from gptodo.utils import (
     is_task_ready,
     lint_frontmatter_fields,
     task_has_waiting_blocker,
+    task_is_waiting_for_date,
     load_cache,
     load_tasks,
     normalize_state,
@@ -1577,6 +1578,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         "success_criterion": {"type": "string"},  # Verifiable "done" gate
         "tracking_issue": {"type": "string"},  # Human URL of the live coordination issue/PR
         "upstream_coordination_id": {"type": "string"},  # Machine claim key (github:OWNER/REPO#NUM)
+        # Auto-expire (Gordon 2026-07-01)
+        "expired_from": {"type": "string"},  # State the task came from before auto-expire
+        "expired_at": {"type": "date"},  # Date the task was auto-expired
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
         "depends": {"type": "list"},  # Deprecated, use requires instead
@@ -2715,6 +2719,222 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
     console.print(table)
     console.print("\n[dim]Review these tasks for: completion, archival, or reassessment[/]")
     console.print("[dim]Run [bold]gptodo show <id>[/] to inspect a task's details[/]")
+
+
+# =============================================================================
+# Auto-expire (Gordon 2026-07-01)
+#
+# Prevents the queue from growing unboundedly by auto-reaping tasks that have
+# sat quiet in eligible states (default: backlog, todo, someday) for longer
+# than the expire window (default: 90 days since `created`).
+#
+# Auto-expire fires from `created`, NOT `modified`, because a task that only
+# gets touched by lint/reformat still hasn't been *worked* — using mtime would
+# let queue drift hide behind incidental edits. If a task genuinely deserves
+# to survive the window, the operator should progress it (todo → active) or
+# park it (someday), not just poke at the file.
+#
+# Design choices:
+#   - `expired` is a *soft-terminal* state: it can be revived via
+#     `gptodo edit --set state <backlog|todo>` without --force. The point is
+#     unclutter, not permanent kill.
+#   - `expired_from` records the pre-expire state so revival can restore it.
+#   - Tasks with `recur:` set are NEVER auto-expired — they're legitimately
+#     dormant between fires. Same for tasks with a future `wait:` date.
+#   - Tasks in `active`, `waiting`, or `ready_for_review` are NEVER
+#     auto-expired regardless of age: they represent live work / blocked-on-
+#     external / awaiting-review. Age there is a symptom, not queue rot.
+# =============================================================================
+
+# Which states are eligible for auto-expire. Anything not on this list is
+# never reaped by `gptodo expire`, no matter how old.
+EXPIRE_ELIGIBLE_STATES: List[str] = ["backlog", "todo", "someday"]
+
+# Default window (days since `created`) after which an eligible task expires.
+# Configurable via `--days` on the CLI.
+EXPIRE_DEFAULT_DAYS: int = 90
+
+
+def _task_is_expirable(task: TaskInfo, cutoff: datetime, eligible_states: List[str]) -> bool:
+    """Decide whether a task is a candidate for auto-expire.
+
+    Returns True when ALL of:
+      - task.state is in `eligible_states`
+      - task.created is on/before `cutoff`
+      - task has no `recur:` field (recurring tasks are legitimately dormant)
+      - task has no future `wait:` date (waited-on tasks aren't stale)
+    """
+    if task.state not in eligible_states:
+        return False
+    if task.recur:
+        return False
+    if task.created > cutoff:
+        return False
+    # Future wait: means the task is intentionally hidden until then; not stale.
+    if task_is_waiting_for_date(task):
+        return False
+    return True
+
+
+@cli.command("expire")
+@click.option(
+    "--days",
+    default=EXPIRE_DEFAULT_DAYS,
+    type=int,
+    envvar="GPTODO_EXPIRE_DAYS",
+    show_default=True,
+    help=(
+        "Auto-expire tasks whose `created` date is older than this many days. "
+        "Can also be set via GPTODO_EXPIRE_DAYS env var."
+    ),
+)
+@click.option(
+    "--state",
+    "states",
+    multiple=True,
+    type=click.Choice(EXPIRE_ELIGIBLE_STATES),
+    help=(
+        "Restrict auto-expire to specific state(s). Repeatable. "
+        f"Default: {', '.join(EXPIRE_ELIGIBLE_STATES)}."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which tasks would expire without modifying files.",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Emit machine-readable JSON (stable contract for scripts).",
+)
+def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool):
+    """Auto-expire long-quiet tasks to unclutter the queue.
+
+    Walks task files, finds tasks in eligible states (default:
+    backlog/todo/someday) whose `created` date is older than `--days`, and
+    transitions them to `expired`. `expired_from` and `expired_at` are stamped
+    in frontmatter so revival is a one-liner:
+
+        gptodo edit <task> --set state backlog
+
+    Skipped by design:
+      - Tasks in active/waiting/ready_for_review (live work).
+      - Tasks with `recur:` set (legitimately dormant between fires).
+      - Tasks with a future `wait:` date (intentionally hidden).
+
+    Examples:
+        gptodo expire                       # 90d default, all eligible states
+        gptodo expire --days 60             # tighter window
+        gptodo expire --state backlog       # only reap backlog
+        gptodo expire --dry-run             # preview, don't modify
+        gptodo expire --json                # machine-readable output
+    """
+    frontmatter_ = frontmatter  # local alias for clarity
+
+    if days <= 0:
+        msg = "--days must be a positive integer"
+        if output_json:
+            print(json.dumps({"error": msg}, indent=2))
+        else:
+            console.print(f"[red]Error: {msg}[/]")
+        raise SystemExit(1)
+
+    eligible = list(states) if states else list(EXPIRE_ELIGIBLE_STATES)
+
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print(json.dumps({"expired": [], "count": 0, "dry_run": dry_run}, indent=2))
+        else:
+            console.print("[yellow]No tasks found![/]")
+        return
+
+    cutoff = datetime.now() - timedelta(days=days)
+
+    candidates = [t for t in all_tasks if _task_is_expirable(t, cutoff, eligible)]
+    candidates.sort(key=lambda t: t.created)
+
+    expired_at_str = datetime.now().strftime("%Y-%m-%d")
+
+    expired_records: List[Dict[str, Any]] = []
+    for task in candidates:
+        age_days = (datetime.now() - task.created).days
+        record = {
+            "id": task.id,
+            "path": str(task.path.relative_to(repo_root)),
+            "from_state": task.state,
+            "created": task.created.strftime("%Y-%m-%d"),
+            "age_days": age_days,
+        }
+        if not dry_run:
+            # Stamp frontmatter and rewrite the file. We intentionally do this
+            # per-task rather than batching so a mid-run failure leaves the
+            # already-updated files consistent.
+            post = frontmatter_.load(task.path)
+            post.metadata["expired_from"] = task.state
+            post.metadata["expired_at"] = expired_at_str
+            post.metadata["state"] = "expired"
+            with open(task.path, "w") as f:
+                f.write(frontmatter_.dumps(post))
+        expired_records.append(record)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "expired": expired_records,
+                    "count": len(expired_records),
+                    "days_threshold": days,
+                    "eligible_states": eligible,
+                    "dry_run": dry_run,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if not expired_records:
+        console.print(
+            f"[green]No expirable tasks found[/] "
+            f"(threshold: {days} days, states: {', '.join(eligible)})."
+        )
+        return
+
+    verb = "Would expire" if dry_run else "Expired"
+    console.print(
+        f"\n[bold yellow]{verb} {len(expired_records)} task(s)[/] "
+        f"(threshold: {days} days, states: {', '.join(eligible)}):\n"
+    )
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Task", style="cyan")
+    table.add_column("From", style="yellow")
+    table.add_column("Age (days)", justify="right", style="red")
+    table.add_column("Created", style="dim")
+    for rec in expired_records:
+        table.add_row(
+            rec["id"],
+            rec["from_state"],
+            str(rec["age_days"]),
+            rec["created"],
+        )
+    console.print(table)
+
+    if dry_run:
+        console.print(
+            "\n[dim]Dry-run: no files modified. "
+            "Re-run without --dry-run to apply.[/]"
+        )
+    else:
+        console.print(
+            "\n[dim]Revive with: [bold]gptodo edit <task> --set state "
+            "<backlog|todo>[/].[/]"
+        )
 
 
 @cli.command("sync")
