@@ -391,7 +391,8 @@ def test_activity_to_event_excludes_duration_from_data():
     assert "duration_ms" not in ev.data  # keeps same-tool/status blocks mergeable
 
 
-def test_emit_file_ensures_bucket_and_heartbeats(tmp_path):
+def test_emit_file_ensures_bucket_and_heartbeats(tmp_path, monkeypatch):
+    monkeypatch.setattr(tailer.core, "state_dir", lambda: tmp_path)
     rollout = tmp_path / "rollout-test.jsonl"
     rollout.write_text(
         "\n".join(
