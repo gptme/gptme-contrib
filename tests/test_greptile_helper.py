@@ -368,6 +368,16 @@ def test_spent_trigger_with_backdated_commit_does_not_suppress():
         status.stdout.strip() == "needs-re-review"
     ), f"Expected needs-re-review, got: {status.stdout.strip()}"
 
+    # Trigger must also succeed: spent trigger + no in-cycle trigger → allow
+    result, log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, (
+        f"Spent trigger with backdated commit must allow re-trigger. "
+        f"stdout: {result.stdout}, stderr: {result.stderr}"
+    )
+    assert (
+        "@greptileai review" in log
+    ), f"Trigger must post a review comment. log: {log}"
+
 
 def _make_greptile_review(commit_id: str, submitted_at: str) -> dict:
     return {

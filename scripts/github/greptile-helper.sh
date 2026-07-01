@@ -228,6 +228,10 @@ _needs_re_review() {
     # Fallback: no PR-review commit_id available → use the date heuristic.
     info=$(_greptile_review_info) || return 1
     reviewed_at=$(echo "$info" | _json_field "reviewed_at") || reviewed_at=""
+    # Defense-in-depth: jq outputs literal "null" on null JSON via -r flag.
+    # _json_field uses Python (handles None correctly), but guard against
+    # future refactors that switch to jq-based extraction.
+    if [ "$reviewed_at" = "null" ]; then reviewed_at=""; fi
     if [ -z "$reviewed_at" ]; then
         return 1
     fi
