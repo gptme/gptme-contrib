@@ -789,8 +789,15 @@ def check_directory(
             results["untracked"],
         )
 
-    # Determine which states to show based on compact mode
-    states_to_show = ["backlog", "todo", "active", "ready_for_review"] if compact else config.states
+    # Determine which states to show based on compact mode.
+    # Compact = the active work funnel: untriaged, triaged, in-flight,
+    # and awaiting verification. Exclude blocked, deferred, and terminal
+    # states so the short view stays focused on real work.
+    states_to_show = (
+        [s for s in ("backlog", "todo", "active", "ready_for_review") if s in config.states]
+        if compact
+        else config.states
+    )
 
     # Print active states in order
     for state in states_to_show:
@@ -948,7 +955,9 @@ def _show_github_issues(
 @click.option("--type", type=click.Choice(list(CONFIGS.keys())), default="tasks")
 @click.option("--all", is_flag=True, help="Check all directory types")
 @click.option(
-    "--compact", is_flag=True, help="Only show backlog/todo/active/ready_for_review tasks"
+    "--compact",
+    is_flag=True,
+    help="Show only the active work funnel: backlog, todo, active, ready_for_review",
 )
 @click.option("--summary", is_flag=True, help="Only show summary")
 @click.option("--issues", is_flag=True, help="Only show items with issues")
@@ -2853,7 +2862,18 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
     all_tasks = load_tasks(tasks_dir)
     if not all_tasks:
         if output_json:
-            print(json.dumps({"expired": [], "count": 0, "dry_run": dry_run}, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "expired": [],
+                        "count": 0,
+                        "days_threshold": days,
+                        "eligible_states": eligible,
+                        "dry_run": dry_run,
+                    },
+                    indent=2,
+                )
+            )
         else:
             console.print("[yellow]No tasks found![/]")
         return
