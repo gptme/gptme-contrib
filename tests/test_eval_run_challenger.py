@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -180,3 +181,42 @@ def test_build_report_groups_by_category() -> None:
 
     assert "| code | 2 | 1/2 | 1/2 | 0.50 |" in report
     assert "| research | 1 | 1/1 | 1/1 | 1.00 |" in report
+
+
+def _run_git(worktree: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def test_git_reset_hard_discards_commits_and_untracked_files(tmp_path: Path) -> None:
+    """Simulates the worktree-accumulation bug: without a reset, a second
+    trace would run against a repo already modified by the first."""
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    # Use a non-default branch name: some environments run a global pre-commit
+    # hook that blocks direct commits to master/main in non-agent repos.
+    _run_git(worktree, "init", "-q", "-b", "scratch")
+    _run_git(worktree, "config", "user.email", "test@example.com")
+    _run_git(worktree, "config", "user.name", "Test")
+    _run_git(worktree, "config", "commit.gpgsign", "false")
+    (worktree / "README.md").write_text("initial\n")
+    _run_git(worktree, "add", "README.md")
+    _run_git(worktree, "commit", "-q", "-m", "initial")
+    base_sha = eval_run_challenger._git_head(worktree)
+
+    # Simulate what a challenger run does: commit a change and leave untracked cruft.
+    (worktree / "README.md").write_text("changed by trace 1\n")
+    _run_git(worktree, "add", "README.md")
+    _run_git(worktree, "commit", "-q", "-m", "trace 1 change")
+    (worktree / "untracked.txt").write_text("leftover\n")
+    assert eval_run_challenger._git_head(worktree) != base_sha
+
+    eval_run_challenger._git_reset_hard(worktree, base_sha)
+
+    assert eval_run_challenger._git_head(worktree) == base_sha
+    assert (worktree / "README.md").read_text() == "initial\n"
+    assert not (worktree / "untracked.txt").exists()

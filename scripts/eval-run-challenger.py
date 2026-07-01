@@ -106,6 +106,26 @@ def _git_head(worktree: Path) -> str:
     ).stdout.strip()
 
 
+def _git_reset_hard(worktree: Path, sha: str) -> None:
+    """Reset *worktree* to *sha* and discard any untracked files it produced.
+
+    Called between traces so each challenger run starts from the same clean
+    baseline rather than accumulating commits/files from prior traces.
+    """
+    subprocess.run(
+        ["git", "-C", str(worktree), "reset", "--hard", sha],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "clean", "-fd"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
 def _git_commits_since(worktree: Path, base_sha: str) -> tuple[int, list[str]]:
     """Return (commit_count, changed_files) made in *worktree* since base_sha."""
     count_out = subprocess.run(
@@ -288,6 +308,10 @@ def main() -> int:
     if not args.dry_run and not args.brain_worktree:
         parser.error("--brain-worktree is required unless --dry-run is set")
 
+    # Capture the pre-run baseline once so every trace can be reset back to
+    # the same clean starting point, keeping traces isolated from each other.
+    base_sha = None if args.dry_run else _git_head(args.brain_worktree)
+
     results = []
     for trace in traces:
         oracle_input = extract_oracle_input(trace["trajectory_path"])
@@ -304,6 +328,8 @@ def main() -> int:
             )
             continue
 
+        assert base_sha is not None  # guaranteed once args.dry_run is False
+        _git_reset_hard(args.brain_worktree, base_sha)
         challenger = run_challenger(
             oracle_input,
             worktree=args.brain_worktree,
