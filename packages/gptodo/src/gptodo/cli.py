@@ -2929,10 +2929,10 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
     console.print(table)
 
     if dry_run:
-        console.print("\n[dim]Dry-run: no files modified. " "Re-run without --dry-run to apply.[/]")
+        console.print("\n[dim]Dry-run: no files modified. Re-run without --dry-run to apply.[/]")
     else:
         console.print(
-            "\n[dim]Revive with: [bold]gptodo edit <task> --set state " "<backlog|todo>[/].[/]"
+            "\n[dim]Revive with: [bold]gptodo edit <task> --set state <backlog|todo>[/].[/]"
         )
 
 
