@@ -315,6 +315,24 @@ def test_expire_json_output(tmp_path: Path, monkeypatch) -> None:
     assert from_states == {"backlog", "todo"}
 
 
+def test_expire_json_empty_task_directory_uses_full_schema(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["expire", "--json"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "expired": [],
+        "count": 0,
+        "days_threshold": 90,
+        "eligible_states": ["backlog", "todo", "someday"],
+        "dry_run": False,
+    }
+
+
 def test_expire_json_dry_run(tmp_path: Path, monkeypatch) -> None:
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
