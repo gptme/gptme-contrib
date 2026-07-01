@@ -601,7 +601,7 @@ def format_tweet_time(tweet: tweepy.Tweet) -> str:
     """Format tweet timestamp"""
     if not hasattr(tweet, "created_at"):
         return "N/A"
-    return tweet.created_at.strftime("%Y-%m-%d %H:%M")  # type: ignore
+    return tweet.created_at.strftime("%Y-%m-%d %H:%M")  # type: ignore[no-any-return]
 
 
 def display_tweet(tweet: tweepy.Tweet, author_info: str | None = None) -> None:

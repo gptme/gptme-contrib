@@ -39,7 +39,7 @@ import click
 import feedparser
 import requests
 import yaml
-from bs4 import BeautifulSoup  # type: ignore
+from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
