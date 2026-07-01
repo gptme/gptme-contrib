@@ -318,6 +318,57 @@ def test_rereview_ignores_old_trigger_from_previous_review_cycle():
     assert status.stdout.strip() == "needs-re-review"
 
 
+def test_spent_trigger_with_backdated_commit_does_not_suppress():
+    """Regression for gptme/gptme#2987: Greptile updates its comment in-place
+    (advancing reviewed_at), making our prior trigger 'spent'. The new commit has
+    committer.date BEFORE the trigger timestamp (written locally then pushed), so the
+    date comparison incorrectly reports 'no new commits since our last trigger'.
+    The fix: only consider in-cycle triggers (after review_cutoff) when gating.
+
+    Timeline:
+      R1 = 60min ago   Greptile posts initial PR review on commit OLDSHA
+      T1 = 40min ago   We trigger re-review (@greptileai review comment)
+      R2 = 20min ago   Greptile updates its issue comment in-place (reviewed_at = R2)
+                       → T1 is now 'spent' (T1 < R2, trigger_status = 'none')
+                       → Greptile's PR review commit_id still points at OLDSHA
+      D  = 45min ago   New commit pushed (HEAD = NEWSHA), committer.date = 45min ago
+                       → committer.date (45min) < T1 (40min) in absolute time
+                       → Old guard: head_date < last_trigger_date → SUPPRESS (bug!)
+                       → New guard: no trigger after R2 → allow ✓
+    """
+    # Greptile created comment 60min ago, updated in-place 20min ago (reviewed_at = R2)
+    reviewed_at = _iso_ago(minutes=20)
+    fixture = {
+        "pr_number": 2987,
+        "raw_comments": [
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at
+            ),
+            # T1 = 40min ago, "spent" because T1 (40min) < R2 (20min) in absolute time
+            _make_trigger_comment("test-user", _iso_ago(minutes=40)),
+        ],
+        # SHA-based primary path: Greptile reviewed OLDSHA, PR head is NEWSHA
+        "raw_reviews": [_make_greptile_review("OLDSHA", _iso_ago(minutes=60))],
+        "raw_pr": {"head": {"sha": "NEWSHA"}, "created_at": _iso_ago(minutes=120)},
+        "raw_commits": [
+            # Commit pushed to PR after T1, but committer.date = 45min ago (before T1=40min)
+            _make_commit(_iso_ago(minutes=45)),
+        ],
+        "bot_reaction_count": 0,
+    }
+    # Must NOT suppress: the "spent" pre-review trigger must not gate the new re-review
+    result = _run_helper("check", fixture)
+    assert result.returncode == 0, (
+        f"Spent trigger with backdated commit must not suppress re-review. "
+        f"stderr: {result.stderr}"
+    )
+
+    status = _run_helper("status", fixture)
+    assert (
+        status.stdout.strip() == "needs-re-review"
+    ), f"Expected needs-re-review, got: {status.stdout.strip()}"
+
+
 def _make_greptile_review(commit_id: str, submitted_at: str) -> dict:
     return {
         "user": {"login": "greptile-apps[bot]"},
