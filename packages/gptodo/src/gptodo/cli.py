@@ -101,8 +101,6 @@ from gptodo.unblock import auto_unblock_with_fan_in
 from gptodo.utils import (
     # Constants
     CONFIGS,
-    DEPRECATED_FRONTMATTER_FIELDS,
-    KNOWN_FRONTMATTER_FIELDS,
     STATE_EMOJIS,
     STATE_STYLES,
     # Data classes
@@ -1672,9 +1670,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                         other_illegal.append(entry)
 
                 if terminal_reopens and not force:
-                    console.print(
-                        "[red]Refusing to reopen terminal state(s) without --force:[/]"
-                    )
+                    console.print("[red]Refusing to reopen terminal state(s) without --force:[/]")
                     for tname, cur, target in terminal_reopens:
                         console.print(
                             f"  {tname}: {cur} → {target}. Terminal states are sticky "
@@ -1716,9 +1712,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                         )
 
                 if (terminal_reopens or other_illegal) and force:
-                    console.print(
-                        "[yellow]--force: proceeding with illegal transition(s):[/]"
-                    )
+                    console.print("[yellow]--force: proceeding with illegal transition(s):[/]")
                     for tname, cur, target in terminal_reopens + other_illegal:
                         console.print(f"  {tname}: {cur} → {target} (forced)")
         elif field_spec["type"] == "date":
@@ -2926,14 +2920,10 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
     console.print(table)
 
     if dry_run:
-        console.print(
-            "\n[dim]Dry-run: no files modified. "
-            "Re-run without --dry-run to apply.[/]"
-        )
+        console.print("\n[dim]Dry-run: no files modified. Re-run without --dry-run to apply.[/]")
     else:
         console.print(
-            "\n[dim]Revive with: [bold]gptodo edit <task> --set state "
-            "<backlog|todo>[/].[/]"
+            "\n[dim]Revive with: [bold]gptodo edit <task> --set state <backlog|todo>[/].[/]"
         )
 
 
@@ -5633,9 +5623,7 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
 
     # Human output — group by task, deprecated first
     if not all_findings:
-        console.print(
-            f"[green]✓ No frontmatter schema violations across {len(tasks)} task(s).[/]"
-        )
+        console.print(f"[green]✓ No frontmatter schema violations across {len(tasks)} task(s).[/]")
         return
 
     deprecated_count = sum(1 for f in all_findings if f["severity"] == "warn-deprecated")
@@ -5646,9 +5634,7 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
         f"{len({f['task'] for f in all_findings})} task(s):[/]"
     )
     if deprecated_count:
-        console.print(
-            f"  [red]{deprecated_count}[/] anti-design-goal / deprecated field(s)"
-        )
+        console.print(f"  [red]{deprecated_count}[/] anti-design-goal / deprecated field(s)")
     if unknown_count:
         console.print(f"  [yellow]{unknown_count}[/] unknown field(s)")
 

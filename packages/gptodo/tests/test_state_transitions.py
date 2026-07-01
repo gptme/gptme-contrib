@@ -66,9 +66,7 @@ def test_terminal_state_reopen_allowed_with_force(tmp_path: Path, monkeypatch) -
     _write(tasks_dir, "closed", "cancelled")
 
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(
-        cli, ["edit", "closed", "--set", "state", "backlog", "--force"]
-    )
+    result = CliRunner().invoke(cli, ["edit", "closed", "--set", "state", "backlog", "--force"])
 
     assert result.exit_code == 0, result.output
     assert "--force" in result.output
@@ -76,9 +74,7 @@ def test_terminal_state_reopen_allowed_with_force(tmp_path: Path, monkeypatch) -
     assert tasks[0].metadata["state"] == "backlog"
 
 
-def test_illegal_nonterminal_transition_warns_but_succeeds(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_illegal_nonterminal_transition_warns_but_succeeds(tmp_path: Path, monkeypatch) -> None:
     """active → todo is illegal per VALID_TRANSITIONS but common in practice.
 
     Default behavior: warn, don't block. This is the specific drift the
@@ -101,9 +97,7 @@ def test_illegal_nonterminal_transition_warns_but_succeeds(
     assert tasks[0].metadata["state"] == "todo"
 
 
-def test_strict_mode_env_var_blocks_illegal_transition(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_strict_mode_env_var_blocks_illegal_transition(tmp_path: Path, monkeypatch) -> None:
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     _write(tasks_dir, "watch-thing", "active")
@@ -125,9 +119,7 @@ def test_strict_mode_bypassed_by_force(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GPTODO_STRICT_TRANSITIONS", "1")
-    result = CliRunner().invoke(
-        cli, ["edit", "watch-thing", "--set", "state", "todo", "--force"]
-    )
+    result = CliRunner().invoke(cli, ["edit", "watch-thing", "--set", "state", "todo", "--force"])
 
     assert result.exit_code == 0, result.output
     tasks = load_tasks(tasks_dir)
