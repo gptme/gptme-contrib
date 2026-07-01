@@ -63,26 +63,39 @@ _json_field() {
 
 _no_new_commit_since_our_last_trigger() {
     # Returns 0 (true) when the PR head commit is NOT newer than our most recent
-    # `@greptileai review` trigger — i.e. we already triggered for the current head
-    # and nothing has been pushed since. Re-triggering then is exactly the "re-reviewing
-    # without pushing anything" spam Erik flagged on gptme#2908: the SHA-based
-    # _needs_re_review stays true forever when Greptile acks a trigger but never advances
-    # its review commit_id to head, so without this guard each grace window re-fires.
-    # Gating on OUR last trigger (not the last review) makes a re-review with no new
-    # commit structurally impossible — the lifetime ceiling is only a backstop above this.
-    # Fail-OPEN to 1 (allow) when there's no prior trigger or head can't be read, so a
+    # `@greptileai review` trigger IN THE CURRENT REVIEW CYCLE — i.e. we already
+    # triggered for the current head and nothing has been pushed since. Re-triggering
+    # then is exactly the "re-reviewing without pushing anything" spam Erik flagged on
+    # gptme#2908: the SHA-based _needs_re_review stays true forever when Greptile acks a
+    # trigger but never advances its review commit_id to head, so without this guard each
+    # grace window re-fires.
+    #
+    # IMPORTANT: Only triggers AFTER review_cutoff are in-scope (current review cycle).
+    # Pre-review triggers are "spent" — Greptile already responded to them. When Greptile
+    # updates its review comment in-place (advancing reviewed_at), old triggers become spent
+    # and must NOT gate the next re-review. Root cause: gptme/gptme#2987 commit e07b1a4b
+    # had committer.date 10s before our last trigger (written locally, then pushed). The
+    # pre-cutoff trigger made last_trigger_date land after the commit date, so the guard
+    # incorrectly suppressed a legitimate re-review. Fix: compare only within-cycle triggers.
+    #
+    # Fail-OPEN to 1 (allow) when there's no in-cycle trigger or head can't be read, so a
     # transient API failure never permanently suppresses a legitimate re-review.
+    local review_cutoff="${1:-}"
     local head_date last_trigger_date
+    local cycle_filter=""
+    if [ -n "$review_cutoff" ]; then
+        cycle_filter="| select(.created_at > \"$review_cutoff\")"
+    fi
     head_date=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" 2>/dev/null \
         | jq -rs '[.[][] | .commit.committer.date] | sort | last // ""' 2>/dev/null) || head_date=""
     last_trigger_date=$(_issue_comments_json \
-        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) | .created_at] | sort | last // \"\"" 2>/dev/null) || last_trigger_date=""
-    [ -z "$last_trigger_date" ] && return 1   # no prior trigger → allow
+        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) $cycle_filter | .created_at] | sort | last // \"\"" 2>/dev/null) || last_trigger_date=""
+    [ -z "$last_trigger_date" ] && return 1   # no in-cycle trigger → allow (nothing to gate against)
     [ -z "$head_date" ] && return 1           # can't read head → allow (fail-open)
     if _timestamp_gt "$head_date" "$last_trigger_date" 2>/dev/null; then
-        return 1   # a commit landed AFTER our last trigger → re-review is legitimate
+        return 1   # a commit landed AFTER our in-cycle trigger → re-review is legitimate
     fi
-    return 0       # nothing pushed since our last trigger → suppress
+    return 0       # nothing pushed since our in-cycle trigger → suppress
 }
 
 _timestamp_gt() {
@@ -215,6 +228,10 @@ _needs_re_review() {
     # Fallback: no PR-review commit_id available → use the date heuristic.
     info=$(_greptile_review_info) || return 1
     reviewed_at=$(echo "$info" | _json_field "reviewed_at") || reviewed_at=""
+    # Defense-in-depth: jq outputs literal "null" on null JSON via -r flag.
+    # _json_field uses Python (handles None correctly), but guard against
+    # future refactors that switch to jq-based extraction.
+    if [ "$reviewed_at" = "null" ]; then reviewed_at=""; fi
     if [ -z "$reviewed_at" ]; then
         return 1
     fi
@@ -361,11 +378,13 @@ check)
             if [ "$trigger_status" = "in-progress" ]; then
                 exit 1  # Re-review trigger in-flight
             fi
-            # Root guard: no new commit since our last trigger → not safe to trigger.
+            # Root guard: no new commit since our last in-cycle trigger → not safe to trigger.
             # Exception: trigger_status=stale means Greptile acked but never reviewed —
             # skip this guard so the stale-retry path can fire and recover the stuck PR.
-            if [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger; then
-                exit 2  # Nothing pushed since our last trigger — treat as up-to-date.
+            # Pass reviewed_at so the guard only considers triggers from the current review
+            # cycle (pre-review "spent" triggers must not gate the next re-review).
+            if [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
+                exit 2  # Nothing pushed since our last in-cycle trigger — treat as up-to-date.
             fi
             exit 0  # Re-review needed
         fi
@@ -411,12 +430,13 @@ trigger)
                 echo "  [greptile] Re-review trigger in-flight on $REPO#$PR_NUMBER. Skipping."
                 exit 0
             fi
-            # ROOT GUARD: never re-review without a new commit since OUR last trigger.
+            # ROOT GUARD: never re-review without a new commit since OUR last in-cycle trigger.
             # _needs_re_review (SHA-based) stays true when Greptile acks but doesn't advance
             # its review commit_id to head, so this catches the "re-reviewing without pushing"
             # spam (gptme#2908). Exception: trigger_status=stale means Greptile acked but
             # never reviewed — skip the guard and allow re-trigger to escape the stuck state.
-            if [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger; then
+            # Pass reviewed_at: guard must only fire against in-cycle triggers (post-review).
+            if [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
                 echo "  [greptile] SKIP: $REPO#$PR_NUMBER has no new commits since our last @greptileai review trigger. Not re-reviewing (nothing was pushed)."
                 exit 0
             fi
@@ -458,9 +478,9 @@ status)
                 trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
                 if [ "$trigger_status" = "in-progress" ]; then
                     echo "in-progress"
-                # Root guard: no new commit since our last trigger → report as up-to-date.
+                # Root guard: no new commit since our last in-cycle trigger → report as up-to-date.
                 # Exception: stale means Greptile acked but never reviewed → needs-re-review.
-                elif [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger; then
+                elif [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
                     echo "already-reviewed"
                 else
                     echo "needs-re-review"
