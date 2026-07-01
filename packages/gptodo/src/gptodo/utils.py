@@ -116,6 +116,137 @@ def get_canonical_states() -> list[str]:
     ]
 
 
+# =============================================================================
+# Frontmatter Schema (Gordon 2026-07-01 upstream fix)
+# =============================================================================
+#
+# KNOWN_FRONTMATTER_FIELDS lists every metadata key we intentionally support in
+# task frontmatter. Anything outside this set (and not in DEPRECATED_FRONTMATTER_FIELDS)
+# is almost certainly a hallucination from an autonomous loop or an operator
+# session that mis-remembered the schema. `gptodo lint` and `gptodo check --lint`
+# warn on unknown fields to catch drift at write time.
+#
+# When adding a new field: append it here AND document it in the corresponding
+# CLI command docstring (usually `gptodo edit`) AND cover it with a test.
+# Silent field additions defeat the point of the schema.
+
+KNOWN_FRONTMATTER_FIELDS: set[str] = {
+    # Core identity + workflow
+    "state",
+    "priority",
+    "task_type",
+    "assigned_to",
+    "created",
+    "tags",
+    # Scheduling / recurring / deferral
+    "recur",
+    "wait",
+    # GTD / dependency
+    "next_action",
+    "waiting_for",
+    "waiting_since",
+    "depends",  # deprecated alias for requires, but still accepted
+    "requires",
+    "blocks",  # deprecated (inverse semantics), still accepted
+    "related",
+    "discovered-from",
+    "parent",
+    # Progress + outputs
+    "progress",
+    "completed",
+    "output_types",
+    "success_criterion",
+    # External tracking
+    "tracking",
+    "tracking_issue",
+    "upstream_coordination_id",
+    # Multi-agent coordination
+    "parallelizable",
+    "isolation",
+    "worktree_path",
+    "assigned_at",
+    "lock_timeout_hours",
+    "spawned_from",
+    "spawned_tasks",
+    "coordination_mode",
+    "session_id",
+    # Optional frontmatter identity fields (accepted, not required)
+    "name",
+    "description",
+    "title",
+    "type",
+}
+
+# Fields that gptodo used to accept OR that operators/loops repeatedly try to
+# add and MUST NOT be introduced without an explicit design change. When we
+# see one, emit a WARN pointing at the correct alternative.
+#
+# `modified` is the canonical anti-design-goal example: high-churn field that
+# would have to be wired into every edit path. File mtime and
+# `git log -1 --format=%ai <file>` already answer "when was this touched?"
+# for free.
+DEPRECATED_FRONTMATTER_FIELDS: dict[str, str] = {
+    "modified": (
+        "Anti-design-goal: high-churn field that must be wired into every edit. "
+        "Use `os.path.getmtime(path)` or `git log -1 --format=%ai <file>` instead."
+    ),
+    "last_modified": (
+        "Not part of the schema. Use file mtime or "
+        "`git log -1 --format=%ai <file>` for last-touched time."
+    ),
+    "updated_at": (
+        "Not part of the schema. Use file mtime or "
+        "`git log -1 --format=%ai <file>` for last-touched time."
+    ),
+    "updated": (
+        "Not part of the schema. Use file mtime or "
+        "`git log -1 --format=%ai <file>` for last-touched time."
+    ),
+    "last_completed": (
+        "Not a gptodo field. Recurring tasks track next-fire via `wait:` on "
+        "auto-reset; there is no last_completed stamp."
+    ),
+}
+
+
+def lint_frontmatter_fields(metadata: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+    """Return (severity, field, message) tuples for schema violations.
+
+    Severities:
+        "warn-deprecated" — field is on the DEPRECATED_FRONTMATTER_FIELDS list
+        "warn-unknown"    — field is not in KNOWN_FRONTMATTER_FIELDS
+
+    This is a soft check: callers should surface these as warnings, not errors.
+    Rejecting unknown fields at read time would break autonomous-loop task
+    creation, which the schema needs to nudge toward — not wall off from —
+    the correct form.
+    """
+    findings: List[Tuple[str, str, str]] = []
+    for key in metadata.keys():
+        if not isinstance(key, str):
+            continue
+        if key in DEPRECATED_FRONTMATTER_FIELDS:
+            findings.append(
+                (
+                    "warn-deprecated",
+                    key,
+                    DEPRECATED_FRONTMATTER_FIELDS[key],
+                )
+            )
+        elif key not in KNOWN_FRONTMATTER_FIELDS:
+            findings.append(
+                (
+                    "warn-unknown",
+                    key,
+                    f"Field '{key}' is not in the known schema. If this is a real, "
+                    "intentional field, add it to KNOWN_FRONTMATTER_FIELDS in "
+                    "gptodo/utils.py. Otherwise, remove it — the autonomous loop "
+                    "tends to invent plausible-sounding fields under load.",
+                )
+            )
+    return findings
+
+
 CONFIGS = {
     "tasks": DirectoryConfig(
         type_name="tasks",

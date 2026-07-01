@@ -166,6 +166,125 @@ Task description...
 - [x] Completed subtask
 ```
 
+## State Semantics
+
+The eight canonical states and what they *mean* — not just what they're
+called. The autonomous loop drifts when "active" gets used as an opaque
+"recently touched" tag; enforcing the semantics is the point of the
+`gptodo transitions` table and the `--force` gate on `gptodo edit --set state`.
+
+| State              | Meaning                                                                                                    | In `next`/`ready`? |
+| ------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------ |
+| `backlog`          | Queued, not yet triaged. Default for newly-created tasks.                                                  | Yes                |
+| `todo`             | Triaged and ready to start; unclaimed; nothing is blocking work.                                           | Yes                |
+| `active`           | A human or agent is working on it **right now**. Should be paired with `assigned_to` and `assigned_at`.    | No (already owned) |
+| `waiting`          | Blocked on an external event (a date, a reply, an approval, a gate firing). Should carry `wait:` and/or `waiting_for:` explaining *what* it's waiting for. | No             |
+| `ready_for_review` | Work done, awaiting operator sign-off before `done`. Should reference a commit or PR in the body.          | No                 |
+| `someday`          | Parked idea; may or may not ever be picked up. Explicitly excluded from `next`/`ready` (GTD someday/maybe). | No                 |
+| `done`             | Terminal. Work merged / criterion met.                                                                     | No (terminal)      |
+| `cancelled`        | Terminal. Will not be picked up; rationale in body.                                                        | No (terminal)      |
+
+Legacy deprecated aliases (still accepted with a warning): `new` → `backlog`,
+`paused` → `backlog`.
+
+### Common confusions to avoid
+
+- **`active` is NOT "recently touched" or "in-progress work by me generally".**
+  It means an agent has claimed the task and is executing on it *in this
+  session*. If nobody's actively driving it, it should be `todo`, `waiting`,
+  or `someday`. Watch-* tasks that sit waiting for a gate to fire belong in
+  `waiting` (with a `wait:` or `waiting_for:` explaining what triggers them),
+  not `active`.
+- **`waiting` is for external blockers**, not "I haven't gotten to it yet"
+  (that's `backlog`/`todo`) and not "I'm blocked on another task" (that's
+  handled by `requires:` — the effective state is computed as `blocked`
+  automatically). Use `waiting` when a real-world event needs to arrive:
+  a date, a message, a PR merge, an approval.
+- **`todo` is unclaimed and ready.** If someone starts on it, they should
+  transition it to `active` via `gptodo claim` (which also records
+  `assigned_to`).
+- **`someday` is not the same as `backlog`.** `backlog` says "we'll get to
+  this"; `someday` says "maybe never, but keep it around". Only `someday`
+  is excluded from `gptodo next`/`ready`.
+
+### Legal transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> backlog
+    backlog --> todo
+    backlog --> someday
+    backlog --> cancelled
+    todo --> active
+    todo --> backlog
+    todo --> someday
+    todo --> cancelled
+    active --> ready_for_review
+    active --> waiting
+    active --> someday
+    active --> done
+    active --> cancelled
+    ready_for_review --> active : review fails
+    ready_for_review --> done
+    ready_for_review --> cancelled
+    waiting --> active : blocker resolved
+    waiting --> someday
+    waiting --> cancelled
+    someday --> backlog : revived
+    someday --> todo : revived
+    someday --> cancelled
+    done --> [*]
+    cancelled --> [*]
+```
+
+`gptodo transitions` prints the machine-readable table. `gptodo edit --set state X`
+enforces legality and refuses illegal transitions unless you pass `--force`
+(e.g. reopening a `done` task, or dropping `active` back to `todo` without
+finishing / handing off). The escape hatch exists — the check is a nudge,
+not a wall — but every `--force` should be a conscious act, not a habit.
+
+## Frontmatter Schema — Known vs. Hallucinated Fields
+
+The set of *supported* frontmatter fields lives in
+`KNOWN_FRONTMATTER_FIELDS` (see `src/gptodo/utils.py`). `gptodo lint` scans
+task files for anything outside that set and emits a warning.
+
+**Do not add ad-hoc fields.** Autonomous LLM sessions repeatedly invent
+plausible-sounding fields under pressure — `modified`, `last_modified`,
+`updated_at`, `last_completed` — most of which duplicate information you
+can already get for free.
+
+The canonical anti-example is `modified:` (proposed by an autonomous loop
+in 2026-07-01 as a "solution" to queue-health monitoring). It was rejected
+as an anti-design-goal: it's a high-churn field that would have to be wired
+into *every* edit path, and the answer it purports to provide is already
+available via:
+
+```bash
+python -c "import os; print(os.path.getmtime('tasks/foo.md'))"   # file mtime
+git log -1 --format=%ai tasks/foo.md                             # last commit
+```
+
+Both are free. Adding a stored `modified` field creates a churn hazard
+(every edit forgets to update it, every test needs to inject it, every
+diff carries noise) with no net information gain.
+
+The `gptodo lint` command surfaces these to keep the schema clean:
+
+```bash
+gptodo lint                        # scan all tasks
+gptodo lint tasks/foo.md           # single file
+gptodo lint --json                 # machine-readable
+gptodo lint --strict               # non-zero exit if warnings found (CI)
+```
+
+Deprecated / anti-goal warnings suggest the correct alternative in the
+message body. Unknown-field warnings ask you to either add the field to
+`KNOWN_FRONTMATTER_FIELDS` (deliberate PR + test) or remove it. Warnings
+never reject a task — a fresh loop must still be able to write whatever
+frontmatter it decides on; the linter's job is to *nudge* toward the
+schema, not gate loop output.
+
 ## GitHub Integration
 
 Requires GitHub CLI (`gh`) installed and authenticated:
