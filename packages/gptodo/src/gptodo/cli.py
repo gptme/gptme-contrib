@@ -788,7 +788,7 @@ def check_directory(
         )
 
     # Determine which states to show based on compact mode
-    states_to_show = ["backlog", "active"] if compact else config.states
+    states_to_show = ["backlog", "todo", "active", "ready_for_review"] if compact else config.states
 
     # Print active states in order
     for state in states_to_show:
@@ -945,7 +945,9 @@ def _show_github_issues(
 @cli.command()
 @click.option("--type", type=click.Choice(list(CONFIGS.keys())), default="tasks")
 @click.option("--all", is_flag=True, help="Check all directory types")
-@click.option("--compact", is_flag=True, help="Only show new and active tasks")
+@click.option(
+    "--compact", is_flag=True, help="Only show backlog/todo/active/ready_for_review tasks"
+)
 @click.option("--summary", is_flag=True, help="Only show summary")
 @click.option("--issues", is_flag=True, help="Only show items with issues")
 @click.option(
