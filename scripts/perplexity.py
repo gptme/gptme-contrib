@@ -93,7 +93,7 @@ class PerplexitySearch:
             with open(config_path, "rb") as f:
                 config = tomllib.load(f)
                 if api_key := config.get("env", {}).get("PERPLEXITY_API_KEY"):
-                    return api_key  # type: ignore
+                    return api_key  # type: ignore[no-any-return]
 
         raise ValueError(
             f"Perplexity API key not found. Set PERPLEXITY_API_KEY environment variable or add 'PERPLEXITY_API_KEY' to the env section in {config_path}"
