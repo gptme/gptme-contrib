@@ -28,7 +28,7 @@ These tests cover:
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -48,9 +48,7 @@ def _write(
     fm_lines = [f"state: {state}", f"created: {created}"]
     if extra.strip():
         fm_lines.append(extra.strip())
-    (tasks_dir / f"{name}.md").write_text(
-        "---\n" + "\n".join(fm_lines) + "\n---\n# " + name + "\n"
-    )
+    (tasks_dir / f"{name}.md").write_text("---\n" + "\n".join(fm_lines) + "\n---\n# " + name + "\n")
 
 
 def _iso(days_ago: int) -> str:
@@ -218,6 +216,21 @@ def test_expire_reaps_tasks_with_past_wait(tmp_path: Path, monkeypatch) -> None:
     assert tasks[0].metadata["state"] == "expired"
 
 
+def test_expire_handles_timezone_aware_created_timestamps(tmp_path: Path, monkeypatch) -> None:
+    """Timezone-aware `created` timestamps should expire cleanly, not crash comparisons."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    created = (datetime.now(timezone(timedelta(hours=2))) - timedelta(days=200)).isoformat()
+    _write(tasks_dir, "old-aware", "backlog", created)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["expire"])
+
+    assert result.exit_code == 0, result.output
+    tasks = load_tasks(tasks_dir)
+    assert tasks[0].metadata["state"] == "expired"
+
+
 # ---------- Revival ------------------------------------------------------------
 
 
@@ -375,7 +388,13 @@ def test_expired_state_is_valid_state_choice_in_check(tmp_path: Path, monkeypatc
     """An expired task should not trigger validation issues in `gptodo check`."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
-    _write(tasks_dir, "old", "expired", _iso(100), extra="expired_from: backlog\nexpired_at: 2026-06-01")
+    _write(
+        tasks_dir,
+        "old",
+        "expired",
+        _iso(100),
+        extra="expired_from: backlog\nexpired_at: 2026-06-01",
+    )
 
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(cli, ["check"])
@@ -387,9 +406,7 @@ def test_expired_state_is_valid_state_choice_in_check(tmp_path: Path, monkeypatc
 # ---------- expired_from / expired_at stamping --------------------------------
 
 
-def test_expire_stamps_expired_from_matching_original_state(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_expire_stamps_expired_from_matching_original_state(tmp_path: Path, monkeypatch) -> None:
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     _write(tasks_dir, "old-someday", "someday", _iso(200))

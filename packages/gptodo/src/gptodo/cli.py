@@ -1676,7 +1676,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                             f"  {tname}: {cur} → {target}. Terminal states are sticky "
                             "by design; use --force if you really mean it."
                         )
-                    return
+                    raise SystemExit(1)
 
                 if other_illegal and strict and not force:
                     console.print(
@@ -1695,7 +1695,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                         "belong in 'waiting' (with `wait:` / `waiting_for:`), "
                         "not 'active'.[/]"
                     )
-                    return
+                    raise SystemExit(1)
 
                 if other_illegal and not force:
                     # Non-strict: warn, don't block.
@@ -2749,6 +2749,13 @@ EXPIRE_ELIGIBLE_STATES: List[str] = ["backlog", "todo", "someday"]
 EXPIRE_DEFAULT_DAYS: int = 90
 
 
+def _normalize_expire_datetime(value: datetime) -> datetime:
+    """Normalize datetimes used by `expire` to a comparable naive UTC form."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _task_is_expirable(task: TaskInfo, cutoff: datetime, eligible_states: List[str]) -> bool:
     """Decide whether a task is a candidate for auto-expire.
 
@@ -2762,7 +2769,7 @@ def _task_is_expirable(task: TaskInfo, cutoff: datetime, eligible_states: List[s
         return False
     if task.recur:
         return False
-    if task.created > cutoff:
+    if _normalize_expire_datetime(task.created) > cutoff:
         return False
     # Future wait: means the task is intentionally hidden until then; not stale.
     if task_is_waiting_for_date(task):
@@ -2848,21 +2855,23 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
             console.print("[yellow]No tasks found![/]")
         return
 
-    cutoff = datetime.now() - timedelta(days=days)
+    now = _normalize_expire_datetime(datetime.now(timezone.utc))
+    cutoff = now - timedelta(days=days)
 
     candidates = [t for t in all_tasks if _task_is_expirable(t, cutoff, eligible)]
-    candidates.sort(key=lambda t: t.created)
+    candidates.sort(key=lambda t: _normalize_expire_datetime(t.created))
 
-    expired_at_str = datetime.now().strftime("%Y-%m-%d")
+    expired_at_str = now.strftime("%Y-%m-%d")
 
     expired_records: List[Dict[str, Any]] = []
     for task in candidates:
-        age_days = (datetime.now() - task.created).days
+        created = _normalize_expire_datetime(task.created)
+        age_days = (now - created).days
         record = {
             "id": task.id,
             "path": str(task.path.relative_to(repo_root)),
             "from_state": task.state,
-            "created": task.created.strftime("%Y-%m-%d"),
+            "created": created.strftime("%Y-%m-%d"),
             "age_days": age_days,
         }
         if not dry_run:
