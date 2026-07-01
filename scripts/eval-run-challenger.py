@@ -24,9 +24,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -141,7 +141,20 @@ def run_challenger(
     for key in NESTED_SUBPROCESS_ENV_BLOCKLIST:
         env.pop(key, None)
 
-    argv = shlex.split(challenger_cmd) + [oracle_input]
+    # Write oracle input to a tempfile to avoid ARG_MAX (E2BIG) when the
+    # prompt contains very large file contents or diffs embedded in a trace.
+    prompt_file = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".prompt.txt", delete=False
+    )
+    prompt_file.write(oracle_input)
+    prompt_path = prompt_file.name
+    prompt_file.close()
+
+    # Use shell command substitution to read prompt from file; this keeps the
+    # prompt content out of argv, avoiding the ~2 MB combined arg+env limit.
+    shell_cmd = f"exec {challenger_cmd} \"$(cat '{prompt_path}')\""
+    argv = ["sh", "-c", shell_cmd]
+
     start = time.monotonic()
     timed_out = False
     try:
@@ -164,6 +177,8 @@ def run_challenger(
             if isinstance(raw_stdout, bytes)
             else (raw_stdout or "")
         )[-2000:]
+    finally:
+        os.unlink(prompt_path)
     duration = time.monotonic() - start
 
     commits_made, files_changed = _git_commits_since(worktree, base_sha)
