@@ -123,10 +123,12 @@ def execute_gptme(
         run_env = os.environ.copy()
         run_env["GPTME_SHELL_TIMEOUT"] = str(shell_timeout)
         run_env["GPTME_CHAT_HISTORY"] = "true"
-        run_env["GPTME_LOGS_HOME"] = str(gptme_logs_dir)
 
         if env:
             run_env.update(env)
+
+        # Must be set after caller env merge so it cannot be clobbered.
+        run_env["GPTME_LOGS_HOME"] = str(gptme_logs_dir)
 
         # Use tee to stream output to both terminal and log file
         # This gives us real-time journald logging AND complete log file
