@@ -762,51 +762,64 @@ def _build_status_json(dir_type: str, results: Dict[str, List[TaskInfo]]) -> Dic
 
 
 def check_directory(
-    console: Console, dir_type: str, repo_root: Path, compact: bool = False
+    console: Console,
+    dir_type: str,
+    repo_root: Path,
+    compact: bool = False,
+    summary_only: bool = False,
 ) -> Dict[str, List[TaskInfo]]:
-    """Check and display status for a single directory type."""
+    """Check and display status for a single directory type.
+
+    ``summary_only`` prints just the header and the summary line, skipping the
+    per-state task listing (used by ``--summary``, whose contract is "only show
+    summary"). The summary itself always prints, so callers must not print it a
+    second time.
+    """
     config = CONFIGS[dir_type]
     checker = StateChecker(repo_root, config)
     results = checker.check_all()
 
-    # Print header with type-specific color
+    # Print header with type-specific color. No trailing newline: the first
+    # section (and the summary) already lead with a blank line, so a trailing
+    # one here would double the gap under the header.
     style, _ = STATE_STYLES.get(config.states[0], ("white", "•"))
-    console.print(f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]\n")
+    console.print(f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]")
 
-    # Print sections in order
-    if results["issues"]:
-        print_status_section(
-            console,
-            "Issues Found",
-            results["issues"],
-            show_state=True,
-        )
-
-    if results["untracked"]:
-        print_status_section(
-            console,
-            "Untracked Files",
-            results["untracked"],
-        )
-
-    # Determine which states to show based on compact mode.
-    # Compact = the active work funnel: untriaged, triaged, in-flight,
-    # and awaiting verification. Exclude blocked, deferred, and terminal
-    # states so the short view stays focused on real work.
-    states_to_show = (
-        [s for s in ("backlog", "todo", "active", "ready_for_review") if s in config.states]
-        if compact
-        else config.states
-    )
-
-    # Print active states in order
-    for state in states_to_show:
-        if state in config.states and results.get(state):
+    if not summary_only:
+        # Print sections in order
+        if results["issues"]:
             print_status_section(
                 console,
-                state,
-                results[state],
+                "Issues Found",
+                results["issues"],
+                show_state=True,
             )
+
+        if results["untracked"]:
+            print_status_section(
+                console,
+                "Untracked Files",
+                results["untracked"],
+            )
+
+        # Determine which states to show based on compact mode.
+        # Compact = the active work funnel: untriaged, triaged, in-flight,
+        # and awaiting verification. Exclude blocked, deferred, and terminal
+        # states so the short view stays focused on real work.
+        states_to_show = (
+            [s for s in ("backlog", "todo", "active", "ready_for_review") if s in config.states]
+            if compact
+            else config.states
+        )
+
+        # Print active states in order
+        for state in states_to_show:
+            if state in config.states and results.get(state):
+                print_status_section(
+                    console,
+                    state,
+                    results[state],
+                )
 
     # Print summary
     print_summary(console, results, config)
@@ -1005,7 +1018,7 @@ def status(type, all, compact, summary, issues, github, github_repo, output_json
     if all:
         # Check all directory types
         for type_name in CONFIGS.keys():
-            results = check_directory(console, type_name, repo_root, compact)
+            results = check_directory(console, type_name, repo_root, compact, summary_only=summary)
             if results:  # Only include directories with items
                 all_results[type_name] = results
 
@@ -1020,7 +1033,7 @@ def status(type, all, compact, summary, issues, github, github_repo, output_json
 
     else:
         # Check single directory type
-        results = check_directory(console, type, repo_root, compact)
+        results = check_directory(console, type, repo_root, compact, summary_only=summary)
         if results:
             all_results[type] = results
 
@@ -1039,11 +1052,8 @@ def status(type, all, compact, summary, issues, github, github_repo, output_json
         if not has_issues:
             console.print("\n[green]No issues found![/]")
 
-    elif summary:
-        # Show only the summary for each type
-        for dir_type, results in all_results.items():
-            config = CONFIGS[dir_type]
-            print_summary(console, results, config)
+    # Note: --summary is handled inside check_directory (summary_only), which
+    # prints the summary once. Re-printing it here would duplicate it.
 
     # Show GitHub issues not yet tracked as task files
     if github:

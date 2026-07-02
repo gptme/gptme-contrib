@@ -16,7 +16,7 @@ import re
 import subprocess
 import warnings
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -556,11 +556,34 @@ def find_repo_root(start_path: Path) -> Path:
 
 
 def format_time_ago(dt: datetime) -> str:
-    """Format a datetime as a human-readable time ago string."""
+    """Format a datetime as a human-readable time ago string.
+
+    Date-only sources (midnight, i.e. no HH:MM:SS — the resolution most task
+    frontmatter offers, e.g. ``created: 2026-07-02``) carry no sub-day
+    precision, so rendering "16h ago" is spuriously precise. For those, report
+    at day resolution (today / yesterday / Nd ago) — the actual resolution the
+    value provides. Timestamps that include a time component keep the finer
+    just-now / Nm / Nh precision.
+    """
     # Convert to naive datetime if timezone-aware
     if dt.tzinfo:
         dt = dt.astimezone().replace(tzinfo=None)
     now = datetime.now()
+
+    # Date-only (midnight) → calendar-day resolution, not fake hour precision.
+    if dt.time() == time(0, 0, 0, 0):
+        days = (now.date() - dt.date()).days
+        if days < 0:
+            return "future"
+        elif days == 0:
+            return "today"
+        elif days == 1:
+            return "yesterday"
+        elif days < 30:
+            return f"{days}d ago"
+        else:
+            return dt.strftime("%Y-%m-%d")
+
     delta = now - dt
 
     if delta < timedelta(minutes=1):
