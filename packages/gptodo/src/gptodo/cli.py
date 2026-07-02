@@ -2776,6 +2776,7 @@ def _task_is_expirable(task: TaskInfo, cutoff: datetime, eligible_states: List[s
       - task.created is on/before `cutoff`
       - task has no `recur:` field (recurring tasks are legitimately dormant)
       - task has no future `wait:` date (waited-on tasks aren't stale)
+      - task.priority is not "high" (high-priority tasks are intentionally kept)
     """
     if task.state not in eligible_states:
         return False
@@ -2785,6 +2786,9 @@ def _task_is_expirable(task: TaskInfo, cutoff: datetime, eligible_states: List[s
         return False
     # Future wait: means the task is intentionally hidden until then; not stale.
     if task_is_waiting_for_date(task):
+        return False
+    # High-priority tasks are explicitly important; don't silently reap them.
+    if task.priority == "high":
         return False
     return True
 
@@ -2836,6 +2840,7 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
       - Tasks in active/waiting/ready_for_review (live work).
       - Tasks with `recur:` set (legitimately dormant between fires).
       - Tasks with a future `wait:` date (intentionally hidden).
+      - Tasks with `priority: high` (explicitly important, never silently reaped).
 
     Examples:
         gptodo expire                       # 90d default, all eligible states
