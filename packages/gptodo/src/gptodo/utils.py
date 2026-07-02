@@ -573,7 +573,9 @@ def format_time_ago(dt: datetime) -> str:
     # Date-only (midnight) → calendar-day resolution, not fake hour precision.
     if dt.time() == time(0, 0, 0, 0):
         days = (now.date() - dt.date()).days
-        if days <= 0:
+        if days < 0:
+            return "future"
+        elif days == 0:
             return "today"
         elif days == 1:
             return "yesterday"

@@ -126,6 +126,13 @@ def test_format_time_ago_date_only_uses_day_resolution() -> None:
     assert format_time_ago(today_midnight - timedelta(days=3)) == "3d ago"
 
 
+def test_format_time_ago_future_date_only_reports_future() -> None:
+    """Future date-only timestamps must not be mislabeled as today."""
+    now = datetime.now()
+    tomorrow_midnight = datetime(now.year, now.month, now.day) + timedelta(days=1)
+    assert format_time_ago(tomorrow_midnight) == "future"
+
+
 def test_format_time_ago_with_time_component_keeps_precision() -> None:
     """Timestamps that carry a time-of-day keep hour/minute precision."""
     dt = datetime.now() - timedelta(hours=3, minutes=1, seconds=7)
