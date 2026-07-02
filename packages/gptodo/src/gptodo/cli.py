@@ -5608,12 +5608,13 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
     Runs two classes of checks:
 
     **Schema errors** (always exit 1): structural violations that make a task
-    file unambiguous or unsafe to parse — duplicate keys, space-separated
-    timestamps, unquoted '#' truncation, missing required fields, invalid enum
-    values, bad assigned_to format, deprecated/unknown field names.
+    file ambiguous or unsafe to parse — duplicate keys, space-separated
+    timestamps, leading-``#`` null values, missing required fields, invalid
+    enum values, bad ``assigned_to`` format.
 
     **Warnings** (exit 1 only with ``--strict``): fields not in the known
-    schema (KNOWN_FRONTMATTER_FIELDS) and fields on the deprecated list.
+    schema (KNOWN_FRONTMATTER_FIELDS), deprecated field names, and inline
+    ``#`` in scalar values that may silently truncate the value.
 
     Examples:
         gptodo lint                          # lint all tasks
@@ -5653,7 +5654,8 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
     all_findings: list[dict] = []
     for task in tasks:
         # Schema errors — always fatal.
-        for error_msg in validate_schema(task.path):
+        schema_warnings: list[str] = []
+        for error_msg in validate_schema(task.path, collect_warnings=schema_warnings):
             all_findings.append(
                 {
                     "task": task.name,
@@ -5661,6 +5663,17 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
                     "severity": "error",
                     "field": "-",
                     "message": error_msg,
+                }
+            )
+        # Ambiguous inline-'#' warnings from schema checks (non-fatal).
+        for warning_msg in schema_warnings:
+            all_findings.append(
+                {
+                    "task": task.name,
+                    "path": str(task.path.relative_to(repo_root)),
+                    "severity": "warning",
+                    "field": "-",
+                    "message": warning_msg,
                 }
             )
         # Field-level warnings (deprecated / unknown).

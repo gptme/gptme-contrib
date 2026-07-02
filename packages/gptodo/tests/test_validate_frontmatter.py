@@ -10,6 +10,7 @@ from gptodo.validate_frontmatter import (
     validate_timestamp_syntax,
     validate_unique_frontmatter_keys,
     validate_unquoted_hash_scalars,
+    warn_inline_hash,
 )
 
 
@@ -64,37 +65,49 @@ def test_quoted_space_datetime_rejected():
 
 
 def test_unquoted_hash_at_start():
+    # Value begins with '#' → YAML makes it null → always a hard error.
     raw = "next_action: #377 fix something\n"
     errors = validate_unquoted_hash_scalars(raw)
     assert len(errors) == 1
     assert "next_action" in errors[0]
 
 
-def test_unquoted_inline_hash():
+def test_unquoted_inline_hash_is_warning_not_error():
+    # Inline ' #' is ambiguous (possible truncation vs intentional comment)
+    # → warning via warn_inline_hash(), NOT a hard error.
     raw = "waiting_for: PR #815 review\n"
-    errors = validate_unquoted_hash_scalars(raw)
-    assert len(errors) == 1
-    assert "waiting_for" in errors[0]
+    assert validate_unquoted_hash_scalars(raw) == [], "inline ' #' must not be a hard schema error"
+    warnings = warn_inline_hash(raw)
+    assert len(warnings) == 1
+    assert "waiting_for" in warnings[0]
 
 
 def test_quoted_hash_ok():
     raw = "waiting_for: 'PR #815 review'\n"
     assert validate_unquoted_hash_scalars(raw) == []
+    assert warn_inline_hash(raw) == []
 
 
-def test_hash_in_trailing_comment_flagged():
-    # YAML silently truncates at ' #', so even a true end-of-line comment on a
-    # value line is flagged.  Authors should either remove the comment or quote
-    # the value.  This is intentionally conservative.
+def test_hash_in_trailing_comment_not_an_error():
+    # 'state: active  # current' is valid YAML — YAML parses the value as
+    # 'active'; the '# current' is an intentional trailing comment, no data
+    # loss.  Must NOT be a hard schema error.  warn_inline_hash() may still
+    # emit a softer warning about the ambiguity.
     raw = "state: active  # current\n"
-    errors = validate_unquoted_hash_scalars(raw)
-    assert len(errors) == 1
+    assert (
+        validate_unquoted_hash_scalars(raw) == []
+    ), "trailing comment on a complete scalar value must not be a hard error"
+    # warn_inline_hash CAN surface this as a warning (intentionally softer).
+    warnings = warn_inline_hash(raw)
+    assert len(warnings) == 1
+    assert "state" in warnings[0]
 
 
 def test_standalone_comment_line_ignored():
     # A line whose first non-space character is '#' is a comment line, not a scalar.
     raw = "# This is a comment\nstate: active\n"
     assert validate_unquoted_hash_scalars(raw) == []
+    assert warn_inline_hash(raw) == []
 
 
 # ---------------------------------------------------------------------------
@@ -212,13 +225,30 @@ def test_space_datetime_caught_by_schema(tmp_path):
     assert any("T" in e for e in errors)
 
 
-def test_unquoted_hash_caught_by_schema(tmp_path):
+def test_leading_hash_null_caught_by_schema(tmp_path):
+    # A value that begins with '#' becomes null — always a hard schema error.
+    p = _write_task(
+        tmp_path,
+        "---\nstate: backlog\ncreated: 2026-07-01\nnext_action: #377 fix\n---\n# task\n",
+    )
+    errors = validate_schema(p)
+    assert any("next_action" in e for e in errors)
+
+
+def test_inline_hash_surfaced_as_warning_by_schema(tmp_path):
+    # Inline ' #' is ambiguous — collect_warnings surfaces it as a non-fatal warning.
     p = _write_task(
         tmp_path,
         "---\nstate: backlog\ncreated: 2026-07-01\nwaiting_for: PR #815 fix\n---\n# task\n",
     )
-    errors = validate_schema(p)
-    assert any("#" in e or "hash" in e.lower() or "comment" in e.lower() for e in errors)
+    warnings: list[str] = []
+    errors = validate_schema(p, collect_warnings=warnings)
+    assert not any(
+        "#" in e or "hash" in e.lower() for e in errors
+    ), "inline ' #' must not be a hard schema error"
+    assert any(
+        "waiting_for" in w for w in warnings
+    ), "inline ' #' must surface as a warning via collect_warnings"
 
 
 def test_placement_form_passes_schema(tmp_path):

@@ -126,16 +126,19 @@ def validate_timestamp_syntax(raw_yaml: str) -> list[str]:
 
 
 def validate_unquoted_hash_scalars(raw_yaml: str) -> list[str]:
-    """Return errors for unquoted scalars that contain ``#``.
+    """Return errors for unquoted scalars whose value *begins* with ``#``.
 
-    A bare ``#`` after whitespace starts a YAML comment, silently truncating
-    the value.  A value that *begins* with ``#`` is treated as a comment and
-    becomes ``null``.  Both must be quoted.
+    When a YAML scalar starts with ``#``, the entire value is treated as a
+    comment and becomes ``null`` — always a data-loss error.
+
+    An inline ``#`` *after* whitespace (e.g. ``state: active  # note``) is
+    intentional YAML comment syntax with no data loss and is NOT flagged here.
+    See :func:`warn_inline_hash` for an optional softer warning on those cases.
     """
     errors: list[str] = []
     for line in raw_yaml.splitlines():
         stripped = line.strip()
-        # Skip comments, blank lines, and continuation lines.
+        # Skip comment lines, blank lines, and continuation lines.
         if not stripped or stripped.startswith("#") or line[:1] in (" ", "\t"):
             continue
         m = _SCALAR_LINE_RE.match(line)
@@ -152,13 +155,40 @@ def validate_unquoted_hash_scalars(raw_yaml: str) -> list[str]:
                 "it as a comment and the value becomes null. "
                 "Quote the entire value."
             )
-        elif " #" in value:
-            errors.append(
-                f"Field '{field}': unquoted ' #' — YAML treats the rest "
-                "as a comment and truncates the value. "
-                "Quote the entire value."
-            )
     return errors
+
+
+def warn_inline_hash(raw_yaml: str) -> list[str]:
+    """Return warnings for scalar values containing an unquoted inline ``' #'``.
+
+    A bare `` #`` in the middle of a scalar value causes YAML to silently
+    truncate everything after it.  This is often a mistake when referencing
+    GitHub issues (e.g. ``waiting_for: PR #815 fix`` → parsed as ``PR``).
+    However, it is also used intentionally as a trailing YAML comment
+    (``state: active  # note``), so this check produces **warnings** rather
+    than hard errors.  Use ``--strict`` to promote these to failures.
+    """
+    warnings_out: list[str] = []
+    for line in raw_yaml.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or line[:1] in (" ", "\t"):
+            continue
+        m = _SCALAR_LINE_RE.match(line)
+        if not m:
+            continue
+        field, raw_value = m.groups()
+        value = raw_value.lstrip()
+        if value[:1] in ("'", '"', "[", "{", "|", ">"):
+            continue
+        # Start-of-value '#' is a hard error handled by validate_unquoted_hash_scalars.
+        if not value.startswith("#") and " #" in value:
+            warnings_out.append(
+                f"Field '{field}': unquoted ' #' may silently truncate the "
+                "value — YAML treats everything after ' #' as a comment. "
+                "If '#' is part of the value (e.g. a PR reference), "
+                "quote the entire value."
+            )
+    return warnings_out
 
 
 # ---------------------------------------------------------------------------
@@ -206,17 +236,21 @@ def validate_assigned_to_format(value: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def validate_schema(file: Path) -> list[str]:
+def validate_schema(file: Path, *, collect_warnings: list[str] | None = None) -> list[str]:
     """Run structural schema checks on a task file and return a list of errors.
 
-    Covers YAML-level invariants (duplicate keys, unquoted '#', space-separated
-    timestamps) and parsed-metadata invariants (required fields, valid enum
-    values, assigned_to format).
+    Covers YAML-level invariants (duplicate keys, leading-``#`` null values,
+    space-separated timestamps) and parsed-metadata invariants (required fields,
+    valid enum values, assigned_to format).
 
     Does NOT flag deprecated or unknown field names — those are style warnings
     handled by ``lint_frontmatter_fields()`` and surfaced by ``gptodo lint``.
 
-    Returns an empty list when the file is structurally valid.
+    If *collect_warnings* is a list, ambiguous inline-``#`` cases (potential
+    value truncation vs intentional trailing comment) are appended to it as
+    non-fatal warnings instead of hard errors.
+
+    Returns an empty list when the file has no structural errors.
     """
     # Defer imports to avoid circular dependencies on gptodo internals.
     from gptodo.utils import validate_task_file  # noqa: PLC0415
@@ -236,6 +270,8 @@ def validate_schema(file: Path) -> list[str]:
         errors.extend(validate_timestamp_syntax(raw_yaml))
         errors.extend(validate_unique_frontmatter_keys(raw_yaml))
         errors.extend(validate_unquoted_hash_scalars(raw_yaml))
+        if collect_warnings is not None:
+            collect_warnings.extend(warn_inline_hash(raw_yaml))
 
     # Parse the frontmatter.
     try:
