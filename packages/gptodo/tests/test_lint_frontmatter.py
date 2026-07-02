@@ -65,6 +65,15 @@ fabricated_field: some-value
 # Task with unknown field
 """
 
+TASK_WITH_INLINE_HASH = """\
+---
+state: todo
+created: 2026-06-01T00:00:00+00:00
+waiting_for: PR #815 review
+---
+# Task with inline hash
+"""
+
 TASK_WITH_MULTIPLE_BAD_FIELDS = """\
 ---
 state: todo
@@ -206,6 +215,19 @@ def test_lint_cli_strict_clean_exits_zero(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(cli, ["lint", "--strict"])
 
     assert result.exit_code == 0, result.output
+
+
+def test_lint_cli_renders_schema_warning_as_schema_warning(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    _write(tasks_dir, "inline-hash", TASK_WITH_INLINE_HASH)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["lint"])
+
+    assert result.exit_code == 0, result.output
+    assert "schema warning" in result.output
+    assert "unknown field" not in result.output
 
 
 def test_lint_cli_does_not_break_task_loading(tmp_path: Path, monkeypatch) -> None:

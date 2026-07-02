@@ -111,6 +111,10 @@ def validate_timestamp_syntax(raw_yaml: str) -> list[str]:
     """
     errors: list[str] = []
     for line in raw_yaml.splitlines():
+        stripped = line.strip()
+        # Skip comment lines, blank lines, and continuation lines.
+        if not stripped or stripped.startswith("#") or line[:1] in (" ", "\t"):
+            continue
         m = _TIMESTAMP_FIELD_RE.match(line)
         if not m:
             continue

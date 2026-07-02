@@ -5703,6 +5703,7 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
         return
 
     error_count = sum(1 for f in all_findings if f["severity"] == "error")
+    warning_count = sum(1 for f in all_findings if f["severity"] == "warning")
     deprecated_count = sum(1 for f in all_findings if f["severity"] == "warn-deprecated")
     unknown_count = sum(1 for f in all_findings if f["severity"] == "warn-unknown")
 
@@ -5712,6 +5713,8 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
     )
     if error_count:
         console.print(f"  [bold red]{error_count}[/] schema error(s)")
+    if warning_count:
+        console.print(f"  [yellow]{warning_count}[/] schema warning(s)")
     if deprecated_count:
         console.print(f"  [red]{deprecated_count}[/] anti-design-goal / deprecated field(s)")
     if unknown_count:
@@ -5727,6 +5730,8 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
         for f in by_task[task_name]:
             if f["severity"] == "error":
                 console.print(f"  [bold red]ERROR[/] {f['message']}")
+            elif f["severity"] == "warning":
+                console.print(f"  [yellow]WARN[/] schema warning: {f['message']}")
             elif f["severity"] == "warn-deprecated":
                 console.print(
                     f"  [red]WARN[/] deprecated field [bold]{f['field']}[/]: {f['message']}"

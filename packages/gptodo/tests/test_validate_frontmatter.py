@@ -59,6 +59,11 @@ def test_quoted_space_datetime_rejected():
     assert len(errors) == 1
 
 
+def test_space_datetime_inside_block_scalar_ignored():
+    raw = "next_action: |\n  created: 2026-07-02 10:00:00\n"
+    assert validate_timestamp_syntax(raw) == []
+
+
 # ---------------------------------------------------------------------------
 # validate_unquoted_hash_scalars
 # ---------------------------------------------------------------------------
