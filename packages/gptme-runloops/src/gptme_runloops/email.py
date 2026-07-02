@@ -269,3 +269,6 @@ Complete when all emails are addressed.
                     self._record_backoff_success()
         except Exception as e:
             self.logger.error(f"Post-run email check failed: {e}")
+
+        # Chain to base class to record session and cleanup tmpdir
+        super().post_run(result)

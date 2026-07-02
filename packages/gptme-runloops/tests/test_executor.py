@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from gptme_runloops.utils import execution as execution_mod
 from gptme_runloops.utils.execution import ExecutionResult
 from gptme_runloops.utils.executor import (
     ClaudeCodeExecutor,
@@ -105,6 +106,78 @@ def test_gptme_executor_passes_run_type():
 
         call_kwargs = mock.call_args
         assert call_kwargs[1]["run_type"] == "autonomous"
+
+
+def test_execute_gptme_persists_trajectory_and_removes_isolated_logs(
+    tmp_path, monkeypatch
+):
+    """execute_gptme copies conversation.jsonl durably and removes GPTME_LOGS_HOME."""
+    global_log_dir = tmp_path / "global-logs"
+    global_log_dir.mkdir()
+    monkeypatch.setattr(execution_mod, "GLOBAL_LOG_DIR", global_log_dir)
+    monkeypatch.setattr(execution_mod.shutil, "which", lambda _: "/usr/bin/gptme")
+
+    isolated_log_dirs: list[Path] = []
+
+    def fake_run(cmd, *, env, **kwargs):
+        isolated_logs = Path(env["GPTME_LOGS_HOME"])
+        isolated_log_dirs.append(isolated_logs)
+        session_dir = isolated_logs / "2026-07-02-test-session"
+        session_dir.mkdir(parents=True)
+        (session_dir / "conversation.jsonl").write_text('{"role": "user"}\n')
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(execution_mod.subprocess, "run", fake_run)
+
+    result = execution_mod.execute_gptme(
+        "Test prompt",
+        workspace=tmp_path,
+        timeout=60,
+        run_type="test",
+    )
+
+    assert result.success
+    assert result.trajectory_path is not None
+    assert result.trajectory_path.exists()
+    assert result.trajectory_path.parent.parent == global_log_dir
+    assert isolated_log_dirs
+    assert isolated_log_dirs[0] not in result.trajectory_path.parents
+    assert not isolated_log_dirs[0].exists()
+    assert not list(tmp_path.glob(".gptme-prompt-*.txt"))
+
+
+def test_execute_gptme_logs_duplicate_conversation_files(tmp_path, monkeypatch):
+    """Unexpected duplicate conversation.jsonl files are visible in the run log."""
+    global_log_dir = tmp_path / "global-logs"
+    global_log_dir.mkdir()
+    monkeypatch.setattr(execution_mod, "GLOBAL_LOG_DIR", global_log_dir)
+    monkeypatch.setattr(execution_mod.shutil, "which", lambda _: "/usr/bin/gptme")
+
+    def fake_run(cmd, *, env, **kwargs):
+        isolated_logs = Path(env["GPTME_LOGS_HOME"])
+        session_a = isolated_logs / "a-session"
+        session_b = isolated_logs / "b-session"
+        session_a.mkdir(parents=True)
+        session_b.mkdir(parents=True)
+        (session_a / "conversation.jsonl").write_text('{"session": "a"}\n')
+        (session_b / "conversation.jsonl").write_text('{"session": "b"}\n')
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(execution_mod.subprocess, "run", fake_run)
+
+    result = execution_mod.execute_gptme(
+        "Test prompt",
+        workspace=tmp_path,
+        timeout=60,
+        run_type="duplicate",
+    )
+
+    assert result.trajectory_path is not None
+    assert result.trajectory_path.read_text() == '{"session": "a"}\n'
+    log_text = "\n".join(path.read_text() for path in global_log_dir.glob("*.log"))
+    assert "Multiple conversation.jsonl files found" in log_text
+    assert "a-session/conversation.jsonl" in log_text
+    assert "b-session/conversation.jsonl" in log_text
 
 
 def test_gptme_executor_is_available():
