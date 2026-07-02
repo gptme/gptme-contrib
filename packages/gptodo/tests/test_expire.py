@@ -9,7 +9,7 @@ point is to unclutter, not to permanently kill.
 These tests cover:
 
   1. Default 90d window reaps only tasks that meet ALL predicates
-     (state, age, no recur, no future wait).
+     (state, age, no recur, no future wait, non-high priority).
   2. --days N adjusts the window.
   3. --state restricts which eligible states get reaped.
   4. --dry-run reports but does not mutate.
@@ -23,6 +23,7 @@ These tests cover:
      nothing new to expire.
  11. --json emits a stable machine-readable contract.
  12. Expired tasks are excluded from `gptodo ready` and `gptodo next`.
+ 13. High-priority tasks are never reaped regardless of age.
 """
 
 from __future__ import annotations
@@ -464,3 +465,42 @@ def test_expire_env_var_overrides_default_days(tmp_path: Path, monkeypatch) -> N
     assert result.exit_code == 0, result.output
     tasks = load_tasks(tasks_dir)
     assert tasks[0].metadata["state"] == "expired"
+
+
+# ---------- Priority guard -----------------------------------------------------
+
+
+def test_expire_skips_high_priority_tasks(tmp_path: Path, monkeypatch) -> None:
+    """High-priority tasks are never reaped regardless of age."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    _write(tasks_dir, "high-prio", "someday", _iso(200), extra="priority: high")
+    _write(tasks_dir, "medium-prio", "someday", _iso(200), extra="priority: medium")
+    _write(tasks_dir, "no-prio", "someday", _iso(200))
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["expire"])
+    assert result.exit_code == 0, result.output
+
+    by_name = {t.name: t for t in load_tasks(tasks_dir)}
+    assert by_name["high-prio"].metadata["state"] == "someday"  # protected
+    assert by_name["medium-prio"].metadata["state"] == "expired"
+    assert by_name["no-prio"].metadata["state"] == "expired"
+
+
+def test_expire_high_priority_excluded_from_json_output(tmp_path: Path, monkeypatch) -> None:
+    """High-priority tasks must not appear in --json expired list."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    _write(tasks_dir, "high-prio", "backlog", _iso(200), extra="priority: high")
+    _write(tasks_dir, "low-prio", "backlog", _iso(200), extra="priority: low")
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["expire", "--json"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.stdout)
+    assert payload["count"] == 1
+    ids = {r["id"] for r in payload["expired"]}
+    assert "low-prio" in ids
+    assert "high-prio" not in ids
