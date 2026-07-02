@@ -33,6 +33,7 @@ Wiring:
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import os
 import re
@@ -175,6 +176,21 @@ def _tracker() -> ConversationTracker:
     return ConversationTracker(_messages_dir() / ".tracking")
 
 
+def _ssh_control_path(ssh_target: str) -> str:
+    """Build a bounded SSH ControlPath for the given SSH target.
+
+    Uses SHA-256 truncated to 32 hex chars for deterministic, collision-resistant
+    keying that stays under the 107-char Unix domain socket path limit.
+
+    Places the socket in ``XDG_RUNTIME_DIR`` (user-private, mode 0700) when
+    available, falling back to ``~/.ssh/`` — avoids predictable paths in the
+    world-writable ``/tmp`` directory.
+    """
+    ctl_key = hashlib.sha256(ssh_target.encode()).hexdigest()[:32]
+    ctl_dir = os.environ.get("XDG_RUNTIME_DIR") or os.path.expanduser("~/.ssh")
+    return os.path.join(ctl_dir, f"ssh-ctl-{os.getuid()}-{ctl_key}")
+
+
 def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default") -> Deliver:
     """Build a ``deliver`` hook that SCPs a message into a recipient's inbox.
 
@@ -209,7 +225,25 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
             remote_inbox = f"{remote_root}/inbox/"
         else:
             remote_inbox = f"{remote_root}/mailboxes/{mailbox}/inbox/"
-        ssh_opts = ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
+        # ControlMaster reuses one TCP connection (and one PAM/logind session) for
+        # both the mkdir and scp calls instead of opening two separate connections.
+        # Each recipient gets its own ControlPath keyed by user+host to avoid
+        # cross-host master conflicts.  ControlPersist=60 keeps the master alive for
+        # 60 s so burst deliveries to the same host share it; it auto-closes after
+        # that — no persistent background process.
+        ctl_path = _ssh_control_path(ssh_target)
+        ssh_opts = [
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            f"ControlPath={ctl_path}",
+            "-o",
+            "ControlPersist=60",
+        ]
         try:
             subprocess.run(
                 ["ssh", *ssh_opts, ssh_target, f"mkdir -p {shlex.quote(remote_inbox)}"],

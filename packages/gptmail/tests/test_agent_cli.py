@@ -10,6 +10,7 @@ See task: fold-agent-msg-into-gptmail-single-comms-tool.
 """
 
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -808,3 +809,31 @@ def test_broadcast_reports_partial_delivery_failure(
     }
     assert by_to["gordon"]["delivered"] is False
     assert "delivered" not in by_to["bob"]
+
+
+def test_ssh_control_path_stays_under_socket_limit() -> None:
+    """ControlPath must stay under the 107-char Unix domain socket path limit."""
+    long_target = f"user@{'x' * 200}.example.com"
+    ctl_path = agent_cli._ssh_control_path(long_target)
+    assert len(ctl_path) <= 107, f"ControlPath too long: {len(ctl_path)} chars: {ctl_path}"
+    basename = os.path.basename(ctl_path)
+    assert basename.startswith("ssh-ctl-")
+    uid, hash_part = basename.removeprefix("ssh-ctl-").split("-", 1)
+    assert uid.isdigit()
+    assert len(hash_part) == 32
+    int(hash_part, 16)  # must be valid hex
+
+
+def test_ssh_control_path_deterministic() -> None:
+    """Same SSH target must produce the same ControlPath."""
+    target = "bob@bob.lxc"
+    p1 = agent_cli._ssh_control_path(target)
+    p2 = agent_cli._ssh_control_path(target)
+    assert p1 == p2
+
+
+def test_ssh_control_path_different_targets_differ() -> None:
+    """Different SSH targets must produce different ControlPaths."""
+    p1 = agent_cli._ssh_control_path("alice@alice.lxc")
+    p2 = agent_cli._ssh_control_path("bob@bob.lxc")
+    assert p1 != p2
