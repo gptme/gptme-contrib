@@ -279,12 +279,50 @@ class BaseRunLoop(ABC):
     def post_run(self, result: ExecutionResult) -> None:
         """Perform post-run cleanup and logging.
 
-        Override in subclasses for run-specific cleanup.
+        Records the session to the gptme-sessions store so harness metrics,
+        bandit posteriors, and quality analysis stay accurate. Subclasses that
+        override this method should call super().post_run(result) to preserve
+        recording, or call _record_session(result) explicitly.
 
         Args:
             result: Result from execution
         """
-        pass
+        self._record_session(result)
+
+    def _record_session(self, result: ExecutionResult) -> None:
+        """Write a session record via gptme-sessions post_session().
+
+        Non-fatal: logs a warning on failure rather than disrupting the run loop.
+        Uses GPTME_SESSIONS_DIR env var (set in .env) for the store path.
+        """
+        try:
+            from gptme_sessions.post_session import post_session
+            from gptme_sessions.store import SessionStore
+        except ImportError:
+            self.logger.debug(
+                "gptme_sessions not available — skipping session recording"
+            )
+            return
+
+        duration = (
+            int(time.time() - self._start_time) if self._start_time is not None else 0
+        )
+        try:
+            post_session(
+                store=SessionStore(),  # uses GPTME_SESSIONS_DIR env var
+                harness=self.executor.name,
+                model=self.model,
+                run_type=self.run_type,
+                exit_code=result.exit_code,
+                duration_seconds=duration,
+                trajectory_path=result.trajectory_path,
+            )
+            self.logger.info(
+                f"Session recorded (harness={self.executor.name}, "
+                f"trajectory={'yes' if result.trajectory_path else 'no'})"
+            )
+        except Exception as e:
+            self.logger.warning(f"Session recording failed (non-fatal): {e}")
 
     def cleanup(self) -> None:
         """Release lock and cleanup resources."""

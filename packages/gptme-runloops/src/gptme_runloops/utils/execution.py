@@ -5,6 +5,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -16,10 +17,19 @@ GLOBAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
 class ExecutionResult:
     """Result from gptme execution."""
 
-    def __init__(self, exit_code: int, timed_out: bool = False):
+    def __init__(
+        self,
+        exit_code: int,
+        timed_out: bool = False,
+        trajectory_path: Path | None = None,
+    ):
         self.exit_code = exit_code
         self.timed_out = timed_out
         self.success = exit_code == 0
+        # Path to conversation.jsonl written by this gptme session (if any).
+        # Populated when GPTME_LOGS_HOME isolation is used — lets callers
+        # record the session via post_session() without fragile mtime searches.
+        self.trajectory_path = trajectory_path
 
 
 def execute_gptme(
@@ -58,6 +68,14 @@ def execute_gptme(
     prompt_file = workspace / f".gptme-prompt-{os.getpid()}.txt"
     prompt_file.write_text(prompt)
 
+    # Isolate gptme session logs to a private tmpdir so trajectory discovery is
+    # reliable. When gptme runs with --workspace pointing to a dir that has an
+    # [agent] section in gptme.toml, it ignores --name and creates random
+    # YYYY-MM-DD-adjective-noun "petname" directories instead — breaking any
+    # pattern-based lookup. GPTME_LOGS_HOME redirects all logs for this process
+    # to a known private dir, making the conversation.jsonl always findable.
+    gptme_logs_dir = Path(tempfile.mkdtemp(prefix="gptme-session-"))
+
     try:
         # Build gptme command
         # Find gptme in PATH (typically pipx-managed)
@@ -89,6 +107,7 @@ def execute_gptme(
         run_env = os.environ.copy()
         run_env["GPTME_SHELL_TIMEOUT"] = str(shell_timeout)
         run_env["GPTME_CHAT_HISTORY"] = "true"
+        run_env["GPTME_LOGS_HOME"] = str(gptme_logs_dir)
 
         if env:
             run_env.update(env)
@@ -107,6 +126,9 @@ def execute_gptme(
             f.write(f"Shell timeout: {shell_timeout}s\n\n")
             f.write("=== Output ===\n")
 
+        trajectory_path: Path | None = None
+        timed_out = False
+
         # Execute with tee - streams to both stdout and log file
         try:
             result = subprocess.run(
@@ -122,7 +144,7 @@ def execute_gptme(
                 f.write("\n=== Execution completed ===\n")
                 f.write(f"Exit code: {result.returncode}\n")
 
-            return ExecutionResult(exit_code=result.returncode)
+            exit_code = result.returncode
 
         except subprocess.TimeoutExpired:
             # Log timeout to file (append to preserve tee output)
@@ -131,9 +153,22 @@ def execute_gptme(
                 f.write(f"Status: TIMED OUT after {timeout}s\n")
 
             print(f"ERROR: Execution timed out after {timeout}s", file=sys.stderr)
-            return ExecutionResult(exit_code=124, timed_out=True)
+            exit_code = 124
+            timed_out = True
+
+        # Discover conversation.jsonl written by this session.
+        # gptme creates one session dir per run under GPTME_LOGS_HOME.
+        trajs = list(gptme_logs_dir.rglob("conversation.jsonl"))
+        if trajs:
+            trajectory_path = trajs[0]
+
+        return ExecutionResult(
+            exit_code=exit_code,
+            timed_out=timed_out,
+            trajectory_path=trajectory_path,
+        )
 
     finally:
-        # Clean up prompt file
+        # Clean up prompt file (gptme_logs_dir is preserved — caller records session)
         if prompt_file.exists():
             prompt_file.unlink()

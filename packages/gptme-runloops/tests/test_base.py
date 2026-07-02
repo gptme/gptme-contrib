@@ -93,10 +93,11 @@ def test_base_run_full_cycle():
 
         run = TestRunLoop(workspace, "test")
 
-        # Mock all external calls
+        # Mock all external calls (including _record_session to avoid real store writes)
         with (
             patch("gptme_runloops.base.git_pull_with_retry") as mock_pull,
             patch("gptme_runloops.utils.executor.execute_gptme") as mock_execute,
+            patch.object(run, "_record_session") as mock_record,
         ):
             mock_pull.return_value = True
             mock_execute.return_value = ExecutionResult(exit_code=0)
@@ -107,6 +108,22 @@ def test_base_run_full_cycle():
             assert exit_code == 0
             mock_pull.assert_called_once()
             mock_execute.assert_called_once()
+            # post_run() must call _record_session() with the execution result
+            mock_record.assert_called_once()
+
+
+def test_base_run_records_session_on_success():
+    """Test that post_run() calls _record_session() on a successful run."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+        result = ExecutionResult(exit_code=0)
+
+        with patch.object(run, "_record_session") as mock_record:
+            run.post_run(result)
+            mock_record.assert_called_once_with(result)
 
 
 def test_base_run_exception_handling():
