@@ -22,6 +22,7 @@ class ExecutionResult:
         exit_code: int,
         timed_out: bool = False,
         trajectory_path: Path | None = None,
+        tmpdir: Path | None = None,
     ):
         self.exit_code = exit_code
         self.timed_out = timed_out
@@ -30,6 +31,21 @@ class ExecutionResult:
         # Populated when GPTME_LOGS_HOME isolation is used — lets callers
         # record the session via post_session() without fragile mtime searches.
         self.trajectory_path = trajectory_path
+        # Temporary directory holding the isolated gptme session logs.
+        # Owned by this result; caller must call cleanup_tmpdir() after
+        # post_session() has ingested the trajectory, or use the context
+        # manager form.
+        self.tmpdir = tmpdir
+
+    def cleanup_tmpdir(self) -> None:
+        """Delete the isolated gptme session logs directory.
+
+        Call this after post_session() has processed trajectory_path to avoid
+        accumulating stale tmpdir entries across many runs.
+        """
+        if self.tmpdir and self.tmpdir.exists():
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+            self.tmpdir = None
 
 
 def execute_gptme(
@@ -182,11 +198,13 @@ def execute_gptme(
             exit_code=exit_code,
             timed_out=timed_out,
             trajectory_path=trajectory_path,
+            tmpdir=gptme_logs_dir,
         )
 
     finally:
         # Clean up prompt file and the private GPTME_LOGS_HOME staging dir.
-        # trajectory_path points to a durable copy under GLOBAL_LOG_DIR.
+        # trajectory_path points to a durable copy under GLOBAL_LOG_DIR;
+        # cleanup_tmpdir() on the result is a no-op since the dir is gone.
         if prompt_file.exists():
             prompt_file.unlink()
         shutil.rmtree(gptme_logs_dir, ignore_errors=True)

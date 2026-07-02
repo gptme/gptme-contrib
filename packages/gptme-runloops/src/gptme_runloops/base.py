@@ -288,6 +288,7 @@ class BaseRunLoop(ABC):
             result: Result from execution
         """
         self._record_session(result)
+        result.cleanup_tmpdir()
 
     def _record_session(self, result: ExecutionResult) -> None:
         """Write a session record via gptme-sessions post_session().

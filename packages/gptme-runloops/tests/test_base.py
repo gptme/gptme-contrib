@@ -127,6 +127,43 @@ def test_base_run_records_session_on_success():
             mock_record.assert_called_once_with(result)
 
 
+def test_post_run_cleans_up_tmpdir():
+    """Test that post_run() deletes the gptme session tmpdir after recording."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+        # Create a fake tmpdir as execute_gptme would
+        session_tmpdir = Path(tempfile.mkdtemp(prefix="gptme-session-"))
+        (session_tmpdir / "conversation.jsonl").write_text("{}")
+        result = ExecutionResult(
+            exit_code=0,
+            trajectory_path=session_tmpdir / "conversation.jsonl",
+            tmpdir=session_tmpdir,
+        )
+
+        with patch.object(run, "_record_session"):
+            run.post_run(result)
+
+        # tmpdir must be deleted after post_run
+        assert not session_tmpdir.exists(), "gptme session tmpdir leaked after post_run"
+        assert result.tmpdir is None
+
+
+def test_cleanup_tmpdir_is_idempotent():
+    """Test that cleanup_tmpdir() is safe to call multiple times."""
+    session_tmpdir = Path(tempfile.mkdtemp(prefix="gptme-session-"))
+    result = ExecutionResult(exit_code=0, tmpdir=session_tmpdir)
+
+    result.cleanup_tmpdir()
+    assert not session_tmpdir.exists()
+    assert result.tmpdir is None
+
+    # Second call must not raise
+    result.cleanup_tmpdir()
+
+
 def test_base_run_exception_handling():
     """Test exception handling in run cycle."""
     with tempfile.TemporaryDirectory() as tmpdir:
