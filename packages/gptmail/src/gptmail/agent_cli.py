@@ -209,7 +209,26 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
             remote_inbox = f"{remote_root}/inbox/"
         else:
             remote_inbox = f"{remote_root}/mailboxes/{mailbox}/inbox/"
-        ssh_opts = ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
+        # ControlMaster reuses one TCP connection (and one PAM/logind session) for
+        # both the mkdir and scp calls instead of opening two separate connections.
+        # Each recipient gets its own ControlPath keyed by user+host to avoid
+        # cross-host master conflicts.  ControlPersist=60 keeps the master alive for
+        # 60 s so burst deliveries to the same host share it; it auto-closes after
+        # that — no persistent background process.
+        ctl_key = re.sub(r"[^a-zA-Z0-9]", "_", ssh_target)
+        ctl_path = f"/tmp/.ssh-ctl-{os.getuid()}-{ctl_key}"
+        ssh_opts = [
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            f"ControlPath={ctl_path}",
+            "-o",
+            "ControlPersist=60",
+        ]
         try:
             subprocess.run(
                 ["ssh", *ssh_opts, ssh_target, f"mkdir -p {shlex.quote(remote_inbox)}"],
