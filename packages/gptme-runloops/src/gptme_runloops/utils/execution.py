@@ -158,9 +158,25 @@ def execute_gptme(
 
         # Discover conversation.jsonl written by this session.
         # gptme creates one session dir per run under GPTME_LOGS_HOME.
-        trajs = list(gptme_logs_dir.rglob("conversation.jsonl"))
+        trajs = sorted(gptme_logs_dir.rglob("conversation.jsonl"))
         if trajs:
-            trajectory_path = trajs[0]
+            selected_traj = trajs[0]
+            if len(trajs) > 1:
+                with log_file.open("a") as f:
+                    f.write("\n=== Multiple conversation.jsonl files found ===\n")
+                    f.write(f"Using: {selected_traj}\n")
+                    f.write("All candidates:\n")
+                    for traj in trajs:
+                        f.write(f"- {traj}\n")
+
+            durable_session_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f"{run_type}-{timestamp}-session-",
+                    dir=GLOBAL_LOG_DIR,
+                )
+            )
+            trajectory_path = durable_session_dir / "conversation.jsonl"
+            shutil.copy2(selected_traj, trajectory_path)
 
         return ExecutionResult(
             exit_code=exit_code,
@@ -169,6 +185,8 @@ def execute_gptme(
         )
 
     finally:
-        # Clean up prompt file (gptme_logs_dir is preserved — caller records session)
+        # Clean up prompt file and the private GPTME_LOGS_HOME staging dir.
+        # trajectory_path points to a durable copy under GLOBAL_LOG_DIR.
         if prompt_file.exists():
             prompt_file.unlink()
+        shutil.rmtree(gptme_logs_dir, ignore_errors=True)

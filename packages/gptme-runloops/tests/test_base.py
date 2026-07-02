@@ -100,7 +100,8 @@ def test_base_run_full_cycle():
             patch.object(run, "_record_session") as mock_record,
         ):
             mock_pull.return_value = True
-            mock_execute.return_value = ExecutionResult(exit_code=0)
+            result = ExecutionResult(exit_code=0)
+            mock_execute.return_value = result
 
             # Run full cycle
             exit_code = run.run()
@@ -109,7 +110,7 @@ def test_base_run_full_cycle():
             mock_pull.assert_called_once()
             mock_execute.assert_called_once()
             # post_run() must call _record_session() with the execution result
-            mock_record.assert_called_once()
+            mock_record.assert_called_once_with(result)
 
 
 def test_base_run_records_session_on_success():
