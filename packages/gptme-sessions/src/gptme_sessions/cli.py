@@ -2927,6 +2927,83 @@ def cost(
         click.echo(format_cost_summary(summary, daily=daily, by_model=by_model))
 
 
+@cli.command()
+@click.argument("query")
+@click.option("--days", default=30, show_default=True, help="Search sessions from last N days")
+@click.option(
+    "--harness",
+    type=click.Choice(["gptme", "claude-code", "codex", "copilot"]),
+    default=None,
+    help="Limit to a specific harness",
+)
+@click.option("--max-results", default=10, show_default=True, help="Max sessions to return")
+@click.option("--case-sensitive", is_flag=True, help="Case-sensitive search")
+@click.option("--no-snippets", is_flag=True, help="Show only session IDs, no text excerpts")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON instead of formatted text")
+def search(
+    query: str,
+    days: int,
+    harness: str | None,
+    max_results: int,
+    case_sensitive: bool,
+    no_snippets: bool,
+    as_json: bool,
+) -> None:
+    """Search session transcripts for a query string.
+
+    Performs case-insensitive substring search across session transcripts
+    and returns matching sessions ranked by recency then hit count.
+
+    Example:
+        gptme sessions search "module not found" --days 30
+    """
+    from .search import search_sessions
+
+    click.echo(f"Searching {days}-day window for: {query!r}", err=True)
+    results = search_sessions(
+        query=query,
+        harness=harness,
+        days=days,
+        max_results=max_results,
+        case_sensitive=case_sensitive,
+    )
+
+    if as_json:
+        import dataclasses
+
+        click.echo(
+            json.dumps(
+                [
+                    {
+                        "session_id": r.session_id,
+                        "harness": r.harness,
+                        "path": r.path,
+                        "hit_count": r.hit_count,
+                        "started_at": r.started_at.isoformat() if r.started_at else None,
+                        "snippets": [dataclasses.asdict(s) for s in r.snippets],
+                    }
+                    for r in results
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not results:
+        click.echo("No sessions found.")
+        return
+
+    click.echo(f"\nFound {len(results)} session(s):\n")
+    for r in results:
+        harness_label = f"[{r.harness}]"
+        click.echo(f"  {r.display_date}  {harness_label}  {r.session_id}  ({r.hit_count} hit(s))")
+        if not no_snippets:
+            for s in r.snippets:
+                role_label = s.role.upper()[:4]
+                click.echo(f"    [{role_label}] {s.text}")
+        click.echo()
+
+
 def main() -> int:
     """Entry point for console_scripts (backward-compatible wrapper).
 

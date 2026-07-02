@@ -488,7 +488,12 @@ def read_transcript(path: Path) -> SessionTranscript:
     model = _extract_model(fmt, msgs, path)
 
     # Session ID: use path stem (UUID for CC, session dir name for gptme, etc.)
-    session_id = path.stem if path.suffix == ".jsonl" else path.name
+    # For gptme directories, path.stem will be "conversation" after conversion,
+    # so use the parent directory name instead.
+    if path.suffix == ".jsonl" and fmt == "gptme":
+        session_id = path.parent.name
+    else:
+        session_id = path.stem if path.suffix == ".jsonl" else path.name
 
     capabilities: list[str] = []
     if norm_msgs:
