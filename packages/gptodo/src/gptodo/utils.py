@@ -214,6 +214,10 @@ DEPRECATED_FRONTMATTER_FIELDS: dict[str, str] = {
         "Not a gptodo field. Recurring tasks track next-fire via `wait:` on "
         "auto-reset; there is no last_completed stamp."
     ),
+    "owner": (
+        "Not a task schema field — use `assigned_to` instead. "
+        "`owner` is a common hallucination for the real assignment field."
+    ),
 }
 
 
