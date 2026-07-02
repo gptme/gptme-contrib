@@ -5603,24 +5603,27 @@ def transitions_cmd(output_json: bool):
 )
 @click.argument("task_files", nargs=-1, type=click.Path())
 def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> None:
-    """Lint task frontmatter for hallucinated / unknown fields.
+    """Lint task frontmatter for schema errors and unknown/deprecated fields.
 
-    Flags fields not in the known schema (KNOWN_FRONTMATTER_FIELDS) and
-    fields on the deprecated/anti-design list (DEPRECATED_FRONTMATTER_FIELDS).
-    Warnings only — this does not reject tasks, only nudges toward the
-    correct form.
+    Runs two classes of checks:
 
-    The specific `modified` field is called out because it's the canonical
-    anti-design-goal example: high-churn, has to be wired into every edit,
-    and file mtime + `git log -1 --format=%ai <file>` already answer
-    "when was this touched?" for free.
+    **Schema errors** (always exit 1): structural violations that make a task
+    file ambiguous or unsafe to parse — duplicate keys, space-separated
+    timestamps, leading-``#`` null values, missing required fields, invalid
+    enum values, bad ``assigned_to`` format.
+
+    **Warnings** (exit 1 only with ``--strict``): fields not in the known
+    schema (KNOWN_FRONTMATTER_FIELDS), deprecated field names, and inline
+    ``#`` in scalar values that may silently truncate the value.
 
     Examples:
         gptodo lint                          # lint all tasks
         gptodo lint tasks/foo.md tasks/bar.md # lint specific files
         gptodo lint --json                   # machine-readable
-        gptodo lint --strict                 # exit 1 if warnings found (CI)
+        gptodo lint --strict                 # exit 1 on warnings too (CI)
     """
+    from gptodo.validate_frontmatter import validate_schema  # noqa: PLC0415
+
     console = Console()
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
@@ -5650,8 +5653,31 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
     # Collect findings across all tasks
     all_findings: list[dict] = []
     for task in tasks:
-        findings = lint_frontmatter_fields(task.metadata)
-        for severity, field, message in findings:
+        # Schema errors — always fatal.
+        schema_warnings: list[str] = []
+        for error_msg in validate_schema(task.path, collect_warnings=schema_warnings):
+            all_findings.append(
+                {
+                    "task": task.name,
+                    "path": str(task.path.relative_to(repo_root)),
+                    "severity": "error",
+                    "field": "-",
+                    "message": error_msg,
+                }
+            )
+        # Ambiguous inline-'#' warnings from schema checks (non-fatal).
+        for warning_msg in schema_warnings:
+            all_findings.append(
+                {
+                    "task": task.name,
+                    "path": str(task.path.relative_to(repo_root)),
+                    "severity": "warning",
+                    "field": "-",
+                    "message": warning_msg,
+                }
+            )
+        # Field-level warnings (deprecated / unknown).
+        for severity, field, message in lint_frontmatter_fields(task.metadata):
             all_findings.append(
                 {
                     "task": task.name,
@@ -5662,17 +5688,22 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
                 }
             )
 
+    has_errors = any(f["severity"] == "error" for f in all_findings)
+    has_warnings = any(f["severity"] != "error" for f in all_findings)
+
     if output_json:
         print(json.dumps({"findings": all_findings, "count": len(all_findings)}, indent=2))
-        if strict and all_findings:
+        if has_errors or (strict and has_warnings):
             sys.exit(1)
         return
 
-    # Human output — group by task, deprecated first
+    # Human output — group by task, errors first
     if not all_findings:
         console.print(f"[green]✓ No frontmatter schema violations across {len(tasks)} task(s).[/]")
         return
 
+    error_count = sum(1 for f in all_findings if f["severity"] == "error")
+    warning_count = sum(1 for f in all_findings if f["severity"] == "warning")
     deprecated_count = sum(1 for f in all_findings if f["severity"] == "warn-deprecated")
     unknown_count = sum(1 for f in all_findings if f["severity"] == "warn-unknown")
 
@@ -5680,6 +5711,10 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
         f"\n[bold]Frontmatter lint — {len(all_findings)} finding(s) across "
         f"{len({f['task'] for f in all_findings})} task(s):[/]"
     )
+    if error_count:
+        console.print(f"  [bold red]{error_count}[/] schema error(s)")
+    if warning_count:
+        console.print(f"  [yellow]{warning_count}[/] schema warning(s)")
     if deprecated_count:
         console.print(f"  [red]{deprecated_count}[/] anti-design-goal / deprecated field(s)")
     if unknown_count:
@@ -5693,7 +5728,11 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
     for task_name in sorted(by_task.keys()):
         console.print(f"\n[bold]{task_name}[/] ({by_task[task_name][0]['path']}):")
         for f in by_task[task_name]:
-            if f["severity"] == "warn-deprecated":
+            if f["severity"] == "error":
+                console.print(f"  [bold red]ERROR[/] {f['message']}")
+            elif f["severity"] == "warning":
+                console.print(f"  [yellow]WARN[/] schema warning: {f['message']}")
+            elif f["severity"] == "warn-deprecated":
                 console.print(
                     f"  [red]WARN[/] deprecated field [bold]{f['field']}[/]: {f['message']}"
                 )
@@ -5702,7 +5741,7 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
                     f"  [yellow]WARN[/] unknown field [bold]{f['field']}[/]: {f['message']}"
                 )
 
-    if strict:
+    if has_errors or (strict and has_warnings):
         sys.exit(1)
 
 
