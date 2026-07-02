@@ -186,6 +186,10 @@ class TestSearchSessions:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("anything")
         assert results == []
@@ -195,6 +199,10 @@ class TestSearchSessions:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("module not found")
         assert len(results) == 1
@@ -205,6 +213,8 @@ class TestSearchSessions:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[cc]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("CORS bug")
         assert len(results) == 1
@@ -215,6 +225,8 @@ class TestSearchSessions:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("module not found")
         assert len(results) == 1
@@ -224,6 +236,8 @@ class TestSearchSessions:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("module not found", case_sensitive=True)
         assert len(results) == 0
@@ -233,6 +247,8 @@ class TestSearchSessions:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("module not found", case_sensitive=True)
         assert len(results) == 1
@@ -244,6 +260,8 @@ class TestSearchSessions:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=sessions),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("target query", max_results=3)
         assert len(results) <= 3
@@ -284,6 +302,8 @@ class TestSearchSessions:
                 return_value=[old_session, new_session],
             ),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("target")
         assert len(results) == 2
@@ -294,6 +314,8 @@ class TestSearchSessions:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[bad]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             results = search_sessions("anything")
         assert results == []
@@ -316,6 +338,8 @@ class TestSearchCLI:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             result = runner.invoke(cli, ["search", "nonexistent-xyz-query"])
         assert result.exit_code == 0
@@ -327,6 +351,8 @@ class TestSearchCLI:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             result = runner.invoke(cli, ["search", "target", "--json"])
         assert result.exit_code == 0
@@ -344,6 +370,8 @@ class TestSearchCLI:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             result = runner.invoke(cli, ["search", "target", "--no-snippets"])
         assert result.exit_code == 0
@@ -354,6 +382,8 @@ class TestSearchCLI:
         with (
             patch("gptme_sessions.search.discover_gptme_sessions", return_value=[]),
             patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
         ):
             result = runner.invoke(cli, ["search", "test", "--harness", "gptme"])
         assert result.exit_code == 0

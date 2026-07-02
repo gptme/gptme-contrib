@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from .discovery import discover_cc_sessions, discover_gptme_sessions
+from .discovery import (
+    discover_cc_sessions,
+    discover_codex_sessions,
+    discover_copilot_sessions,
+    discover_gptme_sessions,
+)
 from .transcript import read_transcript
 
 logger = logging.getLogger(__name__)
@@ -124,7 +129,7 @@ def search_sessions(
     query:
         Substring to search for (case-insensitive by default).
     harness:
-        Limit to a specific harness (``"gptme"`` or ``"claude-code"``).
+        Limit to a specific harness (``"gptme"``, ``"claude-code"``, ``"codex"``, or ``"copilot"``).
         ``None`` searches all supported harnesses.
     days:
         Search sessions from the last N days.
@@ -144,6 +149,10 @@ def search_sessions(
         paths.extend(discover_gptme_sessions(start, today))
     if harness in (None, "claude-code"):
         paths.extend(discover_cc_sessions(start, today))
+    if harness in (None, "codex"):
+        paths.extend(discover_codex_sessions(start, today))
+    if harness in (None, "copilot"):
+        paths.extend(discover_copilot_sessions(start, today))
 
     results: list[SearchResult] = []
     for path in paths:
