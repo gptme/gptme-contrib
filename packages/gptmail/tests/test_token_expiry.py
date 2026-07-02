@@ -21,14 +21,14 @@ def test_is_not_expired_with_utc_aware() -> None:
 
 def test_is_expired_with_naive_datetime() -> None:
     """Naive datetime (legacy) still works — treated as UTC."""
-    expired = datetime.utcnow() - timedelta(hours=1)
+    expired = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
     info = TokenInfo(token="t", expires_at=expired)
     assert info.is_expired() is True
 
 
 def test_is_not_expired_with_naive_datetime() -> None:
     """Naive datetime (legacy) future token works."""
-    future = datetime.utcnow() + timedelta(hours=2)
+    future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=2)
     info = TokenInfo(token="t", expires_at=future)
     assert info.is_expired() is False
 

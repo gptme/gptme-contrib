@@ -476,8 +476,10 @@ def test_stat_fingerprint_changes_on_mtime(tmp_path):
     assert count1 == 2
     assert fp1 == fp2  # stable when nothing changes
 
-    # Touch a file — fingerprint must change.
-    (d / "a.py").write_text("x = 2")
+    # Modify a file — fingerprint must change.
+    # Use different-length content so the size field changes reliably; mtime_ns can be
+    # identical for sequential writes on fast SSDs within the same kernel timer tick.
+    (d / "a.py").write_text("x = 2\n")
     with patch.object(
         commit_map,
         "_tracked_source_files",
@@ -485,5 +487,5 @@ def test_stat_fingerprint_changes_on_mtime(tmp_path):
     ):
         fp3, count3 = commit_map._stat_fingerprint(d)
 
-    assert fp3 != fp1  # mtime/size changed
+    assert fp3 != fp1  # mtime_ns or size changed
     assert count3 == 2
