@@ -2932,7 +2932,7 @@ def cost(
 @click.option("--days", default=30, show_default=True, help="Search sessions from last N days")
 @click.option(
     "--harness",
-    type=click.Choice(["gptme", "claude-code"]),
+    type=click.Choice(["gptme", "claude-code", "codex", "copilot"]),
     default=None,
     help="Limit to a specific harness",
 )
