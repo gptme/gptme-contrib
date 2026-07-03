@@ -493,12 +493,12 @@ class AgentEmail:
         elif env_allowlist:
             allowlisted = [e.strip() for e in env_allowlist.split(",") if e.strip()]
         else:
-            # Default allowlist if not configured
+            # Default allowlist if not configured (RFC 5737 fake addresses)
+            # Real addresses should be supplied via EMAIL_ALLOWLIST env var at deploy time
             allowlisted = [
-                "erik@bjareho.lt",
-                "erik.bjareholt@gmail.com",
-                "filip.harald@gmail.com",
-                "rickard.edic@gmail.com",
+                "erik@example.com",
+                "filip@example.com",
+                "rickard@example.com",
             ]
 
         # Remove +tag from email address for comparison
@@ -537,8 +537,9 @@ class AgentEmail:
         """Check if recipient is allowlisted for outbound send.
 
         Fail-closed: empty or unparseable recipients are blocked.
-        Uses EMAIL_SEND_ALLOWLIST env var; falls back to the same defaults
-        as the inbound allowlist (Erik, Filip, Rickard) plus own address.
+        Uses EMAIL_SEND_ALLOWLIST env var; falls back to RFC 5737 fake
+        default addresses (example.com) plus own address. Real addresses
+        should be configured via EMAIL_SEND_ALLOWLIST at deploy time.
 
         Args:
             recipient: The email address or "Name <addr>" string to check.
@@ -552,11 +553,12 @@ class AgentEmail:
         elif env_allowlist:
             allowlisted = [e.strip() for e in env_allowlist.split(",") if e.strip()]
         else:
+            # Default allowlist (RFC 5737 fake addresses)
+            # Real addresses should be supplied via EMAIL_SEND_ALLOWLIST env var at deploy time
             allowlisted = [
-                "erik@bjareho.lt",
-                "erik.bjareholt@gmail.com",
-                "filip.harald@gmail.com",
-                "rickard.edic@gmail.com",
+                "erik@example.com",
+                "filip@example.com",
+                "rickard@example.com",
             ]
             if self.own_email:
                 allowlisted.append(self.own_email.lower())

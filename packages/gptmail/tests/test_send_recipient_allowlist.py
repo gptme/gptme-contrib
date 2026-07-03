@@ -22,7 +22,7 @@ def agent(tmp_path: Path) -> AgentEmail:
 
 def test_default_allowlist_allows_erik(agent: AgentEmail, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("EMAIL_SEND_ALLOWLIST", raising=False)
-    assert agent._is_allowlisted_recipient("erik@bjareho.lt")
+    assert agent._is_allowlisted_recipient("erik@example.com")
 
 
 def test_default_allowlist_blocks_stranger(agent: AgentEmail, monkeypatch: pytest.MonkeyPatch):
@@ -39,7 +39,8 @@ def test_default_allowlist_allows_own_email(agent: AgentEmail, monkeypatch: pyte
 def test_env_override_allows_custom_recipient(agent: AgentEmail, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "custom@example.com,other@example.com")
     assert agent._is_allowlisted_recipient("custom@example.com")
-    assert not agent._is_allowlisted_recipient("erik@bjareho.lt")
+    # When env is set, default allowlist is ignored
+    assert not agent._is_allowlisted_recipient("erik@example.com")
 
 
 def test_wildcard_allows_all(agent: AgentEmail, monkeypatch: pytest.MonkeyPatch):
@@ -55,7 +56,7 @@ def test_empty_recipient_blocked(agent: AgentEmail, monkeypatch: pytest.MonkeyPa
 def test_name_plus_addr_format_allowed(agent: AgentEmail, monkeypatch: pytest.MonkeyPatch):
     """'Display Name <email>' format is parsed and checked correctly."""
     monkeypatch.delenv("EMAIL_SEND_ALLOWLIST", raising=False)
-    assert agent._is_allowlisted_recipient("Erik Bjäreholt <erik@bjareho.lt>")
+    assert agent._is_allowlisted_recipient("Erik Bjäreholt <erik@example.com>")
 
 
 def test_name_plus_addr_format_blocked(agent: AgentEmail, monkeypatch: pytest.MonkeyPatch):
@@ -64,9 +65,9 @@ def test_name_plus_addr_format_blocked(agent: AgentEmail, monkeypatch: pytest.Mo
 
 
 def test_plus_tag_stripped(agent: AgentEmail, monkeypatch: pytest.MonkeyPatch):
-    """erik+tag@bjareho.lt matches the base address."""
+    """erik+tag@example.com matches the base address."""
     monkeypatch.delenv("EMAIL_SEND_ALLOWLIST", raising=False)
-    assert agent._is_allowlisted_recipient("erik+newsletter@bjareho.lt")
+    assert agent._is_allowlisted_recipient("erik+newsletter@example.com")
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ def test_send_allows_allowlisted_recipient(
     draft_dir.mkdir(parents=True, exist_ok=True)
     draft_id = "test-send-ok"
     draft_path = draft_dir / f"{draft_id}.md"
-    draft_path.write_text("To: erik@bjareho.lt\n" "Subject: Hello\n" "\n" "Hi Erik!\n")
+    draft_path.write_text("To: erik@example.com\n" "Subject: Hello\n" "\n" "Hi Erik!\n")
 
     # Stub out the actual SMTP delivery so no real email is sent.
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
