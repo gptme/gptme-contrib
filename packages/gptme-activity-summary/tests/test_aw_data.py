@@ -113,13 +113,18 @@ def test_format_aw_activity_domain_minutes():
 
 def test_fetch_aw_activity_returns_unavailable_when_no_server():
     """fetch_aw_activity returns empty activity if AW server not running."""
+    from unittest.mock import patch
+
     from gptme_activity_summary import aw_data
 
     original_server = aw_data.AW_SERVER
     aw_data.AW_SERVER = "http://localhost:59999"
 
     try:
-        activity = fetch_aw_activity(date.today(), date.today())
+        # Patch SingleInstance so a co-running AW process doesn't block client creation.
+        # The real "no server" failure happens at get_info() when :59999 is unreachable.
+        with patch("aw_client.singleinstance.SingleInstance"):
+            activity = fetch_aw_activity(date.today(), date.today())
         assert not activity.available
         assert activity.top_apps == []
         assert activity.total_active_seconds == 0.0
