@@ -533,6 +533,54 @@ class AgentEmail:
                 return True
         return False
 
+    def _is_allowlisted_recipient(self, recipient: str) -> bool:
+        """Check if recipient is allowlisted for outbound send.
+
+        Fail-closed: empty or unparseable recipients are blocked.
+        Uses EMAIL_SEND_ALLOWLIST env var; falls back to the same defaults
+        as the inbound allowlist (Erik, Filip, Rickard) plus own address.
+
+        Args:
+            recipient: The email address or "Name <addr>" string to check.
+
+        Returns:
+            True if the recipient is in the allowlist, False otherwise.
+        """
+        env_allowlist = os.getenv("EMAIL_SEND_ALLOWLIST", "")
+        if env_allowlist == "*":
+            return True
+        elif env_allowlist:
+            allowlisted = [e.strip() for e in env_allowlist.split(",") if e.strip()]
+        else:
+            allowlisted = [
+                "erik@bjareho.lt",
+                "erik.bjareholt@gmail.com",
+                "filip.harald@gmail.com",
+                "rickard.edic@gmail.com",
+            ]
+            if self.own_email:
+                allowlisted.append(self.own_email.lower())
+
+        if not recipient:
+            return False
+
+        _, recipient_email = parseaddr(recipient)
+        if not recipient_email:
+            recipient_email = recipient
+
+        clean = recipient_email.lower()
+        if "+" in clean and "@" in clean:
+            local, domain = clean.split("@", 1)
+            if "+" in local:
+                clean = f"{local.split('+')[0]}@{domain}"
+
+        recipient_domain = clean.split("@")[-1] if "@" in clean else ""
+        for allowed in allowlisted:
+            allowed_lower = allowed.lower()
+            if clean == allowed_lower or recipient_domain == allowed_lower:
+                return True
+        return False
+
     def _is_notification_email(self, subject: str, content: str) -> bool:
         """Check if email is a notification that doesn't need a reply.
 
@@ -770,6 +818,13 @@ class AgentEmail:
 
             if not recipient:
                 raise ValueError("No recipient found in email headers")
+
+            if not self._is_allowlisted_recipient(recipient):
+                raise ValueError(
+                    f"Recipient '{recipient}' is not in the send allowlist. "
+                    "Set EMAIL_SEND_ALLOWLIST=* to allow all, or provide a "
+                    "comma-separated list of allowed addresses."
+                )
 
             # Detect if body is already HTML (e.g. from a script that
             # generates HTML directly). If so, send as simple text/html

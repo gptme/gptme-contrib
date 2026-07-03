@@ -117,6 +117,7 @@ def test_send_to_header_non_ascii_name_is_deliverable(tmp_path, monkeypatch):
         return _FakeCompleted()
 
     monkeypatch.setattr(lib.subprocess, "run", _fake_run)
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "*")  # test is about MIME encoding, not allowlist
 
     email_dir = tmp_path / "email"
     for subdir in ["inbox", "sent", "archive", "drafts", "filters"]:
