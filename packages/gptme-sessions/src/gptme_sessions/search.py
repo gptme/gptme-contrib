@@ -69,13 +69,22 @@ def _make_snippet(content: str, pattern: re.Pattern) -> str | None:
     return snippet
 
 
-def _search_path(path: Path, pattern: re.Pattern) -> SearchResult | None:
+def _search_path(
+    path: Path,
+    pattern: re.Pattern,
+    file_pattern: re.Pattern | None = None,
+) -> SearchResult | None:
     """Search a single session file and return a result, or None if no match."""
     try:
         transcript = read_transcript(path)
     except Exception as exc:
         logger.debug("skipping %s: %s", path, exc)
         return None
+
+    # Pre-filter: if file_pattern specified, skip sessions that don't mention the file
+    if file_pattern is not None:
+        if not any(msg.content and file_pattern.search(msg.content) for msg in transcript.messages):
+            return None
 
     total_hits = 0
     snippets: list[Snippet] = []
@@ -118,6 +127,7 @@ def search_sessions(
     days: int = 30,
     max_results: int = 20,
     case_sensitive: bool = False,
+    file_path: str | None = None,
 ) -> list[SearchResult]:
     """Search session transcripts and return results ranked by recency then hit count.
 
@@ -137,9 +147,13 @@ def search_sessions(
         Maximum number of sessions to return.
     case_sensitive:
         If True, perform a case-sensitive search.
+    file_path:
+        If provided, only return sessions that mention this file path in their
+        transcript (catches Read, Edit, Write, and tool calls referencing the file).
     """
     flags = 0 if case_sensitive else re.IGNORECASE
     pattern = re.compile(re.escape(query), flags)
+    file_pattern = re.compile(re.escape(file_path), flags) if file_path else None
 
     today = date.today()
     start = today - timedelta(days=days)
@@ -156,7 +170,7 @@ def search_sessions(
 
     results: list[SearchResult] = []
     for path in paths:
-        result = _search_path(path, pattern)
+        result = _search_path(path, pattern, file_pattern)
         if result is not None:
             results.append(result)
 
