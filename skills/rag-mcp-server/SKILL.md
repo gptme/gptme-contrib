@@ -11,7 +11,7 @@ metadata:
   author: bob
   version: "1.0.0"
   tags: [mcp, rag, knowledge, search, sessions, wisdom]
-  requires_tools: [uv]
+  requires_tools: [uv, bob-search]
   requires_skills: []
 ---
 
@@ -79,12 +79,15 @@ Default session DB: `~/.local/share/bob/session-index.db`
 ### 4. Run a quick smoke test
 
 ```bash
-# Should return book chunks about processes:
-rag-mcp-server &
-# In another shell or via MCP client:
-# search_wisdom("virtual memory", source="ostep", top_k=2)
+# Verify the wisdom index is queryable (should return OSTEP chunks):
+bob-search wisdom "virtual memory" --source ostep --top-k 2
 
-kill %1  # stop the background server
+# Verify the session index is queryable (if indexed):
+bob-search sessions "caching" --limit 2
+
+# Verify the MCP server starts and responds to JSON-RPC:
+echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}},"id":1}' | \
+  rag-mcp-server | head -1
 ```
 
 ## MCP Configuration
@@ -145,14 +148,21 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 ## Tools Reference
 
+These MCP tools become available to the agent once the server is configured.
+Call them when a question would benefit from grounding in CS fundamentals or
+past session history.
+
 ### `search_wisdom`
 
 ```
 search_wisdom(query: str, source?: str, top_k?: int = 5) -> list[Chunk]
 ```
 
-Searches the indexed book corpus. Each result includes: `source` (book slug),
-`title`, `chapter`, `content` (excerpt), `score`.
+Searches the indexed book corpus for passages relevant to the query. Each result
+includes: `source` (book slug), `title`, `chapter`, `content` (excerpt), `score`.
+
+**When to call**: the user asks "how does X work?" or you need to ground a
+technical explanation in authoritative CS references.
 
 **Example queries** that work well:
 - `"how does virtual memory work"` → OSTEP Chapter 13
@@ -168,7 +178,9 @@ list_wisdom_sources() -> list[str]
 ```
 
 Returns book slugs currently indexed (e.g. `["ostep", "sicp", "pro-git", ...]`).
-Use to verify what's available before a query.
+
+**When to call**: before a `search_wisdom` call if you're unsure which sources
+are available, or to verify the index is populated.
 
 ### `search_sessions`
 
@@ -180,6 +192,9 @@ Searches past sessions (journal, gptme logs, Claude Code trajectories). Each
 result includes: `source`, `date`, `title`, `summary`, `path`, `score`.
 
 `source` can be `journal`, `gptme`, or `claude_code`.
+
+**When to call**: the user asks "what did we discuss about X?" or you need
+context from a previous session to inform current work.
 
 **Example queries**:
 - `"RAG retrieval implementation"` → sessions where RAG was discussed
