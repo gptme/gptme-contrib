@@ -202,7 +202,7 @@ class SessionRecord:
     cascade_intent: dict[str, Any] | None = None  # structured CASCADE reasons + constraints dict
 
     # Outcome
-    outcome: str = "unknown"  # productive, noop, failed
+    outcome: str = "unknown"  # productive, noop, violated_policy, failed
     exit_code: int | None = None  # process exit code (124 = timeout)
     duration_seconds: int = 0
     token_count: int | None = None

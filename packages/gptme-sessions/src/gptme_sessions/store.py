@@ -230,6 +230,7 @@ class SessionStore:
         total = len(records)
         productive = sum(1 for r in records if r.outcome == "productive")
         noop = sum(1 for r in records if r.outcome == "noop")
+        violated_policy = sum(1 for r in records if r.outcome == "violated_policy")
 
         # Model breakdown (uses normalized names for grouping)
         model_stats: dict[str, dict[str, int]] = {}
@@ -314,6 +315,7 @@ class SessionStore:
             "total": total,
             "productive": productive,
             "noop": noop,
+            "violated_policy": violated_policy,
             "success_rate": productive / total if total > 0 else 0,
             "duration": duration_stats,
             "by_model": {m: _rate(s) for m, s in sorted(model_stats.items())},
@@ -335,8 +337,11 @@ def format_stats(stats: dict, out: TextIO = sys.stdout) -> None:
         return
 
     rate = stats.get("success_rate", 0)
+    violated = stats.get("violated_policy", 0)
     out.write(f"Sessions: {total} total, {stats['productive']} productive ")
     out.write(f"({rate:.0%} success rate)\n")
+    if violated:
+        out.write(f"  Policy violations: {violated} session(s)\n")
 
     dur = stats.get("duration", {})
     if dur:

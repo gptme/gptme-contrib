@@ -133,6 +133,16 @@ def test_bandit_state_update_session_string_outcome():
     assert state.total_sessions == 2
 
 
+def test_bandit_state_update_session_violated_policy_outcome():
+    """violated_policy outcome maps to 0.0 reward (same as noop/failed)."""
+    state = BanditState()
+    state.update_session(["code"], outcome="productive")
+    state.update_session(["code"], outcome="violated_policy")
+    assert state.arms["code"].beta == pytest.approx(2.0)
+    assert state.arms["code"].alpha == pytest.approx(2.0)
+    assert state.total_sessions == 2
+
+
 def test_bandit_state_update_session_float_outcome():
     """Float outcomes produce fractional alpha/beta updates."""
     state = BanditState()
