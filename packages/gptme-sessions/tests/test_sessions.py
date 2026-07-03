@@ -187,6 +187,22 @@ def test_session_store_stats(tmp_path: Path):
     assert s["by_model_run_type"]["sonnet×monitoring"]["rate"] == 0.5
 
 
+def test_session_store_violated_policy_stats(tmp_path: Path):
+    """violated_policy outcome is tracked separately and excluded from productive count."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="haiku", outcome="productive"))
+    store.append(SessionRecord(model="haiku", outcome="violated_policy"))
+    store.append(SessionRecord(model="haiku", outcome="noop"))
+
+    s = store.stats()
+    assert s["total"] == 3
+    assert s["productive"] == 1
+    assert s["violated_policy"] == 1
+    assert s["noop"] == 1
+    # success_rate counts only productive, not violated_policy
+    assert s["success_rate"] == pytest.approx(1 / 3)
+
+
 def test_session_store_empty(tmp_path: Path):
     """Empty store returns sensible defaults."""
     store = SessionStore(sessions_dir=tmp_path)
