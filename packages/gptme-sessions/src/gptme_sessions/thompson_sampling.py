@@ -245,7 +245,8 @@ class BanditState:
         Args:
             active_arms: Arm IDs that were active in this session.
             outcome: Session outcome. Accepts:
-                - str: 'productive' (1.0), 'noop'/'failed' (0.0)
+                - str: 'productive' (1.0), 'noop'/'failed' (0.0),
+                  'violated_policy' (0.0, counted as policy violation)
                 - float in [0, 1]: Graded reward for nuanced learning.
             context: Optional context tuple. When provided, updates both
                      the contextual arm AND the global arm.
@@ -258,12 +259,13 @@ class BanditState:
         if isinstance(outcome, str):
             if outcome == "productive":
                 base_reward = 1.0
-            elif outcome in ("noop", "failed"):
+            elif outcome in ("noop", "failed", "violated_policy"):
                 base_reward = 0.0
             else:
                 raise ValueError(
                     f"Unknown string outcome: {outcome!r}. "
-                    "Expected 'productive', 'noop', 'failed', or a float in [0, 1]."
+                    "Expected 'productive', 'noop', 'failed', 'violated_policy', "
+                    "or a float in [0, 1]."
                 )
         else:
             base_reward = float(outcome)
@@ -470,7 +472,7 @@ class Bandit:
         Args:
             active_arms: Arm IDs that were active.
             outcome: Session outcome: 'productive'/1.0, 'noop'/'failed'/0.0,
-                     or a graded float in [0, 1].
+                     'violated_policy'/0.0, or a graded float in [0, 1].
             context: Optional context tuple for contextual arms.
             decay_rate: If set, apply exponential decay before updating.
             per_arm_rewards: Optional per-arm rewards for salience-weighted credit.
@@ -762,7 +764,7 @@ def sample(
 @click.option(
     "--outcome",
     required=True,
-    help="Session outcome: productive/noop/failed or a float in [0,1]",
+    help="Session outcome: productive/noop/failed/violated_policy or a float in [0,1]",
 )
 @click.option("--arms", multiple=True, required=True, help="Active arm IDs")
 @click.option("--context", multiple=True, help="Context tuple, e.g. --context infrastructure opus")
@@ -788,9 +790,9 @@ def update(
             print("Error: float outcome must be in [0, 1]", file=sys.stderr)
             raise click.exceptions.Exit(1)
     except ValueError:
-        if outcome not in ("productive", "noop", "failed"):
+        if outcome not in ("productive", "noop", "failed", "violated_policy"):
             print(
-                "Error: outcome must be productive/noop/failed or a float in [0,1]",
+                "Error: outcome must be productive/noop/failed/violated_policy or a float in [0,1]",
                 file=sys.stderr,
             )
             raise click.exceptions.Exit(1)
