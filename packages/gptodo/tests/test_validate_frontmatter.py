@@ -272,3 +272,51 @@ def test_opaque_session_at_host_passes_schema(tmp_path):
         "---\nstate: backlog\ncreated: 2026-07-01\nassigned_to: a3f9@bob\n---\n# task\n",
     )
     assert validate_schema(p) == []
+
+
+# ---------------------------------------------------------------------------
+# pool field validation
+# ---------------------------------------------------------------------------
+
+
+def test_pool_general_passes_schema(tmp_path):
+    p = _write_task(
+        tmp_path,
+        "---\nstate: backlog\ncreated: 2026-07-01\npool: general\n---\n# task\n",
+    )
+    assert validate_schema(p) == []
+
+
+def test_pool_frontier_passes_schema(tmp_path):
+    p = _write_task(
+        tmp_path,
+        "---\nstate: backlog\ncreated: 2026-07-01\npool: frontier\n---\n# task\n",
+    )
+    assert validate_schema(p) == []
+
+
+def test_pool_null_passes_schema(tmp_path):
+    """pool: null is accepted (treated as unset, defaults to general)."""
+    p = _write_task(
+        tmp_path,
+        "---\nstate: backlog\ncreated: 2026-07-01\npool: null\n---\n# task\n",
+    )
+    assert validate_schema(p) == []
+
+
+def test_pool_absent_passes_schema(tmp_path):
+    """pool is optional; omitting it is valid (defaults to general)."""
+    p = _write_task(
+        tmp_path,
+        "---\nstate: backlog\ncreated: 2026-07-01\n---\n# task\n",
+    )
+    assert validate_schema(p) == []
+
+
+def test_pool_invalid_value_rejected(tmp_path):
+    p = _write_task(
+        tmp_path,
+        "---\nstate: backlog\ncreated: 2026-07-01\npool: premium\n---\n# task\n",
+    )
+    errors = validate_schema(p)
+    assert any("pool" in e for e in errors)
