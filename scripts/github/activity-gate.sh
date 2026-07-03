@@ -656,6 +656,17 @@ check_greptile_scores() {
         # Guard against both empty string and literal "null" from jq
         [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
 
+        # Guard: score must be a single decimal digit [0-9]. Non-digit values
+        # (e.g. "}" from a failed jq capture whose tail -1 picks up the closing
+        # brace of an empty object, or quoted strings like "5" when jq lacks -r)
+        # bypass all numeric comparisons and silently fall through to
+        # greptile_needs_improvement. Wipe the state file so the next sweep
+        # re-fetches from the API instead of serving the corrupt cache forever.
+        if ! [[ "$greptile_score" =~ ^[0-9]$ ]]; then
+            rm -f "$state_file"
+            continue
+        fi
+
         # Score 5 = clean — update state file (so check_merge_ready sees
         # the perfect score instead of a stale sub-5 entry) and skip.
         if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
