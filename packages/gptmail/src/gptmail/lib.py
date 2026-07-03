@@ -493,12 +493,12 @@ class AgentEmail:
         elif env_allowlist:
             allowlisted = [e.strip() for e in env_allowlist.split(",") if e.strip()]
         else:
-            # Default allowlist if not configured
+            # Default allowlist if not configured (RFC 5737 fake addresses)
+            # Real addresses should be supplied via EMAIL_ALLOWLIST env var at deploy time
             allowlisted = [
-                "erik@bjareho.lt",
-                "erik.bjareholt@gmail.com",
-                "filip.harald@gmail.com",
-                "rickard.edic@gmail.com",
+                "erik@example.com",
+                "filip@example.com",
+                "rickard@example.com",
             ]
 
         # Remove +tag from email address for comparison
@@ -530,6 +530,64 @@ class AgentEmail:
             allowed_lower = allowed.lower()
             # Match full email OR domain
             if clean_sender == allowed_lower or sender_domain == allowed_lower:
+                return True
+        return False
+
+    def _is_allowlisted_recipient(self, recipient: str) -> bool:
+        """Check if recipient is allowlisted for outbound send.
+
+        Fail-closed: empty or unparseable recipients are blocked.
+        Uses EMAIL_SEND_ALLOWLIST env var; falls back to RFC 5737 fake
+        default addresses (example.com) plus own address. Real addresses
+        should be configured via EMAIL_SEND_ALLOWLIST at deploy time.
+
+        Matching rules:
+        - Full address match (``user@example.com``): only that address.
+        - Bare domain (``example.com``): all addresses at that domain.
+          Use with care — a bare domain allowlists every recipient there.
+        - ``+tag`` suffixes are stripped before matching (``user+tag@x.com``
+          matches an allowlisted ``user@x.com``).
+        - ``*`` wildcard allows any recipient.
+
+        Args:
+            recipient: The email address or "Name <addr>" string to check.
+
+        Returns:
+            True if the recipient is in the allowlist, False otherwise.
+        """
+        env_allowlist = os.getenv("EMAIL_SEND_ALLOWLIST", "")
+        if env_allowlist == "*":
+            return True
+        elif env_allowlist:
+            allowlisted = [e.strip() for e in env_allowlist.split(",") if e.strip()]
+        else:
+            # Default allowlist (RFC 5737 fake addresses)
+            # Real addresses should be supplied via EMAIL_SEND_ALLOWLIST env var at deploy time
+            allowlisted = [
+                "erik@example.com",
+                "filip@example.com",
+                "rickard@example.com",
+            ]
+            if self.own_email:
+                allowlisted.append(self.own_email.lower())
+
+        if not recipient:
+            return False
+
+        _, recipient_email = parseaddr(recipient)
+        if not recipient_email:
+            recipient_email = recipient
+
+        clean = recipient_email.lower()
+        if "+" in clean and "@" in clean:
+            local, domain = clean.split("@", 1)
+            if "+" in local:
+                clean = f"{local.split('+')[0]}@{domain}"
+
+        recipient_domain = clean.split("@")[-1] if "@" in clean else ""
+        for allowed in allowlisted:
+            allowed_lower = allowed.lower()
+            if clean == allowed_lower or recipient_domain == allowed_lower:
                 return True
         return False
 
@@ -759,10 +817,6 @@ class AgentEmail:
 
         # Actually send via msmtp first
         try:
-            # Validate msmtp is available
-            if not self._validate_msmtp_config():
-                raise RuntimeError("msmtp is not properly installed or configured")
-
             # Extract headers and body for sending
             headers, body = self._markdown_to_email(content)
             recipient = headers.get("To", "")
@@ -770,6 +824,17 @@ class AgentEmail:
 
             if not recipient:
                 raise ValueError("No recipient found in email headers")
+
+            if not self._is_allowlisted_recipient(recipient):
+                raise ValueError(
+                    f"Recipient '{recipient}' is not in the send allowlist. "
+                    "Set EMAIL_SEND_ALLOWLIST=* to allow all, or provide a "
+                    "comma-separated list of allowed addresses."
+                )
+
+            # Validate msmtp is available before trying to send
+            if not self._validate_msmtp_config():
+                raise RuntimeError("msmtp is not properly installed or configured")
 
             # Detect if body is already HTML (e.g. from a script that
             # generates HTML directly). If so, send as simple text/html
