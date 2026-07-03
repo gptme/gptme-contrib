@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -12,6 +13,14 @@ from click.testing import CliRunner
 from gptme_sessions.cli import cli
 from gptme_sessions.record import SessionRecord
 from gptme_sessions.store import SessionStore
+
+# Patch _discover_all to avoid scanning the real filesystem during tests.
+# The discovery code walks CC/gptme/codex session directories; on a loaded
+# system with hundreds of sessions this takes 20-30s and makes tests flaky
+# under the default pytest-timeout. Tests that specifically need discovery
+# behaviour (test_stats_empty_store_no_duplicate_hint, test_discovery.py)
+# supply their own patches or run in test_discovery.py.
+_NO_DISCOVER = patch("gptme_sessions.cli._discover_all", return_value=[])
 
 
 # -- Helpers -----------------------------------------------------------------
@@ -114,7 +123,8 @@ class TestQueryCommand:
     def test_query_stats_flag(self, tmp_path: Path):
         """query --stats shows statistics (format_stats writes to sys.stdout)."""
         _seed_store(tmp_path)
-        rc, out = _invoke(["query", "--stats"], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke(["query", "--stats"], tmp_path)
         assert rc == 0
         # format_stats writes to sys.stdout, not click.echo — verify via --json
         rc2, out2 = _invoke(["query", "--stats", "--json"], tmp_path)
@@ -229,7 +239,8 @@ class TestStatsCommand:
     def test_stats_basic(self, tmp_path: Path):
         """stats shows summary for all records."""
         _seed_store(tmp_path)
-        rc, out = _invoke(["stats"], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke(["stats"], tmp_path)
         assert rc == 0
         # format_stats writes to sys.stdout directly, not click.echo
         # Validate content via --json variant instead
