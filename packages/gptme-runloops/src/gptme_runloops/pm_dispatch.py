@@ -399,7 +399,7 @@ def _resolve_model_with_bandit(
     ``resolve_lane_model()`` split.
     """
     # Direct @mention override: never downgrade to the cheap fast-lane model.
-    if detail and is_direct_mention(detail):
+    if is_direct_mention(detail):
         return model
 
     if bandit is None:
