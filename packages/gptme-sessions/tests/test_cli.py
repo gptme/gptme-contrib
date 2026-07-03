@@ -910,7 +910,8 @@ class TestStatsDefaults:
     def test_stats_defaults_to_30d(self, tmp_path: Path):
         """stats without --since defaults to 30d window."""
         _seed_store(tmp_path)
-        rc, out = _invoke(["stats"], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke(["stats"], tmp_path)
         assert rc == 0
         # Should show the 30-day header
         assert "30 days" in out.lower() or "all-time" in out.lower()
