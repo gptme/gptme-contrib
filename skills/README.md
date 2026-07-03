@@ -104,6 +104,24 @@ Skills extend gptme's lesson system by providing executable components alongside
 
 **Keywords**: `SOUL.md`, `persona`, `agent voice`, `rewrite soul`, `agent identity`
 
+### 5. rag-mcp-server
+
+**Purpose**: Add foundational CS knowledge search and session-memory search to Claude Code or Claude Desktop via MCP.
+
+**Use cases**:
+- Querying indexed CS books ("how does virtual memory work?") inline during coding
+- Searching past sessions ("what did we discuss about caching last week?")
+- Setting up or troubleshooting the `rag-mcp-server` MCP plugin
+
+**Features**:
+- `search_wisdom` tool: BM25 search over 7 CC-licensed CS books (SICP, OSTEP, Pro Git, etc.)
+- `search_sessions` tool: full-text search over journal, gptme logs, Claude Code trajectories
+- `list_wisdom_sources` tool: list indexed book slugs
+- Zero-config Claude Code setup: `claude mcp add wisdom-rag rag-mcp-server`
+- Custom DB path support for non-default installs
+
+**Keywords**: `mcp server`, `wisdom search`, `session search`, `rag-mcp-server`, `knowledge base`, `book index`
+
 ## Using Skills
 
 ### Loading a Skill
