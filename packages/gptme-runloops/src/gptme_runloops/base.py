@@ -87,6 +87,10 @@ class BaseRunLoop(ABC):
         self._start_time: float | None = None
         self._work_description: str | None = None  # Description of work found
 
+    # Subclasses may override to set a fixed CASCADE category for this run type.
+    # None means category is inferred from trajectory signals (the default).
+    _category: str | None = None
+
     # --- Backoff infrastructure ---
 
     @property
@@ -317,6 +321,7 @@ class BaseRunLoop(ABC):
                 exit_code=result.exit_code,
                 duration_seconds=duration,
                 trajectory_path=result.trajectory_path,
+                category=self._category,
             )
             self.logger.info(
                 f"Session recorded (harness={self.executor.name}, "

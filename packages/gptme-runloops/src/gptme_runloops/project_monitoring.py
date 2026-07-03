@@ -41,6 +41,8 @@ class ProjectMonitoringRun(BaseRunLoop):
     - Execution-focused processing
     """
 
+    _category = "pm-react"
+
     def __init__(
         self,
         workspace: Path,
