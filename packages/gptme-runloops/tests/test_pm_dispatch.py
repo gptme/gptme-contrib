@@ -27,6 +27,7 @@ from gptme_runloops.pm_dispatch import (
     classify_lane,
     derive_slot_key,
     dispatch_grouped_items,
+    is_direct_mention,
     partition_items,
     resolve_lane_model,
 )
@@ -1338,6 +1339,42 @@ class TestBanditObservationCount:
         assert _bandit_observation_count(bandit, "ci-fix", models=["sonnet"]) == 0
 
 
+class TestIsDirectMention:
+    """Tests for is_direct_mention() — mirrors bash item_detail_is_direct_mention()."""
+
+    def test_bare_mention_token(self):
+        assert is_direct_mention("mention") is True
+
+    def test_mention_in_semicolon_list(self):
+        assert is_direct_mention("comment; mention") is True
+
+    def test_mention_with_whitespace(self):
+        assert is_direct_mention("  mention  ") is True
+        assert is_direct_mention("assign;   mention") is True
+
+    def test_direct_mention_handoff_source(self):
+        assert is_direct_mention("source: direct_mention_handoff") is True
+
+    def test_team_mention_does_not_qualify(self):
+        assert is_direct_mention("team_mention") is False
+
+    def test_comment_reason_does_not_qualify(self):
+        assert is_direct_mention("comment") is False
+
+    def test_assign_reason_does_not_qualify(self):
+        assert is_direct_mention("assign") is False
+
+    def test_empty_detail_returns_false(self):
+        assert is_direct_mention("") is False
+
+    def test_substring_mention_does_not_match(self):
+        # "team_mention" contains "mention" as a substring — must not match
+        assert is_direct_mention("team_mention; review") is False
+
+    def test_multiple_tokens_with_mention(self):
+        assert is_direct_mention("review; mention; assign") is True
+
+
 class TestResolveModelWithBandit:
     def test_no_bandit_delegates_to_static(self):
         result = _resolve_model_with_bandit(
@@ -1390,6 +1427,56 @@ class TestResolveModelWithBandit:
             ["ci_failure"], "slow", "sonnet", "haiku", bandit
         )
         assert result == "sonnet"  # static fallback: slow lane → base model
+
+    # --- direct-mention override (ErikBjare/bob#907) ---
+
+    def test_direct_mention_bypasses_fast_model_no_bandit(self):
+        """A direct mention in fast lane must NOT get the cheap fast_model."""
+        result = _resolve_model_with_bandit(
+            ["notification"], "fast", "sonnet", "haiku-cheap", None, detail="mention"
+        )
+        assert result == "sonnet"
+
+    def test_direct_mention_bypasses_fast_model_with_bandit(self):
+        """Direct mention overrides bandit as well — bandit must not downgrade the model."""
+        bandit = _StubBandit(
+            {"notification-triage": MIN_BANDIT_OBSERVATIONS + 10}, model="haiku-cheap"
+        )
+        result = _resolve_model_with_bandit(
+            ["notification"],
+            "fast",
+            "sonnet",
+            "haiku-cheap",
+            bandit,
+            detail="comment; mention",
+        )
+        assert result == "sonnet"
+
+    def test_direct_mention_handoff_source_bypasses_fast_model(self):
+        """assigned_issue_pending_reply.py handoff marker also triggers the override."""
+        result = _resolve_model_with_bandit(
+            ["notification"],
+            "fast",
+            "sonnet",
+            "haiku-cheap",
+            None,
+            detail="source: direct_mention_handoff",
+        )
+        assert result == "sonnet"
+
+    def test_non_mention_fast_lane_still_uses_fast_model(self):
+        """Non-mention fast-lane items are unaffected — still get fast_model."""
+        result = _resolve_model_with_bandit(
+            ["notification"], "fast", "sonnet", "haiku-cheap", None, detail="comment"
+        )
+        assert result == "haiku-cheap"
+
+    def test_empty_detail_fast_lane_still_uses_fast_model(self):
+        """Empty detail is not a mention — fast lane still uses fast_model."""
+        result = _resolve_model_with_bandit(
+            ["notification"], "fast", "sonnet", "haiku-cheap", None, detail=""
+        )
+        assert result == "haiku-cheap"
 
 
 # --- LaneDispatcher with bandit ---

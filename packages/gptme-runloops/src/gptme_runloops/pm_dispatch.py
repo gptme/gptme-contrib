@@ -47,6 +47,30 @@ MIN_BANDIT_OBSERVATIONS = 5
 logger = logging.getLogger(__name__)
 
 
+def is_direct_mention(detail: str) -> bool:
+    """Return True when *detail* marks a direct Erik @Bob mention handoff.
+
+    Mirrors the bash ``item_detail_is_direct_mention()`` function in
+    ``project-monitoring-dispatch.sh``.  Two upstream sources produce
+    different marker shapes:
+
+    * ``activity-gate.sh`` emits the raw GitHub notification ``reason`` as
+      detail tokens joined by ``"; "``.  A bare ``"mention"`` token means a
+      direct @Bob mention; ``"team_mention"`` and others do not qualify.
+    * ``assigned_issue_pending_reply.py`` embeds
+      ``source: direct_mention_handoff`` inside the detail string.
+
+    Direct Erik mentions are high-signal asks — dispatching them to the
+    cheap fast-lane model causes NOOPs (ErikBjare/bob#907).
+    """
+    if "direct_mention_handoff" in detail:
+        return True
+    for tok in detail.split(";"):
+        if tok.strip() == "mention":
+            return True
+    return False
+
+
 # --- Data classes ---
 
 
@@ -62,6 +86,7 @@ class SlotItem:
     types: list[str]
     title: str = ""
     url: str = ""
+    detail: str = ""
 
 
 @dataclass
@@ -359,13 +384,24 @@ def _resolve_model_with_bandit(
     model: str | None,
     fast_model: str | None,
     bandit: Any | None,
+    detail: str = "",
 ) -> str | None:
     """Resolve the dispatch model for an item.
 
-    When a bandit is provided and has ≥ MIN_BANDIT_OBSERVATIONS for the
-    inferred work type, use Thompson sampling to select the model.
-    Otherwise fall back to the static resolve_lane_model() split.
+    Direct Erik @mention items (``is_direct_mention(detail) == True``) always
+    get the base *model* — never the cheap *fast_model* — regardless of lane or
+    bandit state.  This mirrors the bash ``select_slot_model()`` precedence rule
+    and prevents the NOOP failure from ErikBjare/bob#907.
+
+    For all other items: when a bandit is provided and has ≥
+    MIN_BANDIT_OBSERVATIONS for the inferred work type, use Thompson sampling
+    to select the model.  Otherwise fall back to the static
+    ``resolve_lane_model()`` split.
     """
+    # Direct @mention override: never downgrade to the cheap fast-lane model.
+    if detail and is_direct_mention(detail):
+        return model
+
     if bandit is None:
         return resolve_lane_model(lane, model, fast_model)
     work_type = classify_item_work_type(item_types)
@@ -560,7 +596,7 @@ class LaneDispatcher:
                     item=item,
                     backend=backend,
                     model=_resolve_model_with_bandit(
-                        item.types, lane, model, fast_model, bandit
+                        item.types, lane, model, fast_model, bandit, item.detail
                     ),
                     script_path=script_path,
                 )
