@@ -101,6 +101,20 @@ class TestComplete:
         ok = work.complete("agent-a", "task-1")
         assert not ok
 
+    def test_complete_after_expiry_is_denied(self, work: WorkClaimManager) -> None:
+        """An expired claim must not be completable (ghost-complete prevention)."""
+        work.claim("agent-a", "task-1")
+        work.db.conn.execute(
+            "UPDATE work SET expires_at = datetime('now', '-1 seconds') WHERE task_id = ?",
+            ("task-1",),
+        )
+        ok = work.complete("agent-a", "task-1")
+        assert not ok
+        # Task should remain in claimed state, reclaimable by another agent
+        claim = work.get("task-1")
+        assert claim is not None
+        assert claim.status == "claimed"
+
 
 class TestAbandon:
     def test_abandon_claimed_task(self, work: WorkClaimManager) -> None:

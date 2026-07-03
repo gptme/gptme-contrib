@@ -399,6 +399,10 @@ class WorkClaimManager:
     ) -> bool:
         """Mark a claimed task as completed. Returns True if successful.
 
+        An expired claim (``expires_at < now``) cannot be completed — without
+        this guard a session that outlives its TTL can ghost-complete a task in
+        the window before another session reclaims it.
+
         When ``dry_run`` is true, validates the completion path without
         persisting the status change.
         """
@@ -408,7 +412,8 @@ class WorkClaimManager:
             rows = conn.execute(
                 """UPDATE work SET status = 'completed', result = ?,
                     completed_at = datetime('now')
-                WHERE task_id = ? AND claimer = ? AND status = 'claimed'""",
+                WHERE task_id = ? AND claimer = ? AND status = 'claimed'
+                  AND expires_at >= datetime('now')""",
                 (result, task_id, agent_id),
             )
             ok = bool(rows.rowcount > 0)
