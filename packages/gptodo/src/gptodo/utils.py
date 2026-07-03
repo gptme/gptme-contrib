@@ -168,6 +168,8 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     "tracking",
     "tracking_issue",
     "upstream_coordination_id",
+    # Work-pool routing (see frontier-pool-routing design)
+    "pool",
     # Multi-agent coordination
     "parallelizable",
     "isolation",
@@ -900,6 +902,11 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
         priority = metadata["priority"]
         if priority not in ("high", "medium", "low", None):
             issues.append("Priority must be 'high', 'medium', or 'low'")
+
+    if "pool" in metadata:
+        pool = metadata["pool"]
+        if pool not in ("general", "frontier", None):
+            issues.append("pool must be 'general' or 'frontier'")
 
     if "tags" in metadata and not isinstance(metadata["tags"], list):
         issues.append("Tags must be a list")
