@@ -16,6 +16,7 @@ from gptme_sessions.search import (
     _search_path,
     search_sessions,
 )
+from gptme_sessions.transcript import NormalizedMessage, SessionTranscript
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,35 @@ def _cc_session(tmp_path: Path, text: str, ts: str = "2026-03-01T10:00:00.000Z")
                 "content": [{"type": "text", "text": text}],
             },
         }
+    ]
+    _write_jsonl(jsonl, records)
+    return jsonl
+
+
+def _cc_tool_use_session(
+    tmp_path: Path,
+    user_text: str,
+    tool_input: dict,
+    ts: str = "2026-03-01T10:00:00.000Z",
+) -> Path:
+    """Create a Claude Code session where the file path exists only in tool input."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    jsonl = tmp_path / "tool-use.jsonl"
+    records = [
+        {
+            "type": "user",
+            "timestamp": ts,
+            "message": {"role": "user", "content": [{"type": "text", "text": user_text}]},
+        },
+        {
+            "type": "assistant",
+            "timestamp": ts,
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "tool_use", "name": "Read", "input": tool_input}],
+            },
+        },
     ]
     _write_jsonl(jsonl, records)
     return jsonl
@@ -392,3 +422,156 @@ class TestSearchCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ["search", "test", "--harness", "invalid-harness"])
         assert result.exit_code != 0
+
+    def test_search_file_filter_in_help(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["search", "--help"])
+        assert result.exit_code == 0
+        assert "--file" in result.output
+
+    def test_search_file_filter_narrows_results(self, tmp_path: Path):
+        session_with_file = _gptme_session(
+            tmp_path / "with",
+            [("assistant", "target found, editing /src/mymodule.py now")],
+        )
+        session_without_file = _gptme_session(
+            tmp_path / "without",
+            [("assistant", "target found, but no file reference")],
+        )
+        runner = CliRunner()
+        with (
+            patch(
+                "gptme_sessions.search.discover_gptme_sessions",
+                return_value=[session_with_file, session_without_file],
+            ),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            result = runner.invoke(cli, ["search", "target", "--file", "/src/mymodule.py"])
+        assert result.exit_code == 0
+        assert "1 session(s)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _search_path with file_pattern
+# ---------------------------------------------------------------------------
+
+
+class TestSearchPathFileFilter:
+    def test_returns_none_when_file_not_mentioned(self, tmp_path: Path):
+        import re
+
+        session = _gptme_session(tmp_path, [("assistant", "some content without the file")])
+        file_pattern = re.compile(re.escape("/src/mymodule.py"), re.IGNORECASE)
+        result = _search_path(session, re.compile("content"), file_pattern)
+        assert result is None
+
+    def test_returns_result_when_file_mentioned(self, tmp_path: Path):
+        import re
+
+        session = _gptme_session(
+            tmp_path, [("assistant", "editing /src/mymodule.py to fix the bug")]
+        )
+        file_pattern = re.compile(re.escape("/src/mymodule.py"), re.IGNORECASE)
+        result = _search_path(session, re.compile("fix", re.IGNORECASE), file_pattern)
+        assert result is not None
+        assert result.hit_count == 1
+
+    def test_requires_both_query_and_file_to_match(self, tmp_path: Path):
+        import re
+
+        session = _gptme_session(
+            tmp_path,
+            [
+                ("assistant", "the file /src/mymodule.py exists but no query word here"),
+            ],
+        )
+        file_pattern = re.compile(re.escape("/src/mymodule.py"), re.IGNORECASE)
+        result = _search_path(session, re.compile("notfound"), file_pattern)
+        assert result is None
+
+    def test_matches_file_path_from_tool_input(self, tmp_path: Path):
+        import re
+
+        transcript = SessionTranscript(
+            schema_version=1,
+            session_id="abc123",
+            harness="claude-code",
+            trajectory_path=str(tmp_path / "abc123.jsonl"),
+            started_at="2026-03-01T10:00:00+00:00",
+            messages=[
+                NormalizedMessage(role="user", content="please fix the auth bug"),
+                NormalizedMessage(
+                    role="assistant",
+                    content="",
+                    tool_name="Read",
+                    tool_input={"path": "/src/auth.py"},
+                ),
+            ],
+        )
+        file_pattern = re.compile(re.escape("/src/auth.py"), re.IGNORECASE)
+        with patch("gptme_sessions.search.read_transcript", return_value=transcript):
+            result = _search_path(tmp_path / "abc123.jsonl", re.compile("auth bug"), file_pattern)
+        assert result is not None
+        assert result.hit_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: search_sessions with file_path
+# ---------------------------------------------------------------------------
+
+
+class TestSearchSessionsFileFilter:
+    def test_file_filter_excludes_sessions_without_file(self, tmp_path: Path):
+        session_with = _gptme_session(
+            tmp_path / "with",
+            [("assistant", "worked on /src/auth.py")],
+        )
+        session_without = _gptme_session(
+            tmp_path / "without",
+            [("assistant", "worked on unrelated things")],
+        )
+        with (
+            patch(
+                "gptme_sessions.search.discover_gptme_sessions",
+                return_value=[session_with, session_without],
+            ),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            results = search_sessions("worked", file_path="/src/auth.py")
+        assert len(results) == 1
+        assert results[0].path == str(session_with)
+
+    def test_file_filter_none_returns_all_matches(self, tmp_path: Path):
+        session_a = _gptme_session(tmp_path / "a", [("assistant", "fix the bug")])
+        session_b = _gptme_session(tmp_path / "b", [("assistant", "fix the config")])
+        with (
+            patch(
+                "gptme_sessions.search.discover_gptme_sessions",
+                return_value=[session_a, session_b],
+            ),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            results = search_sessions("fix", file_path=None)
+        assert len(results) == 2
+
+    def test_file_filter_matches_cc_tool_input(self, tmp_path: Path):
+        cc = _cc_tool_use_session(
+            tmp_path,
+            user_text="fix the auth bug",
+            tool_input={"path": "/src/auth.py"},
+        )
+        with (
+            patch("gptme_sessions.search.discover_gptme_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[cc]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            results = search_sessions("auth bug", file_path="/src/auth.py")
+        assert len(results) == 1
+        assert results[0].harness == "claude-code"

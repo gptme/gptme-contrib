@@ -2940,6 +2940,9 @@ def cost(
 @click.option("--case-sensitive", is_flag=True, help="Case-sensitive search")
 @click.option("--no-snippets", is_flag=True, help="Show only session IDs, no text excerpts")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON instead of formatted text")
+@click.option(
+    "--file", "file_path", default=None, help="Only show sessions that touched this file path"
+)
 def search(
     query: str,
     days: int,
@@ -2948,24 +2951,31 @@ def search(
     case_sensitive: bool,
     no_snippets: bool,
     as_json: bool,
+    file_path: str | None,
 ) -> None:
     """Search session transcripts for a query string.
 
     Performs case-insensitive substring search across session transcripts
     and returns matching sessions ranked by recency then hit count.
 
-    Example:
+    Use --file to narrow results to sessions that touched a specific file:
+
         gptme sessions search "module not found" --days 30
+        gptme sessions search "refactor" --file src/mymodule.py
     """
     from .search import search_sessions
 
-    click.echo(f"Searching {days}-day window for: {query!r}", err=True)
+    msg = f"Searching {days}-day window for: {query!r}"
+    if file_path:
+        msg += f" (filtered to sessions touching {file_path!r})"
+    click.echo(msg, err=True)
     results = search_sessions(
         query=query,
         harness=harness,
         days=days,
         max_results=max_results,
         case_sensitive=case_sensitive,
+        file_path=file_path,
     )
 
     if as_json:
