@@ -40,6 +40,25 @@ Example: Running `uv run gptodo --help` and `uv run gptodo edit --help` reveals 
 - **Faster learning**: --help is faster than reading source code
 - **Correct usage**: Avoid misusing undocumented internals
 
+## LOO Analysis Note
+
+Leave-one-out (LOO) analysis shows Δ=−0.0893 (p=0.0027, n=21) against the
+harm target. This is a **selection-bias artifact, not a causal effect**:
+
+The keywords (`wrap the command to add`, `before patching the wrapper`,
+`doesn't have a flag for`) are specific to wrapper-patching sessions —
+an inherently harder task class where the discovery phase has already passed.
+The LOO delta reflects that sessions selected by these keywords have a higher
+baseline difficulty/harm, not that the lesson itself causes harm. The lesson
+is irrelevant in those sessions (reminder arrives too late), hence the
+negative signal.
+
+**Lesson type → LOO bias**: this fires *after* the relevant phase (discovery)
+in the sessions that match — making it selection-biased the same way corrective
+lessons are. The `confound_note` frontmatter field documents this so automated
+archival tooling does not act on the raw delta. The `Detection` section was
+also narrowed to the discovery phase only to reduce future mid-implementation
+triggering.
+
 ## Related
 - [Shell Command Chaining](./shell-command-chaining.md) - Efficient command execution
-- LOO analysis 2026-07-03: Δ=-0.0893 (p=0.0027, n=21) — genuinely harmful. Keywords fire in mid-implementation sessions (past discovery phase) where the reminder is irrelevant. `confound_note` added; Detection narrowed to discovery-only.
