@@ -807,10 +807,6 @@ class AgentEmail:
 
         # Actually send via msmtp first
         try:
-            # Validate msmtp is available
-            if not self._validate_msmtp_config():
-                raise RuntimeError("msmtp is not properly installed or configured")
-
             # Extract headers and body for sending
             headers, body = self._markdown_to_email(content)
             recipient = headers.get("To", "")
@@ -825,6 +821,10 @@ class AgentEmail:
                     "Set EMAIL_SEND_ALLOWLIST=* to allow all, or provide a "
                     "comma-separated list of allowed addresses."
                 )
+
+            # Validate msmtp is available before trying to send
+            if not self._validate_msmtp_config():
+                raise RuntimeError("msmtp is not properly installed or configured")
 
             # Detect if body is already HTML (e.g. from a script that
             # generates HTML directly). If so, send as simple text/html
