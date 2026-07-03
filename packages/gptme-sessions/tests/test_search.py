@@ -16,6 +16,7 @@ from gptme_sessions.search import (
     _search_path,
     search_sessions,
 )
+from gptme_sessions.transcript import NormalizedMessage, SessionTranscript
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,35 @@ def _cc_session(tmp_path: Path, text: str, ts: str = "2026-03-01T10:00:00.000Z")
                 "content": [{"type": "text", "text": text}],
             },
         }
+    ]
+    _write_jsonl(jsonl, records)
+    return jsonl
+
+
+def _cc_tool_use_session(
+    tmp_path: Path,
+    user_text: str,
+    tool_input: dict,
+    ts: str = "2026-03-01T10:00:00.000Z",
+) -> Path:
+    """Create a Claude Code session where the file path exists only in tool input."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    jsonl = tmp_path / "tool-use.jsonl"
+    records = [
+        {
+            "type": "user",
+            "timestamp": ts,
+            "message": {"role": "user", "content": [{"type": "text", "text": user_text}]},
+        },
+        {
+            "type": "assistant",
+            "timestamp": ts,
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "tool_use", "name": "Read", "input": tool_input}],
+            },
+        },
     ]
     _write_jsonl(jsonl, records)
     return jsonl
@@ -461,6 +491,31 @@ class TestSearchPathFileFilter:
         result = _search_path(session, re.compile("notfound"), file_pattern)
         assert result is None
 
+    def test_matches_file_path_from_tool_input(self, tmp_path: Path):
+        import re
+
+        transcript = SessionTranscript(
+            schema_version=1,
+            session_id="abc123",
+            harness="claude-code",
+            trajectory_path=str(tmp_path / "abc123.jsonl"),
+            started_at="2026-03-01T10:00:00+00:00",
+            messages=[
+                NormalizedMessage(role="user", content="please fix the auth bug"),
+                NormalizedMessage(
+                    role="assistant",
+                    content="",
+                    tool_name="Read",
+                    tool_input={"path": "/src/auth.py"},
+                ),
+            ],
+        )
+        file_pattern = re.compile(re.escape("/src/auth.py"), re.IGNORECASE)
+        with patch("gptme_sessions.search.read_transcript", return_value=transcript):
+            result = _search_path(tmp_path / "abc123.jsonl", re.compile("auth bug"), file_pattern)
+        assert result is not None
+        assert result.hit_count == 1
+
 
 # ---------------------------------------------------------------------------
 # Integration tests: search_sessions with file_path
@@ -504,3 +559,19 @@ class TestSearchSessionsFileFilter:
         ):
             results = search_sessions("fix", file_path=None)
         assert len(results) == 2
+
+    def test_file_filter_matches_cc_tool_input(self, tmp_path: Path):
+        cc = _cc_tool_use_session(
+            tmp_path,
+            user_text="fix the auth bug",
+            tool_input={"path": "/src/auth.py"},
+        )
+        with (
+            patch("gptme_sessions.search.discover_gptme_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[cc]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            results = search_sessions("auth bug", file_path="/src/auth.py")
+        assert len(results) == 1
+        assert results[0].harness == "claude-code"

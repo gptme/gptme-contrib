@@ -69,6 +69,25 @@ def _make_snippet(content: str, pattern: re.Pattern) -> str | None:
     return snippet
 
 
+def _value_mentions_file(value: object, file_pattern: re.Pattern) -> bool:
+    """Return True when a structured tool input contains the file path."""
+    if isinstance(value, str):
+        return bool(file_pattern.search(value))
+    if isinstance(value, dict):
+        return any(_value_mentions_file(v, file_pattern) for v in value.values())
+    if isinstance(value, list):
+        return any(_value_mentions_file(v, file_pattern) for v in value)
+    return False
+
+
+def _message_mentions_file(msg, file_pattern: re.Pattern) -> bool:
+    """Return True when a normalized message mentions the file path."""
+    return bool(
+        (msg.content and file_pattern.search(msg.content))
+        or (msg.tool_input and _value_mentions_file(msg.tool_input, file_pattern))
+    )
+
+
 def _search_path(
     path: Path,
     pattern: re.Pattern,
@@ -83,7 +102,7 @@ def _search_path(
 
     # Pre-filter: if file_pattern specified, skip sessions that don't mention the file
     if file_pattern is not None:
-        if not any(msg.content and file_pattern.search(msg.content) for msg in transcript.messages):
+        if not any(_message_mentions_file(msg, file_pattern) for msg in transcript.messages):
             return None
 
     total_hits = 0
