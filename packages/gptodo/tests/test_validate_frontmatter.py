@@ -295,6 +295,15 @@ def test_pool_frontier_passes_schema(tmp_path):
     assert validate_schema(p) == []
 
 
+def test_pool_null_passes_schema(tmp_path):
+    """pool: null is accepted (treated as unset, defaults to general)."""
+    p = _write_task(
+        tmp_path,
+        "---\nstate: backlog\ncreated: 2026-07-01\npool: null\n---\n# task\n",
+    )
+    assert validate_schema(p) == []
+
+
 def test_pool_absent_passes_schema(tmp_path):
     """pool is optional; omitting it is valid (defaults to general)."""
     p = _write_task(

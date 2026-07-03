@@ -906,7 +906,7 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
     if "pool" in metadata:
         pool = metadata["pool"]
         if pool not in ("general", "frontier", None):
-            issues.append("pool must be 'general' or 'frontier'")
+            issues.append("pool must be 'general', 'frontier', or null")
 
     if "tags" in metadata and not isinstance(metadata["tags"], list):
         issues.append("Tags must be a list")
