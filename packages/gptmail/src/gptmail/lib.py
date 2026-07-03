@@ -541,6 +541,14 @@ class AgentEmail:
         default addresses (example.com) plus own address. Real addresses
         should be configured via EMAIL_SEND_ALLOWLIST at deploy time.
 
+        Matching rules:
+        - Full address match (``user@example.com``): only that address.
+        - Bare domain (``example.com``): all addresses at that domain.
+          Use with care — a bare domain allowlists every recipient there.
+        - ``+tag`` suffixes are stripped before matching (``user+tag@x.com``
+          matches an allowlisted ``user@x.com``).
+        - ``*`` wildcard allows any recipient.
+
         Args:
             recipient: The email address or "Name <addr>" string to check.
 
