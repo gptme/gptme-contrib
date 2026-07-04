@@ -147,25 +147,27 @@ def extract_cc_model(jsonl_path: Path) -> str | None:
         want to cover both pipelines.
     """
     try:
-        with open(jsonl_path, encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if i >= 50:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(entry, dict):
-                    continue
-                msg = entry.get("message", {})
-                if isinstance(msg, dict) and msg.get("role") == "assistant":
-                    model = msg.get("model")
-                    if model and model not in _SENTINEL_MODELS:
-                        return str(model)
-    except (OSError, UnicodeDecodeError) as e:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            # Read at most 512 KiB to avoid blocking on huge single-line files.
+            chunk = f.read(512 * 1024)
+        for i, line in enumerate(chunk.split("\n", 50)):
+            if i >= 50:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            msg = entry.get("message", {})
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                model = msg.get("model")
+                if model and model not in _SENTINEL_MODELS:
+                    return str(model)
+    except OSError as e:
         logger.debug("Failed to read %s for model extraction: %s", jsonl_path, e)
     return None
 
@@ -548,7 +550,9 @@ def _first_event_cwd(jsonl_path: Path) -> str | None:
     """Extract ``payload.cwd`` from the first event in a Codex JSONL file."""
     try:
         with jsonl_path.open(encoding="utf-8") as f:
-            first_line = f.readline().strip()
+            # Read at most 8 KiB to avoid hanging on huge single-line files.
+            chunk = f.read(8192)
+        first_line = chunk.split("\n", 1)[0].strip()
         if not first_line:
             return None
         event = json.loads(first_line)

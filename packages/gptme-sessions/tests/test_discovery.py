@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from gptme_sessions.discovery import (
+    _first_event_cwd,
     _quick_date_from_jsonl,
     _quick_datetime_from_jsonl,
     _session_in_range,
@@ -818,6 +819,38 @@ class TestExtractProject:
         }
         jsonl.write_text(json.dumps(event) + "\n")
         assert extract_project("codex", jsonl) == "/home/bob/bob"
+
+    def test_codex_large_first_line_uses_bounded_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """codex: uses a bounded read instead of readline() for huge first lines."""
+        jsonl = tmp_path / "session.jsonl"
+        oversized_event = json.dumps(
+            {"type": "session_meta", "payload": {"cwd": "/home/bob/bob", "blob": "x" * 9000}}
+        )
+
+        class FakeFile:
+            def __enter__(self) -> FakeFile:
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                return False
+
+            def read(self, size: int = -1) -> str:
+                assert size == 8192
+                return oversized_event[:size]
+
+            def readline(self) -> str:
+                raise AssertionError("_first_event_cwd should not call readline()")
+
+        def fake_open(path: Path, encoding: str = "utf-8") -> FakeFile:
+            assert path == jsonl
+            assert encoding == "utf-8"
+            return FakeFile()
+
+        monkeypatch.setattr(Path, "open", fake_open)
+
+        assert _first_event_cwd(jsonl) is None
 
     def test_codex_non_dict_first_event_returns_none(self, tmp_path: Path) -> None:
         """codex: returns None when the first JSONL value is not an object."""
