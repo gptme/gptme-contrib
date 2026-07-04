@@ -48,6 +48,7 @@ members = [
     "gptme-warpgrep",
     "gptme-whatsapp",
     "gptme-wisdom",
+    "gptme-wisdom-mcp",
     "gptme-wrapped",
     "gptme-youtube",
     "gptodo",
@@ -2214,6 +2215,34 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
+]
+provides-extras = ["dev", "test"]
+
+[[package]]
+name = "gptme-wisdom-mcp"
+version = "0.1.0"
+source = { editable = "packages/gptme-wisdom-mcp" }
+dependencies = [
+    { name = "gptme-wisdom" },
+    { name = "mcp" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme-wisdom", editable = "packages/gptme-wisdom" },
+    { name = "mcp", specifier = ">=1.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
 ]
 provides-extras = ["dev", "test"]
 
