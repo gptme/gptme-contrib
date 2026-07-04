@@ -40,9 +40,9 @@ logger = logging.getLogger(__name__)
 
 _PATH_TARGET_TOOLS = {"save", "append", "patch", "patch_anchored", "morph"}
 
-# Default ledger path — respects XDG_DATA_HOME if set.
+# Default ledger path — respects XDG_DATA_HOME if set and non-empty.
 _DEFAULT_LEDGER = (
-    Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    Path(os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share"))
     / "gptme"
     / "receipts.jsonl"
 )
