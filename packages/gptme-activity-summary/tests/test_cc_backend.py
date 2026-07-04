@@ -153,15 +153,47 @@ def test_call_claude_code_whitespace_only_counts_as_empty(mock_run, mock_sleep):
     assert mock_run.call_count == 2
 
 
+@patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_nonzero_exit_raises(mock_run):
-    """Test non-zero exit code raises CalledProcessError immediately."""
-    mock_run.return_value = _make_completed_process(returncode=1, stderr="error msg")
+def test_call_claude_code_nonzero_exit_raises_after_retries(mock_run, mock_sleep):
+    """Test non-zero exit code raises CalledProcessError after exhausting retries."""
+    mock_run.return_value = _make_completed_process(returncode=1, stderr="rate limited")
     try:
-        call_claude_code("test prompt")
+        call_claude_code("test prompt", max_retries=3)
         assert False, "Should have raised CalledProcessError"
     except subprocess.CalledProcessError as e:
         assert e.returncode == 1
+    assert mock_run.call_count == 3  # retried 3 times, not raised immediately
+    assert mock_sleep.call_count == 2  # slept between attempts
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_nonzero_then_success(mock_run, mock_sleep):
+    """Test retry after non-zero exit eventually succeeds."""
+    mock_run.side_effect = [
+        _make_completed_process(returncode=1, stderr="transient error"),
+        _make_completed_process(stdout='{"ok": true}'),
+    ]
+    result = call_claude_code("test prompt", max_retries=3)
+    assert result == '{"ok": true}'
+    assert mock_run.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_nonzero_logs_stderr(mock_run, mock_sleep, caplog):
+    """Test that stderr is logged on non-zero exit."""
+    import logging
+
+    mock_run.return_value = _make_completed_process(returncode=1, stderr="quota exhausted")
+    with caplog.at_level(logging.WARNING):
+        try:
+            call_claude_code("test prompt", max_retries=1)
+        except subprocess.CalledProcessError:
+            pass
+    assert any("quota exhausted" in msg for msg in caplog.messages)
 
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")

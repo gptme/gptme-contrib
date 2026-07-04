@@ -72,6 +72,17 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
             env=env,
         )
         if result.returncode != 0:
+            stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
+            logger.warning(
+                "claude -p exited %d (attempt %d/%d). stderr: %s",
+                result.returncode,
+                attempt,
+                max_retries,
+                stderr_preview,
+            )
+            if attempt < max_retries:
+                time.sleep(_RETRY_DELAY_S * attempt)  # linear backoff
+                continue
             raise subprocess.CalledProcessError(
                 result.returncode, ["claude", "-p"], result.stdout, result.stderr
             )
@@ -82,7 +93,7 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
 
         # Empty response — likely nesting detection or transient failure
         logger.warning(
-            "claude -p returned empty response (attempt %d/%d). " "stderr: %s",
+            "claude -p returned empty response (attempt %d/%d). stderr: %s",
             attempt,
             max_retries,
             result.stderr.strip()[:200] if result.stderr else "(none)",
