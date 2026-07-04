@@ -139,7 +139,8 @@ class SessionIndex:
 
         Args:
             query: Search query (supports FTS5 syntax: AND, OR, NOT, phrases)
-            source: Filter by source type ("journal", "gptme", "claude_code")
+            source: Filter by source type ("journal", "gptme", "claude_code",
+                "cursor", or "codex")
             limit: Max results to return
             since: Only return sessions after this date
             recency_weight: How much to weight recency vs relevance (0-1).
@@ -235,31 +236,29 @@ class SessionIndex:
         if count == 0:
             return 0
 
-        # Delete matching rows from sessions table
-        self.conn.execute("DELETE FROM sessions WHERE path LIKE ?", (f"%{pattern}%",))
+        with self.conn:
+            self.conn.execute("DELETE FROM sessions WHERE path LIKE ?", (f"%{pattern}%",))
 
-        # Rebuild FTS index from remaining data (safer than row-level deletes
-        # on content-less FTS5 tables, which require exact original values)
-        self.conn.execute("DROP TABLE IF EXISTS sessions_fts")
-        self.conn.execute(
-            """
-            CREATE VIRTUAL TABLE sessions_fts USING fts5(
-                title,
-                content,
-                summary,
-                content='',
-                tokenize='porter unicode61'
+            # Rebuild FTS index from remaining data (safer than row-level deletes
+            # on content-less FTS5 tables, which require exact original values)
+            self.conn.execute("DROP TABLE IF EXISTS sessions_fts")
+            self.conn.execute(
+                """
+                CREATE VIRTUAL TABLE sessions_fts USING fts5(
+                    title,
+                    content,
+                    summary,
+                    content='',
+                    tokenize='porter unicode61'
+                )
+                """
             )
-            """
-        )
-        # Re-populate FTS from sessions table.
-        self.conn.execute(
-            """
-            INSERT INTO sessions_fts (rowid, title, content, summary)
-            SELECT id, title, content, summary FROM sessions
-            """
-        )
-        self.conn.commit()
+            self.conn.execute(
+                """
+                INSERT INTO sessions_fts (rowid, title, content, summary)
+                SELECT id, title, content, summary FROM sessions
+                """
+            )
         return count
 
     def rebuild(self) -> None:

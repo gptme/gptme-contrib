@@ -30,7 +30,7 @@ class SessionDocument:
     Represents a single searchable unit from any session source.
     """
 
-    source: str  # "journal", "gptme", "claude_code"
+    source: str  # "journal", "gptme", "claude_code", "cursor", or "codex"
     path: str  # absolute file path
     date: datetime  # session date
     title: str  # session title or slug
@@ -632,7 +632,7 @@ def _make_gptme_summary(messages: list[str], max_len: int = 200) -> str:
         r"^\[user\]\s*'?Here is the prompt to follow:",
         r"^\[user\]\s*/home/.*\.txt\b",
         r"^\[user\]\s*/tmp/autonomous-prompt",
-        r"^\[user\]\s*You are Bob, running autonomously",
+        r"^\[user\]\s*You are [A-Z][A-Za-z0-9_-]*, running autonomously",
     ]
 
     for msg in messages:

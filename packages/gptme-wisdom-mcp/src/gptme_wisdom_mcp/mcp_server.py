@@ -90,7 +90,8 @@ def search_sessions(
 
     Args:
         query: Free-text query against session titles and summaries.
-        source: Optional filter — "journal", "gptme", or "claude_code".
+        source: Optional filter — "journal", "gptme", "claude_code", "cursor",
+            or "codex".
         limit: Number of results to return (1–20). Default 5.
 
     Returns:
