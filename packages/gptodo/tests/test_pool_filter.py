@@ -28,6 +28,13 @@ def write_task(tasks_dir: Path, name: str, **metadata: object) -> None:
     (tasks_dir / f"{name}.md").write_text("\n".join(lines))
 
 
+def cli_runner_separate_stderr() -> CliRunner:
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:
+        return CliRunner()
+
+
 # ---------------------------------------------------------------------------
 # task_pool() helper — unit tests covering all three frontier signals
 # ---------------------------------------------------------------------------
@@ -269,7 +276,7 @@ class TestNextPoolFilter:
         tasks_dir.mkdir()
         write_task(tasks_dir, "general-only", state="backlog", created="2026-01-01T00:00:00")
         monkeypatch.chdir(tmp_path)
-        runner = CliRunner()
+        runner = cli_runner_separate_stderr()
         result = runner.invoke(cli, ["next", "--json", "--pool", "frontier"])
         assert result.exit_code == 0
         data = json.loads(result.stdout)
