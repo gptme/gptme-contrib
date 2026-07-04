@@ -22,19 +22,23 @@ _RETRY_DELAY_S = 5
 
 def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RETRIES) -> str:
     """
-    Call Claude Code CLI with a prompt, retrying on empty responses.
+    Call Claude Code CLI with a prompt, retrying on non-zero exit or empty responses.
+
+    Retries with linear backoff (delay = _RETRY_DELAY_S * attempt_number) on:
+    - Non-zero exit codes (transient CC service failures)
+    - Empty stdout responses (nesting detection or transient failures)
 
     Args:
         prompt: The prompt to send to Claude Code
         timeout: Maximum time to wait for response (seconds)
-        max_retries: Maximum number of retry attempts on empty response
+        max_retries: Maximum number of retry attempts per failure type
 
     Returns:
         The response text from Claude Code
 
     Raises:
         subprocess.TimeoutExpired: If the command times out
-        subprocess.CalledProcessError: If the command fails (non-zero exit)
+        subprocess.CalledProcessError: If non-zero exit persists after all retries
     """
     import os
 
@@ -81,6 +85,10 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
                 stderr_preview,
             )
             if attempt < max_retries:
+                # Retry all non-zero codes without discrimination. This addresses transient
+                # CC service failures (rate limits, temporary unavailability). Permanent errors
+                # (e.g., command-not-found, auth failure) will exhaust the retry window and
+                # then raise, which is acceptable since they're rare in normal operation.
                 time.sleep(_RETRY_DELAY_S * attempt)  # linear backoff
                 continue
             raise subprocess.CalledProcessError(
