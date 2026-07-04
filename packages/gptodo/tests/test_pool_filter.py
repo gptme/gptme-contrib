@@ -313,6 +313,33 @@ class TestTaskToDictPool:
         assert result.exit_code == 2
         assert "--pool/--exclude-pool are only supported with --json" in result.stderr
 
+    def test_status_pool_filter_recomputes_summary(self, tmp_path: Path, monkeypatch) -> None:
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(
+            tasks_dir,
+            "frontier-active",
+            state="active",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
+        write_task(tasks_dir, "frontier-broken", state="backlog", pool="frontier")
+        write_task(tasks_dir, "general-active", state="active", created="2026-01-01T00:00:00")
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", "--json", "--pool", "frontier"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+
+        assert {t["id"] for t in data["tasks"]} == {"frontier-active", "frontier-broken"}
+        assert data["summary"] == {
+            "total": 2,
+            "by_state": {"active": 1, "backlog": 1},
+            "issues": 1,
+            "untracked": 0,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Regression: frontier-routing tag must NOT be treated as pool=frontier

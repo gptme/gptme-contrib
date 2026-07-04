@@ -792,6 +792,30 @@ def _build_status_json(dir_type: str, results: Dict[str, List[TaskInfo]]) -> Dic
     }
 
 
+def _build_status_summary_from_task_dicts(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build the status JSON summary from a serialized task list."""
+    by_state: Dict[str, int] = {}
+    issues = 0
+    untracked = 0
+
+    for task in tasks:
+        state = task.get("state")
+        has_issues = bool(task.get("has_issues"))
+        if state:
+            by_state[state] = by_state.get(state, 0) + 1
+        elif not has_issues:
+            untracked += 1
+        if has_issues:
+            issues += 1
+
+    return {
+        "total": len(tasks),
+        "by_state": by_state,
+        "issues": issues,
+        "untracked": untracked,
+    }
+
+
 def check_directory(
     console: Console,
     dir_type: str,
@@ -1074,10 +1098,10 @@ def status(
             if "types" in payload:
                 for v in payload["types"].values():
                     v["tasks"] = [t for t in v["tasks"] if _passes(t)]
-                    v["summary"]["total"] = len(v["tasks"])
+                    v["summary"] = _build_status_summary_from_task_dicts(v["tasks"])
             else:
                 payload["tasks"] = [t for t in payload["tasks"] if _passes(t)]
-                payload["summary"]["total"] = len(payload["tasks"])
+                payload["summary"] = _build_status_summary_from_task_dicts(payload["tasks"])
         print(json.dumps(payload, indent=2))
         return
 
