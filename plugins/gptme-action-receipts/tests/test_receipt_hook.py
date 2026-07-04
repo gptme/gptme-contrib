@@ -6,7 +6,10 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from gptme_action_receipts.hooks.receipt_hook import _make_receipt, _receipt_pre
+from gptme_action_receipts.hooks.receipt_hook import (
+    _make_receipt,
+    _receipt_pre,
+)
 
 
 @dataclass
@@ -148,3 +151,29 @@ class TestReceiptPreHook:
         receipt = json.loads(ledger.read_text().strip())
         assert receipt["target"] == ".env"
         assert "secret-token" not in receipt["target"]
+
+
+class TestDefaultLedgerPath:
+    def test_empty_xdg_data_home_falls_back_to_home(self, monkeypatch):
+        """Empty XDG_DATA_HOME must not produce a CWD-relative ledger path."""
+        monkeypatch.setenv("XDG_DATA_HOME", "")
+        # Re-import to pick up the env var change — or verify the fallback directly.
+        import importlib
+
+        import gptme_action_receipts.hooks.receipt_hook as mod
+
+        importlib.reload(mod)
+        assert (
+            mod._DEFAULT_LEDGER.is_absolute()
+        ), f"Expected absolute path, got: {mod._DEFAULT_LEDGER}"
+        assert str(mod._DEFAULT_LEDGER).endswith("gptme/receipts.jsonl")
+
+    def test_set_xdg_data_home_is_used(self, tmp_path, monkeypatch):
+        """A valid XDG_DATA_HOME value is honoured."""
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        import importlib
+
+        import gptme_action_receipts.hooks.receipt_hook as mod
+
+        importlib.reload(mod)
+        assert str(mod._DEFAULT_LEDGER) == str(tmp_path / "gptme" / "receipts.jsonl")
