@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import subprocess
 import time
@@ -234,9 +236,12 @@ class Indexer:
 
     def _generate_doc_id(self, document: Document) -> Document:
         if not document.doc_id:
-            base = str(hash(document.content))
-            ts = int(time.time() * 1000)
-            document.doc_id = f"{base}-{ts}"
+            payload = json.dumps(
+                {"content": document.content, "metadata": document.metadata},
+                default=str,
+                sort_keys=True,
+            )
+            document.doc_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return document
 
     def reset_collection(self) -> None:
