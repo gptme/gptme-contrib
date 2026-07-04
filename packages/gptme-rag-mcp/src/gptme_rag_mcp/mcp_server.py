@@ -23,7 +23,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from gptme_rag.indexer import BookIndex, SessionIndex
+from gptme_rag_mcp.indexer import BookIndex, SessionIndex
 
 # Module-level path overrides — set by main() before mcp.run() so tool functions
 # pick up custom DB locations when the server is run with --wisdom-db / --sessions-db.

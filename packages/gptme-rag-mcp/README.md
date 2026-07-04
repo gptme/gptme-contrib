@@ -1,4 +1,4 @@
-# gptme-rag
+# gptme-rag-mcp
 
 RAG-as-MCP Knowledge Server for gptme agents — search foundational CS books and
 AI session history via the Model Context Protocol (MCP).
@@ -17,7 +17,7 @@ indexing stack.
 
 ## What it does
 
-`gptme-rag` exposes two knowledge planes as MCP tools:
+`gptme-rag-mcp` exposes two knowledge planes as MCP tools:
 
 | Tool | What it searches |
 |------|-----------------|
@@ -28,9 +28,9 @@ indexing stack.
 ## Install
 
 ```bash
-uv tool install gptme-rag
+uv tool install gptme-rag-mcp
 # or
-pip install gptme-rag
+pip install gptme-rag-mcp
 ```
 
 ## Quick start

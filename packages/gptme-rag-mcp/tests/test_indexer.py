@@ -6,8 +6,8 @@ from pathlib import Path
 
 def test_session_index_roundtrip():
     """Create an index, add a document, search, find it."""
-    from gptme_rag.indexer import SessionIndex
-    from gptme_rag.parsers import SessionDocument
+    from gptme_rag_mcp.indexer import SessionIndex
+    from gptme_rag_mcp.parsers import SessionDocument
     from datetime import datetime
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -32,8 +32,8 @@ def test_session_index_roundtrip():
 
 def test_book_index_roundtrip():
     """Create a book index, add a chunk, search, find it."""
-    from gptme_rag.indexer import BookIndex
-    from gptme_rag.parsers import BookDocument
+    from gptme_rag_mcp.indexer import BookIndex
+    from gptme_rag_mcp.parsers import BookDocument
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "wisdom.db"
@@ -60,7 +60,7 @@ def test_book_index_roundtrip():
 
 def test_parse_book_text_basic():
     """parse_book_text should chunk content and return BookDocuments."""
-    from gptme_rag.parsers import parse_book_text
+    from gptme_rag_mcp.parsers import parse_book_text
 
     text = """# Chapter 1: Introduction
 
@@ -88,8 +88,8 @@ Every expression evaluates to a value in the language.
 
 def test_mcp_server_importable():
     """mcp_server module should import without error."""
-    import gptme_rag.mcp_server  # noqa: F401
-    from gptme_rag.mcp_server import search_wisdom, search_sessions, list_wisdom_sources
+    import gptme_rag_mcp.mcp_server  # noqa: F401
+    from gptme_rag_mcp.mcp_server import search_wisdom, search_sessions, list_wisdom_sources
 
     assert callable(search_wisdom)
     assert callable(search_sessions)

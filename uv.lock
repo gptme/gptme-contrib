@@ -34,7 +34,7 @@ members = [
     "gptme-imagen",
     "gptme-lessons-extras",
     "gptme-lsp",
-    "gptme-rag",
+    "gptme-rag-mcp",
     "gptme-ralph",
     "gptme-retrieval",
     "gptme-runloops",
@@ -1871,9 +1871,9 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
-name = "gptme-rag"
+name = "gptme-rag-mcp"
 version = "0.1.0"
-source = { editable = "packages/gptme-rag" }
+source = { editable = "packages/gptme-rag-mcp" }
 dependencies = [
     { name = "gptme-wisdom" },
     { name = "mcp" },
