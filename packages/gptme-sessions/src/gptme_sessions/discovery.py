@@ -548,7 +548,9 @@ def _first_event_cwd(jsonl_path: Path) -> str | None:
     """Extract ``payload.cwd`` from the first event in a Codex JSONL file."""
     try:
         with jsonl_path.open(encoding="utf-8") as f:
-            first_line = f.readline().strip()
+            # Read at most 8 KiB to avoid hanging on huge single-line files.
+            chunk = f.read(8192)
+        first_line = chunk.split("\n", 1)[0].strip()
         if not first_line:
             return None
         event = json.loads(first_line)
