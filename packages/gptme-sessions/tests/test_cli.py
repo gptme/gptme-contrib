@@ -265,9 +265,10 @@ class TestStatsCommand:
         assert data["total"] == 2
 
     def test_stats_empty_store(self, tmp_path: Path):
-        """stats on empty store shows discovery fallback."""
+        """stats on empty store shows discovery fallback (no real sessions found)."""
         SessionStore(sessions_dir=tmp_path)
-        rc, out = _invoke(["stats"], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke(["stats"], tmp_path)
         assert rc == 0
         assert "discover" in out.lower() or "sync" in out.lower() or "session" in out.lower()
 
@@ -295,7 +296,8 @@ class TestStatsCommand:
     def test_stats_no_matches_with_filter(self, tmp_path: Path):
         """stats with filter that matches nothing shows appropriate message."""
         _seed_store(tmp_path)
-        rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
         assert rc == 0
         assert "no records" in out.lower()
 
@@ -649,7 +651,8 @@ class TestTopLevelCli:
     def test_no_subcommand_shows_stats(self, tmp_path: Path):
         """Invoking without subcommand shows stats (format_stats → sys.stdout)."""
         _seed_store(tmp_path)
-        rc, out = _invoke([], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke([], tmp_path)
         assert rc == 0
         # format_stats writes to sys.stdout (not captured by CliRunner)
         # but the tip line IS captured via click.echo
@@ -658,7 +661,8 @@ class TestTopLevelCli:
     def test_no_subcommand_empty_store(self, tmp_path: Path):
         """Empty store without subcommand shows discovery message."""
         SessionStore(sessions_dir=tmp_path)
-        rc, out = _invoke([], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke([], tmp_path)
         assert rc == 0
         assert "discover" in out.lower() or "sync" in out.lower() or "session" in out.lower()
 
@@ -728,17 +732,18 @@ class TestSyncTimestamp:
 
         store_dir = tmp_path / "store"
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "--sessions-dir",
-                str(store_dir),
-                "sync",
-                "--since",
-                "30d",
-            ],
-            env={"GPTME_LOGS_DIR": str(logs_dir)},
-        )
+        with _NO_DISCOVER:
+            result = runner.invoke(
+                cli,
+                [
+                    "--sessions-dir",
+                    str(store_dir),
+                    "sync",
+                    "--since",
+                    "30d",
+                ],
+                env={"GPTME_LOGS_DIR": str(logs_dir)},
+            )
         assert result.exit_code == 0
 
         # Load the store and check the timestamp

@@ -5278,6 +5278,7 @@ def test_runs_fallback_to_discovery_when_empty(tmp_path: Path, capsys, monkeypat
 def test_stats_no_fallback_when_records_exist(tmp_path: Path, capsys, monkeypatch):
     """stats does not show discovery fallback when records exist in the store."""
     import sys
+    from unittest.mock import patch
 
     from gptme_sessions.cli import main
     from gptme_sessions import SessionRecord, SessionStore
@@ -5289,7 +5290,8 @@ def test_stats_no_fallback_when_records_exist(tmp_path: Path, capsys, monkeypatc
     monkeypatch.setattr(
         sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "stats"]
     )
-    rc = main()
+    with patch("gptme_sessions.cli._discover_all", return_value=[]):
+        rc = main()
     assert rc == 0
     # _show_discovery_fallback uses click.echo() which capsys captures.
     # The absence of the fallback message confirms normal stats were shown.
