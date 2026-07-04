@@ -5,6 +5,7 @@ on:
     tags:
       - 'gptodo-v[0-9]*'
       - 'gptmail-v[0-9]*'
+      - 'gptme-rag-v[0-9]*'
 
 jobs:
   publish:
