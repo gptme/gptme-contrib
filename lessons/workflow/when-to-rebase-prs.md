@@ -8,7 +8,7 @@ match:
     - mergeable=false
     - rebase based on behind count
     - rebasing without checking for conflicts
-status: active
+status: archived
 ---
 
 # When to Rebase PRs

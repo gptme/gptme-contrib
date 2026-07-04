@@ -4,7 +4,7 @@ match:
   - "python script permission denied"
   - "choose correct python execution method"
   - "shebang python execution"
-status: active
+status: archived
 description: "Choose the correct Python execution method based on script type and context: uv scripts with shebang use direct execution, poetry projects use `poetry run`, standalone scripts use appropriate tooling."
 ---
 
