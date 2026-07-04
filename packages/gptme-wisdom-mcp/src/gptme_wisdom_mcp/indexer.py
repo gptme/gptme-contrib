@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -349,6 +349,10 @@ def _compute_hybrid_score(
         session_date = datetime.fromisoformat(date_str)
     except ValueError:
         session_date = now  # Fallback: treat unparseable dates as recent
+    if session_date.tzinfo is not None and session_date.utcoffset() is not None:
+        if now.tzinfo is None or now.utcoffset() is None:
+            now = now.replace(tzinfo=timezone.utc)
+        session_date = session_date.astimezone(now.tzinfo)
     age_days = max(0, (now - session_date).days)
     recency = math.exp(-math.log(2) * age_days / half_life_days)
 

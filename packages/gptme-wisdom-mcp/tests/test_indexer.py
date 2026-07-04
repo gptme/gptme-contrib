@@ -2,7 +2,7 @@
 
 import json
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -88,6 +88,29 @@ def test_session_search_handles_unbalanced_quote_query():
             assert idx.add(doc) is True
 
             results = idx.search('He said "hello')
+            assert len(results) == 1
+            assert results[0]["path"] == doc.path
+
+
+def test_session_search_handles_timezone_aware_dates():
+    """Timezone-aware indexed dates should not crash recency scoring."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "test.db"
+        with SessionIndex(db_path=db) as idx:
+            doc = SessionDocument(
+                source="journal",
+                path="/tmp/test/2026-01-01/aware.md",
+                date=datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc),
+                title="Timezone-aware session",
+                content="Timezone-aware session metadata should still be searchable.",
+                summary="Timezone-aware metadata",
+            )
+            assert idx.add(doc) is True
+
+            results = idx.search("timezone aware")
             assert len(results) == 1
             assert results[0]["path"] == doc.path
 
