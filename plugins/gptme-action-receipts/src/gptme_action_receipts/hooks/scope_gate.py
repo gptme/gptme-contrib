@@ -37,11 +37,11 @@ def _extract_gh_repo(command: str, workspace: Path | None) -> str | None:
     """Extract owner/repo from a gh command.
 
     Resolution order:
-    1. ``--repo OWNER/REPO`` flag (explicit)
+    1. ``--repo OWNER/REPO`` / ``--repo=OWNER/REPO`` flag (explicit)
     2. First positional ``OWNER/REPO`` argument (e.g. ``gh repo delete OWNER/REPO``)
     3. Workspace git remote origin fallback
     """
-    m = re.search(r"--repo\s+(" + _REPO_PATTERN + r")", command)
+    m = re.search(r"--repo(?:\s+|=)(" + _REPO_PATTERN + r")", command)
     if m:
         return m.group(1)
     # Positional owner/repo: gh repo delete / gh release delete / gh repo view

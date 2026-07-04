@@ -149,6 +149,15 @@ class TestCheckScopeUnauthorized:
         assert violation is not None
         assert "gptme/gptme-contrib" in violation
 
+    def test_unauthorized_merge_equals_repo_flag_flagged(self, authed_merge_yaml: Path):
+        violation = check_scope(
+            "shell",
+            "gh pr merge 1175 --squash --repo=gptme/gptme-contrib",
+            None,
+        )
+        assert violation is not None
+        assert "gptme/gptme-contrib" in violation
+
     def test_force_push_flagged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         path = tmp_path / "scope.yaml"
         path.write_text(yaml.dump({"scopes": {"force_push_repos": []}}))
