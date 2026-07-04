@@ -573,6 +573,56 @@ def test_resolve_copilot_version(model: str, expected: str) -> None:
     ), f"resolve_copilot_version({model!r}) -> {resolve_copilot_version(model)!r}, want {expected!r}"
 
 
+FABLE_TOML_FIXTURE = """\
+[prices.claude-code]
+opus      = [5.0, 25.0]
+sonnet    = [3.0, 15.0]
+"fable-5" = [15.0, 75.0]
+
+[tps.claude-code]
+"fable-5" = 18000
+"""
+
+
+@pytest.fixture()
+def fable_toml_path(tmp_path: Path) -> Path:
+    p = tmp_path / "harness-quota-fable.toml"
+    p.write_text(FABLE_TOML_FIXTURE, encoding="utf-8")
+    return p
+
+
+def test_estimate_session_cost_fable_token_count_path(fable_toml_path: Path) -> None:
+    """CC:fable-5 sessions with only token_count use the subscription-backed path.
+
+    Regression: before the fix, ('claude-code', 'fable-5') was absent from both
+    SUBSCRIPTION_BACKED_MODELS and _CACHE_PRICING_PROVIDER, so token_count-only
+    fable sessions returned None instead of a real estimate.
+    """
+    cfg = load_quota_config(fable_toml_path)
+    # 1M tokens, cache_read rate for anthropic = 0.1x, fable input = $15/1M
+    # expected = 1_000_000 * 15.0 * 0.1 / 1_000_000 = $1.50
+    cost = estimate_session_cost(
+        "claude-code", "fable", token_count=1_000_000, config=cfg
+    )
+    assert cost is not None, "fable-5 token_count path should return a cost estimate"
+    assert abs(cost - 1.5) < 0.001, f"expected ~$1.50, got {cost}"
+
+
+def test_estimate_session_cost_fable_alias_resolves(fable_toml_path: Path) -> None:
+    """resolve_cc_version('fable') -> 'fable-5' -> pricing key ('claude-code', 'fable-5')."""
+    cfg = load_quota_config(fable_toml_path)
+    cost_alias = estimate_session_cost(
+        "claude-code", "fable", cache_read_tokens=1_000_000, config=cfg
+    )
+    cost_versioned = estimate_session_cost(
+        "claude-code", "fable-5", cache_read_tokens=1_000_000, config=cfg
+    )
+    assert cost_alias is not None and cost_versioned is not None
+    assert (
+        abs(cost_alias - cost_versioned) < 0.000001
+    ), f"'fable' and 'fable-5' should resolve to the same cost; got {cost_alias} vs {cost_versioned}"
+
+
 # Skeleton tests to restore when CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED is set back to False.
 # Uncomment and adjust CREDIT_CHANGE_DATE if the cutover date changes.
 #
