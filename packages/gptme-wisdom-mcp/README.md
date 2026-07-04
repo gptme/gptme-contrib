@@ -1,4 +1,4 @@
-# gptme-rag-mcp
+# gptme-wisdom-mcp
 
 RAG-as-MCP Knowledge Server for gptme agents — search foundational CS books and
 AI session history via the Model Context Protocol (MCP).
@@ -17,7 +17,7 @@ indexing stack.
 
 ## What it does
 
-`gptme-rag-mcp` exposes two knowledge planes as MCP tools:
+`gptme-wisdom-mcp` exposes two knowledge planes as MCP tools:
 
 | Tool | What it searches |
 |------|-----------------|
@@ -28,19 +28,19 @@ indexing stack.
 ## Install
 
 ```bash
-uv tool install gptme-rag-mcp
+uv tool install gptme-wisdom-mcp
 # or
-pip install gptme-rag-mcp
+pip install gptme-wisdom-mcp
 ```
 
 ## Quick start
 
 ```bash
 # Run on stdio (default MCP transport)
-rag-mcp-server
+gptme-wisdom-mcp
 
 # Custom DB paths
-rag-mcp-server --wisdom-db ~/books/wisdom.db --sessions-db ~/sessions/index.db
+gptme-wisdom-mcp --wisdom-db ~/books/wisdom.db --sessions-db ~/sessions/index.db
 ```
 
 ## Claude Desktop config
@@ -52,7 +52,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 {
   "mcpServers": {
     "wisdom-rag": {
-      "command": "rag-mcp-server",
+      "command": "gptme-wisdom-mcp",
       "args": [
         "--wisdom-db", "/path/to/wisdom.db",
         "--sessions-db", "/path/to/session-index.db"
@@ -70,7 +70,7 @@ Add to `.claude/settings.json` in your project:
 {
   "mcpServers": {
     "wisdom-rag": {
-      "command": "rag-mcp-server",
+      "command": "gptme-wisdom-mcp",
       "args": ["--wisdom-db", "/path/to/wisdom.db"]
     }
   }
@@ -80,7 +80,7 @@ Add to `.claude/settings.json` in your project:
 Or via `claude mcp add`:
 
 ```bash
-claude mcp add wisdom-rag -- rag-mcp-server --wisdom-db /path/to/wisdom.db
+claude mcp add wisdom-rag -- gptme-wisdom-mcp --wisdom-db /path/to/wisdom.db
 ```
 
 ## Building the wisdom index
@@ -99,7 +99,7 @@ The session index is built from gptme conversation logs, Claude Code transcripts
 and journal markdown files. Point the server at your existing index:
 
 ```bash
-rag-mcp-server --sessions-db ~/.local/share/gptme/session-index.db
+gptme-wisdom-mcp --sessions-db ~/.local/share/gptme/session-index.db
 ```
 
 ## Acknowledgments

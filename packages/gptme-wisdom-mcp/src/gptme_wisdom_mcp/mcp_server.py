@@ -5,9 +5,9 @@ tools, so Claude Code, Claude Desktop, and any MCP-capable client can query
 foundational knowledge and cross-session memory without running a separate script.
 
 Usage:
-    uv run rag-mcp-server                                       # stdio (default paths)
-    uv run rag-mcp-server --wisdom-db ~/books/wisdom.db         # custom wisdom DB
-    uv run rag-mcp-server --sessions-db ~/sessions/index.db     # custom sessions DB
+    uv run gptme-wisdom-mcp                                       # stdio (default paths)
+    uv run gptme-wisdom-mcp --wisdom-db ~/books/wisdom.db         # custom wisdom DB
+    uv run gptme-wisdom-mcp --sessions-db ~/sessions/index.db     # custom sessions DB
 
 Tools exposed:
     search_wisdom(query, source?, top_k?)   → list[Chunk]
@@ -23,7 +23,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from gptme_rag_mcp.indexer import BookIndex, SessionIndex
+from gptme_wisdom_mcp.indexer import BookIndex, SessionIndex
 
 # Module-level path overrides — set by main() before mcp.run() so tool functions
 # pick up custom DB locations when the server is run with --wisdom-db / --sessions-db.
@@ -123,7 +123,7 @@ def search_sessions(
 
 
 def main() -> None:
-    """Entry point for `rag-mcp-server` script."""
+    """Entry point for `gptme-wisdom-mcp` script."""
     global _wisdom_db, _sessions_db
 
     parser = argparse.ArgumentParser(
