@@ -188,7 +188,7 @@ class SessionIndex:
             rows = self.conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             # FTS query syntax error — try wrapping terms in quotes
-            escaped_query = f'"{normalized_query}"'
+            escaped_query = _quote_fts_phrase(normalized_query)
             params[0] = escaped_query
             rows = self.conn.execute(sql, params).fetchall()
 
@@ -298,8 +298,7 @@ def _normalize_fts_query(query: str) -> str:
 
     The tokenizer splits on hyphens and most punctuation, so compound terms
     like "SWE-bench" become two tokens "swe" + "bench". We replace hyphens
-    with spaces so the query aligns with the token stream. We also strip
-    characters that cause FTS5 syntax errors (unbalanced quotes, etc.).
+    with spaces so the query aligns with the token stream.
     """
     import re as _re
 
@@ -308,6 +307,12 @@ def _normalize_fts_query(query: str) -> str:
     # Collapse multiple spaces
     q = _re.sub(r"\s+", " ", q).strip()
     return q
+
+
+def _quote_fts_phrase(query: str) -> str:
+    """Return query as an FTS5 phrase, escaping embedded double quotes."""
+    escaped = query.replace('"', '""')
+    return f'"{escaped}"'
 
 
 # Source quality weights: journal entries are curated summaries,

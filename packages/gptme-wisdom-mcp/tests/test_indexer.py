@@ -69,6 +69,29 @@ def test_purge_rebuild_preserves_content_search():
             assert results[0]["path"] == kept.path
 
 
+def test_session_search_handles_unbalanced_quote_query():
+    """Malformed FTS quote syntax should fall back without crashing."""
+    from gptme_wisdom_mcp.indexer import SessionIndex
+    from gptme_wisdom_mcp.parsers import SessionDocument
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "test.db"
+        with SessionIndex(db_path=db) as idx:
+            doc = SessionDocument(
+                source="journal",
+                path="/tmp/test/2026-01-01/quoted.md",
+                date=datetime(2026, 1, 1),
+                title="Quoted session",
+                content="He said hello while debugging the MCP search fallback.",
+                summary="Debugged quote handling",
+            )
+            assert idx.add(doc) is True
+
+            results = idx.search('He said "hello')
+            assert len(results) == 1
+            assert results[0]["path"] == doc.path
+
+
 def test_book_index_roundtrip():
     """Create a book index, add a chunk, search, find it."""
     from gptme_wisdom_mcp.indexer import BookIndex
