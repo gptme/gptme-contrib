@@ -724,6 +724,8 @@ class TestClassifyStatsCommand:
 class TestSyncTimestamp:
     def test_sync_uses_session_date_not_now(self, tmp_path: Path):
         """sync should use session date from discovery, not datetime.now()."""
+        from datetime import date
+
         # Create a gptme session directory with a known date
         logs_dir = tmp_path / "logs"
         session_dir = logs_dir / "2026-03-10-test-session"
@@ -732,7 +734,19 @@ class TestSyncTimestamp:
 
         store_dir = tmp_path / "store"
         runner = CliRunner()
-        with _NO_DISCOVER:
+
+        # Mock _discover_all to return this test session instead of scanning filesystem
+        mock_discovered = [
+            {
+                "harness": "gptme",
+                "path": session_dir,
+                "model": None,
+                "session_date": date(2026, 3, 10),
+                "session_name": "test-session",
+                "project": None,
+            }
+        ]
+        with patch("gptme_sessions.cli._discover_all", return_value=mock_discovered):
             result = runner.invoke(
                 cli,
                 [
@@ -751,9 +765,9 @@ class TestSyncTimestamp:
         records = store.load_all()
         # Should have imported one record
         gptme_records = [r for r in records if r.harness == "gptme"]
-        if gptme_records:
-            # The timestamp should start with the session date, not today
-            assert gptme_records[0].timestamp.startswith("2026-03-10")
+        assert len(gptme_records) == 1
+        # The timestamp should start with the session date, not today
+        assert gptme_records[0].timestamp.startswith("2026-03-10")
 
     def test_sync_imports_real_start_time_from_trajectory(self, tmp_path: Path):
         """sync should record the real start time, not a noon-UTC placeholder.
