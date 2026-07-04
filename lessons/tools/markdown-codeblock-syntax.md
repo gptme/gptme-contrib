@@ -5,7 +5,7 @@ match:
     - "files ending with incomplete content"
     - "codeblock without language tag causing parse errors"
     - "save operation truncating content"
-    - "truncated mid-codeblock"
+    - "save output stopped inside fenced block"
     - "codeblock fence not closed"
 automation:
   status: automated
