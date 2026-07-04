@@ -267,6 +267,8 @@ def test_reply_with_max_tokens_delegates_when_scoped_key_matches_shared_key(
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
     monkeypatch.setenv("OPENROUTER_API_KEY_TWITTER", "shared-key")
+    # Set a real API key so the CC-subprocess fallback is not triggered.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-real-key")
 
     expected = llm_module.Message("assistant", "delegated")
     calls: dict[str, Any] = {}
@@ -358,6 +360,107 @@ def test_reply_with_max_tokens_keeps_direct_openrouter_call_for_scoped_override(
     ]
     assert result.role == "assistant"
     assert result.content == "scoped override"
+
+
+def test_reply_with_max_tokens_uses_cc_subprocess_for_dummy_key(
+    llm_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ANTHROPIC_API_KEY is a dummy placeholder, use CC subprocess fallback."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY_TWITTER", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY_SOCIAL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-key")
+
+    cc_calls: list[list[Any]] = []
+    expected = llm_module.Message("assistant", "cc response")
+
+    def fake_cc_subprocess(messages: list[Any]) -> Any:
+        cc_calls.append(messages)
+        return expected
+
+    monkeypatch.setattr(llm_module, "_reply_with_cc_subprocess", fake_cc_subprocess)
+    monkeypatch.setattr(
+        llm_module,
+        "reply",
+        lambda *a, **k: pytest.fail("reply() must not be called with dummy key"),
+    )
+
+    messages = [llm_module.Message("user", "hello")]
+    result = llm_module._reply_with_max_tokens(messages, "anthropic/claude-sonnet-4-5")
+
+    assert result is expected
+    assert len(cc_calls) == 1
+    assert cc_calls[0] == messages
+
+
+def test_reply_with_max_tokens_uses_cc_subprocess_when_no_key(
+    llm_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ANTHROPIC_API_KEY is absent entirely, use CC subprocess fallback."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY_TWITTER", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY_SOCIAL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    cc_calls: list[list[Any]] = []
+    expected = llm_module.Message("assistant", "cc response")
+
+    def fake_cc_subprocess(messages: list[Any]) -> Any:
+        cc_calls.append(messages)
+        return expected
+
+    monkeypatch.setattr(llm_module, "_reply_with_cc_subprocess", fake_cc_subprocess)
+    monkeypatch.setattr(
+        llm_module,
+        "reply",
+        lambda *a, **k: pytest.fail("reply() must not be called without key"),
+    )
+
+    messages = [llm_module.Message("user", "hello")]
+    result = llm_module._reply_with_max_tokens(messages, "anthropic/claude-sonnet-4-5")
+
+    assert result is expected
+    assert len(cc_calls) == 1
+
+
+def test_reply_with_cc_subprocess_success(
+    llm_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CC subprocess path builds combined prompt and returns assistant Message."""
+    import subprocess as subprocess_mod
+
+    run_calls: list[dict[str, Any]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        run_calls.append({"cmd": cmd, "kwargs": kwargs})
+        return types.SimpleNamespace(
+            returncode=0, stdout="review response\n", stderr=""
+        )
+
+    # subprocess is imported inline inside _reply_with_cc_subprocess; patching
+    # the cached module object is sufficient since all imports share one instance.
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+
+    messages = [
+        llm_module.Message("system", "You are a helpful agent."),
+        llm_module.Message("user", "Review this tweet."),
+    ]
+    result = llm_module._reply_with_cc_subprocess(messages)
+
+    assert result.role == "assistant"
+    assert result.content == "review response"
+    assert len(run_calls) == 1
+    cmd = run_calls[0]["cmd"]
+    assert cmd[0] == "claude"
+    assert "-p" in cmd
+    assert "--no-session-persistence" in cmd
+    # Combined prompt must contain both system and user parts
+    prompt_arg = cmd[-1]
+    assert "You are a helpful agent." in prompt_arg
+    assert "Review this tweet." in prompt_arg
 
 
 def test_our_handle_in_thread_context_triggers_identity_note(

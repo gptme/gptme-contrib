@@ -507,6 +507,53 @@ def _resolve_scoped_openrouter_api_key() -> str:
     return ""
 
 
+def _reply_with_cc_subprocess(messages: list[Message]) -> Message:
+    """Call Claude via CC OAuth subprocess, bypassing ANTHROPIC_API_KEY.
+
+    Fallback for when ANTHROPIC_API_KEY is absent or a placeholder (e.g. 'dummy-key').
+    The 'claude -p' CLI uses the OAuth subscription rather than a direct API key,
+    so it works even when the gptme config sets a dummy key to prevent CC conflicts.
+    """
+    import subprocess
+
+    env = os.environ.copy()
+    # Clear CC session vars so the subprocess doesn't attach to the parent session.
+    for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CC_SESSION_ID", "CC_MODEL"):
+        env.pop(k, None)
+
+    # Build a combined prompt: system instructions followed by user message.
+    parts = []
+    for msg in messages:
+        if msg.role == "system":
+            parts.append(f"<system>\n{msg.content}\n</system>")
+        elif msg.role == "user":
+            parts.append(msg.content)
+    prompt = "\n\n".join(parts)
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--no-session-persistence", prompt],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        logging.warning("CC subprocess timed out for twitter LLM call")
+        return Message("assistant", "")
+    except FileNotFoundError:
+        logging.warning("'claude' CLI not found; CC subprocess fallback unavailable")
+        return Message("assistant", "")
+
+    if result.returncode != 0:
+        logging.warning(
+            "CC subprocess failed (exit %d): %s", result.returncode, result.stderr[:200]
+        )
+        return Message("assistant", "")
+
+    return Message("assistant", result.stdout.strip())
+
+
 def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
     """Call LLM with explicit max_tokens to control OpenRouter budget reservation.
 
@@ -518,10 +565,19 @@ def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
     Use gptme's reply() by default now that it supports max_tokens. Keep the
     direct OpenRouter call only for Twitter/social-specific key overrides, since
     gptme caches provider clients and cannot yet swap OPENROUTER_API_KEY per call.
+    Falls back to CC subprocess when ANTHROPIC_API_KEY is absent or a placeholder.
     """
     scoped_api_key = _resolve_scoped_openrouter_api_key()
     shared_api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not scoped_api_key or scoped_api_key == shared_api_key:
+        # Use CC subprocess when ANTHROPIC_API_KEY is absent or a placeholder,
+        # since gptme.llm.reply() would fail with an authentication error.
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not anthropic_key or anthropic_key.lower().startswith("dummy"):
+            logging.debug(
+                "Using CC subprocess fallback (ANTHROPIC_API_KEY is dummy/absent)"
+            )
+            return _reply_with_cc_subprocess(messages)
         return reply(
             messages,
             model_name,
