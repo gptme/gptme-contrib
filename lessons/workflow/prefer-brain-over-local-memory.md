@@ -1,8 +1,9 @@
 ---
 match:
   keywords:
-    - MEMORY.md
-    - brain repo
+    - "saving to local claude memory"
+    - "writing to projects memory"
+    - "runtime-local memory"
   session_categories: [self-review, infrastructure]
 status: active
 description: "When an agent has a brain repo (git workspace), persist knowledge there — not in runtime-local memory systems like Claude Code's `~/.claude/projects/*/memory/`."

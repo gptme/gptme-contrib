@@ -2,7 +2,6 @@
 match:
   keywords:
     - "noted for future reference"
-    - "I'll remember this"
     - "will keep this in mind"
     - "good to know"
     - "thanks for the clarification"
