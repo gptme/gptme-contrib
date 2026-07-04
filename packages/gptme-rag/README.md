@@ -3,6 +3,18 @@
 RAG-as-MCP Knowledge Server for gptme agents — search foundational CS books and
 AI session history via the Model Context Protocol (MCP).
 
+## Prior art and consolidation
+
+This package is related to the existing
+[`gptme/gptme-rag`](https://github.com/gptme/gptme-rag) project, which already
+provides ChromaDB-backed semantic document RAG, file watching, CLI commands, and
+an MCP server. This contrib package is a narrower MCP surface for the
+`gptme-wisdom` book index and Bob/gptme session search.
+
+If `gptme-rag` is upstreamed into `gptme-contrib`, this package should be
+reconciled with that repo instead of replacing or reimplementing its existing
+indexing stack.
+
 ## What it does
 
 `gptme-rag` exposes two knowledge planes as MCP tools:

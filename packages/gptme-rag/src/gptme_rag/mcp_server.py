@@ -11,7 +11,7 @@ Usage:
 
 Tools exposed:
     search_wisdom(query, source?, top_k?)   → list[Chunk]
-    list_wisdom_sources()                   → list[str]
+    list_wisdom_sources()                   → list[Source]
     search_sessions(query, source?, limit?) → list[SessionResult]
 """
 
@@ -70,11 +70,11 @@ def search_wisdom(
 
 
 @mcp.tool()
-def list_wisdom_sources() -> list[str]:
-    """Return the list of book slugs currently indexed in the wisdom layer.
+def list_wisdom_sources() -> list[dict]:
+    """Return metadata for books currently indexed in the wisdom layer.
 
-    Use these slugs as the `source` argument in search_wisdom() to restrict
-    results to a specific book.
+    Use each row's `source` slug as the `source` argument in search_wisdom() to
+    restrict results to a specific book.
     """
     with BookIndex(db_path=_wisdom_db) as idx:
         return list(idx.sources())
