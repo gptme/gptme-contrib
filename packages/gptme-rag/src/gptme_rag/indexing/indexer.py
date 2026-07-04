@@ -436,8 +436,13 @@ class Indexer:
         if not documents:
             return 0
 
-        # Get unique file count
-        n_files = len(set(doc.metadata.get("source", "") for doc in documents))
+        sources = sorted(
+            {str(source) for doc in documents if (source := doc.metadata.get("source"))}
+        )
+        n_files = len(sources)
+
+        for source in sources:
+            self.delete_documents({"source": source})
 
         # Process the documents
         self.add_documents(documents)

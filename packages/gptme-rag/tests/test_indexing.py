@@ -137,6 +137,24 @@ def test_indexer_directory(indexer, tmp_path):
     )
 
 
+def test_indexer_directory_is_idempotent(indexer, tmp_path):
+    """Repeated directory indexing should replace existing chunks, not duplicate them."""
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "guide.md").write_text("Python programming guide")
+    (docs_dir / "tutorial.md").write_text("JavaScript tutorial")
+
+    assert indexer.index_directory(docs_dir, glob_pattern="**/*.md") == 2
+    first = indexer.collection.get()
+    assert len(first["ids"]) > 0
+
+    assert indexer.index_directory(docs_dir, glob_pattern="**/*.md") == 2
+    second = indexer.collection.get()
+
+    assert len(second["ids"]) == len(first["ids"])
+    assert len(set(second["ids"])) == len(second["ids"])
+
+
 def test_path_matching(indexer):
     # Test the _matches_paths method directly
     doc = Document(
