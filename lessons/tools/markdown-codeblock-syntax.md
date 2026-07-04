@@ -5,9 +5,8 @@ match:
     - "files ending with incomplete content"
     - "codeblock without language tag causing parse errors"
     - "save operation truncating content"
-    - "unclosed code block"
-    - "code block that's not closed"
-    - "there's no closing"
+    - "save output stopped inside fenced block"
+    - "codeblock fence not closed"
 automation:
   status: automated
   validator: scripts/precommit/validators/validate_markdown_codeblock_syntax.py
