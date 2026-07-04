@@ -441,6 +441,9 @@ class TaskInfo:
     spawned_tasks: List[str] = field(default_factory=list)  # Child tasks
     coordination_mode: str | None = None  # sequential, parallel, fan-out-fan-in
     success_criterion: str | None = None  # Verifiable "done" gate (Outcomes-style)
+    pool: str | None = (
+        None  # Work pool: "frontier" for frontier-tier-only; None/"general" for general
+    )
 
     @property
     def id(self) -> str:
@@ -499,6 +502,45 @@ def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     if state == "waiting":
         return True
     return bool(task.metadata.get("waiting_for"))
+
+
+def task_pool(task: "TaskInfo") -> str:
+    """Return effective pool for a task: 'frontier' or 'general'.
+
+    Mirrors the frontier-detection logic in scripts/claim-cascade-task.py
+    (_task_is_frontier) so CLI pool filtering is consistent with claim-gate
+    enforcement. Recognizes:
+    - pool: frontier  (explicit frontmatter field)
+    - frontier- id prefix  (back-compat naming convention)
+    - frontier tag          (back-compat tag)
+    """
+    if task.pool == "frontier":
+        return "frontier"
+    if (task.name or "").lower().startswith("frontier-"):
+        return "frontier"
+    if "frontier" in (task.tags or []):
+        return "frontier"
+    return "general"
+
+
+def task_matches_pool_filter(
+    task: "TaskInfo",
+    pool: str | None = None,
+    exclude_pool: str | None = None,
+) -> bool:
+    """Return True if the task passes --pool / --exclude-pool filters.
+
+    Args:
+        task: Task to evaluate.
+        pool: If given, only tasks in this pool pass.
+        exclude_pool: If given, tasks in this pool are excluded.
+    """
+    effective = task_pool(task)
+    if pool is not None and effective != pool:
+        return False
+    if exclude_pool is not None and effective == exclude_pool:
+        return False
+    return True
 
 
 def find_repo_root(start_path: Path) -> Path:
@@ -1124,6 +1166,7 @@ def load_tasks(
                 spawned_tasks=metadata.get("spawned_tasks", []),
                 coordination_mode=metadata.get("coordination_mode"),
                 success_criterion=metadata.get("success_criterion"),
+                pool=metadata.get("pool"),
             )
             tasks.append(task)
 
@@ -1188,6 +1231,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "spawned_from": task.spawned_from,
         "spawned_tasks": task.spawned_tasks,
         "coordination_mode": task.coordination_mode,
+        "pool": task_pool(task),
     }
 
 

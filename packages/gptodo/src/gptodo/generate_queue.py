@@ -130,6 +130,22 @@ class Task:
         return "\n".join(lines)
 
 
+def _gq_task_is_frontier(task_id: str, metadata: dict) -> bool:
+    """Return True when a task belongs to the frontier pool.
+
+    Mirrors the detection logic in scripts/claim-cascade-task.py so
+    generate-queue pool filtering is consistent with the claim gate.
+    """
+    if metadata.get("pool") == "frontier":
+        return True
+    if task_id.lower().startswith("frontier-"):
+        return True
+    tags = metadata.get("tags", []) or []
+    if "frontier" in tags:
+        return True
+    return False
+
+
 class QueueGenerator:
     """Generate work queue from task files and GitHub issues."""
 
@@ -141,6 +157,8 @@ class QueueGenerator:
         tasks_dir: str = "tasks",
         state_dir: str = "state",
         user: str | None = None,
+        pool_filter: str | None = None,
+        exclude_pool: str | None = None,
     ):
         self.workspace = workspace_path
         self.github_username = github_username
@@ -148,6 +166,8 @@ class QueueGenerator:
         self.state_dir = self.workspace / state_dir
         self.journal_dir = self.workspace / journal_dir
         self.user = user  # Filter tasks by assigned_to field
+        self.pool_filter = pool_filter  # Only include tasks in this pool
+        self.exclude_pool = exclude_pool  # Exclude tasks in this pool
 
         # Output filename includes user if specified
         if user:
@@ -216,6 +236,15 @@ class QueueGenerator:
                     assigned_to = post.metadata.get("assigned_to", "agent")
                     # Include if assigned to specified user or "both"
                     if assigned_to != self.user and assigned_to != "both":
+                        continue
+
+                # Apply pool filter
+                if self.pool_filter is not None or self.exclude_pool is not None:
+                    is_frontier = _gq_task_is_frontier(task_file.stem, post.metadata)
+                    effective_pool = "frontier" if is_frontier else "general"
+                    if self.pool_filter is not None and effective_pool != self.pool_filter:
+                        continue
+                    if self.exclude_pool is not None and effective_pool == self.exclude_pool:
                         continue
 
                 # Filter by priority (high or urgent only) - skip if filtering by user
@@ -616,6 +645,18 @@ class QueueGenerator:
     default="state",
     help="State directory name (default: state)",
 )
+@click.option(
+    "--pool",
+    "pool_filter",
+    default=None,
+    help="Only include tasks in this pool (e.g. 'frontier', 'general')",
+)
+@click.option(
+    "--exclude-pool",
+    "exclude_pool",
+    default=None,
+    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
+)
 def generate_queue(
     workspace: Path,
     github_username: str | None,
@@ -623,6 +664,8 @@ def generate_queue(
     journal_dir: str,
     tasks_dir: str,
     state_dir: str,
+    pool_filter: str | None,
+    exclude_pool: str | None,
 ) -> None:
     """Generate work queue from task files and GitHub issues."""
     # Get GitHub username if not provided
@@ -637,6 +680,8 @@ def generate_queue(
         tasks_dir=tasks_dir,
         state_dir=state_dir,
         user=user,
+        pool_filter=pool_filter,
+        exclude_pool=exclude_pool,
     )
 
     generator.generate()
