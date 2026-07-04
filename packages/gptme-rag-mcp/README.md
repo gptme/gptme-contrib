@@ -86,9 +86,12 @@ claude mcp add wisdom-rag -- rag-mcp-server --wisdom-db /path/to/wisdom.db
 ## Building the wisdom index
 
 The wisdom DB is populated separately by indexing CC-licensed books.
-See the `rag-mcp-server index` subcommand (coming soon) or use the
-[`rag` package](https://github.com/ErikBjare/bob/tree/master/packages/rag)
-directly for the full indexing pipeline.
+Use [`gptme-wisdom`](../gptme-wisdom/) to ingest supported books:
+
+```bash
+gptme-wisdom ingest --source thinkpython --file /tmp/thinkpython.txt
+gptme-wisdom search "recursion base case"
+```
 
 ## Building the session index
 

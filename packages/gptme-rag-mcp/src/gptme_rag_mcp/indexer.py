@@ -6,11 +6,12 @@ types. Can be upgraded to vector search (chromadb) later for semantic matching.
 Ranking uses a hybrid score combining FTS5 relevance with temporal decay:
 - FTS5 BM25 rank provides keyword relevance
 - Exponential decay factor prioritizes recent sessions (half-life: 90 days)
-- Source weighting: journal (1.5x) > gptme (1.0x) > claude_code (1.0x)
+- Source weighting: journal (1.3x) > gptme (1.0x) > claude_code (1.0x)
 """
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from datetime import datetime
@@ -33,7 +34,7 @@ from .parsers import (
     parse_journal_entry,
 )
 
-DEFAULT_DB_PATH = Path.home() / ".local/share/bob/session-index.db"
+DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "gptme" / "session-index.db"
 
 __all__ = ["SessionIndex", "BookIndex", "DEFAULT_DB_PATH"]
 
@@ -60,6 +61,7 @@ class SessionIndex:
                 path TEXT NOT NULL UNIQUE,
                 date TEXT NOT NULL,
                 title TEXT NOT NULL,
+                content TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}'
             );
@@ -92,16 +94,17 @@ class SessionIndex:
         try:
             cursor = self.conn.execute(
                 """
-                INSERT INTO sessions (source, path, date, title, summary, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (source, path, date, title, content, summary, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc.source,
                     doc.path,
                     doc.date.isoformat(),
                     doc.title,
+                    doc.content,
                     doc.summary,
-                    str(doc.metadata),
+                    json.dumps(doc.metadata),
                 ),
             )
             row_id = cursor.lastrowid
@@ -249,12 +252,11 @@ class SessionIndex:
             )
             """
         )
-        # Re-populate FTS from sessions table (title and summary available,
-        # content is lost since we don't store it in sessions — use summary)
+        # Re-populate FTS from sessions table.
         self.conn.execute(
             """
             INSERT INTO sessions_fts (rowid, title, content, summary)
-            SELECT id, title, summary, summary FROM sessions
+            SELECT id, title, content, summary FROM sessions
             """
         )
         self.conn.commit()

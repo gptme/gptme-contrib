@@ -1,6 +1,8 @@
-"""Basic smoke tests for gptme-rag indexer and parsers."""
+"""Basic smoke tests for gptme-rag-mcp indexer and parsers."""
 
+import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 
@@ -8,7 +10,6 @@ def test_session_index_roundtrip():
     """Create an index, add a document, search, find it."""
     from gptme_rag_mcp.indexer import SessionIndex
     from gptme_rag_mcp.parsers import SessionDocument
-    from datetime import datetime
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "test.db"
@@ -20,6 +21,7 @@ def test_session_index_roundtrip():
                 title="Test session about Python async",
                 content="We fixed a race condition in the async event loop using asyncio locks.",
                 summary="Fixed async race condition",
+                metadata={"model": "test-model", "tokens": 123},
             )
             assert idx.add(doc) is True
             # Duplicate should return False
@@ -28,6 +30,43 @@ def test_session_index_roundtrip():
             results = idx.search("async race condition")
             assert len(results) == 1
             assert results[0]["title"] == "Test session about Python async"
+            stored_metadata = idx.conn.execute(
+                "SELECT metadata FROM sessions WHERE path = ?", (doc.path,)
+            ).fetchone()[0]
+            assert json.loads(stored_metadata) == {"model": "test-model", "tokens": 123}
+
+
+def test_purge_rebuild_preserves_content_search():
+    """Purging one path should not degrade FTS recall for remaining content."""
+    from gptme_rag_mcp.indexer import SessionIndex
+    from gptme_rag_mcp.parsers import SessionDocument
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "test.db"
+        with SessionIndex(db_path=db) as idx:
+            kept = SessionDocument(
+                source="journal",
+                path="/tmp/test/2026-01-01/keep.md",
+                date=datetime(2026, 1, 1),
+                title="Kept session",
+                content="This body contains the unique term zirconium-retrospective.",
+                summary="A short summary without the body-only term",
+            )
+            removed = SessionDocument(
+                source="journal",
+                path="/tmp/test/2026-01-01/remove.md",
+                date=datetime(2026, 1, 1),
+                title="Removed session",
+                content="This body contains throwaway deletion text.",
+                summary="Removed summary",
+            )
+            assert idx.add(kept) is True
+            assert idx.add(removed) is True
+
+            assert idx.purge_paths_matching("remove.md") == 1
+            results = idx.search("zirconium retrospective")
+            assert len(results) == 1
+            assert results[0]["path"] == kept.path
 
 
 def test_book_index_roundtrip():
