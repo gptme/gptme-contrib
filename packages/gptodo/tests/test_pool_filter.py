@@ -315,7 +315,7 @@ class TestTaskToDictPool:
         tasks_dir.mkdir()
         write_task(tasks_dir, "frontier-task", state="backlog", created="2026-01-01T00:00:00")
         monkeypatch.chdir(tmp_path)
-        runner = CliRunner()
+        runner = cli_runner_separate_stderr()
         result = runner.invoke(cli, ["status", "--pool", "frontier"])
         assert result.exit_code == 2
         assert "--pool/--exclude-pool are only supported with --json" in result.stderr
