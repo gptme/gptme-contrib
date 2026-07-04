@@ -507,7 +507,7 @@ def _resolve_scoped_openrouter_api_key() -> str:
     return ""
 
 
-def _reply_with_cc_subprocess(messages: list[Message]) -> Message:
+def _reply_with_cc_subprocess(messages: list[Message], model_name: str) -> Message:
     """Call Claude via CC OAuth subprocess, bypassing ANTHROPIC_API_KEY.
 
     Fallback for when ANTHROPIC_API_KEY is absent or a placeholder (e.g. 'dummy-key').
@@ -521,18 +521,20 @@ def _reply_with_cc_subprocess(messages: list[Message]) -> Message:
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CC_SESSION_ID", "CC_MODEL"):
         env.pop(k, None)
 
-    # Build a combined prompt: system instructions followed by user message.
+    # Build a combined prompt: system instructions followed by conversation turns.
     parts = []
     for msg in messages:
         if msg.role == "system":
             parts.append(f"<system>\n{msg.content}\n</system>")
         elif msg.role == "user":
             parts.append(msg.content)
+        elif msg.role == "assistant":
+            parts.append(f"<assistant>\n{msg.content}\n</assistant>")
     prompt = "\n\n".join(parts)
 
     try:
         result = subprocess.run(
-            ["claude", "-p", "--no-session-persistence", prompt],
+            ["claude", "-p", "--no-session-persistence", "--model", model_name, prompt],
             capture_output=True,
             text=True,
             env=env,
@@ -572,12 +574,16 @@ def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
     if not scoped_api_key or scoped_api_key == shared_api_key:
         # Use CC subprocess when ANTHROPIC_API_KEY is absent or a placeholder,
         # since gptme.llm.reply() would fail with an authentication error.
+        # But only if there's no usable OpenRouter key either.
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not anthropic_key or anthropic_key.lower().startswith("dummy"):
+        any_openrouter_key = _resolve_openrouter_api_key()
+        if (
+            not anthropic_key or anthropic_key.lower().startswith("dummy")
+        ) and not any_openrouter_key:
             logging.debug(
-                "Using CC subprocess fallback (ANTHROPIC_API_KEY is dummy/absent)"
+                "Using CC subprocess fallback (ANTHROPIC_API_KEY is dummy/absent and no OpenRouter key available)"
             )
-            return _reply_with_cc_subprocess(messages)
+            return _reply_with_cc_subprocess(messages, model_name)
         return reply(
             messages,
             model_name,
