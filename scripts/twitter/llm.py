@@ -520,6 +520,10 @@ def _reply_with_cc_subprocess(messages: list[Message], model_name: str) -> Messa
     # Clear CC session vars so the subprocess doesn't attach to the parent session.
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CC_SESSION_ID", "CC_MODEL"):
         env.pop(k, None)
+    # This fallback exists specifically to bypass ANTHROPIC_API_KEY (absent or a
+    # dummy placeholder), so never forward it — the CLI would otherwise try to
+    # authenticate with it directly instead of using the OAuth subscription.
+    env.pop("ANTHROPIC_API_KEY", None)
 
     # Build a combined prompt: system instructions followed by conversation turns.
     parts = []
