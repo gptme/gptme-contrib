@@ -66,6 +66,35 @@ class TestTaskPool:
         task = load_tasks(tasks_dir)[0]
         assert task_pool(task) == "frontier"
 
+    def test_explicit_pool_general_overrides_frontier_prefix(self, tmp_path: Path) -> None:
+        """Explicit pool:general frontmatter wins over implicit frontier- id prefix."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(
+            tasks_dir,
+            "frontier-override-test",
+            state="backlog",
+            created="2026-01-01T00:00:00",
+            pool="general",
+        )
+        task = load_tasks(tasks_dir)[0]
+        assert task_pool(task) == "general"
+
+    def test_explicit_pool_general_overrides_frontier_tag(self, tmp_path: Path) -> None:
+        """Explicit pool:general frontmatter wins over implicit frontier tag."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(
+            tasks_dir,
+            "some-task",
+            state="backlog",
+            created="2026-01-01T00:00:00",
+            pool="general",
+            tags=["frontier", "feature"],
+        )
+        task = load_tasks(tasks_dir)[0]
+        assert task_pool(task) == "general"
+
     def test_frontier_tag_returns_frontier(self, tmp_path: Path) -> None:
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()

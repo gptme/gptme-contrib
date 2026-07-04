@@ -136,8 +136,11 @@ def _gq_task_is_frontier(task_id: str, metadata: dict) -> bool:
     Mirrors the detection logic in scripts/claim-cascade-task.py so
     generate-queue pool filtering is consistent with the claim gate.
     """
-    if metadata.get("pool") == "frontier":
-        return True
+    # Explicit frontmatter field wins over all implicit signals.
+    pool = metadata.get("pool")
+    if pool is not None:
+        return bool(pool == "frontier")
+    # Back-compat implicit signals (no explicit pool field in frontmatter).
     if task_id.lower().startswith("frontier-"):
         return True
     tags = metadata.get("tags", []) or []

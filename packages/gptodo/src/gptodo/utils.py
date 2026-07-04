@@ -514,8 +514,10 @@ def task_pool(task: "TaskInfo") -> str:
     - frontier- id prefix  (back-compat naming convention)
     - frontier tag          (back-compat tag)
     """
-    if task.pool == "frontier":
-        return "frontier"
+    # Explicit frontmatter field wins over all implicit signals.
+    if task.pool is not None:
+        return "frontier" if task.pool == "frontier" else "general"
+    # Back-compat implicit signals (no explicit pool field in frontmatter).
     if (task.name or "").lower().startswith("frontier-"):
         return "frontier"
     if "frontier" in (task.tags or []):
