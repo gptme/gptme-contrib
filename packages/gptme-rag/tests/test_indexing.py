@@ -1,7 +1,9 @@
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from gptme_rag.indexing.document import Document
+from gptme_rag.indexing.indexer import Indexer
 
 
 @pytest.fixture
@@ -200,6 +202,59 @@ def test_delete_documents_failure_does_not_wipe_collection(indexer, test_docs, m
 
     got = indexer.collection.get()
     assert len(got["ids"]) == len(test_docs), "documents must survive a failed delete"
+
+
+def test_generated_doc_id_is_stable():
+    """Documents without explicit IDs should not duplicate across processes."""
+    indexer = Indexer(embedding_function="default")
+    doc_a = Document(
+        content="same content",
+        metadata={"source": "/tmp/a.md", "chunk_index": 0},
+    )
+    doc_b = Document(
+        content="same content",
+        metadata={"source": "/tmp/a.md", "chunk_index": 0},
+    )
+    doc_c = Document(
+        content="same content",
+        metadata={"source": "/tmp/b.md", "chunk_index": 0},
+    )
+
+    assert indexer._generate_doc_id(doc_a).doc_id == indexer._generate_doc_id(doc_b).doc_id
+    assert indexer._generate_doc_id(doc_a).doc_id != indexer._generate_doc_id(doc_c).doc_id
+
+
+def test_compute_relevance_score_handles_empty_query():
+    """Explain-mode scoring should not divide by zero for an empty query."""
+    indexer = Indexer(embedding_function="default")
+    doc = Document(content="content", metadata={"source": "test.txt"}, doc_id="doc")
+
+    score, scores = indexer.compute_relevance_score(doc, distance=0.2, query="")
+    explanation = indexer.explain_scoring("", doc, 0.2, scores)
+
+    assert score == sum(scores.values())
+    assert scores["term_overlap"] == 0.0
+    assert explanation["explanations"]["term_overlap"].startswith("Term overlap 0.0%")
+
+
+def test_compute_relevance_score_accepts_iso_last_modified():
+    """Document.from_file stores ISO metadata; recency scoring must parse it."""
+    indexer = Indexer(embedding_function="default")
+    doc = Document(
+        content="fresh content",
+        metadata={
+            "source": "fresh.txt",
+            "last_modified": datetime.now().isoformat(),
+        },
+        doc_id="fresh",
+    )
+
+    score, scores = indexer.compute_relevance_score(doc, distance=0.2, query="fresh")
+    explanation = indexer.explain_scoring("fresh", doc, 0.2, scores)
+
+    assert score > scores["base"]
+    assert scores["recency_boost"] > 0.0
+    assert explanation["explanations"]["recency_boost"].startswith("Modified ")
 
 
 def test_reset_collection_preserves_embedding_metadata(indexer):

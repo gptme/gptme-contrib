@@ -244,6 +244,26 @@ class Indexer:
             document.doc_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return document
 
+    @staticmethod
+    def _metadata_timestamp(value: Any) -> float | None:
+        """Return a Unix timestamp from numeric or ISO metadata values."""
+        if isinstance(value, int | float):
+            return float(value)
+        if isinstance(value, datetime):
+            return value.timestamp()
+        if not isinstance(value, str):
+            return None
+
+        try:
+            return float(value)
+        except ValueError:
+            pass
+
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
     def reset_collection(self) -> None:
         """Reset the collection to a clean state."""
         try:
@@ -479,7 +499,7 @@ class Indexer:
         # Term matches (simple tf scoring)
         query_terms = set(query.lower().split())
         content_terms = set(doc.content.lower().split())
-        term_overlap = len(query_terms & content_terms) / len(query_terms)
+        term_overlap = len(query_terms & content_terms) / len(query_terms) if query_terms else 0.0
         scores["term_overlap"] = self.scoring_weights["term_overlap"] * term_overlap
         total_score += scores["term_overlap"]
 
@@ -495,8 +515,8 @@ class Indexer:
             # Recency boost
             scores["recency_boost"] = 0
             if "last_modified" in doc.metadata:
-                try:
-                    last_modified = float(doc.metadata["last_modified"])
+                last_modified = self._metadata_timestamp(doc.metadata["last_modified"])
+                if last_modified is not None:
                     days_ago = (time.time() - last_modified) / (24 * 3600)
                     if days_ago < 30:  # 30-day window for recency
                         recency_factor = 1 - (days_ago / 30)
@@ -504,7 +524,7 @@ class Indexer:
                             self.scoring_weights["recency_boost"] * recency_factor
                         )
                         total_score += scores["recency_boost"]
-                except (ValueError, TypeError):
+                else:
                     logger.debug(
                         f"Invalid last_modified timestamp: {doc.metadata['last_modified']}"
                     )
@@ -1005,7 +1025,7 @@ class Indexer:
         # Term overlap
         query_terms = set(query.lower().split())
         content_terms = set(doc.content.lower().split())
-        term_overlap = len(query_terms & content_terms) / len(query_terms)
+        term_overlap = len(query_terms & content_terms) / len(query_terms) if query_terms else 0.0
         explanations["term_overlap"] = (
             f"Term overlap {term_overlap:.1%}: +{scores['term_overlap']:.3f}"
         )
@@ -1020,8 +1040,8 @@ class Indexer:
         # Recency
         if "recency_boost" in scores:
             if doc.metadata and "last_modified" in doc.metadata:
-                try:
-                    last_modified = float(doc.metadata["last_modified"])
+                last_modified = self._metadata_timestamp(doc.metadata["last_modified"])
+                if last_modified is not None:
                     days_ago = (time.time() - last_modified) / (24 * 3600)
                     if days_ago < 30:
                         explanations["recency_boost"] = (
@@ -1029,7 +1049,7 @@ class Indexer:
                         )
                     else:
                         explanations["recency_boost"] = f"Modified {days_ago:.1f} days ago: +0"
-                except (ValueError, TypeError):
+                else:
                     explanations["recency_boost"] = "Invalid modification time: +0"
 
         return {
