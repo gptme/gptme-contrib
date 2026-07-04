@@ -131,3 +131,20 @@ class TestReceiptPreHook:
 
         receipt = json.loads(ledger.read_text().strip())
         assert len(receipt["target"]) == 512
+
+    def test_file_write_target_uses_path_not_content(self, tmp_path, monkeypatch):
+        ledger = tmp_path / "receipts.jsonl"
+        monkeypatch.setenv("GPTME_RECEIPTS_LEDGER", str(ledger))
+
+        data = _MockPreData(
+            tool_use=_MockToolUse(
+                tool="save",
+                args=[".env"],
+                content="API_KEY=secret-token\n",
+            ),
+        )
+        list(_receipt_pre(data))
+
+        receipt = json.loads(ledger.read_text().strip())
+        assert receipt["target"] == ".env"
+        assert "secret-token" not in receipt["target"]

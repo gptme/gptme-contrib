@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_PATH_TARGET_TOOLS = {"save", "append", "patch", "patch_anchored", "morph"}
+
 # Default ledger path — respects XDG_DATA_HOME if set.
 _DEFAULT_LEDGER = (
     Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
@@ -76,6 +78,18 @@ def _make_receipt(
     return payload
 
 
+def _target_descriptor(tool_use: object) -> str:
+    """Return a bounded action target without logging file-write bodies."""
+    tool_name = getattr(tool_use, "tool", "unknown") or "unknown"
+    args = getattr(tool_use, "args", None) or []
+
+    if tool_name in _PATH_TARGET_TOOLS:
+        return str(args[0])[:512].strip() if args else ""
+
+    raw_content = getattr(tool_use, "content", "") or ""
+    return raw_content[:512].strip()
+
+
 def _receipt_pre(
     data: ToolExecutePreData,
 ) -> Generator[Message | StopPropagation, None, None]:
@@ -84,9 +98,7 @@ def _receipt_pre(
         return
 
     tool_name = getattr(data.tool_use, "tool", "unknown") or "unknown"
-    # Use content as the target descriptor (first 512 chars to keep lines reasonable).
-    raw_content = getattr(data.tool_use, "content", "") or ""
-    target = raw_content[:512].strip()
+    target = _target_descriptor(data.tool_use)
 
     session_id = current_session_id.get()
     receipt = _make_receipt(tool_name, target, data.workspace, session_id)
