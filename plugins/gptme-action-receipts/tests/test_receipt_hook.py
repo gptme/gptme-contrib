@@ -35,8 +35,9 @@ class TestMakeReceipt:
         assert r["receipt_hash"].startswith("sha256:")
 
     def test_hash_is_deterministic(self):
-        r1 = _make_receipt("shell", "ls", None, "s1")
-        r2 = _make_receipt("shell", "ls", None, "s1")
+        timestamp = "2026-07-04T18:00:00+00:00"
+        r1 = _make_receipt("shell", "ls", None, "s1", timestamp=timestamp)
+        r2 = _make_receipt("shell", "ls", None, "s1", timestamp=timestamp)
         # Hashes must be identical for the same inputs.
         assert r1["receipt_hash"] == r2["receipt_hash"]
 
@@ -53,6 +54,14 @@ class TestMakeReceipt:
     def test_no_workspace(self):
         r = _make_receipt("save", "file.py", None, "s1")
         assert r["workspace"] is None
+
+    def test_prefers_gptme_model_env(self, monkeypatch):
+        monkeypatch.setenv("GPTME_MODEL", "gptme-model")
+        monkeypatch.setenv("CC_MODEL", "claude-code-model")
+
+        r = _make_receipt("shell", "ls", None, "s1")
+
+        assert r["model"] == "gptme-model"
 
 
 class TestReceiptPreHook:

@@ -1,7 +1,7 @@
 # gptme-action-receipts
 
 Append-only audit ledger for gptme tool actions. Before each tool executes,
-this plugin emits a tamper-evident receipt to `~/.local/share/gptme/receipts.jsonl`.
+this plugin emits a hashed receipt to `~/.local/share/gptme/receipts.jsonl`.
 
 ## Motivation
 
@@ -23,6 +23,11 @@ This plugin provides the audit trail.
   "receipt_hash": "sha256:abc123..."
 }
 ```
+
+The `receipt_hash` is a deterministic SHA-256 digest of the receipt fields. It
+can detect accidental corruption of a receipt line, but it is not an adversarial
+tamper-proofing mechanism: a writer with access to the ledger can modify a line
+and recompute the hash. Harder deletion/rewriting resistance is future work.
 
 ## Usage
 
@@ -46,6 +51,7 @@ register()
 |---|---|---|
 | `GPTME_RECEIPTS_LEDGER` | `~/.local/share/gptme/receipts.jsonl` | Override ledger path |
 | `GPTME_SESSION_ID` | `"unknown"` | Session ID fallback when not in a gptme session |
+| `GPTME_MODEL` | `"unknown"` | Model attribution; falls back to `CC_MODEL` if unset |
 
 ## Ledger inspection
 

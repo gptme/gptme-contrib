@@ -17,12 +17,19 @@ import json
 import logging
 import os
 from collections.abc import Generator
-from datetime import UTC, datetime
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gptme.hooks import HookType, register_hook
-from gptme.hooks.server_confirm import current_session_id
+
+try:
+    from gptme.hooks import current_session_id
+except ImportError:  # pragma: no cover - compatibility fallback for older gptme.
+    current_session_id: ContextVar[str | None] = ContextVar(
+        "current_session_id", default=None
+    )
 
 if TYPE_CHECKING:
     from gptme.hooks import StopPropagation
@@ -50,19 +57,20 @@ def _make_receipt(
     target: str,
     workspace: Path | None,
     session_id: str | None,
+    timestamp: str | None = None,
 ) -> dict:
-    ts = datetime.now(UTC).isoformat(timespec="seconds")
+    ts = timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds")
     payload = {
         "session_id": session_id or os.environ.get("GPTME_SESSION_ID", "unknown"),
         "model": (
-            os.environ.get("CC_MODEL") or os.environ.get("GPTME_MODEL") or "unknown"
+            os.environ.get("GPTME_MODEL") or os.environ.get("CC_MODEL") or "unknown"
         ),
         "action_type": tool_name,
         "target": target,
         "workspace": str(workspace) if workspace else None,
         "timestamp": ts,
     }
-    # Deterministic hash of the receipt content for tamper-evidence.
+    # Deterministic hash of the receipt content for accidental-corruption checks.
     blob = json.dumps(payload, sort_keys=True).encode()
     payload["receipt_hash"] = "sha256:" + hashlib.sha256(blob).hexdigest()
     return payload
