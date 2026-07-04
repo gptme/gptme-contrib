@@ -139,7 +139,7 @@ def main() -> None:
         "--sessions-db",
         type=Path,
         default=None,
-        help="Path to the session index SQLite DB (default: ~/.local/share/bob/session-index.db)",
+        help="Path to the session index SQLite DB (default: ~/.local/share/gptme/session-index.db)",
     )
     args = parser.parse_args()
 
