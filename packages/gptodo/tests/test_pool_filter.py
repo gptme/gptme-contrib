@@ -147,6 +147,14 @@ class TestTaskMatchesPoolFilter:
         t = self._make_task(tmp_path, "anything")
         assert task_matches_pool_filter(t) is True
 
+    def test_pool_all_passes_frontier_task(self, tmp_path: Path) -> None:
+        t = self._make_task(tmp_path, "frontier-x", pool="frontier")
+        assert task_matches_pool_filter(t, pool="all") is True
+
+    def test_pool_all_passes_general_task(self, tmp_path: Path) -> None:
+        t = self._make_task(tmp_path, "general-x")
+        assert task_matches_pool_filter(t, pool="all") is True
+
     def test_pool_frontier_passes_frontier_task(self, tmp_path: Path) -> None:
         t = self._make_task(tmp_path, "frontier-x", pool="frontier")
         assert task_matches_pool_filter(t, pool="frontier") is True
@@ -219,7 +227,8 @@ class TestReadyPoolFilter:
         assert "frontier-design" not in ids
         assert "tag-frontier-task" not in ids
 
-    def test_no_pool_filter_returns_all(self, tmp_path: Path, monkeypatch) -> None:
+    def test_no_pool_filter_returns_general_only(self, tmp_path: Path, monkeypatch) -> None:
+        """Default (no --pool flag) hides non-default pools; only general pool shown."""
         self.setup_tasks(tmp_path)
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
@@ -228,7 +237,21 @@ class TestReadyPoolFilter:
         data = json.loads(result.output)
         ids = [t["id"] for t in data["ready_tasks"]]
         assert "general-work" in ids
+        assert "frontier-design" not in ids
+        assert "tag-frontier-task" not in ids
+
+    def test_pool_all_returns_all(self, tmp_path: Path, monkeypatch) -> None:
+        """--pool all is the escape hatch that shows tasks from every pool."""
+        self.setup_tasks(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["ready", "--json", "--pool", "all"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        ids = [t["id"] for t in data["ready_tasks"]]
+        assert "general-work" in ids
         assert "frontier-design" in ids
+        assert "tag-frontier-task" in ids
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +272,17 @@ class TestNextPoolFilter:
             pool="frontier",
         )
 
+    def test_next_default_returns_general_only(self, tmp_path: Path, monkeypatch) -> None:
+        """Default gptodo next hides frontier tasks; general session can't see frontier work."""
+        self.setup_tasks(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["next", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["next_task"] is not None
+        assert data["next_task"]["id"] == "general-work"
+
     def test_next_pool_frontier_returns_frontier_task(self, tmp_path: Path, monkeypatch) -> None:
         self.setup_tasks(tmp_path)
         monkeypatch.chdir(tmp_path)
@@ -258,6 +292,16 @@ class TestNextPoolFilter:
         data = json.loads(result.output)
         assert data["next_task"] is not None
         assert data["next_task"]["id"] == "frontier-task"
+
+    def test_next_pool_all_returns_highest_priority(self, tmp_path: Path, monkeypatch) -> None:
+        """--pool all shows every pool; general session can opt in to full view."""
+        self.setup_tasks(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["next", "--json", "--pool", "all"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["next_task"] is not None
 
     def test_next_exclude_pool_frontier_returns_general(self, tmp_path: Path, monkeypatch) -> None:
         self.setup_tasks(tmp_path)
@@ -319,6 +363,33 @@ class TestTaskToDictPool:
         result = runner.invoke(cli, ["status", "--pool", "frontier"])
         assert result.exit_code == 2
         assert "--pool/--exclude-pool are only supported with --json" in result.stderr
+
+    def test_status_shows_hidden_pools_discoverability(self, tmp_path: Path, monkeypatch) -> None:
+        """Human-readable status shows 'Other pools: frontier: N' so non-default pools
+        are never silently orphaned when unflagged selection hides them."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(tasks_dir, "general-task", state="backlog", created="2026-01-01T00:00:00")
+        write_task(
+            tasks_dir,
+            "frontier-active",
+            state="active",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
+        write_task(
+            tasks_dir,
+            "frontier-done",
+            state="done",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0
+        assert "Other pools:" in result.output
+        assert "frontier:" in result.output
 
     def test_status_pool_filter_recomputes_summary(self, tmp_path: Path, monkeypatch) -> None:
         tasks_dir = tmp_path / "tasks"

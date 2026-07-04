@@ -532,11 +532,18 @@ def task_matches_pool_filter(
 ) -> bool:
     """Return True if the task passes --pool / --exclude-pool filters.
 
+    Special pool value ``"all"`` disables all filtering (shows every pool).
+    Default (pool=None, exclude_pool=None) passes everything; selection
+    commands default to pool="general" to hide non-default pools.
+
     Args:
         task: Task to evaluate.
-        pool: If given, only tasks in this pool pass.
+        pool: If given, only tasks in this pool pass. Use ``"all"`` to
+              bypass all pool filtering.
         exclude_pool: If given, tasks in this pool are excluded.
     """
+    if pool == "all":
+        return True
     effective = task_pool(task)
     if pool is not None and effective != pool:
         return False

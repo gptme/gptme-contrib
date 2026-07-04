@@ -127,6 +127,7 @@ from gptodo.utils import (
     task_has_waiting_blocker,
     task_is_waiting_for_date,
     task_matches_pool_filter,
+    task_pool,
     load_cache,
     load_tasks,
     normalize_state,
@@ -419,8 +420,8 @@ def effective(task_id: str):
 @click.option(
     "--pool",
     "pool_filter",
-    default=None,
-    help="Only show tasks in this pool (e.g. 'frontier', 'general')",
+    default="general",
+    help="Only show tasks in this pool. Use 'all' to see every pool, 'frontier' for frontier only. Default: 'general' (non-default pools hidden).",
 )
 @click.option(
     "--exclude-pool",
@@ -488,23 +489,22 @@ def list_(sort, active_only, context, output_json, output_jsonl, pool_filter, ex
         if not output_json and not output_jsonl:
             console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
 
-    # Apply pool filter
-    if pool_filter is not None or exclude_pool is not None:
-        tasks = [
-            task
-            for task in tasks
-            if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
-        ]
-        if not tasks:
-            if output_json:
-                print("No tasks found matching pool filter", file=sys.stderr)
-                print(json.dumps({"tasks": [], "count": 0}, indent=2))
-                return
-            if output_jsonl:
-                print("No tasks found matching pool filter", file=sys.stderr)
-                return
-            console.print("[yellow]No tasks found matching pool filter[/]")
+    # Apply pool filter (default: general only; --pool all to see every pool)
+    tasks = [
+        task
+        for task in tasks
+        if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
+    if not tasks:
+        if output_json:
+            print("No tasks found matching pool filter", file=sys.stderr)
+            print(json.dumps({"tasks": [], "count": 0}, indent=2))
             return
+        if output_jsonl:
+            print("No tasks found matching pool filter", file=sys.stderr)
+            return
+        console.print("[yellow]No tasks found matching pool filter[/]")
+        return
 
     # Sort tasks for display based on option
     if sort == "state":
@@ -878,6 +878,26 @@ def check_directory(
 
     # Print summary
     print_summary(console, results, config)
+
+    # Discoverability: show hidden non-default pool counts so they are never silently orphaned.
+    all_tasks_flat = [t for lst in results.values() for t in lst]
+    non_default = [t for t in all_tasks_flat if task_pool(t) != "general"]
+    if non_default:
+        pool_totals: Dict[str, list] = {}
+        for t in non_default:
+            p = task_pool(t)
+            if p not in pool_totals:
+                pool_totals[p] = [0, 0]  # [total, actionable]
+            pool_totals[p][0] += 1
+            if t.state in ("backlog", "active"):
+                pool_totals[p][1] += 1
+        parts = ", ".join(
+            f"{p}: {counts[0]} ({counts[1]} actionable)"
+            for p, counts in sorted(pool_totals.items())
+        )
+        console.print(
+            f"  [dim]Other pools: {parts} (use --pool {next(iter(pool_totals))} to view)[/]"
+        )
 
     return results
 
@@ -2388,8 +2408,8 @@ def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
 @click.option(
     "--pool",
     "pool_filter",
-    default=None,
-    help="Only show tasks in this pool (e.g. 'frontier', 'general')",
+    default="general",
+    help="Only show tasks in this pool. Use 'all' to see every pool, 'frontier' for frontier only. Default: 'general' (non-default pools hidden).",
 )
 @click.option(
     "--exclude-pool",
@@ -2406,7 +2426,8 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     Use --json for machine-readable output in autonomous workflows.
     Use --jsonl for compact one-task-per-line output (better with head -n).
     Use --use-cache to also check URL-based 'requires' against cached issue states.
-    Use --pool/--exclude-pool to filter by work pool (e.g. 'frontier', 'general').
+    Use --pool to filter by work pool; default hides non-default pools (e.g. frontier).
+    Use --pool all to see every pool; --pool frontier for frontier only.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2452,13 +2473,12 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     else:  # both
         filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
 
-    # Apply pool filter
-    if pool_filter is not None or exclude_pool is not None:
-        filtered_tasks = [
-            task
-            for task in filtered_tasks
-            if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
-        ]
+    # Apply pool filter (default: general only; --pool all to see every pool)
+    filtered_tasks = [
+        task
+        for task in filtered_tasks
+        if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
 
     # Filter for ready (unblocked) tasks.
     # ready_for_review tasks: work is done; skip dependency checks, only check waiting_for.
@@ -2580,8 +2600,8 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
 @click.option(
     "--pool",
     "pool_filter",
-    default=None,
-    help="Only consider tasks in this pool (e.g. 'frontier', 'general')",
+    default="general",
+    help="Only consider tasks in this pool. Use 'all' to see every pool, 'frontier' for frontier only. Default: 'general' (non-default pools hidden).",
 )
 @click.option(
     "--exclude-pool",
@@ -2597,7 +2617,8 @@ def next_(output_json, use_cache, pool_filter, exclude_pool):
 
     Use --json for machine-readable output in autonomous workflows.
     Use --use-cache to also check URL-based 'requires' against cached issue states.
-    Use --pool/--exclude-pool to filter by work pool (e.g. 'frontier', 'general').
+    Use --pool to filter by work pool; default hides non-default pools (e.g. frontier).
+    Use --pool all to see every pool; --pool frontier for frontier sessions only.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -2630,13 +2651,12 @@ def next_(output_json, use_cache, pool_filter, exclude_pool):
     # Filter for new or active tasks
     workable_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
 
-    # Apply pool filter
-    if pool_filter is not None or exclude_pool is not None:
-        workable_tasks = [
-            task
-            for task in workable_tasks
-            if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
-        ]
+    # Apply pool filter (default: general only; --pool all to see every pool)
+    workable_tasks = [
+        task
+        for task in workable_tasks
+        if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
 
     if not workable_tasks:
         if output_json:
@@ -4914,8 +4934,8 @@ def spawn_cmd(
 @click.option(
     "--pool",
     "pool_filter",
-    default=None,
-    help="Only process tasks in this pool (e.g. 'frontier', 'general')",
+    default="general",
+    help="Only process tasks in this pool. Use 'all' to see every pool, 'frontier' for frontier only. Default: 'general' (non-default pools hidden).",
 )
 @click.option(
     "--exclude-pool",
@@ -4960,13 +4980,12 @@ def loop_cmd(
     all_tasks_dict: Dict[str, TaskInfo] = {t.name: t for t in all_tasks_list if t.name}
     ready_tasks = [t for t in all_tasks_list if t.name and is_task_ready(t, all_tasks_dict)]
 
-    # Apply pool filter
-    if pool_filter is not None or exclude_pool is not None:
-        ready_tasks = [
-            t
-            for t in ready_tasks
-            if task_matches_pool_filter(t, pool=pool_filter, exclude_pool=exclude_pool)
-        ]
+    # Apply pool filter (default: general only; --pool all to see every pool)
+    ready_tasks = [
+        t
+        for t in ready_tasks
+        if task_matches_pool_filter(t, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
 
     if not ready_tasks:
         console.print("[yellow]No ready tasks found[/]")
