@@ -1038,6 +1038,9 @@ def status(
     type, all, compact, summary, issues, github, github_repo, output_json, pool_filter, exclude_pool
 ):
     """Show status of tasks and other tracked items."""
+    if not output_json and (pool_filter is not None or exclude_pool is not None):
+        raise click.UsageError("--pool/--exclude-pool are only supported with --json")
+
     console = Console()
     repo_root = find_repo_root(Path.cwd())
 

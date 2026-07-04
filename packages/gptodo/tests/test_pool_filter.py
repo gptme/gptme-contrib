@@ -272,10 +272,9 @@ class TestNextPoolFilter:
         runner = CliRunner()
         result = runner.invoke(cli, ["next", "--json", "--pool", "frontier"])
         assert result.exit_code == 0
-        # Click merges stderr into output; strip the stderr message before parsing JSON
-        json_text = result.output.split("\nNo new or active tasks found", 1)[0]
-        data = json.loads(json_text)
+        data = json.loads(result.stdout)
         assert data["next_task"] is None
+        assert "No new or active tasks found" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +302,16 @@ class TestTaskToDictPool:
         tasks_by_id = {t["id"]: t for t in data["tasks"]}
         assert tasks_by_id["frontier-task"]["pool"] == "frontier"
         assert tasks_by_id["general-task"]["pool"] == "general"
+
+    def test_status_pool_filter_requires_json(self, tmp_path: Path, monkeypatch) -> None:
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(tasks_dir, "frontier-task", state="backlog", created="2026-01-01T00:00:00")
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", "--pool", "frontier"])
+        assert result.exit_code == 2
+        assert "--pool/--exclude-pool are only supported with --json" in result.stderr
 
 
 # ---------------------------------------------------------------------------
