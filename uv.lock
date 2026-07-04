@@ -1340,12 +1340,14 @@ version = "0.1.0"
 source = { editable = "plugins/gptme-action-receipts" }
 dependencies = [
     { name = "gptme" },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
 test = [
     { name = "pytest" },
     { name = "pytest-mock" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -1353,6 +1355,8 @@ requires-dist = [
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
     { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0" },
 ]
 provides-extras = ["test"]
 

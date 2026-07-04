@@ -6,8 +6,10 @@ context to answer "who authorized this action, when, and in what scope" —
 the minimal audit trail that would have surfaced the gptme-contrib#1175
 unauthorized self-merge incident at response time.
 
-Phase 1 (this module): ledger + receipt emission only — no blocking gate.
-Phase 2 (future): wire a scope-check that aborts out-of-scope actions.
+Phase 1 (this module): ledger + receipt emission.
+Phase 2 (this module): scope-check gate — aborts out-of-scope actions when
+    violation_action is 'block', or emits a warning when 'warn' (default).
+    Configure via ``~/.config/gptme/scope.yaml`` or GPTME_SCOPE_MANIFEST.
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ if TYPE_CHECKING:
     from gptme.hooks import StopPropagation
     from gptme.hooks.types import ToolExecutePreData
     from gptme.message import Message
+
+from .scope_gate import check_scope, violation_action
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +116,20 @@ def _receipt_pre(
     except OSError as exc:
         # Never crash the agent over an audit write failure — log and move on.
         logger.warning("action-receipts: failed to write receipt: %s", exc)
+
+    # Phase 2: scope-check gate.
+    violation = check_scope(tool_name, target, data.workspace)
+    if violation:
+        action = violation_action()
+        if action == "block":
+            from gptme.hooks import StopPropagation  # noqa: PLC0415
+
+            yield StopPropagation(f"[scope-gate] BLOCKED: {violation}")
+            return
+        else:
+            logger.warning(
+                "action-receipts: SCOPE VIOLATION (warn only): %s", violation
+            )
 
     return
     yield  # make this a generator

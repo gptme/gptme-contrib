@@ -1,0 +1,31 @@
+# gptme-action-receipts scope manifest — example/template
+# Copy to ~/.config/gptme/scope.yaml and customize for your workspace.
+#
+# violation_action: 'warn'  — log a warning but allow the action (default, safe for soak)
+#                   'block' — abort the action and show an error to the agent
+#
+# Scope lists use fnmatch glob patterns:
+#   ErikBjare/*   matches any repo under ErikBjare
+#   ErikBjare/bob matches only that exact repo
+#
+# Incident motivator: gptme-contrib#1175 (unauthorized self-merge, 2026-06-30).
+# That command — "gh pr merge 1175 --squash --repo gptme/gptme-contrib" — would have
+# hit the merge_repos gate (gptme/gptme-contrib absent from the list) and been blocked.
+
+version: 1
+violation_action: warn   # flip to 'block' after 7-day soak with no false positives
+
+scopes:
+  # Repos where 'gh pr merge' is authorized.
+  merge_repos:
+    - ErikBjare/bob        # brain repo — autonomous self-merges are explicitly allowed
+
+  # Repos where 'git push --force' is authorized.
+  force_push_repos:
+    - ErikBjare/bob        # worktree branches in own repo
+
+  # Repos where 'gh repo delete' is authorized (leave empty to deny all).
+  repo_delete: []
+
+  # Repos where 'gh release delete' is authorized.
+  release_delete: []
