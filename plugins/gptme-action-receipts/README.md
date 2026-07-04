@@ -24,6 +24,8 @@ This plugin provides the audit trail.
 }
 ```
 
+The `target` field contains the first 512 characters of the tool's content (e.g., shell command for shell tools, file content for write operations, etc.). Truncation keeps ledger lines compact.
+
 The `receipt_hash` is a deterministic SHA-256 digest of the receipt fields. It
 can detect accidental corruption of a receipt line, but it is not an adversarial
 tamper-proofing mechanism: a writer with access to the ledger can modify a line
