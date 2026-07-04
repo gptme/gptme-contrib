@@ -170,3 +170,40 @@ def test_path_matching(indexer):
         paths=[Path("/home/user/project/docs")],
         path_filters=("*.py",),
     )
+
+
+def test_add_document_failure_does_not_wipe_collection(indexer, test_docs, monkeypatch):
+    """A failed add must raise, not destroy the existing index (data-loss regression)."""
+    indexer.add_document(test_docs[0])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated add failure")
+
+    monkeypatch.setattr(indexer.collection, "add", boom)
+    with pytest.raises(RuntimeError, match="simulated add failure"):
+        indexer.add_document(test_docs[1])
+
+    got = indexer.collection.get(ids=[test_docs[0].doc_id])
+    assert len(got["ids"]) == 1, "existing documents must survive a failed add"
+
+
+def test_delete_documents_failure_does_not_wipe_collection(indexer, test_docs, monkeypatch):
+    """A failed delete must raise, not escalate into deleting the whole collection."""
+    indexer.add_documents(test_docs)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated delete failure")
+
+    monkeypatch.setattr(indexer.collection, "delete", boom)
+    with pytest.raises(RuntimeError, match="simulated delete failure"):
+        indexer.delete_documents({"category": "ml"})
+
+    got = indexer.collection.get()
+    assert len(got["ids"]) == len(test_docs), "documents must survive a failed delete"
+
+
+def test_reset_collection_preserves_embedding_metadata(indexer):
+    """reset_collection must recreate with the same embedding model metadata."""
+    indexer.reset_collection()
+    metadata = indexer.collection.metadata or {}
+    assert metadata.get("embedding_model") == indexer.embedding_model_name

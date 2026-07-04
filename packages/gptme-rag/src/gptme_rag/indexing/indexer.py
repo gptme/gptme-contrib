@@ -246,7 +246,12 @@ class Indexer:
         except (ValueError, NotFoundError):
             pass
         self.collection = self.client.create_collection(
-            name=self.collection_name, metadata={"hnsw:space": "cosine"}
+            name=self.collection_name,
+            metadata={
+                "hnsw:space": "cosine",
+                "embedding_model": self.embedding_model_name,
+            },
+            embedding_function=self.embedding_function,
         )
         logger.debug(f"Reset collection: {self.collection_name}")
 
@@ -263,14 +268,11 @@ class Indexer:
             )
             logger.debug(f"Added document with ID: {document.doc_id}")
         except Exception as e:
+            # Never reset the collection here: wiping the entire persistent
+            # index because one document failed to add is catastrophic data
+            # loss. Surface the error to the caller instead.
             logger.error(f"Error adding document: {e}", exc_info=True)
-            # Reset collection and retry
-            self.reset_collection()
-            self.collection.add(
-                documents=[document.content],
-                metadatas=[document.metadata],
-                ids=[document.doc_id],
-            )
+            raise
 
     def delete_documents(self, where: dict) -> None:
         """Delete documents matching the where clause."""
@@ -278,9 +280,10 @@ class Indexer:
             self.collection.delete(where=where)
             logger.debug(f"Deleted documents matching: {where}")
         except Exception as e:
+            # A failed delete must not escalate into deleting the whole
+            # collection. Surface the error to the caller instead.
             logger.error(f"Error deleting documents: {e}", exc_info=True)
-            # Reset collection if needed
-            self.reset_collection()
+            raise
 
     def add_documents(self, documents: list[Document], batch_size: int = 10) -> None:
         """Add multiple documents to the index.
