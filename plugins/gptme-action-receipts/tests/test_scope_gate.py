@@ -9,9 +9,12 @@ from unittest.mock import patch
 import pytest
 import yaml
 from gptme_action_receipts.hooks.scope_gate import (
+    _extract_git_push_remote,
     _is_authorized,
+    _load_scope_config,
     _parse_repo_from_url,
     check_scope,
+    check_scope_decision,
 )
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +167,44 @@ class TestCheckScopeUnauthorized:
         assert violation is not None
         assert "gptme-contrib" in violation
 
+    @pytest.mark.parametrize(
+        ("command", "expected_remote"),
+        [
+            ("git push -f origin HEAD", "origin"),
+            ("git push origin HEAD -f", "origin"),
+            ("git push --force origin HEAD", "origin"),
+            ("git push --force-with-lease origin HEAD", "origin"),
+        ],
+    )
+    def test_force_push_flag_variants_flagged(
+        self,
+        command: str,
+        expected_remote: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        path = tmp_path / "scope.yaml"
+        path.write_text(yaml.dump({"scopes": {"force_push_repos": []}}))
+        monkeypatch.setenv("GPTME_SCOPE_MANIFEST", str(path))
+        fake_url = "https://github.com/gptme/gptme-contrib.git"
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=fake_url, stderr=""
+            )
+            violation = check_scope("shell", command, tmp_path)
+
+        assert violation is not None
+        assert "gptme-contrib" in violation
+        assert mock_run.call_args.args[0] == [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "get-url",
+            expected_remote,
+        ]
+
     def test_repo_delete_flagged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         path = tmp_path / "scope.yaml"
         path.write_text(yaml.dump({"scopes": {"repo_delete": []}}))
@@ -238,6 +279,39 @@ class TestCheckScopeResilience:
         )
         assert violation is not None  # defaults deny
 
+    def test_default_config_scopes_are_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("GPTME_SCOPE_MANIFEST", str(tmp_path / "nonexistent.yaml"))
+
+        cfg = _load_scope_config()
+        cfg["scopes"]["merge_repos"].append("mutated/repo")
+
+        assert _load_scope_config()["scopes"]["merge_repos"] == []
+
+    def test_scope_decision_reuses_detection_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        path = tmp_path / "scope.yaml"
+        path.write_text(
+            yaml.dump(
+                {
+                    "violation_action": "block",
+                    "scopes": {"merge_repos": ["ErikBjare/bob"]},
+                }
+            )
+        )
+        monkeypatch.setenv("GPTME_SCOPE_MANIFEST", str(path))
+
+        decision = check_scope_decision(
+            "shell",
+            "gh pr merge 1175 --squash --repo gptme/gptme-contrib",
+            None,
+        )
+
+        assert decision.violation is not None
+        assert decision.action == "block"
+
     def test_subprocess_error_during_extraction_no_crash(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -250,3 +324,18 @@ class TestCheckScopeResilience:
             result = check_scope("shell", "gh pr merge 42 --squash", tmp_path)
         # No --repo + subprocess failure → repo extraction fails → no violation
         assert result is None
+
+
+class TestExtractGitPushRemote:
+    @pytest.mark.parametrize(
+        ("command", "remote"),
+        [
+            ("git push origin HEAD --force", "origin"),
+            ("git push --force origin HEAD", "origin"),
+            ("git push -f origin HEAD", "origin"),
+            ("git push --force-with-lease=main origin HEAD", "origin"),
+            ("git push -o ci.skip origin HEAD -f", "origin"),
+        ],
+    )
+    def test_skips_flags_before_remote(self, command: str, remote: str):
+        assert _extract_git_push_remote(command) == remote

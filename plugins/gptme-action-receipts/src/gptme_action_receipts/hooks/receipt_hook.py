@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from gptme.hooks.types import ToolExecutePreData
     from gptme.message import Message
 
-from .scope_gate import check_scope, violation_action
+from .scope_gate import check_scope_decision
 
 logger = logging.getLogger(__name__)
 
@@ -118,17 +118,17 @@ def _receipt_pre(
         logger.warning("action-receipts: failed to write receipt: %s", exc)
 
     # Phase 2: scope-check gate.
-    violation = check_scope(tool_name, target, data.workspace)
-    if violation:
-        action = violation_action()
-        if action == "block":
+    decision = check_scope_decision(tool_name, target, data.workspace)
+    if decision.violation:
+        if decision.action == "block":
             from gptme.hooks import StopPropagation  # noqa: PLC0415
 
-            yield StopPropagation(f"[scope-gate] BLOCKED: {violation}")
+            yield StopPropagation(f"[scope-gate] BLOCKED: {decision.violation}")
             return
         else:
             logger.warning(
-                "action-receipts: SCOPE VIOLATION (warn only): %s", violation
+                "action-receipts: SCOPE VIOLATION (warn only): %s",
+                decision.violation,
             )
 
     return

@@ -10,10 +10,13 @@ error falls back to warn-mode with no crash.
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import logging
 import re
+import shlex
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -62,9 +65,14 @@ def _extract_gh_repo(command: str, workspace: Path | None) -> str | None:
 
 def _extract_git_push_repo(command: str, workspace: Path | None) -> str | None:
     """Extract owner/repo for a git push command via remote URL resolution."""
-    # Try to find the remote name in the command (git push <remote> ...).
-    m = re.search(r"git\s+push\s+([A-Za-z0-9_\-]+)", command)
-    remote = m.group(1) if m else "origin"
+    remote = _extract_git_push_remote(command)
+    if remote is None:
+        remote = "origin"
+
+    repo = _parse_repo_from_url(remote)
+    if repo is not None:
+        return repo
+
     if workspace:
         try:
             result = subprocess.run(
@@ -80,6 +88,47 @@ def _extract_git_push_repo(command: str, workspace: Path | None) -> str | None:
     return None
 
 
+def _extract_git_push_remote(command: str) -> str | None:
+    """Return the git push remote argument, ignoring flags before the remote."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+
+    try:
+        push_index = next(
+            i
+            for i in range(len(parts) - 1)
+            if parts[i] == "git" and parts[i + 1] == "push"
+        )
+    except StopIteration:
+        return None
+
+    tokens = parts[push_index + 2 :]
+    skip_next = False
+    options_with_values = {
+        "--receive-pack",
+        "--exec",
+        "--push-option",
+        "--repo",
+        "-o",
+    }
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--":
+            continue
+        if token.startswith("-"):
+            opt = token.split("=", 1)[0]
+            if opt in options_with_values and "=" not in token:
+                skip_next = True
+            continue
+        return token
+
+    return None
+
+
 def _parse_repo_from_url(url: str) -> str | None:
     """Convert git remote URL to 'owner/repo' string."""
     # SSH: git@github.com:owner/repo.git
@@ -90,7 +139,11 @@ def _parse_repo_from_url(url: str) -> str | None:
 # Each entry: (pattern_re, scope_key, extractor_fn)
 _SCOPE_CHECKS: list[tuple[str, str, Any]] = [
     (r"gh\s+pr\s+merge\b", "merge_repos", _extract_gh_repo),
-    (r"git\s+push(?:\s+\S+)?\s+.*--force", "force_push_repos", _extract_git_push_repo),
+    (
+        r"git\s+push\b(?=.*(?:--force(?:-[A-Za-z]+)*(?:[=\s]|$)|-[A-Za-z]*f[A-Za-z]*(?:\s|$)))",
+        "force_push_repos",
+        _extract_git_push_repo,
+    ),
     (r"gh\s+repo\s+delete\b", "repo_delete", _extract_gh_repo),
     (r"gh\s+release\s+delete\b", "release_delete", _extract_gh_repo),
 ]
@@ -112,6 +165,14 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+@dataclass(frozen=True)
+class ScopeDecision:
+    """Scope-check result plus the action read from the same config."""
+
+    violation: str | None
+    action: str
+
+
 def _scope_manifest_path() -> Path | None:
     """Return the scope manifest path to use, or None if scope-checking is disabled."""
     import os
@@ -129,7 +190,7 @@ def _load_scope_config() -> dict[str, Any]:
     """Load scope manifest, falling back to conservative defaults on any error."""
     path = _scope_manifest_path()
     if path is None:
-        return _DEFAULT_CONFIG.copy()
+        return copy.deepcopy(_DEFAULT_CONFIG)
     try:
         import yaml  # type: ignore[import-untyped]
 
@@ -148,7 +209,7 @@ def _load_scope_config() -> dict[str, Any]:
             path,
             exc,
         )
-        return _DEFAULT_CONFIG.copy()
+        return copy.deepcopy(_DEFAULT_CONFIG)
 
 
 # --------------------------------------------------------------------------- #
@@ -167,23 +228,39 @@ def check_scope(
     Never raises — all errors are logged and fall back to 'no violation'.
     """
     try:
-        return _check_scope_inner(tool_name, target, workspace)
+        cfg = _load_scope_config()
+        return _check_scope_inner(tool_name, target, workspace, cfg)
     except Exception as exc:
         logger.warning("action-receipts scope-gate: unexpected error: %s", exc)
         return None
+
+
+def check_scope_decision(
+    tool_name: str,
+    target: str,
+    workspace: Path | None,
+) -> ScopeDecision:
+    """Check scope and return the violation action from the same config read."""
+    try:
+        cfg = _load_scope_config()
+        violation = _check_scope_inner(tool_name, target, workspace, cfg)
+        return ScopeDecision(violation=violation, action=violation_action(cfg))
+    except Exception as exc:
+        logger.warning("action-receipts scope-gate: unexpected error: %s", exc)
+        return ScopeDecision(violation=None, action="warn")
 
 
 def _check_scope_inner(
     tool_name: str,
     target: str,
     workspace: Path | None,
+    cfg: dict[str, Any],
 ) -> str | None:
     """Inner scope check — may raise; callers should wrap in try/except."""
     # Only inspect shell/bash tool calls.
     if tool_name not in ("shell", "bash", "execute"):
         return None
 
-    cfg = _load_scope_config()
     scopes: dict[str, list[str]] = cfg.get("scopes", {})
 
     for pattern, scope_key, extractor in _SCOPE_CHECKS:
