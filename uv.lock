@@ -15,6 +15,7 @@ members = [
     "credential-slots",
     "gptmail",
     "gptme-ace",
+    "gptme-action-receipts",
     "gptme-activity-summary",
     "gptme-attention-tracker",
     "gptme-cc-memory",
@@ -1332,6 +1333,28 @@ requires-dist = [
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.2.0" },
 ]
 provides-extras = ["embeddings", "full", "dev"]
+
+[[package]]
+name = "gptme-action-receipts"
+version = "0.1.0"
+source = { editable = "plugins/gptme-action-receipts" }
+dependencies = [
+    { name = "gptme" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-mock" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
+    { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
+]
+provides-extras = ["test"]
 
 [[package]]
 name = "gptme-activity-summary"
