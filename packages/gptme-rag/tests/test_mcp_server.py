@@ -55,9 +55,7 @@ def test_cli_mcp_command_registered():
     """The `gptme-rag mcp` subcommand should be discoverable via Click."""
     from gptme_rag.cli import cli
 
-    assert (
-        "mcp" in cli.commands
-    ), f"Expected 'mcp' command in CLI; got {sorted(cli.commands)}"
+    assert "mcp" in cli.commands, f"Expected 'mcp' command in CLI; got {sorted(cli.commands)}"
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +77,7 @@ def _seed_docs(docs_dir):
     """Write two small docs designed to make a 'gptme assistant' query rank
     one above the other, so we can validate ordering deterministically."""
     docs_dir.mkdir(parents=True, exist_ok=True)
-    (docs_dir / "hello.md").write_text(
-        "# Hello\n\nThe quick brown fox jumps over the lazy dog.\n"
-    )
+    (docs_dir / "hello.md").write_text("# Hello\n\nThe quick brown fox jumps over the lazy dog.\n")
     (docs_dir / "gptme.md").write_text(
         "# gptme\n\ngptme is a personal AI assistant for the terminal.\n"
     )
@@ -165,9 +161,7 @@ def test_query_returns_ranked_results(tmp_path):
     result = _call_tool(server, "rag_query", {"query": "gptme assistant", "top_k": 2})
 
     # FastMCP returns structured output as {"result": [...]} for list returns.
-    hits = (
-        result["result"] if isinstance(result, dict) and "result" in result else result
-    )
+    hits = result["result"] if isinstance(result, dict) and "result" in result else result
     assert isinstance(hits, list)
     assert len(hits) == 2
 
@@ -206,14 +200,10 @@ def test_query_top_k_clamped(tmp_path):
 
     # top_k=0 → clamped to 1, returns exactly 1 hit (2 docs indexed, clamp is the binding constraint)
     result = _call_tool(server, "rag_query", {"query": "gptme", "top_k": 0})
-    hits = (
-        result["result"] if isinstance(result, dict) and "result" in result else result
-    )
+    hits = result["result"] if isinstance(result, dict) and "result" in result else result
     assert len(hits) == 1
 
     # top_k=999 → clamped to 50, but we only have 2 docs so just verify no error
     result = _call_tool(server, "rag_query", {"query": "gptme", "top_k": 999})
-    hits = (
-        result["result"] if isinstance(result, dict) and "result" in result else result
-    )
+    hits = result["result"] if isinstance(result, dict) and "result" in result else result
     assert len(hits) <= 2  # only have 2 docs in the test corpus

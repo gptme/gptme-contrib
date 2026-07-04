@@ -105,9 +105,7 @@ class SearchOutputFormatter:
         """Print content with optional syntax highlighting."""
         lexer = doc.metadata.get("extension", "").lstrip(".") or "text"
         self.console.print(
-            content
-            if self.raw
-            else Syntax(content, lexer, theme="monokai", word_wrap=True)
+            content if self.raw else Syntax(content, lexer, theme="monokai", word_wrap=True)
         )
 
     def print_score(self, relevance: float):
@@ -152,9 +150,7 @@ def cli(verbose: bool):
 
 @cli.command()
 @click.argument("paths", nargs=-1, type=click.Path(exists=True, path_type=Path))
-@click.option(
-    "--pattern", "-p", default="**/*.*", help="Glob pattern for files to index"
-)
+@click.option("--pattern", "-p", default="**/*.*", help="Glob pattern for files to index")
 @click.option(
     "--persist-dir",
     type=click.Path(path_type=Path),
@@ -235,13 +231,9 @@ def index(
                 if last_modified:
                     try:
                         # Parse ISO format timestamp to float
-                        existing_files[abs_path] = datetime.fromisoformat(
-                            last_modified
-                        ).timestamp()
+                        existing_files[abs_path] = datetime.fromisoformat(last_modified).timestamp()
                     except ValueError:
-                        logger.warning(
-                            "Invalid last_modified format: %s", last_modified
-                        )
+                        logger.warning("Invalid last_modified format: %s", last_modified)
                         existing_files[abs_path] = 0
                 else:
                     existing_files[abs_path] = 0
@@ -275,9 +267,7 @@ def index(
                             logger.debug("New file: %s", abs_source)
                             filtered_documents.append(doc)
                         # Round to microseconds (6 decimal places) for comparison
-                        elif round(current_mtime, 6) > round(
-                            existing_files[abs_source], 6
-                        ):
+                        elif round(current_mtime, 6) > round(existing_files[abs_source], 6):
                             logger.debug(
                                 "Modified file: %s (current: %s, stored: %s)",
                                 abs_source,
@@ -528,9 +518,7 @@ def search(
             )
         results = []
         for i, doc in enumerate(documents):
-            relevance = (
-                max(0.0, min(1.0, float(1 - distances[i]))) if distances else None
-            )
+            relevance = max(0.0, min(1.0, float(1 - distances[i]))) if distances else None
             content = get_expanded_content(doc, expand, indexer)
             result: dict = {
                 "source": doc.metadata.get("source", "unknown"),
@@ -552,9 +540,7 @@ def search(
         # results_in_context: how many of the returned results fit in the assembled
         # context window. When expand=="none" and truncated, this is less than
         # total_results; when expanding, all results are returned.
-        results_in_context = (
-            len(context.documents) if expand == "none" else len(results)
-        )
+        results_in_context = len(context.documents) if expand == "none" else len(results)
         # truncated: indicates some results were excluded from the context.
         # Covers both token-limit truncation (context.truncated) and content
         # deduplication by assemble_context (which silently drops duplicates
@@ -648,12 +634,8 @@ def search(
 
 
 @cli.command()
-@click.argument(
-    "directory", type=click.Path(exists=True, file_okay=False, path_type=Path)
-)
-@click.option(
-    "--pattern", "-p", default="**/*.*", help="Glob pattern for files to index"
-)
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--pattern", "-p", default="**/*.*", help="Glob pattern for files to index")
 @click.option(
     "--persist-dir",
     type=click.Path(path_type=Path),
@@ -705,9 +687,7 @@ def watch(
         indexer = Indexer(
             persist_directory=persist_dir,
             enable_persist=True,
-            embedding_function=(
-                "modernbert" if embedding_function is None else embedding_function
-            ),
+            embedding_function=("modernbert" if embedding_function is None else embedding_function),
             device=device or "cpu",
             chunk_size=chunk_size,  # Now optional in Indexer
             chunk_overlap=chunk_overlap,  # Now optional in Indexer
@@ -722,9 +702,7 @@ def watch(
 
         try:
             # TODO: FileWatcher should use same gitignore patterns as indexer
-            file_watcher = FileWatcher(
-                indexer, [str(directory)], pattern, ignore_patterns
-            )
+            file_watcher = FileWatcher(indexer, [str(directory)], pattern, ignore_patterns)
             with file_watcher:
                 console.print("Watching for changes. Press Ctrl+C to stop.")
                 # Keep the main thread alive
@@ -762,9 +740,7 @@ def clean(persist_dir: Path, force: bool):
             return
 
         if not force:
-            if not click.confirm(
-                f"Are you sure you want to delete the index at {persist_dir}?"
-            ):
+            if not click.confirm(f"Are you sure you want to delete the index at {persist_dir}?"):
                 console.print("Operation cancelled", style="yellow")
                 return
 
@@ -781,9 +757,7 @@ def status():
     """Show the status of the index."""
     try:
         with console.status("Getting index status..."):
-            indexer = Indexer(
-                persist_directory=default_persist_dir, enable_persist=True
-            )
+            indexer = Indexer(persist_directory=default_persist_dir, enable_persist=True)
             status = indexer.get_status()
 
         # Print basic information
@@ -791,9 +765,7 @@ def status():
         console.print(f"Collection: [cyan]{status['collection_name']}[/cyan]")
         console.print(f"Storage Type: [cyan]{status['storage_type']}[/cyan]")
         if "persist_directory" in status:
-            console.print(
-                f"Persist Directory: [cyan]{status['persist_directory']}[/cyan]"
-            )
+            console.print(f"Persist Directory: [cyan]{status['persist_directory']}[/cyan]")
 
         # Print document statistics
         console.print("\n[bold]Document Statistics[/bold]")
@@ -807,23 +779,15 @@ def status():
                 status["source_stats"].items(), key=lambda x: x[1], reverse=True
             ):
                 ext_display = ext if ext else "no extension"
-                percentage = (
-                    (count / status["chunk_count"]) * 100
-                    if status["chunk_count"]
-                    else 0
-                )
+                percentage = (count / status["chunk_count"]) * 100 if status["chunk_count"] else 0
                 console.print(
                     f"  {ext_display:12} [yellow]{count:4}[/yellow] chunks ([yellow]{percentage:4.1f}%[/yellow])"
                 )
 
         # Print configuration
         console.print("\n[bold]Configuration[/bold]")
-        console.print(
-            f"Chunk Size: [blue]{status['config']['chunk_size']:,}[/blue] tokens"
-        )
-        console.print(
-            f"Chunk Overlap: [blue]{status['config']['chunk_overlap']:,}[/blue] tokens"
-        )
+        console.print(f"Chunk Size: [blue]{status['config']['chunk_size']:,}[/blue] tokens")
+        console.print(f"Chunk Overlap: [blue]{status['config']['chunk_overlap']:,}[/blue] tokens")
         if "embedding_model" in status["config"]:
             model_name = status["config"]["embedding_model"]
             if model_name == "ModernBERT":
@@ -868,12 +832,8 @@ def benchmark():
 
 
 @benchmark.command()
-@click.argument(
-    "directory", type=click.Path(exists=True, file_okay=False, path_type=Path)
-)
-@click.option(
-    "--pattern", "-p", default="**/*.*", help="Glob pattern for files to benchmark"
-)
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--pattern", "-p", default="**/*.*", help="Glob pattern for files to benchmark")
 @click.option(
     "--persist-dir",
     type=click.Path(path_type=Path),
@@ -892,9 +852,7 @@ def indexing(directory: Path, pattern: str, persist_dir: Path | None):
 
 
 @benchmark.command()
-@click.argument(
-    "directory", type=click.Path(exists=True, file_okay=False, path_type=Path)
-)
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
     "--queries",
     "-q",
@@ -936,9 +894,7 @@ def search_benchmark(
 
 
 @benchmark.command()
-@click.argument(
-    "directory", type=click.Path(exists=True, file_okay=False, path_type=Path)
-)
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
     "--duration",
     "-d",

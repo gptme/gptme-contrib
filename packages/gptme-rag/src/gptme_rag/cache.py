@@ -292,10 +292,7 @@ class SmartRAGCache:
             self.stats["total_size_bytes"] += entry.size_bytes()
 
             # Evict old entries if over memory limit
-            while (
-                self.stats["total_size_bytes"] > self.max_memory_bytes
-                and len(self.cache) > 1
-            ):
+            while self.stats["total_size_bytes"] > self.max_memory_bytes and len(self.cache) > 1:
                 # Remove least recently used (FIFO from OrderedDict)
                 old_key, old_entry = self.cache.popitem(last=False)
                 self.stats["total_size_bytes"] -= old_entry.size_bytes()
@@ -316,9 +313,7 @@ class SmartRAGCache:
         """
         with self.lock:
             total_requests = self.stats["hits"] + self.stats["misses"]
-            hit_rate = (
-                self.stats["hits"] / total_requests if total_requests > 0 else 0.0
-            )
+            hit_rate = self.stats["hits"] / total_requests if total_requests > 0 else 0.0
 
             return {
                 **self.stats,

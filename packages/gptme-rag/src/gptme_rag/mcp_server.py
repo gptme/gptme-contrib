@@ -29,8 +29,7 @@ def _format_results(
             content = content[:max_chars_per_doc] + "...[truncated]"
         out.append(
             {
-                "score": 1.0
-                - float(score),  # convert distance → similarity (higher = better)
+                "score": 1.0 - float(score),  # convert distance → similarity (higher = better)
                 "source": str(doc.metadata.get("source", "")) if doc.metadata else "",
                 "content": content,
                 "metadata": dict(doc.metadata) if doc.metadata else {},
@@ -65,9 +64,7 @@ def build_server(persist_dir: Path | None = None) -> Any:
         target = target.expanduser().resolve()
         target.mkdir(parents=True, exist_ok=True)
         if target not in _indexer_cache:
-            _indexer_cache[target] = Indexer(
-                persist_directory=target, enable_persist=True
-            )
+            _indexer_cache[target] = Indexer(persist_directory=target, enable_persist=True)
         return _indexer_cache[target]
 
     @server.tool()

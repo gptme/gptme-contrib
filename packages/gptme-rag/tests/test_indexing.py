@@ -109,8 +109,7 @@ def test_indexer_directory(indexer, tmp_path):
     )
     assert len(py_results) > 0
     assert all(
-        Path(doc.metadata["source"]).parent.name == "src"
-        and doc.metadata["source"].endswith(".py")
+        Path(doc.metadata["source"]).parent.name == "src" and doc.metadata["source"].endswith(".py")
         for doc in py_results
     )
 

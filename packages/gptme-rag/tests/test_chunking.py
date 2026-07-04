@@ -68,9 +68,7 @@ def test_chunk_grouping(test_file, indexer):
 
     # Search with and without grouping
     grouped_docs, _, _ = indexer.search("Lorem ipsum", n_results=3, group_chunks=True)
-    ungrouped_docs, _, _ = indexer.search(
-        "Lorem ipsum", n_results=3, group_chunks=False
-    )
+    ungrouped_docs, _, _ = indexer.search("Lorem ipsum", n_results=3, group_chunks=False)
 
     # Grouped results should have unique source documents
     grouped_sources = set(
