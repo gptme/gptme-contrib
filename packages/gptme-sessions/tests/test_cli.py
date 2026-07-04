@@ -265,9 +265,10 @@ class TestStatsCommand:
         assert data["total"] == 2
 
     def test_stats_empty_store(self, tmp_path: Path):
-        """stats on empty store shows discovery fallback."""
+        """stats on empty store shows discovery fallback (no real sessions found)."""
         SessionStore(sessions_dir=tmp_path)
-        rc, out = _invoke(["stats"], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke(["stats"], tmp_path)
         assert rc == 0
         assert "discover" in out.lower() or "sync" in out.lower() or "session" in out.lower()
 
@@ -295,7 +296,8 @@ class TestStatsCommand:
     def test_stats_no_matches_with_filter(self, tmp_path: Path):
         """stats with filter that matches nothing shows appropriate message."""
         _seed_store(tmp_path)
-        rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke(["stats", "--model", "nonexistent"], tmp_path)
         assert rc == 0
         assert "no records" in out.lower()
 
@@ -649,7 +651,8 @@ class TestTopLevelCli:
     def test_no_subcommand_shows_stats(self, tmp_path: Path):
         """Invoking without subcommand shows stats (format_stats → sys.stdout)."""
         _seed_store(tmp_path)
-        rc, out = _invoke([], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke([], tmp_path)
         assert rc == 0
         # format_stats writes to sys.stdout (not captured by CliRunner)
         # but the tip line IS captured via click.echo
@@ -658,7 +661,8 @@ class TestTopLevelCli:
     def test_no_subcommand_empty_store(self, tmp_path: Path):
         """Empty store without subcommand shows discovery message."""
         SessionStore(sessions_dir=tmp_path)
-        rc, out = _invoke([], tmp_path)
+        with _NO_DISCOVER:
+            rc, out = _invoke([], tmp_path)
         assert rc == 0
         assert "discover" in out.lower() or "sync" in out.lower() or "session" in out.lower()
 
@@ -720,6 +724,8 @@ class TestClassifyStatsCommand:
 class TestSyncTimestamp:
     def test_sync_uses_session_date_not_now(self, tmp_path: Path):
         """sync should use session date from discovery, not datetime.now()."""
+        from datetime import date
+
         # Create a gptme session directory with a known date
         logs_dir = tmp_path / "logs"
         session_dir = logs_dir / "2026-03-10-test-session"
@@ -728,17 +734,30 @@ class TestSyncTimestamp:
 
         store_dir = tmp_path / "store"
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "--sessions-dir",
-                str(store_dir),
-                "sync",
-                "--since",
-                "30d",
-            ],
-            env={"GPTME_LOGS_DIR": str(logs_dir)},
-        )
+
+        # Mock _discover_all to return this test session instead of scanning filesystem
+        mock_discovered = [
+            {
+                "harness": "gptme",
+                "path": session_dir,
+                "model": None,
+                "session_date": date(2026, 3, 10),
+                "session_name": "test-session",
+                "project": None,
+            }
+        ]
+        with patch("gptme_sessions.cli._discover_all", return_value=mock_discovered):
+            result = runner.invoke(
+                cli,
+                [
+                    "--sessions-dir",
+                    str(store_dir),
+                    "sync",
+                    "--since",
+                    "30d",
+                ],
+                env={"GPTME_LOGS_DIR": str(logs_dir)},
+            )
         assert result.exit_code == 0
 
         # Load the store and check the timestamp
@@ -746,9 +765,9 @@ class TestSyncTimestamp:
         records = store.load_all()
         # Should have imported one record
         gptme_records = [r for r in records if r.harness == "gptme"]
-        if gptme_records:
-            # The timestamp should start with the session date, not today
-            assert gptme_records[0].timestamp.startswith("2026-03-10")
+        assert len(gptme_records) == 1
+        # The timestamp should start with the session date, not today
+        assert gptme_records[0].timestamp.startswith("2026-03-10")
 
     def test_sync_imports_real_start_time_from_trajectory(self, tmp_path: Path):
         """sync should record the real start time, not a noon-UTC placeholder.
