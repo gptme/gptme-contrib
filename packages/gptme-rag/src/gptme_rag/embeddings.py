@@ -3,9 +3,7 @@ from sentence_transformers import SentenceTransformer
 
 
 class ModernBERTEmbedding(EmbeddingFunction):
-    def __init__(
-        self, model_name: str = "joe32140/ModernBERT-base-msmarco", device: str = "cpu"
-    ):
+    def __init__(self, model_name: str = "joe32140/ModernBERT-base-msmarco", device: str = "cpu"):
         """Initialize ModernBERT embedding function.
 
         Args:
@@ -27,7 +25,7 @@ class ModernBERTEmbedding(EmbeddingFunction):
         self.is_msmarco = "msmarco" in model_name.lower()
         self.model = SentenceTransformer(model_name, device=device)
 
-    def __call__(self, texts: Documents) -> list[list[float]]:
+    def __call__(self, texts: Documents) -> list[list[float]]:  # type: ignore[override]
         """Generate embeddings for the input texts.
 
         Args:
@@ -37,7 +35,7 @@ class ModernBERTEmbedding(EmbeddingFunction):
             List of embeddings
         """
         # Batch inputs for efficiency
-        embeddings = self.model.encode(
+        embeddings: list[list[float]] = self.model.encode(
             texts,
             batch_size=32,  # Adjust based on GPU memory
             convert_to_numpy=True,
@@ -48,20 +46,20 @@ class ModernBERTEmbedding(EmbeddingFunction):
 
 class GenericSentenceTransformerEmbedding(EmbeddingFunction):
     """Generic embedding function for any sentence-transformers model."""
-    
+
     def __init__(self, model_name: str, device: str = "cpu"):
         """Initialize with any sentence-transformers model.
-        
+
         Args:
             model_name: Hugging Face model name (e.g., "all-MiniLM-L6-v2", "all-mpnet-base-v2")
             device: Device to run the model on (defaults to 'cpu')
         """
         self.model_name = model_name
         self.model = SentenceTransformer(model_name, device=device)
-    
-    def __call__(self, texts: Documents) -> list[list[float]]:
+
+    def __call__(self, texts: Documents) -> list[list[float]]:  # type: ignore[override]
         """Generate embeddings for the input texts."""
-        embeddings = self.model.encode(
+        embeddings: list[list[float]] = self.model.encode(
             texts,
             batch_size=32,
             convert_to_numpy=True,

@@ -41,18 +41,21 @@ class IndexEventHandler(FileSystemEventHandler):
 
     def on_modified(self, event: FileSystemEvent) -> None:
         """Handle file modification events."""
-        if not event.is_directory and self._should_process(event.src_path):
-            self._queue_update(Path(event.src_path))
+        src = str(event.src_path)
+        if not event.is_directory and self._should_process(src):
+            self._queue_update(Path(src))
 
     def on_created(self, event: FileSystemEvent) -> None:
         """Handle file creation events."""
-        if not event.is_directory and self._should_process(event.src_path):
-            self._queue_update(Path(event.src_path))
+        src = str(event.src_path)
+        if not event.is_directory and self._should_process(src):
+            self._queue_update(Path(src))
 
     def on_deleted(self, event: FileSystemEvent) -> None:
         """Handle file deletion events."""
-        if not event.is_directory and self._should_process(event.src_path):
-            self._queue_deletion(Path(event.src_path))
+        src = str(event.src_path)
+        if not event.is_directory and self._should_process(src):
+            self._queue_deletion(Path(src))
 
     def _should_process(self, path: str) -> bool:
         """Check if a file should be processed based on pattern and ignore patterns."""
@@ -77,9 +80,7 @@ class IndexEventHandler(FileSystemEventHandler):
                 self._timers[resolved_path].cancel()
 
             # Schedule update after delay (debouncing)
-            timer = Timer(
-                self._update_delay, self._process_update, args=[resolved_path]
-            )
+            timer = Timer(self._update_delay, self._process_update, args=[resolved_path])
             self._timers[resolved_path] = timer
             timer.start()
             logger.debug(f"Queued update for {path} (delay: {self._update_delay}s)")
@@ -94,9 +95,7 @@ class IndexEventHandler(FileSystemEventHandler):
                 self._timers[resolved_path].cancel()
 
             # Schedule deletion after delay (debouncing)
-            timer = Timer(
-                self._update_delay, self._process_deletion, args=[resolved_path]
-            )
+            timer = Timer(self._update_delay, self._process_deletion, args=[resolved_path])
             self._timers[resolved_path] = timer
             timer.start()
             logger.debug(f"Queued deletion for {path} (delay: {self._update_delay}s)")
@@ -114,9 +113,7 @@ class IndexEventHandler(FileSystemEventHandler):
             self.indexer.cache.clear()
             logger.debug(f"Successfully removed {canonical_path} from index")
         except Exception as e:
-            logger.error(
-                f"Error removing {canonical_path} from index: {e}", exc_info=True
-            )
+            logger.error(f"Error removing {canonical_path} from index: {e}", exc_info=True)
 
     def _process_update(self, path: Path) -> None:
         """Process a queued file update."""
@@ -167,23 +164,25 @@ class IndexEventHandler(FileSystemEventHandler):
     def on_moved(self, event: FileSystemEvent) -> None:
         """Handle file move events."""
         if not event.is_directory:
-            logger.info(f"File moved: {event.src_path} -> {event.dest_path}")
-            src_path = Path(event.src_path).resolve()
-            dest_path = Path(event.dest_path).resolve()
+            src_str = str(event.src_path)
+            dest_str = str(event.dest_path)
+            logger.info(f"File moved: {src_str} -> {dest_str}")
+            src_path = Path(src_str).resolve()
+            dest_path = Path(dest_str).resolve()
 
             # Remove old file from index if it was being tracked
-            if self._should_process(event.src_path):
+            if self._should_process(src_str):
                 logger.debug(f"Removing old path from index: {src_path}")
-                old_docs = self.indexer.search(
-                    "", n_results=100, where={"source": str(src_path)}
-                )[0]
+                old_docs = self.indexer.search("", n_results=100, where={"source": str(src_path)})[
+                    0
+                ]
                 for doc in old_docs:
                     if doc.doc_id is not None:
                         self.indexer.delete_document(doc.doc_id)
                         logger.debug(f"Deleted old document: {doc.doc_id}")
 
             # Index the file at its new location if it matches our patterns
-            if self._should_process(event.dest_path):
+            if self._should_process(dest_str):
                 logger.info(f"Indexing moved file at new location: {dest_path}")
 
                 # Wait for the file to be fully moved and readable
@@ -203,12 +202,9 @@ class IndexEventHandler(FileSystemEventHandler):
                             content[:50]
                         )  # Search by content prefix
                         if results and any(
-                            str(dest_path) == doc.metadata.get("source")
-                            for doc in results
+                            str(dest_path) == doc.metadata.get("source") for doc in results
                         ):
-                            logger.info(
-                                f"Successfully verified moved file: {dest_path}"
-                            )
+                            logger.info(f"Successfully verified moved file: {dest_path}")
                             break
                         elif attempt < max_attempts - 1:
                             logger.warning(
@@ -267,9 +263,7 @@ class IndexEventHandler(FileSystemEventHandler):
         logger.debug(f"File will be processed: {path}")
         return False
 
-    def _update_index_with_retries(
-        self, path: Path, content: str, max_attempts: int = 5
-    ) -> bool:
+    def _update_index_with_retries(self, path: Path, content: str, max_attempts: int = 5) -> bool:
         """Update index for a file with retries."""
         canonical_path = str(path.resolve())
 
@@ -312,15 +306,11 @@ class IndexEventHandler(FileSystemEventHandler):
                     )
 
             except Exception as e:
-                logger.error(
-                    f"Error during indexing attempt {attempt + 1}: {e}", exc_info=True
-                )
+                logger.error(f"Error during indexing attempt {attempt + 1}: {e}", exc_info=True)
                 if attempt == max_attempts - 1:
                     raise
 
-        logger.error(
-            f"Failed to verify index update after {max_attempts} attempts for {path}"
-        )
+        logger.error(f"Failed to verify index update after {max_attempts} attempts for {path}")
         return False
 
     def _process_single_update(self, path: Path, processed_paths: set[str]) -> None:

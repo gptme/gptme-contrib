@@ -132,9 +132,7 @@ class Indexer:
 
         # Use provided values or defaults
         self.chunk_size = chunk_size if chunk_size is not None else default_chunk_size
-        self.chunk_overlap = (
-            chunk_overlap if chunk_overlap is not None else default_chunk_overlap
-        )
+        self.chunk_overlap = chunk_overlap if chunk_overlap is not None else default_chunk_overlap
 
         # Initialize settings
         settings = Settings(
@@ -208,9 +206,7 @@ class Indexer:
         self.cache = SmartRAGCache(ttl_seconds=300, max_memory_bytes=100 * 1024 * 1024)
 
         # Initialize document processor with configured chunk sizes
-        logger.debug(
-            f"Using chunk size: {self.chunk_size}, overlap: {self.chunk_overlap}"
-        )
+        logger.debug(f"Using chunk size: {self.chunk_size}, overlap: {self.chunk_overlap}")
 
         self.processor = DocumentProcessor(
             chunk_size=self.chunk_size,
@@ -323,7 +319,7 @@ class Indexer:
                 ids.append(doc.doc_id)
 
             # Add batch to collection
-            self.collection.add(documents=contents, metadatas=metadatas, ids=ids)
+            self.collection.add(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
         except Exception as e:
             logger.error(f"Failed to process batch: {e}")
             raise
@@ -432,18 +428,21 @@ class Indexer:
 
         # Print a few example documents
         print("\nExample documents:")
-        for i in range(min(3, len(results["ids"]))):
+        ids = results["ids"] or []
+        docs = results["documents"] or []
+        metas = results["metadatas"] or []
+        for i in range(min(3, len(ids))):
             print(f"\nDoc {i}:")
-            print(f"ID: {results['ids'][i]}")
-            print(f"Content (first 100 chars): {results['documents'][i][:100]}...")
-            print(f"Metadata: {results['metadatas'][i]}")
+            print(f"ID: {ids[i]}")
+            print(f"Content (first 100 chars): {docs[i][:100]}...")
+            print(f"Metadata: {metas[i]}")
 
         # Now do a test search
         print("\nTest search for 'Lorem ipsum':")
         search_results = self.collection.query(query_texts=["Lorem ipsum"], n_results=3)
         print("\nRaw search results:")
-        print(f"IDs: {search_results['ids'][0]}")
-        print(f"Distances: {search_results['distances'][0]}")
+        print(f"IDs: {(search_results['ids'] or [[]])[0]}")
+        print(f"Distances: {(search_results['distances'] or [[]])[0]}")
 
     def compute_relevance_score(
         self,
@@ -482,9 +481,7 @@ class Indexer:
             path_depth = len(Path(doc.metadata.get("source", "")).parts)
             max_depth = 10  # Normalize depth to max of 10 levels
             depth_factor = min(path_depth / max_depth, 1.0)
-            scores["depth_penalty"] = (
-                -self.scoring_weights["depth_penalty"] * depth_factor
-            )
+            scores["depth_penalty"] = -self.scoring_weights["depth_penalty"] * depth_factor
             total_score += scores["depth_penalty"]
 
             # Recency boost
@@ -688,14 +685,17 @@ class Indexer:
             all_docs = self.collection.get()
             matching_sources = set()
 
-            for meta in all_docs["metadatas"]:
+            for meta in all_docs["metadatas"] or []:
                 if not meta or "source" not in meta:
                     continue
 
-                source_path = Path(meta["source"])
+                source_path = Path(str(meta["source"]))
                 # Create a dummy document for path matching
                 doc = Document(
-                    content="", metadata=meta, doc_id="temp", source_path=source_path
+                    content="",
+                    metadata=dict(meta),
+                    doc_id="temp",
+                    source_path=source_path,  # type: ignore[arg-type]
                 )
 
                 # Use _matches_paths to check all patterns
@@ -716,28 +716,31 @@ class Indexer:
             where=search_where or None,  # chromadb 1.x rejects empty dict
         )
 
-        if not results["ids"][0]:
+        result_ids = results["ids"] or [[]]
+        result_docs = results["documents"] or [[]]
+        result_metas = results["metadatas"] or [[]]
+        result_dists = results["distances"] or [[]]
+
+        if not result_ids[0]:
             return [], [], [] if explain else None
 
         # Process results
         if group_chunks:
             # Group by source document
             docs_by_source: dict[str, tuple[Document, float]] = {}
-            for i, doc_id in enumerate(results["ids"][0]):
+            for i, doc_id in enumerate(result_ids[0]):
                 source_id = doc_id.split("#chunk")[0]
                 if source_id not in docs_by_source:
                     doc = Document(
-                        content=results["documents"][0][i],
-                        metadata=results["metadatas"][0][i],
+                        content=result_docs[0][i],
+                        metadata=result_metas[0][i],  # type: ignore[arg-type]
                         doc_id=doc_id,
                     )
                     if self._matches_paths(doc, paths, path_filters):
-                        docs_by_source[source_id] = (doc, results["distances"][0][i])
+                        docs_by_source[source_id] = (doc, result_dists[0][i])
 
             # Take top n results
-            sorted_docs = sorted(docs_by_source.values(), key=lambda x: x[1])[
-                :n_results
-            ]
+            sorted_docs = sorted(docs_by_source.values(), key=lambda x: x[1])[:n_results]
             if sorted_docs:
                 docs_tuple, dist_tuple = zip(*sorted_docs)
                 documents = list(docs_tuple)
@@ -757,9 +760,7 @@ class Indexer:
                 score, score_breakdown = self.compute_relevance_score(
                     doc, distance, query, debug=explain
                 )
-                explanations.append(
-                    self.explain_scoring(query, doc, distance, score_breakdown)
-                )
+                explanations.append(self.explain_scoring(query, doc, distance, score_breakdown))
             return list(documents), list(distances), explanations
 
         # Cache results before returning (only if not explain mode)
@@ -783,7 +784,7 @@ class Indexer:
 
     def _process_individual_chunks(
         self,
-        results: dict,
+        results: Any,
         paths: list[Path] | None,
         n_results: int,
         explain: bool,
@@ -795,15 +796,18 @@ class Indexer:
         explanations: list[dict] = []
         seen_ids = set()
 
-        result_distances = results["distances"][0] if "distances" in results else []
+        ids_outer = results["ids"] or [[]]
+        docs_outer = results["documents"] or [[]]
+        metas_outer = results["metadatas"] or [[]]
+        result_distances = (results["distances"] or [[]])[0] if "distances" in results else []
 
-        for i, doc_id in enumerate(results["ids"][0]):
+        for i, doc_id in enumerate(ids_outer[0]):
             if len(documents) >= n_results or doc_id in seen_ids:
                 break
 
             doc = Document(
-                content=results["documents"][0][i],
-                metadata=results["metadatas"][0][i],
+                content=docs_outer[0][i],
+                metadata=metas_outer[0][i],
                 doc_id=doc_id,
             )
 
@@ -827,21 +831,24 @@ class Indexer:
         """
         # Get all documents from collection
         results = self.collection.get()
-        logger.debug("ChromaDB returned %d documents", len(results["ids"]))
-        if results["ids"]:
-            logger.debug("First document metadata: %s", results["metadatas"][0])
+        result_ids = results["ids"] or []
+        result_docs = results["documents"] or []
+        result_metas = results["metadatas"] or []
+        logger.debug("ChromaDB returned %d documents", len(result_ids))
+        if result_ids:
+            logger.debug("First document metadata: %s", result_metas[0])
 
-        if not results["ids"]:
+        if not result_ids:
             return []
 
         if group_by_source:
             # Group chunks by source document
             doc_groups: dict[str, list[Document]] = {}
 
-            for i, doc_id in enumerate(results["ids"]):
+            for i, doc_id in enumerate(result_ids):
                 doc = Document(
-                    content=results["documents"][i],
-                    metadata=results["metadatas"][i],
+                    content=result_docs[i],
+                    metadata=result_metas[i],  # type: ignore[arg-type]
                     doc_id=doc_id,
                 )
 
@@ -858,11 +865,11 @@ class Indexer:
             # Return all documents/chunks
             return [
                 Document(
-                    content=results["documents"][i],
-                    metadata=results["metadatas"][i],
+                    content=result_docs[i],
+                    metadata=result_metas[i],  # type: ignore[arg-type]
                     doc_id=doc_id,
                 )
-                for i, doc_id in enumerate(results["ids"])
+                for i, doc_id in enumerate(result_ids)
             ]
 
     def get_document_chunks(self, base_doc_id: str) -> list[Document]:
@@ -876,14 +883,17 @@ class Indexer:
         """
         # Get all documents from collection
         all_docs = self.collection.get()
+        all_ids = all_docs["ids"] or []
+        all_doc_contents = all_docs["documents"] or []
+        all_metas = all_docs["metadatas"] or []
 
         # Filter chunks belonging to this document
         chunks = []
-        for i, doc_id in enumerate(all_docs["ids"]):
+        for i, doc_id in enumerate(all_ids):
             if doc_id.startswith(base_doc_id):
                 chunk = Document(
-                    content=all_docs["documents"][i],
-                    metadata=all_docs["metadatas"][i],
+                    content=all_doc_contents[i],
+                    metadata=all_metas[i],  # type: ignore[arg-type]
                     doc_id=doc_id,
                 )
                 chunks.append(chunk)
@@ -1010,9 +1020,7 @@ class Indexer:
                             f"Modified {days_ago:.1f} days ago: +{scores['recency_boost']:.3f}"
                         )
                     else:
-                        explanations["recency_boost"] = (
-                            f"Modified {days_ago:.1f} days ago: +0"
-                        )
+                        explanations["recency_boost"] = f"Modified {days_ago:.1f} days ago: +0"
                 except (ValueError, TypeError):
                     explanations["recency_boost"] = "Invalid modification time: +0"
 
@@ -1038,23 +1046,25 @@ class Indexer:
         """
         # Get all documents to analyze
         results = self.collection.get()
+        result_ids = results["ids"] or []
+        result_metas = results["metadatas"] or []
 
         # Count unique source documents
         sources = set()
         source_stats: dict[str, int] = {}  # Extension -> count
 
-        for metadata in results["metadatas"]:
+        for metadata in result_metas:
             if metadata and "source" in metadata:
                 sources.add(metadata["source"])
                 # Get file extension statistics
-                ext = Path(metadata["source"]).suffix
+                ext = Path(str(metadata["source"])).suffix
                 source_stats[ext] = source_stats.get(ext, 0) + 1
 
         status = {
             "collection_name": self.collection_name,
             "storage_type": "persistent" if self.is_persistent else "in-memory",
             "document_count": len(sources),
-            "chunk_count": len(results["ids"]) if results["ids"] else 0,
+            "chunk_count": len(result_ids),
             "source_stats": source_stats,
             "config": {
                 "chunk_size": self.processor.chunk_size,
@@ -1182,9 +1192,7 @@ class Indexer:
 
         return valid_files
 
-    def collect_documents(
-        self, path: Path, glob_pattern: str = "**/*.*"
-    ) -> list[Document]:
+    def collect_documents(self, path: Path, glob_pattern: str = "**/*.*") -> list[Document]:
         """Collect documents from a file or directory without processing them.
 
         Args:
