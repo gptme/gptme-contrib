@@ -372,11 +372,11 @@ def test_reply_with_max_tokens_uses_cc_subprocess_for_dummy_key(
     monkeypatch.delenv("OPENROUTER_API_KEY_SOCIAL", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-key")
 
-    cc_calls: list[list[Any]] = []
+    cc_calls: list[tuple[list[Any], str]] = []
     expected = llm_module.Message("assistant", "cc response")
 
-    def fake_cc_subprocess(messages: list[Any]) -> Any:
-        cc_calls.append(messages)
+    def fake_cc_subprocess(messages: list[Any], model_name: str) -> Any:
+        cc_calls.append((messages, model_name))
         return expected
 
     monkeypatch.setattr(llm_module, "_reply_with_cc_subprocess", fake_cc_subprocess)
@@ -387,11 +387,12 @@ def test_reply_with_max_tokens_uses_cc_subprocess_for_dummy_key(
     )
 
     messages = [llm_module.Message("user", "hello")]
-    result = llm_module._reply_with_max_tokens(messages, "anthropic/claude-sonnet-4-5")
+    model = "anthropic/claude-sonnet-4-5"
+    result = llm_module._reply_with_max_tokens(messages, model)
 
     assert result is expected
     assert len(cc_calls) == 1
-    assert cc_calls[0] == messages
+    assert cc_calls[0] == (messages, model)
 
 
 def test_reply_with_max_tokens_uses_cc_subprocess_when_no_key(
@@ -404,11 +405,11 @@ def test_reply_with_max_tokens_uses_cc_subprocess_when_no_key(
     monkeypatch.delenv("OPENROUTER_API_KEY_SOCIAL", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    cc_calls: list[list[Any]] = []
+    cc_calls: list[tuple[list[Any], str]] = []
     expected = llm_module.Message("assistant", "cc response")
 
-    def fake_cc_subprocess(messages: list[Any]) -> Any:
-        cc_calls.append(messages)
+    def fake_cc_subprocess(messages: list[Any], model_name: str) -> Any:
+        cc_calls.append((messages, model_name))
         return expected
 
     monkeypatch.setattr(llm_module, "_reply_with_cc_subprocess", fake_cc_subprocess)
@@ -419,10 +420,12 @@ def test_reply_with_max_tokens_uses_cc_subprocess_when_no_key(
     )
 
     messages = [llm_module.Message("user", "hello")]
-    result = llm_module._reply_with_max_tokens(messages, "anthropic/claude-sonnet-4-5")
+    model = "anthropic/claude-sonnet-4-5"
+    result = llm_module._reply_with_max_tokens(messages, model)
 
     assert result is expected
     assert len(cc_calls) == 1
+    assert cc_calls[0] == (messages, model)
 
 
 def test_reply_with_cc_subprocess_success(
@@ -448,7 +451,9 @@ def test_reply_with_cc_subprocess_success(
         llm_module.Message("system", "You are a helpful agent."),
         llm_module.Message("user", "Review this tweet."),
     ]
-    result = llm_module._reply_with_cc_subprocess(messages)
+    result = llm_module._reply_with_cc_subprocess(
+        messages, "anthropic/claude-sonnet-4-5"
+    )
 
     assert result.role == "assistant"
     assert result.content == "review response"
@@ -457,6 +462,8 @@ def test_reply_with_cc_subprocess_success(
     assert cmd[0] == "claude"
     assert "-p" in cmd
     assert "--no-session-persistence" in cmd
+    assert "--model" in cmd
+    assert "anthropic/claude-sonnet-4-5" in cmd
     # Combined prompt must contain both system and user parts
     prompt_arg = cmd[-1]
     assert "You are a helpful agent." in prompt_arg
