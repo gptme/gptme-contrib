@@ -409,6 +409,7 @@ CACHE_CREATION_MULTIPLIER: dict[str, float] = {
 _CACHE_PRICING_PROVIDER: dict[tuple[str, str], str] = {
     ("claude-code", "opus"): "anthropic",
     ("claude-code", "sonnet"): "anthropic",
+    ("claude-code", "fable-5"): "anthropic",
     ("copilot-cli", "claude-opus-4.6"): "anthropic",
     ("copilot-cli", "claude-sonnet-4.6"): "anthropic",
     ("codex", "gpt-5.4"): "openai",
@@ -501,6 +502,7 @@ def estimate_session_cost(
 SUBSCRIPTION_BACKED_MODELS: set[tuple[str, str]] = {
     ("claude-code", "opus"),
     ("claude-code", "sonnet"),
+    ("claude-code", "fable-5"),
     ("grok-build", "grok-build"),
     ("codex", "gpt-5.4"),
     ("codex", "gpt-5.5"),
