@@ -173,13 +173,11 @@ class IndexEventHandler(FileSystemEventHandler):
             # Remove old file from index if it was being tracked
             if self._should_process(src_str):
                 logger.debug(f"Removing old path from index: {src_path}")
-                old_docs = self.indexer.search("", n_results=100, where={"source": str(src_path)})[
-                    0
-                ]
-                for doc in old_docs:
-                    if doc.doc_id is not None:
-                        self.indexer.delete_document(doc.doc_id)
-                        logger.debug(f"Deleted old document: {doc.doc_id}")
+                try:
+                    self.indexer.delete_documents({"source": str(src_path)})
+                    logger.debug(f"Deleted old documents for: {src_path}")
+                except Exception as e:
+                    logger.warning(f"Error removing old path {src_path} from index: {e}")
 
             # Index the file at its new location if it matches our patterns
             if self._should_process(dest_str):
