@@ -32,10 +32,11 @@ def test_autonomous_run_cycle():
 
         run = AutonomousRun(workspace)
 
-        # Mock external calls
+        # Mock external calls (including _record_session to avoid live store writes)
         with (
             patch("gptme_runloops.base.git_pull_with_retry") as mock_pull,
             patch("gptme_runloops.utils.executor.execute_gptme") as mock_execute,
+            patch.object(run, "_record_session"),
         ):
             mock_pull.return_value = True
             mock_execute.return_value = ExecutionResult(exit_code=0)
