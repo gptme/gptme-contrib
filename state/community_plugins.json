@@ -1,0 +1,78 @@
+{
+  "fetched_at": "2026-06-29T00:00:00Z",
+  "source": "seeded from gptme/registry.gptme.org registry.json (2026-06-29); future updates via scripts/fetch-community-plugins.py",
+  "entries": [
+    {
+      "name": "gptme/gptme-rag",
+      "description": "RAG plugin for gptme — semantic document search and retrieval-augmented generation.",
+      "url": "https://github.com/gptme/gptme-rag",
+      "stars": 17,
+      "language": "Python",
+      "topics": ["gptme-plugin"]
+    },
+    {
+      "name": "gptme/gptme.vim",
+      "description": "Vim plugin for gptme — use gptme from within vim/neovim.",
+      "url": "https://github.com/gptme/gptme.vim",
+      "stars": 7,
+      "language": "Vim Script",
+      "topics": ["gptme-plugin"]
+    },
+    {
+      "name": "gptme/gptme-tauri",
+      "description": "Desktop app for gptme built with Tauri — GUI wrapper with system tray integration.",
+      "url": "https://github.com/gptme/gptme-tauri",
+      "stars": 6,
+      "language": "Rust",
+      "topics": ["gptme-plugin", "gptme-skill"]
+    },
+    {
+      "name": "gptme/gptme-webui",
+      "description": "Web UI for gptme — browser-based chat interface for remote agents.",
+      "url": "https://github.com/gptme/gptme-webui",
+      "stars": 5,
+      "language": "TypeScript",
+      "topics": ["gptme-plugin", "gptme-skill"]
+    },
+    {
+      "name": "gptme/gptme-voice",
+      "description": "Voice interface for gptme — Twilio telephony and OpenAI Realtime API integration.",
+      "url": "https://github.com/gptme/gptme-voice",
+      "stars": 4,
+      "language": "Python",
+      "topics": ["gptme-skill"]
+    },
+    {
+      "name": "gptme/gptme-codegraph",
+      "description": "Code knowledge graph MCP server for gptme — repository structure awareness.",
+      "url": "https://github.com/gptme/gptme-codegraph",
+      "stars": 3,
+      "language": "Python",
+      "topics": ["gptme-plugin", "gptme-mcp-server"]
+    },
+    {
+      "name": "gptme/gptme-forum",
+      "description": "Forum interaction skill for gptme agents — read and post to online discussion boards.",
+      "url": "https://github.com/gptme/gptme-forum",
+      "stars": 3,
+      "language": "Python",
+      "topics": ["gptme-skill"]
+    },
+    {
+      "name": "gptme/gptme-daily-briefing",
+      "description": "Daily briefing skill — summaries of repos, threads, and contacts for autonomous agents.",
+      "url": "https://github.com/gptme/gptme-daily-briefing",
+      "stars": 3,
+      "language": "Python",
+      "topics": ["gptme-skill"]
+    },
+    {
+      "name": "gptme/gptme-subscription",
+      "description": "Subscription management skill — quota-aware harness selection and rotation.",
+      "url": "https://github.com/gptme/gptme-subscription",
+      "stars": 2,
+      "language": "Python",
+      "topics": ["gptme-skill"]
+    }
+  ]
+}

@@ -1,0 +1,447 @@
+#!/bin/bash
+# git-safe-commit: Serialize git commits to prevent concurrent staging conflicts
+#
+# Problem: When multiple sessions (autonomous, operator, meta-operator) run
+# concurrently on the same repo, they share .git/index. prek's stash/restore
+# cycle during pre-commit hooks can race with concurrent commits, causing:
+#   - Wrong files in commits (staged by another session)
+#   - prek stash-restore conflicts that silently revert edits
+#   - Wasted tokens re-doing work that was lost
+#
+# Solution: flock serializes the entire commit (including pre-commit hooks)
+# so prek's stash/restore is atomic from other sessions' perspective.
+#
+# Usage: git-safe-commit file1.py file2.py -m "feat: description"
+#        git-safe-commit --all-staged -m "chore: commit intentional staged set"
+#        (same arguments as `git commit`, plus optional --all-staged guard)
+#
+# See: https://github.com/ErikBjare/bob/issues/465
+
+set -uo pipefail
+
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null)" || true
+if [ -z "$GIT_DIR" ]; then
+    echo "error: not in a git repository" >&2
+    exit 1
+fi
+
+LOCKFILE="$GIT_DIR/commit.lock"
+
+NO_VERIFY=0
+ALLOW_ALL_STAGED=0
+ALLOW_EMPTY=0
+PATHSPEC_COUNT=0
+PATHSPECS=()
+PARSE_AFTER_DASHDASH=0
+SKIP_NEXT_ARG=0
+FORWARD_ARGS=()
+
+for arg in "$@"; do
+    if [ "$SKIP_NEXT_ARG" -eq 1 ]; then
+        SKIP_NEXT_ARG=0
+        FORWARD_ARGS+=("$arg")
+        continue
+    fi
+
+    if [ "$arg" = "--all-staged" ]; then
+        ALLOW_ALL_STAGED=1
+        continue
+    fi
+
+    if [ "$arg" = "--no-verify" ] || [ "$arg" = "-n" ]; then
+        NO_VERIFY=1
+    fi
+
+    if [ "$arg" = "--allow-empty" ]; then
+        ALLOW_EMPTY=1
+    fi
+
+    FORWARD_ARGS+=("$arg")
+
+    if [ "$PARSE_AFTER_DASHDASH" -eq 1 ]; then
+        PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+        PATHSPECS+=("$arg")
+        continue
+    fi
+
+    case "$arg" in
+        --)
+            PARSE_AFTER_DASHDASH=1
+            ;;
+        -m|--message|-F|--file|-c|--reedit-message|-C|--reuse-message|--fixup|--squash|--author|--date|--trailer)
+            SKIP_NEXT_ARG=1
+            ;;
+        --pathspec-from-file)
+            SKIP_NEXT_ARG=1
+            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            ;;
+        --message=*|--file=*|--author=*|--date=*|--fixup=*|--squash=*|--trailer=*)
+            ;;
+        --pathspec-from-file=*)
+            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            ;;
+        -*)
+            ;;
+        *)
+            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            PATHSPECS+=("$arg")
+            ;;
+    esac
+done
+
+if [ "$PATHSPEC_COUNT" -eq 0 ] && [ "$ALLOW_ALL_STAGED" -ne 1 ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
+    echo "🚫 Refusing implicit whole-index commit in shared repo" >&2
+    echo "" >&2
+    echo "   Use explicit file paths with git-safe-commit so concurrent sessions" >&2
+    echo "   can't accidentally commit unrelated staged changes." >&2
+    echo "" >&2
+
+    # If the caller already staged specific files, show them and a ready-to-copy
+    # command. This turns the most common "git add X && git-safe-commit -m ..."
+    # antipattern into a one-step fix.
+    STAGED_FILES="$(git diff --cached --name-only 2>/dev/null)"
+    STAGED_COUNT=0
+    if [ -n "$STAGED_FILES" ]; then
+        STAGED_COUNT=$(printf '%s\n' "$STAGED_FILES" | grep -c '^' || echo 0)
+    fi
+    STAGED_SUGGEST_CAP=20
+
+    if [ "$STAGED_COUNT" -gt 0 ] && [ "$STAGED_COUNT" -le "$STAGED_SUGGEST_CAP" ]; then
+        echo "   You have $STAGED_COUNT file(s) already staged:" >&2
+        printf '%s\n' "$STAGED_FILES" | sed 's/^/     /' >&2
+        echo "" >&2
+        # Build the suggested command with shell-escaped staged paths on one line.
+        STAGED_ONE_LINE=""
+        while IFS= read -r staged_file; do
+            [ -z "$staged_file" ] && continue
+            printf -v staged_quoted '%q' "$staged_file"
+            STAGED_ONE_LINE="${STAGED_ONE_LINE:+$STAGED_ONE_LINE }$staged_quoted"
+        done <<< "$STAGED_FILES"
+        echo "   To commit exactly those files:" >&2
+        echo "     git-safe-commit $STAGED_ONE_LINE -m 'your message'" >&2
+        echo "" >&2
+        echo "   Or, to commit the entire staged set regardless:" >&2
+        echo "     git-safe-commit --all-staged -m 'your message'" >&2
+    else
+        echo "   If you intentionally want the entire staged set, rerun with:" >&2
+        echo "     git-safe-commit --all-staged -m 'your message'" >&2
+        echo "" >&2
+        echo "   Safer default:" >&2
+        echo "     git-safe-commit <file1> <file2> -m 'your message'" >&2
+    fi
+    echo "" >&2
+    exit 1
+fi
+
+check_index_corruption() {
+    # Run this under the commit lock so we see the latest index state after any
+    # waiting, not a stale snapshot from before lock acquisition.
+    local head_count tracked_count phantom_missing_count phantom_missing_sample
+    local phantom_sample_limit phantom_sample_count new_count
+    local phantom_missing_threshold
+
+    head_count=$(git ls-tree -r --name-only HEAD 2>/dev/null | wc -l)
+    tracked_count=$(git ls-files 2>/dev/null | wc -l)
+    phantom_missing_count=0
+    phantom_missing_sample=""
+    phantom_sample_limit=5
+    phantom_sample_count=0
+
+    if [ "$head_count" -gt 1000 ]; then
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if [ -e "$f" ] || [ -L "$f" ]; then
+                phantom_missing_count=$((phantom_missing_count + 1))
+                if [ "$phantom_sample_count" -lt "$phantom_sample_limit" ]; then
+                    phantom_missing_sample="${phantom_missing_sample}${f}
+"
+                    phantom_sample_count=$((phantom_sample_count + 1))
+                fi
+            fi
+        done < <(
+            comm -23 \
+                <(git ls-tree -r --name-only HEAD 2>/dev/null | sort) \
+                <(git ls-files 2>/dev/null | sort)
+        )
+    fi
+
+    phantom_missing_threshold=100
+    if [ "$head_count" -gt 1000 ] && [ "$phantom_missing_count" -gt "$phantom_missing_threshold" ]; then
+        echo "🚨 Git index corruption detected ($phantom_missing_count HEAD-tracked files missing from index but still on disk)" >&2
+        echo "" >&2
+        echo "   HEAD has $head_count paths; index currently tracks $tracked_count." >&2
+        echo "   Sample phantom paths:" >&2
+        printf '%s' "$phantom_missing_sample" | sed 's/^/     /' >&2
+        echo "" >&2
+        echo "   Attempting auto-recovery: git read-tree HEAD" >&2
+        git read-tree HEAD
+        new_count=$(git ls-files 2>/dev/null | wc -l)
+        echo "   ✅ Index rebuilt: $new_count tracked files" >&2
+        echo "" >&2
+        echo "   Please re-stage your files and retry:" >&2
+        echo "     git add <your-files>" >&2
+        echo "     git-safe-commit <your-files> -m 'your message'" >&2
+        echo "" >&2
+        exit 1
+    fi
+}
+
+hook_allows_untracked_dirty_guard_relaxation() {
+    local hook_path
+
+    hook_path="${1:-}"
+
+    # No pre-commit hook means no stash/restore cycle to worry about.
+    if [ -z "$hook_path" ]; then
+        return 0
+    fi
+
+    # The bundled auto-stage hook captures the staged set and always runs
+    # prek/pre-commit with `--files <staged>`, which avoids pre-commit's
+    # repo-wide stash/restore path. Symlinked and copied installs both work
+    # because grep reads the target file contents.
+    if grep -Fq "Pre-commit hook with auto-staging and commit serialization." "$hook_path" 2>/dev/null && \
+       grep -Fq 'run --files "${ORIGINALLY_STAGED_FILES[@]}"' "$hook_path" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
+check_clean_worktree_for_hooks() {
+    local unstaged_files untracked_files unstaged_count untracked_count
+    local sample_count mode block block_reason pre_commit_hook
+    local unstaged_reason untracked_reason
+    local allow_untracked allow_untracked_reason
+
+    pre_commit_hook="${1:-}"
+
+    unstaged_files="$(git diff --name-only --ignore-submodules -- 2>/dev/null)" || true
+    untracked_files="$(git ls-files --others --exclude-standard 2>/dev/null)" || true
+    unstaged_count=0
+    untracked_count=0
+    sample_count=0
+    mode=""
+    block=0
+    block_reason=""
+    unstaged_reason=""
+    untracked_reason=""
+    allow_untracked=0
+    allow_untracked_reason=""
+
+    if [ -n "$unstaged_files" ]; then
+        unstaged_count=$(printf '%s\n' "$unstaged_files" | grep -c . || true)
+    fi
+    if [ -n "$untracked_files" ]; then
+        untracked_count=$(printf '%s\n' "$untracked_files" | grep -c . || true)
+    fi
+
+    # The catastrophic case from issue #642 was prek's stash/restore cycle losing
+    # tracked-file entries from the index. Untracked files are not stashed by
+    # default and don't trigger that failure mode. Repos whose pre-commit hook
+    # invokes prek with `--files <staged>` (the standard agent-template hook)
+    # also skip prek's stash entirely, making this guard mostly belt-and-suspenders.
+    #
+    # Default: block on unstaged-modified tracked files. Untracked files alone are
+    # allowed only when there is no pre-commit hook or the hook is the known
+    # auto-stage wrapper that scopes checks to the staged set. Unknown hooks stay
+    # strict because git-safe-commit runs whatever hook the repo installed.
+    # Override: GIT_SAFE_COMMIT_DIRTY_GUARD=strict restores the old "any dirt blocks" behavior.
+    # Override: GIT_SAFE_COMMIT_DIRTY_GUARD=off skips the guard entirely.
+    mode="${GIT_SAFE_COMMIT_DIRTY_GUARD:-default}"
+
+    if [ "$mode" = "off" ]; then
+        return 0
+    fi
+
+    if [ "$mode" = "default" ]; then
+        if hook_allows_untracked_dirty_guard_relaxation "$pre_commit_hook"; then
+            allow_untracked=1
+            if [ -z "$pre_commit_hook" ]; then
+                allow_untracked_reason="no pre-commit hook detected"
+            else
+                allow_untracked_reason="hook scopes pre-commit to staged files"
+            fi
+        fi
+    fi
+
+    if [ "$unstaged_count" -gt 0 ]; then
+        unstaged_reason="${unstaged_count} unstaged tracked modification"
+        if [ "$unstaged_count" -ne 1 ]; then
+            unstaged_reason="${unstaged_reason}s"
+        fi
+    fi
+    if [ "$untracked_count" -gt 0 ] && [ "$allow_untracked" -ne 1 ]; then
+        untracked_reason="${untracked_count} untracked path"
+        if [ "$untracked_count" -ne 1 ]; then
+            untracked_reason="${untracked_reason}s"
+        fi
+        if [ "$mode" = "strict" ]; then
+            untracked_reason="${untracked_reason} (strict mode)"
+        fi
+    fi
+
+    if [ -n "$unstaged_reason" ] && [ -n "$untracked_reason" ]; then
+        block=1
+        block_reason="${unstaged_reason} and ${untracked_reason}"
+    elif [ -n "$unstaged_reason" ]; then
+        block=1
+        block_reason="$unstaged_reason"
+    elif [ -n "$untracked_reason" ]; then
+        block=1
+        block_reason="$untracked_reason"
+    fi
+
+    if [ "$block" -eq 1 ]; then
+        echo "🚫 Refusing to run pre-commit in a dirty worktree: ${block_reason}" >&2
+        echo "" >&2
+        echo "   In this shared repo, prek/pre-commit may stash+restore unrelated files" >&2
+        echo "   and corrupt the index (issue #642)." >&2
+        echo "" >&2
+        echo "   Clean the worktree first, or after manual verification rerun with:" >&2
+        echo "     git-safe-commit ... --no-verify" >&2
+        echo "" >&2
+        echo "   Sample dirty paths:" >&2
+        {
+            printf '%s\n' "$unstaged_files"
+            [ -n "$untracked_reason" ] && printf '%s\n' "$untracked_files"
+        } | grep -v '^$' | head -10 | sed 's/^/     /' >&2
+        sample_count=$unstaged_count
+        if [ -n "$untracked_reason" ]; then
+            sample_count=$((sample_count + untracked_count))
+        fi
+        if [ "$sample_count" -gt 10 ]; then
+            echo "     ... and $((sample_count - 10)) more" >&2
+        fi
+        echo "" >&2
+        exit 1
+    fi
+
+    # Default mode: untracked files alone are allowed. Warn so the operator knows
+    # the worktree isn't pristine but the commit can proceed.
+    if [ "$untracked_count" -gt 0 ] && [ "$allow_untracked" -eq 1 ]; then
+        echo "⚠️  worktree has ${untracked_count} untracked path(s); proceeding (${allow_untracked_reason}; set GIT_SAFE_COMMIT_DIRTY_GUARD=strict to block)" >&2
+    fi
+}
+
+stage_explicit_pathspecs() {
+    if [ "${#PATHSPECS[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    # The documented wrapper usage is `git-safe-commit file1 file2 -m ...`.
+    # Stage those explicit paths under the commit lock so callers don't need
+    # a separate `git add` step for untracked files, and so the pre-commit
+    # dirty worktree guard (when hooks run) sees the explicit set already
+    # staged.
+    #
+    # Runs unconditionally — including under --no-verify — because the
+    # convenience is mode-independent. Without unconditional staging,
+    # `git commit <path>` rejects untracked pathspecs with "did not match
+    # any file(s) known to git", which forces an awkward `git add` step
+    # exactly when the wrapper is supposed to remove it.
+    git add -- "${PATHSPECS[@]}"
+}
+
+resolve_pre_commit_hook() {
+    local hooks_dir hook_path
+
+    # core.hooksPath takes precedence over the default .git/hooks directory
+    hooks_dir="$(git config core.hooksPath 2>/dev/null)"
+    if [ -z "$hooks_dir" ]; then
+        hooks_dir="$(git rev-parse --git-path hooks 2>/dev/null)" || return 1
+    fi
+    hook_path="$hooks_dir/pre-commit"
+
+    if [ -x "$hook_path" ]; then
+        printf '%s\n' "$hook_path"
+        return 0
+    fi
+
+    return 1
+}
+
+LOCK_TIMEOUT=60
+exec 9>"$LOCKFILE"
+if ! flock --timeout "$LOCK_TIMEOUT" 9; then
+    echo "error: timed out waiting for commit lock" >&2
+    exit 1
+fi
+
+check_index_corruption
+
+stage_explicit_pathspecs
+
+MANUAL_PRECOMMIT_RAN=0
+if [ "$NO_VERIFY" -ne 1 ]; then
+    PRE_COMMIT_HOOK=""
+    ALLOW_UNTRACKED_FOR_HOOK=0
+    if PRE_COMMIT_HOOK="$(resolve_pre_commit_hook)"; then
+        DIRTY_GUARD_MODE="${GIT_SAFE_COMMIT_DIRTY_GUARD:-default}"
+        if [ "$DIRTY_GUARD_MODE" = "off" ] || \
+           { [ "$DIRTY_GUARD_MODE" = "default" ] && \
+             hook_allows_untracked_dirty_guard_relaxation "$PRE_COMMIT_HOOK"; }; then
+            ALLOW_UNTRACKED_FOR_HOOK=1
+        fi
+        :
+    else
+        PRE_COMMIT_HOOK=""
+    fi
+    check_clean_worktree_for_hooks "$PRE_COMMIT_HOOK"
+    if [ -n "$PRE_COMMIT_HOOK" ]; then
+        # Run the tracked hook directly under the wrapper lock, then hand off to
+        # git commit --no-verify. This avoids the hook-time missing-object bug
+        # while preserving the same pre-commit behavior and auto-staging logic.
+        env \
+            GIT_SAFE_COMMIT_LOCK_HELD=1 \
+            GIT_SAFE_COMMIT_EXPECT_CLEAN=1 \
+            GIT_SAFE_COMMIT_MANUAL_PRECOMMIT=1 \
+            GIT_SAFE_COMMIT_ALLOW_UNTRACKED="$ALLOW_UNTRACKED_FOR_HOOK" \
+            "$PRE_COMMIT_HOOK"
+        PRE_COMMIT_EXIT=$?
+        if [ "$PRE_COMMIT_EXIT" -ne 0 ]; then
+            exit "$PRE_COMMIT_EXIT"
+        fi
+        MANUAL_PRECOMMIT_RAN=1
+    fi
+fi
+
+if [ "$NO_VERIFY" -ne 1 ] && [ "$MANUAL_PRECOMMIT_RAN" -eq 1 ]; then
+    # pre-commit already ran directly under the lock; use --no-verify so git
+    # does not redispatch the pre-commit hook. prepare-commit-msg still runs
+    # (--no-verify only skips pre-commit and commit-msg, not prepare-commit-msg).
+    env GIT_SAFE_COMMIT_LOCK_HELD=1 git commit --no-verify "${FORWARD_ARGS[@]}"
+else
+    env GIT_SAFE_COMMIT_LOCK_HELD=1 git commit "${FORWARD_ARGS[@]}"
+fi
+COMMIT_EXIT=$?
+
+if [ "$COMMIT_EXIT" -ne 0 ]; then
+    exit "$COMMIT_EXIT"
+fi
+
+# Post-commit safety net: detect catastrophic index corruption (issue #642).
+# Even if pre-commit hooks pass (phantom filter suppresses warnings), verify
+# the committed diff doesn't contain mass file deletions. If it does,
+# auto-revert before the damage can be pushed.
+DELETED_IN_COMMIT=$(git diff-tree --no-commit-id -r --diff-filter=D HEAD 2>/dev/null | wc -l)
+DELETION_THRESHOLD=100
+
+if [ "$DELETED_IN_COMMIT" -gt "$DELETION_THRESHOLD" ]; then
+    COMMIT_SHA=$(git rev-parse --short HEAD)
+    echo ""
+    echo "🚨 CATASTROPHIC COMMIT DETECTED (issue #642 safeguard)"
+    echo "   Commit $COMMIT_SHA deleted $DELETED_IN_COMMIT files"
+    echo ""
+    echo "   Auto-reverting with: git reset --soft HEAD~1"
+    git reset --soft HEAD~1
+    echo "   ✅ Commit reverted. Your changes are still staged."
+    echo ""
+    echo "   To commit safely:"
+    echo "     1. Run: git diff --cached --stat  (verify only intended files staged)"
+    echo "     2. Run: git commit --no-verify -m 'your message'"
+    echo ""
+    exit 1
+fi
+
+exit 0

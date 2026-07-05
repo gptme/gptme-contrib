@@ -1,0 +1,550 @@
+"""Tests for core LessonValidator behavior."""
+
+import tempfile
+from pathlib import Path
+
+from gptme_lessons_extras.validate import LessonValidator
+
+
+def _write_lesson(tmp: Path, content: str) -> Path:
+    """Write a lesson file and return its path."""
+    p = tmp / "test-lesson.md"
+    p.write_text(content)
+    return p
+
+
+_MINIMAL_LESSON = """\
+---
+match:
+  keywords:
+    - "test keyword phrase"
+status: active
+{extra}
+---
+
+# Test Lesson
+
+## Rule
+Test rule.
+
+## Context
+Test context.
+
+## Detection
+- Signal 1
+
+## Pattern
+```txt
+example
+```
+
+## Outcome
+- Benefit 1
+"""
+
+# A fully valid lesson for testing non-companion fields (version, target_grade, etc.).
+# Intentionally has no companion link so tests that expect zero errors pass regardless
+# of whether knowledge/lessons/test-lesson.md exists on disk.
+_VALID_LESSON = """\
+---
+match:
+  keywords:
+    - "test keyword phrase"
+status: active
+{extra}
+---
+
+# Test Lesson
+
+## Rule
+Test rule.
+
+## Context
+Test context.
+
+## Detection
+- Signal 1
+- Signal 2
+
+## Pattern
+```txt
+example
+```
+
+## Outcome
+- Benefit 1
+
+## Related
+- See also: some-other-resource
+"""
+
+
+def test_unknown_field_still_warned():
+    """Fields not in allowed_fields should produce a warning."""
+    content = _MINIMAL_LESSON.format(extra="bogus_field: true")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        bogus_warnings = [w for w in validator.warnings if "bogus_field" in w]
+        assert len(bogus_warnings) > 0, "Unknown fields should produce warnings"
+
+
+def test_confidence_field_now_warned():
+    """confidence field should produce a warning after revert of #535."""
+    content = _MINIMAL_LESSON.format(extra="confidence:\n  score: 0.5")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        confidence_warnings = [w for w in validator.warnings if "confidence" in w]
+        assert (
+            len(confidence_warnings) > 0
+        ), "confidence field should produce a warning (store scores in state files, not frontmatter)"
+
+
+def test_description_field_not_warned():
+    """description field is used by hybrid semantic matcher (gptme#2469); should not warn."""
+    content = _MINIMAL_LESSON.format(
+        extra='description: "Persist insights across sessions to prevent rediscovery"'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        desc_warnings = [w for w in validator.warnings if "description" in w]
+        assert (
+            len(desc_warnings) == 0
+        ), "description field is load-bearing for semantic matching and should not warn"
+
+
+def test_metadata_field_not_warned():
+    """metadata field (e.g. metadata.tags) is structural categorisation; should not warn."""
+    content = _MINIMAL_LESSON.format(
+        extra="metadata:\n  tags: [meta-learning, persistent-insight]"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        meta_warnings = [w for w in validator.warnings if "metadata" in w]
+        assert (
+            len(meta_warnings) == 0
+        ), "metadata field is structural categorisation and should not warn"
+
+
+# ---------------------------------------------------------------------------
+# version field tests (Issue #614)
+# ---------------------------------------------------------------------------
+
+
+def test_version_int_accepted():
+    """version as a positive integer should be accepted without errors/warnings."""
+    content = _VALID_LESSON.format(extra="version: 2")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+        version_warnings = [w for w in validator.warnings if "version" in w]
+        assert not version_warnings, f"Unexpected version warnings: {version_warnings}"
+
+
+def test_version_semver_string_accepted():
+    """version as a semver-style string should be accepted without errors."""
+    content = _VALID_LESSON.format(extra='version: "2.1.0"')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+
+
+def test_version_descriptive_tag_accepted():
+    """version as a descriptive tag string should be accepted without errors."""
+    content = _VALID_LESSON.format(extra='version: "v2-compact-primary"')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+
+
+def test_version_zero_rejected():
+    """version: 0 (non-positive int) should produce an error."""
+    content = _MINIMAL_LESSON.format(extra="version: 0")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        version_errors = [e for e in validator.errors if "version" in e]
+        assert version_errors, "version: 0 should produce an error"
+
+
+def test_version_negative_rejected():
+    """version: -1 (negative int) should produce an error."""
+    content = _MINIMAL_LESSON.format(extra="version: -1")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        version_errors = [e for e in validator.errors if "version" in e]
+        assert version_errors, "Negative version should produce an error"
+
+
+def test_version_empty_string_rejected():
+    """Empty version string should produce an error."""
+    content = _MINIMAL_LESSON.format(extra='version: ""')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        version_errors = [e for e in validator.errors if "version" in e]
+        assert version_errors, "Empty version string should produce an error"
+
+
+def test_version_wrong_type_rejected():
+    """version as a list should produce an error."""
+    content = _MINIMAL_LESSON.format(extra="version:\n  - a\n  - b")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        version_errors = [e for e in validator.errors if "version" in e]
+        assert version_errors, "version as a list should produce an error"
+
+
+def test_version_bool_rejected():
+    """version: true (YAML bool, Python bool subclasses int) should be rejected."""
+    content = _MINIMAL_LESSON.format(extra="version: true")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        version_errors = [e for e in validator.errors if "version" in e]
+        assert version_errors, "version: true (bool) should produce an error"
+
+
+def test_target_grade_single_dim_accepted():
+    """target_grade as a single known dimension should be accepted."""
+    content = _VALID_LESSON.format(extra="target_grade: harm")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+        target_warnings = [w for w in validator.warnings if "target_grade" in w]
+        assert (
+            not target_warnings
+        ), f"Unexpected target_grade warnings: {target_warnings}"
+
+
+def test_target_grade_list_accepted():
+    """target_grade as a list of known dimensions should be accepted."""
+    content = _VALID_LESSON.format(extra='target_grade: ["harm", "alignment"]')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+
+
+def test_target_grade_unknown_dim_rejected():
+    """Unknown target_grade dimensions should produce an error."""
+    content = _VALID_LESSON.format(extra="target_grade: craftsmanship")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        target_errors = [e for e in validator.errors if "target_grade" in e]
+        assert target_errors, "Unknown target_grade dims should produce an error"
+
+
+def test_target_grade_non_string_list_item_rejected():
+    """List values must all be non-empty strings."""
+    content = _VALID_LESSON.format(extra='target_grade: ["harm", 3]')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        target_errors = [e for e in validator.errors if "target_grade" in e]
+        assert target_errors, "Non-string target_grade entries should produce an error"
+
+
+# ---------------------------------------------------------------------------
+# automation field tests
+# ---------------------------------------------------------------------------
+
+
+_AUTOMATION_BLOCK = """\
+automation:
+  status: automated
+  validator: scripts/precommit/validators/validate_example.py
+  enforcement: {enforcement}
+  automated_date: 2026-04-19"""
+
+
+def test_automation_field_accepted():
+    """A well-formed automation mapping should be accepted silently."""
+    content = _VALID_LESSON.format(
+        extra=_AUTOMATION_BLOCK.format(enforcement="warning")
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+        automation_warnings = [w for w in validator.warnings if "automation" in w]
+        assert (
+            not automation_warnings
+        ), f"Unexpected automation warnings: {automation_warnings}"
+
+
+def test_automation_enforcement_error_accepted():
+    """enforcement: error should also be valid."""
+    content = _VALID_LESSON.format(extra=_AUTOMATION_BLOCK.format(enforcement="error"))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not validator.errors, f"Unexpected errors: {validator.errors}"
+
+
+def test_automation_invalid_enforcement_rejected():
+    """enforcement must be 'warning' or 'error'."""
+    content = _VALID_LESSON.format(
+        extra=_AUTOMATION_BLOCK.format(enforcement="critical")
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        automation_errors = [e for e in validator.errors if "automation" in e]
+        assert (
+            automation_errors
+        ), "Invalid automation.enforcement should produce an error"
+
+
+def test_automation_unknown_subfield_warns():
+    """Unknown sub-fields under automation should produce a warning (not error)."""
+    content = _VALID_LESSON.format(
+        extra="automation:\n  status: automated\n  weirdfield: nope"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        assert not [
+            e for e in validator.errors if "automation" in e
+        ], f"Unknown sub-fields should warn, not error: {validator.errors}"
+        warnings = [
+            w for w in validator.warnings if "automation" in w and "weirdfield" in w
+        ]
+        assert warnings, "Unknown automation sub-fields should produce a warning"
+
+
+def test_automation_must_be_mapping():
+    """automation as a non-mapping (e.g. a string) should be an error."""
+    content = _VALID_LESSON.format(extra='automation: "just a string"')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        automation_errors = [e for e in validator.errors if "automation" in e]
+        assert automation_errors, "Non-mapping automation value should produce an error"
+
+
+def test_automation_coexists_with_flat_fields_warns():
+    """Having both 'automation' block and flat automated_by/automated_date should warn."""
+    content = _VALID_LESSON.format(
+        extra="automation:\n  status: automated\nautomated_by: some-validator\nautomated_date: 2025-01-01"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        coexist_warnings = [
+            w for w in validator.warnings if "automation" in w and "automated_by" in w
+        ]
+        assert (
+            coexist_warnings
+        ), "Coexisting 'automation' block and flat automated_by field should warn"
+
+
+# confound_note field tests
+
+
+def test_confound_note_string_accepted():
+    """A non-empty confound_note string should be accepted without errors."""
+    content = _VALID_LESSON.format(
+        extra='confound_note: "corrective lesson — fires in higher-harm contexts"'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        confound_errors = [e for e in validator.errors if "confound_note" in e]
+        assert (
+            not confound_errors
+        ), f"Valid confound_note should not produce errors: {confound_errors}"
+
+
+def test_confound_note_empty_string_rejected():
+    """An empty confound_note string should produce an error."""
+    content = _VALID_LESSON.format(extra='confound_note: ""')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        confound_errors = [e for e in validator.errors if "confound_note" in e]
+        assert confound_errors, "Empty confound_note should produce an error"
+
+
+def test_confound_note_bool_rejected():
+    """A boolean confound_note should produce an error."""
+    content = _VALID_LESSON.format(extra="confound_note: true")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        confound_errors = [e for e in validator.errors if "confound_note" in e]
+        assert confound_errors, "Boolean confound_note should produce an error"
+
+
+def test_confound_note_wrong_type_rejected():
+    """A non-string confound_note (e.g. integer) should produce an error."""
+    content = _VALID_LESSON.format(extra="confound_note: 42")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        confound_errors = [e for e in validator.errors if "confound_note" in e]
+        assert confound_errors, "Non-string confound_note should produce an error"
+
+
+# An archived lesson that is long AND has no companion link — would normally
+# trigger both the companion-doc and length soft warnings.
+_ARCHIVED_LONG_LESSON = (
+    """\
+---
+match:
+  keywords:
+    - "test keyword phrase"
+status: archived
+---
+
+# Archived Test Lesson
+
+## Rule
+Test rule.
+
+## Context
+Test context.
+
+## Detection
+- Signal 1
+- Signal 2
+
+## Pattern
+```txt
+example
+```
+
+## Outcome
+"""
+    + "\n".join(f"- Benefit {i}" for i in range(120))
+    + "\n"
+)
+
+
+def test_archived_lesson_skips_length_warning():
+    """Archived lessons are frozen — no length nag even when over target."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), _ARCHIVED_LONG_LESSON)
+        validator = LessonValidator(path)
+        validator.validate()
+        length_warnings = [w for w in validator.warnings if "lines (target" in w]
+        assert not length_warnings, f"Unexpected length warnings: {length_warnings}"
+
+
+def test_archived_lesson_skips_companion_warning():
+    """Archived lessons should not warn about missing/unlinked companion docs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), _ARCHIVED_LONG_LESSON)
+        validator = LessonValidator(path)
+        validator.validate()
+        companion_warnings = [w for w in validator.warnings if "companion" in w.lower()]
+        assert (
+            not companion_warnings
+        ), f"Unexpected companion warnings: {companion_warnings}"
+
+
+def test_active_long_lesson_still_warns():
+    """Guard: the skip is archived-only — active lessons still get the length nag."""
+    active = _ARCHIVED_LONG_LESSON.replace("status: archived", "status: active")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), active)
+        validator = LessonValidator(path)
+        validator.validate()
+        length_warnings = [w for w in validator.warnings if "lines (target" in w]
+        assert length_warnings, "Active long lesson should still warn about length"
+
+
+# A concise lesson (<100 lines) that links a companion doc that does not exist.
+_LESSON_WITH_DEAD_COMPANION_LINK = """\
+---
+match:
+  keywords:
+    - "test keyword phrase"
+status: active
+---
+
+# Test Lesson With Dead Companion Link
+
+## Rule
+Test rule.
+
+## Context
+Test context.
+
+## Detection
+- Signal 1
+
+## Pattern
+```txt
+example
+```
+
+## Outcome
+- Benefit 1
+
+## Related
+- Full context: [knowledge/lessons/test-lesson.md](../../knowledge/lessons/test-lesson.md)
+"""
+
+
+def test_dead_companion_link_raises_error():
+    """A lesson that links a companion doc that doesn't exist should error."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), _LESSON_WITH_DEAD_COMPANION_LINK)
+        validator = LessonValidator(path)
+        validator.validate()
+        companion_errors = [e for e in validator.errors if "companion" in e.lower()]
+        assert (
+            companion_errors
+        ), "Lesson linking a nonexistent companion doc should raise an error"
+
+
+def test_dead_companion_link_archived_skips():
+    """Archived lessons skip companion checks, so dead links are not flagged."""
+    content = _LESSON_WITH_DEAD_COMPANION_LINK.replace(
+        "status: active", "status: archived"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_lesson(Path(tmp), content)
+        validator = LessonValidator(path)
+        validator.validate()
+        companion_errors = [e for e in validator.errors if "companion" in e.lower()]
+        assert (
+            not companion_errors
+        ), f"Archived lesson should not flag dead companion link: {companion_errors}"

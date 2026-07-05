@@ -1,0 +1,198 @@
+name: Test Packages
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # Detect which paths changed to skip expensive jobs on unrelated PRs
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      packages: ${{ steps.filter.outputs.packages }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          packages:
+            - 'packages/**'
+            - 'pyproject.toml'
+            - 'uv.lock'
+            - 'Makefile'
+            - '.github/workflows/test-packages.yml'
+
+  # Discovery job - outputs package matrix dynamically using Makefile (single source of truth)
+  # On PRs, filters the matrix to only packages with actual file changes
+  discover:
+    needs: changes
+    # Always run on push to master; on PRs, only when package code changed
+    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.discover.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for git diff against base branch on PRs
+
+      - name: Discover packages
+        id: discover
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # Get all packages from Makefile (single source of truth)
+          make ci-list-packages-json > /tmp/all_packages.json
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Get files changed in this PR (use env var to avoid shell injection)
+            changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+
+            # If shared config changed, run all packages (can't tell which are affected)
+            if echo "$changed" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then
+              echo "Shared config changed, running all packages"
+              packages=$(cat /tmp/all_packages.json)
+            else
+              # Files directly under packages/ (not in a subdirectory) also trigger full run
+              if echo "$changed" | grep -qE '^packages/[^/]+$'; then
+                echo "Root-level packages/ file changed, running all packages"
+                packages=$(cat /tmp/all_packages.json)
+              else
+                # Extract affected package names from changed paths (packages/<name>/...)
+                affected=$(echo "$changed" | sed -n 's|^packages/\([^/]*\)/.*|\1|p' | sort -u)
+
+                if [ -z "$affected" ]; then
+                  echo "No package files changed, skipping tests"
+                  packages="[]"
+                else
+                  # Filter all packages to only affected ones
+                  packages=$(echo "$affected" | python3 -c "import json,sys; all_pkgs=json.load(open('/tmp/all_packages.json')); affected=set(sys.stdin.read().strip().split('\n')); print(json.dumps([p for p in all_pkgs if p in affected]))")
+                fi
+              fi
+            fi
+          else
+            # On push to master, run all packages
+            packages=$(cat /tmp/all_packages.json)
+          fi
+
+          echo "packages=$packages" >> $GITHUB_OUTPUT
+          echo "Discovered packages: $packages"
+
+  # Test each package in parallel
+  test:
+    needs: discover
+    if: needs.discover.result == 'success' && needs.discover.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+        package: ${{ fromJson(needs.discover.outputs.packages) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          uv sync --all-packages
+
+      - name: Run tests for ${{ matrix.package }}
+        run: |
+          make -C packages/${{ matrix.package }} test
+
+  # Coverage report (combined for all packages)
+  coverage:
+    needs: changes
+    # Always run on push to master; on PRs, only when package code changed
+    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get install -y portaudio19-dev libportaudio2
+
+      - name: Install dependencies
+        run: |
+          uv sync --all-packages --all-extras
+
+      - name: Run coverage for all packages
+        run: |
+          # Find all packages with tests and collect coverage
+          for pkg in packages/*/; do
+            name=$(basename "$pkg")
+            # Skip __pycache__ and symlinks
+            [ -L "$pkg" ] && continue
+            [ "$name" = "__pycache__" ] && continue
+            # Only packages with both tests/ and src/
+            if [ -d "$pkg/tests" ] && [ -d "$pkg/src" ] && [ -f "$pkg/Makefile" ]; then
+              echo "=== Coverage for $name ==="
+              uv run --with pytest --with pytest-cov --with pytest-timeout pytest "$pkg/tests" \
+                --cov="$pkg/src" \
+                --cov-append \
+                --cov-report=term-missing \
+                -m "not slow" \
+                --timeout=30 \
+                -q || true
+            fi
+          done
+          # Generate combined XML report once after all packages
+          uv run --with coverage coverage xml || true
+
+      - name: Upload coverage to Codecov
+        if: hashFiles('coverage.xml') != ''
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          flags: packages
+          name: codecov-packages
+          fail_ci_if_error: false
+
+  # Typecheck all packages (single job, not parallelized per-package)
+  typecheck:
+    needs: changes
+    # Always run on push to master; on PRs, only when package code changed
+    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          uv sync --all-packages
+
+      - name: Run typecheck
+        run: |
+          make typecheck-packages

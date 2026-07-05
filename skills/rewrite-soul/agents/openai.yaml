@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rewrite SOUL"
+  short_description: "Rewrite or tighten a SOUL.md persona file"
+  default_prompt: "Rewrite this agent's SOUL.md to be sharper and more opinionated without changing its core identity."

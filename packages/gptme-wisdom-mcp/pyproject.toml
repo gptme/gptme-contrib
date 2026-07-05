@@ -1,0 +1,64 @@
+[project]
+name = "gptme-wisdom-mcp"
+version = "0.1.0"
+description = "RAG-as-MCP Knowledge Server for gptme agents — search CS books and session history via MCP"
+authors = [
+    {name = "gptme contributors", email = "gptme@superuserlabs.org"}
+]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["mcp", "rag", "gptme", "knowledge-retrieval", "session-search"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "mcp>=1.0",
+    "gptme-wisdom>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/gptme/gptme-contrib"
+Repository = "https://github.com/gptme/gptme-contrib"
+Issues = "https://github.com/gptme/gptme-contrib/issues"
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.0.0",
+    "pytest>=7.0",
+]
+test = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+gptme-wisdom-mcp = "gptme_wisdom_mcp.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_wisdom_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.uv.sources]
+gptme-wisdom = { workspace = true }
+
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

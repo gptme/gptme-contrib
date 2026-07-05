@@ -1,0 +1,115 @@
+# Twitter Workflow Configuration
+
+# Timeline monitoring settings
+monitoring:
+  check_interval: 300  # seconds
+  max_tweets_per_check: 50
+  min_engagement_threshold:
+    followers: 100
+    likes: 5
+    retweets: 2
+
+# Tweet evaluation criteria
+evaluation:
+  # Topics of interest (used for relevance scoring)
+  topics:
+    - AI/ML
+    - Programming
+    - Open Source
+    - Privacy
+    - Cryptocurrency
+    - Time tracking
+    - Developer tools
+
+  # Projects to monitor mentions of
+  projects:
+    - ActivityWatch
+    - gptme
+    - "What Did You Get Done"
+
+  # Engagement triggers
+  triggers:
+    - type: mention
+      description: "Direct mentions of the agent"
+    - type: project_mention
+      description: "Mentions of our projects"
+    - type: relevant_discussion
+      description: "Discussions about our focus areas"
+    - type: question
+      description: "Questions about our domains"
+
+# Response templates
+templates:
+  # Few-shot examples for the LLM
+  examples:
+    - type: project_mention
+      tweet: "Just discovered @ActivityWatch - interesting approach to time tracking!"
+      response: "Thanks for checking out ActivityWatch! 🎯 As one of the contributors, I'm excited about how it helps people understand their time use while keeping data local and private."
+
+    - type: technical_question
+      tweet: "How does @gptmeorg handle tool access? Seems powerful but concerned about security."
+      response: "Great question about security! gptme uses a configurable tool system where you can restrict which tools are available. All tool execution is logged and can be reviewed before running."
+
+    - type: relevant_discussion
+      tweet: "We need more privacy-first alternatives to popular tools. Tired of everything being cloud-first."
+      response: "Strongly agree! That's why I'm excited about projects like ActivityWatch that are local-first by design. Privacy and user autonomy should be the default, not an afterthought."
+
+# Review criteria
+review:
+  required_checks:
+    - "Maintains professional tone"
+    - "Accurate technical information"
+    - "Aligned with our values"
+    - "Adds value to discussion"
+    - "Shows understanding of specific context"
+    - "No controversial topics"
+    - "Minimal emoji usage (0-1 max, never at the beginning of tweets, prefer no emojis)"
+    - "Under 280 characters"
+    - "Links in replies, not main tweet"
+    - "No hashtags"
+
+  criteria_descriptions:
+    - name: "Context Completeness"
+      description: "Draft must have access to full conversation thread context (minimum 3 tweets or all if thread is shorter). Check that thread_context is present and includes the complete discussion."
+      examples:
+        - fail: "Only has immediate reply target, missing earlier thread context"
+        - pass: "Has 5+ tweets from thread showing full conversation history"
+
+    - name: "Shows understanding of specific context"
+      description: "Response must demonstrate understanding of the actual topic being discussed, not a confused or mismatched understanding. Must engage with specific points made in the conversation."
+      examples:
+        - fail: "Talks about charging prices when discussion is about Twitter API costs"
+        - fail: "Generic reply about learning when thread is specifically about GTD task planning"
+        - pass: "The issue about improving RAG integration looks promising - especially the vector embedding approach you mentioned."
+
+    - name: "Relevance to Discussion"
+      description: "Response must be on-topic for the conversation. Not generic, not could-apply-to-anything content. Must be grounded in the actual discussion happening."
+      examples:
+        - fail: "Learning to be more selective with my replies 🎯"  # generic, doesn't engage with GTD/planning discussion
+        - pass: "Great point about breaking tasks into next actions - that's the core GTD principle that makes it work"
+
+    - name: "Technical Accuracy"
+      description: "All factual claims must be verifiable. No false statements about capabilities, timeline, or project status. Check dates against git history."
+      examples:
+        - fail: "One year of autonomous operation!"  # when autonomous operation started 6 weeks ago, not 1 year
+        - fail: "We support X feature"  # when feature doesn't exist yet
+        - pass: "Celebrating my first birthday! Created one year ago today."  # verifiable via git log
+
+# Rate limiting
+rate_limits:
+  max_tweets_per_hour: 5
+  max_replies_per_hour: 10
+  min_time_between_tweets: 900  # 15 minutes
+
+# Blacklist
+blacklist:
+  topics:
+    - politics
+    - religion
+    - NSFW content
+
+  patterns:
+    - "spam"
+    - "airdrop"
+    - "giveaway"
+    - "get rich"

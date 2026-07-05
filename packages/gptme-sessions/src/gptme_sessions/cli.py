@@ -1,0 +1,3036 @@
+"""CLI entry point for gptme-sessions."""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import re
+import sys
+from datetime import date, datetime, timedelta, timezone
+from fnmatch import fnmatch
+from pathlib import Path
+from typing import Any, cast
+
+import click
+
+# fcntl is POSIX-only; on Windows we skip locking.
+try:
+    import fcntl as _fcntl
+
+    _has_fcntl = True
+except ImportError:
+    _has_fcntl = False
+
+from .discovery import (
+    discover_cc_sessions,
+    discover_codex_sessions,
+    discover_copilot_sessions,
+    discover_gptme_sessions,
+    extract_cc_model,
+    extract_project,
+    extract_session_name,
+    parse_gptme_config,
+    session_date_from_path,
+    session_datetime_from_path,
+)
+from .post_session import VALID_AB_GROUPS, VALID_CONTEXT_TIERS, post_session
+from .replay import (
+    ToolResultsMode,
+    render_replay,
+    resolve_replay_target,
+    resolve_session_record_prefix,
+)
+from .record import SessionRecord, normalize_run_type
+from .signals import extract_from_path
+from .store import (
+    SessionStore,
+    compute_run_analytics,
+    format_run_analytics,
+    format_stats,
+)
+
+logger = logging.getLogger(__name__)
+
+HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot-cli"]
+
+# Maps usage dict keys (from extract_from_path) to SessionRecord field names.
+_USAGE_FIELD_MAP: dict[str, str] = {
+    "model": "model",
+    "total_tokens": "token_count",
+    "input_tokens": "input_tokens",
+    "output_tokens": "output_tokens",
+    "cache_creation_tokens": "cache_creation_tokens",
+    "cache_read_tokens": "cache_read_tokens",
+    "sys_prompt_tokens": "sys_prompt_tokens",
+    "context_peak_tokens": "context_peak_tokens",
+    "context_window": "context_window",
+    "sys_prompt_bytes": "sys_prompt_bytes",
+    "first_turn_bytes": "first_turn_bytes",
+    "context_peak_bytes": "context_peak_bytes",
+    "session_total_bytes": "session_total_bytes",
+}
+
+
+def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool:
+    """Set ``record.field`` when it is empty/unknown and ``value`` is usable."""
+    if value is None:
+        return False
+    current = getattr(record, field)
+    if isinstance(current, list):
+        if current:
+            return False
+        if isinstance(value, list):
+            setattr(record, field, value)
+            return True
+        return False
+    if current not in (None, "", 0, "unknown"):
+        return False
+    if current == value:
+        return False
+    setattr(record, field, value)
+    return True
+
+
+def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool:
+    """Backfill missing fields on an existing record from ``extract_from_path`` output."""
+    changed = False
+
+    if record.outcome == "unknown":
+        record.outcome = "productive" if result.get("productive") else "noop"
+        changed = True
+    changed |= _assign_if_missing(
+        record, "duration_seconds", int(result.get("session_duration_s") or 0)
+    )
+    changed |= _assign_if_missing(record, "deliverables", result.get("deliverables", []))
+    changed |= _assign_if_missing(
+        record, "deliverable_details", result.get("deliverable_details", [])
+    )
+    changed |= _assign_if_missing(record, "category", result.get("inferred_category"))
+
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        for usage_key, record_key in _USAGE_FIELD_MAP.items():
+            changed |= _assign_if_missing(record, record_key, usage.get(usage_key))
+
+    return changed
+
+
+def _apply_extract_result_to_kwargs(record_kwargs: dict, result: dict) -> None:
+    """Populate new-record kwargs from ``extract_from_path`` output."""
+    record_kwargs["outcome"] = "productive" if result.get("productive") else "noop"
+    record_kwargs["duration_seconds"] = int(result.get("session_duration_s") or 0)
+    record_kwargs["deliverables"] = result.get("deliverables", [])
+    record_kwargs["deliverable_details"] = result.get("deliverable_details", [])
+    if result.get("inferred_category"):
+        record_kwargs["category"] = result["inferred_category"]
+
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return
+
+    for usage_key, record_key in _USAGE_FIELD_MAP.items():
+        value = usage.get(usage_key)
+        if value is not None:
+            record_kwargs[record_key] = value
+
+
+def _judge_fields(
+    score: float | None,
+    reason: str | None,
+    model: str | None,
+) -> dict[str, object]:
+    """Return legacy and multivariate-alignment fields for CLI results."""
+    if score is None:
+        return {}
+
+    fields: dict[str, object] = {
+        "llm_judge_score": score,
+        "llm_judge_reason": reason,
+        "llm_judge_model": model,
+        "grades": {"alignment": score},
+    }
+    if reason is not None:
+        fields["grade_reasons"] = {"alignment": reason}
+    return fields
+
+
+def _discover_all(
+    since_days: float = 30,
+    harness_filter: str | None = None,
+) -> list[dict]:
+    """Collect discovered sessions across all harnesses, sorted chronologically.
+
+    Returns a list of dicts with keys ``harness``, ``path``, and
+    ``session_date`` (a :class:`datetime.date` or ``None``).
+    Dicts for ``gptme`` and ``claude-code`` harnesses also include ``model``
+    (may be ``None`` if extraction fails); ``codex`` and ``copilot`` entries
+    do not include ``model``.  Callers should use ``.get("model")`` accordingly.
+    Results are sorted oldest-first across all harnesses so callers get a
+    unified chronological view rather than harness-grouped output.
+    Used for fallback display and the ``sync`` command.
+    """
+    today = date.today()
+    # Discovery scans whole-day session dirs; round sub-day windows up to a day.
+    start = today - timedelta(days=math.ceil(since_days))
+    discovered: list[dict] = []
+
+    if harness_filter in (None, "gptme"):
+        for p in discover_gptme_sessions(start, today):
+            jsonl = p / "conversation.jsonl"
+            resolved = jsonl if jsonl.exists() else p
+            model = parse_gptme_config(p).get("model") or None
+            discovered.append(
+                {
+                    "harness": "gptme",
+                    "path": resolved,
+                    "model": model,
+                    "session_date": session_date_from_path("gptme", resolved),
+                    "session_name": extract_session_name("gptme", resolved),
+                    "project": extract_project("gptme", resolved),
+                }
+            )
+    if harness_filter in (None, "claude-code"):
+        for p in discover_cc_sessions(start, today):
+            model = extract_cc_model(p)
+            discovered.append(
+                {
+                    "harness": "claude-code",
+                    "path": p,
+                    "model": model,
+                    "session_date": session_date_from_path("claude-code", p),
+                    "session_name": extract_session_name("claude-code", p),
+                    "project": extract_project("claude-code", p),
+                }
+            )
+    if harness_filter in (None, "codex"):
+        for p in discover_codex_sessions(start, today):
+            discovered.append(
+                {
+                    "harness": "codex",
+                    "path": p,
+                    "session_date": session_date_from_path("codex", p),
+                    "session_name": extract_session_name("codex", p),
+                    "project": extract_project("codex", p),
+                }
+            )
+    if harness_filter in (None, "copilot-cli"):
+        for p in discover_copilot_sessions(start, today):
+            discovered.append(
+                {
+                    "harness": "copilot-cli",
+                    "path": p,
+                    "session_date": session_date_from_path("copilot", p),
+                    "session_name": extract_session_name("copilot", p),
+                    "project": extract_project("copilot", p),
+                }
+            )
+
+    # Sort chronologically across harnesses; entries without a date sort last.
+    discovered.sort(key=lambda e: e.get("session_date") or date.max)
+    return discovered
+
+
+def _count_unsynced(
+    store: SessionStore,
+    records: list[SessionRecord] | None = None,
+    since_days: int = 14,
+) -> int:
+    """Count sessions discovered in the last *since_days* days not yet in the store.
+
+    Pass *records* to avoid a redundant ``store.load_all()`` call when the
+    caller has already loaded them (e.g. for ``store.stats()``).
+
+    Uses the same path-matching logic as the ``sync`` command so the count
+    accurately reflects what ``sync`` would import for the same *since_days*
+    window.  Note that ``sync --since`` accepts custom windows (e.g. 90d), so
+    running ``sync`` with a wider window may import sessions not counted here.
+    """
+    discovered = _discover_all(since_days=since_days)
+    if not discovered:
+        return 0
+    if records is None:
+        records = store.load_all()
+    existing_paths = {r.journal_path for r in records if r.journal_path} | {
+        r.trajectory_path for r in records if r.trajectory_path
+    }
+    return sum(1 for e in discovered if str(e["path"]) not in existing_paths)
+
+
+def _show_discovery_fallback(since_days: int = 30) -> None:
+    """Show discovered sessions when the store has no records.
+
+    Prints a summary grouped by harness, then a hint to run ``sync``.
+    """
+    discovered = _discover_all(since_days=since_days)
+    click.echo("No session records found in store.")
+    if not discovered:
+        click.echo(
+            f"No sessions discovered in the last {_fmt_since(since_days)} either.\n"
+            "To record sessions, run 'gptme-sessions post-session' after each agent run."
+        )
+        return
+
+    # Summarize by harness
+    counts: dict[str, int] = {}
+    for e in discovered:
+        counts[e["harness"]] = counts.get(e["harness"], 0) + 1
+
+    click.echo(f"Discovered {len(discovered)} session(s) in the last {_fmt_since(since_days)}:\n")
+    for harness, n in sorted(counts.items()):
+        click.echo(f"  {harness:14s}  {n} session(s)")
+
+    click.echo(
+        "\nRun 'gptme-sessions sync' to import sessions into the store for analytics."
+        "\nRun 'gptme-sessions discover' to list session paths."
+    )
+
+
+# Units accepted by --since, expressed as a fraction of a day. Sub-day units are
+# preserved as fractions so timestamp filters (query/runs) get hour/minute
+# precision instead of silently rounding up to a whole day.
+_SINCE_UNIT_DAYS: dict[str, float] = {
+    "s": 1 / 86400, "sec": 1 / 86400, "secs": 1 / 86400, "second": 1 / 86400, "seconds": 1 / 86400,
+    "m": 1 / 1440, "min": 1 / 1440, "mins": 1 / 1440, "minute": 1 / 1440, "minutes": 1 / 1440,
+    "h": 1 / 24, "hr": 1 / 24, "hrs": 1 / 24, "hour": 1 / 24, "hours": 1 / 24,
+    "d": 1.0, "day": 1.0, "days": 1.0,
+    "w": 7.0, "wk": 7.0, "wks": 7.0, "week": 7.0, "weeks": 7.0,
+}  # fmt: skip
+
+_SINCE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([a-z]*)")
+
+
+def _parse_since(since: str | None) -> float | None:
+    """Parse a --since value into a number of days (float; None = no filter).
+
+    Accepts compact forms (``90s``, ``30m``, ``2h``, ``7d``, ``2w``), a bare
+    number (interpreted as days for backward compatibility — ``30`` == ``30d``),
+    natural phrases (``"2 hours ago"``, ``"30 minutes"``, ``"1 week ago"``), and
+    ``all`` (no filter). Sub-day windows are returned as fractions of a day, so
+    timestamp filters (``query``, ``runs``) get hour/minute precision rather than
+    rounding up to a whole day. The unit ``m`` means *minutes*.
+    """
+    if not since:
+        return None
+    s = since.strip().lower()
+    if s == "all":
+        return None
+
+    # Try direct match first
+    match = _SINCE_RE.fullmatch(s)
+    if not match and s.endswith("ago"):
+        # Try after stripping trailing "ago" (handles "2 hours ago", "1d ago")
+        stripped = s[:-3].strip()
+        match = _SINCE_RE.fullmatch(stripped)
+
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2)
+        if unit == "":
+            return value  # bare number == days (back-compat)
+        if unit in _SINCE_UNIT_DAYS:
+            return value * _SINCE_UNIT_DAYS[unit]
+    raise click.BadParameter(
+        f"invalid value {since!r} (expected e.g. 90s, 30m, 2h, 7d, 2w, '2 hours ago', or 'all')",
+        param_hint="'--since'",
+    )
+
+
+def _fmt_since(since_days: float | None) -> str:
+    """Format a *since_days* value (float days) for user-facing messages.
+
+    Converts raw floats like ``0.08333`` into ``"2 hours"`` so that sub-day
+    windows display readably.
+    """
+    if since_days is None:
+        return "all time"
+
+    seconds = since_days * 86400
+    if seconds < 120:  # less than 2 minutes
+        return f"{int(round(seconds))} seconds"
+    if seconds < 3600:  # less than 1 hour → minutes
+        return f"{int(round(seconds / 60))} minutes"
+    if seconds < 86400:  # less than 1 day → hours
+        return f"{int(round(seconds / 3600))} hours"
+
+    # Days — show as integer when whole, otherwise one decimal
+    if since_days == int(since_days):
+        return f"{int(since_days)} days"
+    return f"{since_days:.1f} days"
+
+
+def _record_timestamp_sort_key(record: SessionRecord) -> tuple[int, float | str]:
+    """Sort records newest-first using ISO timestamps when possible."""
+    if record.timestamp:
+        try:
+            ts = datetime.fromisoformat(record.timestamp.replace("Z", "+00:00"))
+            return (1, ts.timestamp())
+        except ValueError:
+            pass
+    return (0, record.session_id)
+
+
+def _select_auto_tag_targets(
+    records: list[SessionRecord],
+    *,
+    limit: int,
+    retag_all: bool,
+) -> list[SessionRecord]:
+    """Return newest matching records for ``auto-tag`` processing."""
+    candidates = [
+        record
+        for record in records
+        if retag_all or not record.category or record.category == "unknown"
+    ]
+    candidates.sort(key=_record_timestamp_sort_key, reverse=True)
+    return candidates[:limit]
+
+
+def _load_auto_tag_mapping(mapping_file: Path) -> list[tuple[str, str]]:
+    """Load YAML mapping of ``pattern: category`` entries for ``auto-tag``."""
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - depends on environment packaging
+        raise click.ClickException(
+            "PyYAML is required for --mapping-file support. Install the 'pyyaml' package first."
+        ) from exc
+
+    try:
+        raw = yaml.safe_load(mapping_file.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise click.ClickException(f"Failed to read mapping file {mapping_file}: {exc}") from exc
+    except Exception as exc:
+        raise click.ClickException(
+            f"Failed to parse YAML mapping file {mapping_file}: {exc}"
+        ) from exc
+
+    if raw is None:
+        return []
+    if not isinstance(raw, dict):
+        raise click.ClickException(
+            f"{mapping_file} must contain a YAML mapping of 'pattern: category' entries."
+        )
+
+    rules: list[tuple[str, str]] = []
+    for pattern, category in raw.items():
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise click.ClickException(f"{mapping_file} contains an empty or non-string pattern.")
+        if not isinstance(category, str) or not category.strip():
+            raise click.ClickException(
+                f"{mapping_file} maps pattern {pattern!r} to an empty or non-string category."
+            )
+        rules.append((pattern.strip(), category.strip()))
+    return rules
+
+
+def _match_auto_tag_override(
+    rules: list[tuple[str, str]],
+    candidates: list[str],
+) -> tuple[str, str] | None:
+    """Return the first matching override as ``(category, pattern)``."""
+    normalized = [candidate.lower() for candidate in candidates if candidate]
+    for pattern, category in rules:
+        pattern_norm = pattern.lower()
+        has_glob = any(ch in pattern for ch in "*?[")
+        for candidate in normalized:
+            matched = fnmatch(candidate, pattern_norm) if has_glob else pattern_norm in candidate
+            if matched:
+                return category, pattern
+    return None
+
+
+# -- dedup helpers -----------------------------------------------------------
+
+# Fields whose presence signals a "richer" (more complete) record. Used both to
+# rank duplicate records and to decide which fields to merge into the keeper.
+_RICHNESS_FIELDS: tuple[str, ...] = (
+    "start_time",
+    "end_time",
+    "session_name",
+    "project",
+    "category",
+    "recommended_category",
+    "selector_mode",
+    "trajectory_path",
+    "journal_path",
+    "trajectory_grade",
+    "llm_judge_score",
+    "token_count",
+    "context_peak_tokens",
+    "harm_category",
+    "span_aggregates",
+)
+
+# Values that count as "empty" for richness/merge purposes.
+# Do NOT include numeric 0: Python's 0 == 0.0 would treat a legitimate 0.0
+# llm_judge_score or trajectory_grade as missing and silently overwrite it.
+_EMPTY_VALUES: tuple[object, ...] = (None, "", "unknown")
+
+
+def _record_interval(record: SessionRecord) -> tuple[datetime, datetime] | None:
+    """Return ``(start, end)`` datetimes for a record, or ``None`` if unparseable.
+
+    Prefers ``start_time``/``end_time``; falls back to ``timestamp`` plus
+    ``duration_seconds`` when the explicit end is missing.
+    """
+    start_raw = record.start_time or record.timestamp
+    if not start_raw:
+        return None
+    try:
+        start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    end: datetime | None = None
+    if record.end_time:
+        try:
+            end = datetime.fromisoformat(record.end_time.replace("Z", "+00:00"))
+        except ValueError:
+            end = None
+    if end is None:
+        end = start + timedelta(seconds=max(record.duration_seconds or 0, 0))
+    if end < start:
+        end = start
+    return start, end
+
+
+def _overlap_ratio(
+    a: tuple[datetime, datetime],
+    b: tuple[datetime, datetime],
+) -> float:
+    """Jaccard overlap of two intervals: intersection / union (0.0-1.0).
+
+    Jaccard (not "fraction of the shorter interval") is the right test for
+    *duplicate* records — two recordings of the same session have near-identical
+    start AND end, so their intersection ≈ their union. A short session merely
+    nested inside a longer, genuinely different session has a small union ratio
+    and is correctly left alone.
+    """
+    earliest_start = min(a[0], b[0])
+    latest_end = max(a[1], b[1])
+    union = (latest_end - earliest_start).total_seconds()
+    if union <= 0:
+        # Both intervals are the same zero-length instant → identical.
+        return 1.0
+    latest_start = max(a[0], b[0])
+    earliest_end = min(a[1], b[1])
+    intersection = (earliest_end - latest_start).total_seconds()
+    if intersection <= 0:
+        return 0.0
+    return min(intersection / union, 1.0)
+
+
+def _record_richness(record: SessionRecord) -> int:
+    """Count populated metadata fields; higher means a more complete record."""
+    score = sum(1 for name in _RICHNESS_FIELDS if getattr(record, name, None) not in _EMPTY_VALUES)
+    score += len(record.deliverables or [])
+    score += len(record.deliverable_details or [])
+    score += len(record.grades or {})
+    return score
+
+
+def _find_duplicate_groups(
+    records: list[SessionRecord],
+    *,
+    min_overlap: float,
+) -> list[list[SessionRecord]]:
+    """Group same-harness records whose time intervals overlap by ``>= min_overlap``.
+
+    Returns groups of 2+ records, each sorted richest-first. Records without a
+    parseable interval are never grouped. Overlap is transitive (union-find), so
+    a chain of overlapping sessions collapses into a single group.
+    """
+    by_harness: dict[str, list[tuple[SessionRecord, tuple[datetime, datetime]]]] = {}
+    for record in records:
+        interval = _record_interval(record)
+        if interval is None:
+            continue
+        by_harness.setdefault(record.harness or "unknown", []).append((record, interval))
+
+    groups: list[list[SessionRecord]] = []
+    for items in by_harness.values():
+        count = len(items)
+        parent = list(range(count))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i in range(count):
+            for j in range(i + 1, count):
+                if _overlap_ratio(items[i][1], items[j][1]) >= min_overlap:
+                    parent[find(i)] = find(j)
+
+        clusters: dict[int, list[SessionRecord]] = {}
+        for idx in range(count):
+            clusters.setdefault(find(idx), []).append(items[idx][0])
+        for members in clusters.values():
+            if len(members) >= 2:
+                members.sort(key=_record_richness, reverse=True)
+                groups.append(members)
+    return groups
+
+
+def _merge_into_keeper(
+    keeper: SessionRecord,
+    duplicate: SessionRecord,
+    *,
+    apply: bool,
+) -> list[str]:
+    """Fill the keeper's empty fields from a duplicate; return the filled names.
+
+    When ``apply`` is False the field list is computed without mutating, so the
+    same call powers both ``--dry-run`` previews and real merges.
+    """
+    filled: list[str] = []
+    for name in _RICHNESS_FIELDS:
+        if getattr(keeper, name, None) not in _EMPTY_VALUES:
+            continue
+        other = getattr(duplicate, name, None)
+        if other not in _EMPTY_VALUES:
+            if apply:
+                setattr(keeper, name, other)
+            filled.append(name)
+    # Merge deliverables (list[str])
+    existing = set(keeper.deliverables or [])
+    extra = [d for d in (duplicate.deliverables or []) if d not in existing]
+    if extra:
+        if apply:
+            if keeper.deliverables is None:
+                keeper.deliverables = list(extra)
+            else:
+                keeper.deliverables.extend(extra)
+        filled.append("deliverables")
+    # Merge deliverable_details (list[dict]) — union by value equality
+    existing_details = keeper.deliverable_details or []
+    extra_details = [d for d in (duplicate.deliverable_details or []) if d not in existing_details]
+    if extra_details:
+        if apply:
+            if keeper.deliverable_details is None:
+                keeper.deliverable_details = list(extra_details)
+            else:
+                keeper.deliverable_details.extend(extra_details)
+        filled.append("deliverable_details")
+    # Merge grades (dict[str, float]) — add keys the keeper lacks
+    dup_grades = duplicate.grades or {}
+    extra_grades = {k: v for k, v in dup_grades.items() if k not in (keeper.grades or {})}
+    if extra_grades:
+        if apply:
+            if keeper.grades is None:
+                keeper.grades = dict(extra_grades)
+            else:
+                keeper.grades.update(extra_grades)
+        filled.append("grades")
+    return filled
+
+
+@click.group(invoke_without_command=True)
+@click.option(
+    "--sessions-dir",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    default=None,
+    help="Path to sessions directory (default: ~/.local/share/gptme-sessions/)",
+)
+@click.pass_context
+def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
+    """Session tracking and analytics for agents. Supports trajectories from gptme, Claude Code, Codex, and Copilot."""
+    ctx.ensure_object(dict)
+    ctx.obj["sessions_dir"] = sessions_dir
+    if ctx.invoked_subcommand is None:
+        _unsync_window = 14  # days to scan for unsynced sessions
+        _default_since = 30  # default stats window
+        store = SessionStore(sessions_dir=sessions_dir)
+        records = store.load_all()
+
+        # Default to last 30 days for top-level stats
+        recent = store.query(since_days=_default_since)
+        s = store.stats(recent)
+        if s.get("total", 0) == 0:
+            if records:
+                # Records exist but all fall outside the default window
+                click.echo(
+                    f"No records in the last {_default_since} days. "
+                    "Use 'gptme-sessions stats --since all' for all-time data."
+                )
+            else:
+                _show_discovery_fallback()
+        else:
+            click.echo(
+                f"Last {_default_since} days (use 'gptme-sessions stats --since all' for all-time):\n"
+            )
+            format_stats(s)
+            unsynced = _count_unsynced(store, records=records, since_days=_unsync_window)
+            if unsynced > 0:
+                click.echo(
+                    f"\nTip: {unsynced} new session(s) available in the last {_unsync_window} days. "
+                    "Run 'gptme-sessions sync' to import."
+                )
+            else:
+                click.echo("\nTip: Run 'gptme-sessions sync' to keep the store up to date.")
+
+
+# -- Shared filter options for query/stats -----------------------------------
+
+
+def _filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
+    """Decorator adding common filter options to a command."""
+    for option in reversed(
+        [
+            click.option("--model", default=None, help="Filter by model (e.g. opus, sonnet)"),
+            click.option("--run-type", default=None, help="Filter by run type"),
+            click.option("--category", default=None, help="Filter by category"),
+            click.option("--harness", default=None, help="Filter by harness"),
+            click.option("--outcome", default=None, help="Filter by outcome"),
+            click.option(
+                "--project", default=None, help="Filter by project name (substring match)"
+            ),
+            click.option(
+                "--since",
+                default=None,
+                help="Filter by recency (e.g. 90s, 30m, 2h, 7d, 2w, '2 hours ago', or 'all')",
+            ),
+            click.option("--json", "as_json", is_flag=True, help="Output as JSON"),
+        ]
+    ):
+        func = option(func)
+    return func
+
+
+# -- query -------------------------------------------------------------------
+
+
+@cli.command()
+@_filter_options
+@click.option("--stats", "show_stats", is_flag=True, help="Show summary statistics")
+@click.pass_context
+def query(
+    ctx: click.Context,
+    model: str | None,
+    run_type: str | None,
+    category: str | None,
+    harness: str | None,
+    outcome: str | None,
+    project: str | None,
+    since: str | None,
+    as_json: bool,
+    show_stats: bool,
+) -> None:
+    """Query session records."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since)
+
+    if show_stats:
+        records = store.query(
+            model=model,
+            run_type=run_type,
+            category=category,
+            harness=harness,
+            outcome=outcome,
+            since_days=since_days,
+            project=project,
+        )
+        s = store.stats(records)
+        if as_json:
+            click.echo(json.dumps(s, indent=2))
+        else:
+            format_stats(s)
+        return
+
+    records = store.query(
+        model=model,
+        run_type=run_type,
+        category=category,
+        harness=harness,
+        outcome=outcome,
+        since_days=since_days,
+        project=project,
+    )
+    if as_json:
+        click.echo(json.dumps([r.to_dict() for r in records], indent=2))
+    else:
+        for r in records:
+            status = "+" if r.outcome == "productive" else "-"
+            cat = r.category or "?"
+            dur = f"{r.duration_seconds // 60:3d}m" if r.duration_seconds > 0 else "   ?"
+            # Show date only (not time) for compactness
+            date_str = r.timestamp[:10] if r.timestamp else "????"
+            # Session name or short ID
+            name = r.session_name or r.session_id[:8]
+            # Project: last path component
+            proj = ""
+            if r.project:
+                proj = r.project.rstrip("/").rsplit("/", 1)[-1] if "/" in r.project else r.project
+            click.echo(
+                f"[{status}] {date_str}  {name:20s}  {(r.model_normalized or 'unknown'):8s}  "
+                f"{cat:14s}  {dur}  {proj}"
+            )
+        click.echo(f"\n{len(records)} records")
+
+
+# -- show --------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("session_id")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
+    """Show details for a single session record by ID prefix.
+
+    SESSION_ID is a full or prefix of a session ID (e.g. 'a1b2c3d4' or 'a1b2').
+    """
+    if not session_id:
+        raise click.UsageError("Session ID must not be empty.")
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    try:
+        record = resolve_session_record_prefix(store.load_all(), session_id)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
+    if as_json:
+        click.echo(json.dumps(record.to_dict(), indent=2))
+        return
+
+    status = "+" if record.outcome == "productive" else "-"
+    click.echo(f"[{status}] {record.session_id}  {record.timestamp[:10]}")
+    if record.session_name:
+        click.echo(f"  {'Name:':<14}{record.session_name}")
+    if record.project:
+        click.echo(f"  {'Project:':<14}{record.project}")
+    click.echo(f"  {'Harness:':<14}{record.harness or 'unknown'}")
+    click.echo(f"  {'Model:':<14}{record.model or 'unknown'}")
+    click.echo(f"  {'Run type:':<14}{record.run_type or 'unknown'}")
+    click.echo(f"  {'Outcome:':<14}{record.outcome}")
+    if record.duration_seconds:
+        _s = record.duration_seconds
+        _h, _rem = divmod(_s, 3600)
+        _m, _sec = divmod(_rem, 60)
+        dur_str = f"{_h}h {_m}m {_sec}s" if _h else f"{_m}m {_sec}s"
+        click.echo(f"  {'Duration:':<14}{dur_str}")
+    if record.category:
+        click.echo(f"  {'Category:':<14}{record.category}")
+    if record.recommended_category:
+        click.echo(f"  {'Recommended:':<14}{record.recommended_category}")
+    if record.selector_mode:
+        click.echo(f"  {'Selector:':<14}{record.selector_mode}")
+    if record.token_count is not None:
+        click.echo(f"  {'Tokens:':<14}{record.token_count:,}")
+    if record.llm_judge_score is not None:
+        click.echo(f"  {'Judge score:':<14}{record.llm_judge_score:.2f}")
+    if record.llm_judge_reason:
+        click.echo(f"  {'Judge reason:':<14}{record.llm_judge_reason}")
+    if record.llm_judge_model:
+        click.echo(f"  {'Judge model:':<14}{record.llm_judge_model}")
+    if record.trigger:
+        click.echo(f"  {'Trigger:':<14}{record.trigger}")
+    if record.journal_path:
+        click.echo(f"  {'Journal:':<14}{record.journal_path}")
+    if record.deliverables:
+        click.echo("  Deliverables:")
+        for d in record.deliverables:
+            click.echo(f"    - {d}")
+
+
+# -- stats -------------------------------------------------------------------
+
+
+@cli.command()
+@_filter_options
+@click.pass_context
+def stats(
+    ctx: click.Context,
+    model: str | None,
+    run_type: str | None,
+    category: str | None,
+    harness: str | None,
+    outcome: str | None,
+    project: str | None,
+    since: str | None,
+    as_json: bool,
+) -> None:
+    """Show summary statistics.
+
+    Defaults to last 30 days. Use --since all for all-time stats.
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    # Default to 30d when no --since specified
+    since_days = _parse_since(since) if since else 30
+    records = store.query(
+        model=model,
+        run_type=run_type,
+        category=category,
+        harness=harness,
+        outcome=outcome,
+        since_days=since_days,
+        project=project,
+    )
+    s = store.stats(records)
+    showed_fallback = False
+    if as_json:
+        click.echo(json.dumps(s, indent=2))
+    elif s.get("total", 0) == 0:
+        has_filters = any([model, run_type, category, harness, outcome, project, since])
+        if has_filters:
+            click.echo("No records match your filters.")
+        elif store.load_all():
+            # Records exist but all fall outside the implicit 30-day window
+            click.echo(
+                f"No records in the last {_fmt_since(since_days)}. Use --since all for all-time data."
+            )
+        else:
+            _show_discovery_fallback(since_days=30)
+            showed_fallback = True
+    else:
+        if not since:
+            click.echo(f"Last {_fmt_since(since_days)} (use --since all for all-time):\n")
+        format_stats(s)
+    if not as_json and not showed_fallback:
+        # Check for unsynced sessions regardless of whether stats matched anything —
+        # hint is useful even when results exist (import may add more context).
+        # Skip when _show_discovery_fallback already printed a sync recommendation.
+        # Discovery is day-granular; round a sub-day window up to whole days.
+        hint_window = math.ceil(since_days) if since_days else 30
+        unsynced = _count_unsynced(store, since_days=hint_window)
+        if unsynced > 0:
+            click.echo(
+                f"\nHint: {unsynced} session(s) discovered but not synced. "
+                "Run 'gptme-sessions sync' to import."
+            )
+
+
+# -- runs --------------------------------------------------------------------
+
+
+@cli.command()
+@click.option("--since", default="14d", help="Time window (e.g. 2h, 7d, 2w, or 'all')")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def runs(ctx: click.Context, since: str, as_json: bool) -> None:
+    """Run analytics (duration, NOOP rate, trends)."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since)
+    records = store.query(since_days=since_days)
+    analytics = compute_run_analytics(records)
+    if as_json:
+        click.echo(json.dumps(analytics, indent=2))
+    elif analytics.get("total", 0) == 0:
+        # --since always acts as a filter (default: 14d). Only show discovery
+        # fallback when the store itself is empty, not when the time window
+        # simply has no runs.
+        if store.query():
+            click.echo(f"No runs found in the last {_fmt_since(since_days or 14)}.")
+        else:
+            _show_discovery_fallback(since_days=math.ceil(since_days or 14))
+    else:
+        format_run_analytics(analytics)
+
+
+# -- append ------------------------------------------------------------------
+
+
+@cli.command()
+@click.option("--harness", default="unknown", help="Harness name")
+@click.option("--model", default="unknown", help="Model name")
+@click.option("--run-type", default="autonomous", help="Run type")
+@click.option("--category", default=None, help="Category (e.g. code, content)")
+@click.option("--outcome", default="unknown", help="Session outcome")
+@click.option("--duration", type=int, default=0, help="Duration in seconds")
+@click.option("--selector-mode", default=None, help="Selector mode used")
+@click.option("--journal-path", default=None, help="Path to journal entry")
+@click.option("--deliverables", multiple=True, help="Commit SHAs, PR URLs")
+@click.pass_context
+def append(
+    ctx: click.Context,
+    harness: str,
+    model: str,
+    run_type: str,
+    category: str | None,
+    outcome: str,
+    duration: int,
+    selector_mode: str | None,
+    journal_path: str | None,
+    deliverables: tuple[str, ...],
+) -> None:
+    """Append a session record.
+
+    Deprecated: use 'sync' to import sessions from trajectories, or 'annotate'
+    to correct metadata on an existing record.
+    """
+    click.echo(
+        "Warning: 'append' is deprecated. Use 'sync' to import sessions from trajectories "
+        "or 'annotate' to correct metadata on an existing record.",
+        err=True,
+    )
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    record = SessionRecord(
+        harness=harness,
+        model=model,
+        run_type=run_type,
+        category=category,
+        outcome=outcome,
+        duration_seconds=duration,
+        selector_mode=selector_mode,
+        journal_path=journal_path,
+        deliverables=list(deliverables),
+    )
+    path = store.append(record)
+    click.echo(f"Appended session {record.session_id} to {path}")
+
+
+# -- annotate ----------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("session_id")
+@click.option("--model", default=None, help="Override model name")
+@click.option("--harness", default=None, help="Override harness")
+@click.option("--run-type", default=None, help="Override run type")
+@click.option("--category", default=None, help="Override category")
+@click.option(
+    "--outcome",
+    default=None,
+    type=click.Choice(["productive", "noop", "failed", "unknown", "violated_policy"]),
+    help="Override outcome",
+)
+@click.option(
+    "--duration",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Override duration in seconds (must be non-negative)",
+)
+@click.option("--journal-path", default=None, help="Override journal path")
+@click.option(
+    "--selector-mode",
+    default=None,
+    help="Override selector mode (e.g. scored, llm-context)",
+)
+@click.option(
+    "--trigger",
+    default=None,
+    type=click.Choice(["timer", "dispatch", "manual", "spawn"]),
+    help="Override trigger",
+)
+@click.option(
+    "--token-count", type=click.IntRange(min=0), default=None, help="Override token count"
+)
+@click.option(
+    "--recommended-category",
+    default=None,
+    help="Override recommended category (from Thompson sampling / CASCADE)",
+)
+@click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
+@click.option(
+    "--json", "as_json", is_flag=True, help="Output updated record as JSON after applying changes"
+)
+@click.pass_context
+def annotate(
+    ctx: click.Context,
+    session_id: str,
+    model: str | None,
+    harness: str | None,
+    run_type: str | None,
+    category: str | None,
+    outcome: str | None,
+    duration: int | None,
+    journal_path: str | None,
+    selector_mode: str | None,
+    trigger: str | None,
+    token_count: int | None,
+    recommended_category: str | None,
+    add_deliverable: tuple[str, ...],
+    as_json: bool,
+) -> None:
+    """Amend an existing session record by session ID (prefix match supported).
+
+    Useful for manually correcting metadata extracted at sync time — for
+    example fixing a misidentified model, reclassifying the outcome, or
+    adding a journal path that wasn't set during the session.
+
+    Only fields explicitly supplied are updated; all other fields are left
+    unchanged.  To add deliverables without overwriting existing ones, use
+    ``--add-deliverable``.  There is currently no option to replace the whole
+    deliverables list; edit the session-records.jsonl file directly for that.
+    """
+    # Validate session_id first — its error message is more precise than the
+    # no-op guard, so diagnose it regardless of what other options were passed.
+    if not session_id:
+        raise click.UsageError("Session ID must not be empty.")
+
+    # Guard: if nothing was supplied, avoid a no-op rewrite (check before touching the store)
+    nothing_supplied = (
+        model is None
+        and harness is None
+        and run_type is None
+        and category is None
+        and outcome is None
+        and duration is None
+        and journal_path is None
+        and selector_mode is None
+        and trigger is None
+        and token_count is None
+        and recommended_category is None
+        and not add_deliverable
+    )
+    if nothing_supplied:
+        raise click.UsageError(
+            "No fields specified. Provide at least one option to update "
+            "(e.g. --model, --outcome, --add-deliverable)."
+        )
+
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    store.sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    # Hold an exclusive lock to serialise concurrent annotate calls during the
+    # load → mutate → rewrite cycle (prevents annotate-vs-annotate clobber).
+    # Note: sync/post-session use store.append(), which does not acquire this
+    # lock. Fully protecting against annotate+sync races would require locking
+    # inside SessionStore itself — that is a future improvement.
+
+    # The lock file is a permanent sentinel — never deleted. This ensures all
+    # concurrent annotate calls operate on the same inode, so the flock queue
+    # works correctly. Deleting the file would allow a newly arriving process
+    # to acquire LOCK_EX on a fresh inode while a blocked waiter holds
+    # LOCK_EX on the old inode, breaking mutual exclusion.
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock_file:
+        if _has_fcntl:
+            _fcntl.flock(lock_file, _fcntl.LOCK_EX)
+        try:
+            records = store.load_all()
+
+            if not records:
+                raise click.ClickException("No session records found in store.")
+
+            # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
+            matches = [r for r in records if r.session_id.startswith(session_id)]
+            if not matches:
+                raise click.ClickException(
+                    f"No session found with ID prefix {session_id!r}. "
+                    "Run 'gptme-sessions query' to list available session IDs."
+                )
+            if len(matches) > 1:
+                ids = ", ".join(r.session_id for r in matches)
+                raise click.ClickException(
+                    f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
+                )
+
+            record = matches[0]
+
+            # Apply only the fields that were explicitly provided
+            if model is not None:
+                record.model = model
+            if harness is not None:
+                record.harness = harness
+            if run_type is not None:
+                record.run_type = normalize_run_type(run_type)
+            if category is not None:
+                record.category = category
+            if outcome is not None:
+                record.outcome = outcome
+            if duration is not None:
+                record.duration_seconds = duration
+            if journal_path is not None:
+                record.journal_path = journal_path
+            if selector_mode is not None:
+                record.selector_mode = selector_mode
+            if trigger is not None:
+                record.trigger = trigger
+            if token_count is not None:
+                record.token_count = token_count
+            if recommended_category is not None:
+                record.recommended_category = recommended_category
+            if add_deliverable:
+                existing = list(record.deliverables or [])
+                for d in add_deliverable:
+                    if d not in existing:
+                        existing.append(d)
+                record.deliverables = existing
+
+            store.rewrite(records)
+
+            if as_json:
+                click.echo(json.dumps(record.to_dict(), indent=2, default=str))
+            else:
+                click.echo(f"Updated session {record.session_id}.")
+        finally:
+            if _has_fcntl:
+                _fcntl.flock(lock_file, _fcntl.LOCK_UN)
+
+
+# -- auto-tag ----------------------------------------------------------------
+
+
+@cli.command("auto-tag")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=10,
+    show_default=True,
+    help="Maximum number of matching records to process",
+)
+@click.option(
+    "--retag-all",
+    is_flag=True,
+    help="Retag records even when they already have a category",
+)
+@click.option(
+    "--mapping-file",
+    type=click.Path(path_type=Path, exists=True),  # type: ignore[type-var]
+    default=None,
+    help="Optional YAML mapping of 'pattern: category' overrides",
+)
+@click.option("--dry-run", is_flag=True, help="Show category changes without rewriting the store")
+@click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
+@click.pass_context
+def auto_tag(
+    ctx: click.Context,
+    limit: int,
+    retag_all: bool,
+    mapping_file: Path | None,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Assign categories to session records from trajectory-derived signals."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    if not records:
+        click.echo("No records in store.")
+        return
+
+    targets = _select_auto_tag_targets(records, limit=limit, retag_all=retag_all)
+    if not targets:
+        scope = "records" if retag_all else "untagged records"
+        click.echo(f"No {scope} matched the auto-tag selection.")
+        return
+
+    override_rules = _load_auto_tag_mapping(mapping_file) if mapping_file else []
+    results: list[dict[str, Any]] = []
+    changed = 0
+    unchanged = 0
+    skipped = 0
+
+    for record in targets:
+        row: dict[str, Any] = {
+            "session_id": record.session_id,
+            "previous_category": record.category,
+            "trajectory_path": record.trajectory_path,
+        }
+        if not record.trajectory_path:
+            row["status"] = "skipped"
+            row["reason"] = "missing trajectory_path"
+            results.append(row)
+            skipped += 1
+            continue
+
+        traj_path = Path(record.trajectory_path)
+        if not traj_path.exists():
+            row["status"] = "skipped"
+            row["reason"] = "trajectory_path does not exist"
+            results.append(row)
+            skipped += 1
+            continue
+
+        try:
+            extract_result = extract_from_path(traj_path)
+        except Exception as exc:
+            row["status"] = "skipped"
+            row["reason"] = f"signal extraction failed: {exc}"
+            results.append(row)
+            skipped += 1
+            continue
+
+        candidate_paths = [
+            value
+            for value in [
+                record.project,
+                record.journal_path,
+                record.trajectory_path,
+                *extract_result.get("file_writes", []),
+                *extract_result.get("journal_paths", []),
+            ]
+            if isinstance(value, str) and value
+        ]
+        override = _match_auto_tag_override(override_rules, candidate_paths)
+        inferred_category = cast(str | None, extract_result.get("inferred_category"))
+        category: str | None
+        if override is not None:
+            category, pattern = override
+            source = f"mapping:{pattern}"
+        else:
+            category = inferred_category
+            source = "signals"
+
+        if not category:
+            row["status"] = "skipped"
+            row["reason"] = "no category inferred"
+            results.append(row)
+            skipped += 1
+            continue
+
+        row["category"] = category
+        row["source"] = source
+        if record.category == category:
+            row["status"] = "unchanged"
+            unchanged += 1
+        else:
+            row["status"] = "updated" if not dry_run else "would-update"
+            changed += 1
+            if not dry_run:
+                record.category = category
+        results.append(row)
+
+    if changed and not dry_run:
+        store.rewrite(records)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+    else:
+        for row in results:
+            status = row["status"]
+            session_id = str(row["session_id"])
+            if status == "skipped":
+                click.echo(f"{session_id:<12}  skipped      {row['reason']}")
+                continue
+            previous = row.get("previous_category") or "?"
+            current = row.get("category") or "?"
+            click.echo(
+                f"{session_id:<12}  {status:<11}  {previous:<14} -> {current:<14}  [{row['source']}]"
+            )
+
+        summary_verb = "Would tag" if dry_run else "Tagged"
+        click.echo(
+            f"\n{summary_verb} {changed} record(s); {unchanged} unchanged; {skipped} skipped."
+        )
+
+
+@cli.command()
+@click.option(
+    "--min-overlap",
+    type=click.FloatRange(0.0, 1.0),
+    default=0.6,
+    show_default=True,
+    help="Minimum Jaccard time-overlap (intersection/union) for two "
+    "same-harness records to count as duplicates",
+)
+@click.option("--dry-run", is_flag=True, help="Show the merge plan without rewriting the store")
+@click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
+@click.pass_context
+def dedup(
+    ctx: click.Context,
+    min_overlap: float,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Merge duplicate session records into the richer record.
+
+    Two records are duplicates when they share a harness and their time
+    intervals overlap by at least ``--min-overlap`` (Jaccard:
+    intersection/union). The richest record in each
+    group is kept and enriched with any metadata it was missing; the other
+    records are tagged with ``duplicate_of`` so analytics can filter them out.
+
+    Records are **never deleted** — trajectory/session data is preserved
+    (re-running is idempotent: already-merged duplicates are skipped).
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    if not records:
+        click.echo("No records in store.")
+        return
+
+    groups = _find_duplicate_groups(records, min_overlap=min_overlap)
+    if not groups:
+        click.echo("No duplicate session records found.")
+        return
+
+    results: list[dict[str, Any]] = []
+    merged_count = 0
+    for group in groups:
+        keeper = group[0]
+        dup_rows: list[dict[str, Any]] = []
+        for dup in group[1:]:
+            if dup._legacy_fields.get("duplicate_of"):
+                # Already merged in a prior run — keep idempotent.
+                continue
+            filled = _merge_into_keeper(keeper, dup, apply=not dry_run)
+            if not dry_run:
+                dup._legacy_fields["duplicate_of"] = keeper.session_id
+            dup_rows.append(
+                {
+                    "session_id": dup.session_id,
+                    "richness": _record_richness(dup),
+                    "merged_fields": filled,
+                    "status": "would-merge" if dry_run else "merged",
+                }
+            )
+            merged_count += 1
+        if dup_rows:
+            results.append(
+                {
+                    "keeper": keeper.session_id,
+                    "keeper_richness": _record_richness(keeper),
+                    "harness": keeper.harness or "unknown",
+                    "duplicates": dup_rows,
+                }
+            )
+
+    if not results:
+        click.echo("No new duplicates to merge (all already deduped).")
+        return
+
+    if merged_count and not dry_run:
+        store.rewrite(records)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+    else:
+        for row in results:
+            click.echo(
+                f"keeper {row['keeper']} ({row['harness']}, richness={row['keeper_richness']}):"
+            )
+            for dup in row["duplicates"]:
+                fields = ", ".join(dup["merged_fields"]) or "no new fields"
+                click.echo(
+                    f"  {dup['status']:<11}  {dup['session_id']:<12}  "
+                    f"richness={dup['richness']:<3}  [{fields}]"
+                )
+        summary_verb = "Would merge" if dry_run else "Merged"
+        click.echo(
+            f"\n{summary_verb} {merged_count} duplicate record(s) into {len(results)} keeper(s)."
+        )
+
+
+# -- discover ----------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--harness",
+    type=click.Choice(HARNESS_CHOICES),
+    default=None,
+    help="Limit to a specific harness (default: all)",
+)
+@click.option("--since", default="7d", help="How far back to scan (e.g. 7d, 30d). Default: 7d")
+@click.option(
+    "--signals", is_flag=True, help="Extract and display productivity signals for each session"
+)
+@click.option("--unsynced", is_flag=True, help="Show only sessions not yet imported into the store")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def discover(
+    ctx: click.Context,
+    harness: str | None,
+    since: str,
+    signals: bool,
+    unsynced: bool,
+    as_json: bool,
+) -> None:
+    """Discover trajectory files from gptme, Claude Code, Codex, and Copilot harnesses.
+
+    Shows a sync-status indicator for each session:
+    [S] already imported into the store, [ ] not yet synced.
+    Use --unsynced to list only sessions pending import.
+    """
+    since_days = _parse_since(since) or 7
+    today = date.today()
+    # Discovery scans whole-day session dirs; round sub-day windows up to a day.
+    start = today - timedelta(days=math.ceil(since_days))
+
+    discovered: list[dict] = []
+
+    if harness in (None, "gptme"):
+        for p in discover_gptme_sessions(start, today):
+            jsonl = p / "conversation.jsonl"
+            resolved = jsonl if jsonl.exists() else p
+            discovered.append(
+                {
+                    "harness": "gptme",
+                    "path": str(resolved),
+                    "session_date": session_date_from_path("gptme", resolved),
+                }
+            )
+
+    if harness in (None, "claude-code"):
+        for p in discover_cc_sessions(start, today):
+            discovered.append(
+                {
+                    "harness": "claude-code",
+                    "path": str(p),
+                    "session_date": session_date_from_path("claude-code", p),
+                }
+            )
+
+    if harness in (None, "codex"):
+        for p in discover_codex_sessions(start, today):
+            discovered.append(
+                {
+                    "harness": "codex",
+                    "path": str(p),
+                    "session_date": session_date_from_path("codex", p),
+                }
+            )
+
+    if harness in (None, "copilot-cli"):
+        for p in discover_copilot_sessions(start, today):
+            discovered.append(
+                {
+                    "harness": "copilot-cli",
+                    "path": str(p),
+                    "session_date": session_date_from_path("copilot", p),
+                }
+            )
+
+    # Sort chronologically across all harnesses; entries without a date sort last.
+    discovered.sort(key=lambda e: e.get("session_date") or date.max)
+
+    # Mark each entry as synced or not by cross-referencing the store.
+    # Normalize paths so symlinks/relative paths don't cause false mismatches.
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    existing_paths = {str(Path(r.journal_path).resolve()) for r in records if r.journal_path}
+    for entry in discovered:
+        entry["synced"] = str(Path(entry["path"]).resolve()) in existing_paths
+
+    total_discovered = len(discovered)
+
+    # Apply --unsynced filter before signal extraction (avoid wasted work).
+    if unsynced:
+        discovered = [e for e in discovered if not e["synced"]]
+
+    # Optionally enrich with signals
+    if signals:
+        for entry in discovered:
+            try:
+                result = extract_from_path(Path(entry["path"]))
+                entry["grade"] = result["grade"]
+                entry["productive"] = result["productive"]
+                entry["tool_calls"] = sum(result["tool_calls"].values())
+                entry["git_commits"] = len(result["git_commits"])
+                entry["error_count"] = result["error_count"]
+            except Exception as exc:  # noqa: BLE001
+                entry["signals_error"] = str(exc)
+
+    if as_json:
+        # Always emit a wrapper object so the schema is consistent regardless
+        # of whether --unsynced is used.  Consumers can always read
+        # ``output["sessions"]`` without branching on the flag.
+        # ``total_discovered`` lets callers distinguish "nothing found in
+        # window" (total_discovered=0, sessions=[]) from "all already synced"
+        # (total_discovered>0, sessions=[]) when --unsynced is active.
+        click.echo(
+            json.dumps(
+                {"sessions": discovered, "total_discovered": total_discovered},
+                indent=2,
+                default=str,
+            )
+        )
+    else:
+        if not discovered:
+            if unsynced and total_discovered > 0:
+                click.echo(
+                    f"All {total_discovered} session(s) in the last {_fmt_since(since_days)} are already synced."
+                )
+            else:
+                click.echo(f"No sessions found in the last {_fmt_since(since_days)}.")
+            return
+        harness_width = max(len(e["harness"]) for e in discovered)
+        for entry in discovered:
+            path_str = entry["path"]
+            harness_str = entry["harness"].ljust(harness_width)
+            sync_flag = "S" if entry["synced"] else " "
+            date_str = str(entry["session_date"]) if entry.get("session_date") else "????"
+            if signals and "grade" in entry:
+                grade = entry["grade"]
+                prod = "+" if entry["productive"] else "-"
+                tools = entry["tool_calls"]
+                commits = entry["git_commits"]
+                errors = entry["error_count"]
+                click.echo(
+                    f"[{sync_flag}][{prod}] {date_str}  {harness_str}  grade={grade:.2f}"
+                    f"  tools={tools} commits={commits} errors={errors}"
+                    f"  {path_str}"
+                )
+            elif "signals_error" in entry:
+                click.echo(
+                    f"[{sync_flag}][?] {date_str}  {harness_str}"
+                    f"  (signals error: {entry['signals_error']})  {path_str}"
+                )
+            else:
+                click.echo(f"[{sync_flag}]   {date_str}  {harness_str}  {path_str}")
+        if unsynced:
+            synced_skipped = total_discovered - len(discovered)
+            footer = (
+                f" ({total_discovered} total, {synced_skipped} already synced)"
+                if synced_skipped
+                else ""
+            )
+        else:
+            unsynced_count = sum(1 for e in discovered if not e["synced"])
+            synced_count = len(discovered) - unsynced_count
+            footer = f", {synced_count} synced, {unsynced_count} pending"
+        click.echo(f"\n{len(discovered)} session(s) found ({start} to {today})" + footer)
+
+
+# -- signals -----------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("path", type=click.Path(path_type=Path))  # type: ignore[type-var]
+@click.option(
+    "--json", "as_json", is_flag=True, help="Output as JSON (default: human-readable summary)"
+)
+@click.option("--grade", is_flag=True, help="Output grade only (float 0.0-1.0)")
+@click.option("--usage", is_flag=True, help="Output token usage breakdown")
+@click.option(
+    "--llm-judge",
+    is_flag=True,
+    help="Run LLM-as-judge scoring (requires anthropic or gptme package)",
+)
+@click.option("--goals", default=None, help="Agent goals for LLM judge (default: generic)")
+@click.option("--category", "judge_category", default=None, help="Category hint for LLM judge")
+@click.option(
+    "--model",
+    "judge_model",
+    default=None,
+    help="Judge model ID. Anthropic IDs (claude-*, anthropic/*) use the anthropic SDK; "
+    "other provider-prefixed IDs (openrouter/..., openai-subscription/..., lmstudio/...) "
+    "route via gptme.llm.reply.",
+)
+def signals(
+    path: Path,
+    as_json: bool,
+    grade: bool,
+    usage: bool,
+    llm_judge: bool,
+    goals: str | None,
+    judge_category: str | None,
+    judge_model: str | None,
+) -> None:
+    """Extract productivity signals from a gptme or Claude Code trajectory (.jsonl)."""
+    # Validate mutual exclusivity
+    flags = sum([as_json, grade, usage])
+    if flags > 1:
+        raise click.UsageError("--json, --grade, and --usage are mutually exclusive")
+
+    if not path.is_file():
+        if path.is_dir():
+            raise click.BadParameter(
+                f"{path} is a directory, expected a .jsonl file", param_hint="'PATH'"
+            )
+        else:
+            raise click.BadParameter(f"{path} not found", param_hint="'PATH'")
+    try:
+        result = extract_from_path(path)
+    except PermissionError:
+        raise click.ClickException(f"cannot read {path}: permission denied")
+    except UnicodeDecodeError:
+        raise click.ClickException(f"{path} contains non-UTF-8 content")
+
+    # Run LLM judge if requested (skip with --grade/--usage — result not displayed in those modes)
+    if llm_judge and not (grade or usage):
+        from .judge import judge_from_signals
+
+        judge_kwargs: dict = {}
+        if goals:
+            judge_kwargs["goals"] = goals
+        if judge_model:
+            judge_kwargs["model"] = judge_model
+        verdict = judge_from_signals(
+            result,
+            category=judge_category,
+            **judge_kwargs,
+        )
+        if verdict:
+            result["llm_judge"] = verdict
+        else:
+            click.echo(
+                "LLM judge: unavailable (missing API key, SDK, or judge returned no result)",
+                err=True,
+            )
+
+    if grade:
+        click.echo(f"{result['grade']:.4f}")
+        return
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    if usage:
+        u = result.get("usage")
+        if u:
+            if u.get("total_tokens", 0) > 0:
+                click.echo(
+                    f"input={u['input_tokens']} "
+                    f"output={u['output_tokens']} "
+                    f"cache_read={u['cache_read_tokens']} "
+                    f"cache_create={u['cache_creation_tokens']} "
+                    f"total={u['total_tokens']}"
+                )
+            elif u.get("rate_limit_primary_pct") is not None:
+                primary = u["rate_limit_primary_pct"]
+                secondary = u.get("rate_limit_secondary_pct")
+                sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
+                click.echo(
+                    f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)"
+                )
+        return
+
+    # Human-readable summary
+    tc = result["tool_calls"]
+    total_tools = sum(tc.values())
+    steps = result.get("steps", 0)
+    click.echo(f"Format: {result.get('format', 'gptme')}")
+    tools_per_step = f" ({total_tools / steps:.1f} tools/step)" if steps else ""
+    click.echo(
+        f"Tool calls: {total_tools} in {steps} step(s){tools_per_step} "
+        f"({', '.join(f'{t}:{n}' for t, n in sorted(tc.items(), key=lambda x: -x[1])[:5])})"
+    )
+    click.echo(f"Git commits: {len(result['git_commits'])}")
+    unique_writes = len(set(result["file_writes"]))
+    total_writes = len(result["file_writes"])
+    write_str = (
+        str(unique_writes)
+        if unique_writes == total_writes
+        else f"{unique_writes} unique ({total_writes} total)"
+    )
+    click.echo(f"File writes: {write_str}")
+    click.echo(f"Errors: {result['error_count']}")
+    click.echo(f"Retries: {result['retry_count']}")
+    click.echo(f"Duration: {result['session_duration_s']}s")
+    click.echo(f"Productive: {result['productive']}")
+    click.echo(f"Grade: {result['grade']:.4f}")
+    if result.get("usage"):
+        u = result["usage"]
+        if "total_tokens" in u:
+            click.echo(
+                f"Tokens: {u['total_tokens']:,} total "
+                f"(in={u['input_tokens']:,} out={u['output_tokens']:,} "
+                f"cache_create={u['cache_creation_tokens']:,} "
+                f"cache_read={u['cache_read_tokens']:,})"
+            )
+        elif u.get("rate_limit_primary_pct") is not None:
+            primary = u["rate_limit_primary_pct"]
+            secondary = u.get("rate_limit_secondary_pct")
+            sec_str = f" secondary={secondary:.1f}%" if secondary is not None else ""
+            click.echo(f"Rate limits: primary={primary:.1f}%{sec_str} (no absolute token counts)")
+    if result.get("llm_judge"):
+        j = result["llm_judge"]
+        click.echo(f"LLM Judge: {j['score']:.2f} ({j['model']}) — {j['reason']}")
+    if result["deliverables"]:
+        click.echo("Deliverables:")
+        for d in result["deliverables"][:10]:
+            click.echo(f"  - {d}")
+
+
+# -- transcript --------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("path", type=click.Path(path_type=Path))  # type: ignore[type-var]
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON (default: human-readable)")
+@click.option(
+    "--messages-only",
+    is_flag=True,
+    help="Output only the messages array (implies --json)",
+)
+def transcript(path: Path, as_json: bool, messages_only: bool) -> None:
+    """Read a trajectory file and output a normalized session transcript.
+
+    PATH is the path to a harness JSONL file (gptme conversation.jsonl,
+    Claude Code session UUID.jsonl, Codex rollout.jsonl, or Copilot
+    events.jsonl). The format is auto-detected.
+
+    Use --json for the full stable machine-readable contract (schema_version,
+    session metadata, and messages array). Use --messages-only for just the
+    messages array (useful for piping into other tools).
+
+    The JSON output is a stable, versioned contract (schema_version=1) that
+    external consumers can depend on across harness updates.
+    """
+    from .transcript import read_transcript
+
+    if not path.is_file():
+        if path.is_dir():
+            raise click.BadParameter(
+                f"{path} is a directory, expected a .jsonl file", param_hint="'PATH'"
+            )
+        raise click.BadParameter(f"{path} not found", param_hint="'PATH'")
+
+    try:
+        t = read_transcript(path)
+    except PermissionError:
+        raise click.ClickException(f"cannot read {path}: permission denied")
+    except UnicodeDecodeError:
+        raise click.ClickException(f"{path} contains non-UTF-8 content")
+
+    if messages_only:
+        click.echo(json.dumps([m.to_dict() for m in t.messages], indent=2))
+        return
+
+    if as_json:
+        click.echo(t.to_json())
+        return
+
+    # Human-readable summary
+    click.echo(f"Harness:      {t.harness}")
+    click.echo(f"Session ID:   {t.session_id}")
+    if t.session_name:
+        click.echo(f"Session name: {t.session_name}")
+    if t.project:
+        click.echo(f"Project:      {t.project}")
+    if t.model:
+        click.echo(f"Model:        {t.model}")
+    if t.started_at:
+        click.echo(f"Started at:   {t.started_at}")
+    if t.last_activity:
+        click.echo(f"Last activity: {t.last_activity}")
+    click.echo(f"Messages:     {len(t.messages)}")
+    click.echo(f"Capabilities: {', '.join(t.capabilities) or 'none'}")
+    click.echo(f"Schema:       v{t.schema_version}")
+
+    if t.messages:
+        click.echo("\nTranscript (first 5 messages):")
+        for msg in t.messages[:5]:
+            ts_str = f"[{msg.timestamp[:19]}] " if msg.timestamp else ""
+            if msg.tool_name:
+                click.echo(
+                    f"  {ts_str}{msg.role} → {msg.tool_name}({json.dumps(msg.tool_input or {})})"
+                )
+            elif msg.role == "tool_result":
+                content_preview = (msg.content or "")[:80].replace("\n", "\\n")
+                err_flag = " [ERROR]" if msg.is_error else ""
+                click.echo(f"  {ts_str}tool_result{err_flag}: {content_preview}")
+            else:
+                content_preview = (msg.content or "")[:80].replace("\n", "\\n")
+                click.echo(f"  {ts_str}{msg.role}: {content_preview}")
+
+
+@cli.command()
+@click.argument("target")
+@click.option(
+    "--raw-system",
+    is_flag=True,
+    help="Show initial system messages instead of collapsing them",
+)
+@click.option(
+    "--tool-input",
+    is_flag=True,
+    help="Show structured tool inputs for tool calls",
+)
+@click.option(
+    "--tool-results",
+    type=click.Choice(["summary", "full", "hide"], case_sensitive=False),
+    default="summary",
+    show_default=True,
+    help="How to render tool result payloads",
+)
+@click.option(
+    "--tail",
+    type=click.IntRange(min=1),
+    help="Render only the last N normalized messages",
+)
+@click.pass_context
+def replay(
+    ctx: click.Context,
+    target: str,
+    raw_system: bool,
+    tool_input: bool,
+    tool_results: str,
+    tail: int | None,
+) -> None:
+    """Replay a completed session in the terminal.
+
+    TARGET can be either a trajectory path or a session-record ID prefix.
+    """
+    try:
+        transcript = resolve_replay_target(target, sessions_dir=ctx.obj["sessions_dir"])
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc))
+    except PermissionError:
+        raise click.ClickException(f"cannot read {target}: permission denied")
+    except UnicodeDecodeError:
+        raise click.ClickException(f"{target} contains non-UTF-8 content")
+
+    tool_results_mode = cast(ToolResultsMode, tool_results)
+    click.echo(
+        render_replay(
+            transcript,
+            raw_system=raw_system,
+            show_tool_input=tool_input,
+            tool_results=tool_results_mode,
+            tail=tail,
+        ),
+        nl=False,
+    )
+
+
+# -- sync --------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--harness",
+    type=click.Choice(HARNESS_CHOICES),
+    default=None,
+    help="Limit to a specific harness (default: all)",
+)
+@click.option("--since", default="14d", help="How far back to scan (e.g. 7d, 30d). Default: 14d")
+@click.option(
+    "--signals",
+    "with_signals",
+    is_flag=True,
+    help="Extract productivity signals from each trajectory (slower but richer)",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would be imported without writing")
+@click.option(
+    "--fix-timestamps",
+    is_flag=True,
+    help="Backfill correct timestamps for existing records from their trajectory paths",
+)
+@click.pass_context
+def sync(
+    ctx: click.Context,
+    harness: str | None,
+    since: str,
+    with_signals: bool,
+    dry_run: bool,
+    fix_timestamps: bool,
+) -> None:
+    """Discover trajectory files and import them into the session store.
+
+    Scans known trajectory directories for gptme, Claude Code, Codex, and
+    Copilot sessions and appends a :class:`~gptme_sessions.record.SessionRecord`
+    for each one not already in the store.
+
+    Use ``--signals`` to extract productivity signals (outcome, duration,
+    deliverables) from each trajectory.  This is slower but produces richer
+    records suitable for ``stats`` and ``runs`` analytics.
+
+    Re-running ``sync`` is safe: sessions already in the store (matched by
+    trajectory path) are skipped.  With ``--signals``, existing records that
+    have ``outcome=unknown`` (no signals yet) will be updated in-place.
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+
+    # Handle --fix-timestamps: correct timestamps on existing records using
+    # session dates extracted from their trajectory paths.
+    if fix_timestamps:
+        existing_records = store.load_all()
+        if not existing_records:
+            click.echo("No records in store to fix.")
+            return
+        fixed = 0
+        for rec in existing_records:
+            if not rec.trajectory_path:
+                continue
+            h = rec.harness or "unknown"
+            traj = Path(rec.trajectory_path)
+            # Prefer the real start time from the trajectory; fall back to
+            # session_date at midnight when the trajectory can't be read.
+            real_dt = session_datetime_from_path(h, traj) if traj.is_file() else None
+            if real_dt:
+                correct_ts = real_dt.isoformat()
+                new_prefix = real_dt.date().isoformat()
+            else:
+                sd = session_date_from_path(h, traj)
+                if sd is None:
+                    continue
+                correct_ts = f"{sd.isoformat()}T00:00:00+00:00"
+                new_prefix = sd.isoformat()
+
+            # Detect noon-UTC placeholder: synthetic 12:00:00 timestamps
+            # produced by the old sync path. We include records whose duration
+            # was later backfilled by --with-signals — those still have the
+            # wrong time even though duration_seconds is now non-zero.
+            is_noon_placeholder = (
+                real_dt is not None
+                and rec.timestamp[11:19] == "12:00:00"
+                and real_dt.isoformat()[11:19] != "12:00:00"
+            )
+            needs_fix = not rec.timestamp.startswith(new_prefix) or is_noon_placeholder
+            if needs_fix:
+                if dry_run:
+                    click.echo(
+                        f"  would fix: {rec.session_id}  {rec.timestamp[:19]} → {correct_ts[:19]}"
+                    )
+                else:
+                    rec.timestamp = correct_ts
+                fixed += 1
+        if not dry_run and fixed:
+            store.rewrite(existing_records)
+        click.echo(
+            f"{'Would fix' if dry_run else 'Fixed'} {fixed} timestamp(s) "
+            f"out of {len(existing_records)} record(s)."
+        )
+        return
+
+    since_days = _parse_since(since)  # None means "all time"
+    since_days_effective = since_days if since_days is not None else 36500  # ~100 years
+    discovered = _discover_all(since_days=since_days_effective, harness_filter=harness)
+
+    if not discovered:
+        window_desc = f"last {_fmt_since(since_days)}"
+        click.echo(f"No sessions found in the {window_desc}.")
+        return
+
+    # Build lookup structures for deduplication and in-place updates.
+    existing_records = store.load_all()
+    existing_by_path = {r.trajectory_path: r for r in existing_records if r.trajectory_path}
+
+    new_records: list[SessionRecord] = []
+    updated_paths: set[str] = set()
+    imported = 0
+    updated = 0
+    skipped = 0
+
+    # Warn when a large number of new sessions would be imported.
+    # This catches accidental wide-window syncs (e.g. --since 90d) that inflate stats.
+    new_count_estimate = sum(1 for e in discovered if str(e["path"]) not in existing_by_path)
+    if not dry_run and new_count_estimate > 100:
+        window_warn = _fmt_since(since_days)
+        click.echo(
+            f"Warning: {new_count_estimate} new session(s) would be imported "
+            f"(window: {window_warn}). Use --dry-run to preview. Proceeding...",
+            err=True,
+        )
+
+    for entry in discovered:
+        path_str = str(entry["path"])
+        traj_path = entry["path"]
+
+        if path_str in existing_by_path:
+            existing = existing_by_path[path_str]
+            needs_update = False
+
+            # Update model if it was previously unknown and we now know it.
+            entry_model = entry.get("model")
+            if entry_model and (not existing.model or existing.model == "unknown"):
+                existing.model = entry_model
+                needs_update = True
+
+            # Backfill session_name and project if missing.
+            if not existing.session_name and entry.get("session_name"):
+                existing.session_name = entry["session_name"]
+                needs_update = True
+            if not existing.project and entry.get("project"):
+                existing.project = entry["project"]
+                needs_update = True
+
+            # Copilot trajectories never contain token-count fields — only byte
+            # metrics and model name are extractable. Checking token fields for
+            # copilot-cli sessions would keep usage_backfill_needed=True forever.
+            if existing.harness == "copilot-cli":
+                _backfill_fields: tuple[str, ...] = (
+                    "model",
+                    "sys_prompt_bytes",
+                    "first_turn_bytes",
+                    "context_peak_bytes",
+                    "session_total_bytes",
+                )
+            else:
+                _backfill_fields = (
+                    "token_count",
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_tokens",
+                    "cache_read_tokens",
+                    "sys_prompt_tokens",
+                    "context_peak_tokens",
+                    "context_window",
+                    "sys_prompt_bytes",
+                    "first_turn_bytes",
+                    "context_peak_bytes",
+                    "session_total_bytes",
+                )
+            usage_backfill_needed = any(
+                getattr(existing, field) is None for field in _backfill_fields
+            )
+
+            if (
+                with_signals
+                and traj_path.is_file()
+                and (existing.outcome == "unknown" or usage_backfill_needed)
+            ):
+                if not dry_run:
+                    try:
+                        result = extract_from_path(traj_path)
+                        needs_update |= _apply_extract_result_to_record(existing, result)
+                    except Exception as exc:
+                        click.echo(
+                            f"  warning: signals extraction failed for {path_str}: {exc}",
+                            err=True,
+                        )
+                        if not needs_update:  # don't double-count if model was already updated
+                            skipped += 1
+                else:
+                    needs_update = True  # mark for dry-run reporting
+            elif (
+                with_signals
+                and not traj_path.is_file()
+                and (existing.outcome == "unknown" or usage_backfill_needed)
+            ):
+                click.echo(
+                    f"  warning: trajectory not found, cannot backfill signals for {path_str}",
+                    err=True,
+                )
+                if not needs_update:
+                    skipped += 1
+            elif not needs_update:
+                skipped += 1
+
+            if needs_update:
+                if dry_run:
+                    click.echo(f"  would update: {entry['harness']:14s}  {path_str}")
+                    updated_paths.add(path_str)
+                else:
+                    updated_paths.add(path_str)
+                    updated += 1
+            continue
+
+        # Build the record with correct timestamp from the trajectory's first
+        # event (not now()).  Without this, all bulk-synced records either get
+        # today's timestamp (skewing daily stats) or a noon-UTC placeholder
+        # (which collapses many sessions to a single hour and breaks hourly
+        # analytics).  Read the real first-event datetime when possible;
+        # fall back to noon-UTC on the session_date only if the trajectory
+        # has no readable timestamp.
+        session_dt: datetime | None = (
+            session_datetime_from_path(entry["harness"], traj_path) if traj_path.is_file() else None
+        )
+        session_date: date | None = entry.get("session_date")
+        record_kwargs: dict = {
+            "harness": entry["harness"],
+            "trajectory_path": path_str,  # used for deduplication on re-sync
+        }
+        if session_dt:
+            record_kwargs["timestamp"] = session_dt.isoformat()
+        elif session_date:
+            record_kwargs["timestamp"] = datetime(
+                session_date.year,
+                session_date.month,
+                session_date.day,
+                12,
+                0,
+                0,
+                tzinfo=timezone.utc,
+            ).isoformat()
+        if entry.get("model"):
+            record_kwargs["model"] = entry["model"]
+        if entry.get("session_name"):
+            record_kwargs["session_name"] = entry["session_name"]
+        if entry.get("project"):
+            record_kwargs["project"] = entry["project"]
+
+        if with_signals and traj_path.is_file() and not dry_run:
+            try:
+                result = extract_from_path(traj_path)
+                _apply_extract_result_to_kwargs(record_kwargs, result)
+            except Exception as exc:
+                click.echo(
+                    f"  warning: signals extraction failed for {path_str}: {exc}",
+                    err=True,
+                )
+
+        if dry_run:
+            click.echo(f"  would import: {entry['harness']:14s}  {path_str}")
+        else:
+            new_records.append(SessionRecord(**record_kwargs))
+            imported += 1
+
+    if not dry_run:
+        if updated_paths:
+            # Rewrite the store to persist in-place mutations on existing_records.
+            # NOTE: existing_records was loaded once at the start of sync; any records
+            # appended to the store by a concurrent process after that load may be lost
+            # here.  See store.rewrite() docstring for details on this known trade-off.
+            store.rewrite(existing_records + new_records)
+        else:
+            for rec in new_records:
+                store.append(rec)
+
+    if dry_run:
+        n_would_update = len(updated_paths)
+        n_would_import = len(discovered) - skipped - n_would_update
+        click.echo(
+            f"\n{len(discovered)} found, {skipped} unchanged, "
+            f"{n_would_import} would be imported"
+            + (f", {n_would_update} would be updated" if n_would_update else "")
+        )
+    else:
+        parts = [f"Imported {imported} session(s)"]
+        if updated:
+            parts.append(f"updated {updated}")
+        parts.append(f"{skipped} unchanged.")
+        click.echo(", ".join(parts))
+
+
+@cli.command("repair-grades")
+@click.option("--dry-run", is_flag=True, help="Show what would change without rewriting the store")
+@click.pass_context
+def repair_grades(ctx: click.Context, dry_run: bool) -> None:
+    """Backfill multivariate grade fields from legacy scalar fields."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    if not records:
+        click.echo("No records in store.")
+        return
+
+    repaired = 0
+    productivity_added = 0
+    alignment_added = 0
+    reasons_added = 0
+
+    for rec in records:
+        had_productivity = "productivity" in rec.grades
+        had_alignment = "alignment" in rec.grades
+        had_alignment_reason = "alignment" in rec.grade_reasons
+
+        if rec.sync_grade_fields():
+            repaired += 1
+            if not had_productivity and "productivity" in rec.grades:
+                productivity_added += 1
+            if not had_alignment and "alignment" in rec.grades:
+                alignment_added += 1
+            if not had_alignment_reason and "alignment" in rec.grade_reasons:
+                reasons_added += 1
+
+    if repaired and not dry_run:
+        store.rewrite(records)
+
+    verb = "Would repair" if dry_run else "Repaired"
+    click.echo(
+        f"{verb} {repaired} record(s): "
+        f"productivity={productivity_added}, "
+        f"alignment={alignment_added}, "
+        f"alignment_reasons={reasons_added}."
+    )
+
+
+# -- post-session ------------------------------------------------------------
+
+
+@cli.command("post-session")
+@click.option(
+    "--harness",
+    required=True,
+    type=click.Choice(HARNESS_CHOICES),
+    help="Harness name (claude-code, gptme, codex, copilot)",
+)
+@click.option("--model", default="unknown", help="Model name")
+@click.option("--run-type", default="unknown", help="Run type (autonomous, etc.)")
+@click.option("--trigger", default=None, help="Session trigger: timer, dispatch, manual, spawn")
+@click.option("--category", default=None, help="Work category (code, triage, ...)")
+@click.option(
+    "--recommended-category",
+    default=None,
+    help="Category recommended by the selector before the session ran",
+)
+@click.option(
+    "--selector-mode",
+    default=None,
+    help="Selector strategy used (e.g. scored, llm-context)",
+)
+@click.option(
+    "--exit-code",
+    type=int,
+    default=0,
+    help="Exit code from the agent process (non-zero = failed, 124 = timeout/noop)",
+)
+@click.option("--duration", type=int, default=0, help="Duration in seconds")
+@click.option(
+    "--trajectory",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    default=None,
+    help="Path to trajectory .jsonl for signal extraction",
+)
+@click.option("--start-commit", default=None, help="Git HEAD SHA before session (for NOOP detect)")
+@click.option("--end-commit", default=None, help="Git HEAD SHA after session (for NOOP detect)")
+@click.option(
+    "--deliverables",
+    "deliverables_raw",
+    multiple=True,
+    help="Explicit deliverables (commit SHAs, PR URLs). Omit to extract from trajectory.",
+)
+@click.option("--journal-path", default=None, help="Path to journal entry for this session")
+@click.option("--session-id", default=None, help="Override auto-generated session ID")
+@click.option(
+    "--context-tier",
+    default=None,
+    type=click.Choice(sorted(VALID_CONTEXT_TIERS)),
+    help="Context tier used in this session (standard, extended, large, massive)",
+)
+@click.option(
+    "--ab-group",
+    default=None,
+    type=click.Choice(sorted(VALID_AB_GROUPS)),
+    help="A/B experiment group (control or treatment)",
+)
+@click.option("--tier-version", default=None, help="Context tier config version for this session")
+@click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
+@click.pass_context
+def post_session_cmd(
+    ctx: click.Context,
+    harness: str,
+    model: str,
+    run_type: str,
+    trigger: str | None,
+    category: str | None,
+    recommended_category: str | None,
+    selector_mode: str | None,
+    exit_code: int,
+    duration: int,
+    trajectory: Path | None,
+    start_commit: str | None,
+    end_commit: str | None,
+    deliverables_raw: tuple[str, ...],
+    journal_path: str | None,
+    session_id: str | None,
+    context_tier: str | None,
+    ab_group: str | None,
+    tier_version: str | None,
+    as_json: bool,
+) -> None:
+    """Record a completed session: extract signals, determine outcome, append record."""
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    deliverables = list(deliverables_raw) if deliverables_raw else None
+    ps = post_session(
+        store=store,
+        harness=harness,
+        model=model,
+        run_type=run_type,
+        trigger=trigger,
+        category=category,
+        recommended_category=recommended_category,
+        selector_mode=selector_mode,
+        exit_code=exit_code,
+        duration_seconds=duration,
+        trajectory_path=trajectory,
+        start_commit=start_commit,
+        end_commit=end_commit,
+        deliverables=deliverables,
+        journal_path=journal_path,
+        session_id=session_id,
+        context_tier=context_tier,
+        ab_group=ab_group,
+        tier_version=tier_version,
+    )
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "session_id": ps.record.session_id,
+                    "outcome": ps.record.outcome,
+                    "grade": ps.grade,
+                    "token_count": ps.token_count,
+                }
+            )
+        )
+    else:
+        grade_str = f"{ps.grade:.4f}" if ps.grade is not None else "n/a"
+        tok_str = f"{ps.token_count:,}" if ps.token_count is not None else "n/a"
+        click.echo(
+            f"Recorded session {ps.record.session_id}: "
+            f"outcome={ps.record.outcome} grade={grade_str} tokens={tok_str}"
+        )
+
+
+# -- judge -------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--journal-dir",
+    type=click.Path(path_type=Path, exists=True),  # type: ignore[type-var]
+    default=None,
+    help="Path to journal directory (default: ./journal)",
+)
+@click.option("--last", type=int, default=20, help="Score last N sessions (default: 20)")
+@click.option("--goals", default=None, help="Agent goals for LLM judge (default: generic)")
+@click.option(
+    "--model",
+    "judge_model",
+    default=None,
+    help="Judge model ID. Anthropic IDs (claude-*, anthropic/*) use the anthropic SDK; "
+    "other provider-prefixed IDs (openrouter/..., openai-subscription/..., lmstudio/...) "
+    "route via gptme.llm.reply. Default: claude-haiku-4-5-20251001.",
+)
+@click.option(
+    "--update-store",
+    is_flag=True,
+    help="Write scores back to session-records.jsonl (matching by session_id)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--dry-run", is_flag=True, help="Show sessions without scoring")
+@click.pass_context
+def judge(
+    ctx: click.Context,
+    journal_dir: Path | None,
+    last: int,
+    goals: str | None,
+    judge_model: str | None,
+    update_store: bool,
+    as_json: bool,
+    dry_run: bool,
+) -> None:
+    """Score sessions with LLM-as-judge goal-alignment evaluation.
+
+    Reads autonomous session journal entries and evaluates each for strategic
+    value. Scores range 0.0-1.0 with a 1-sentence reason.
+
+    With --update-store, writes scores back to session-records.jsonl by matching
+    session IDs from journal filenames to stored records.
+    """
+    from .judge import DEFAULT_GOALS, DEFAULT_JUDGE_MODEL, judge_session
+
+    if dry_run and update_store:
+        raise click.UsageError("--dry-run and --update-store are mutually exclusive")
+
+    effective_model = judge_model or DEFAULT_JUDGE_MODEL
+
+    if journal_dir is None:
+        journal_dir = Path.cwd() / "journal"
+    if not journal_dir.is_dir():
+        raise click.BadParameter(f"{journal_dir} is not a directory", param_hint="'--journal-dir'")
+
+    # Discover autonomous session entries
+    entries: list[Path] = []
+    for day_dir in sorted(journal_dir.iterdir()):
+        if day_dir.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_dir.name):
+            entries.extend(sorted(day_dir.glob("autonomous-session-*.md")))
+    if last <= 0:
+        raise click.UsageError("--last must be a positive integer (got 0 or negative)")
+    entries = entries[-last:]
+
+    if not entries:
+        click.echo("No autonomous session journal entries found.", err=True)
+        return
+
+    click.echo(f"Found {len(entries)} session(s) to {'preview' if dry_run else 'score'}", err=True)
+
+    # Parse session ID from filename
+    def extract_sid(p: Path) -> str:
+        m = re.match(r"autonomous-session-(\w+)", p.stem)
+        return m.group(1) if m else p.stem
+
+    # Parse YAML-like metadata from journal code blocks
+    def parse_meta(text: str) -> dict[str, str]:
+        m = re.search(r"```ya?ml\s*\n(.*?)```", text, re.DOTALL)
+        if not m:
+            return {}
+        meta = {}
+        for line in m.group(1).strip().splitlines():
+            if ":" in line:
+                k, _, v = line.partition(":")
+                meta[k.strip()] = v.strip()
+        return meta
+
+    effective_goals = goals or DEFAULT_GOALS
+    results: list[dict] = []
+
+    for entry in entries:
+        try:
+            text = entry.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("Skipping %s: %s", entry, e)
+            continue
+
+        try:
+            meta = parse_meta(text)
+            sid = extract_sid(entry)
+            cat = meta.get("category", "unknown")
+            outcome = meta.get("outcome", "unknown")
+            entry_date = entry.parent.name
+
+            result_row: dict = {
+                "session_id": sid,
+                "date": entry_date,
+                "category": cat,
+                "outcome": outcome,
+                "journal_path": str(entry),
+            }
+
+            if dry_run:
+                results.append(result_row)
+                if not as_json:
+                    click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {outcome}")
+                continue
+
+            verdict = judge_session(
+                text, category=cat, goals=effective_goals, model=effective_model
+            )
+            score = verdict["score"] if verdict else None
+            reason = verdict["reason"] if verdict else None
+
+            result_row.update(_judge_fields(score, reason, verdict["model"] if verdict else None))
+            results.append(result_row)
+
+            if not as_json and score is not None:
+                click.echo(f"  {sid:<12} {entry_date}  {cat:<14} {score:.2f}  {reason}")
+        except Exception as e:
+            logger.warning("Error processing %s: %s", entry, e)
+            continue
+
+    if dry_run:
+        if as_json:
+            click.echo(json.dumps(results, indent=2))
+        else:
+            click.echo(f"\n{len(results)} session(s) (dry run)")
+        return
+
+    # Write scores back to store if requested
+    if update_store:
+        store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+        records = store.load_all()
+        score_map = {r["session_id"]: r for r in results if r.get("llm_judge_score") is not None}
+        updated = 0
+        for rec in records:
+            if rec.session_id in score_map:
+                s = score_map[rec.session_id]
+                rec.set_alignment_grade(
+                    s["llm_judge_score"],
+                    reason=s.get("llm_judge_reason"),
+                    model=s.get("llm_judge_model"),
+                )
+                updated += 1
+        if updated:
+            store.rewrite(records)
+            click.echo(f"\nUpdated {updated} record(s) in {store.path}", err=True)
+        elif not score_map:
+            click.echo(
+                "\nNo sessions were scored — check ANTHROPIC_API_KEY and the anthropic package.",
+                err=True,
+            )
+        else:
+            click.echo("\nNo matching records found in store to update.", err=True)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+    else:
+        # Summary stats
+        scored = [r for r in results if r.get("llm_judge_score") is not None]
+        if scored:
+            scores = [r["llm_judge_score"] for r in scored]
+            click.echo(
+                f"\nScored: {len(scored)}/{len(results)}  "
+                f"mean={sum(scores) / len(scores):.2f}  "
+                f"min={min(scores):.2f}  max={max(scores):.2f}"
+            )
+        else:
+            click.echo(
+                "\nNo sessions scored. Check that ANTHROPIC_API_KEY is set"
+                " and the anthropic package is installed.",
+                err=True,
+            )
+
+
+@cli.command()
+@click.option(
+    "--journal-dir",
+    type=click.Path(path_type=Path, exists=True),  # type: ignore[type-var]
+    default=None,
+    help="Path to journal directory (default: ./journal)",
+)
+@click.option("--last", type=int, default=20, help="Classify last N sessions (default: 20)")
+@click.option(
+    "--llm/--no-llm", default=True, help="Use LLM classifier (default: yes, keyword fallback)"
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--update-store",
+    is_flag=True,
+    help="Write categories back to session-records.jsonl (matching by session_id)",
+)
+@click.option(
+    "--judge",
+    "also_judge",
+    is_flag=True,
+    help="Also score goal-alignment in same LLM call (requires --llm)",
+)
+@click.option("--goals", default=None, help="Agent goals for judge scoring (with --judge)")
+@click.pass_context
+def classify(
+    ctx: click.Context,
+    journal_dir: Path | None,
+    last: int,
+    llm: bool,
+    as_json: bool,
+    update_store: bool,
+    also_judge: bool,
+    goals: str | None,
+) -> None:
+    """Classify sessions by work category (code, infrastructure, triage, etc.).
+
+    Reads autonomous session journal entries and classifies each into a
+    work category. Uses LLM classification by default with keyword fallback.
+
+    With --judge, also scores goal-alignment in the same LLM call (cheaper
+    than separate classify + judge calls).
+    """
+    from .classification import (
+        classify_by_keywords,
+        classify_by_llm,
+        judge_and_classify,
+    )
+
+    if also_judge and not llm:
+        raise click.UsageError("--judge requires --llm (cannot judge without LLM)")
+
+    if journal_dir is None:
+        journal_dir = Path.cwd() / "journal"
+    if not journal_dir.is_dir():
+        raise click.BadParameter(f"{journal_dir} is not a directory", param_hint="'--journal-dir'")
+
+    # Discover autonomous session entries
+    entries: list[Path] = []
+    for day_dir in sorted(journal_dir.iterdir()):
+        if day_dir.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_dir.name):
+            entries.extend(sorted(day_dir.glob("autonomous-session-*.md")))
+    if last <= 0:
+        raise click.UsageError("--last must be a positive integer")
+    entries = entries[-last:]
+
+    if not entries:
+        click.echo("No autonomous session journal entries found.", err=True)
+        return
+
+    click.echo(f"Classifying {len(entries)} session(s)...", err=True)
+
+    def extract_sid(p: Path) -> str:
+        m = re.match(r"autonomous-session-(\w+)", p.stem)
+        return m.group(1) if m else p.stem
+
+    results: list[dict] = []
+    for entry in entries:
+        try:
+            text = entry.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("Skipping %s: %s", entry, e)
+            continue
+
+        sid = extract_sid(entry)
+        entry_date = entry.parent.name
+
+        try:
+            if also_judge:
+                classification, judge_result = judge_and_classify(text, goals=goals)
+                if classification is None:
+                    logger.warning(
+                        "judge_and_classify failed for %s; falling back to keyword classification",
+                        sid,
+                    )
+                    classification = classify_by_keywords(text)
+            elif llm:
+                classification = classify_by_llm(text)
+                if classification is None:
+                    classification = classify_by_keywords(text)
+                judge_result = None
+            else:
+                classification = classify_by_keywords(text)
+                judge_result = None
+
+            row: dict = {
+                "session_id": sid,
+                "date": entry_date,
+                **classification.to_dict(),
+                "journal_path": str(entry),
+            }
+            if judge_result:
+                row.update(
+                    _judge_fields(
+                        judge_result["score"],
+                        judge_result["reason"],
+                        judge_result["model"],
+                    )
+                )
+
+            results.append(row)
+
+            if not as_json:
+                score_str = f"  {judge_result['score']:.2f}" if judge_result else ""
+                click.echo(
+                    f"  {sid:<12} {entry_date}  {classification.category:<16} "
+                    f"conf={classification.confidence:.2f}  "
+                    f"[{classification.classifier}]{score_str}"
+                )
+        except Exception as e:
+            logger.warning("Error processing %s: %s", entry, e)
+            continue
+
+    # Write categories back to store if requested
+    if update_store:
+        store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+        records = store.load_all()
+        cat_map = {r["session_id"]: r for r in results}
+        updated = 0
+        for rec in records:
+            if rec.session_id in cat_map:
+                r = cat_map[rec.session_id]
+                rec.category = r["category"]
+                if r.get("llm_judge_score") is not None:
+                    rec.set_alignment_grade(
+                        r["llm_judge_score"],
+                        reason=r.get("llm_judge_reason"),
+                        model=r.get("llm_judge_model"),
+                    )
+                updated += 1
+        if updated:
+            store.rewrite(records)
+            click.echo(f"\nUpdated {updated} record(s) in {store.path}", err=True)
+        else:
+            click.echo("\nNo matching records found in store to update.", err=True)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+    else:
+        # Summary stats
+        from collections import Counter
+
+        cats = Counter(r["category"] for r in results)
+        productive = sum(1 for r in results if r.get("productive"))
+        click.echo(f"\nClassified: {len(results)} sessions  ({productive} productive)")
+        for cat, count in cats.most_common():
+            click.echo(f"  {cat:<16} {count}")
+
+
+def _discover_journal_entries(
+    journal_dir: Path,
+    last: int,
+) -> list[Path]:
+    """Discover autonomous session journal entries, sorted chronologically."""
+    entries: list[Path] = []
+    for day_dir in sorted(journal_dir.iterdir()):
+        if day_dir.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_dir.name):
+            entries.extend(sorted(day_dir.glob("*autonomous-session-*.md")))
+    return entries[-last:] if last > 0 else entries
+
+
+@cli.command("classify-stats")
+@click.option(
+    "--journal-dir",
+    type=click.Path(path_type=Path, exists=True),  # type: ignore[type-var]
+    default=None,
+    help="Path to journal directory (default: ./journal)",
+)
+@click.option("--last", type=int, default=20, help="Number of sessions to analyze (default: 20)")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--diversity-window", type=int, default=5, help="Window for diversity check (default: 5)"
+)
+def classify_stats(
+    journal_dir: Path | None,
+    last: int,
+    as_json: bool,
+    diversity_window: int,
+) -> None:
+    """Show classification stats and session diversity alerts.
+
+    Classifies recent sessions using the fast keyword classifier and shows
+    category breakdown, productivity rate, trends, and diversity warnings.
+    """
+    from collections import Counter
+
+    from .classification import classify_by_keywords
+
+    if journal_dir is None:
+        journal_dir = Path.cwd() / "journal"
+    if not journal_dir.is_dir():
+        raise click.BadParameter(f"{journal_dir} is not a directory", param_hint="'--journal-dir'")
+
+    entries = _discover_journal_entries(journal_dir, last)
+    if not entries:
+        click.echo("No autonomous session journal entries found.", err=True)
+        return
+
+    # Classify all entries (keyword-only for speed)
+    results: list[dict] = []
+    for entry in entries:
+        try:
+            text = entry.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        result = classify_by_keywords(text)
+        row = {
+            "date": entry.parent.name,
+            **result.to_dict(),
+        }
+        results.append(row)
+
+    if not results:
+        click.echo("No sessions could be classified.", err=True)
+        return
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+        return
+
+    total = len(results)
+    productive = sum(1 for r in results if r.get("productive"))
+    cats = Counter(r["category"] for r in results)
+
+    # Multi-label counts (primary + secondary)
+    cats_multi: Counter[str] = Counter()
+    for r in results:
+        cats_multi[r["category"]] += 1
+        sec = r.get("secondary_category")
+        if sec:
+            cats_multi[sec] += 1
+
+    click.echo(f"Session Classification Stats (last {total} sessions)")
+    click.echo("=" * 50)
+    click.echo(f"Productive: {productive}/{total} ({productive * 100 // total}%)")
+    click.echo(f"NOOP:       {total - productive}/{total} ({(total - productive) * 100 // total}%)")
+    click.echo()
+    click.echo("Category Breakdown (primary):")
+    for cat, count in cats.most_common():
+        pct = count * 100 // total
+        bar = "#" * (pct // 2)
+        click.echo(f"  {cat:15s} {count:3d} ({pct:2d}%) {bar}")
+
+    # Multi-label view
+    has_secondary = any(r.get("secondary_category") for r in results)
+    if has_secondary:
+        click.echo()
+        click.echo("Category Presence (primary + secondary):")
+        for cat, count in cats_multi.most_common():
+            pct = count * 100 // total
+            bar = "#" * (pct // 2)
+            primary_count = cats.get(cat, 0)
+            secondary_count = count - primary_count
+            detail = f"{primary_count}p"
+            if secondary_count > 0:
+                detail += f"+{secondary_count}s"
+            click.echo(f"  {cat:15s} {count:3d} ({pct:2d}%) {bar}  [{detail}]")
+
+    # Missing categories
+    productive_cats = {
+        "code",
+        "infrastructure",
+        "triage",
+        "strategic",
+        "content",
+        "cross-repo",
+        "research",
+    }
+    present_cats = set(cats_multi.keys())
+    missing = productive_cats - present_cats
+    if missing:
+        click.echo(f"\n  Missing categories: {', '.join(sorted(missing))}")
+
+    # Trend (last 5 vs previous 5)
+    if total >= 10:
+        recent = results[-5:]
+        earlier = results[-10:-5]
+        recent_prod = sum(1 for c in recent if c.get("productive"))
+        earlier_prod = sum(1 for c in earlier if c.get("productive"))
+        if recent_prod > earlier_prod:
+            trend = "improving"
+        elif recent_prod < earlier_prod:
+            trend = "declining"
+        else:
+            trend = "stable"
+        click.echo(f"\nTrend: {trend} (recent 5: {recent_prod}/5, previous 5: {earlier_prod}/5)")
+
+    # Diversity check
+    if len(results) >= diversity_window:
+        click.echo()
+        click.echo(f"Session Diversity (last {diversity_window}):")
+        recent_cats = [r["category"] for r in results[-diversity_window:]]
+        alerts: list[str] = []
+
+        if len(recent_cats) >= 3 and len(set(recent_cats[-3:])) == 1:
+            alerts.append(f"3+ consecutive '{recent_cats[-1]}' sessions — consider diversifying")
+
+        non_code = sum(1 for c in recent_cats if c in ("triage", "pm-react"))
+        if non_code >= 3:
+            alerts.append(
+                f"{non_code}/{diversity_window} sessions were triage/pm-react — pivot to code or ideas"
+            )
+
+        code_sessions = sum(1 for c in recent_cats if c == "code")
+        if code_sessions == 0 and diversity_window >= 5:
+            alerts.append("No code sessions in last 5 — consider picking up a coding task")
+
+        if alerts:
+            for alert in alerts:
+                click.echo(f"  ⚠️  {alert}")
+        else:
+            unique = len(set(recent_cats))
+            cats_str = ", ".join(f"{c}({recent_cats.count(c)})" for c in dict.fromkeys(recent_cats))
+            click.echo(f"  ✅ Good diversity: {unique}/{diversity_window} categories — {cats_str}")
+
+
+@cli.command()
+@click.option("--days", default=7, show_default=True, help="Include sessions from last N days")
+@click.option("--daily", is_flag=True, help="Show day-by-day cost breakdown")
+@click.option("--by-model", "by_model", is_flag=True, help="Show per-model cost breakdown")
+@click.option("--last-7d", "last_7d", is_flag=True, help="Shorthand for --days 7")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON instead of formatted text")
+@click.pass_context
+def cost(
+    ctx: click.Context,
+    days: int,
+    daily: bool,
+    by_model: bool,
+    last_7d: bool,
+    as_json: bool,
+) -> None:
+    """Show session cost breakdown.
+
+    Requires gptme-usage to be installed for pricing data.
+    Install with: pip install gptme-sessions[cost]
+    """
+    from .cost import analyze_costs, format_cost_summary
+
+    try:
+        from gptme_usage.harness_models import estimate_session_cost as _  # noqa: F401
+    except ImportError:
+        raise click.ClickException(
+            "gptme-usage is required for cost estimation.\n"
+            "Install with: pip install gptme-sessions[cost]"
+        )
+
+    if last_7d:
+        days = 7
+
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.query()
+    summary = analyze_costs(records, days=days)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "session_count": summary.session_count,
+                    "priced_count": summary.priced_count,
+                    "total_cost": summary.total_cost,
+                    "avg_cost": summary.avg_cost,
+                    "by_model": {
+                        m: {
+                            "count": s.count,
+                            "total_cost": s.total_cost,
+                            "avg_cost": s.avg_cost,
+                        }
+                        for m, s in summary.by_model.items()
+                    },
+                    "by_day": {
+                        d: {
+                            "count": s.count,
+                            "total_cost": s.total_cost,
+                        }
+                        for d, s in summary.by_day.items()
+                    },
+                },
+                indent=2,
+            )
+        )
+    else:
+        click.echo(format_cost_summary(summary, daily=daily, by_model=by_model))
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--days", default=30, show_default=True, help="Search sessions from last N days")
+@click.option(
+    "--harness",
+    type=click.Choice(["gptme", "claude-code", "codex", "copilot"]),
+    default=None,
+    help="Limit to a specific harness",
+)
+@click.option("--max-results", default=10, show_default=True, help="Max sessions to return")
+@click.option("--case-sensitive", is_flag=True, help="Case-sensitive search")
+@click.option("--no-snippets", is_flag=True, help="Show only session IDs, no text excerpts")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON instead of formatted text")
+@click.option(
+    "--file", "file_path", default=None, help="Only show sessions that touched this file path"
+)
+def search(
+    query: str,
+    days: int,
+    harness: str | None,
+    max_results: int,
+    case_sensitive: bool,
+    no_snippets: bool,
+    as_json: bool,
+    file_path: str | None,
+) -> None:
+    """Search session transcripts for a query string.
+
+    Performs case-insensitive substring search across session transcripts
+    and returns matching sessions ranked by recency then hit count.
+
+    Use --file to narrow results to sessions that touched a specific file:
+
+        gptme sessions search "module not found" --days 30
+        gptme sessions search "refactor" --file src/mymodule.py
+    """
+    from .search import search_sessions
+
+    msg = f"Searching {days}-day window for: {query!r}"
+    if file_path:
+        msg += f" (filtered to sessions touching {file_path!r})"
+    click.echo(msg, err=True)
+    results = search_sessions(
+        query=query,
+        harness=harness,
+        days=days,
+        max_results=max_results,
+        case_sensitive=case_sensitive,
+        file_path=file_path,
+    )
+
+    if as_json:
+        import dataclasses
+
+        click.echo(
+            json.dumps(
+                [
+                    {
+                        "session_id": r.session_id,
+                        "harness": r.harness,
+                        "path": r.path,
+                        "hit_count": r.hit_count,
+                        "started_at": r.started_at.isoformat() if r.started_at else None,
+                        "snippets": [dataclasses.asdict(s) for s in r.snippets],
+                    }
+                    for r in results
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    if not results:
+        click.echo("No sessions found.")
+        return
+
+    click.echo(f"\nFound {len(results)} session(s):\n")
+    for r in results:
+        harness_label = f"[{r.harness}]"
+        click.echo(f"  {r.display_date}  {harness_label}  {r.session_id}  ({r.hit_count} hit(s))")
+        if not no_snippets:
+            for s in r.snippets:
+                role_label = s.role.upper()[:4]
+                click.echo(f"    [{role_label}] {s.text}")
+        click.echo()
+
+
+def main() -> int:
+    """Entry point for console_scripts (backward-compatible wrapper).
+
+    Uses standalone_mode=False so Click returns instead of calling sys.exit(),
+    preserving the return-code contract expected by callers and tests.
+    """
+    try:
+        result = cli(standalone_mode=False)
+        if isinstance(result, int):
+            return result
+    except SystemExit as e:
+        return int(e.code) if e.code else 0
+    except click.exceptions.ClickException as e:
+        e.show()
+        return e.exit_code
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

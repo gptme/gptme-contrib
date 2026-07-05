@@ -1,0 +1,913 @@
+"""Tests for credential_slots.manager.
+
+Ported from Bob's ``tests/test_manage_subscription.py`` (ErikBjare/bob,
+commit e9ea27097) with paths dependency-injected via the :class:`SlotManager`
+constructor instead of monkeypatching module globals.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from credential_slots import (
+    DriftInfo,
+    IdentityDriftInfo,
+    SlotManager,
+    SwitchResult,
+    compute_slot_fingerprint,
+    read_slot_expiry,
+    slot_is_fresh,
+)
+
+
+def _ms_from_now(offset_seconds: float) -> int:
+    """Return a Unix epoch in milliseconds ``offset_seconds`` from now."""
+    return int((datetime.now(timezone.utc).timestamp() + offset_seconds) * 1000)
+
+
+def _write_slot(
+    path: Path,
+    expires_at_ms: int | None,
+    *,
+    refresh_token: str | None = "fake-refresh-token",
+) -> None:
+    """Write a claudeAiOauth credential file with given ``expiresAt``.
+
+    ``expires_at_ms=None`` produces a payload with no ``expiresAt`` key,
+    exercising the unknown-expiry path. ``refresh_token=None`` omits the
+    ``refreshToken`` field (used to exercise no-fingerprint paths).
+    """
+    oauth: dict[str, object] = {"accessToken": "fake-token"}
+    if expires_at_ms is not None:
+        oauth["expiresAt"] = expires_at_ms
+    if refresh_token is not None:
+        oauth["refreshToken"] = refresh_token
+    path.write_text(json.dumps({"claudeAiOauth": oauth}))
+
+
+@pytest.fixture
+def mgr(tmp_path: Path) -> SlotManager:
+    """A SlotManager pointed at an isolated tmp creds_dir."""
+    creds_dir = tmp_path / "creds"
+    creds_dir.mkdir()
+    return SlotManager(creds_dir=creds_dir, subscriptions=["bob", "alice", "erik"])
+
+
+class TestConstructor:
+    def test_requires_sub_placeholder_in_template(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="\\{sub\\}"):
+            SlotManager(
+                creds_dir=tmp_path,
+                subscriptions=["bob"],
+                slot_template=".bad_template_no_placeholder",
+            )
+
+    def test_requires_non_empty_subscriptions(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            SlotManager(creds_dir=tmp_path, subscriptions=[])
+
+    def test_custom_live_name_and_template(self, tmp_path: Path) -> None:
+        creds_dir = tmp_path / "custom"
+        creds_dir.mkdir()
+        m = SlotManager(
+            creds_dir=creds_dir,
+            subscriptions=["a", "b"],
+            slot_template="creds-{sub}.json",
+            live_name="active.json",
+        )
+        assert m.slot_path("a") == creds_dir / "creds-a.json"
+        assert m.live_path == creds_dir / "active.json"
+
+
+class TestReadSlotExpiry:
+    """Reading ``expiresAt`` from a named credential slot."""
+
+    def test_missing_slot_returns_none(self, mgr: SlotManager) -> None:
+        assert mgr.read_slot_expiry("bob") is None
+
+    def test_valid_expiry_parses(self, mgr: SlotManager) -> None:
+        future_ms = _ms_from_now(3600)
+        _write_slot(mgr.slot_path("bob"), future_ms)
+        result = mgr.read_slot_expiry("bob")
+        assert result is not None
+        # Within 1 second of the written value
+        assert abs(result.timestamp() * 1000 - future_ms) < 1000
+
+    def test_missing_expiry_key_returns_none(self, mgr: SlotManager) -> None:
+        """Slot file exists but has no expiresAt — treat as unknown."""
+        _write_slot(mgr.slot_path("bob"), expires_at_ms=None)
+        assert mgr.read_slot_expiry("bob") is None
+
+    def test_malformed_json_returns_none(self, mgr: SlotManager) -> None:
+        mgr.slot_path("bob").write_text("{not json")
+        assert mgr.read_slot_expiry("bob") is None
+
+    def test_non_dict_payload_returns_none(self, mgr: SlotManager) -> None:
+        """JSON parses but root is a list — refuse rather than crash."""
+        mgr.slot_path("bob").write_text('["ok"]')
+        assert mgr.read_slot_expiry("bob") is None
+
+    def test_module_function_accepts_plain_path(self, tmp_path: Path) -> None:
+        """The module-level helper works without a SlotManager."""
+        p = tmp_path / "creds.json"
+        _write_slot(p, _ms_from_now(60))
+        assert read_slot_expiry(p) is not None
+
+
+class TestSlotIsFresh:
+    """Whether a named slot is safe to switch to."""
+
+    def test_future_expiry_is_fresh(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600))
+        ok, reason = mgr.slot_is_fresh("bob")
+        assert ok is True
+        assert "valid" in reason.lower()
+
+    def test_past_expiry_not_fresh(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600))
+        ok, reason = mgr.slot_is_fresh("bob")
+        assert ok is False
+        assert "expired" in reason.lower()
+
+    def test_near_expiry_within_grace_not_fresh(self, mgr: SlotManager) -> None:
+        """Token within the 5-min grace window is rejected."""
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(60))
+        ok, reason = mgr.slot_is_fresh("bob", grace_seconds=300)
+        assert ok is False
+        assert "expir" in reason.lower()
+
+    def test_grace_can_be_overridden_per_call(self, mgr: SlotManager) -> None:
+        """Per-call grace_seconds beats the manager default."""
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(60))
+        # Default (300) rejects; a 10s grace accepts.
+        assert mgr.slot_is_fresh("bob")[0] is False
+        assert mgr.slot_is_fresh("bob", grace_seconds=10)[0] is True
+
+    def test_missing_slot_not_fresh(self, mgr: SlotManager) -> None:
+        ok, reason = mgr.slot_is_fresh("bob")
+        assert ok is False
+        assert (
+            "missing" in reason.lower()
+            or "not found" in reason.lower()
+            or "unreadable" in reason.lower()
+        )
+
+    def test_missing_expiry_treated_as_unknown(self, mgr: SlotManager) -> None:
+        """No expiresAt in a present file → refuse (surface unusual state)."""
+        _write_slot(mgr.slot_path("bob"), expires_at_ms=None)
+        ok, _ = mgr.slot_is_fresh("bob")
+        assert ok is False
+
+    def test_frozen_now_parameter(self, mgr: SlotManager) -> None:
+        """Passing a fixed ``now`` makes the check deterministic."""
+        _write_slot(mgr.slot_path("bob"), 2_000_000_000_000)  # far future
+        frozen = datetime.fromtimestamp(1_500_000_000, tz=timezone.utc)
+        ok, _ = mgr.slot_is_fresh("bob", now=frozen)
+        assert ok is True
+
+    def test_module_function_accepts_plain_path(self, tmp_path: Path) -> None:
+        p = tmp_path / "x.json"
+        _write_slot(p, _ms_from_now(3600))
+        ok, _ = slot_is_fresh(p)
+        assert ok is True
+
+
+class TestGetActiveSubscription:
+    def test_none_when_no_symlink(self, mgr: SlotManager) -> None:
+        assert mgr.get_active_subscription() is None
+
+    def test_reads_symlink_target(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600))
+        mgr.live_path.symlink_to(".credentials.json.bob")
+        assert mgr.get_active_subscription() == "bob"
+
+    def test_unknown_target_returns_none(self, mgr: SlotManager) -> None:
+        """Symlink points outside the known subscription list."""
+        (mgr.creds_dir / ".credentials.json.other").write_text("{}")
+        mgr.live_path.symlink_to(".credentials.json.other")
+        assert mgr.get_active_subscription() is None
+
+    def test_regular_file_returns_none(self, mgr: SlotManager) -> None:
+        """Live file is a regular file (drift state) — no active sub."""
+        mgr.live_path.write_text("{}")
+        assert mgr.get_active_subscription() is None
+
+    def test_path_separator_template_resolves(self, tmp_path: Path) -> None:
+        """Slot template containing a path separator resolves to the right sub.
+
+        Regression: a name-only comparison (``live.resolve().name`` against
+        ``slot_template.format(...)``) silently returned None when the
+        template included any directory component, because the template
+        output contained the separator while the resolved target name did
+        not. The fix compares resolved paths, not string names.
+        """
+        creds_dir = tmp_path / "creds"
+        (creds_dir / "slots").mkdir(parents=True)
+        m = SlotManager(
+            creds_dir=creds_dir,
+            subscriptions=["bob", "alice"],
+            slot_template="slots/{sub}.json",
+        )
+        _write_slot(m.slot_path("bob"), _ms_from_now(3600))
+        m.live_path.symlink_to("slots/bob.json")
+        assert m.get_active_subscription() == "bob"
+
+
+class TestGetAvailableSubscriptions:
+    def test_empty_when_none_exist(self, mgr: SlotManager) -> None:
+        assert mgr.get_available_subscriptions() == []
+
+    def test_only_present_slots(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600))
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+        # erik missing
+        assert mgr.get_available_subscriptions() == ["bob", "alice"]
+
+    def test_does_not_check_freshness(self, mgr: SlotManager) -> None:
+        """``get_available_subscriptions`` only looks at existence."""
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600))  # expired
+        assert mgr.get_available_subscriptions() == ["bob"]
+
+
+class TestDetectLiveSlotDrift:
+    """Live credentials file should match exactly one named slot."""
+
+    def test_live_matches_one_slot(self, mgr: SlotManager) -> None:
+        blob = b'{"claudeAiOauth":{"accessToken":"x"}}'
+        mgr.live_path.write_bytes(blob)
+        mgr.slot_path("bob").write_bytes(blob)
+        mgr.slot_path("alice").write_bytes(b'{"other":true}')
+        drift = mgr.detect_live_slot_drift()
+        assert drift is not None
+        assert drift["drift"] is False
+        assert drift["matching_slot"] == "bob"
+
+    def test_live_matches_no_slot(self, mgr: SlotManager) -> None:
+        mgr.live_path.write_bytes(b'{"claudeAiOauth":{"accessToken":"fresh"}}')
+        mgr.slot_path("bob").write_bytes(
+            b'{"claudeAiOauth":{"accessToken":"stale-bob"}}'
+        )
+        mgr.slot_path("alice").write_bytes(
+            b'{"claudeAiOauth":{"accessToken":"stale-alice"}}'
+        )
+        drift = mgr.detect_live_slot_drift()
+        assert drift is not None
+        assert drift["drift"] is True
+        assert drift["matching_slot"] is None
+        # All slot hashes are reported
+        assert set(drift["slot_hashes"].keys()) == {"bob", "alice"}
+
+    def test_live_missing_returns_none(self, mgr: SlotManager) -> None:
+        assert mgr.detect_live_slot_drift() is None
+
+    def test_live_is_symlink_follows(self, mgr: SlotManager) -> None:
+        blob = b'{"claudeAiOauth":{"accessToken":"y"}}'
+        mgr.slot_path("bob").write_bytes(blob)
+        mgr.live_path.symlink_to(".credentials.json.bob")
+        drift = mgr.detect_live_slot_drift()
+        assert drift is not None
+        assert drift["drift"] is False
+        assert drift["matching_slot"] == "bob"
+
+    def test_drift_info_shape(self, mgr: SlotManager) -> None:
+        """Smoke-check that returned object matches the :class:`DriftInfo` keys."""
+        mgr.live_path.write_bytes(b"irrelevant")
+        drift = mgr.detect_live_slot_drift()
+        assert drift is not None
+        expected_keys: set[str] = set(DriftInfo.__annotations__.keys())
+        assert expected_keys.issubset(drift.keys())
+
+    def test_broken_symlink_reported_as_drift(self, mgr: SlotManager) -> None:
+        """Broken live symlink must not collapse into the 'no live file' branch.
+
+        Regression: ``Path.exists()`` returns False for broken symlinks, so
+        the prior ``if not live.exists(): return None`` silently masked a
+        broken symlink as "nothing to compare", which is indistinguishable
+        from "no live file at all". The fix: when the live path is a
+        broken symlink, report it as drift with ``live_hash=None`` so
+        callers can detect and repair the broken state.
+        """
+        # Create a broken symlink: target doesn't exist
+        mgr.live_path.symlink_to(".credentials.json.bob")
+        assert mgr.live_path.is_symlink()
+        assert not mgr.live_path.exists()  # broken — target missing
+
+        # Seed a slot so slot_hashes are populated
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+
+        drift = mgr.detect_live_slot_drift()
+        assert drift is not None, "broken symlink should not return None"
+        assert drift["drift"] is True
+        assert drift["matching_slot"] is None
+        assert drift["live_hash"] is None  # unreadable
+        assert "alice" in drift["slot_hashes"]
+
+
+class TestSwitchTo:
+    """switch_to: atomic symlink flip with safety checks."""
+
+    def _seed(
+        self,
+        mgr: SlotManager,
+        *,
+        bob_ms: int,
+        alice_ms: int,
+        initial: str = "alice",
+    ) -> None:
+        _write_slot(mgr.slot_path("bob"), bob_ms)
+        _write_slot(mgr.slot_path("alice"), alice_ms)
+        mgr.live_path.symlink_to(f".credentials.json.{initial}")
+
+    def test_fresh_target_switches(self, mgr: SlotManager) -> None:
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        result = mgr.switch_to("bob", "probe")
+        assert result.ok is True
+        assert mgr.get_active_subscription() == "bob"
+
+    def test_expired_target_rejected(self, mgr: SlotManager) -> None:
+        self._seed(mgr, bob_ms=_ms_from_now(-3600), alice_ms=_ms_from_now(3600))
+        result = mgr.switch_to("bob", "probe")
+        assert result.ok is False
+        assert "expired" in result.reason.lower()
+        assert mgr.get_active_subscription() == "alice"
+
+    def test_expired_target_rejected_even_with_force(self, mgr: SlotManager) -> None:
+        """force bypasses the lock guard but NOT the expiry check."""
+        self._seed(mgr, bob_ms=_ms_from_now(-3600), alice_ms=_ms_from_now(3600))
+        result = mgr.switch_to("bob", "manual", force=True)
+        assert result.ok is False
+        assert mgr.get_active_subscription() == "alice"
+
+    def test_missing_slot_rejected(self, mgr: SlotManager) -> None:
+        mgr.live_path.symlink_to(".credentials.json.alice")
+        # No slot files at all
+        result = mgr.switch_to("bob", "probe")
+        assert result.ok is False
+        assert "missing" in result.reason.lower()
+
+    def test_lock_guard_defers_switch(self, mgr: SlotManager) -> None:
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        mgr.lock_guard = lambda: ["autonomous-infrastructure"]
+        result = mgr.switch_to("bob", "probe")
+        assert result.ok is False
+        assert result.deferred_locks == ["autonomous-infrastructure"]
+        assert "deferred" in result.reason.lower()
+        # Live symlink unchanged
+        assert mgr.get_active_subscription() == "alice"
+
+    def test_lock_guard_empty_list_allows_switch(self, mgr: SlotManager) -> None:
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        mgr.lock_guard = lambda: []  # no active locks
+        result = mgr.switch_to("bob", "probe")
+        assert result.ok is True
+
+    def test_force_bypasses_lock_guard(self, mgr: SlotManager) -> None:
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        mgr.lock_guard = lambda: ["busy-session"]
+        result = mgr.switch_to("bob", "manual", force=True)
+        assert result.ok is True
+        assert mgr.get_active_subscription() == "bob"
+
+    def test_on_switch_callback_fires_on_success(self, mgr: SlotManager) -> None:
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        events: list[tuple[str, str]] = []
+        mgr.on_switch = lambda sub, reason: events.append((sub, reason))
+        mgr.switch_to("bob", "probe")
+        assert events == [("bob", "probe")]
+
+    def test_on_switch_not_called_on_failure(self, mgr: SlotManager) -> None:
+        self._seed(mgr, bob_ms=_ms_from_now(-3600), alice_ms=_ms_from_now(3600))
+        events: list[tuple[str, str]] = []
+        mgr.on_switch = lambda sub, reason: events.append((sub, reason))
+        mgr.switch_to("bob", "probe")
+        assert events == []
+
+    def test_logger_receives_defer_message(self, mgr: SlotManager) -> None:
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        lines: list[str] = []
+        mgr.logger = lines.append
+        mgr.lock_guard = lambda: ["lock-a"]
+        mgr.switch_to("bob", "probe")
+        assert any("deferred" in line.lower() for line in lines)
+
+    def test_replaces_existing_symlink(self, mgr: SlotManager) -> None:
+        """Target slot change when symlink already exists (existing setup)."""
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        # initial points at alice
+        assert mgr.get_active_subscription() == "alice"
+        mgr.switch_to("bob", "rebalance")
+        assert mgr.get_active_subscription() == "bob"
+        # And back
+        mgr.switch_to("alice", "revert")
+        assert mgr.get_active_subscription() == "alice"
+
+    def test_unknown_subscription_rejected(self, mgr: SlotManager) -> None:
+        """switch_to must refuse subs not in self.subscriptions.
+
+        Without this guard, a successful switch to an off-list name leaves
+        get_active_subscription() returning None — violating the invariant
+        that a successful switch is observable via the inverse call.
+        """
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        # Seed a slot file for an unregistered sub so the freshness check
+        # would otherwise pass — this isolates the guard as the rejection reason.
+        _write_slot(mgr.slot_path("gordon"), _ms_from_now(3600))
+        result = mgr.switch_to("gordon", "rebalance")
+        assert result.ok is False
+        assert "unknown" in result.reason.lower()
+        # Live symlink unchanged — still points at the initial alice slot.
+        assert mgr.get_active_subscription() == "alice"
+
+    def test_fingerprint_write_failure_does_not_abort_successful_switch(
+        self, mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A disk-full or permission error during fingerprint capture must not
+        turn a successfully-flipped symlink into an unhandled exception.
+        on_switch must still fire and SwitchResult(ok=True) must be returned.
+        """
+        self._seed(mgr, bob_ms=_ms_from_now(3600), alice_ms=_ms_from_now(3600))
+        events: list[tuple[str, str]] = []
+        mgr.on_switch = lambda sub, reason: events.append((sub, reason))
+
+        def _raise(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(mgr, "capture_slot_fingerprint", _raise)
+        result = mgr.switch_to("bob", "test")
+        assert result.ok is True
+        # symlink was placed
+        assert mgr.get_active_subscription() == "bob"
+        # on_switch still fired
+        assert events == [("bob", "test")]
+
+
+class TestSwitchResult:
+    """Shape of :class:`SwitchResult`."""
+
+    def test_defaults(self) -> None:
+        r = SwitchResult(ok=True, reason="ok")
+        assert r.deferred_locks == []
+
+    def test_equality(self) -> None:
+        assert SwitchResult(ok=False, reason="x", deferred_locks=["a"]) == SwitchResult(
+            ok=False, reason="x", deferred_locks=["a"]
+        )
+
+
+class TestHealDriftTo:
+    """heal_drift_to() syncs the live cred to ``sub``'s slot after CC OAuth refresh.
+
+    Recurring incident: ErikBjare/bob#685 — every CC OAuth token refresh
+    rewrites the live credential file, breaking the symlink and stranding
+    every named slot at a stale token. Without heal, the auto-switcher
+    refuses to act because every slot looks expired.
+
+    Workspace caller (e.g. ``manage-subscription.py``) owns *which* sub to
+    heal into (typically inferred from a switch log they own); this method
+    just performs the file ops safely.
+    """
+
+    def _seed_drifted(
+        self,
+        mgr: SlotManager,
+        *,
+        live_oauth_expires_ms: int | None,
+        live_is_symlink: bool = False,
+        live_present: bool = True,
+        slots_expires_ms: int | None = None,
+    ) -> Path:
+        """Set up a drifted state and return the live path.
+
+        Default: all named slots have a 1h-stale token; live is a regular
+        file with caller-supplied expiry. Override flags exercise the
+        symlink-drift and missing-live paths.
+        """
+        stale_ms = (
+            slots_expires_ms if slots_expires_ms is not None else _ms_from_now(-3600)
+        )
+        for sub in mgr.subscriptions:
+            _write_slot(mgr.slot_path(sub), stale_ms)
+        live = mgr.live_path
+        if live_present:
+            if live_is_symlink:
+                # Broken symlink — detect_live_slot_drift reports drift with
+                # live_hash=None, distinct from the regular-file OAuth-refresh
+                # case. heal_drift_to must refuse this since it cannot
+                # determine which slot the operator meant to heal.
+                live.symlink_to(".credentials.json.deleted-target")
+            else:
+                payload: dict[str, object] = {
+                    "claudeAiOauth": {"accessToken": "fresh-token-from-cc-refresh"}
+                }
+                if live_oauth_expires_ms is not None:
+                    payload["claudeAiOauth"]["expiresAt"] = live_oauth_expires_ms  # type: ignore[index]
+                live.write_text(json.dumps(payload))
+        return live
+
+    def test_no_drift_returns_false(self, mgr: SlotManager) -> None:
+        """Heal is a no-op when drift detector reports no drift."""
+        bob_slot = mgr.slot_path("bob")
+        bob_slot.write_bytes(b'{"claudeAiOauth":{"accessToken":"x"}}')
+        mgr.live_path.symlink_to(".credentials.json.bob")
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "no drift" in result.reason
+
+    def test_drift_executes_heal(self, mgr: SlotManager) -> None:
+        """Drift + fresh live token: copy live → slot, replace with symlink."""
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        original_live_content = live.read_text()
+        bob_slot = mgr.slot_path("bob")
+
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is True
+        assert "healed" in result.reason
+        # Live is now a symlink pointing at bob's slot
+        assert live.is_symlink()
+        assert os.readlink(str(live)) == ".credentials.json.bob"
+        # Bob's slot now contains the freshest token (was overwritten)
+        assert bob_slot.read_text() == original_live_content
+        # No drift now
+        drift = mgr.detect_live_slot_drift()
+        assert drift is not None
+        assert drift["drift"] is False
+
+    def test_symlink_live_refused(self, mgr: SlotManager) -> None:
+        """Drift via symlink-with-missing-target is ambiguous; refuse."""
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=None, live_is_symlink=True)
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "symlink" in result.reason
+        # Untouched
+        assert live.is_symlink()
+
+    def test_expired_live_token_not_healed(self, mgr: SlotManager) -> None:
+        """Refuse to heal when the live token itself is expired."""
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(-3600))
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "expired or in grace" in result.reason
+        assert not live.is_symlink()
+
+    def test_missing_oauth_payload_not_healed(self, mgr: SlotManager) -> None:
+        """Refuse to heal when live file lacks the claudeAiOauth payload."""
+        for sub in mgr.subscriptions:
+            _write_slot(mgr.slot_path(sub), _ms_from_now(-3600))
+        live = mgr.live_path
+        live.write_text(json.dumps({"some_other_format": True}))
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "claudeAiOauth" in result.reason
+
+    def test_missing_expires_at_not_healed(self, mgr: SlotManager) -> None:
+        """Refuse when payload exists but has no parseable expiresAt."""
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=None)
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "expiresAt" in result.reason
+        assert not live.is_symlink()
+
+    def test_unknown_subscription_rejected(self, mgr: SlotManager) -> None:
+        """Refuse to heal into a sub not in self.subscriptions."""
+        self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        result = mgr.heal_drift_to("gordon")
+        assert result.ok is False
+        assert "unknown" in result.reason.lower()
+
+    def test_malformed_json_not_healed(self, mgr: SlotManager) -> None:
+        """Refuse cleanly when live file is not valid JSON."""
+        for sub in mgr.subscriptions:
+            _write_slot(mgr.slot_path(sub), _ms_from_now(-3600))
+        live = mgr.live_path
+        live.write_text("not json{")
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "unreadable or malformed JSON" in result.reason
+
+    def test_invokes_on_switch_callback(self, tmp_path: Path) -> None:
+        """Successful heal calls on_switch with the auto-heal reason."""
+        creds_dir = tmp_path / "creds"
+        creds_dir.mkdir()
+        events: list[tuple[str, str]] = []
+        mgr = SlotManager(
+            creds_dir=creds_dir,
+            subscriptions=["bob", "alice"],
+            on_switch=lambda sub, reason: events.append((sub, reason)),
+        )
+        self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        result = mgr.heal_drift_to("alice")
+        assert result.ok is True
+        assert events == [("alice", "auto-heal drift (live cred resynced to slot)")]
+
+    def test_lock_guard_defers_unless_forced(self, tmp_path: Path) -> None:
+        """When lock_guard returns active locks, heal defers; force bypasses."""
+        creds_dir = tmp_path / "creds"
+        creds_dir.mkdir()
+        mgr = SlotManager(
+            creds_dir=creds_dir,
+            subscriptions=["bob", "alice"],
+            lock_guard=lambda: ["session-abc"],
+        )
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+
+        # Default: defers
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is False
+        assert "deferred" in result.reason
+        assert result.deferred_locks == ["session-abc"]
+        assert not live.is_symlink()  # untouched
+
+        # force=True: heals through the lock
+        result = mgr.heal_drift_to("bob", force=True)
+        assert result.ok is True
+        assert live.is_symlink()
+
+    def test_slot_file_chmod_to_user_only(self, mgr: SlotManager) -> None:
+        """Healed slot file has 0600 perms (no group/other read)."""
+        self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        bob_slot = mgr.slot_path("bob")
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is True
+        mode = bob_slot.stat().st_mode & 0o777
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    def test_atomicity_preserves_state_on_failure(
+        self, mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If os.replace fails mid-heal, no partial state is left behind.
+
+        Simulate failure of the second os.replace (the symlink swap). The
+        slot has already been replaced with fresh content (acceptable —
+        slot now matches live) but the live file remains a regular file.
+        Verify that no .tmp* artifacts remain.
+        """
+        live = self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+
+        original_replace = os.replace
+        call_count = {"n": 0}
+
+        def flaky_replace(src: object, dst: object) -> None:
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated EACCES")
+            original_replace(src, dst)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "replace", flaky_replace)
+        with pytest.raises(OSError, match="simulated EACCES"):
+            mgr.heal_drift_to("bob")
+
+        # Live file remains as a regular file (heal aborted before symlink swap)
+        assert live.exists()
+        assert not live.is_symlink()
+        # No leftover .tmp* artifacts in creds_dir
+        leftovers = sorted(p.name for p in mgr.creds_dir.iterdir() if ".tmp" in p.name)
+        assert leftovers == [], f"unexpected tmp files: {leftovers}"
+
+    def test_fingerprint_write_failure_does_not_abort_successful_heal(
+        self, mgr: SlotManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fingerprint capture failure after a successful symlink heal must not
+        propagate as an unhandled exception. on_switch must still fire and
+        SwitchResult(ok=True) must be returned.
+        """
+        self._seed_drifted(mgr, live_oauth_expires_ms=_ms_from_now(3600))
+        events: list[tuple[str, str]] = []
+        mgr.on_switch = lambda sub, reason: events.append((sub, reason))
+
+        def _raise(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(mgr, "capture_slot_fingerprint", _raise)
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is True
+        # Live is now a symlink to bob's slot
+        assert mgr.live_path.is_symlink()
+        # on_switch still fired
+        assert len(events) == 1
+        assert "auto-heal" in events[0][1]
+
+
+class TestSlotFingerprint:
+    """Identity fingerprint capture and computation."""
+
+    def test_compute_returns_sha256_of_refresh_token(self, tmp_path: Path) -> None:
+        p = tmp_path / "slot.json"
+        _write_slot(p, _ms_from_now(3600), refresh_token="rt-bob")
+        fp = compute_slot_fingerprint(p)
+        assert fp is not None
+        assert len(fp) == 64  # sha256 hex
+        # Same content → same fingerprint
+        _write_slot(tmp_path / "slot2.json", _ms_from_now(60), refresh_token="rt-bob")
+        assert compute_slot_fingerprint(tmp_path / "slot2.json") == fp
+
+    def test_compute_distinguishes_tokens(self, tmp_path: Path) -> None:
+        a = tmp_path / "a.json"
+        b = tmp_path / "b.json"
+        _write_slot(a, _ms_from_now(3600), refresh_token="rt-bob")
+        _write_slot(b, _ms_from_now(3600), refresh_token="rt-alice")
+        assert compute_slot_fingerprint(a) != compute_slot_fingerprint(b)
+
+    def test_compute_returns_none_when_no_refresh_token(self, tmp_path: Path) -> None:
+        p = tmp_path / "no-rt.json"
+        _write_slot(p, _ms_from_now(3600), refresh_token=None)
+        assert compute_slot_fingerprint(p) is None
+
+    def test_compute_returns_none_for_missing_file(self, tmp_path: Path) -> None:
+        assert compute_slot_fingerprint(tmp_path / "nope.json") is None
+
+    def test_capture_writes_fingerprint_file(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        fp = mgr.capture_slot_fingerprint("bob")
+        assert fp is not None
+        fp_path = mgr.fingerprint_path("bob")
+        assert fp_path.exists()
+        payload = json.loads(fp_path.read_text())
+        assert payload["refresh_token_sha256"] == fp
+        assert payload["slot"] == "bob"
+        assert "captured_at" in payload
+
+    def test_capture_returns_none_when_slot_missing(self, mgr: SlotManager) -> None:
+        assert mgr.capture_slot_fingerprint("bob") is None
+        assert not mgr.fingerprint_path("bob").exists()
+
+    def test_capture_overwrites_atomically(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-old")
+        first = mgr.capture_slot_fingerprint("bob")
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-new")
+        second = mgr.capture_slot_fingerprint("bob")
+        assert first is not None and second is not None
+        assert first != second
+        # No leftover .tmp* artifacts
+        leftovers = sorted(p.name for p in mgr.creds_dir.iterdir() if ".tmp" in p.name)
+        assert leftovers == [], f"unexpected tmp files: {leftovers}"
+
+    def test_capture_uses_secure_permissions(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        mgr.capture_slot_fingerprint("bob")
+        mode = mgr.fingerprint_path("bob").stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_read_stored_handles_malformed(self, mgr: SlotManager) -> None:
+        mgr.fingerprint_path("bob").write_text("{not json")
+        assert mgr.read_stored_fingerprint("bob") is None
+
+    def test_constructor_validates_fingerprint_template(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="fingerprint_template"):
+            SlotManager(
+                creds_dir=tmp_path,
+                subscriptions=["bob"],
+                fingerprint_template=".bad_template_no_placeholder",
+            )
+
+
+class TestDetectSlotIdentityDrift:
+    """Identity drift detection via stored fingerprints.
+
+    Regression coverage for ErikBjare/bob#769: detects when a slot's
+    refresh token has been silently replaced (e.g. operator wrote a new
+    OAuth credential through the live symlink, landing in the slot file
+    while the live↔slot hashes still match).
+    """
+
+    def test_returns_no_drift_when_fingerprint_matches(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        mgr.capture_slot_fingerprint("bob")
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+        assert info["sub"] == "bob"
+        assert info["stored_fingerprint"] == info["current_fingerprint"]
+        assert "match" in info["reason"].lower()
+
+    def test_detects_identity_drift_in_769_scenario(self, mgr: SlotManager) -> None:
+        """ErikBjare/bob#769 reproduction.
+
+        Bob slot is established with refresh token rt-bob, fingerprint
+        captured. Live symlink points at bob slot. An operator writes
+        Alice's credentials *through* the symlink — the bob slot now
+        contains rt-alice, but the hash-based drift check sees live and
+        slot still match. Identity drift catches it.
+        """
+        # Initial state: bob slot established, symlink + fingerprint captured
+        bob_slot = mgr.slot_path("bob")
+        _write_slot(bob_slot, _ms_from_now(3600), refresh_token="rt-bob")
+        mgr.live_path.symlink_to(".credentials.json.bob")
+        mgr.capture_slot_fingerprint("bob")
+
+        # Hash drift sees no drift (live == slot, by symlink)
+        legacy = mgr.detect_live_slot_drift()
+        assert legacy is not None and legacy["drift"] is False
+
+        # Operator writes Alice's creds through the live symlink — lands in bob slot
+        mgr.live_path.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "alice-token",
+                        "refreshToken": "rt-alice",
+                        "expiresAt": _ms_from_now(3600),
+                    }
+                }
+            )
+        )
+
+        # Hash check still misses it (live === slot)
+        legacy2 = mgr.detect_live_slot_drift()
+        assert legacy2 is not None and legacy2["drift"] is False
+
+        # Identity check catches it
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is True
+        assert info["sub"] == "bob"
+        assert info["stored_fingerprint"] != info["current_fingerprint"]
+        assert "refresh token changed" in info["reason"]
+
+    def test_no_drift_when_fingerprint_not_yet_captured(self, mgr: SlotManager) -> None:
+        """Backward-compatible: pre-existing slots without a captured
+        fingerprint must not be reported as drifting (would create
+        false-positives on first deploy)."""
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+        assert info["stored_fingerprint"] is None
+        assert info["current_fingerprint"] is not None
+        assert "no fingerprint stored" in info["reason"].lower()
+
+    def test_drift_when_slot_vanishes_after_capture(self, mgr: SlotManager) -> None:
+        """Fingerprint was captured but the slot is now missing/unreadable —
+        treat as identity drift since we cannot verify the slot still holds
+        the expected token."""
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        mgr.capture_slot_fingerprint("bob")
+        mgr.slot_path("bob").unlink()
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is True
+        assert info["stored_fingerprint"] is not None
+        assert info["current_fingerprint"] is None
+        assert (
+            "missing" in info["reason"].lower()
+            or "cannot verify" in info["reason"].lower()
+        )
+
+    def test_no_drift_when_slot_missing_and_no_fingerprint(
+        self, mgr: SlotManager
+    ) -> None:
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+        assert info["stored_fingerprint"] is None
+        assert info["current_fingerprint"] is None
+
+    def test_unknown_subscription_raises(self, mgr: SlotManager) -> None:
+        with pytest.raises(ValueError, match="unknown subscription"):
+            mgr.detect_slot_identity_drift("not-a-real-sub")
+
+    def test_switch_to_auto_captures_fingerprint(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600), refresh_token="rt-bob")
+        assert not mgr.fingerprint_path("bob").exists()
+        result = mgr.switch_to("bob", "initial")
+        assert result.ok is True
+        assert mgr.fingerprint_path("bob").exists()
+        # Subsequent identity check sees no drift
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+
+    def test_heal_drift_to_auto_captures_fingerprint(self, mgr: SlotManager) -> None:
+        # Set up drift state: live file is a regular file (no symlink),
+        # slot file is older with different refresh token
+        live = mgr.live_path
+        live.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "fresh",
+                        "refreshToken": "rt-new",
+                        "expiresAt": _ms_from_now(3600),
+                    }
+                }
+            )
+        )
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(60), refresh_token="rt-old")
+
+        result = mgr.heal_drift_to("bob")
+        assert result.ok is True, result.reason
+        assert mgr.fingerprint_path("bob").exists()
+        # Fingerprint reflects the *new* token now in the slot
+        info = mgr.detect_slot_identity_drift("bob")
+        assert info["drift"] is False
+        assert info["current_fingerprint"] == compute_slot_fingerprint(
+            mgr.slot_path("bob")
+        )
+
+    def test_typed_dict_shape(self, mgr: SlotManager) -> None:
+        """IdentityDriftInfo has the documented fields."""
+        info: IdentityDriftInfo = mgr.detect_slot_identity_drift("bob")
+        assert set(info.keys()) == {
+            "drift",
+            "sub",
+            "stored_fingerprint",
+            "current_fingerprint",
+            "reason",
+        }

@@ -1,0 +1,7971 @@
+"""Tests for gptme-sessions package."""
+
+import json
+import logging
+from pathlib import Path
+
+from gptme_sessions import SessionRecord, SessionStore
+import pytest
+
+from gptme_sessions.signals import (
+    _detect_format,
+    detect_format,
+    extract_signals,
+    extract_signals_cc,
+    extract_signals_codex,
+    extract_signals_copilot,
+    extract_usage_cc,
+    extract_usage_codex,
+    extract_usage_gptme,
+    grade_signals,
+    infer_category,
+    is_productive,
+)
+from gptme_sessions.store import (
+    compute_run_analytics,
+    format_run_analytics,
+    format_stats,
+)
+
+
+def test_session_record_defaults():
+    """SessionRecord auto-generates ID and timestamp."""
+    r = SessionRecord()
+    assert r.session_id
+    assert r.timestamp
+    assert r.harness == "unknown"
+    assert r.model == "unknown"
+
+
+def test_session_record_serialization():
+    """Round-trip through JSON preserves data."""
+    r = SessionRecord(
+        harness="claude-code",
+        model="opus",
+        run_type="autonomous",
+        category="code",
+        outcome="productive",
+        duration_seconds=2400,
+        deliverables=["abc123"],
+    )
+    d = r.to_dict()
+    assert d["model"] == "opus"
+    assert d["deliverables"] == ["abc123"]
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.model == "opus"
+    assert r2.category == "code"
+    assert r2.deliverables == ["abc123"]
+
+
+def test_session_record_from_dict_preserves_unknown_fields():
+    """from_dict captures unknown fields into ``_legacy_fields`` so they
+    survive a subsequent ``to_dict``/rewrite.
+
+    Regression for silent data loss: older schemas wrote fields like
+    ``inferred_category``, ``failure_reason``, and ``recommended_confidence``
+    directly into the JSONL. Round-tripping such records through
+    ``load_all → mutate → rewrite`` previously dropped them.
+    """
+    d = {
+        "session_id": "abc",
+        "model": "sonnet",
+        "inferred_category": "infrastructure",
+        "failure_reason": "timeout",
+        "recommended_confidence": 0.42,
+    }
+    r = SessionRecord.from_dict(d)
+    assert r.model == "sonnet"
+    # Legacy fields survive round-trip via to_dict.
+    out = r.to_dict()
+    assert out["inferred_category"] == "infrastructure"
+    assert out["failure_reason"] == "timeout"
+    assert out["recommended_confidence"] == 0.42
+    # And via JSON round-trip.
+    reloaded = SessionRecord.from_dict(json.loads(r.to_json()))
+    reloaded_out = reloaded.to_dict()
+    assert reloaded_out["inferred_category"] == "infrastructure"
+    assert reloaded_out["failure_reason"] == "timeout"
+
+
+def test_session_record_to_dict_legacy_never_overrides_known_fields():
+    """A known-field value must win over an identically-keyed legacy entry.
+
+    ``_legacy_fields`` is only intended to cover fields *not* present on the
+    current dataclass — a forged/duplicate key in the legacy dict must not
+    shadow the authoritative dataclass value.
+    """
+    r = SessionRecord(session_id="x", model="sonnet", category="research")
+    # Simulate a legacy dict that (incorrectly) contains a known-field key.
+    r._legacy_fields = {"category": "DO_NOT_USE_ME", "inferred_category": "ok"}
+    out = r.to_dict()
+    assert out["category"] == "research"
+    assert out["inferred_category"] == "ok"
+
+
+def test_session_record_to_json():
+    """to_json produces valid single-line JSON."""
+    r = SessionRecord(model="sonnet", outcome="noop")
+    line = r.to_json()
+    parsed = json.loads(line)
+    assert parsed["model"] == "sonnet"
+    assert "\n" not in line
+
+
+def test_session_store_append_and_load(tmp_path: Path):
+    """Append records and load them back."""
+    store = SessionStore(sessions_dir=tmp_path)
+
+    r1 = SessionRecord(model="opus", outcome="productive", run_type="autonomous")
+    r2 = SessionRecord(model="sonnet", outcome="noop", run_type="monitoring")
+
+    store.append(r1)
+    store.append(r2)
+
+    records = store.load_all()
+    assert len(records) == 2
+    assert records[0].model == "opus"
+    assert records[1].model == "sonnet"
+
+
+def test_session_store_query_by_model(tmp_path: Path):
+    """Query filters by model."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", outcome="productive"))
+    store.append(SessionRecord(model="sonnet", outcome="productive"))
+    store.append(SessionRecord(model="sonnet", outcome="noop"))
+
+    results = store.query(model="sonnet")
+    assert len(results) == 2
+    assert all(r.model == "sonnet" for r in results)
+
+
+def test_session_store_query_by_run_type(tmp_path: Path):
+    """Query filters by run type."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(run_type="autonomous", outcome="productive"))
+    store.append(SessionRecord(run_type="monitoring", outcome="noop"))
+    store.append(SessionRecord(run_type="monitoring", outcome="productive"))
+
+    results = store.query(run_type="monitoring")
+    assert len(results) == 2
+
+
+def test_session_store_query_combined_filters(tmp_path: Path):
+    """Query with multiple filters intersects them."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="sonnet", run_type="monitoring", outcome="noop"))
+    store.append(SessionRecord(model="sonnet", run_type="autonomous", outcome="productive"))
+    store.append(SessionRecord(model="opus", run_type="monitoring", outcome="productive"))
+
+    results = store.query(model="sonnet", run_type="monitoring")
+    assert len(results) == 1
+    assert results[0].outcome == "noop"
+
+
+def test_session_store_stats(tmp_path: Path):
+    """Stats computes correct summary."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", run_type="autonomous", outcome="productive"))
+    store.append(SessionRecord(model="opus", run_type="autonomous", outcome="productive"))
+    store.append(SessionRecord(model="sonnet", run_type="monitoring", outcome="noop"))
+    store.append(SessionRecord(model="sonnet", run_type="monitoring", outcome="productive"))
+
+    s = store.stats()
+    assert s["total"] == 4
+    assert s["productive"] == 3
+    assert s["success_rate"] == 0.75
+
+    # Model breakdown
+    assert s["by_model"]["opus"]["total"] == 2
+    assert s["by_model"]["opus"]["rate"] == 1.0
+    assert s["by_model"]["sonnet"]["total"] == 2
+    assert s["by_model"]["sonnet"]["rate"] == 0.5
+
+    # Cross-tab
+    assert s["by_model_run_type"]["opus×autonomous"]["total"] == 2
+    assert s["by_model_run_type"]["sonnet×monitoring"]["rate"] == 0.5
+
+
+def test_session_store_violated_policy_stats(tmp_path: Path):
+    """violated_policy outcome is tracked separately and excluded from productive count."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="haiku", outcome="productive"))
+    store.append(SessionRecord(model="haiku", outcome="violated_policy"))
+    store.append(SessionRecord(model="haiku", outcome="noop"))
+
+    s = store.stats()
+    assert s["total"] == 3
+    assert s["productive"] == 1
+    assert s["violated_policy"] == 1
+    assert s["noop"] == 1
+    # success_rate counts only productive, not violated_policy
+    assert s["success_rate"] == pytest.approx(1 / 3)
+
+
+def test_session_store_empty(tmp_path: Path):
+    """Empty store returns sensible defaults."""
+    store = SessionStore(sessions_dir=tmp_path)
+    records = store.load_all()
+    assert records == []
+
+    s = store.stats()
+    assert s["total"] == 0
+
+
+def test_session_store_corrupted_line(tmp_path: Path):
+    """Corrupted JSON lines are skipped."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", outcome="productive"))
+
+    # Inject a corrupted line
+    with open(store.path, "a", encoding="utf-8") as f:
+        f.write("not valid json\n")
+
+    store.append(SessionRecord(model="sonnet", outcome="noop"))
+
+    records = store.load_all()
+    assert len(records) == 2  # corrupted line skipped
+
+
+def test_session_record_model_stored_raw():
+    """Model field stores the raw string, model_normalized provides short form."""
+    r = SessionRecord(model="claude-opus-4-6")
+    assert r.model == "claude-opus-4-6"  # raw preserved
+    assert r.model_normalized == "opus"  # normalized for display
+    r2 = SessionRecord(model="claude-sonnet-4-6")
+    assert r2.model == "claude-sonnet-4-6"
+    assert r2.model_normalized == "sonnet"
+    r3 = SessionRecord(model="claude-haiku-4-5")
+    assert r3.model == "claude-haiku-4-5"
+    assert r3.model_normalized == "haiku"
+    # Non-matching names pass through both
+    r4 = SessionRecord(model="gpt-5.3-codex")
+    assert r4.model == "gpt-5.3-codex"
+    assert r4.model_normalized == "gpt-5.3-codex"
+    # Provider-prefixed model strings normalize only via property
+    r5 = SessionRecord(model="openai-subscription/gpt-5.3-codex")
+    assert r5.model == "openai-subscription/gpt-5.3-codex"
+    assert r5.model_normalized == "gpt-5.3-codex"
+    r6 = SessionRecord(model="openrouter/z-ai/glm-5@z-ai")
+    assert r6.model == "openrouter/z-ai/glm-5@z-ai"
+    assert r6.model_normalized == "glm-5"
+    r7 = SessionRecord(model="anthropic/claude-opus-4-6")
+    assert r7.model == "anthropic/claude-opus-4-6"
+    assert r7.model_normalized == "opus"
+
+
+def test_session_record_run_type_normalization():
+    """Numeric and prefixed run_types are normalized."""
+    r = SessionRecord(run_type="1042")
+    assert r.run_type == "autonomous"
+    r2 = SessionRecord(run_type="autonomous-session-3")
+    assert r2.run_type == "autonomous"
+    # Normal values pass through
+    r3 = SessionRecord(run_type="monitoring")
+    assert r3.run_type == "monitoring"
+
+
+def test_session_store_rewrite(tmp_path: Path):
+    """Rewrite atomically replaces all records."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", outcome="productive"))
+    store.append(SessionRecord(model="sonnet", outcome="noop"))
+    assert len(store.load_all()) == 2
+
+    # Rewrite with modified records
+    records = store.load_all()
+    records[0].category = "code"
+    store.rewrite(records)
+
+    reloaded = store.load_all()
+    assert len(reloaded) == 2
+    assert reloaded[0].category == "code"
+
+
+def test_store_rewrite_preserves_legacy_fields(tmp_path: Path):
+    """rewrite() must not silently drop legacy fields written by older
+    schema versions (e.g. ``inferred_category``, ``failure_reason``).
+
+    This is the end-to-end regression for the silent data-loss path that
+    existed in ``sync --signals`` and ``sync --fix-timestamps``: both
+    mutate records in memory and then ``rewrite()`` them, which
+    previously stripped any field not defined on ``SessionRecord``.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    # Hand-write a record containing legacy fields (simulating an older
+    # store written before the fields were removed from the dataclass).
+    legacy_line = json.dumps(
+        {
+            "session_id": "legacy1",
+            "timestamp": "2026-04-15T10:00:00+00:00",
+            "model": "opus",
+            "outcome": "noop",
+            "inferred_category": "infrastructure",
+            "failure_reason": "timeout",
+            "recommended_confidence": 0.73,
+        }
+    )
+    store.path.write_text(legacy_line + "\n")
+
+    # Load, mutate something unrelated, rewrite.
+    records = store.load_all()
+    assert len(records) == 1
+    records[0].outcome = "productive"  # any mutation
+    store.rewrite(records)
+
+    # Legacy fields must survive the round-trip.
+    raw = json.loads(store.path.read_text().splitlines()[0])
+    assert raw["outcome"] == "productive"
+    assert raw["inferred_category"] == "infrastructure"
+    assert raw["failure_reason"] == "timeout"
+    assert raw["recommended_confidence"] == 0.73
+
+
+def test_store_rewrite_preserves_appended_records(tmp_path: Path):
+    """rewrite() keeps records appended after load_all() was called."""
+    store = SessionStore(sessions_dir=tmp_path)
+    rec1 = SessionRecord(model="opus", outcome="productive")
+    store.append(rec1)
+
+    records = store.load_all()  # snapshot with only rec1
+
+    # Simulate concurrent append between load and rewrite
+    rec2 = SessionRecord(model="sonnet", outcome="noop")
+    store.append(rec2)
+
+    # Rewrite with the original snapshot (should NOT drop rec2)
+    store.rewrite(records)
+
+    reloaded = store.load_all()
+    ids = {r.session_id for r in reloaded}
+    assert rec1.session_id in ids
+    assert rec2.session_id in ids
+
+
+def test_store_rewrite_preserves_malformed_lines(tmp_path: Path):
+    """rewrite() keeps malformed JSONL lines rather than silently dropping them."""
+    store = SessionStore(sessions_dir=tmp_path)
+    rec = SessionRecord(model="opus")
+    store.append(rec)
+
+    # Inject a malformed line directly
+    with open(store.path, "a") as f:
+        f.write("NOT VALID JSON\n")
+
+    records = store.load_all()  # malformed line is skipped
+    store.rewrite(records)  # should preserve the malformed line
+
+    raw_lines = [line.strip() for line in store.path.read_text().splitlines() if line.strip()]
+    assert any(line == "NOT VALID JSON" for line in raw_lines)
+
+
+def test_session_record_hour_24_fix():
+    """Hour 24 timestamps are corrected to 23:59:59."""
+    r = SessionRecord(timestamp="2026-03-04T24:00:00+00:00")
+    assert "T23:59:59" in r.timestamp
+
+
+def test_session_record_hour_24_non_midnight_fix():
+    """Non-midnight T24 timestamps (e.g. T24:30:45) are mapped to T23:MM:SS."""
+    r = SessionRecord(timestamp="2026-03-04T24:30:45+00:00")
+    assert "T23:30:45" in r.timestamp
+
+
+def test_format_stats_empty():
+    """format_stats handles empty stats gracefully."""
+    import io
+
+    buf = io.StringIO()
+    format_stats({"total": 0}, buf)
+    assert "No session records" in buf.getvalue()
+
+
+def test_format_stats_with_data(tmp_path: Path):
+    """format_stats produces readable output."""
+    import io
+
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(
+        SessionRecord(
+            model="opus",
+            run_type="autonomous",
+            outcome="productive",
+            duration_seconds=1800,
+        )
+    )
+    store.append(SessionRecord(model="sonnet", run_type="monitoring", outcome="noop"))
+
+    s = store.stats()
+    buf = io.StringIO()
+    format_stats(s, buf)
+    output = buf.getvalue()
+    assert "Sessions: 2" in output
+    assert "opus" in output
+    assert "sonnet" in output
+
+
+def test_format_stats_none_harness(tmp_path: Path):
+    """format_stats does not crash when harness field is None."""
+    import io
+
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", harness=None, outcome="productive"))
+    store.append(SessionRecord(model="sonnet", harness="gptme", outcome="noop"))
+
+    s = store.stats()
+    buf = io.StringIO()
+    format_stats(s, buf)  # must not raise TypeError
+    output = buf.getvalue()
+    assert "null" in output  # None harness displayed as "null"
+    assert "gptme" in output
+
+
+def test_compute_run_analytics(tmp_path: Path):
+    """Run analytics computes expected breakdowns."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(
+        SessionRecord(
+            model="opus",
+            run_type="autonomous",
+            outcome="productive",
+            duration_seconds=1800,
+        )
+    )
+    store.append(
+        SessionRecord(
+            model="sonnet",
+            run_type="monitoring",
+            outcome="noop",
+            duration_seconds=30,
+        )
+    )
+    store.append(
+        SessionRecord(
+            model="opus",
+            run_type="autonomous",
+            outcome="productive",
+            duration_seconds=600,
+        )
+    )
+
+    records = store.load_all()
+    analytics = compute_run_analytics(records)
+    assert analytics["total"] == 3
+    assert analytics["duration_distribution"]["30m+"] == 1
+    assert analytics["duration_distribution"]["<1m"] == 1
+    assert analytics["noop_by_run_type"]["monitoring"]["noop"] == 1
+
+
+def test_format_run_analytics_empty():
+    """format_run_analytics handles empty data gracefully."""
+    import io
+
+    buf = io.StringIO()
+    format_run_analytics({"total": 0}, buf)
+    assert "No session records" in buf.getvalue()
+
+
+def test_normalize_model():
+    """normalize_model function works standalone."""
+    from gptme_sessions.record import normalize_model
+
+    assert normalize_model("claude-opus-4-6") == "opus"
+    assert normalize_model("custom-model") == "custom-model"
+    assert normalize_model("anthropic/claude-sonnet-4-6") == "sonnet"
+
+
+def test_session_store_query_by_category(tmp_path: Path):
+    """Query filters by category."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(category="code", outcome="productive"))
+    store.append(SessionRecord(category="content", outcome="productive"))
+    store.append(SessionRecord(category="code", outcome="noop"))
+
+    results = store.query(category="code")
+    assert len(results) == 2
+
+
+def test_session_store_query_by_harness(tmp_path: Path):
+    """Query filters by harness."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(harness="claude-code", outcome="productive"))
+    store.append(SessionRecord(harness="gptme", outcome="productive"))
+
+    results = store.query(harness="gptme")
+    assert len(results) == 1
+
+
+def test_session_store_query_by_outcome(tmp_path: Path):
+    """Query filters by outcome."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(outcome="productive"))
+    store.append(SessionRecord(outcome="noop"))
+    store.append(SessionRecord(outcome="productive"))
+
+    results = store.query(outcome="productive")
+    assert len(results) == 2
+
+
+def test_session_record_none_run_type():
+    """SessionRecord with run_type=None (from JSON null) doesn't crash."""
+    r = SessionRecord.from_dict({"model": "opus", "run_type": None})
+    assert r.run_type is None
+
+
+def test_session_record_none_run_type_roundtrip():
+    """None run_type survives full serialize → deserialize without becoming 'unknown'."""
+    r = SessionRecord.from_dict({"model": "opus", "run_type": None})
+    d = r.to_dict()
+    assert "run_type" in d
+    assert d["run_type"] is None
+    r2 = SessionRecord.from_dict(d)
+    assert r2.run_type is None
+
+
+def test_normalize_model_none():
+    """normalize_model(None) returns None without crashing."""
+    from gptme_sessions.record import normalize_model
+
+    assert normalize_model(None) is None
+    assert normalize_model("") == ""
+
+
+def test_session_record_none_duration_seconds():
+    """duration_seconds=None (from JSON null) is coerced to 0, not left as None."""
+    r = SessionRecord.from_dict({"model": "opus", "duration_seconds": None})
+    assert r.duration_seconds == 0
+    # Verify it doesn't crash in comparison operations used by stats/analytics
+    assert r.duration_seconds > -1
+    assert r.duration_seconds // 60 == 0
+
+
+def test_session_record_none_model_roundtrip():
+    """None model survives serialize → deserialize without crashing."""
+    r = SessionRecord.from_dict({"run_type": "autonomous", "model": None})
+    assert r.model is None
+    d = r.to_dict()
+    assert d["model"] is None
+    r2 = SessionRecord.from_dict(d)
+    assert r2.model is None
+
+
+def test_session_store_null_model_in_jsonl(tmp_path: Path):
+    """A JSONL record with model=null doesn't crash load_all."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", outcome="productive"))
+
+    # Inject a record with model: null
+    with open(store.path, "a", encoding="utf-8") as f:
+        import json
+
+        f.write(json.dumps({"model": None, "run_type": "autonomous", "outcome": "noop"}) + "\n")
+
+    store.append(SessionRecord(model="sonnet", outcome="noop"))
+
+    records = store.load_all()
+    assert len(records) == 3  # null model record is valid, not skipped
+    assert records[1].model is None
+
+
+def test_query_by_normalized_model_finds_raw_records(tmp_path: Path):
+    """Querying by normalized name finds records stored with raw model strings."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="claude-opus-4-6", outcome="productive"))
+    store.append(SessionRecord(model="anthropic/claude-sonnet-4-6", outcome="noop"))
+    store.append(SessionRecord(model="gpt-4o", outcome="productive"))
+
+    # Query by normalized name should find records with raw model strings
+    opus_results = store.query(model="opus")
+    assert len(opus_results) == 1
+    assert opus_results[0].model == "claude-opus-4-6"
+    assert opus_results[0].model_normalized == "opus"
+
+    sonnet_results = store.query(model="sonnet")
+    assert len(sonnet_results) == 1
+    assert sonnet_results[0].model == "anthropic/claude-sonnet-4-6"
+
+    # Query by raw name also works
+    raw_results = store.query(model="claude-opus-4-6")
+    assert len(raw_results) == 1
+
+
+def test_model_raw_preserved_in_serialization():
+    """Raw model string survives round-trip serialization."""
+    r = SessionRecord(model="anthropic/claude-opus-4-6", outcome="productive")
+    assert r.model == "anthropic/claude-opus-4-6"
+    assert r.model_normalized == "opus"
+
+    d = r.to_dict()
+    assert d["model"] == "anthropic/claude-opus-4-6"
+
+    r2 = SessionRecord.from_dict(d)
+    assert r2.model == "anthropic/claude-opus-4-6"
+    assert r2.model_normalized == "opus"
+
+
+def test_stats_group_by_normalized_model(tmp_path: Path):
+    """Stats groups by normalized model, merging different raw strings."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="claude-opus-4-6", outcome="productive"))
+    store.append(SessionRecord(model="anthropic/claude-opus-4-5", outcome="productive"))
+    store.append(SessionRecord(model="claude-sonnet-4-6", outcome="noop"))
+
+    s = store.stats()
+    # Both opus variants should be grouped together
+    assert "opus" in s["by_model"]
+    assert s["by_model"]["opus"]["total"] == 2
+    assert "sonnet" in s["by_model"]
+    assert s["by_model"]["sonnet"]["total"] == 1
+
+
+def test_normalize_model_openai_subscription_not_absorbed():
+    """openai-subscription/* models strip prefix via regex fallback (not "openai" catch-all)."""
+    from gptme_sessions.record import normalize_model
+
+    # Explicitly listed — should normalize
+    assert normalize_model("openai-subscription/gpt-5.3-codex") == "gpt-5.3-codex"
+    # Not listed — regex fallback strips "openai-subscription/" prefix
+    assert normalize_model("openai-subscription/gpt-future") == "gpt-future"
+    # Bare "openai" legacy still normalizes
+    assert normalize_model("openai") == "gpt-4o"
+
+
+def test_since_days_z_suffix_python310(tmp_path):
+    """since_days filtering handles 'Z'-suffixed timestamps (Python 3.10 compat)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    # Inject a record with a Z-suffixed timestamp (external tool / older JSON dump)
+    with open(store.path, "a", encoding="utf-8") as f:
+        import json
+
+        f.write(
+            json.dumps(
+                {"timestamp": "2020-01-01T00:00:00Z", "model": "opus", "outcome": "productive"}
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps({"timestamp": "2099-01-01T00:00:00Z", "model": "sonnet", "outcome": "noop"})
+            + "\n"
+        )
+    # The far-future record (2099) is within 30d is impossible; but the 2020 one should be
+    # excluded, not crash, when filtering with since_days
+    records = store.query(since_days=1)
+    # Neither is within 1 day, but the key test is that no ValueError/TypeError is raised
+    assert isinstance(records, list)
+
+    # A Z-suffixed timestamp from "now" should be included
+    from datetime import datetime, timezone
+
+    now_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(store.path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"timestamp": now_z, "model": "haiku", "outcome": "productive"}) + "\n")
+    records = store.query(since_days=1)
+    assert any(r.model == "haiku" for r in records)
+
+
+def test_query_stats_forwards_all_filters(tmp_path):
+    """query --stats forwards category, harness, outcome to store.query()."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(
+        SessionRecord(model="opus", category="code", harness="gptme", outcome="productive")
+    )
+    store.append(
+        SessionRecord(model="sonnet", category="content", harness="claude-code", outcome="noop")
+    )
+
+    # Filter by category — only the "code" record should be counted
+    code_records = store.query(category="code")
+    s = store.stats(code_records)
+    assert s["total"] == 1
+
+    # Filter by outcome — only productive
+    prod_records = store.query(outcome="productive")
+    s2 = store.stats(prod_records)
+    assert s2["total"] == 1
+    assert s2["productive"] == 1
+
+    # Filter by harness
+    cc_records = store.query(harness="claude-code")
+    s3 = store.stats(cc_records)
+    assert s3["total"] == 1
+
+
+# ── Signals tests ────────────────────────────────────────────────────────────
+
+
+def _make_gptme_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[dict]:
+    """Build minimal gptme-format trajectory records."""
+    msgs: list[dict] = []
+    for i in range(writes):
+        msgs.append(
+            {
+                "role": "assistant",
+                "content": f'@save(c{i}): {{"path": "/home/bob/file{i}.py"}}',
+                "timestamp": f"2026-03-01T10:{i:02d}:00+00:00",
+            }
+        )
+    for i in range(commits):
+        msgs.append(
+            {
+                "role": "system",
+                "content": f"[master abc{i:04d}] commit message {i}",
+                "timestamp": f"2026-03-01T11:{i:02d}:00+00:00",
+            }
+        )
+    for _ in range(errors):
+        msgs.append(
+            {
+                "role": "system",
+                "content": "Error during execution: something went wrong",
+                "timestamp": "2026-03-01T10:20:00+00:00",
+            }
+        )
+    return msgs
+
+
+def _make_cc_msgs(commits: int = 0, writes: int = 0, errors: int = 0) -> list[dict]:
+    """Build minimal Claude Code-format trajectory records."""
+    msgs: list[dict] = []
+    for i in range(writes):
+        msgs.append(
+            {
+                "type": "assistant",
+                "timestamp": f"2026-03-01T10:{i:02d}:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"edit_{i}",
+                            "name": "Edit",
+                            "input": {"file_path": f"/home/bob/file{i}.py"},
+                        }
+                    ],
+                },
+            }
+        )
+    for i in range(commits):
+        # Proper linked Bash tool_use → tool_result pair for commit detection
+        bash_id = f"bash_commit_{i}"
+        msgs.append(
+            {
+                "type": "assistant",
+                "timestamp": f"2026-03-01T11:{i:02d}:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": bash_id,
+                            "name": "Bash",
+                            "input": {"command": f"git commit -m 'commit message {i}'"},
+                        }
+                    ],
+                },
+            }
+        )
+        msgs.append(
+            {
+                "type": "user",
+                "timestamp": f"2026-03-01T11:{i:02d}:30.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": bash_id,
+                            "is_error": False,
+                            "content": f"[master abc{i:04d}] commit message {i}\n 1 file changed",
+                        }
+                    ],
+                },
+            }
+        )
+    for j in range(errors):
+        msgs.append(
+            {
+                "type": "user",
+                "timestamp": "2026-03-01T10:20:00.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "is_error": True,
+                            "content": "Exit code 1\nSomething failed",
+                        }
+                    ],
+                },
+            }
+        )
+    return msgs
+
+
+def test_detect_format_gptme():
+    """Detects gptme format from role-keyed messages."""
+    msgs = _make_gptme_msgs(commits=1)
+    assert detect_format(msgs) == "gptme"
+
+
+def test_detect_format_claude_code():
+    """Detects claude_code format from type-keyed records."""
+    msgs = _make_cc_msgs(commits=1)
+    assert detect_format(msgs) == "claude_code"
+
+
+def test_detect_format_empty():
+    """Empty messages default to gptme."""
+    assert detect_format([]) == "gptme"
+
+
+def test_extract_signals_cc_commits():
+    """CC trajectory: git commits extracted from Bash tool results."""
+    msgs = _make_cc_msgs(commits=2)
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 2
+    assert sigs["git_commits"][0].startswith("commit message 0")
+
+
+def test_extract_signals_cc_file_writes():
+    """CC trajectory: Edit tool calls register as file writes."""
+    msgs = _make_cc_msgs(writes=3)
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["file_writes"]) == 3
+
+
+def test_extract_signals_cc_errors():
+    """CC trajectory: tool_result with is_error=True increments error_count."""
+    msgs = _make_cc_msgs(errors=2)
+    sigs = extract_signals_cc(msgs)
+    assert sigs["error_count"] == 2
+
+
+def test_extract_signals_cc_journal_excluded():
+    """CC trajectory: file writes to /journal/ paths are excluded."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": "/home/bob/bob/journal/2026-03-01/session.md"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_signals_cc_tool_call_counts():
+    """CC trajectory: tool call names are counted correctly."""
+    msgs = _make_cc_msgs(writes=2)
+    msgs.append(
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:30:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
+            },
+        }
+    )
+    sigs = extract_signals_cc(msgs)
+    assert sigs["tool_calls"].get("Edit", 0) == 2
+    assert sigs["tool_calls"].get("Bash", 0) == 1
+
+
+def test_extract_signals_cc_retry_detection():
+    """CC trajectory: writing the same file twice registers as a retry."""
+    path = "/home/bob/bob/script.py"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": f"2026-03-01T10:{i:02d}:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": path}}],
+            },
+        }
+        for i in range(2)
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["retry_count"] >= 1
+
+
+def test_extract_signals_cc_background_bash_commits(tmp_path: Path):
+    """CC trajectory: git commits in background bash task output files are detected.
+
+    When CC runs a Bash command in background mode, the tool result contains only
+    a pointer: "Output is being written to: /tmp/claude.../tasks/TASKID.output"
+    The actual git commit output is in that file, not the tool result string.
+    """
+    # Write a fake background task output file with a git commit line
+    bg_output = tmp_path / "bayr910lo.output"
+    bg_output.write_text(
+        "[master b88840647] feat(speckit-reader): add phase 3 tests\n 8 files changed\n"
+    )
+
+    bash_id = "bash_bg_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add tests'", "timeout": 60000},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T10:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": f"Command running in background with ID: bayr910lo. Output is being written to: {bg_output}",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 1
+    assert "feat(speckit-reader)" in sigs["git_commits"][0]
+
+
+def test_extract_signals_cc_gh_pr_merge():
+    """CC trajectory: gh pr merge success output is detected as a pr_merges signal."""
+    bash_id = "bash_merge_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "gh pr merge 1725 --squash"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": "✓ Squashed and merged pull request #1725 (fix(models): add parallel tool calls flag)",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Merges are now in pr_merges (not git_commits) for distinct grade weighting
+    assert len(sigs["git_commits"]) == 0
+    assert sigs["pr_merges"] == ["PR #1725"]
+    # deliverables still includes the merge
+    assert any("merge PR #1725" in d for d in sigs["deliverables"])
+
+
+@pytest.mark.parametrize(
+    "merge_output",
+    [
+        "✓ Squashed and merged pull request #42 (feat: squash test)",
+        "✓ Rebased and merged pull request #42 (feat: rebase test)",
+        "✓ Merged pull request #42 (feat: merge test)",
+    ],
+)
+def test_extract_signals_cc_gh_pr_merge_variants(merge_output: str):
+    """CC trajectory: all gh pr merge variants (squash/rebase/plain) are detected."""
+    bash_id = "bash_merge_variants"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "gh pr merge 42"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": merge_output,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Merges are now in pr_merges (not git_commits) for distinct grade weighting
+    assert len(sigs["git_commits"]) == 0
+    assert sigs["pr_merges"] == ["PR #42"]
+    assert any("merge PR #42" in d for d in sigs["deliverables"])
+
+
+def _make_bash_exchange(cmd: str, result: str, bash_id: str = "bash_001") -> list[dict]:
+    """Helper: build a minimal CC assistant+user pair for a single Bash call."""
+    return [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": bash_id, "name": "Bash", "input": {"command": cmd}}
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": result,
+                    }
+                ],
+            },
+        },
+    ]
+
+
+def test_extract_signals_cc_reviews_submitted():
+    """gh pr review commands increment reviews_submitted (and gh_interactions)."""
+    sigs = extract_signals_cc(_make_bash_exchange("gh pr review 42 --approve", "Approved"))
+    assert sigs["reviews_submitted"] == 1
+    assert sigs["gh_interactions"] >= 1  # aggregate still counted
+
+
+def test_extract_signals_cc_comments_posted_pr():
+    """gh pr comment increments comments_posted."""
+    sigs = extract_signals_cc(
+        _make_bash_exchange("gh pr comment 42 --body 'LGTM'", "Added comment")
+    )
+    assert sigs["comments_posted"] == 1
+    assert sigs["gh_interactions"] >= 1
+
+
+def test_extract_signals_cc_comments_posted_issue():
+    """gh issue comment increments comments_posted."""
+    sigs = extract_signals_cc(
+        _make_bash_exchange("gh issue comment 99 --body 'Fixed'", "Added comment")
+    )
+    assert sigs["comments_posted"] == 1
+
+
+def test_extract_signals_cc_issues_created():
+    """gh issue create increments issues_created (and gh_interactions aggregate)."""
+    sigs = extract_signals_cc(
+        _make_bash_exchange(
+            "gh issue create --title 'Bug' --body 'desc'",
+            "https://github.com/org/repo/issues/123",
+        )
+    )
+    assert sigs["issues_created"] == 1
+    assert sigs["gh_interactions"] >= 1  # aggregate still counted
+
+
+def test_extract_signals_cc_ci_fixed_basic():
+    """ci_fixed=True when --log-failed returns non-empty output and session has commits."""
+    commit_output = "[master a1b2c3d] fix(ci): address mypy error in signals.py"
+    # Two-exchange session: first check CI failures, then commit the fix
+    ci_id = "bash_ci_001"
+    commit_id = "bash_commit_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": ci_id,
+                        "name": "Bash",
+                        "input": {"command": "gh run view 12345 --log-failed"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": ci_id,
+                        "is_error": False,
+                        "content": "FAILED test_something.py::test_foo\nAssertionError: expected True",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:01:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": commit_id,
+                        "name": "Bash",
+                        "input": {
+                            "command": "git commit fix.py -m 'fix(ci): address mypy error in signals.py'"
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:01:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": commit_id,
+                        "is_error": False,
+                        "content": commit_output,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["ci_fixed"] is True
+    assert len(sigs["git_commits"]) == 1
+
+
+def test_extract_signals_cc_ci_fixed_not_triggered_without_commits():
+    """ci_fixed=False when --log-failed returns failures but session has no commits."""
+    sigs = extract_signals_cc(
+        _make_bash_exchange(
+            "gh run view 12345 --log-failed",
+            "FAILED test_something.py::test_foo\nAssertionError",
+        )
+    )
+    assert sigs["ci_fixed"] is False
+
+
+def test_extract_signals_cc_ci_fixed_not_triggered_on_empty_output():
+    """ci_fixed=False when --log-failed returns empty output (no failures)."""
+    # We need to also have a commit to confirm that empty output is the blocker
+    ci_id = "bash_ci_001"
+    commit_id = "bash_commit_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": ci_id,
+                        "name": "Bash",
+                        "input": {"command": "gh run view 12345 --log-failed"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": ci_id,
+                        "is_error": False,
+                        "content": "",  # empty = no failures
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:01:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": commit_id,
+                        "name": "Bash",
+                        "input": {"command": "git commit fix.py -m 'chore: update something'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:01:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": commit_id,
+                        "is_error": False,
+                        "content": "[master b2c3d4e] chore: update something",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["ci_fixed"] is False
+
+
+def test_extract_signals_cc_ci_fixed_background_task(tmp_path: Path):
+    """ci_fixed=False when --log-failed runs in background mode with empty output file.
+
+    When CC runs a Bash command in background mode, result_str is a non-empty
+    pointer string like "Output is being written to: /tmp/.../TASKID.output".
+    Without the background-task guard, this non-empty pointer would falsely
+    trigger _ci_failure_found=True. The fix reads the actual output file instead.
+    """
+    # Write an empty background output file (no CI failures)
+    bg_output = tmp_path / "ci_check.output"
+    bg_output.write_text("")
+
+    ci_id = "bash_ci_bg_001"
+    commit_id = "bash_commit_bg_001"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": ci_id,
+                        "name": "Bash",
+                        "input": {"command": "gh run view 99999 --log-failed"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": ci_id,
+                        "is_error": False,
+                        # Background task pointer — non-empty but not CI log output
+                        "content": f"Command running in background with ID: bg001. Output is being written to: {bg_output}",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-21T11:01:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": commit_id,
+                        "name": "Bash",
+                        "input": {"command": "git commit fix.py -m 'fix: address ci failure'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-21T11:01:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": commit_id,
+                        "is_error": False,
+                        "content": "[master c3d4e5f] fix: address ci failure",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Should be False: background output file was empty (no real CI failures found)
+    assert sigs["ci_fixed"] is False
+
+
+def test_extract_signals_cc_ci_fixed_grade_boost():
+    """ci_fixed contributes 0.8 effective units to grade_signals."""
+    base_sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 3},
+        "pr_merges": [],
+        "prs_submitted": [],
+        "issues_closed": 0,
+        "gh_interactions": 0,
+        "ci_fixed": False,
+    }
+    ci_fixed_sigs = {**base_sigs, "ci_fixed": True}
+    # ci_fixed session should grade higher
+    assert grade_signals(ci_fixed_sigs) > grade_signals(base_sigs)
+    # Isolated grade_signals unit test: 0.8 effective units alone → 0.60 tier.
+    # Note: in practice extract_signals_cc always sets ci_fixed=True together with
+    # ≥1 commit, so real sessions reach effective_units ≥ 1.8 → 0.70 tier.
+    assert grade_signals(ci_fixed_sigs) == pytest.approx(0.60)
+
+
+def test_is_productive_ci_fixed():
+    """is_productive returns True when ci_fixed is True, even with no other signals."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "pr_merges": [],
+        "issues_closed": 0,
+        "ci_fixed": True,
+    }
+    assert is_productive(sigs) is True
+
+
+def test_extract_signals_cc_pr_merge_grade():
+    """PR merges score at 1.5x in grade_signals (above PR submit at 1.2x)."""
+    # A session that merges one PR should grade higher than one that only submits one PR
+    sigs_merge = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 1},
+        "pr_merges": ["PR #10"],
+        "prs_submitted": [],
+        "issues_closed": 0,
+        "gh_interactions": 1,
+    }
+    sigs_submit = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 1},
+        "pr_merges": [],
+        "prs_submitted": ["PR #10"],
+        "issues_closed": 0,
+        "gh_interactions": 1,
+    }
+    assert grade_signals(sigs_merge) > grade_signals(sigs_submit)
+
+
+def test_extract_signals_cc_pr_merge_not_in_git_commits():
+    """PR merges are in pr_merges, NOT in git_commits (to avoid double-counting)."""
+    msgs = _make_bash_exchange(
+        "gh pr merge 99 --squash",
+        "✓ Squashed and merged pull request #99 (feat: new thing)",
+    )
+    sigs = extract_signals_cc(msgs)
+    assert sigs["pr_merges"] == ["PR #99"]
+    assert all("merge PR" not in c for c in sigs["git_commits"])
+    assert any("merge PR #99" in d for d in sigs["deliverables"])
+
+
+def test_extract_signals_cc_pr_merge_no_false_positive_from_file_read():
+    """Reading a test file containing 'Merged pull request' strings must NOT credit a merge.
+
+    Root cause of the bug: _PR_MERGE_RE was applied to ALL Bash results, so reading
+    test fixtures (which contain example gh pr merge output strings) falsely incremented
+    pr_merges. Fix: gate detection on _pr_merge_pending (set only when `gh pr merge` cmd).
+    """
+    # A Read of a test file that contains example pr-merge output strings
+    fixture_content = (
+        "def test_merge():\n"
+        '    assert "✓ Squashed and merged pull request #1725" in output\n'
+        '    assert "✓ Squashed and merged pull request #42" in other\n'
+    )
+    # Use a cat command (not gh pr merge) — simulates reading a test file
+    msgs = _make_bash_exchange(
+        "cat packages/gptme-sessions/tests/test_sessions.py", fixture_content
+    )
+    sigs = extract_signals_cc(msgs)
+    assert (
+        sigs["pr_merges"] == []
+    ), f"Reading test fixtures must not credit pr_merges: got {sigs['pr_merges']}"
+
+
+def test_extract_signals_cc_git_commits_deduplicated_across_tool_calls():
+    """Same commit hash appearing in two separate Bash results must be counted once.
+
+    Root cause: _direct_hashes was re-initialised per tool call, so if git commit
+    output (containing the hash) appeared in both a 'git commit' result AND a later
+    'git show HEAD' or 'git log' result, the commit was added twice to git_commits.
+    Fix: use a session-level set (_all_direct_commit_hashes) across all Bash results.
+    """
+    hash_val = "abc1234"
+    commit_msg = "feat: my feature"
+    commit_line = f"[master {hash_val}] {commit_msg}\n 3 files changed, 10 insertions(+)"
+
+    # Two separate Bash calls both returning output that contains the same commit
+    first_call = _make_bash_exchange(
+        "git commit -m 'feat: my feature'", commit_line, bash_id="bash_001"
+    )
+    second_call = _make_bash_exchange("git show HEAD --stat", commit_line, bash_id="bash_002")
+    msgs = first_call + second_call
+    sigs = extract_signals_cc(msgs)
+    assert sigs["git_commits"] == [
+        f"{commit_msg} ({hash_val})"
+    ], f"Expected exactly 1 commit entry, got: {sigs['git_commits']}"
+
+
+def test_grade_signals_dead_session():
+    """Grade is very low (0.10) for dead sessions with zero tool calls."""
+    sigs = extract_signals_cc([])
+    assert grade_signals(sigs) == 0.10
+
+
+def test_grade_signals_noop():
+    """Grade is 0.25 when agent was active (made tool calls) but produced no deliverables."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 5},  # active but unproductive
+    }
+    assert grade_signals(sigs) == 0.25
+
+
+def test_grade_signals_monitoring_no_work_with_errors():
+    """Monitoring sessions that correctly find no work get neutral 0.35
+    even when they have minor errors (e.g. gh CLI returning non-zero
+    for 'no results'). Without this, low-error monitoring scans get
+    penalized at 0.25 or 0.15, suppressing the monitoring category in
+    Thompson sampling."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 2,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 8},
+    }
+    # Without category hint: regular floor 0.25, minus error-rate penalty
+    # error_rate = 2/8 = 0.25 > 0.15 → -0.10 → 0.25 - 0.10 = 0.15
+    assert grade_signals(sigs) == pytest.approx(0.15)
+    # With monitoring category: neutral 0.35 floor, same error penalty
+    # 0.35 - 0.10 = 0.25 — improved from 0.15 without the fix
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.25)
+    # For monitoring with very low errors (<5%): full neutral 0.35
+    sigs_low_err = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 8},
+    }
+    assert grade_signals(sigs_low_err, category="pm-react") == pytest.approx(0.35)
+
+
+def test_grade_signals_productive():
+    """Grade is higher when commits are present."""
+    msgs = _make_cc_msgs(commits=2)
+    sigs = extract_signals_cc(msgs)
+    assert grade_signals(sigs) >= 0.60
+
+
+def test_is_productive_cc():
+    """is_productive returns True for sessions with commits."""
+    msgs = _make_cc_msgs(commits=1)
+    sigs = extract_signals_cc(msgs)
+    assert is_productive(sigs)
+
+
+def test_is_productive_cc_writes_only():
+    """is_productive returns True for sessions with 2+ writes but no commits."""
+    msgs = _make_cc_msgs(writes=3)
+    sigs = extract_signals_cc(msgs)
+    assert is_productive(sigs)
+
+
+def test_extract_from_path_cc(tmp_path: Path):
+    """extract_from_path auto-detects CC format from file contents."""
+    from gptme_sessions.signals import extract_from_path
+
+    trajectory_file = tmp_path / "session.jsonl"
+    msgs = _make_cc_msgs(commits=1, writes=2)
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "claude_code"
+    assert result["productive"] is True
+    assert result["grade"] >= 0.50
+
+
+def test_extract_from_path_gptme(tmp_path: Path):
+    """extract_from_path auto-detects gptme format from file contents."""
+    from gptme_sessions.signals import extract_from_path
+
+    trajectory_file = tmp_path / "conversation.jsonl"
+    msgs = _make_gptme_msgs(commits=1)
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "gptme"
+    assert result["productive"] is True
+
+
+def test_stats_subcommand_filter_args(tmp_path: Path, monkeypatch):
+    """stats subcommand accepts --category, --harness, --outcome and filters correctly."""
+    from gptme_sessions.cli import main
+
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(
+        SessionRecord(model="opus", category="code", harness="gptme", outcome="productive")
+    )
+    store.append(
+        SessionRecord(model="sonnet", category="content", harness="claude-code", outcome="noop")
+    )
+
+    # stats --category code should only count 1 record
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "stats",
+            "--category",
+            "code",
+            "--json",
+        ],
+    )
+    result = main()
+    assert result == 0
+
+    # stats --harness claude-code should only count 1 record
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "stats",
+            "--harness",
+            "claude-code",
+            "--json",
+        ],
+    )
+    result = main()
+    assert result == 0
+
+    # stats --outcome productive should only count 1 record
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "stats",
+            "--outcome",
+            "productive",
+            "--json",
+        ],
+    )
+    result = main()
+    assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# extract_usage_cc
+# ---------------------------------------------------------------------------
+
+
+def _make_cc_assistant_usage(
+    input_tokens: int,
+    output_tokens: int,
+    cache_create: int = 0,
+    cache_read: int = 0,
+    model: str = "claude-sonnet-4-6",
+) -> dict:
+    """Minimal CC assistant record with usage info."""
+    return {
+        "type": "assistant",
+        "message": {
+            "model": model,
+            "content": [],
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": cache_create,
+                "cache_read_input_tokens": cache_read,
+            },
+        },
+    }
+
+
+def test_extract_usage_cc_basic():
+    """Token counts are summed across all assistant turns."""
+    msgs = [
+        _make_cc_assistant_usage(100, 50, 200, 0),
+        _make_cc_assistant_usage(10, 20, 0, 500),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["input_tokens"] == 110
+    assert usage["output_tokens"] == 70
+    assert usage["cache_creation_tokens"] == 200
+    assert usage["cache_read_tokens"] == 500
+    assert usage["total_tokens"] == 880
+    assert usage["model"] == "claude-sonnet-4-6"
+    assert usage["sys_prompt_tokens"] == 300
+    assert usage["context_peak_tokens"] == 510
+
+
+def test_extract_usage_cc_empty():
+    """Empty trajectory (no assistant turns) returns empty dict."""
+    usage = extract_usage_cc([])
+    assert usage == {}
+
+
+def test_extract_usage_cc_ignores_non_assistant():
+    """User records and other types don't contribute to token counts."""
+    msgs = [
+        {"type": "user", "message": {"content": [], "usage": {"input_tokens": 9999}}},
+        _make_cc_assistant_usage(10, 5),
+        {"type": "queue-operation", "operation": "start"},
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["input_tokens"] == 10
+    assert usage["output_tokens"] == 5
+
+
+def test_extract_usage_cc_model_last_wins():
+    """Last seen model in assistant messages is returned."""
+    msgs = [
+        _make_cc_assistant_usage(10, 5, model="claude-sonnet-4-6"),
+        _make_cc_assistant_usage(10, 5, model="claude-opus-4-6"),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["model"] == "claude-opus-4-6"
+
+
+def test_extract_usage_cc_no_usage_field():
+    """Assistant record without usage field doesn't crash."""
+    msgs = [
+        {"type": "assistant", "message": {"model": "claude-sonnet-4-6", "content": []}},
+        _make_cc_assistant_usage(5, 3),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["input_tokens"] == 5
+    assert usage["output_tokens"] == 3
+    assert usage["total_tokens"] == 8
+    assert usage["sys_prompt_tokens"] == 5
+    assert usage["context_peak_tokens"] == 5
+
+
+def test_detect_format_cc_with_preamble():
+    """CC trajectories starting with non-standard record types are still detected correctly.
+
+    If the first 15 records are 'queue-operation', 'system_prompt', etc., the format
+    detection must scan beyond them to find the real CC records.
+    """
+    preamble = [
+        {"type": "queue-operation", "operation": "start"},
+        {"type": "system_prompt", "content": "You are an assistant."},
+    ] * 8  # 16 records — beyond the old first-15 window
+    cc_msgs = _make_cc_msgs(commits=1)
+    assert detect_format(preamble + cc_msgs) == "claude_code"
+
+
+def test_extract_signals_cc_journal_no_retry_penalty():
+    """Writing to a journal path multiple times does not inflate retry_count.
+
+    Journal paths are excluded from file_writes (not deliverables), and must
+    also be excluded from retry tracking so repeated journal updates don't
+    penalize the session grade.
+    """
+    path = "/home/bob/bob/journal/2026-03-01/session.md"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": f"2026-03-01T10:{i:02d}:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": path}}],
+            },
+        }
+        for i in range(3)
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["retry_count"] == 0
+    assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_signals_cc_commit_detection_bash_only():
+    """Commit patterns in non-Bash tool results (e.g. Read) are not counted.
+
+    A Read result could contain git log output from a file, which would be a
+    false positive if we applied commit detection to all tool results.
+    """
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "read_1",
+                        "name": "Read",
+                        "input": {"file_path": "/home/bob/CHANGELOG.md"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:01:00.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read_1",
+                        "is_error": False,
+                        "content": "[master abc1234] some historical commit in changelog",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["git_commits"]) == 0  # not from Bash output — must not be counted
+
+
+def test_grade_signals_file_writes_deduplication():
+    """Repeated edits to the same file should not inflate grade tier.
+
+    A session editing one file 3 times (3 raw writes, 1 unique) should NOT
+    score higher than a session editing a unique file once (1 raw write, 1 unique).
+    Without deduplication, the repeated-writes session would hit the writes>=3
+    tier (0.55) while the single-write session stays at 0.40.
+    """
+    sigs_repeated = {
+        "git_commits": [],
+        "file_writes": ["foo.py", "foo.py", "foo.py"],  # same file 3x
+        "error_count": 0,
+        "retry_count": 2,
+        "tool_calls": {"Edit": 3},
+    }
+    sigs_unique = {
+        "git_commits": [],
+        "file_writes": ["foo.py"],  # same unique output, one write
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Edit": 1},
+    }
+    grade_repeated = grade_signals(sigs_repeated)
+    grade_unique = grade_signals(sigs_unique)
+    # Both have 1 unique write — repeated session should not outscore unique session
+    # (repeated session gets retry penalty, unique doesn't)
+    assert grade_repeated <= grade_unique
+
+
+def test_extract_signals_cc_notebook_edit():
+    """NotebookEdit writes are tracked via notebook_path, not file_path."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "nb_1",
+                        "name": "NotebookEdit",
+                        "input": {"notebook_path": "/home/bob/analysis.ipynb", "new_source": "x=1"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["file_writes"] == ["/home/bob/analysis.ipynb"]
+
+
+def test_is_productive_deduplication():
+    """is_productive uses unique file_writes count, consistent with grade_signals."""
+    sigs_two_writes_same_file = {
+        "git_commits": [],
+        "file_writes": ["foo.py", "foo.py"],  # 2 raw writes, 1 unique
+    }
+    sigs_two_unique_writes = {
+        "git_commits": [],
+        "file_writes": ["foo.py", "bar.py"],  # 2 raw writes, 2 unique
+    }
+    assert not is_productive(sigs_two_writes_same_file)
+    assert is_productive(sigs_two_unique_writes)
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for gptme extract_signals path
+# ---------------------------------------------------------------------------
+
+
+def test_extract_signals_gptme_file_writes():
+    """gptme trajectory: save/write/edit/patch tool calls register as file writes."""
+    msgs = _make_gptme_msgs(writes=3)
+    sigs = extract_signals(msgs)
+    assert len(sigs["file_writes"]) == 3
+    assert all(f.startswith("/home/bob/file") for f in sigs["file_writes"])
+
+
+def test_extract_signals_gptme_commits():
+    """gptme trajectory: git commit lines in system messages are extracted."""
+    msgs = _make_gptme_msgs(commits=2)
+    sigs = extract_signals(msgs)
+    assert len(sigs["git_commits"]) == 2
+
+
+def test_extract_signals_gptme_error_detection_guard():
+    """gptme trajectory: 'Ran command:' prefix suppresses error detection.
+
+    This tests the operator-precedence fix: the guard must apply to all three
+    error-detection conditions, not just the last one.
+    """
+    msgs = [
+        # Should NOT be counted as error — starts with "Ran command:"
+        {
+            "role": "system",
+            "content": "Ran command: ls\nError during execution: Permission denied",
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        # Should NOT be counted as error — starts with "Ran command:"
+        {
+            "role": "system",
+            "content": "Ran command: cat file\nError: no such file",
+            "timestamp": "2026-03-01T10:01:00+00:00",
+        },
+        # SHOULD be counted — genuine error output (no "Ran command:" prefix)
+        {
+            "role": "system",
+            "content": "Error during execution: command failed",
+            "timestamp": "2026-03-01T10:02:00+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["error_count"] == 1
+
+
+def test_extract_signals_gptme_retry_detection():
+    """gptme trajectory: writing the same file twice registers as a retry."""
+    path = "/home/bob/bob/script.py"
+    msgs = [
+        {
+            "role": "assistant",
+            "content": f'@save(c{i}): {{"path": "{path}"}}',
+            "timestamp": f"2026-03-01T10:{i:02d}:00+00:00",
+        }
+        for i in range(2)
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["retry_count"] >= 1
+
+
+def test_extract_signals_gptme_journal_excluded():
+    """gptme trajectory: writes to /journal/ paths are excluded from file_writes."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": '@save(c0): {"path": "/home/bob/bob/journal/2026-03-01/session.md"}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        }
+    ]
+    sigs = extract_signals(msgs)
+    assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_signals_gptme_no_placeholder_inflation():
+    """gptme trajectory: tool calls with unparseable paths don't inflate file_writes.
+
+    Previously, path-extraction failures caused placeholder strings like '<save>',
+    '<write>', '<patch>' to be appended to file_writes. Three different tool names
+    with unparseable args would then push the session into the writes>=3 grade tier
+    (0.55) even though zero real files were written.
+    """
+    msgs = [
+        # Three different write tools, none with extractable 'path' args
+        {
+            "role": "assistant",
+            "content": '@save(c0): {"content": "no path field here"}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": '@write(c1): {"content": "also no path"}',
+            "timestamp": "2026-03-01T10:01:00+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": '@patch(c2): {"diff": "no path either"}',
+            "timestamp": "2026-03-01T10:02:00+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert len(sigs["file_writes"]) == 0
+    # Grade should reflect no real output (active session, non-zero tool calls)
+    assert grade_signals(sigs) == 0.25
+
+
+def test_extract_signals_cc_no_placeholder_inflation():
+    """CC trajectory: write tools with no extractable path don't inflate file_writes.
+
+    Same as gptme version but for Claude Code format — a Write tool call with no
+    'file_path' in its input should not append a placeholder to file_writes.
+    """
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": f"2026-03-01T10:{i:02d}:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"write_{i}",
+                        "name": "Write",
+                        "input": {"content": "no file_path here"},  # missing file_path
+                    }
+                ],
+            },
+        }
+        for i in range(3)
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["file_writes"]) == 0
+
+
+def test_extract_signals_gptme_steps_basic():
+    """gptme trajectory: each assistant turn with tool calls counts as one step."""
+    msgs = [
+        # Turn 1: one tool call
+        {
+            "role": "assistant",
+            "content": '@shell(c0): {"command": "ls"}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {"role": "system", "content": "file.py", "timestamp": "2026-03-01T10:00:01+00:00"},
+        # Turn 2: two tool calls (parallel) — still one step
+        {
+            "role": "assistant",
+            "content": '@shell(c1): {"command": "git status"}\n@save(c2): {"path": "/tmp/out.py"}',
+            "timestamp": "2026-03-01T10:00:02+00:00",
+        },
+        {"role": "system", "content": "ok", "timestamp": "2026-03-01T10:00:03+00:00"},
+        # Turn 3: pure text, no tool calls — NOT a step
+        {
+            "role": "assistant",
+            "content": "Here is my analysis.",
+            "timestamp": "2026-03-01T10:00:04+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["steps"] == 2
+
+
+def test_extract_signals_gptme_steps_parallel_tools():
+    """gptme trajectory: multiple parallel tool calls in one turn = one step."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": ("@shell(c0): {}\n@shell(c1): {}\n@shell(c2): {}\n"),
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        }
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["steps"] == 1
+    assert sum(sigs["tool_calls"].values()) == 3
+
+
+def test_extract_signals_gptme_steps_zero():
+    """gptme trajectory: no tool calls → steps is 0."""
+    msgs = [
+        {"role": "assistant", "content": "Hello world", "timestamp": "2026-03-01T10:00:00+00:00"},
+        {"role": "user", "content": "Thanks", "timestamp": "2026-03-01T10:00:01+00:00"},
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["steps"] == 0
+
+
+def test_extract_signals_cc_steps_basic():
+    """CC trajectory: each assistant record with tool_use items counts as one step."""
+    msgs = [
+        # Step 1: single Bash tool call
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}
+                ],
+            },
+        },
+        # Step 2: two tool calls in parallel — still one step
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:02.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "pwd"}},
+                    {
+                        "type": "tool_use",
+                        "id": "t3",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/x"},
+                    },
+                ],
+            },
+        },
+        # Pure text turn — NOT a step
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:04.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done."}],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["steps"] == 2
+
+
+def test_extract_signals_cc_steps_parallel_tools():
+    """CC trajectory: multiple parallel tool_use items in one record = one step."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"t{i}",
+                        "name": "Bash",
+                        "input": {"command": f"cmd{i}"},
+                    }
+                    for i in range(4)
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["steps"] == 1
+    assert sigs["tool_calls"]["Bash"] == 4
+
+
+def test_extract_signals_cc_tool_timing_parallel_batch():
+    """Parallel tools split one user-turn wall time across the batch."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "bash_1",
+                        "name": "Bash",
+                        "input": {"command": "pytest -q"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "read_1",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/x"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "bash_1",
+                        "is_error": False,
+                        "content": "ok",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read_1",
+                        "is_error": False,
+                        "content": "ok",
+                    },
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["total_tool_time_s"] == 10.0
+    assert sigs["tool_time_total"] == {"Bash": 5.0, "Read": 5.0}
+    assert sigs["tool_time_max"] == {"Bash": 5.0, "Read": 5.0}
+
+
+def test_extract_signals_cc_tool_timing_old_dispatch_not_reused():
+    """Consumed dispatch timestamps must not skew later same-timestamp batches."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "old_1",
+                        "name": "Bash",
+                        "input": {"command": "old1"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "old_2",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/old"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "old_1",
+                        "is_error": False,
+                        "content": "ok",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "old_2",
+                        "is_error": False,
+                        "content": "ok",
+                    },
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "new_1",
+                        "name": "Bash",
+                        "input": {"command": "new1"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "new_1",
+                        "is_error": False,
+                        "content": "ok",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["tool_time_total"]["Bash"] == 15.0
+    assert sigs["tool_time_max"]["Bash"] == 10.0
+    assert sigs["tool_time_total"]["Read"] == 5.0
+    assert sigs["total_tool_time_s"] == 20.0
+
+
+def test_extract_signals_cc_warning_phrases_scan_suffix_and_word_boundary():
+    """Warning scan should catch tail errors without double-counting 'failures'."""
+    prefix = "x" * 4050  # > 4000 to trigger the split-scan branch
+    suffix = "\nTraceback\nerror: bad\n2 failures in 0.5s\n"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "bash_warn",
+                        "name": "Bash",
+                        "input": {"command": "pytest -q"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:02.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "bash_warn",
+                        "is_error": False,
+                        "content": prefix + suffix,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["warning_phrase_count"] == 3
+
+
+def test_detect_format_public_alias():
+    """detect_format() is the public alias for _detect_format()."""
+    gptme_msgs = [{"role": "assistant", "content": "hi"}]
+    cc_msgs = [{"type": "assistant", "message": {"role": "assistant", "content": []}}]
+    assert detect_format(gptme_msgs) == "gptme"
+    assert detect_format(cc_msgs) == "claude_code"
+    # Both return the same result as the private version
+    assert detect_format(gptme_msgs) == _detect_format(gptme_msgs)
+    assert detect_format(cc_msgs) == _detect_format(cc_msgs)
+
+
+def test_signals_cli_usage_cc(tmp_path):
+    """signals --usage outputs token breakdown for CC trajectories."""
+    import subprocess
+
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "model": "claude-opus-4-5",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 300,
+                },
+            },
+        }
+    ]
+    p = tmp_path / "session.jsonl"
+    p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+
+    result = subprocess.run(
+        ["gptme-sessions", "signals", str(p), "--usage"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    out = result.stdout.strip()
+    assert "input=100" in out
+    assert "output=50" in out
+    assert "cache_read=300" in out
+    assert "cache_create=200" in out
+    assert "total=650" in out
+
+
+def test_signals_cli_usage_gptme(tmp_path):
+    """signals --usage produces no output for gptme format (no embedded usage)."""
+    import subprocess
+
+    msgs = [{"role": "assistant", "content": "hello", "timestamp": "2026-03-01T10:00:00+00:00"}]
+    p = tmp_path / "conversation.jsonl"
+    p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+
+    result = subprocess.run(
+        ["gptme-sessions", "signals", str(p), "--usage"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""  # no usage data in gptme format
+
+
+def test_signals_cli_usage_cc_zero(tmp_path):
+    """signals --usage produces no output for CC with model but all-zero usage counters."""
+    import subprocess
+
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "model": "claude-opus-4-5",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            },
+        }
+    ]
+    p = tmp_path / "session.jsonl"
+    p.write_text("\n".join(json.dumps(m) for m in msgs) + "\n")
+
+    result = subprocess.run(
+        ["gptme-sessions", "signals", str(p), "--usage"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""  # zero total tokens → no output
+
+
+# ---------------------------------------------------------------------------
+# extract_usage_gptme
+# ---------------------------------------------------------------------------
+
+
+def test_extract_usage_gptme_metadata():
+    """Token counts in msg.metadata are extracted correctly."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "hello",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cost": 0.005,
+            },
+        },
+        {
+            "role": "assistant",
+            "content": "world",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 200,
+                "output_tokens": 30,
+                "cost": 0.003,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 300
+    assert usage["output_tokens"] == 80
+    assert usage["total_tokens"] == 380
+    assert abs(usage["cost"] - 0.008) < 1e-9
+    assert usage["model"] == "anthropic/claude-sonnet-4-6"
+    assert usage["sys_prompt_tokens"] == 100
+    assert usage["context_peak_tokens"] == 200
+
+
+def test_extract_usage_gptme_empty():
+    """Empty trajectory returns empty dict."""
+    assert extract_usage_gptme([]) == {}
+
+
+def test_extract_usage_gptme_no_metadata():
+    """Messages without metadata still return byte metrics (token-less gptme sessions)."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "test",
+            # no metadata field
+        }
+    ]
+    result = extract_usage_gptme(msgs)
+    # Byte metrics are returned even without token metadata (the primary gptme use case)
+    assert result["session_total_bytes"] == len("test".encode())
+    assert result["total_tokens"] == 0
+    assert result["cost"] == 0.0
+
+
+def test_extract_usage_gptme_truly_empty():
+    """Truly empty message list (no content, no tokens) returns {}."""
+    assert extract_usage_gptme([]) == {}
+
+
+def test_extract_usage_gptme_byte_metrics_without_token_data():
+    """Byte metrics are returned for token-less gptme sessions (the primary target use case).
+
+    Regression test for Greptile finding on PR #846: the early-return guard
+    `if total_tokens == 0 and cost == 0.0: return {}` must not discard byte
+    metrics for gptme sessions that have no token metadata.
+    """
+    sys_content = "You are a helpful assistant."
+    user_content = "Hello, world!"
+    asst_content = "Hi there!"
+    msgs = [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": asst_content},  # no metadata → no tokens
+    ]
+    result = extract_usage_gptme(msgs)
+    assert result, "Should return non-empty dict even with no token metadata"
+    # sys_prompt_bytes: bytes before first user turn (system message only)
+    assert result["sys_prompt_bytes"] == len(sys_content.encode())
+    # first_turn_bytes: bytes before first assistant (system + user, not including assistant)
+    assert result["first_turn_bytes"] == len(sys_content.encode()) + len(user_content.encode())
+    # session_total_bytes: all messages
+    assert result["session_total_bytes"] == (
+        len(sys_content.encode()) + len(user_content.encode()) + len(asst_content.encode())
+    )
+    # context_peak_bytes: bytes before first (and only) assistant turn
+    assert result["context_peak_bytes"] == len(sys_content.encode()) + len(user_content.encode())
+    # Token fields are zero since no metadata
+    assert result["total_tokens"] == 0
+    assert result["cost"] == 0.0
+
+
+def test_extract_usage_gptme_sys_prompt_bytes_from_system_role():
+    """Regression: system-role messages must be counted in sys_prompt_bytes.
+
+    Bug: the original condition `role != 'system'` skipped actual system messages,
+    so sys_prompt_bytes was always 0 for the system prompt.
+    """
+    sys_text = "You are a helpful assistant."
+    msgs = [
+        {"role": "system", "content": sys_text},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi"},
+    ]
+    result = extract_usage_gptme(msgs)
+    assert result["sys_prompt_bytes"] == len(sys_text.encode())
+
+
+def test_extract_usage_gptme_first_turn_bytes_excludes_assistant():
+    """Regression: first_turn_bytes must NOT include the first assistant message.
+
+    Bug: bytes were added before checking role=='assistant', so the first
+    assistant message was included in first_turn_bytes.
+    """
+    user_text = "Hello"
+    assistant_text = "Hi there, how can I help?"
+    msgs = [
+        {"role": "user", "content": user_text},
+        {"role": "assistant", "content": assistant_text},
+        {"role": "user", "content": "Another question"},
+    ]
+    result = extract_usage_gptme(msgs)
+    # first_turn_bytes = only the user message before first assistant reply
+    assert result["first_turn_bytes"] == len(user_text.encode())
+    assert result["session_total_bytes"] == len(
+        (user_text + assistant_text + "Another question").encode()
+    )
+
+
+def test_extract_usage_gptme_token_less_returns_bytes():
+    """Regression: token-less gptme sessions must not be silently dropped.
+
+    Bug: `if total_tokens == 0 and cost == 0.0: return {}` fired before
+    byte fields were included, discarding all byte data for gptme sessions
+    that have no token metadata — exactly the population this feature targets.
+    """
+    msgs = [
+        {"role": "system", "content": "System prompt here"},
+        {"role": "user", "content": "Query"},
+        {"role": "assistant", "content": "Response without token metadata"},
+    ]
+    result = extract_usage_gptme(msgs)
+    assert result != {}, "token-less gptme sessions must return byte metrics"
+    assert result["session_total_bytes"] is not None
+    assert result["sys_prompt_bytes"] == len("System prompt here".encode())
+    assert result["total_tokens"] == 0
+
+
+def test_extract_usage_gptme_metadata_no_token_data():
+    """Metadata present but without token data should not lock sys_prompt_tokens at 0.
+
+    Regression test for Greptile finding on PR #845: the gptme extractor must not
+    set sys_prompt_tokens unconditionally on the first metadata-bearing turn when
+    no real token data is present. A later turn with actual data should still be
+    captured as sys_prompt.
+    """
+    msgs = [
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+        {
+            "role": "assistant",
+            "content": "First response",
+            "metadata": {"model": "test-model"},
+            # metadata without any token fields
+        },
+        {
+            "role": "user",
+            "content": "Do something",
+        },
+        {
+            "role": "assistant",
+            "content": "Second response",
+            "metadata": {
+                "model": "test-model",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cost": 0.002,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage, "Should return non-empty dict when token data exists"
+    assert usage["sys_prompt_tokens"] == 100, (
+        "sys_prompt_tokens should be the first turn WITH real token data, "
+        "not the first metadata-bearing turn"
+    )
+    assert usage["context_peak_tokens"] == 100
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
+
+
+def test_extract_usage_gptme_non_assistant_ignored():
+    """Token data on user/system messages must not be accumulated."""
+    msgs = [
+        {
+            "role": "user",
+            "content": "hello",
+            "usage": {"input_tokens": 9999, "output_tokens": 9999, "cost": 99.0},
+        },
+        {
+            "role": "system",
+            "content": "You are a helpful assistant.",
+            "metadata": {"input_tokens": 9999, "output_tokens": 9999},
+        },
+        {
+            "role": "assistant",
+            "content": "Hi!",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cost": 0.001,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    # Only assistant turn should contribute
+    assert usage["input_tokens"] == 50
+    assert usage["output_tokens"] == 10
+    assert abs(usage["cost"] - 0.001) < 1e-9
+
+
+def test_extract_usage_gptme_last_model_wins():
+    """Last-seen model is recorded (consistent with extract_usage_cc)."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "first",
+            "metadata": {
+                "model": "anthropic/claude-haiku-4-5",
+                "input_tokens": 100,
+                "output_tokens": 20,
+            },
+        },
+        {
+            "role": "assistant",
+            "content": "second",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 200,
+                "output_tokens": 40,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    # Last model should win, not first
+    assert usage["model"] == "anthropic/claude-sonnet-4-6"
+    assert usage["input_tokens"] == 300
+    assert usage["output_tokens"] == 60
+
+
+def test_extract_from_path_gptme_includes_usage(tmp_path: Path):
+    """extract_from_path includes usage data for gptme format trajectories."""
+    from gptme_sessions.signals import extract_from_path
+
+    trajectory_file = tmp_path / "conversation.jsonl"
+    msgs = [
+        {
+            "role": "user",
+            "content": "write hello",
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": '@save(c0): {"path": "/tmp/hello.py"}',
+            "timestamp": "2026-03-01T10:01:00+00:00",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 500,
+                "output_tokens": 100,
+            },
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "gptme"
+    assert "usage" in result
+    assert result["usage"]["input_tokens"] == 500
+    assert result["usage"]["output_tokens"] == 100
+    assert result["usage"]["model"] == "anthropic/claude-sonnet-4-6"
+    assert result["usage"]["sys_prompt_tokens"] == 500
+    assert result["usage"]["context_peak_tokens"] == 500
+
+
+def test_extract_usage_gptme_cache_tokens():
+    """Cache tokens from msg.metadata are extracted and included in total."""
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "response",
+            "metadata": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_tokens": 800,
+                "cache_creation_tokens": 200,
+                "cost": 0.01,
+            },
+        },
+    ]
+    usage = extract_usage_gptme(msgs)
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
+    assert usage["cache_read_tokens"] == 800
+    assert usage["cache_creation_tokens"] == 200
+    # total_tokens includes cache tokens (consistent with extract_usage_cc)
+    assert usage["total_tokens"] == 1150  # 100 + 50 + 800 + 200
+    assert abs(usage["cost"] - 0.01) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# post_session() tests
+# ---------------------------------------------------------------------------
+
+
+from gptme_sessions import PostSessionResult, post_session  # noqa: E402
+
+
+def test_post_session_basic(tmp_path: Path):
+    """post_session records a session with minimal args."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        run_type="autonomous",
+    )
+    assert isinstance(result, PostSessionResult)
+    assert result.record.harness == "claude-code"
+    assert result.record.model == "opus"
+    # No trajectory, no commit comparison → default is unknown (no signal)
+    assert result.record.outcome == "unknown"
+    assert result.grade is None
+    assert result.signals is None
+    assert result.token_count is None
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].session_id == result.record.session_id
+
+
+def test_post_session_outcome_from_exit_code(tmp_path: Path):
+    """Non-zero exit code marks session as failed."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(store=store, harness="gptme", exit_code=1)
+    assert result.record.outcome == "failed"
+
+
+def test_post_session_timeout_is_unknown(tmp_path: Path):
+    """Exit code 124 (timeout) with no evidence → unknown, not failed."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(store=store, harness="gptme", exit_code=124)
+    assert result.record.outcome == "unknown"
+
+
+def test_post_session_timeout_with_productive_trajectory(tmp_path: Path):
+    """exit_code=124 does NOT override productive trajectory outcome."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    commit_output = "[master abc1234] feat: add feature"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add feature'"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": commit_output}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        exit_code=124,  # timeout
+        trajectory_path=traj,
+    )
+    # Trajectory evidence of productive work takes priority over timeout → productive
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_timeout_with_new_commits(tmp_path: Path):
+    """exit_code=124 does NOT override productive git-comparison outcome."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=124,  # timeout
+        start_commit="aaa",
+        end_commit="bbb",  # different → productive by git
+    )
+    # Git evidence of productive work takes priority over timeout → productive
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_noop_from_commits(tmp_path: Path):
+    """Same start/end commit → noop when no trajectory."""
+    store = SessionStore(sessions_dir=tmp_path)
+    sha = "abc1234"
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit=sha,
+        end_commit=sha,
+    )
+    assert result.record.outcome == "noop"
+
+
+def test_post_session_productive_from_commits(tmp_path: Path):
+    """Different start/end commits → productive when no trajectory."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit="abc1234",
+        end_commit="def5678",
+    )
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_exit_code_overrides_commits(tmp_path: Path):
+    """Failed exit code takes priority over git comparison."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=2,
+        start_commit="aaa",
+        end_commit="bbb",  # would be productive by git
+    )
+    assert result.record.outcome == "failed"
+
+
+def test_post_session_with_trajectory_productive(tmp_path: Path):
+    """Trajectory with commits → productive outcome, grade extracted."""
+    # Write a minimal CC trajectory with a git commit in Bash output
+    traj = tmp_path / "session.jsonl"
+    import json as _json
+
+    commit_output = "[master abc1234] feat: add feature"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add feature'"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": commit_output}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="opus",
+        trajectory_path=traj,
+        start_commit="abc",
+        end_commit="abc",  # same → would be noop by git, but trajectory overrides
+    )
+    assert result.record.outcome == "productive"
+    assert result.grade is not None
+    assert result.grade > 0
+    assert result.signals is not None
+    assert len(result.signals["git_commits"]) == 1
+
+
+def test_post_session_with_trajectory_noop(tmp_path: Path):
+    """Trajectory with no commits/writes → noop outcome."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "echo hello"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:00:30Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "hello"}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    assert result.record.outcome == "noop"
+    assert result.grade is not None
+    assert result.grade < 0.5
+
+
+def test_post_session_token_count_from_trajectory(tmp_path: Path):
+    """Token count extracted from CC trajectory usage data."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cache_read_input_tokens": 200,
+                    "cache_creation_input_tokens": 100,
+                },
+                "model": "claude-opus-4-6",
+            },
+        }
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    assert result.token_count == 1800  # 1000+500+200+100
+    assert result.record.token_count == 1800
+    assert result.record.sys_prompt_tokens == 1300
+    assert result.record.context_peak_tokens == 1300
+
+
+def test_post_session_missing_trajectory(tmp_path: Path):
+    """Missing trajectory path is handled gracefully (non-fatal)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        trajectory_path=Path("/nonexistent/session.jsonl"),
+        start_commit="aaa",
+        end_commit="bbb",
+    )
+    assert result.signals is None
+    assert result.grade is None
+    assert result.record.outcome == "productive"  # falls back to git comparison
+
+
+def test_post_session_partial_commit_pair_no_crash(tmp_path: Path):
+    """Only start_commit provided (no end_commit) must not raise UnboundLocalError.
+
+    Regression test for: elif branch that logs warning but never assigns ``outcome``.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit="abc123",  # end_commit omitted — shell footgun
+    )
+    # No exception; falls through to default → unknown (no signal)
+    assert result.record.outcome == "unknown"
+
+
+def test_post_session_partial_commit_pair_timeout_is_unknown(tmp_path: Path):
+    """Partial commit pair + timeout exit code → unknown (no full signal)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=124,
+        end_commit="def456",  # start_commit omitted
+    )
+    assert result.record.outcome == "unknown"
+
+
+def test_post_session_explicit_deliverables_merged_with_trajectory(tmp_path: Path):
+    """Explicit deliverables are merged with trajectory deliverables."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Write",
+                        "input": {"file_path": "/tmp/foo.py", "content": "x"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        }
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    explicit = ["abc123def456"]
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        deliverables=explicit,
+    )
+    # Shell-provided SHAs merged with trajectory file paths
+    assert result.record.deliverables == ["abc123def456", "/tmp/foo.py"]
+
+
+def test_post_session_empty_deliverables_uses_trajectory(tmp_path: Path):
+    """Empty deliverables list (from shell with no commits) falls through to trajectory."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Write",
+                        "input": {"file_path": "/tmp/bar.py", "content": "y"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        }
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    # Shell passes [] when no commits — trajectory deliverables should be used
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        deliverables=[],
+    )
+    assert result.record.deliverables == ["/tmp/bar.py"]
+
+
+def test_post_session_trajectory_path_stored(tmp_path: Path):
+    """trajectory_path is stored on the SessionRecord when provided."""
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    traj = tmp_path / "session.jsonl"
+    traj.write_text("")  # empty trajectory (no signals)
+
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    assert result.record.trajectory_path == str(traj)
+
+
+def test_post_session_deliverables_from_trajectory(tmp_path: Path):
+    """When no explicit deliverables, trajectory file writes are used."""
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Write",
+                        "input": {"file_path": "/tmp/foo.py", "content": "x"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "t2",
+                        "name": "Edit",
+                        "input": {"file_path": "/tmp/bar.py", "old_string": "a", "new_string": "b"},
+                    },
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        }
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    assert "/tmp/foo.py" in result.record.deliverables
+    assert "/tmp/bar.py" in result.record.deliverables
+    assert result.record.deliverable_details == [
+        {
+            "value": "/tmp/foo.py",
+            "kind": "file",
+            "provenance_class": "tool_authored",
+            "evidence": {"source": "trajectory", "tool_name": "Write"},
+        },
+        {
+            "value": "/tmp/bar.py",
+            "kind": "file",
+            "provenance_class": "tool_authored",
+            "evidence": {"source": "trajectory", "tool_name": "Edit"},
+        },
+    ]
+
+
+def test_post_session_metadata_fields(tmp_path: Path):
+    """Category, journal_path, session_id and duration are stored correctly."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        category="infrastructure",
+        duration_seconds=2700,
+        journal_path="/home/bob/bob/journal/2026-01-01/session.md",
+        session_id="test1234",
+    )
+    r = result.record
+    assert r.category == "infrastructure"
+    assert r.duration_seconds == 2700
+    assert r.journal_path == "/home/bob/bob/journal/2026-01-01/session.md"
+    assert r.session_id == "test1234"
+
+
+def test_post_session_warns_on_duplicate_journal_path(tmp_path: Path, caplog):
+    """Duplicate journal_path reuse across session_ids logs a warning."""
+    store = SessionStore(sessions_dir=tmp_path)
+    journal_path = "/home/bob/bob/journal/2026-03-25/autonomous-session-abcd.md"
+    store.append(SessionRecord(harness="gptme", session_id="first", journal_path=journal_path))
+
+    with caplog.at_level(logging.WARNING, logger="gptme_sessions.post_session"):
+        result = post_session(
+            store=store,
+            harness="gptme",
+            journal_path=journal_path,
+            session_id="second",
+        )
+
+    assert result.record.journal_path == journal_path
+    assert "already used by other session_ids" in caplog.text
+    assert "first" in caplog.text
+
+
+def test_post_session_traj_noop_drops_unvalidated_deliverables(tmp_path: Path):
+    """Trajectory-authoritative noop drops caller commits absent from trajectory.
+
+    Regression test: git-range deliverables can include commits from concurrent
+    sessions on the same branch. When trajectory extraction says noop and found
+    no deliverables of its own, caller-supplied SHAs must not override that.
+    """
+    import json as _json
+
+    # Create trajectory with no commits or writes (trajectory says noop)
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "echo hello"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:00:30Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "hello"}],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    # Caller provides explicit deliverables (commits found via git diff)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        deliverables=["abc123", "def456"],
+    )
+    # Trajectory is authoritative here: noop + no trajectory deliverables means
+    # caller SHAs are treated as concurrent-session contamination.
+    assert result.record.outcome == "noop"
+    assert result.record.deliverables == []
+
+
+def test_post_session_single_file_write_stays_noop(tmp_path: Path):
+    """Trajectory with exactly 1 file write stays noop without caller deliverables.
+
+    Regression test: is_productive() requires ≥2 unique file writes for a
+    commit-free session to be productive.  A single-file-write session is
+    deliberately classified as noop.  The noop→productive override must NOT
+    fire just because that file path appears in traj_deliverables (merged list)
+    — it should only fire when the *caller* supplies explicit deliverables.
+    """
+    import json as _json
+
+    traj = tmp_path / "session.jsonl"
+    msgs = _make_cc_msgs(writes=1)  # exactly 1 file write → noop per is_productive()
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+        # No caller-supplied deliverables — override must NOT fire
+    )
+    # is_productive() says noop (1 write < 2 threshold); no caller deliverables
+    # → outcome must stay noop, not be bumped to productive by traj_deliverables
+    assert result.record.outcome == "noop"
+
+
+def test_post_session_trajectory_grade_stored(tmp_path: Path):
+    """Trajectory grade is persisted in SessionRecord.trajectory_grade.
+
+    Regression test: grade was computed by grade_signals() but never stored
+    in the record, making it unavailable for downstream analysis.
+    """
+    import json as _json
+
+    # Create trajectory with a commit (productive, should get a grade)
+    traj = tmp_path / "session.jsonl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": "git commit -m 'feat: add feature'"},
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model": "claude-opus-4-6",
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": "[master abc1234] feat: add feature\n 1 file changed",
+                    }
+                ],
+            },
+        },
+    ]
+    traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
+
+    store = SessionStore(sessions_dir=tmp_path / "store")
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        trajectory_path=traj,
+    )
+    # Grade should be computed from trajectory and stored in record
+    assert result.grade is not None
+    assert result.record.trajectory_grade is not None
+    assert result.record.trajectory_grade == result.grade
+
+
+def test_post_session_no_trajectory_no_grade(tmp_path: Path):
+    """Without trajectory, trajectory_grade remains None."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        start_commit="abc",
+        end_commit="def",
+    )
+    assert result.record.outcome == "productive"
+    assert result.record.trajectory_grade is None
+    assert result.grade is None
+
+
+def test_post_session_failed_not_overridden_by_deliverables(tmp_path: Path):
+    """A failed session (non-zero exit) stays failed even when deliverables exist.
+
+    Regression guard: the noop→productive override must only fire for noop,
+    never for failed outcomes.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        exit_code=1,
+        deliverables=["abc123"],
+    )
+    assert result.record.outcome == "failed"
+
+
+def test_post_session_cli_basic(tmp_path: Path, capsys, monkeypatch):
+    """CLI post-session command records a session."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "post-session",
+            "--harness",
+            "claude-code",
+            "--model",
+            "opus",
+            "--run-type",
+            "autonomous",
+            "--exit-code",
+            "0",
+            "--duration",
+            "3000",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    # No trajectory/commits → default is unknown (no signal)
+    assert "outcome=unknown" in captured.out
+
+    # Verify record was written
+    store = SessionStore(sessions_dir=tmp_path)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "unknown"
+
+
+def test_post_session_cli_timeout_exit_code(tmp_path: Path, capsys, monkeypatch):
+    """CLI post-session: exit code 124 with no evidence → unknown."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "post-session",
+            "--harness",
+            "gptme",
+            "--exit-code",
+            "124",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "outcome=unknown" in captured.out
+
+
+def test_post_session_cli_json_output(tmp_path: Path, capsys, monkeypatch):
+    """CLI post-session --json outputs valid JSON with expected keys."""
+    import json as _json
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "post-session",
+            "--harness",
+            "gptme",
+            "--json",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    out = _json.loads(captured.out)
+    assert "session_id" in out
+    assert "outcome" in out
+    assert "grade" in out
+    assert "token_count" in out
+
+
+# ============================================================
+# Codex CLI format tests
+# ============================================================
+
+
+def test_detect_format_codex():
+    """Detect Codex CLI trajectory format from session_meta entry."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48.495Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "test-session",
+                "originator": "codex_exec",
+                "cwd": "/home/bob/bob",
+            },
+        }
+    ]
+    assert detect_format(msgs) == "codex"
+    assert _detect_format(msgs) == "codex"
+
+
+def test_detect_format_codex_interactive():
+    """Detect Codex interactive sessions too."""
+    msgs = [
+        {
+            "type": "session_meta",
+            "payload": {"originator": "codex_interactive"},
+        }
+    ]
+    assert detect_format(msgs) == "codex"
+
+
+def test_extract_signals_codex_basic():
+    """Extract signals from a minimal Codex trajectory.
+
+    Uses two turn_context records to model two distinct turns, each with one
+    tool call. Steps should be 2 (one per turn), not 2 (one per function_call).
+    """
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"id": "test", "originator": "codex_exec", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:49Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": '{"cmd": "pwd", "workdir": "/tmp"}',
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 0\nOutput:\n/tmp",
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:55Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:57:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_2",
+                "arguments": '{"cmd": "git commit -m \\"feat: add thing\\""}',
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:57:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_2",
+                "output": "Process exited with code 0\n[master abc1234] feat: add thing\n 1 file changed",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["tool_calls"] == {"exec_command": 2}
+    assert signals["steps"] == 2  # one step per turn (bounded by turn_context records)
+    assert signals["error_count"] == 0
+    assert len(signals["git_commits"]) == 1
+    assert "feat: add thing (abc1234)" in signals["git_commits"]
+    assert signals["session_duration_s"] == 14  # 06:56:48 to 06:57:02
+
+
+def test_extract_signals_codex_error_detection():
+    """Detect errors from non-zero exit codes in Codex."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": '{"cmd": "false"}',
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 1\nOutput:\n",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["error_count"] == 1
+
+
+def test_extract_signals_codex_file_writes():
+    """Detect file writes from exec_command redirect patterns."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": json.dumps({"cmd": "cat > /tmp/test.py <<'EOF'\nprint('hi')\nEOF"}),
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 0",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert "/tmp/test.py" in signals["file_writes"]
+
+
+def test_extract_signals_codex_tee_flags():
+    """tee with flags (-a) should not capture the flag as a file path."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": json.dumps({"cmd": "echo hello | tee -a /tmp/output.log"}),
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:56:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Process exited with code 0",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    # Should capture the actual path, not the flag "-a"
+    assert "-a" not in signals["file_writes"]
+    assert "/tmp/output.log" in signals["file_writes"]
+
+
+def test_extract_signals_codex_apply_patch_file_writes():
+    """Codex uses custom_tool_call name=apply_patch for file edits.
+
+    Regression test for codex misclassification: real productive codex
+    sessions were grading 0.25 because apply_patch was invisible to the
+    extractor (it only checked function_call payloads, not custom_tool_call).
+    """
+    patch_input = (
+        "*** Begin Patch\n"
+        "*** Add File: knowledge/strategic/decision.md\n"
+        "+# Decision\n"
+        "+content\n"
+        "*** Update File: tasks/example.md\n"
+        "@@\n"
+        "-old line\n"
+        "+new line\n"
+        "*** Add File: journal/2026-04-25/autonomous-session-1994.md\n"
+        "+# Session\n"
+        "*** End Patch\n"
+    )
+    msgs = [
+        {
+            "timestamp": "2026-04-25T06:39:09Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-04-25T06:40:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "call_p1",
+                "input": patch_input,
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["tool_calls"].get("apply_patch") == 1
+    assert "knowledge/strategic/decision.md" in signals["file_writes"]
+    assert "tasks/example.md" in signals["file_writes"]
+    # Journal paths route to journal_paths, not file_writes
+    assert "journal/2026-04-25/autonomous-session-1994.md" in signals["journal_paths"]
+    assert "journal/2026-04-25/autonomous-session-1994.md" not in signals["file_writes"]
+
+
+def test_extract_signals_codex_commit_in_write_stdin_output():
+    """Commit hash output gets attached to write_stdin call_id, not exec_command.
+
+    Codex uses a persistent shell: exec_command spawns it, write_stdin sends
+    subsequent commands. The commit hash often lands in a write_stdin output.
+    """
+    msgs = [
+        {
+            "timestamp": "2026-04-25T06:39:09Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-04-25T06:40:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "write_stdin",
+                "call_id": "call_w1",
+                "arguments": json.dumps({"session_id": 1, "chars": "git commit ...\n"}),
+            },
+        },
+        {
+            "timestamp": "2026-04-25T06:40:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_w1",
+                "output": (
+                    "Output:\n"
+                    "✓ All pre-commit checks passed\n"
+                    "[master b16170f38] docs(strategic): codify tauri BYOK as Q2 primary surface\n"
+                    " 6 files changed, 265 insertions(+), 1 deletion(-)\n"
+                ),
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert len(signals["git_commits"]) == 1
+    assert "b16170f38" in signals["git_commits"][0]
+    assert "tauri BYOK" in signals["git_commits"][0]
+
+
+def test_extract_signals_codex_commit_in_long_output():
+    """Commit hash buried after >500 chars of output should still be detected.
+
+    Codex outputs are verbose (full file dumps from sed/cat reads), so the
+    legacy 500-char cap missed real commits.
+    """
+    long_prefix = "x" * 1500 + "\n"
+    msgs = [
+        {
+            "timestamp": "2026-04-25T06:39:09Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-04-25T06:40:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                "arguments": json.dumps({"cmd": "git commit ..."}),
+            },
+        },
+        {
+            "timestamp": "2026-04-25T06:40:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": long_prefix + "[master abc1234] feat: new feature\n",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert len(signals["git_commits"]) == 1
+    assert "abc1234" in signals["git_commits"][0]
+
+
+def test_extract_usage_codex():
+    """Extract model, token, and rate-limit info from Codex trajectory."""
+    msgs = [
+        {
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex"},
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 12000,
+                        "output_tokens": 100,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 12000,
+                        "cached_input_tokens": 9000,
+                        "output_tokens": 100,
+                        "total_tokens": 12100,
+                    },
+                    "model_context_window": 200000,
+                },
+                "rate_limits": {
+                    "limit_id": "codex",
+                    "primary": {"used_percent": 8.0, "window_minutes": 300},
+                    "secondary": {"used_percent": 2.0, "window_minutes": 10080},
+                },
+            },
+        },
+    ]
+    usage = extract_usage_codex(msgs)
+    assert usage["model"] == "gpt-5.3-codex"
+    assert usage["rate_limit_primary_pct"] == 8.0
+    assert usage["rate_limit_secondary_pct"] == 2.0
+    assert usage["sys_prompt_tokens"] == 12000
+    assert usage["context_peak_tokens"] == 12000
+    assert usage["context_window"] == 200000
+    assert usage["input_tokens"] == 12000
+    assert usage["cached_input_tokens"] == 9000
+    assert usage["output_tokens"] == 100
+    assert usage["total_tokens"] == 12100
+
+
+def test_extract_usage_codex_empty():
+    """Empty dict when no model/usage data."""
+    assert extract_usage_codex([]) == {}
+    assert extract_usage_codex([{"type": "session_meta", "payload": {}}]) == {}
+
+
+def test_extract_usage_codex_without_model_omits_model_key():
+    """Usage-only Codex records should not emit a ``model: None`` placeholder."""
+    msgs = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 4000,
+                        "output_tokens": 50,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 4000,
+                        "output_tokens": 50,
+                        "total_tokens": 4050,
+                    },
+                },
+            },
+        }
+    ]
+
+    usage = extract_usage_codex(msgs)
+
+    assert "model" not in usage
+    assert usage["sys_prompt_tokens"] == 4000
+    assert usage["context_peak_tokens"] == 4000
+    assert usage["input_tokens"] == 4000
+    assert usage["output_tokens"] == 50
+    assert usage["total_tokens"] == 4050
+
+
+# ============================================================
+# Copilot CLI format tests
+# ============================================================
+
+
+def test_detect_format_copilot():
+    """Detect Copilot CLI trajectory format from session.start entry."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test-session",
+                "producer": "copilot-agent",
+                "selectedModel": "claude-opus-4.6",
+                "context": {"cwd": "/home/bob/bob"},
+            },
+            "timestamp": "2026-03-03T12:32:04.861Z",
+        }
+    ]
+    assert detect_format(msgs) == "copilot"
+
+
+def test_extract_signals_copilot_basic():
+    """Extract signals from a minimal Copilot trajectory."""
+    msgs: list[dict] = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test",
+                "producer": "copilot-agent",
+                "selectedModel": "claude-opus-4.6",
+            },
+            "timestamp": "2026-03-03T12:32:04Z",
+        },
+        {
+            "type": "assistant.turn_start",
+            "timestamp": "2026-03-03T12:32:05Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {
+                        "toolCallId": "tc_1",
+                        "name": "bash",
+                        "arguments": {"command": "git status"},
+                        "type": "function",
+                    }
+                ]
+            },
+            "timestamp": "2026-03-03T12:32:06Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_1",
+                "success": True,
+                "result": {"content": "[master def5678] docs: update README\n 1 file changed"},
+            },
+            "timestamp": "2026-03-03T12:32:10Z",
+        },
+        {
+            "type": "assistant.turn_end",
+            "timestamp": "2026-03-03T12:32:11Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["tool_calls"] == {"bash": 1}
+    assert signals["steps"] == 1
+    assert signals["error_count"] == 0
+    assert len(signals["git_commits"]) == 1
+    assert "docs: update README (def5678)" in signals["git_commits"]
+    assert signals["session_duration_s"] == 7
+
+
+def test_extract_signals_copilot_error_detection():
+    """Detect errors from failed tools and session.error events."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "session.error",
+            "data": {
+                "errorType": "authentication",
+                "message": "Not authorized",
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash", "arguments": {}}]},
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_1",
+                "success": False,
+                "result": {"content": "command not found"},
+            },
+            "timestamp": "2026-03-03T12:00:03Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 2  # session.error + failed tool
+
+
+def test_extract_signals_copilot_file_writes():
+    """Detect file writes from Copilot edit tool."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {
+                        "toolCallId": "tc_1",
+                        "name": "edit",
+                        "arguments": {
+                            "path": "/home/bob/bob/README.md",
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                        "type": "function",
+                    }
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert "/home/bob/bob/README.md" in signals["file_writes"]
+    assert signals["tool_calls"]["edit"] == 1
+
+
+def test_extract_signals_copilot_null_result():
+    """extract_signals_copilot doesn't crash when tool result is JSON null."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {"toolCallId": "tc_bash", "name": "bash", "arguments": {}},
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_bash",
+                "success": False,
+                "result": None,  # explicit JSON null — must not crash
+            },
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 1
+    assert signals["git_commits"] == []
+
+
+def test_extract_signals_copilot_commit_only_from_bash():
+    """Git commits only extracted from bash tool output, not other tools."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {"toolCallId": "tc_view", "name": "view", "arguments": {}},
+                    {"toolCallId": "tc_bash", "name": "bash", "arguments": {}},
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_view",
+                "success": True,
+                "result": {"content": "[master aaa1111] fake commit from file content"},
+            },
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "tc_bash",
+                "success": True,
+                "result": {"content": "[master bbb2222] real commit from bash"},
+            },
+            "timestamp": "2026-03-03T12:00:03Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    # Only the bash commit should be extracted
+    assert len(signals["git_commits"]) == 1
+    assert "real commit from bash (bbb2222)" in signals["git_commits"]
+
+
+def test_extract_from_path_codex(tmp_path: Path):
+    """extract_from_path correctly identifies and extracts Codex format."""
+    trajectory_file = tmp_path / "rollout.jsonl"
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"id": "test", "originator": "codex_exec", "cwd": "/tmp"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.3-codex"},
+        },
+        {
+            "timestamp": "2026-03-05T06:57:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": '{"cmd": "echo hi"}',
+            },
+        },
+        {
+            "timestamp": "2026-03-05T06:57:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": "Process exited with code 0\nOutput:\nhi",
+            },
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    from gptme_sessions.signals import extract_from_path
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "codex"
+    assert result["tool_calls"]["exec_command"] == 1
+    assert "usage" in result
+    assert result["usage"]["model"] == "gpt-5.3-codex"
+
+
+def test_extract_from_path_copilot(tmp_path: Path):
+    """extract_from_path correctly identifies and extracts Copilot format."""
+    trajectory_file = tmp_path / "events.jsonl"
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test",
+                "producer": "copilot-agent",
+                "selectedModel": "claude-opus-4.6",
+            },
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash", "arguments": {}}]},
+            "timestamp": "2026-03-03T12:00:05Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {"toolCallId": "tc_1", "success": True, "result": {"content": "ok"}},
+            "timestamp": "2026-03-03T12:00:10Z",
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    from gptme_sessions.signals import extract_from_path
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "copilot"
+    assert result["tool_calls"]["bash"] == 1
+    # Model extracted from session.start.selectedModel
+    assert result["usage"]["model"] == "claude-opus-4.6"
+    assert "sys_prompt_bytes" not in result["usage"]
+    assert "first_turn_bytes" not in result["usage"]
+
+
+def test_extract_usage_copilot_model_change():
+    """extract_usage_copilot extracts model from session.model_change events."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent"},
+            "timestamp": "2026-03-04T10:50:00Z",
+        },
+        {
+            "type": "session.model_change",
+            "data": {"newModel": "claude-sonnet-4.6"},
+            "timestamp": "2026-03-04T10:51:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash"}]},
+            "timestamp": "2026-03-04T10:51:05Z",
+        },
+    ]
+    usage = extract_usage_copilot(msgs)
+    assert usage["model"] == "claude-sonnet-4.6"
+
+
+def test_extract_usage_copilot_session_start_selected_model():
+    """extract_usage_copilot falls back to selectedModel from session.start."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test",
+                "producer": "copilot-agent",
+                "selectedModel": "claude-opus-4.6",
+            },
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": []},
+        },
+    ]
+    usage = extract_usage_copilot(msgs)
+    assert usage["model"] == "claude-opus-4.6"
+
+
+def test_extract_usage_copilot_no_model():
+    """extract_usage_copilot can still return byte metrics when model info is absent."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent"},
+        },
+        {
+            "type": "user.message",
+            "data": {"content": "hello"},
+        },
+        {
+            "type": "assistant.message",
+            "data": {"content": "hi", "toolRequests": []},
+        },
+    ]
+    usage = extract_usage_copilot(msgs)
+    assert "model" not in usage
+    assert usage["first_turn_bytes"] == len("hello".encode())
+    assert usage["context_peak_bytes"] == len("hello".encode())
+    assert usage["session_total_bytes"] == len("hellohi".encode())
+
+
+def test_extract_usage_copilot_multiple_model_changes():
+    """extract_usage_copilot uses the last model change (matches CC/gptme behavior)."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.model_change",
+            "data": {"newModel": "claude-sonnet-4.6"},
+        },
+        {
+            "type": "session.model_change",
+            "data": {"newModel": "gpt-5.4"},
+        },
+    ]
+    usage = extract_usage_copilot(msgs)
+    assert usage["model"] == "gpt-5.4"
+
+
+def test_extract_usage_copilot_includes_byte_metrics():
+    """extract_usage_copilot includes byte-level context metrics for Copilot sessions."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    system_text = "SYS"
+    user_text = "USER"
+    assistant_text = "ASSIST"
+    tool_requests = [{"name": "bash", "arguments": {"command": "echo hi"}}]
+    tool_result = {"content": "OUT"}
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": "test",
+                "producer": "copilot-agent",
+                "selectedModel": "gpt-5.4",
+            },
+        },
+        {"type": "system.message", "data": {"content": system_text}},
+        {"type": "user.message", "data": {"content": user_text}},
+        {
+            "type": "assistant.message",
+            "data": {"content": assistant_text, "toolRequests": tool_requests},
+        },
+        {"type": "tool.execution_complete", "data": {"result": tool_result, "success": True}},
+    ]
+
+    usage = extract_usage_copilot(msgs)
+
+    assert usage["model"] == "gpt-5.4"
+    assert usage["sys_prompt_bytes"] == len(system_text.encode())
+    assert usage["first_turn_bytes"] == len(system_text.encode()) + len(user_text.encode())
+    assert usage["context_peak_bytes"] == len(system_text.encode()) + len(user_text.encode())
+    assert usage["session_total_bytes"] > usage["context_peak_bytes"]
+    assert usage["session_total_bytes"] > usage["first_turn_bytes"]
+
+
+def test_extract_usage_copilot_output_tokens():
+    """extract_usage_copilot sums outputTokens from assistant.message events."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent", "selectedModel": "gpt-5.4"},
+        },
+        {"type": "system.message", "data": {"content": "SYS"}},
+        {"type": "user.message", "data": {"content": "hi"}},
+        {
+            "type": "assistant.message",
+            "data": {"content": "hello", "outputTokens": 300},
+        },
+        {"type": "user.message", "data": {"content": "continue"}},
+        {
+            "type": "assistant.message",
+            "data": {"content": "world", "outputTokens": 150},
+        },
+    ]
+
+    usage = extract_usage_copilot(msgs)
+
+    assert usage["output_tokens"] == 450
+    assert usage["model"] == "gpt-5.4"
+
+
+def test_extract_usage_copilot_no_output_tokens():
+    """extract_usage_copilot omits output_tokens when no outputTokens present."""
+    from gptme_sessions.signals import extract_usage_copilot
+
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent", "selectedModel": "gpt-5.4"},
+        },
+        {"type": "assistant.message", "data": {"content": "hello"}},
+    ]
+
+    usage = extract_usage_copilot(msgs)
+    assert "output_tokens" not in usage
+
+
+def test_extract_from_path_copilot_with_model(tmp_path: Path):
+    """extract_from_path includes usage with model when model_change is present."""
+    trajectory_file = tmp_path / "events.jsonl"
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"sessionId": "test", "producer": "copilot-agent"},
+            "timestamp": "2026-03-04T10:50:00Z",
+        },
+        {
+            "type": "session.model_change",
+            "data": {"newModel": "claude-sonnet-4.6"},
+            "timestamp": "2026-03-04T10:51:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash"}]},
+            "timestamp": "2026-03-04T10:51:05Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            "data": {"toolCallId": "tc_1", "success": True, "result": {"content": "ok"}},
+            "timestamp": "2026-03-04T10:51:10Z",
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    from gptme_sessions.signals import extract_from_path
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "copilot"
+    assert "usage" in result
+    assert result["usage"]["model"] == "claude-sonnet-4.6"
+
+
+# --- Null-guard regression tests ---
+
+
+def test_detect_format_codex_null_payload():
+    """_detect_format doesn't crash when Codex session_meta has payload=null."""
+    msgs = [{"type": "session_meta", "payload": None}]
+    # Should not raise; falls through to default format
+    fmt = _detect_format(msgs)
+    assert fmt in ("gptme", "claude_code", "codex", "copilot")
+
+
+def test_detect_format_copilot_null_data():
+    """_detect_format doesn't crash when Copilot session.start has data=null."""
+    msgs = [{"type": "session.start", "data": None}]
+    fmt = _detect_format(msgs)
+    assert fmt in ("gptme", "claude_code", "codex", "copilot")
+
+
+def test_extract_signals_codex_null_payload():
+    """extract_signals_codex doesn't crash when response_item has payload=null."""
+    msgs: list[dict] = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {"type": "response_item", "payload": None},  # explicit null
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["steps"] == 0
+
+
+def test_extract_signals_codex_null_cmd():
+    """cmd: null in exec_command arguments must not crash re.search."""
+    msgs = [
+        {
+            "timestamp": "2026-03-05T06:56:48Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-03-05T06:56:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call_1",
+                # cmd is explicitly null (interrupted mid-call)
+                "arguments": json.dumps({"cmd": None}),
+            },
+        },
+    ]
+    # Must not raise TypeError
+    signals = extract_signals_codex(msgs)
+    assert signals["file_writes"] == []
+
+
+def test_extract_signals_codex_multi_file_writes():
+    """re.finditer captures all write targets in a multi-output command."""
+    msgs = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": {"cmd": "command | tee /tmp/debug.log > /tmp/output.txt"},
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert "/tmp/debug.log" in signals["file_writes"]
+    assert "/tmp/output.txt" in signals["file_writes"]
+
+
+def test_extract_signals_codex_dev_null_excluded():
+    """/dev/null and /dev/stderr are not counted as file writes."""
+    msgs = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": {"cmd": "cmd 2>/dev/null > /tmp/out.txt"},
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert "/dev/null" not in signals["file_writes"]
+    assert "/tmp/out.txt" in signals["file_writes"]
+
+
+def test_extract_signals_codex_comparison_operators_excluded():
+    """Comparison operators (>=, <=) in heredoc content are not file writes."""
+    msgs = [
+        {"type": "session_meta", "payload": {"originator": "codex_exec"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c1",
+                "arguments": {"cmd": "python3 - <<'PY'\nif x >=2:\n    print('ok')\nPY"},
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c2",
+                "arguments": {"cmd": "echo 'usage >=60%' | tee /tmp/report.txt"},
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c3",
+                "arguments": {"cmd": "python3 -c 'if x >= threshold: pass'"},
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    # >=2, >= threshold, and >=60% should NOT be treated as file redirects
+    assert "=2" not in signals["file_writes"]
+    assert "=" not in signals["file_writes"]  # standalone >= e.g. `if x >= threshold`
+    assert "=60%" not in signals["file_writes"]
+    # But real file writes should still work
+    assert "/tmp/report.txt" in signals["file_writes"]
+    assert len(signals["deliverables"]) == 1
+
+
+def test_extract_signals_copilot_null_data_assistant():
+    """extract_signals_copilot doesn't crash when assistant.message has data=null."""
+    msgs: list[dict] = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {"type": "assistant.message", "data": None, "timestamp": "2026-03-03T12:00:01Z"},
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["steps"] == 0
+
+
+def test_extract_signals_copilot_null_tool_requests():
+    """extract_signals_copilot doesn't crash when toolRequests=null."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": None},
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["steps"] == 0
+
+
+def test_extract_signals_copilot_null_arguments():
+    """Copilot write tool with arguments=null doesn't crash."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "toolRequests": [
+                    {"toolCallId": "tc1", "name": "write", "arguments": None},
+                ]
+            },
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["file_writes"] == []
+
+
+def test_extract_signals_copilot_null_data_tool_complete():
+    """extract_signals_copilot doesn't crash when tool.execution_complete has data=null."""
+    msgs: list[dict] = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {"type": "tool.execution_complete", "data": None, "timestamp": "2026-03-03T12:00:01Z"},
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 0
+
+
+def test_extract_signals_copilot_null_success_not_counted_as_error():
+    """success: null in tool.execution_complete must not increment error_count."""
+    msgs = [
+        {
+            "type": "session.start",
+            "data": {"producer": "copilot-agent"},
+            "timestamp": "2026-03-03T12:00:00Z",
+        },
+        {
+            "type": "assistant.message",
+            "data": {"toolRequests": [{"toolCallId": "tc_1", "name": "bash", "arguments": {}}]},
+            "timestamp": "2026-03-03T12:00:01Z",
+        },
+        {
+            "type": "tool.execution_complete",
+            # success is explicitly null (truncated/partial record)
+            "data": {"toolCallId": "tc_1", "success": None, "result": None},
+            "timestamp": "2026-03-03T12:00:02Z",
+        },
+    ]
+    signals = extract_signals_copilot(msgs)
+    assert signals["error_count"] == 0
+
+
+def test_extract_usage_codex_null_payload():
+    """extract_usage_codex doesn't crash when turn_context/event_msg has payload=null."""
+    msgs = [
+        {"type": "turn_context", "payload": None},
+        {"type": "event_msg", "payload": None},
+    ]
+    usage = extract_usage_codex(msgs)
+    assert usage == {}
+
+
+def test_extract_usage_codex_null_rate_limits():
+    """extract_usage_codex doesn't crash when rate_limits=null."""
+    msgs = [
+        {"type": "turn_context", "payload": {"model": "gpt-5.3-codex"}},
+        {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "rate_limits": None},
+        },
+    ]
+    usage = extract_usage_codex(msgs)
+    assert usage["model"] == "gpt-5.3-codex"
+    assert "rate_limit_primary_pct" not in usage
+
+
+# --- CLI discover subcommand ---
+
+
+def _make_codex_session(path: Path, model: str = "gpt-5.3-codex") -> None:
+    """Write a minimal Codex session JSONL to *path*."""
+    msgs = [
+        {
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec", "session_id": "abc"},
+        },
+        {
+            "type": "turn_context",
+            "payload": {"model": model, "task": "do stuff"},
+        },
+    ]
+    with open(path, "w") as f:
+        for m in msgs:
+            f.write(json.dumps(m) + "\n")
+
+
+def test_cli_discover_no_sessions(tmp_path: Path, capsys, monkeypatch):
+    """discover returns 0 and friendly message when no sessions exist."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    # Point all harness dirs to empty tmp dirs
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "discover", "--since", "7d"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No sessions found" in captured.out
+
+
+def test_cli_discover_lists_paths(tmp_path: Path, capsys, monkeypatch):
+    """discover prints paths for each discovered session."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(sessions_dir),
+            "discover",
+            "--harness",
+            "codex",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert str(fake_file) in captured.out
+    assert "[ ]" in captured.out  # not yet synced — core visual change introduced by this PR
+    assert "1 session(s) found" in captured.out
+
+
+def test_cli_discover_harness_filter(tmp_path: Path, capsys, monkeypatch):
+    """discover --harness only calls the matching discover function."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    gptme_called: list[int] = []
+    cc_called: list[int] = []
+
+    def _gptme_discover(*a, **kw) -> list:
+        gptme_called.append(1)
+        return []
+
+    def _cc_discover(*a, **kw) -> list:
+        cc_called.append(1)
+        return []
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", _gptme_discover)
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", _cc_discover)
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(sessions_dir),
+            "discover",
+            "--harness",
+            "codex",
+            "--since",
+            "7d",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    assert not gptme_called, "gptme discover should not be called when --harness codex"
+    assert not cc_called, "cc discover should not be called when --harness codex"
+
+
+def test_cli_discover_json_output(tmp_path: Path, capsys, monkeypatch):
+    """discover --json outputs a consistent wrapper object {sessions, total_discovered}."""
+    import json as _json
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(sessions_dir),
+            "discover",
+            "--harness",
+            "codex",
+            "--json",
+        ],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = _json.loads(captured.out)
+    # Always a wrapper object — same schema whether or not --unsynced is used
+    assert isinstance(data, dict)
+    assert "sessions" in data
+    assert "total_discovered" in data
+    assert data["total_discovered"] == 1
+    sessions = data["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["harness"] == "codex"
+    assert sessions[0]["path"] == str(fake_file)
+    assert sessions[0]["synced"] is False  # fake_file is not in the (empty) sessions_dir store
+
+
+def test_cli_discover_with_signals(tmp_path: Path, capsys, monkeypatch):
+    """discover --signals extracts grade and productivity for each session."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    session_file = tmp_path / "codex_session.jsonl"
+    _make_codex_session(session_file)
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [session_file]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "discover", "--harness", "codex", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Should include grade in output
+    assert "grade=" in captured.out
+
+
+def test_cli_discover_gptme_sessions_with_signals(tmp_path: Path, capsys, monkeypatch):
+    """discover --signals resolves gptme session directories to conversation.jsonl.
+
+    discover_gptme_sessions returns *directory* paths, not .jsonl files.
+    The discover handler must resolve them before calling extract_from_path,
+    otherwise --signals fails with IsADirectoryError.
+    """
+    import sys
+
+    from gptme_sessions.cli import main
+
+    # Create a gptme-style session directory with conversation.jsonl inside
+    session_dir = tmp_path / "2026-03-06-test-session"
+    session_dir.mkdir()
+    conversation_file = session_dir / "conversation.jsonl"
+    msgs = _make_gptme_msgs(commits=1)
+    with open(conversation_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    # discover_gptme_sessions returns the directory, not the file
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [session_dir]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "discover", "--harness", "gptme", "--signals"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    # --signals must produce grade output, not "signals error: Is a directory"
+    assert "grade=" in captured.out
+    assert "Is a directory" not in captured.out
+
+
+def test_cli_discover_invalid_since(tmp_path: Path, capsys, monkeypatch):
+    """discover returns non-zero on invalid --since value."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--since", "notadate"])
+    rc = main()
+    assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# session_date_from_path tests
+# ---------------------------------------------------------------------------
+
+
+def test_session_date_from_path_gptme(tmp_path: Path):
+    """gptme sessions: date extracted from session directory name."""
+    from datetime import date
+
+    from gptme_sessions.discovery import session_date_from_path
+
+    # Path is the conversation.jsonl inside a date-prefixed session dir
+    session_dir = tmp_path / "2026-03-07-my-session"
+    session_dir.mkdir()
+    jsonl = session_dir / "conversation.jsonl"
+    jsonl.touch()
+
+    result = session_date_from_path("gptme", jsonl)
+    assert result == date(2026, 3, 7)
+
+
+def test_session_date_from_path_gptme_dir(tmp_path: Path):
+    """gptme sessions: date extracted when path is the session directory itself."""
+    from datetime import date
+
+    from gptme_sessions.discovery import session_date_from_path
+
+    session_dir = tmp_path / "2026-03-08-another-session"
+    session_dir.mkdir()
+
+    result = session_date_from_path("gptme", session_dir)
+    assert result == date(2026, 3, 8)
+
+
+def test_session_date_from_path_codex(tmp_path: Path):
+    """codex sessions: date extracted from directory structure YYYY/MM/DD."""
+    from datetime import date
+
+    from gptme_sessions.discovery import session_date_from_path
+
+    codex_file = tmp_path / "2026" / "03" / "05" / "session.jsonl"
+    codex_file.parent.mkdir(parents=True)
+    codex_file.touch()
+
+    result = session_date_from_path("codex", codex_file)
+    assert result == date(2026, 3, 5)
+
+
+def test_session_date_from_path_cc(tmp_path: Path):
+    """claude-code sessions: date extracted from JSONL first line."""
+    from datetime import date
+
+    from gptme_sessions.discovery import session_date_from_path
+
+    jsonl = tmp_path / "session.jsonl"
+    jsonl.write_text(
+        json.dumps({"role": "user", "content": "hi", "timestamp": "2026-03-06T10:00:00+00:00"})
+        + "\n"
+    )
+
+    result = session_date_from_path("claude-code", jsonl)
+    assert result == date(2026, 3, 6)
+
+
+def test_session_date_from_path_unknown_returns_none(tmp_path: Path):
+    """session_date_from_path returns None for unreadable paths."""
+    from gptme_sessions.discovery import session_date_from_path
+
+    missing = tmp_path / "nonexistent.jsonl"
+    # Should return None, not raise
+    result = session_date_from_path("claude-code", missing)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-harness chronological ordering tests
+# ---------------------------------------------------------------------------
+
+
+def test_discover_chronological_ordering(tmp_path: Path, capsys, monkeypatch):
+    """discover output is sorted chronologically across harnesses."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    # Simulate a gptme session from 2026-03-09 and a codex session from 2026-03-05.
+    # After chronological sort the codex session (earlier) must appear first.
+
+    gptme_dir = tmp_path / "2026-03-09-test-session"
+    gptme_dir.mkdir()
+    gptme_jsonl = gptme_dir / "conversation.jsonl"
+    gptme_jsonl.touch()
+
+    codex_file = tmp_path / "2026" / "03" / "05" / "session.jsonl"
+    codex_file.parent.mkdir(parents=True)
+    codex_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [gptme_dir])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [codex_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--since", "30d"])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+
+    gptme_pos = captured.out.index(str(gptme_jsonl))
+    codex_pos = captured.out.index(str(codex_file))
+    # codex session (2026-03-05) must appear before gptme session (2026-03-09)
+    assert codex_pos < gptme_pos, "Sessions should be sorted oldest-first across harnesses"
+
+
+def test_discover_json_includes_session_date(tmp_path: Path, capsys, monkeypatch):
+    """discover --json includes session_date field for each entry."""
+    import json as _json
+    import sys
+
+    from gptme_sessions.cli import main
+
+    gptme_dir = tmp_path / "2026-03-07-test"
+    gptme_dir.mkdir()
+    (gptme_dir / "conversation.jsonl").touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [gptme_dir])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "discover", "--harness", "gptme", "--json"])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = _json.loads(captured.out)
+    assert data["total_discovered"] == 1
+    assert len(data["sessions"]) == 1
+    assert data["sessions"][0]["session_date"] == "2026-03-07"
+
+
+def test_discover_date_shown_in_output(tmp_path: Path, capsys, monkeypatch):
+    """discover human output includes the date for each session."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    gptme_dir = tmp_path / "2026-03-07-test"
+    gptme_dir.mkdir()
+    (gptme_dir / "conversation.jsonl").touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [gptme_dir])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "discover", "--harness", "gptme", "--since", "30d"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "2026-03-07" in captured.out
+
+
+@pytest.mark.parametrize(
+    "signals,expected",
+    [
+        # Empty signals → None
+        ({}, None),
+        # Single vote (below threshold) → None
+        ({"git_commits": ["feat: add feature (abc1234)"]}, None),
+        # Two feat: commits → code
+        (
+            {"git_commits": ["feat: add feature (abc1234)", "feat: more (def5678)"]},
+            "code",
+        ),
+        # ci(ci): commits → infrastructure
+        (
+            {"git_commits": ["ci(ci): update workflow (abc1234)", "ci(ci): fix runner (def5678)"]},
+            "infrastructure",
+        ),
+        # Scope with ×2 weight: lessons scope → knowledge overrides docs→content prefix
+        (
+            {
+                "git_commits": [
+                    "docs(lessons): add lesson (abc1234)",
+                    "docs(lessons): add more (def5678)",
+                ]
+            },
+            "knowledge",
+        ),
+        # Tie-break: equal votes, category with highest score wins (no crash)
+        (
+            {
+                "git_commits": [
+                    "feat: code work (abc1234)",
+                    "docs: content work (def5678)",
+                ]
+            },
+            None,  # each gets 1 vote, both below threshold
+        ),
+        # Relative path for lessons → knowledge (not missed by leading-slash check)
+        (
+            {
+                "git_commits": [],
+                "file_writes": ["lessons/workflow/my-lesson.md", "lessons/workflow/other.md"],
+            },
+            "knowledge",
+        ),
+        # Journal-only writes — not classifiable (operational chore, not a work category)
+        (
+            {
+                "git_commits": [],
+                "file_writes": ["journal/2026-03-06/session.md", "journal/2026-03-06/work.md"],
+            },
+            None,
+        ),
+        # strategic scope → strategic category (×2 scope weight so only 1 scope commit needed)
+        (
+            {"git_commits": ["docs(strategic): update idea backlog priorities (abc1234)"]},
+            "strategic",
+        ),
+        # research scope → research category
+        (
+            {"git_commits": ["feat(research): peer research on trycua (abc1234)"]},
+            "research",
+        ),
+        # cross-repo scope → cross-repo category
+        (
+            {"git_commits": ["fix(cross-repo): update gptme-contrib pins (abc1234)"]},
+            "cross-repo",
+        ),
+        # monitoring scope → monitoring category
+        (
+            {"git_commits": ["feat(monitoring): add factory-ingest health check (abc1234)"]},
+            "monitoring",
+        ),
+        # self-review scope → self-review category (2 commits to meet threshold)
+        (
+            {
+                "git_commits": [
+                    "docs(self-review): write weekly review (abc1234)",
+                    "docs(self-review): add goals section (def5678)",
+                ]
+            },
+            "self-review",
+        ),
+        # social scope → social category (2 commits to meet threshold)
+        (
+            {
+                "git_commits": [
+                    "docs(social): update reply threads (abc1234)",
+                    "docs(social): draft friend replies (def5678)",
+                ]
+            },
+            "social",
+        ),
+    ],
+)
+def test_infer_category(signals, expected):
+    assert infer_category(signals) == expected
+
+
+# -- discovery fallback tests ------------------------------------------------
+
+
+def test_stats_fallback_to_discovery_when_empty(tmp_path: Path, capsys, monkeypatch):
+    """stats shows discovery fallback when the store is empty."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "stats"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No session records found in store" in captured.out
+    assert "claude-code" in captured.out
+    assert "sync" in captured.out
+
+
+def test_default_command_fallback_to_discovery_when_empty(tmp_path: Path, capsys, monkeypatch):
+    """Default command (no subcommand) shows discovery fallback when store is empty."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir)])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No session records found in store" in captured.out
+    assert "gptme" in captured.out
+
+
+def test_runs_fallback_to_discovery_when_empty(tmp_path: Path, capsys, monkeypatch):
+    """runs shows discovery fallback when the store is empty."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "runs"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No session records found in store" in captured.out
+
+
+def test_stats_no_fallback_when_records_exist(tmp_path: Path, capsys, monkeypatch):
+    """stats does not show discovery fallback when records exist in the store."""
+    import sys
+    from unittest.mock import patch
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(harness="gptme", model="opus", outcome="productive"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "stats"]
+    )
+    with patch("gptme_sessions.cli._discover_all", return_value=[]):
+        rc = main()
+    assert rc == 0
+    # _show_discovery_fallback uses click.echo() which capsys captures.
+    # The absence of the fallback message confirms normal stats were shown.
+    captured = capsys.readouterr()
+    assert "No session records found" not in captured.out
+
+
+# -- sync command tests -------------------------------------------------------
+
+
+def test_sync_imports_discovered_sessions(tmp_path: Path, capsys, monkeypatch):
+    """sync imports discovered sessions into the store."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Imported 1" in captured.out
+
+    # Verify the record was written to the store
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].harness == "claude-code"
+
+
+def test_sync_deduplicates_on_rerun(tmp_path: Path, capsys, monkeypatch):
+    """sync skips sessions already in the store."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    # Second sync — should skip the already-imported session
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "1 unchanged" in captured.out
+
+    # Only one record should exist
+    store = SessionStore(sessions_dir=sessions_dir)
+    assert len(store.load_all()) == 1
+
+
+def test_sync_dry_run(tmp_path: Path, capsys, monkeypatch):
+    """sync --dry-run shows what would be imported without writing."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--dry-run"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "would import" in captured.out
+
+    # Nothing should have been written
+    store = SessionStore(sessions_dir=sessions_dir)
+    assert len(store.load_all()) == 0
+
+
+def test_sync_no_sessions(tmp_path: Path, capsys, monkeypatch):
+    """sync reports no sessions found when discovery returns nothing."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "No sessions found" in captured.out
+
+
+# -- annotate ----------------------------------------------------------------
+
+
+def test_annotate_updates_fields(tmp_path: Path):
+    """annotate amends specified fields on an existing record by session ID."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", model="unknown", outcome="unknown")
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid,
+        "--model",
+        "claude-opus-4-6",
+        "--outcome",
+        "productive",
+        "--category",
+        "code",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert len(records) == 1
+    r = records[0]
+    assert r.model == "claude-opus-4-6"
+    assert r.outcome == "productive"
+    assert r.category == "code"
+    assert r.harness == "gptme"  # unchanged
+
+
+def test_annotate_prefix_match(tmp_path: Path):
+    """annotate resolves session by ID prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", model="unknown")
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid[:4],  # prefix
+        "--outcome",
+        "noop",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].outcome == "noop"
+
+
+def test_annotate_unknown_id_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when session ID prefix has no match."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord())
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "zzzzzzzz",
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+
+def test_annotate_empty_session_id_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when session_id is an empty string."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", outcome="unknown")
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "",  # empty string matches everything via startswith
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+    # Record must be unchanged
+    records = store.load_all()
+    assert records[0].outcome == "unknown"
+
+
+def test_annotate_ambiguous_prefix_exits_nonzero(tmp_path: Path):
+    """annotate returns non-zero when prefix matches more than one record."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Force two records with the same prefix by controlling session_id
+    r1 = SessionRecord()
+    r1.session_id = "aabb1234"
+    r2 = SessionRecord()
+    r2.session_id = "aabb5678"
+    store.append(r1)
+    store.append(r2)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "aabb",
+        "--outcome",
+        "productive",
+    ]
+    rc = main()
+    assert rc != 0
+
+
+def test_annotate_add_deliverable(tmp_path: Path):
+    """annotate --add-deliverable appends to existing deliverables list."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(deliverables=["existing-sha"])
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--add-deliverable",
+        "new-sha",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].deliverables == ["existing-sha", "new-sha"]
+
+
+def test_annotate_add_deliverable_deduplicates(tmp_path: Path):
+    """annotate --add-deliverable does not create duplicate entries."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(deliverables=["existing-sha"])
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--add-deliverable",
+        "existing-sha",  # already present
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert records[0].deliverables == ["existing-sha"]  # not duplicated
+
+
+def test_annotate_json_output(tmp_path: Path, capsys):
+    """annotate --json outputs the updated record as JSON."""
+    import sys
+    import json
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+        "--model",
+        "claude-opus-4-6",
+        "--json",
+    ]
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["model"] == "claude-opus-4-6"
+    assert data["session_id"] == rec.session_id
+
+
+def test_annotate_noop_exits_nonzero(tmp_path: Path):
+    """annotate without any field option returns non-zero."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        rec.session_id,
+    ]
+    rc = main()
+    assert rc != 0
+
+
+def test_annotate_selector_mode_trigger_token_count(tmp_path: Path):
+    """annotate updates selector_mode, trigger, and token_count fields."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord()
+    store.append(rec)
+    sid = rec.session_id
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        sid,
+        "--selector-mode",
+        "scored",
+        "--trigger",
+        "timer",
+        "--token-count",
+        "42000",
+    ]
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    r = records[0]
+    assert r.selector_mode == "scored"
+    assert r.trigger == "timer"
+    assert r.token_count == 42000
+
+
+def test_annotate_run_type_normalized(tmp_path: Path):
+    """annotate normalizes run_type using the same rules as SessionRecord.__post_init__."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", run_type="unknown"))
+
+    # Digit-only run_type should be normalized to "autonomous"
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--run-type",
+        "42",
+    ]
+    rc = main()
+    assert rc == 0
+    records = store.load_all()
+    assert records[0].run_type == "autonomous"
+
+    # autonomous-session prefix should also normalize
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--run-type",
+        "autonomous-session-3",
+    ]
+    rc = main()
+    assert rc == 0
+    records = store.load_all()
+    assert records[0].run_type == "autonomous"
+
+
+def test_annotate_lock_file_persists(tmp_path: Path):
+    """annotate leaves the .lock file on disk as a permanent sentinel."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--model",
+        "claude-sonnet-4-6",
+    ]
+    rc = main()
+    assert rc == 0
+
+    # Lock file must remain so all callers reuse the same inode (POSIX flock
+    # correctness depends on this — deleting it breaks mutual exclusion).
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    assert lock_path.exists(), f"Lock file {lock_path} must persist as a permanent sentinel"
+
+
+def test_annotate_lock_file_persists_on_error(tmp_path: Path):
+    """annotate leaves the .lock file on disk even when a ClickException is raised."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    # Use a prefix that won't match — annotate will raise ClickException mid-operation
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "notfound",
+        "--model",
+        "claude-sonnet-4-6",
+    ]
+    rc = main()
+    assert rc != 0  # ClickException exits nonzero
+
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    assert lock_path.exists(), f"Lock file {lock_path} must persist as a permanent sentinel"
+
+
+def test_annotate_trigger_rejects_invalid(tmp_path: Path):
+    """annotate --trigger rejects values outside the allowed set."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--trigger",
+        "timeer",  # typo — not a valid choice
+    ]
+    rc = main()
+    assert rc != 0  # click.Choice rejects invalid value
+
+    # Record must be unchanged
+    records = store.load_all()
+    assert records[0].trigger is None
+
+
+def test_annotate_duration_rejects_negative(tmp_path: Path):
+    """annotate --duration rejects negative values."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", duration_seconds=300))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd1234",
+        "--duration",
+        "-1",
+    ]
+    rc = main()
+    assert rc != 0  # click.IntRange(min=0) rejects negative value
+
+    # Record must be unchanged (still 300, not -1)
+    records = store.load_all()
+    assert records[0].duration_seconds == 300
+
+
+def test_annotate_token_count_rejects_negative(tmp_path: Path):
+    """annotate --token-count rejects negative values."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd5678", harness="gptme", token_count=1000))
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "abcd5678",
+        "--token-count",
+        "-1",
+    ]
+    rc = main()
+    assert rc != 0  # click.IntRange(min=0) rejects negative value
+
+    # Record must be unchanged (still 1000, not -1)
+    records = store.load_all()
+    assert records[0].token_count == 1000
+
+
+def test_annotate_empty_id_no_options_reports_id_error(tmp_path: Path):
+    """annotate with empty session_id and no field options gives session_id error, not no-op error.
+
+    Guard ordering: session_id is validated before the nothing_supplied check,
+    so the more precise error message is shown regardless of what options were passed.
+    """
+    import sys
+
+    sessions_dir = tmp_path / "sessions"
+
+    sys.argv = [
+        "gptme-sessions",
+        "--sessions-dir",
+        str(sessions_dir),
+        "annotate",
+        "",  # empty session_id
+        # no field options supplied either
+    ]
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "annotate", ""],
+    )
+    assert result.exit_code != 0
+    assert "Session ID must not be empty" in result.output
+
+
+# -- _count_unsynced and default view unsync hint ----------------------------
+
+
+def test_count_unsynced_returns_zero_when_all_synced(tmp_path: Path, monkeypatch):
+    """_count_unsynced returns 0 when all discovered sessions are already in the store."""
+    from gptme_sessions.cli import _count_unsynced
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    store = SessionStore(sessions_dir=tmp_path / "sessions")
+    # Simulate an already-synced record (journal_path = trajectory path)
+    store.append(SessionRecord(harness="gptme", journal_path=str(fake_file)))
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    assert _count_unsynced(store) == 0
+
+
+def test_count_unsynced_returns_count_of_new_sessions(tmp_path: Path, monkeypatch):
+    """_count_unsynced counts discovered sessions not yet in the store."""
+    from gptme_sessions.cli import _count_unsynced
+
+    new_file = tmp_path / "new_session.jsonl"
+    new_file.touch()
+
+    store = SessionStore(sessions_dir=tmp_path / "sessions")
+    # Store is empty — the discovered file has not been synced yet
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [new_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    assert _count_unsynced(store) == 1
+
+
+def test_default_view_shows_unsync_count_when_pending(tmp_path: Path, capsys, monkeypatch):
+    """Default gptme-sessions view shows unsync count when sessions are pending import."""
+    import sys
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(harness="gptme", outcome="productive"))
+
+    new_file = tmp_path / "new_session.jsonl"
+    new_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [new_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir)])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "1 new session(s) available" in captured.out
+    assert "gptme-sessions sync" in captured.out
+
+
+def test_default_view_shows_generic_hint_when_fully_synced(tmp_path: Path, capsys, monkeypatch):
+    """Default view shows generic sync hint when all discovered sessions are already in store."""
+    import sys
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(harness="gptme", outcome="productive"))
+
+    # No new sessions discovered
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    monkeypatch.setattr(sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir)])
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "new session(s) available" not in captured.out
+    assert "gptme-sessions sync" in captured.out
+
+
+# -- sync model extraction + signals backfill ---------------------------------
+
+
+def test_sync_captures_gptme_model_from_config(tmp_path: Path, capsys, monkeypatch):
+    """sync reads model from gptme session config.toml and stores it in the record."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    # Create a fake gptme session directory with a config.toml declaring the model
+    session_dir = tmp_path / "2026-03-07-test-session"
+    session_dir.mkdir()
+    jsonl = session_dir / "conversation.jsonl"
+    jsonl.touch()
+    (session_dir / "config.toml").write_text('[chat]\nmodel = "claude-sonnet-4-6"\n')
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [session_dir]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-sonnet-4-6"
+    assert records[0].model_normalized == "sonnet"
+
+
+def test_assign_if_missing_no_false_positive_on_zero():
+    """_assign_if_missing must not return True when current == value == 0."""
+    from gptme_sessions import SessionRecord
+    from gptme_sessions.cli import _assign_if_missing
+
+    record = SessionRecord(harness="copilot-cli", trajectory_path="/tmp/x.jsonl")
+    record.duration_seconds = 0
+    changed = _assign_if_missing(record, "duration_seconds", 0)
+    assert not changed, "zero == zero should not be treated as a change"
+    assert record.duration_seconds == 0
+
+    # Sanity-check: a real new value must still trigger a change.
+    changed = _assign_if_missing(record, "duration_seconds", 42)
+    assert changed
+    assert record.duration_seconds == 42
+
+
+def test_sync_signals_backfills_existing_records(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals updates existing records that have outcome=unknown."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "unknown"
+
+    # Mock extract_from_path to return a productive result
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": ["abc123"],
+            "inferred_category": "code",
+        },
+    )
+
+    # Second sync with --signals — should update the existing record
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "updated 1" in captured.out
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "productive"
+    assert records[0].duration_seconds == 300
+    assert records[0].category == "code"
+
+
+def test_sync_signals_import_persists_usage_fields(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals persists extracted usage/context fields on new records."""
+    import sys
+
+    from gptme_sessions import SessionStore
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [fake_file]
+    )
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 45,
+            "deliverables": [],
+            "inferred_category": "monitoring",
+            "usage": {
+                "model": "gpt-5.4",
+                "sys_prompt_bytes": 100,
+                "first_turn_bytes": 200,
+                "context_peak_bytes": 200,
+                "session_total_bytes": 350,
+            },
+        },
+    )
+
+    sessions_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Imported 1" in captured.out
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].harness == "copilot-cli"
+    assert records[0].model == "gpt-5.4"
+    assert records[0].sys_prompt_bytes == 100
+    assert records[0].first_turn_bytes == 200
+    assert records[0].context_peak_bytes == 200
+    assert records[0].session_total_bytes == 350
+
+
+def test_sync_signals_backfills_usage_for_existing_known_record(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """sync --signals backfills missing usage/context fields even when outcome is known."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [fake_file]
+    )
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 90,
+            "deliverables": [],
+            "inferred_category": "monitoring",
+            "usage": {
+                "model": "gpt-5.4",
+                "sys_prompt_bytes": 120,
+                "first_turn_bytes": 260,
+                "context_peak_bytes": 260,
+                "session_total_bytes": 400,
+            },
+        },
+    )
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            harness="copilot-cli",
+            trajectory_path=str(fake_file),
+            outcome="productive",
+            duration_seconds=12,
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "updated 1" in captured.out
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].outcome == "productive"
+    assert records[0].duration_seconds == 12
+    assert records[0].model == "gpt-5.4"
+    assert records[0].sys_prompt_bytes == 120
+    assert records[0].first_turn_bytes == 260
+    assert records[0].context_peak_bytes == 260
+    assert records[0].session_total_bytes == 400
+
+
+def test_sync_signals_does_not_overwrite_existing_deliverables(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals preserves existing deliverables, consistent with category guard."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    # Manually set deliverables on the stored record (simulating prior post-session annotation)
+    store = SessionStore(sessions_dir=sessions_dir)
+    records = store.load_all()
+    assert len(records) == 1
+    records[0].deliverables = ["prior-deliverable"]
+    store.rewrite(records)
+
+    # Mock extract_from_path returning different deliverables
+    monkeypatch.setattr(
+        "gptme_sessions.cli.extract_from_path",
+        lambda p: {
+            "productive": True,
+            "session_duration_s": 120,
+            "deliverables": ["new-deliverable"],
+            "inferred_category": "code",
+        },
+    )
+
+    # Backfill with --signals — deliverables should NOT be overwritten
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    main()
+
+    updated_records = store.load_all()
+    assert updated_records[0].deliverables == ["prior-deliverable"]
+
+
+def test_sync_dry_run_signals_skips_extraction(tmp_path: Path, capsys, monkeypatch):
+    """sync --dry-run --signals does NOT call extract_from_path (just previews)."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    extraction_called = []
+
+    def fake_extract(p):
+        extraction_called.append(p)
+        return {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": [],
+            "inferred_category": "code",
+        }
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", fake_extract)
+
+    # dry-run --signals should preview update without calling extract_from_path
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--dry-run", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    assert extraction_called == [], "extract_from_path should not be called in dry-run mode"
+    captured = capsys.readouterr()
+    assert "would update" in captured.out
+
+
+def test_sync_dry_run_signals_skips_extraction_for_new_records(tmp_path: Path, capsys, monkeypatch):
+    """sync --dry-run --signals does NOT call extract_from_path for new (unimported) records."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+    # Store is EMPTY — session has never been imported.
+
+    extraction_called = []
+
+    def fake_extract(p):
+        extraction_called.append(p)
+        return {
+            "productive": True,
+            "session_duration_s": 300,
+            "deliverables": [],
+            "inferred_category": "code",
+        }
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", fake_extract)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--dry-run", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    assert (
+        extraction_called == []
+    ), "extract_from_path should not be called for new records in dry-run mode"
+    captured = capsys.readouterr()
+    assert "would import" in captured.out
+
+
+def test_sync_backfills_model_for_unknown_records(tmp_path: Path, capsys, monkeypatch):
+    """sync updates model field on existing records that still have model='unknown'."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Pre-populate store with a record that has model="unknown" and the session path
+    existing = SessionRecord(harness="claude-code", model="unknown", trajectory_path=str(fake_file))
+    store.append(existing)
+
+    # discover_cc_sessions returns the same file; extract_cc_model will find a real model
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.extract_cc_model", lambda p: "claude-opus-4-6")
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-opus-4-6"
+
+
+def test_sync_signals_failure_does_not_double_count_skipped(tmp_path: Path, capsys, monkeypatch):
+    """When model update succeeds but signals extraction fails, session counts as updated not skipped."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionStore, SessionRecord
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    # Pre-populate with unknown model + unknown outcome → both updates attempted
+    existing = SessionRecord(harness="claude-code", model="unknown", trajectory_path=str(fake_file))
+    store.append(existing)
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+    # Model extraction succeeds
+    monkeypatch.setattr("gptme_sessions.cli.extract_cc_model", lambda p: "claude-opus-4-6")
+
+    # But signals extraction fails
+    def _raise_signals_error(p):
+        raise RuntimeError("signals extraction error")
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", _raise_signals_error)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+
+    # Session should be counted as updated (model was fixed), not skipped
+    assert "updated 1" in captured.out
+
+    # Model should have been updated despite signals failure
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].model == "claude-opus-4-6"
+
+
+def test_from_dict_migrates_jsonl_journal_path_to_trajectory_path():
+    """Legacy records with .jsonl journal_path are migrated to trajectory_path."""
+    data = {"journal_path": "/home/user/.local/share/gptme/logs/session/conversation.jsonl"}
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/home/user/.local/share/gptme/logs/session/conversation.jsonl"
+    assert r.journal_path is None
+
+
+def test_from_dict_migrates_directory_journal_path_to_trajectory_path():
+    """Legacy gptme sessions without conversation.jsonl store a directory in journal_path.
+
+    These were synced before trajectory_path was introduced, so migration must
+    handle the directory case (no .jsonl suffix) to prevent duplicate imports
+    on the next sync run.
+    """
+    data = {"journal_path": "/home/user/.local/share/gptme/logs/2026-01-15-120000-session"}
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/home/user/.local/share/gptme/logs/2026-01-15-120000-session"
+    assert r.journal_path is None
+
+
+def test_from_dict_preserves_md_journal_path():
+    """Human-written .md journal entries are NOT migrated to trajectory_path."""
+    data = {"journal_path": "/home/user/bob/journal/2026-01-15/session.md"}
+    r = SessionRecord.from_dict(data)
+    assert r.journal_path == "/home/user/bob/journal/2026-01-15/session.md"
+    assert r.trajectory_path is None
+
+
+def test_from_dict_no_migration_when_trajectory_path_already_set():
+    """When trajectory_path is already present, journal_path is not touched."""
+    data = {
+        "trajectory_path": "/some/other.jsonl",
+        "journal_path": "/home/user/.local/share/gptme/logs/session",
+    }
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path == "/some/other.jsonl"
+    assert r.journal_path == "/home/user/.local/share/gptme/logs/session"
+
+
+def test_from_dict_no_migration_when_trajectory_path_is_null():
+    """A new-style record with trajectory_path=null is NOT migrated.
+
+    ``filtered.get("trajectory_path") is None`` would incorrectly fire for
+    records where trajectory_path was written as JSON ``null``.  The guard
+    should use ``"trajectory_path" not in filtered`` so that an intentionally-
+    absent field triggers migration while an explicit null is left alone.
+    """
+    data = {
+        "trajectory_path": None,
+        "journal_path": "/home/user/.local/share/gptme/logs/session",
+    }
+    r = SessionRecord.from_dict(data)
+    assert r.trajectory_path is None
+    assert r.journal_path == "/home/user/.local/share/gptme/logs/session"
+
+
+def test_sync_signals_warns_when_trajectory_missing(tmp_path: Path, capsys, monkeypatch):
+    """sync --signals emits a warning when a stored record's trajectory file is gone."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    fake_file = tmp_path / "session.jsonl"
+    fake_file.touch()
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+
+    sessions_dir = tmp_path / "sessions"
+
+    # First sync — import without signals (outcome stays "unknown")
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    main()
+
+    # Delete the trajectory file to simulate a moved/deleted session
+    fake_file.unlink()
+
+    # sync --signals should warn about the missing trajectory
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "trajectory not found" in captured.err
+
+
+# -- discover sync-status tests ----------------------------------------------
+
+
+def _make_gptme_session_dir(base: Path, name: str) -> Path:
+    """Create a minimal fake gptme session directory with conversation.jsonl."""
+    session_dir = base / name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "conversation.jsonl").write_text("")
+    return session_dir
+
+
+def test_discover_shows_sync_status_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """discover marks sessions already in the store as [S]."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+    from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
+
+    session_dir = _make_gptme_session_dir(tmp_path, "session1")
+    traj_path = session_dir / "conversation.jsonl"
+    sessions_dir = tmp_path / "sessions"
+
+    # Pre-populate the store with a record whose journal_path matches the resolved trajectory.
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", journal_path=str(traj_path))
+    store.append(rec)
+
+    # discover_gptme_sessions returns directories; CLI resolves conversation.jsonl inside.
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_dir],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--harness", "gptme"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "[S]" in result.output
+    assert "[ ]" not in result.output  # synced session must not show empty bracket
+    assert "1 synced" in result.output
+    assert "0 pending" in result.output
+
+
+def test_discover_shows_sync_status_unsynced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """discover marks sessions not in the store with an empty sync indicator."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    session_dir = _make_gptme_session_dir(tmp_path, "session1")
+    sessions_dir = tmp_path / "sessions"
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_dir],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--harness", "gptme"],
+    )
+    assert result.exit_code == 0, result.output
+    # Unsynced session shows "[ ]" (space between brackets, not "S").
+    assert "[S]" not in result.output
+    assert "[ ]" in result.output
+    assert "0 synced" in result.output
+    assert "1 pending" in result.output
+
+
+def test_discover_unsynced_flag_filters_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--unsynced hides sessions already imported into the store."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+    from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
+
+    # Use distinctive names that won't appear in the pytest tmp path.
+    session_imported = _make_gptme_session_dir(tmp_path, "alpha-imported")
+    session_pending = _make_gptme_session_dir(tmp_path, "beta-pending")
+    sessions_dir = tmp_path / "sessions"
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", journal_path=str(session_imported / "conversation.jsonl"))
+    store.append(rec)
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_imported, session_pending],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--harness", "gptme", "--unsynced"],
+    )
+    assert result.exit_code == 0, result.output
+    # Imported session should be absent; pending session should appear.
+    assert "alpha-imported" not in result.output
+    assert "beta-pending" in result.output
+    # Footer shows post-filter count with total and skipped breakdown.
+    assert "1 session(s) found" in result.output
+    assert "2 total" in result.output
+    assert "1 already synced" in result.output
+
+
+def test_discover_unsynced_flag_all_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--unsynced prints an 'all synced' message when nothing is pending."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+    from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
+
+    session_dir = _make_gptme_session_dir(tmp_path, "session1")
+    traj_path = session_dir / "conversation.jsonl"
+    sessions_dir = tmp_path / "sessions"
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    rec = SessionRecord(harness="gptme", journal_path=str(traj_path))
+    store.append(rec)
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_dir],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--harness", "gptme", "--unsynced"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "already synced" in result.output
+
+
+def test_discover_unsynced_flag_no_sessions_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--unsynced with no discovered sessions shows 'No sessions found', not 'already synced'."""
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    sessions_dir = tmp_path / "sessions"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--unsynced"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "No sessions found" in result.output
+    assert "already synced" not in result.output
+
+
+def test_discover_json_unsynced_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--json --unsynced with a pending session returns {sessions, total_discovered}."""
+    import json as _json
+
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+
+    fake_file = tmp_path / "pending.jsonl"
+    fake_file.touch()
+    monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_codex_sessions", lambda start, end: [fake_file]
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    sessions_dir = tmp_path / "sessions"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--unsynced", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    data = _json.loads(result.output)
+    assert isinstance(data, dict)
+    assert data["total_discovered"] == 1
+    assert len(data["sessions"]) == 1
+    assert data["sessions"][0]["synced"] is False
+
+
+def test_discover_json_unsynced_all_synced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """--json --unsynced with all sessions already synced: sessions=[], total_discovered>0.
+
+    This distinguishes 'all synced' from 'nothing found' for scripting consumers.
+    """
+    import json as _json
+
+    from click.testing import CliRunner
+    from gptme_sessions.cli import cli
+    from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
+
+    session_dir = _make_gptme_session_dir(tmp_path, "synced-session")
+    traj_path = session_dir / "conversation.jsonl"
+    sessions_dir = tmp_path / "sessions"
+
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(harness="gptme", journal_path=str(traj_path)))
+
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_gptme_sessions",
+        lambda start, end: [session_dir],
+    )
+    monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda start, end: [])
+    monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda start, end: [])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "discover", "--unsynced", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    data = _json.loads(result.output)
+    assert isinstance(data, dict)
+    assert data["sessions"] == []
+    # total_discovered > 0 tells consumers "all were synced, not missing"
+    assert data["total_discovered"] == 1
+
+
+# -- show command tests -------------------------------------------------------
+
+
+def test_show_displays_session_details(tmp_path: Path, capsys, monkeypatch):
+    """show prints human-readable details for a session matched by full ID."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    record = SessionRecord(
+        session_id="abcd1234",
+        harness="claude-code",
+        model="claude-opus-4-6",
+        run_type="autonomous",
+        outcome="productive",
+        duration_seconds=150,
+        category="code",
+        deliverables=["pr#42"],
+    )
+    store.append(record)
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "abcd1234" in captured.out
+    assert "Harness:      claude-code" in captured.out
+    assert "Outcome:      productive" in captured.out
+    assert "pr#42" in captured.out
+
+
+def test_show_prefix_match(tmp_path: Path, capsys, monkeypatch):
+    """show resolves session by ID prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", outcome="noop"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "abcd1234" in captured.out
+
+
+def test_show_unknown_id_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
+    """show exits non-zero when no session matches the given prefix."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "zzz"]
+    )
+    rc = main()
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "No session found matching" in captured.err
+
+
+def test_show_ambiguous_prefix_exits_nonzero(tmp_path: Path, capsys, monkeypatch):
+    """show exits non-zero when prefix matches multiple sessions."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme"))
+    store.append(SessionRecord(session_id="abcd5678", harness="gptme"))
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd"]
+    )
+    rc = main()
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "Ambiguous prefix" in captured.err
+
+
+def test_show_json_output(tmp_path: Path, capsys, monkeypatch):
+    """show --json outputs valid JSON with all session fields."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234",
+            harness="gptme",
+            model="claude-opus-4-6",
+            outcome="productive",
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234", "--json"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["session_id"] == "abcd1234"
+    assert data["harness"] == "gptme"
+    assert data["outcome"] == "productive"
+
+
+def test_show_duration_hours_aware(tmp_path: Path, capsys, monkeypatch):
+    """show displays duration in hours for sessions >= 60 minutes."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234",
+            harness="gptme",
+            outcome="productive",
+            duration_seconds=5400,  # 1h 30m
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "1h 30m 0s" in captured.out
+    assert "90m" not in captured.out
+
+
+def test_show_displays_selector_fields(tmp_path: Path, capsys, monkeypatch):
+    """show includes recommended_category, selector_mode, and token_count in human-readable output."""
+    import sys
+
+    from gptme_sessions.cli import main
+    from gptme_sessions import SessionRecord, SessionStore
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="abcd1234",
+            harness="gptme",
+            outcome="productive",
+            recommended_category="code",
+            selector_mode="scored",
+            token_count=42000,
+        )
+    )
+
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Recommended:  code" in captured.out  # recommended_category
+    assert "scored" in captured.out  # selector_mode
+    assert "42,000" in captured.out  # token_count formatted with commas
+
+
+def test_show_zero_token_count_displayed(tmp_path: Path, capsys, monkeypatch):
+    """show renders token_count=0 — truthiness check must not suppress it."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(SessionRecord(session_id="abcd1234", harness="gptme", token_count=0))
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "abcd1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Tokens:" in captured.out, "token_count=0 should be shown, not suppressed"
+    assert "0" in captured.out
+
+
+def test_show_empty_id_exits_nonzero(tmp_path: Path):
+    """show rejects an empty session_id with a clear error message."""
+    from click.testing import CliRunner
+
+    from gptme_sessions.cli import cli
+
+    sessions_dir = tmp_path / "sessions"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(sessions_dir), "show", ""],
+    )
+    assert result.exit_code != 0
+    assert "Session ID must not be empty" in result.output
+
+
+def test_show_displays_llm_judge_fields(tmp_path: Path, capsys, monkeypatch):
+    """show renders llm_judge_score, llm_judge_reason, and llm_judge_model."""
+    import sys
+
+    from gptme_sessions import SessionRecord, SessionStore
+    from gptme_sessions.cli import main
+
+    sessions_dir = tmp_path / "sessions"
+    store = SessionStore(sessions_dir=sessions_dir)
+    store.append(
+        SessionRecord(
+            session_id="judge1234",
+            harness="gptme",
+            llm_judge_score=0.85,
+            llm_judge_reason="Made good progress on task.",
+            llm_judge_model="claude-haiku-4-5",
+        )
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gptme-sessions", "--sessions-dir", str(sessions_dir), "show", "judge1234"],
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Judge score:" in captured.out
+    assert "0.85" in captured.out
+    assert "Judge reason:" in captured.out
+    assert "Made good progress on task." in captured.out
+    assert "Judge model:" in captured.out
+    assert "claude-haiku-4-5" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# journal_paths signal extraction tests
+# ---------------------------------------------------------------------------
+
+
+def test_extract_signals_cc_journal_paths_captured():
+    """CC trajectory: journal writes appear in journal_paths, not file_writes."""
+    journal_path = "/home/bob/bob/journal/2026-03-01/session.md"
+    code_path = "/home/bob/bob/src/main.py"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": journal_path},
+                    },
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": code_path},
+                    },
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["file_writes"] == [code_path]
+    assert sigs["journal_paths"] == [journal_path]
+
+
+def test_extract_signals_gptme_journal_paths_captured():
+    """gptme trajectory: journal writes appear in journal_paths, not file_writes."""
+    journal_path = "/home/bob/bob/journal/2026-03-01/session.md"
+    code_path = "/home/bob/bob/src/main.py"
+    msgs = [
+        {
+            "role": "assistant",
+            "content": f'@save(c0): {{"path": "{journal_path}"}}',
+            "timestamp": "2026-03-01T10:00:00+00:00",
+        },
+        {
+            "role": "assistant",
+            "content": f'@save(c1): {{"path": "{code_path}"}}',
+            "timestamp": "2026-03-01T10:01:00+00:00",
+        },
+    ]
+    sigs = extract_signals(msgs)
+    assert sigs["file_writes"] == [code_path]
+    assert sigs["journal_paths"] == [journal_path]
+
+
+def test_extract_signals_codex_journal_paths_captured():
+    """Codex trajectory: journal writes appear in journal_paths, not file_writes."""
+    journal_path = "/home/bob/bob/journal/2026-03-01/session.md"
+    code_path = "/home/bob/bob/src/main.py"
+    msgs = [
+        {
+            "type": "response_item",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call1",
+                "arguments": json.dumps({"cmd": f"cat > {journal_path} << 'EOF'\nentry\nEOF"}),
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-03-01T10:01:00.000Z",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call2",
+                "arguments": json.dumps({"cmd": f"cat > {code_path} << 'EOF'\ncode\nEOF"}),
+            },
+        },
+    ]
+    sigs = extract_signals_codex(msgs)
+    assert sigs["file_writes"] == [code_path]
+    assert sigs["journal_paths"] == [journal_path]
+
+
+def test_extract_signals_copilot_journal_paths_captured():
+    """Copilot trajectory: journal writes appear in journal_paths, not file_writes."""
+    journal_path = "/home/bob/bob/journal/2026-03-01/session.md"
+    code_path = "/home/bob/bob/src/main.py"
+    msgs = [
+        {
+            "type": "assistant.message",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "data": {
+                "toolRequests": [
+                    {
+                        "name": "write",
+                        "toolCallId": "tc1",
+                        "arguments": {"path": journal_path},
+                    },
+                    {
+                        "name": "write",
+                        "toolCallId": "tc2",
+                        "arguments": {"path": code_path},
+                    },
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_copilot(msgs)
+    assert sigs["file_writes"] == [code_path]
+    assert sigs["journal_paths"] == [journal_path]
+
+
+def test_extract_signals_cc_no_journal_paths_empty():
+    """CC trajectory: journal_paths is empty when no journal writes occur."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": "/home/bob/bob/src/main.py"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["journal_paths"] == []
+    assert len(sigs["file_writes"]) == 1
+
+
+def test_extract_signals_cc_bash_heredoc_journal_path(tmp_path: Path):
+    """CC Bash tool: cat heredoc to journal path is detected in journal_paths."""
+    journal_file = tmp_path / "journal" / "2026-03-18" / "session.md"
+    journal_file.parent.mkdir(parents=True)
+    journal_file.write_text("entry")
+    journal_path = str(journal_file)
+
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-18T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": f"cat >> {journal_path} << 'EOF'\n## Entry\nEOF"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["journal_paths"] == [journal_path]
+    assert sigs["file_writes"] == []
+
+
+def test_extract_signals_cc_bash_heredoc_nonexistent_journal_skipped(tmp_path: Path):
+    """CC Bash tool: journal path that doesn't exist on disk is skipped (false positive guard)."""
+    nonexistent = str(tmp_path / "journal" / "2026-03-18" / "session.md")
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-18T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": f"cat >> {nonexistent} << 'EOF'\n## Entry\nEOF"},
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["journal_paths"] == []
+
+
+def test_extract_signals_cc_bash_escaped_date_expansion(tmp_path: Path):
+    """CC Bash tool: escaped \\$(date +%Y-%m-%d) in heredoc path is resolved correctly."""
+    journal_dir = tmp_path / "journal" / "2026-03-18"
+    journal_dir.mkdir(parents=True)
+    journal_file = journal_dir / "session.md"
+    journal_file.write_text("entry")
+    journal_path_template = str(tmp_path / "journal" / r"\$(date +%Y-%m-%d)" / "session.md")
+
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-18T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {
+                            "command": f"cat >> {journal_path_template} << 'EOF'\n## Entry\nEOF"
+                        },
+                    }
+                ],
+            },
+        }
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Escaped \$(date +%Y-%m-%d) should be resolved to 2026-03-18
+    assert sigs["journal_paths"] == [str(journal_file)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Forward-Progress Signals: prs_submitted and issues_closed
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_pr_create_msgs(pr_url: str = "https://github.com/owner/repo/pull/42") -> list[dict]:
+    """Build a minimal CC trajectory where gh pr create succeeds."""
+    tool_id = "bash_pr_create_001"
+    return [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Bash",
+                        "input": {
+                            "command": "gh pr create --title 'feat: add thing' --body 'description'"
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "is_error": False,
+                        "content": f"Creating pull request for feature-branch into master\n\n{pr_url}",
+                    }
+                ],
+            },
+        },
+    ]
+
+
+def _make_issue_close_msgs(issue_num: int = 99) -> list[dict]:
+    """Build a minimal CC trajectory where gh issue close succeeds."""
+    tool_id = "bash_issue_close_001"
+    return [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Bash",
+                        "input": {
+                            "command": f"gh issue close {issue_num} --comment 'Fixed in PR #42'"
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:03.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "is_error": False,
+                        "content": "✓ Closed issue #99",
+                    }
+                ],
+            },
+        },
+    ]
+
+
+def test_extract_signals_cc_pr_create():
+    """gh pr create with successful URL output is tracked in prs_submitted."""
+    msgs = _make_pr_create_msgs("https://github.com/owner/repo/pull/42")
+    sigs = extract_signals_cc(msgs)
+    assert sigs["prs_submitted"] == ["PR #42"]
+    assert sigs["issues_closed"] == 0
+
+
+def test_extract_signals_cc_pr_create_no_url():
+    """gh pr create with no URL in output (e.g. draft, error) is NOT counted."""
+    tool_id = "bash_pr_create_nourl"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Bash",
+                        "input": {"command": "gh pr create --draft --title 'WIP'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "is_error": False,
+                        "content": "PR creation failed: already exists",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["prs_submitted"] == []
+
+
+def test_extract_signals_cc_pr_create_multiple():
+    """Multiple gh pr create calls (e.g. 2 PRs from 2 worktrees) are all tracked."""
+    tool_id1, tool_id2 = "bash_pr_001", "bash_pr_002"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id1,
+                        "name": "Bash",
+                        "input": {"command": "gh pr create --title 'feat: A'"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": tool_id2,
+                        "name": "Bash",
+                        "input": {"command": "gh pr create --title 'fix: B'"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id1,
+                        "is_error": False,
+                        "content": "https://github.com/owner/repo/pull/100",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id2,
+                        "is_error": False,
+                        "content": "https://github.com/owner/repo/pull/101",
+                    },
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert len(sigs["prs_submitted"]) == 2
+    assert "PR #100" in sigs["prs_submitted"]
+    assert "PR #101" in sigs["prs_submitted"]
+
+
+def test_extract_signals_cc_issue_close():
+    """gh issue close N command increments issues_closed."""
+    msgs = _make_issue_close_msgs(issue_num=99)
+    sigs = extract_signals_cc(msgs)
+    assert sigs["issues_closed"] == 1
+    assert sigs["prs_submitted"] == []
+
+
+def test_extract_signals_cc_issue_close_multiple():
+    """Multiple confirmed gh issue close commands accumulate in issues_closed."""
+    tool_id1, tool_id2 = "bash_close_001", "bash_close_002"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id1,
+                        "name": "Bash",
+                        "input": {"command": "gh issue close 10"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": tool_id2,
+                        "name": "Bash",
+                        "input": {"command": "gh issue close 11 --comment 'done'"},
+                    },
+                ],
+            },
+        },
+        # Both closes succeed
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:03.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id1,
+                        "is_error": False,
+                        "content": "✓ Closed issue #10",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id2,
+                        "is_error": False,
+                        "content": "✓ Closed issue #11",
+                    },
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["issues_closed"] == 2
+
+
+def test_extract_signals_cc_issue_close_error_not_counted():
+    """Failed gh issue close (is_error=True) does NOT increment issues_closed."""
+    tool_id = "bash_close_fail"
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Bash",
+                        "input": {"command": "gh issue close 999"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:02.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "is_error": True,  # permission denied or issue not found
+                        "content": "Error: issue not found or you lack permission",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    assert sigs["issues_closed"] == 0
+
+
+def test_extract_signals_cc_pr_create_empty_tool_id():
+    """gh pr create with empty tool_id does not cause a spurious PR to be attributed."""
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "",  # empty tool_id edge case
+                        "name": "Bash",
+                        "input": {"command": "gh pr create --title 'test' --body 'body'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:05.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "",  # empty id in result
+                        "is_error": False,
+                        "content": "https://github.com/owner/repo/pull/77\n",
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Empty tool_id means we cannot safely attribute the URL to the right command
+    assert sigs["prs_submitted"] == []
+
+
+def test_grade_signals_pr_submitted_alone():
+    """A session with 1 PR submitted (no commits) grades like ~1 commit (0.60)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 3},
+        "prs_submitted": ["PR #42"],
+        "issues_closed": 0,
+    }
+    grade = grade_signals(sigs)
+    assert grade == pytest.approx(0.60)
+
+
+def test_grade_signals_two_prs_submitted():
+    """Two PRs submitted grades like ~2 commits (0.70)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 6},
+        "prs_submitted": ["PR #42", "PR #43"],
+        "issues_closed": 0,
+    }
+    grade = grade_signals(sigs)
+    assert grade == pytest.approx(0.70)
+
+
+def test_grade_signals_issues_closed_boost():
+    """Closing issues boosts grade above pure-commit threshold."""
+    sigs_base = {
+        "git_commits": ["fix: something (abc1234)"],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 4},
+    }
+    sigs_with_close = {**sigs_base, "issues_closed": 2}
+    grade_base = grade_signals(sigs_base)
+    grade_with_close = grade_signals(sigs_with_close)
+    # 1 commit alone → 0.60; with 2 issue closes: effective_units=1.8 → still < 2.5 → 0.70
+    assert grade_with_close > grade_base
+    assert grade_with_close == pytest.approx(0.70)
+
+
+def test_grade_signals_category_aware_monitoring():
+    """Monitoring sessions with ≥1 gh_interaction reach 0.55 tier (not floor at 0.40)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 5},
+        "gh_interactions": 2,  # 2 review comments posted
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    # Without category: effective_writes=2 < 3 → floor at 0.40
+    assert grade_signals(sigs) == pytest.approx(0.40)
+    # With monitoring category: any interaction clears 0.55 tier
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.55)
+
+
+def test_grade_signals_category_aware_triage():
+    """Triage sessions with 1 gh_interaction reach 0.55 tier."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 3},
+        "gh_interactions": 1,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    assert grade_signals(sigs) == pytest.approx(0.40)
+    assert grade_signals(sigs, category="triage") == pytest.approx(0.55)
+
+
+def test_grade_signals_category_aware_no_interaction():
+    """Non-commit category with 0 gh_interactions but clean execution gets neutral grade."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 4},
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    # Monitoring sessions that ran tools without errors but found no work are
+    # "correctly empty" rather than failed. They get a neutral 0.35 instead
+    # of the 0.25 floor to avoid systematic bias in bandit updates.
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.35)
+
+
+def test_grade_signals_category_aware_no_interaction_with_errors():
+    """Non-commit category at the error-rate boundary gets the raised 0.35 floor.
+
+    error_rate = 1/20 = 0.05, which is NOT > 0.05, so no error penalty applies.
+    The PR that removed the `errors == 0` gate means non-commit categories now
+    get 0.35 regardless of error count (penalty still applies for >5% error rate).
+    """
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 1,
+        "retry_count": 0,
+        # Keep error_rate at 0.05 so this test isolates the pre-penalty branch
+        # selection instead of the downstream error-rate penalty.
+        "tool_calls": {"Bash": 20},
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.35)
+
+
+def test_grade_signals_category_does_not_affect_commit_tiers():
+    """Category hint does not change grading when commits are present."""
+    sigs = {
+        "git_commits": ["feat: something (abc1234)"],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 4},
+        "gh_interactions": 1,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    # effective_units=1 < 1.5 → 0.60 regardless of category
+    assert grade_signals(sigs) == pytest.approx(0.60)
+    assert grade_signals(sigs, category="pm-react") == pytest.approx(0.60)
+
+
+def test_grade_signals_backward_compat():
+    """Old signals dicts without prs_submitted/issues_closed grade identically."""
+    # Signals from before FPS addition — no new keys
+    sigs_old = {
+        "git_commits": ["fix: something (abc1234)", "refactor: other (def5678)"],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 5},
+    }
+    # Same signals with explicit zeros
+    sigs_new = {**sigs_old, "prs_submitted": [], "issues_closed": 0}
+    assert grade_signals(sigs_old) == grade_signals(sigs_new)
+    assert grade_signals(sigs_old) == pytest.approx(0.70)  # 2 commits → 0.70
+
+
+def test_infer_category_monitoring_fallback():
+    """infer_category returns 'monitoring' for high-gh_interactions, commit-free sessions."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 3,
+    }
+    assert infer_category(sigs) == "pm-react"
+
+
+def test_infer_category_monitoring_not_triggered_with_commits():
+    """Monitoring fallback does not override when commits are present."""
+    sigs = {
+        "git_commits": ["fix: something (abc1234)", "fix: other (def5678)"],
+        "file_writes": ["scripts/foo.py", "scripts/bar.py"],
+        "gh_interactions": 5,
+    }
+    # Has commits → should classify as code, not monitoring
+    result = infer_category(sigs)
+    assert result != "monitoring"
+
+
+def test_infer_category_monitoring_not_triggered_below_threshold():
+    """Monitoring fallback requires at least 2 gh_interactions."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 1,
+    }
+    assert infer_category(sigs) is None
+
+
+def test_grade_signals_monitoring_via_infer_category():
+    """End-to-end: infer_category detects monitoring, grade_signals applies relaxed threshold."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 4},
+        "gh_interactions": 2,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    # Without wiring: category=None → effective_writes=2 < 3 → 0.40
+    assert grade_signals(sigs, category=None) == pytest.approx(0.40)
+    # With infer_category providing "pm-react" → relaxed threshold → 0.55
+    category = infer_category(sigs)
+    assert category == "pm-react"
+    assert grade_signals(sigs, category=category) == pytest.approx(0.55)
+
+
+def test_is_productive_pr_submitted():
+    """is_productive returns True when a PR was submitted (even no commits/writes)."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 0,
+        "prs_submitted": ["PR #99"],
+    }
+    assert is_productive(sigs)
+
+
+def test_is_productive_issue_closed():
+    """is_productive returns True when an issue was successfully closed."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "issues_closed": 1,
+    }
+    assert is_productive(sigs)
+
+
+def test_is_productive_issue_closed_zero():
+    """is_productive returns False when issues_closed is 0 and nothing else."""
+    sigs = {
+        "git_commits": [],
+        "file_writes": [],
+        "gh_interactions": 0,
+        "prs_submitted": [],
+        "issues_closed": 0,
+    }
+    assert not is_productive(sigs)
+
+
+def test_extract_signals_cc_background_commit_no_duplicate(tmp_path: Path):
+    """Background bash commit must not be double-counted when result_str also has the output.
+
+    CC streams the full background task output into result_str when the command
+    finishes. So the commit line appears in BOTH result_str (direct scan) AND the
+    background output file (bg file scan). Without deduplication the commit is
+    appended twice.
+
+    The fix: track hashes found in result_str and skip them in the bg file scan.
+    """
+    commit_line = (
+        "[feat/my-feature a1b2c3d] feat(test): add background dedup test\n 2 files changed\n"
+    )
+    bg_output = tmp_path / "abc123.output"
+    bg_output.write_text("Some prek output\n✓ All pre-commit checks passed\n" + commit_line)
+
+    bash_id = "bash_bg_dedup_001"
+    # result_str contains BOTH the bg file pointer AND the full output (CC streaming)
+    result_content = (
+        f"Command running in background with ID: abc123. "
+        f"Output is being written to: {bg_output}\n"
+        f"Some prek output\n✓ All pre-commit checks passed\n" + commit_line
+    )
+    msgs = [
+        {
+            "type": "assistant",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": bash_id,
+                        "name": "Bash",
+                        "input": {"command": "git safe-commit signals.py -m 'feat: add test'"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-24T10:00:10.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bash_id,
+                        "is_error": False,
+                        "content": result_content,
+                    }
+                ],
+            },
+        },
+    ]
+    sigs = extract_signals_cc(msgs)
+    # Must be exactly 1, not 2
+    assert (
+        len(sigs["git_commits"]) == 1
+    ), f"Expected 1 commit, got {len(sigs['git_commits'])}: {sigs['git_commits']}"
+    assert "feat(test): add background dedup test" in sigs["git_commits"][0]
+    assert "a1b2c3d" in sigs["git_commits"][0]
+
+
+def test_session_store_atomic_append(tmp_path: Path):
+    """append() durably writes each record (fsync) and leaves no double
+    newlines between successive records."""
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(model="opus", outcome="productive", session_id="r1"))
+    store.append(SessionRecord(model="sonnet", outcome="productive", session_id="r2"))
+
+    # Read content directly — no trailing newlines after final record
+    content = store.path.read_bytes()
+    assert not content.endswith(b"\n\n"), "no double newline from atomic write"
+
+    # All records survive a load cycle
+    records = store.load_all()
+    assert len(records) == 2
+    assert records[0].session_id == "r1"
+    assert records[1].session_id == "r2"
+
+
+def test_session_store_corrupt_tail_partial_line(tmp_path: Path):
+    """A partial last line (truncated JSON) does not block append and emits a warning.
+
+    This simulates the exact failure from operator session dea1 (2026-05-31):
+    a process kill mid-write leaves a 105-byte partial record as the last line,
+    silently blocking all future recordings via post_session().
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+
+    # Write good records first
+    store.append(SessionRecord(model="opus", outcome="productive", session_id="pre-1"))
+    store.append(SessionRecord(model="sonnet", outcome="productive", session_id="pre-2"))
+
+    # Inject a partial last line (truncated JSON — the exact failure mode)
+    with open(store.path, "a", encoding="utf-8") as f:
+        f.write('{"session_id": "6242a3bc", "timestamp": "2026-05-30T11:37:20')
+
+    # Append should detect and handle the corrupt tail, then add the new record
+    store.append(SessionRecord(model="haiku", outcome="productive", session_id="post-1"))
+
+    # All good records should survive
+    records = store.load_all()
+    assert len(records) == 3, f"Expected 3 records, got {len(records)}"
+    session_ids = [r.session_id for r in records]
+    assert "pre-1" in session_ids
+    assert "pre-2" in session_ids
+    assert "post-1" in session_ids
+    assert "6242a3bc" not in session_ids  # corrupt line was stripped

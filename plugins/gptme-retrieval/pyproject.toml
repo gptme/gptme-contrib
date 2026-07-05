@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gptme-retrieval"
+version = "0.1.0"
+description = "Retrieval hook plugin for gptme - automatic context retrieval using qmd or other backends"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "gptme",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.0",
+]
+
+[project.entry-points."gptme.plugins"]
+gptme_retrieval = "gptme_retrieval:plugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]

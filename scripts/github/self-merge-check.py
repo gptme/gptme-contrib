@@ -1,0 +1,1299 @@
+#!/usr/bin/env python3
+"""Check whether a PR qualifies for self-merge under the agent's self-merge policy.
+
+Evaluates a PR against a conservative set of rules that determine whether an
+autonomous AI agent can safely merge its own PRs without human review.
+
+Policy summary:
+- CI must be green (or skipped)
+- Greptile review must be present and have no unresolved threads
+- PR must be authored by the authenticated user
+- Changed files must fall into a low-risk category (tests, docs, lessons, internal
+  tooling, task metadata)
+- Sensitive/security/infra paths immediately disqualify the PR
+
+The workspace repo (the repo where the agent's brain lives) is detected automatically.
+Cross-repo PRs (agent pushing to external repos) are disqualified by default.
+To allow cross-repo merges, either:
+- Set WORKSPACE_REPO to a comma- or whitespace-separated allowlist of owner/name
+  entries (e.g. "ErikBjare/bob,gptme/gptme,gptme/gptme-contrib") — all other
+  category/CI/Greptile checks still apply.
+- Or clear WORKSPACE_REPO entirely (set it to empty string) to disable the
+  cross-repo restriction (not recommended; widens the merge surface).
+
+Usage:
+    python3 scripts/github/self-merge-check.py <pr-url>
+    python3 scripts/github/self-merge-check.py --repo gptme/gptme 123
+    python3 scripts/github/self-merge-check.py --json <pr-url>
+
+Environment:
+    GH_RATE_LIMIT_HELPER
+                    Optional explicit path to a GitHub API rate-limit gate
+                    helper. When set, it must point to an executable helper or
+                    the script exits with code 2 instead of silently bypassing
+                    the gate.
+                    Falls back to BOB_GH_RATE_LIMIT_HELPER for compatibility.
+    FORCE_SELF_MERGE_CHECK
+                    Set to bypass the optional GitHub API rate-limit gate.
+                    Falls back to BOB_FORCE_SELF_MERGE_CHECK for compatibility.
+    WORKSPACE_REPO  Allowlist of workspace repos (owner/name), comma- or
+                    whitespace-separated. Auto-detected single repo used when
+                    unset. Set to empty string to disable the cross-repo
+                    restriction entirely.
+    SELF_MERGE_ALLOWED_PATHS
+                    Per-repo path-glob allowlist for files that don't match
+                    the generic self-merge categories. Format:
+                    "owner/repo:path-glob[,owner/repo:path-glob...]".
+                    Uses repo-relative segment globs (* stays within one
+                    directory segment; ** matches zero or more directories).
+
+Exit codes:
+    0   Eligible for self-merge
+    1   Not eligible for self-merge
+    2   Error (invalid args, gh failure, or explicit gate-helper misconfig)
+    76  Deferred by the GitHub API rate-limit gate
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from fnmatch import fnmatchcase
+from functools import cache
+from pathlib import Path
+from typing import Any, cast
+
+MAX_GRAPHQL_PAGE_SIZE = 100
+DEFAULT_MIN_GREPTILE_SCORE = 5
+
+DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
+SPEC_LIKE_DOCS = {
+    "README.md",
+    "ABOUT.md",
+    "ARCHITECTURE.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "SOCIAL.md",
+    "GOALS.md",
+    "GLOSSARY.md",
+    "TASKS.md",
+    "OVERVIEW.md",
+}
+TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
+SENSITIVE_PATH_PREFIXES = (
+    ".github/workflows/",
+    "scripts/deploy",
+    # Use prefix without extension — catches hyphen/underscore variants and versioned copies
+    # e.g. self-merge-check.py, self_merge_check.py, self-merge-check-v2.py all match
+    "scripts/github/self-merge-check",
+    "scripts/github/pr-greptile-trigger",
+    "scripts/github/greptile-helper",
+    # Downstream agent workspaces commonly use these loop-control entrypoints.
+    # Guard both hyphenated and underscored spellings so naming drift still
+    # forces human review.
+    "scripts/session-bandit",
+    "scripts/session_bandit",
+    "scripts/state-delta",
+    "scripts/state_delta",
+    # Loop-orchestration entrypoints: the control path that selects work and
+    # drives autonomous/monitoring runs (and can itself trigger self-merges).
+    # A change here can alter how the loop gates its own merges, so it must go
+    # through human review. Prefixes (no extension) catch hyphen/underscore and
+    # nested layouts: scripts/autonomous-run.sh, scripts/autonomous-run-cc.sh,
+    # scripts/runs/autonomous/autonomous-loop.sh, scripts/runs/github/project-monitoring.sh.
+    "scripts/autonomous-run",
+    "scripts/autonomous_run",
+    "scripts/autonomous-loop",
+    "scripts/autonomous_loop",
+    "scripts/runs/autonomous/",
+    "scripts/runs/github/project-monitoring",
+    "scripts/runs/github/project_monitoring",
+    "infra/",
+    "k8s/",
+    "secrets/",
+)
+SENSITIVE_PATH_PARTS = (
+    "secret",
+    "credential",
+    "token",
+    "auth",
+    "authentication",
+    "authorization",
+    "oauth",
+    "oauth2",
+    "ssh",
+    "deploy",
+    "deployment",
+    "deployer",
+    "systemd",
+    "kube",
+    "k8s",
+)
+INTERNAL_TOOLING_PREFIXES = (
+    "scripts/",
+    "packages/",
+)
+TASK_METADATA_PREFIXES = (
+    "tasks/",
+    "journal/",
+)
+LESSON_PREFIXES = ("lessons/",)
+# Exact full-path match — intentionally only root-level files.
+# Nested Makefiles (e.g. scripts/Makefile, packages/Makefile) fall through to
+# is_internal_tooling() instead. If that scope should change, extend this set.
+BOT_CONFIG_FILES = {
+    ".pre-commit-config.yaml",
+    "Makefile",
+}
+BOT_CONFIG_PREFIXES = (".github/",)
+SELF_MERGE_ALLOWED_PATHS_ENV = "SELF_MERGE_ALLOWED_PATHS"
+GATE_HELPER_ENV = "GH_RATE_LIMIT_HELPER"
+GATE_HELPER_ENV_LEGACY = "BOB_GH_RATE_LIMIT_HELPER"
+FORCE_SELF_MERGE_CHECK_ENV = "FORCE_SELF_MERGE_CHECK"
+FORCE_SELF_MERGE_CHECK_ENV_LEGACY = "BOB_FORCE_SELF_MERGE_CHECK"
+GATE_DEFER_EXIT = 76
+
+
+@dataclass
+class CheckResult:
+    eligible: bool
+    repo: str
+    number: int
+    url: str
+    title: str
+    author: str
+    category: str | None = None
+    reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
+    # HEAD commit OID at time of check — callers should re-verify before merging
+    head_sha: str = ""
+
+
+def run_gh(args: list[str], timeout: int = 30) -> str:
+    """Run gh and return stdout, or empty string on failure."""
+    try:
+        result = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            if result.stderr:
+                print(f"[gh error] {result.stderr.strip()}", file=sys.stderr)
+            return ""
+        return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def get_gh_user() -> str:
+    return run_gh(["api", "user", "-q", ".login"]) or ""
+
+
+@cache
+def merge_permission(repo: str) -> bool | None:
+    """Whether the authenticated user can merge PRs in ``repo``.
+
+    Returns True if the user has push/maintain/admin on the repo, False if they
+    explicitly lack it, or None if the permission could not be determined (gh
+    error / unexpected payload). None is treated as "unknown" by the caller —
+    a warning, not a disqualifier — so a transient API hiccup doesn't block a
+    legitimate self-merge. A definitive False does disqualify: it means the
+    merge attempt would fail with a permissions error (e.g. an agent that
+    contributes to an upstream repo via a fork has pull-only access).
+    """
+    raw = run_gh(["api", f"repos/{repo}", "-q", ".permissions"])
+    if not raw:
+        return None
+    try:
+        perms = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(perms, dict):
+        return None
+    # If none of the expected keys are present the payload shape is unexpected —
+    # treat as unknown so a future API schema change doesn't false-disqualify.
+    if not any(k in perms for k in ("push", "maintain", "admin")):
+        return None
+    return bool(perms.get("push") or perms.get("maintain") or perms.get("admin"))
+
+
+def _resolve_gate_helper(script_path: Path | None = None) -> str | None:
+    """Resolve the optional GitHub API rate-limit gate helper."""
+
+    explicit_helper = os.environ.get(GATE_HELPER_ENV) or os.environ.get(
+        GATE_HELPER_ENV_LEGACY
+    )
+    if explicit_helper:
+        helper = Path(explicit_helper).expanduser()
+        # Determine which env var actually supplied the value for error messages
+        source_env = (
+            GATE_HELPER_ENV
+            if GATE_HELPER_ENV in os.environ
+            and os.environ[GATE_HELPER_ENV] == explicit_helper
+            else GATE_HELPER_ENV_LEGACY
+        )
+        if not helper.is_file():
+            raise RuntimeError(f"{source_env} points to a missing helper: {helper}")
+        if not os.access(helper, os.X_OK):
+            raise RuntimeError(f"{source_env} is not executable: {helper}")
+        return str(helper)
+
+    script = (script_path or Path(__file__)).resolve()
+    if len(script.parents) < 3:
+        return None
+
+    # Auto-probe one explicit workspace-sibling location instead of walking
+    # arbitrary ancestors and executing the first matching filename we find.
+    repo_root = script.parents[2]
+    candidate = repo_root.parent / "scripts" / "github-rate-limit-health.sh"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
+
+
+def _maybe_defer_for_rate_limit(
+    *, json_output: bool, script_path: Path | None = None
+) -> int | None:
+    if os.environ.get(FORCE_SELF_MERGE_CHECK_ENV) or os.environ.get(
+        FORCE_SELF_MERGE_CHECK_ENV_LEGACY
+    ):
+        return None
+
+    gate_helper = _resolve_gate_helper(script_path)
+    if not gate_helper:
+        return None
+
+    try:
+        gate = subprocess.run(
+            [gate_helper, "--gate"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # Gate itself failed — don't block the real check on a broken helper.
+        return None
+
+    if gate.returncode != GATE_DEFER_EXIT:
+        return None
+
+    msg = (
+        "self-merge-check deferred: GitHub API rate limit over threshold "
+        f"(gate exit {GATE_DEFER_EXIT}). Set {FORCE_SELF_MERGE_CHECK_ENV}=1 "
+        f"(or {FORCE_SELF_MERGE_CHECK_ENV_LEGACY}=1) to override."
+    )
+    if json_output:
+        print(json.dumps({"deferred": True, "reason": msg}))
+    else:
+        print(msg, file=sys.stderr)
+    return GATE_DEFER_EXIT
+
+
+def detect_workspace_repo() -> str:
+    """Infer workspace repo from the git remote of the current working directory.
+
+    Tries CWD first, then the script's directory, walking up to find a .git
+    directory and reads the origin remote URL to convert it to owner/repo format.
+
+    Returns empty string if detection fails.
+    """
+
+    # Try to find git root from current working directory first, then script dir
+    seen_roots: set[Path] = set()
+    for start_dir in (Path.cwd(), Path(__file__).resolve().parent):
+        candidate = start_dir
+        for _ in range(10):  # max 10 levels up
+            if (candidate / ".git").exists():
+                if candidate in seen_roots:
+                    break
+                seen_roots.add(candidate)
+                try:
+                    result = subprocess.run(
+                        ["git", "-C", str(candidate), "remote", "get-url", "origin"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0:
+                        url = result.stdout.strip()
+                        parsed = _parse_remote_url(url)
+                        if parsed:
+                            return parsed
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+                break
+            parent = candidate.parent
+            if parent == candidate:
+                break
+            candidate = parent
+    return ""
+
+
+def _parse_workspace_repos(value: str | None) -> list[str] | None:
+    """Parse a WORKSPACE_REPO value into an allowlist.
+
+    Returns:
+        None       — caller passed None (detection failed / unset)
+        []         — explicit empty-string opt-out of the cross-repo restriction
+        list[str]  — one or more owner/repo entries, comma- or whitespace-separated
+
+    Whitespace around entries is trimmed. Empty entries between separators
+    (e.g. ``"a/b,, c/d"``) are silently dropped.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return []
+    # Support both comma- and whitespace-separated input. Replace commas with
+    # spaces then split on whitespace to normalize across ``"a/b,c/d"``,
+    # ``"a/b c/d"``, and ``"a/b, c/d"``.
+    return [r for r in stripped.replace(",", " ").split() if r]
+
+
+def _parse_remote_url(url: str) -> str:
+    """Convert a git remote URL to owner/repo format.
+
+    Handles:
+    - https://github.com/owner/repo.git
+    - git@github.com:owner/repo.git
+    - https://github.com/owner/repo
+    """
+    url = url.strip()
+    if url.startswith("git@github.com:"):
+        path = url[len("git@github.com:") :]
+    elif "github.com/" in url:
+        path = url.split("github.com/", 1)[1]
+    else:
+        return ""
+    # Strip .git suffix
+    if path.endswith(".git"):
+        path = path[:-4]
+    # Normalize to owner/repo (at most 2 components)
+    parts = path.strip("/").split("/")
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return ""
+
+
+def parse_pr_target(
+    pr: str | None, repo: str | None, number: int | None
+) -> tuple[str, int]:
+    """Normalize CLI input into (repo, pr_number)."""
+    if pr:
+        pr = pr.strip()
+        if pr.isdigit():
+            if not repo:
+                raise ValueError("--repo is required when PR is given as a number")
+            return repo, int(pr)
+        if pr.startswith(("http://", "https://")):
+            # Strip query string and fragment before parsing (e.g. ?tab=files, #discussion)
+            clean_pr = pr.split("?")[0].split("#")[0].rstrip("/")
+            parts = clean_pr.split("/")
+            # Valid GitHub PR URL: https://github.com/owner/repo/pull/123 = 7 parts
+            if len(parts) < 7 or parts[-2] != "pull":
+                raise ValueError(f"Not a PR URL: {pr}")
+            return "/".join(parts[-4:-2]), int(parts[-1])
+        if "#" in pr:
+            repo_part, number_part = pr.split("#", 1)
+            return repo_part, int(number_part)
+        # Two-positional `owner/repo <number>` form: pr is the repo, the PR
+        # number was supplied as the separate positional argument.
+        if pr.count("/") == 1 and number is not None:
+            return pr, number
+        raise ValueError(
+            f"Unrecognized PR specifier: {pr!r}. "
+            f"Use a PR URL, 'owner/repo#number', or 'owner/repo <number>'."
+        )
+    if repo and number is not None:
+        return repo, number
+    raise ValueError("Provide a PR URL/specifier or --repo with PR number")
+
+
+def _fetch_pr_files(repo: str, number: int) -> list[dict[str, Any]]:
+    # Use subprocess.run directly so we can check the exit code.  A PR with 0
+    # changed files produces empty stdout (jq emits nothing for an empty array),
+    # which is indistinguishable from a failure when we only look at the output
+    # string.  Checking returncode lets us correctly return [] for the 0-file
+    # case instead of incorrectly raising RuntimeError.
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/pulls/{number}/files",
+                "--paginate",
+                "--jq",
+                ".[] | {path: .filename}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Timed out fetching PR files for {repo}#{number} (>60 s)")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to run 'gh' for {repo}#{number}: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to fetch PR files for {repo}#{number}")
+    raw = result.stdout.strip()
+
+    files: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        files.append(cast(dict[str, Any], json.loads(line)))
+    return files
+
+
+def fetch_pr(repo: str, number: int) -> dict[str, Any]:
+    raw = run_gh(
+        [
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            repo,
+            "--json",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus",
+        ]
+    )
+    if not raw:
+        raise RuntimeError(f"Failed to fetch PR metadata for {repo}#{number}")
+
+    pr = cast(dict[str, Any], json.loads(raw))
+    pr["files"] = _fetch_pr_files(repo, number)
+    return pr
+
+
+def _fetch_greptile_review_data(
+    repo: str, pr_number: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Fetch Greptile reviews and all review threads for a PR.
+
+    Review threads are paginated to avoid silently undercounting unresolved
+    Greptile comments on large PRs.
+    """
+    owner, name = repo.split("/", 1)
+    all_threads: list[dict[str, Any]] = []
+    # None = not yet fetched; [] = fetched but no reviews found.
+    # This distinction prevents re-including the reviews block on every pagination
+    # page when the PR has no Greptile reviews (empty list is falsy, so `if not
+    # reviews` would incorrectly re-request reviews on every subsequent page).
+    reviews: list[dict[str, Any]] | None = None
+    cursor: str | None = None
+
+    while True:
+        # Only fetch reviews on the first page; subsequent pages only need threads.
+        reviews_block = (
+            """reviews(last:50) {
+                nodes {
+                  author { login }
+                  submittedAt
+                  state
+                }
+              }"""
+            if reviews is None
+            else ""
+        )
+        # Use $after variable to avoid cursor string interpolation.
+        after_arg = ", after: $after" if cursor else ""
+        after_var_decl = ", $after: String" if cursor else ""
+        query = f"""
+        query($owner: String!, $name: String!, $pr: Int!{after_var_decl}) {{
+          repository(owner: $owner, name: $name) {{
+            pullRequest(number: $pr) {{
+              {reviews_block}
+              reviewThreads(first:{MAX_GRAPHQL_PAGE_SIZE}{after_arg}) {{
+                pageInfo {{
+                  hasNextPage
+                  endCursor
+                }}
+                nodes {{
+                  isResolved
+                  comments(first:1) {{
+                    nodes {{
+                      author {{ login }}
+                      createdAt
+                    }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+        """
+
+        gh_args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"pr={pr_number}",
+        ]
+        if cursor:
+            gh_args += ["-f", f"after={cursor}"]
+        raw = run_gh(gh_args, timeout=15)
+        if not raw:
+            # If we already have review data from page 1, degrade gracefully by
+            # returning what was collected so far rather than discarding it.  A
+            # mid-pagination transient error should not produce a false "Greptile
+            # review not found" result.
+            if reviews is not None:
+                break
+            return None
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+        pr_data = data.get("data", {}).get("repository", {}).get("pullRequest", {})
+        if not pr_data:
+            return None
+
+        if reviews is None:
+            reviews = (pr_data.get("reviews") or {}).get("nodes", [])
+
+        threads_data = pr_data.get("reviewThreads", {})
+        all_threads.extend(threads_data.get("nodes", []))
+        page_info = threads_data.get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            break
+
+    # reviews is always a list here: all break paths require at least one successful
+    # page, and reviews is set from the first page's response (line 385).  The
+    # `or []` guard would only fire if reviews were None, which is unreachable at
+    # this point — use an explicit None-check to make the invariant clear.
+    return (reviews if reviews is not None else []), all_threads
+
+
+# Sentinel for "review_data was not provided by the caller".
+# Distinguishes between:
+#   - review_data=_UNSET  → helper should fetch on demand (standalone call)
+#   - review_data=None    → caller already tried and the API failed; skip retry
+# This prevents fetch_greptile_status and fetch_unresolved_human_threads from
+# each making an independent GraphQL round-trip when evaluate_pr already tried
+# and got None back (e.g. transient GitHub API failure).
+_UNSET: object = object()
+
+
+def fetch_greptile_status(
+    repo: str,
+    pr_number: int,
+    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = _UNSET,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """Check if Greptile reviewed this PR and count unresolved threads.
+
+    Only considers threads from the most recent Greptile review cycle so that
+    re-reviews after fixes are not blocked by old unresolved thread noise.
+
+    Pass *review_data* (the return value of ``_fetch_greptile_review_data``)
+    to avoid a duplicate GitHub API round-trip when the caller has already
+    fetched this data.  Pass ``None`` explicitly to indicate the upstream fetch
+    already failed — the helper will skip its own retry in that case.
+    """
+    if review_data is _UNSET:
+        review_data = _fetch_greptile_review_data(repo, pr_number)
+    if review_data is None:
+        return {"has_review": False, "unresolved": 0, "total": 0}
+
+    reviews, threads = review_data
+
+    greptile_reviews = [
+        r
+        for r in reviews
+        if "greptile" in ((r.get("author") or {}).get("login", "") or "").lower()
+    ]
+
+    if not greptile_reviews:
+        # Fall back to issue comments for summary-only reviews.
+        # Use --paginate so Greptile's comment is found even on PRs with >30 comments.
+        comments_raw = run_gh(
+            [
+                "api",
+                f"repos/{repo}/issues/{pr_number}/comments",
+                "--paginate",
+                "--jq",
+                '.[] | select(.user.login | test("greptile";"i")) | .id',
+            ],
+            timeout=30,
+        )
+        has_summary = bool(comments_raw and comments_raw.strip())
+        return {"has_review": has_summary, "unresolved": 0, "total": 0}
+
+    def _parse_ts(ts: str) -> datetime:
+        """Parse ISO 8601 timestamp to timezone-aware datetime (handles Z and +00:00)."""
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+    latest_review_time = max(
+        (_parse_ts(r["submittedAt"]) for r in greptile_reviews if r.get("submittedAt")),
+        default=datetime.min.replace(tzinfo=timezone.utc),
+    )
+
+    total = 0
+    unresolved = 0
+    for thread in threads:
+        comments = thread.get("comments", {}).get("nodes", [])
+        if not comments:
+            continue
+        author = (comments[0].get("author") or {}).get("login", "")
+        if "greptile" not in author.lower():
+            continue
+        created_at = comments[0].get("createdAt", "")
+        if created_at and _parse_ts(created_at) < latest_review_time:
+            continue
+        total += 1
+        if not thread.get("isResolved", False):
+            unresolved += 1
+
+    return {"has_review": True, "unresolved": unresolved, "total": total}
+
+
+# Known bot logins (exact match, case-insensitive) to exclude when counting
+# human review threads.  GitHub Apps append "[bot]" to their login, so any
+# login ending with that suffix is also excluded.
+_BOT_EXACT_NAMES = frozenset(("greptile", "codecov", "greptile-apps", "greptileai"))
+
+
+def _is_bot_author(author: str) -> bool:
+    """Return True if the GitHub login belongs to a bot / GitHub App."""
+    lower = author.lower()
+    return lower.endswith("[bot]") or lower in _BOT_EXACT_NAMES
+
+
+def fetch_unresolved_human_threads(
+    repo: str,
+    pr_number: int,
+    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = _UNSET,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """Count unresolved review threads from human (non-bot) reviewers.
+
+    Uses the same GraphQL data as ``fetch_greptile_status`` but filters for
+    threads authored by humans.  Unresolved human threads indicate review
+    feedback that has not been acknowledged — merging over them is the exact
+    pattern Erik flagged on gptme-contrib#537.
+
+    Pass *review_data* (the return value of ``_fetch_greptile_review_data``)
+    to avoid a duplicate GitHub API round-trip when the caller has already
+    fetched this data.  Pass ``None`` explicitly to indicate the upstream fetch
+    already failed — the helper will skip its own retry in that case.
+    """
+    if review_data is _UNSET:
+        review_data = _fetch_greptile_review_data(repo, pr_number)
+    if review_data is None:
+        return {"unresolved": 0, "total": 0, "authors": []}
+
+    _, threads = review_data
+
+    total = 0
+    unresolved = 0
+    unresolved_authors: set[str] = set()
+
+    for thread in threads:
+        comments = thread.get("comments", {}).get("nodes", [])
+        if not comments:
+            continue
+        author = (comments[0].get("author") or {}).get("login", "")
+        if _is_bot_author(author):
+            continue
+        total += 1
+        if not thread.get("isResolved", False):
+            unresolved += 1
+            unresolved_authors.add(author)
+
+    return {
+        "unresolved": unresolved,
+        "total": total,
+        "authors": sorted(unresolved_authors),
+    }
+
+
+def checks_green(status_checks: list[dict[str, Any]]) -> bool:
+    """Return True if all reported checks are success/skipped/neutral.
+
+    Returns True when no checks are configured (no CI), treating the
+    absence of CI as neutral rather than failing. Individual checks with no
+    status and no conclusion are treated as indeterminate, not passing.
+
+    Handles both check shapes in ``statusCheckRollup``:
+    - ``CheckRun`` (GitHub Actions) — result in ``status``/``conclusion``
+    - ``StatusContext`` (legacy commit statuses, e.g. ``codecov/patch``) —
+      result in ``state`` alone, with no ``status``/``conclusion``. Reading
+      only status/conclusion would treat a green StatusContext as
+      indeterminate and falsely flag CI as not green.
+    """
+    if not status_checks:
+        return True
+    allowed = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+    for check in status_checks:
+        conclusion = (check.get("conclusion") or "").upper()
+        status = (check.get("status") or "").upper()
+        state = (check.get("state") or "").upper()
+        # StatusContext entries carry their result in `state` alone.
+        if state and not status and not conclusion:
+            if state not in allowed:
+                return False
+            continue
+        if not status and not conclusion:
+            return False
+        if status and status != "COMPLETED":
+            return False
+        if status == "COMPLETED" and not conclusion:
+            return False
+        if conclusion and conclusion not in allowed:
+            return False
+    return True
+
+
+def is_doc_file(path: str) -> bool:
+    return Path(path).suffix.lower() in DOC_EXTENSIONS
+
+
+def is_spec_like_doc(path: str) -> bool:
+    """Spec-like identity docs (README/ARCHITECTURE/CLAUDE/…) require human review.
+
+    Only matches at the REPOSITORY ROOT. These filenames denote a project's
+    top-level identity/spec docs; a *nested* package README (e.g.
+    ``packages/foo/README.md``) is ordinary package documentation, not a spec,
+    and shouldn't block self-merge of an otherwise low-risk tooling PR.
+    """
+    normalized = path.replace("\\", "/").removeprefix("./")
+    return "/" not in normalized and Path(path).name in SPEC_LIKE_DOCS
+
+
+def is_test_file(path: str) -> bool:
+    return any(marker in path for marker in TEST_MARKERS)
+
+
+def is_internal_tooling(path: str) -> bool:
+    return path.startswith(INTERNAL_TOOLING_PREFIXES)
+
+
+def is_task_metadata(path: str) -> bool:
+    return path.startswith(TASK_METADATA_PREFIXES)
+
+
+def is_lesson_file(path: str) -> bool:
+    return path.startswith(LESSON_PREFIXES)
+
+
+def is_bot_config(path: str) -> bool:
+    return path in BOT_CONFIG_FILES or path.startswith(BOT_CONFIG_PREFIXES)
+
+
+def _parse_repo_path_allowlist(value: str | None) -> dict[str, list[str]]:
+    """Parse SELF_MERGE_ALLOWED_PATHS into a repo -> glob patterns mapping.
+
+    Format:
+        owner/repo:path-glob[,owner/repo:path-glob...]
+
+    Both commas and whitespace may separate entries. Invalid entries are ignored.
+    """
+    if value is None:
+        return {}
+    stripped = value.strip()
+    if not stripped:
+        return {}
+
+    mapping: dict[str, list[str]] = {}
+    for entry in stripped.replace(",", " ").split():
+        repo, sep, pattern = entry.partition(":")
+        if not sep or not repo or not pattern:
+            continue
+        mapping.setdefault(repo, []).append(pattern.replace("\\", "/"))
+    return mapping
+
+
+def _get_repo_path_allowlist() -> dict[str, list[str]]:
+    return _parse_repo_path_allowlist(os.environ.get(SELF_MERGE_ALLOWED_PATHS_ENV))
+
+
+def _path_glob_match(path: str, pattern: str) -> bool:
+    """Match repo-relative paths with shell-style globs.
+
+    `*` stays within one path segment. A standalone `**` segment matches zero or
+    more full directory segments, which keeps the allowlist semantics stable
+    across Python versions and matches normal globstar expectations.
+    """
+    path_parts = tuple(part for part in path.replace("\\", "/").split("/") if part)
+    pattern_parts = tuple(
+        part for part in pattern.replace("\\", "/").split("/") if part
+    )
+
+    @cache
+    def _match(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+
+        pattern_part = pattern_parts[pattern_index]
+        if pattern_part == "**":
+            return _match(path_index, pattern_index + 1) or (
+                path_index < len(path_parts) and _match(path_index + 1, pattern_index)
+            )
+
+        if path_index >= len(path_parts):
+            return False
+        if not fnmatchcase(path_parts[path_index], pattern_part):
+            return False
+        return _match(path_index + 1, pattern_index + 1)
+
+    return _match(0, 0)
+
+
+def is_repo_allowlisted_path(
+    path: str,
+    repo: str | None,
+    repo_path_allowlist: dict[str, list[str]] | None = None,
+) -> bool:
+    if not repo:
+        return False
+    allowlist = (
+        repo_path_allowlist
+        if repo_path_allowlist is not None
+        else _get_repo_path_allowlist()
+    )
+    if not allowlist:
+        return False
+    normalized = path.replace("\\", "/")
+    return any(
+        _path_glob_match(normalized, pattern) for pattern in allowlist.get(repo, [])
+    )
+
+
+def is_sensitive_path(path: str) -> bool:
+    normalized = path.lower().replace("\\", "/")
+    if normalized.startswith(tuple(p.lower() for p in SENSITIVE_PATH_PREFIXES)):
+        return True
+    # Use the original (pre-lowercase) path to preserve camelCase boundaries for
+    # detection; e.g. "authToken.py" → "auth_token" catches the "auth" rule.
+    original_components = path.replace("\\", "/").split("/")
+    for component in original_components:
+        stem = component.rsplit(".", 1)[0] if "." in component else component
+        # Normalise camelCase → snake_case so camelCase filenames are matched.
+        # e.g. "authToken" → "auth_token", "deployScript" → "deploy_script".
+        stem_normalised = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", stem).lower()
+        for part in SENSITIVE_PATH_PARTS:
+            # Match whole words (word boundaries: start/end or separator chars).
+            # Allow trailing "s" for common plurals (token→tokens, secret→secrets).
+            if re.search(
+                r"(?:^|[_\-\.])" + re.escape(part) + r"s?(?:[_\-\.]|$)", stem_normalised
+            ):
+                return True
+    return False
+
+
+def is_allowed_file(
+    path: str,
+    repo: str | None = None,
+    repo_path_allowlist: dict[str, list[str]] | None = None,
+) -> bool:
+    """Check if a file falls into any allowed self-merge category."""
+    if is_sensitive_path(path):
+        return False
+    if is_bot_config(path):
+        return False
+    if is_doc_file(path) and is_spec_like_doc(path):
+        return False
+    return (
+        is_test_file(path)
+        or is_lesson_file(path)
+        or is_task_metadata(path)
+        or is_internal_tooling(path)
+        or is_doc_file(path)
+        or is_repo_allowlisted_path(path, repo, repo_path_allowlist)
+    )
+
+
+def classify_category(
+    paths: list[str], repo: str | None = None
+) -> tuple[str | None, list[str]]:
+    """Return the allowed category, or None with disqualifying reasons.
+
+    The policy says all changed files must fall into *one of* the allowed
+    categories. A PR mixing scripts/ and tasks/ files is still low-risk and
+    eligible as "mixed-allowed".
+    """
+    reasons: list[str] = []
+    if not paths:
+        return None, ["PR has no changed files"]
+
+    if any(is_sensitive_path(path) for path in paths):
+        reasons.append("Touches sensitive/security/infra paths")
+        return None, reasons
+
+    if any(is_bot_config(path) for path in paths):
+        reasons.append(
+            "Bot/CI config changes require human review under current policy"
+        )
+        return None, reasons
+
+    if any(is_doc_file(path) and is_spec_like_doc(path) for path in paths):
+        reasons.append("Touches spec-like documentation requiring human review")
+        return None, reasons
+
+    repo_path_allowlist = _get_repo_path_allowlist()
+
+    # Single-category fast paths
+    if all(is_test_file(path) for path in paths):
+        return "test-only", reasons
+    if all(is_lesson_file(path) for path in paths):
+        return "lesson-updates", reasons
+    if all(is_task_metadata(path) for path in paths):
+        return "task-journal-metadata", reasons
+    if all(is_internal_tooling(path) for path in paths):
+        return "internal-tooling", reasons
+    if all(is_doc_file(path) for path in paths):
+        return "docs-only", reasons
+    if repo and all(
+        is_repo_allowlisted_path(path, repo, repo_path_allowlist) for path in paths
+    ):
+        return f"repo-allowlisted({repo})", reasons
+
+    # Mixed-category: eligible if ALL files are in some allowed category
+    if all(is_allowed_file(path, repo, repo_path_allowlist) for path in paths):
+        categories: list[str] = []
+        if any(is_test_file(path) for path in paths):
+            categories.append("tests")
+        if any(is_lesson_file(path) for path in paths):
+            categories.append("lessons")
+        if any(is_task_metadata(path) for path in paths):
+            categories.append("task-metadata")
+        if any(is_internal_tooling(path) for path in paths):
+            categories.append("internal-tooling")
+        if any(is_doc_file(path) for path in paths):
+            categories.append("docs")
+        if repo and any(
+            is_repo_allowlisted_path(path, repo, repo_path_allowlist) for path in paths
+        ):
+            categories.append("repo-paths")
+        return f"mixed-allowed({'+'.join(categories)})", reasons
+
+    disqualifying = [
+        p for p in paths if not is_allowed_file(p, repo, repo_path_allowlist)
+    ]
+    return None, [
+        f"Files not in any allowed self-merge category: {', '.join(disqualifying)}"
+    ]
+
+
+def _check_workspace_repo(
+    repo: str, workspace_repos: list[str] | None
+) -> tuple[list[str], list[str]]:
+    """Evaluate the cross-repo policy against a PR's repo.
+
+    Returns a ``(reasons, warnings)`` pair. ``reasons`` disqualify the PR from
+    self-merge; ``warnings`` are informational only.
+
+    Semantics:
+    - ``workspace_repos is None``  → detection failed, disqualify (we cannot
+      tell whether the PR is cross-repo)
+    - ``workspace_repos == []``    → explicit opt-out, emit a warning but do
+      not disqualify on cross-repo grounds
+    - ``repo in workspace_repos``  → allowlisted, no reasons or warnings
+    - otherwise                    → cross-repo, disqualify
+    """
+    if workspace_repos is None:
+        return (
+            [
+                "Workspace repo could not be auto-detected; cross-repo restriction cannot be "
+                "enforced. Pass --workspace-repo or set WORKSPACE_REPO (use '' to opt out)."
+            ],
+            [],
+        )
+    if not workspace_repos:
+        return (
+            [],
+            [
+                "Workspace repo check disabled via WORKSPACE_REPO='' or --workspace-repo ''; "
+                "cross-repo restriction is not enforced."
+            ],
+        )
+    if repo not in workspace_repos:
+        allowed = ", ".join(workspace_repos)
+        return (
+            [
+                f"Cross-repo PR ({repo}) is not in allowed workspace repos: {allowed}. "
+                "Clear WORKSPACE_REPO or add this repo to the allowlist."
+            ],
+            [],
+        )
+    return [], []
+
+
+def greptile_summary_score(repo: str, pr_number: int) -> int | None:
+    """Latest Greptile summary score via the shared greptile-merge-signal evaluator.
+
+    Returns the parsed score (0-5), or None if Greptile posted no parseable summary score.
+
+    Note on env-var precedence: this function only extracts the raw score from the
+    subprocess JSON. The floor comparison uses SELF_MERGE_MIN_GREPTILE_SCORE (parsed
+    by _parse_self_merge_min_greptile_score). The subprocess's own threshold
+    GREPTILE_MERGE_SIGNAL_MIN_SCORE has no effect on the gate — setting it does not
+    soften or tighten the floor here.
+    """
+    signal = Path(__file__).with_name("greptile-merge-signal.py")
+    if not signal.exists():
+        return None
+    try:
+        env = os.environ.copy()
+        # The self-merge gate owns its own enable/disable policy; don't let the
+        # standalone signal tool's disable flag silently neuter the floor.
+        env.pop("GREPTILE_MERGE_SIGNAL_DISABLED", None)
+        proc = subprocess.run(
+            [sys.executable, str(signal), "--repo", repo, str(pr_number)],
+            capture_output=True,
+            env=env,
+            text=True,
+            timeout=30,
+        )
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+    score = data.get("score")
+    return int(score) if isinstance(score, int) else None
+
+
+def _parse_self_merge_min_greptile_score() -> int:
+    raw = os.environ.get("SELF_MERGE_MIN_GREPTILE_SCORE", "").strip()
+    if not raw:
+        return DEFAULT_MIN_GREPTILE_SCORE
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MIN_GREPTILE_SCORE
+    if 0 <= value <= 5:
+        return value
+    return DEFAULT_MIN_GREPTILE_SCORE
+
+
+def evaluate_pr(
+    repo: str, number: int, *, workspace_repos: list[str] | None
+) -> CheckResult:
+    pr = fetch_pr(repo, number)
+    author = pr.get("author", {}).get("login", "")
+    title = pr.get("title", "")
+    url = pr.get("url", f"https://github.com/{repo}/pull/{number}")
+    files = [f.get("path", "") for f in pr.get("files", []) if f.get("path")]
+
+    result = CheckResult(
+        eligible=False,
+        repo=repo,
+        number=number,
+        url=url,
+        title=title,
+        author=author,
+        files=files,
+        head_sha=pr.get("headRefOid", ""),
+    )
+
+    current_user = get_gh_user()
+    if not current_user:
+        result.reasons.append(
+            "Could not determine authenticated GitHub user; author-identity check failed."
+        )
+    elif author != current_user:
+        result.reasons.append(f"PR author is {author}, expected {current_user}")
+
+    cross_repo_reasons, cross_repo_warnings = _check_workspace_repo(
+        repo, workspace_repos
+    )
+    result.reasons.extend(cross_repo_reasons)
+    result.warnings.extend(cross_repo_warnings)
+
+    # Merge-permission check: an allowlisted repo the agent cannot actually merge
+    # (pull-only access, e.g. an upstream repo contributed to via a fork) would
+    # otherwise report eligible=YES and then fail the merge with a GitHub
+    # permissions error. Disqualify on a definitive lack of permission; treat an
+    # indeterminate result (gh error) as a non-blocking warning.
+    can_merge = merge_permission(repo)
+    if can_merge is False:
+        result.reasons.append(
+            f"Authenticated user lacks merge permission on {repo} "
+            "(pull-only access; merge would fail). Open a PR for a maintainer to merge."
+        )
+    elif can_merge is None:
+        result.warnings.append(
+            f"Could not determine merge permission on {repo}; "
+            "merge may fail if access is pull-only."
+        )
+
+    if pr.get("isDraft"):
+        result.reasons.append("PR is still a draft")
+
+    if pr.get("state") != "OPEN":
+        result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
+
+    merge_state = pr.get("mergeStateStatus", "")
+    if merge_state == "DIRTY":
+        result.reasons.append(
+            f"PR has merge conflicts (mergeStateStatus: {merge_state})"
+        )
+
+    status_checks = pr.get("statusCheckRollup", [])
+    if not status_checks:
+        result.warnings.append(
+            "No CI checks configured; CI requirement satisfied without a green build"
+        )
+    elif not checks_green(status_checks):
+        result.reasons.append("CI is not fully green")
+
+    # Fetch once; pass to both helpers to avoid duplicate GraphQL round-trips.
+    shared_review_data = _fetch_greptile_review_data(repo, number)
+
+    greptile = fetch_greptile_status(repo, number, review_data=shared_review_data)
+    if not greptile["has_review"]:
+        result.reasons.append("Greptile review not found")
+    elif greptile["unresolved"] > 0:
+        result.reasons.append(
+            f"Greptile has {greptile['unresolved']} unresolved review thread(s)"
+        )
+
+    # Score floor (defense in depth): require the Greptile summary score >= floor
+    # (default 5/5, override via SELF_MERGE_MIN_GREPTILE_SCORE). Without this, resolving
+    # threads alone could let a low-score PR self-merge — the alice#61 (4/5) and #63 (3/5)
+    # incidents where buggy control-path code shipped. Reuses the shared greptile-merge-signal
+    # evaluator (upstreamed from Bob). Parse failure (score None) does NOT block — the
+    # thread/category gates still apply; this only catches a clear sub-floor score.
+    if greptile["has_review"]:
+        min_score = _parse_self_merge_min_greptile_score()
+        score = greptile_summary_score(repo, number)
+        if score is not None and score < min_score:
+            result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
+
+    human_threads = fetch_unresolved_human_threads(
+        repo, number, review_data=shared_review_data
+    )
+    if human_threads["unresolved"] > 0:
+        authors = ", ".join(human_threads["authors"]) or "unknown"
+        result.reasons.append(
+            f"{human_threads['unresolved']} unresolved human review thread(s) "
+            f"from: {authors}"
+        )
+
+    category, category_reasons = classify_category(files, repo=repo)
+    result.category = category
+    result.reasons.extend(category_reasons)
+
+    review_decision = pr.get("reviewDecision")
+    if review_decision == "CHANGES_REQUESTED":
+        result.reasons.append("Review decision: CHANGES_REQUESTED")
+    elif review_decision not in (None, "", "REVIEW_REQUIRED", "APPROVED"):
+        result.warnings.append(f"Review decision: {review_decision}")
+
+    result.eligible = not result.reasons
+    return result
+
+
+def format_human(result: CheckResult) -> str:
+    lines = [
+        f"PR: {result.repo}#{result.number} — {result.title}",
+        f"URL: {result.url}",
+        f"Author: {result.author}",
+        f"Eligible: {'YES' if result.eligible else 'NO'}",
+        f"Category: {result.category or 'none'}",
+    ]
+    if result.reasons:
+        lines.append("Reasons:")
+        lines.extend(f"- {reason}" for reason in result.reasons)
+    if result.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in result.warnings)
+    if result.files:
+        lines.append("Files:")
+        lines.extend(f"- {path}" for path in result.files)
+    return "\n".join(lines)
+
+
+def _resolve_workspace_repos(args: argparse.Namespace) -> list[str] | None:
+    """Resolve the workspace-repo allowlist from CLI args, env, or auto-detection.
+
+    ``--workspace-repo`` / ``WORKSPACE_REPO`` accept a comma- or whitespace-
+    separated list of ``owner/repo`` entries.
+
+    Returns:
+        list[str]  — one or more allowed workspace repos
+        []         — explicit opt-out via empty string (cross-repo restriction disabled)
+        None       — detection was attempted but failed; cross-repo restriction
+                     will disqualify because we cannot tell whether the PR is cross-repo
+    """
+    cli_value: str | None = getattr(args, "workspace_repo", None)
+    if cli_value is not None:
+        return _parse_workspace_repos(cli_value)
+    if "WORKSPACE_REPO" in os.environ:
+        return _parse_workspace_repos(os.environ["WORKSPACE_REPO"])
+    detected = detect_workspace_repo()
+    return [detected] if detected else None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("pr", nargs="?", help="PR URL, repo#num, or PR number")
+    parser.add_argument(
+        "number",
+        nargs="?",
+        type=int,
+        help="PR number when using --repo or 'owner/repo <number>' form",
+    )
+    parser.add_argument("--repo", help="Repository in owner/name form")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    parser.add_argument(
+        "--workspace-repo",
+        help=(
+            "Workspace-repo allowlist (owner/name, comma- or whitespace-separated) "
+            "for cross-repo policy. Auto-detected single repo from git remote if "
+            "not provided. Pass '' to disable the cross-repo restriction entirely."
+        ),
+    )
+    args = parser.parse_args()
+    workspace_repos = _resolve_workspace_repos(args)
+
+    try:
+        deferred = _maybe_defer_for_rate_limit(json_output=args.json)
+        if deferred is not None:
+            return deferred
+        repo, number = parse_pr_target(args.pr, args.repo, args.number)
+        result = evaluate_pr(
+            repo,
+            number,
+            workspace_repos=workspace_repos,
+        )
+    except Exception as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(asdict(result), indent=2))
+    else:
+        if workspace_repos:
+            print(f"Workspace repos: {', '.join(workspace_repos)}")
+        print(format_human(result))
+
+    return 0 if result.eligible else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

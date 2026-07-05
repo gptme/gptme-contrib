@@ -1,0 +1,23 @@
+[Unit]
+Description=Sven WhatsApp bridge (gptme agent)
+After=network.target
+
+[Service]
+Type=simple
+User=sven
+WorkingDirectory=/home/sven/sven/gptme-contrib/packages/gptme-whatsapp/node
+Environment=GPTME_AGENT=sven
+Environment=AGENT_WORKSPACE=/home/sven/sven
+# Set to Tekla's phone number in international format (no +)
+Environment=ALLOWED_CONTACTS=REPLACE_WITH_TEKLAS_NUMBER
+# Node path from nvm
+Environment=PATH=/home/sven/.nvm/versions/node/v24.13.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/sven/.nvm/versions/node/v24.13.1/bin/node /home/sven/sven/gptme-contrib/packages/gptme-whatsapp/node/index.js
+Restart=on-failure
+RestartSec=30
+# Log to journal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

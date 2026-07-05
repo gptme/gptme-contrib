@@ -1,0 +1,2063 @@
+{% extends "base.html" %}
+
+{% block title %}{{ workspace_name }} - gptme workspace{% endblock %}
+
+{% block extra_head %}{% if feed_url %}<link rel="alternate" type="application/atom+xml" title="{{ workspace_name }} Journal" href="{{ feed_url }}">{% endif %}{% endblock %}
+
+{% block extra_style %}
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+header h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+}
+header h1 span { color: var(--text-dim); font-weight: 400; }
+header p { color: var(--text-dim); margin-top: 0.25rem; }
+
+/* Stats grid */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2.5rem;
+}
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+  text-align: center;
+}
+.stat-card .number {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+.stat-card .label {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Layout */
+.dashboard-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 2rem;
+  align-items: start;
+}
+.dashboard-main {
+  min-width: 0;
+}
+.dashboard-nav {
+  order: 2;
+  position: sticky;
+  top: 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+}
+.dashboard-nav h2 {
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  border: none;
+}
+.dashboard-nav-group + .dashboard-nav-group {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.dashboard-nav-group-title {
+  font-size: 0.75rem;
+  font-weight: 500;
+  margin: 0 0 0.5rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.dashboard-nav-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.dashboard-nav-links a {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  text-decoration: none;
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+}
+.dashboard-nav-links a:hover {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+.dashboard-nav-links .nav-count {
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+/* Active nav link */
+.dashboard-nav-links a.nav-active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* Sections */
+section {
+  margin-bottom: 2.5rem;
+  scroll-margin-top: 1rem;
+}
+section h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+section h2 .count-badge {
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+th, td {
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+th {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+tr:hover { background: var(--accent-dim); }
+.task-hint { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.2rem; }
+
+/* Tags */
+.tag {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 0.15em 0.5em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  margin: 0.1em;
+}
+.tag-active { border-color: var(--green); color: var(--green); }
+.tag-deprecated { border-color: var(--orange); color: var(--orange); }
+.tag-medium { border-color: var(--orange); color: var(--orange); }
+.tag-category { border-color: var(--purple); color: var(--purple); }
+.tag-kind-lesson { border-color: var(--accent); color: var(--accent); }
+.tag-kind-skill { border-color: var(--cyan); color: var(--cyan); }
+.tag-source { border-color: var(--orange); color: var(--orange); font-style: italic; }
+.tag-healthy { border-color: var(--green); color: var(--green); }
+.tag-warning { border-color: var(--orange); color: var(--orange); }
+.tag-degraded { border-color: var(--red); color: var(--red); }
+.tag-unhealthy { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.1); }
+.tag-failed { border-color: var(--red); color: var(--red); }
+.restart-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0.1rem 0.4rem;
+  color: var(--text);
+  transition: background 0.15s;
+}
+.restart-btn:hover { background: var(--surface); }
+.restart-btn-disabled { opacity: 0.3; cursor: not-allowed; font-size: 1rem; }
+.tag-err { border-color: var(--red); color: var(--red); }
+.tag-crit { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.1); }
+.tag-emerg { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.2); }
+.tag-alert { border-color: var(--red); color: var(--red); background: rgba(231, 76, 60, 0.15); }
+.tag-notice { border-color: var(--cyan); color: var(--cyan); }
+.tag-info { border-color: var(--text-dim); color: var(--text-dim); }
+.tag-debug { border-color: var(--border); color: var(--border); }
+
+/* Log table */
+#logs-table td { font-family: monospace; font-size: 0.82rem; }
+#logs-table td:last-child { white-space: pre-wrap; word-break: break-all; }
+.logs-link { color: var(--accent); cursor: pointer; font-size: 0.8rem; text-decoration: none; }
+.logs-link:hover { text-decoration: underline; }
+
+/* Category bar chart (compact) */
+.cat-chart {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.cat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.cat-chip:hover, .cat-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.cat-chip .chip-count {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* Filter */
+.filter-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.filter-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.filter-btn:hover, .filter-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.filter-row select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.filter-row select:focus { border-color: var(--accent); color: var(--accent); outline: none; }
+
+/* Pagination */
+#sessions-pagination button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+#sessions-pagination button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+#sessions-pagination button:disabled { opacity: 0.4; cursor: default; }
+
+/* Search */
+.search-box {
+  width: 100%;
+  max-width: 400px;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+}
+.search-box::placeholder { color: var(--text-dim); }
+.search-box:focus { outline: none; border-color: var(--accent); }
+
+/* Global search modal */
+#search-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 1000;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+}
+#search-overlay.open { display: flex; }
+#search-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 100%;
+  max-width: 620px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  overflow: hidden;
+}
+#search-input-wrap {
+  display: flex;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  gap: 0.5rem;
+}
+#search-input-wrap svg { color: var(--text-dim); flex-shrink: 0; }
+#global-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 1rem;
+  outline: none;
+}
+#global-search-input::placeholder { color: var(--text-dim); }
+#search-type-filter {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.8rem;
+  padding: 0.2rem 0.4rem;
+}
+#search-results-area {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.search-result {
+  display: block;
+  padding: 0.75rem 1rem;
+  text-decoration: none;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.search-result:hover, .search-result.selected { background: var(--code-bg); }
+.search-result:last-child { border-bottom: none; }
+.search-result-top { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem; }
+.search-result-title { font-weight: 500; }
+.search-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: var(--accent-dim, rgba(88,166,255,0.15));
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.search-badge-source { background: var(--code-bg); color: var(--text-dim); margin-left: auto; }
+.search-result-excerpt { font-size: 0.82rem; color: var(--text-dim); white-space: pre-line; }
+#search-footer {
+  padding: 0.5rem 1rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+}
+.search-empty { padding: 2rem; text-align: center; color: var(--text-dim); }
+#search-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+#search-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Rendered markdown content (About/README section) */
+.content { line-height: 1.6; }
+.content h1, .content h2 { font-size: 1.1rem; font-weight: 600; margin: 1rem 0 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
+.content h3 { font-size: 1rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
+.content p { margin: 0.5rem 0; }
+.content ul, .content ol { margin: 0.5rem 0; padding-left: 1.75rem; }
+.content li { margin: 0.2rem 0; }
+.content code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.88em; font-family: monospace; }
+.content pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; overflow-x: auto; margin: 0.5rem 0; }
+.content pre code { background: none; padding: 0; }
+.content a { color: var(--accent); }
+.content blockquote { border-left: 3px solid var(--accent); padding-left: 0.75rem; color: var(--text-dim); margin: 0.5rem 0; }
+
+/* GitHub source link */
+.gh-link {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-decoration: none;
+  opacity: 0.6;
+}
+.gh-link:hover { opacity: 1; color: var(--accent); }
+
+/* Show more button */
+.show-more-btn {
+  display: block;
+  width: 100%;
+  padding: 0.6rem;
+  margin-top: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.85rem;
+  text-align: center;
+}
+.show-more-btn:hover {
+  background: var(--accent-dim);
+}
+
+/* Two-column layout for short sections */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+}
+.two-col section { margin-bottom: 0; }
+
+@media (max-width: 1100px) {
+  .dashboard-layout {
+    grid-template-columns: 1fr;
+  }
+  .dashboard-nav {
+    position: static;
+    order: unset;
+  }
+  .dashboard-nav-links {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+}
+
+@media (max-width: 800px) {
+  .two-col { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 600px) {
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  table { font-size: 0.8rem; }
+  th, td { padding: 0.4rem 0.5rem; }
+}
+
+/* Activity heatmap */
+.heatmap-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.heatmap-month-labels {
+  display: flex;
+  gap: var(--hm-gap, 3px);
+  margin-bottom: var(--hm-gap, 3px);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.heatmap-month-label { width: var(--hm-size, 12px); flex-shrink: 0; white-space: nowrap; overflow: visible; }
+.heatmap-grid { display: flex; gap: var(--hm-gap, 3px); }
+.heatmap-col { display: flex; flex-direction: column; gap: var(--hm-gap, 3px); }
+.heatmap-cell {
+  width: var(--hm-size, 12px);
+  height: var(--hm-size, 12px);
+  border-radius: 2px;
+  background: var(--border);
+  flex-shrink: 0;
+  cursor: default;
+}
+@media (max-width: 900px) {
+  .heatmap-wrap { --hm-size: 8px; --hm-gap: 2px; }
+}
+@media (max-width: 600px) {
+  .heatmap-wrap { --hm-size: 6px; --hm-gap: 1px; }
+}
+.heatmap-cell[data-level="1"] { background: #0e4429; }
+.heatmap-cell[data-level="2"] { background: #006d32; }
+.heatmap-cell[data-level="3"] { background: #26a641; }
+.heatmap-cell[data-level="4"] { background: #39d353; }
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+{% endblock %}
+
+{% block content %}
+<header style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
+  <div>
+    <h1>{{ workspace_name }} <span>workspace</span></h1>
+    <p>A <a href="https://gptme.org">gptme</a> workspace dashboard{% if submodules %} (includes {{ submodules | join(', ') }}){% endif %}{% if gh_repo_url %} &middot; <a href="{{ gh_repo_url }}">GitHub</a>{% endif %}{% if agent_urls %}{% for name, url in agent_urls.items() %} &middot; <a href="{{ url }}">{{ name }}</a>{% endfor %}{% endif %}</p>
+  </div>
+  <button id="search-btn" onclick="openSearch()" title="Search workspace (/)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    Search
+    <kbd style="font-size:0.7rem;opacity:0.7;">/</kbd>
+  </button>
+</header>
+
+<!-- Global search overlay -->
+<div id="search-overlay" role="dialog" aria-modal="true" aria-label="Search workspace" onclick="if(event.target===this)closeSearch()">
+  <div id="search-modal">
+    <div id="search-input-wrap">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="global-search-input" type="search" placeholder="Search lessons, tasks, journals, packages…" autocomplete="off">
+      <select id="search-type-filter">
+        <option value="">All types</option>
+        <option value="lesson">Lessons</option>
+        <option value="skill">Skills</option>
+        <option value="task">Tasks</option>
+        <option value="journal">Journals</option>
+        <option value="summary">Summaries</option>
+        <option value="package">Packages</option>
+        <option value="plugin">Plugins</option>
+      </select>
+    </div>
+    <div id="search-results-area">
+      <div class="search-empty">Type to search across your workspace</div>
+    </div>
+    <div id="search-footer">
+      <span id="search-result-count"></span>
+      <span>↑↓ navigate &nbsp; ↵ open &nbsp; Esc close</span>
+    </div>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="number">{{ stats.total_lessons }}</div>
+    <div class="label">Lessons</div>
+  </div>
+  <div class="stat-card">
+    <div class="number">{{ stats.total_skills }}</div>
+    <div class="label">Skills</div>
+  </div>
+  <div class="stat-card">
+    <div class="number">{{ stats.total_plugins }}</div>
+    <div class="label">Plugins</div>
+  </div>
+  <div class="stat-card">
+    <div class="number">{{ stats.total_packages }}</div>
+    <div class="label">Packages</div>
+  </div>
+  {% if stats.total_sessions %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_sessions }}</div>
+    <div class="label">Sessions</div>
+  </div>
+  {% endif %}
+  {% if stats.total_journals %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_journals }}</div>
+    <div class="label">Journal Entries</div>
+  </div>
+  {% endif %}
+  {% if stats.total_tasks %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_tasks }}</div>
+    <div class="label">Tasks</div>
+  </div>
+  {% endif %}
+  {% if stats.total_summaries %}
+  <div class="stat-card">
+    <div class="number">{{ stats.total_summaries }}</div>
+    <div class="label">Summaries</div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="dashboard-layout">
+  <aside class="dashboard-nav" aria-label="Dashboard navigation">
+    <h2>Quick navigation</h2>
+
+    <div class="dashboard-nav-group" id="live-nav-group" style="display:none">
+      <h3 class="dashboard-nav-group-title">Live dashboard</h3>
+      <div class="dashboard-nav-links">
+        <a href="#session-stats"><span>Session stats</span></a>
+        <a href="#activity-heatmap"><span>Activity</span></a>
+        <a href="#recent-sessions"><span>Recent sessions</span></a>
+        <a href="#agent-services"><span>Services</span></a>
+        <a href="#agent-schedule"><span>Schedule</span></a>
+        <a href="#service-health"><span>Service health</span></a>
+        <a href="#service-logs" style="display:none"><span>Service logs</span></a>
+        {% if not journals %}<a href="#dynamic-journals"><span>Journal entries</span></a>{% endif %}
+      </div>
+    </div>
+
+    {% if tasks or sessions or journals or summaries or readme_html or core_files %}
+    <div class="dashboard-nav-group">
+      <h3 class="dashboard-nav-group-title">Content</h3>
+      <div class="dashboard-nav-links">
+        {% if tasks %}<a href="#tasks"><span>Tasks</span><span class="nav-count">{{ stats.total_tasks }}</span></a>{% endif %}
+        {% if sessions %}<a href="#sessions"><span>Recent sessions</span><span class="nav-count">{{ stats.total_sessions }}</span></a>{% endif %}
+        {% if journals %}<a href="#journals"><span>Journal entries</span><span class="nav-count">{{ journals | length }}</span></a>{% endif %}
+        {% if summaries %}<a href="#summaries"><span>Summaries</span><span class="nav-count">{{ summaries | length }}</span></a>{% endif %}
+        {% if readme_html or core_files %}<a href="#about"><span>Core Files</span>{% if core_files %}<span class="nav-count">{{ core_files | length }}</span>{% endif %}</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="dashboard-nav-group">
+      <h3 class="dashboard-nav-group-title">Workspace</h3>
+      <div class="dashboard-nav-links">
+        <a href="#packages"><span>Packages</span><span class="nav-count">{{ stats.total_packages }}</span></a>
+        <a href="#plugins"><span>Plugins</span><span class="nav-count">{{ stats.total_plugins }}</span></a>
+        {% if community_plugins %}<a href="#community-plugins"><span>Community</span><span class="nav-count">{{ stats.total_community_plugins }}</span></a>{% endif %}
+        <a href="#guidance"><span>Lessons &amp; Skills</span><span class="nav-count">{{ stats.total_guidance }}</span></a>
+      </div>
+    </div>
+  </aside>
+  <div class="dashboard-main">
+
+<!-- Dynamic: Session Stats (shown when serve API is available) -->
+<section id="session-stats" class="dynamic-panel" style="display:none">
+  <h2>Session Stats</h2>
+  <div class="stats" id="session-stats-grid"></div>
+  <div id="session-stats-models"></div>
+</section>
+
+<!-- Dynamic: Activity Heatmap (shown when serve API is available) -->
+<section id="activity-heatmap" class="dynamic-panel" style="display:none">
+  <h2>Activity</h2>
+  <div class="heatmap-wrap">
+    <div class="heatmap-month-labels" id="heatmap-months"></div>
+    <div class="heatmap-grid" id="heatmap-grid"></div>
+  </div>
+  <div class="heatmap-legend">
+    <span>Less</span>
+    <span class="heatmap-cell"></span>
+    <span class="heatmap-cell" data-level="1"></span>
+    <span class="heatmap-cell" data-level="2"></span>
+    <span class="heatmap-cell" data-level="3"></span>
+    <span class="heatmap-cell" data-level="4"></span>
+    <span>More</span>
+  </div>
+</section>
+
+<!-- Dynamic: Recent Sessions (shown when serve API is available) -->
+<section id="recent-sessions" class="dynamic-panel" style="display:none">
+  <h2>Recent Sessions <span class="count-badge" id="sessions-count"></span></h2>
+  <div class="filter-row" id="session-filters">
+    <select id="session-filter-harness" onchange="loadRecentSessions(0)">
+      <option value="">All harnesses</option>
+    </select>
+    <select id="session-filter-model" onchange="loadRecentSessions(0)">
+      <option value="">All models</option>
+    </select>
+    <select id="session-filter-outcome" onchange="loadRecentSessions(0)">
+      <option value="">All outcomes</option>
+      <option value="productive">productive</option>
+      <option value="noop">noop</option>
+      <option value="unknown">unknown</option>
+    </select>
+  </div>
+  <table id="dynamic-sessions-table">
+    <thead>
+      <tr><th>Time</th><th>Harness</th><th>Model</th><th>Context</th><th>Category</th><th>Outcome</th><th>Duration</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div id="sessions-pagination" style="display:none;text-align:center;padding:0.5rem;gap:0.5rem;align-items:center;justify-content:center">
+    <button id="sessions-prev" onclick="sessionsPagePrev()" disabled>&#8592; Prev</button>
+    <span id="sessions-page-info" style="margin:0 0.5rem"></span>
+    <button id="sessions-next" onclick="sessionsPageNext()">Next &#8594;</button>
+  </div>
+</section>
+
+<!-- Dynamic: Services (shown when serve API is available) -->
+<section id="agent-services" class="dynamic-panel" style="display:none">
+  <h2>Services</h2>
+  <table id="services-table">
+    <thead>
+      <tr><th>Name</th><th>Status</th><th>Description</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Dynamic: Schedule (shown when serve API is available) -->
+<section id="agent-schedule" class="dynamic-panel" style="display:none">
+  <h2>Schedule</h2>
+  <table id="schedule-table">
+    <thead>
+      <tr><th>Timer</th><th>Activates</th><th>Last Trigger</th><th>Next Run</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Dynamic: Service Health (shown when serve API returns health data) -->
+<section id="service-health" class="dynamic-panel" style="display:none">
+  <h2>Service Health <span class="count-badge" id="health-summary"></span></h2>
+  <table id="health-table">
+    <thead>
+      <tr><th>Service</th><th>Health</th><th>Status</th><th>Uptime</th><th>Restarts</th><th>Memory</th><th>Errors (1h)</th><th>Actions</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- Dynamic: Service Logs (shown when a service is selected from health table) -->
+<section id="service-logs" class="dynamic-panel" style="display:none">
+  <h2>Service Logs <span class="count-badge" id="logs-service-name"></span></h2>
+  <div class="filter-row">
+    <select id="logs-since" onchange="loadServiceLogs()">
+      <option value="1h">Last 1 hour</option>
+      <option value="6h">Last 6 hours</option>
+      <option value="24h">Last 24 hours</option>
+      <option value="7d">Last 7 days</option>
+    </select>
+    <select id="logs-priority" onchange="loadServiceLogs()">
+      <option value="">All priorities</option>
+      <option value="err">Errors only</option>
+      <option value="warning">Warning+</option>
+      <option value="info">Info+</option>
+      <option value="debug">Debug+</option>
+    </select>
+    <button class="filter-btn" id="logs-close" onclick="hideServiceLogs()">Close</button>
+  </div>
+  <table id="logs-table">
+    <thead>
+      <tr><th style="width:160px">Time</th><th style="width:80px">Priority</th><th>Message</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div id="logs-status" style="text-align:center;padding:0.5rem;color:var(--text-dim);font-size:0.85rem"></div>
+</section>
+
+<!-- Dynamic: Journals (shown when serve API is available and no static journals) -->
+{% if not journals %}
+<section id="dynamic-journals" class="dynamic-panel" style="display:none">
+  <h2>Recent Journal Entries</h2>
+  <table id="dynamic-journal-table">
+    <thead>
+      <tr><th>Date</th><th>Entry</th><th>Preview</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if tasks %}
+<!-- Tasks -->
+<section id="tasks">
+  <h2>Tasks <span class="count-badge">({{ stats.total_tasks }})</span></h2>
+  {% if stats.task_states %}
+  <div class="filter-row" id="task-state-filters">
+    <button class="filter-btn active" data-state="all">All <span class="chip-count">{{ stats.total_tasks }}</span></button>
+    {% for state, count in stats.task_states.items() %}
+    <button class="filter-btn" data-state="{{ state }}">{{ state }} <span class="chip-count">{{ count }}</span></button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <table id="tasks-table">
+    <thead>
+      <tr><th>Title</th><th>State</th><th>Priority</th><th>Tags</th><th>Assigned</th>{% if gh_repo_url %}<th></th>{% endif %}</tr>
+    </thead>
+    <tbody>
+    {% for task in tasks %}
+      <tr data-state="{{ task.state }}"{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td>
+          <strong><a href="{{ task.page_url }}">{{ task.title }}</a></strong>
+          {% if task.state in ('active', 'ready_for_review') and task.next_action %}<div class="task-hint">→ {{ task.next_action }}</div>{% endif %}
+          {% if task.state == 'waiting' and task.waiting_for %}<div class="task-hint">⏳ {{ task.waiting_for }}</div>{% endif %}
+          {% if task.age_label %}<div class="task-hint">{{ task.age_label }}</div>{% endif %}
+        </td>
+        <td><span class="tag {% if task.state in ('active', 'ready_for_review') %}tag-active{% elif task.state in ('waiting', 'todo') %}tag-medium{% elif task.state in ('backlog', 'someday') %}tag-source{% elif task.state in ('done', 'cancelled') %}tag-deprecated{% endif %}">{{ task.state }}</span></td>
+        <td>{% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% elif task.priority == 'medium' %}tag-medium{% endif %}">{{ task.priority }}</span>{% endif %}</td>
+        <td>{% for t in task.tags %}<span class="tag tag-category">{{ t }}</span>{% endfor %}</td>
+        <td>{% if task.assigned_to %}{{ task.assigned_to }}{% endif %}</td>
+        {% if gh_repo_url %}<td>{% if task.gh_url %}<a href="{{ task.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if tasks | length > 15 %}
+  <button class="show-more-btn" id="tasks-show-more" data-noun="tasks" onclick="toggleRows(this, 'tasks-table')">Show all {{ tasks | length }} tasks</button>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if sessions %}
+<!-- Static Sessions (from --sessions flag) -->
+<section id="sessions">
+  <h2>Recent Sessions <span class="count-badge">({{ stats.total_sessions }})</span></h2>
+  <table id="static-sessions-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Session</th>
+        <th>Harness</th>
+        <th>Commits</th>
+        <th>Edits</th>
+        <th>Errors</th>
+        <th>Grade</th>
+        <th>Category</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in sessions %}
+      <tr{% if loop.index > 15 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td>{{ s.date }}</td>
+        <td title="{{ s.name }}">{{ s.name[:40] }}</td>
+        <td><span class="tag">{{ s.harness }}</span></td>
+        <td>{{ s.commits }}</td>
+        <td>{{ s.edits }}</td>
+        <td>{{ s.errors }}</td>
+        <td>
+          <span class="tag {% if s.grade >= 0.7 %}tag-active{% elif s.grade >= 0.4 %}tag-medium{% endif %}">
+            {{ "%.2f"|format(s.grade) }}
+          </span>
+        </td>
+        <td>{% if s.category %}<span class="tag tag-category">{{ s.category }}</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if sessions | length > 15 %}
+  <button class="show-more-btn" data-noun="sessions" onclick="toggleRows(this, 'static-sessions-table')">Show all {{ sessions | length }} sessions</button>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if journals %}
+<!-- Recent Journal Entries -->
+<section id="journals">
+  <h2>Recent Journal Entries <span class="count-badge">({{ journals | length }})</span></h2>
+  <table id="journal-table">
+    <thead>
+      <tr><th>Date</th><th>Entry</th><th>Preview</th></tr>
+    </thead>
+    <tbody>
+    {% for j in journals %}
+      <tr{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td>{{ j.date }}</td>
+        <td><a href="{{ j.page_url }}">{{ j.name }}</a></td>
+        <td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ j.preview }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if journals | length > 10 %}
+  <button class="show-more-btn" data-noun="entries" onclick="toggleRows(this, 'journal-table')">Show all {{ journals | length }} entries</button>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if summaries %}
+<!-- Knowledge Summaries -->
+<section id="summaries">
+  <h2>Summaries <span class="count-badge">({% if stats.total_summaries and stats.total_summaries > summaries | length %}{{ summaries | length }} of {{ stats.total_summaries }}{% else %}{{ summaries | length }}{% endif %})</span></h2>
+  <table id="summaries-table">
+    <thead>
+      <tr><th>Period</th><th>Type</th><th>Preview</th></tr>
+    </thead>
+    <tbody>
+    {% for s in summaries %}
+      <tr{% if loop.index > 10 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td><a href="{{ s.page_url }}">{{ s.period }}</a></td>
+        <td><span class="tag tag-category">{{ s.type }}</span></td>
+        <td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.preview }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if summaries | length > 10 %}
+  <button class="show-more-btn" data-noun="summaries" onclick="toggleRows(this, 'summaries-table')">Show all {{ summaries | length }}{% if stats.total_summaries and stats.total_summaries > summaries | length %} rendered{% endif %} summaries</button>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if readme_html or core_files %}
+<!-- Core Files (README + gptme.toml prompt files) -->
+<section id="about">
+  <h2>Core Files {% if core_files %}<span class="count-badge">({{ core_files | length }})</span>{% endif %}</h2>
+  {% if core_files %}
+  <p style="color:var(--text-dim);margin-bottom:1rem">Files auto-included in every agent session via <code>gptme.toml</code>:</p>
+  <table>
+    <thead><tr><th>File</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+    {% for f in core_files %}
+      <tr>
+        <td><code>{{ f }}</code></td>
+        {% if gh_repo_url %}<td><a href="{{ gh_repo_url }}/blob/HEAD/{{ f }}" class="gh-link">src</a></td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if readme_html %}
+  <details>
+    <summary style="cursor:pointer;margin-top:1rem"><strong>README.md</strong></summary>
+    <div class="content" style="margin-top:0.5rem">{{ readme_html | safe }}</div>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
+<!-- Packages & Plugins (short, infrastructure overview) -->
+<div class="two-col">
+  <section id="packages">
+    <h2>Packages <span class="count-badge">({{ stats.total_packages }})</span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Version</th><th>Description</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for pkg in packages %}
+        <tr>
+          <td><strong>{% if pkg.body %}<a href="{{ pkg.page_url }}">{{ pkg.name }}</a>{% else %}{{ pkg.name }}{% endif %}</strong></td>
+          <td>{{ pkg.version }}</td>
+          <td>{{ pkg.description }}</td>
+          {% if gh_repo_url %}<td>{% if pkg.gh_url %}<a href="{{ pkg.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section id="plugins">
+    <h2>Plugins <span class="count-badge">({{ stats.total_plugins }})</span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Description</th><th>Status</th>{% if gh_repo_url %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for plugin in plugins %}
+        <tr>
+          <td><strong>{% if plugin.body %}<a href="{{ plugin.page_url }}">{{ plugin.name }}</a>{% else %}{{ plugin.name }}{% endif %}</strong></td>
+          <td>{{ plugin.description }}</td>
+          <td>{% if plugin.enabled is defined %}{% if plugin.enabled %}<span class="tag tag-active">enabled</span>{% else %}<span class="tag">available</span>{% endif %}{% endif %}</td>
+          {% if gh_repo_url %}<td>{% if plugin.gh_url %}<a href="{{ plugin.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
+<!-- Community Extensions (third-party repos tagged with gptme topics) -->
+{% if community_plugins %}
+<section id="community-plugins">
+  <h2>Community Extensions <span class="count-badge">({{ community_plugins | length }})</span></h2>
+  <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
+    Third-party repos tagged with <code>gptme-plugin</code>, <code>gptme-skill</code>, or <code>gptme-mcp-server</code> on GitHub.
+    To get listed, <a href="https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/classifying-your-repository-with-topics">add a topic</a> to your repo.
+  </p>
+  <table>
+    <thead><tr><th>Repo</th><th>Type</th><th>Language</th><th>⭐</th><th>Description</th></tr></thead>
+    <tbody>
+    {% for ext in community_plugins %}
+      <tr>
+        <td><strong><a href="{{ ext.url }}" target="_blank" rel="noopener">{{ ext.name }}</a></strong></td>
+        <td>{% for t in ext.topics %}<span class="tag">{{ t | replace("gptme-", "") }}</span> {% endfor %}</td>
+        <td>{{ ext.language or "" }}</td>
+        <td>{{ ext.stars or "" }}</td>
+        <td>{{ ext.description or "" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<!-- Lessons & Skills (reference — collapsed by default) -->
+<section id="guidance">
+  <h2>Lessons &amp; Skills <span class="count-badge">({{ stats.total_guidance }})</span></h2>
+  {% if guidance | length > 5 and stats.lesson_categories %}
+  <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
+    Reference catalog —
+    {% for cat, count in stats.lesson_categories.items() %}{{ cat }} ({{ count }}){% if not loop.last %}, {% endif %}{% endfor %}
+  </p>
+  {% endif %}
+  <!-- Advanced filters: hidden until section is expanded (only when >5 items with a show-more button) -->
+  <div id="guidance-adv-filters"{% if guidance | length > 5 %} style="display:none"{% endif %}>
+    <input type="text" class="search-box" id="guidance-search" placeholder="Filter lessons and skills...">
+    <!-- Kind chips (Lessons / Skills) -->
+    <div class="filter-row" id="kind-filters">
+      <button class="filter-btn active" data-kind="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
+      <button class="filter-btn" data-kind="lesson">Lessons <span class="chip-count">{{ stats.total_lessons }}</span></button>
+      <button class="filter-btn" data-kind="skill">Skills <span class="chip-count">{{ stats.total_skills }}</span></button>
+    </div>
+    <!-- Category chips -->
+    <div class="cat-chart" id="guidance-filters">
+      <button class="cat-chip active" data-cat="all">All <span class="chip-count">{{ stats.total_guidance }}</span></button>
+      {% for cat, count in stats.lesson_categories.items() %}
+      <button class="cat-chip" data-cat="{{ cat }}">{{ cat }} <span class="chip-count">{{ count }}</span></button>
+      {% endfor %}
+    </div>
+    {% if sources %}
+    <div class="filter-row" id="source-filters">
+      <button class="filter-btn active" data-source="all">All sources</button>
+      <button class="filter-btn" data-source="_local">Local</button>
+      {% for src in sources %}
+      <button class="filter-btn" data-source="{{ src }}">{{ src }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  <table id="guidance-table">
+    <thead>
+      <tr><th>Title</th><th>Kind</th><th>Category</th><th>Status</th><th>Keywords</th>{% if sources %}<th>Source</th>{% endif %}{% if gh_repo_url %}<th></th>{% endif %}</tr>
+    </thead>
+    <tbody>
+    {% for item in guidance %}
+      <tr data-category="{{ item.category }}" data-kind="{{ item.kind }}" data-source="{{ item.source | default('', true) }}"{% if loop.index > 5 %} class="collapsed-row" style="display:none"{% endif %}>
+        <td>{% if item.page_url %}<a href="{{ item.page_url }}">{{ item.title | default(item.name, true) }}</a>{% else %}{{ item.title | default(item.name, true) }}{% endif %}</td>
+        <td><span class="tag tag-kind-{{ item.kind }}">{{ item.kind }}</span></td>
+        <td><span class="tag tag-category">{{ item.category }}</span></td>
+        <td><span class="tag {% if item.status == 'active' %}tag-active{% elif item.status == 'deprecated' %}tag-deprecated{% endif %}">{{ item.status }}</span></td>
+        <td>{% for kw in item.keywords %}<span class="tag">{{ kw }}</span>{% endfor %}</td>
+        {% if sources %}<td>{% if item.source %}<span class="tag tag-source">{{ item.source }}</span>{% endif %}</td>{% endif %}
+        {% if gh_repo_url %}<td>{% if item.gh_url %}<a href="{{ item.gh_url }}" title="View on GitHub" class="gh-link">src</a>{% endif %}</td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if guidance | length > 5 %}
+  <button class="show-more-btn" id="guidance-show-more" data-noun="items" data-collapsed-label="Browse all {{ guidance | length }} lessons &amp; skills →" data-controls="guidance-adv-filters" onclick="toggleRows(this, 'guidance-table')">Browse all {{ guidance | length }} lessons &amp; skills →</button>
+  {% endif %}
+</section>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Toggle collapsed rows in a table
+function toggleRows(btn, tableId) {
+  const table = document.getElementById(tableId);
+  const rows = table.querySelectorAll('.collapsed-row');
+  const showing = rows[0] && rows[0].style.display !== 'none';
+  rows.forEach(r => r.style.display = showing ? 'none' : '');
+  const total = table.querySelectorAll('tbody tr').length;
+  const noun = btn.dataset.noun || 'items';
+  const collapsedLabel = btn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
+  btn.textContent = showing ? collapsedLabel : 'Show fewer';
+  // Toggle associated controls panel (e.g. filter bar)
+  const controlsId = btn.dataset.controls;
+  if (controlsId) {
+    // Track expanded state unconditionally so applyFilters stays in sync
+    // even if the DOM element is temporarily absent.
+    btn.dataset.expanded = showing ? '' : 'true';
+    const controls = document.getElementById(controlsId);
+    if (controls) {
+      controls.style.display = showing ? 'none' : '';
+    }
+  }
+}
+
+// Guidance (lessons + skills) filtering
+const filterChips = document.querySelectorAll('#guidance-filters .cat-chip');
+const kindBtns = document.querySelectorAll('#kind-filters .filter-btn');
+const sourceBtns = document.querySelectorAll('#source-filters .filter-btn');
+const guidanceRows = document.querySelectorAll('#guidance-table tbody tr');
+const searchBox = document.getElementById('guidance-search');
+const showMoreBtn = document.getElementById('guidance-show-more');
+
+let activeCategory = 'all';
+let activeKind = 'all';
+let activeSource = 'all';
+
+function applyFilters() {
+  const query = (searchBox ? searchBox.value : '').toLowerCase();
+  const isFiltering = activeCategory !== 'all' || activeKind !== 'all' || activeSource !== 'all' || query;
+  // Read expanded state from DOM (set by toggleRows via btn.dataset.expanded)
+  const guidanceExpanded = showMoreBtn && showMoreBtn.dataset.expanded === 'true';
+
+  // When filtering, show all rows (override collapse)
+  if (showMoreBtn) {
+    showMoreBtn.style.display = isFiltering ? 'none' : '';
+    if (!isFiltering) {
+      if (guidanceExpanded) {
+        // User explicitly expanded the section — keep it expanded: "Show fewer" label, controls visible.
+        showMoreBtn.textContent = 'Show fewer';
+        const controlsId = showMoreBtn.dataset.controls;
+        if (controlsId) {
+          const controlsEl = document.getElementById(controlsId);
+          if (controlsEl) controlsEl.style.display = '';
+        }
+      } else {
+        // Restore collapsed label and hide controls when user hasn't expanded.
+        const total = document.getElementById('guidance-table').querySelectorAll('tbody tr').length;
+        const noun = showMoreBtn.dataset.noun || 'items';
+        showMoreBtn.textContent = showMoreBtn.dataset.collapsedLabel || ('Show all ' + total + ' ' + noun);
+        const controlsId = showMoreBtn.dataset.controls;
+        if (controlsId) {
+          const controlsEl = document.getElementById(controlsId);
+          if (controlsEl) controlsEl.style.display = 'none';
+        }
+      }
+    }
+  }
+
+  let idx = 0;
+  guidanceRows.forEach(row => {
+    const cat = row.dataset.category;
+    const kind = row.dataset.kind;
+    const source = row.dataset.source;
+    const text = row.textContent.toLowerCase();
+    const catMatch = activeCategory === 'all' || cat === activeCategory;
+    const kindMatch = activeKind === 'all' || kind === activeKind;
+    const sourceMatch = activeSource === 'all' ||
+      (activeSource === '_local' && !source) ||
+      source === activeSource;
+    const searchMatch = !query || text.includes(query);
+    const match = catMatch && kindMatch && sourceMatch && searchMatch;
+
+    if (isFiltering) {
+      row.style.display = match ? '' : 'none';
+      row.classList.remove('collapsed-row');
+    } else if (guidanceExpanded) {
+      // Section is explicitly expanded — show all rows.
+      // Re-add collapsed-row for rows >5 (stripped by isFiltering branch) so
+      // "Show fewer" can find and hide them. Defensively remove it for rows ≤5
+      // to keep state clean if ever entered via an unexpected path.
+      // Note: match is always true here (!isFiltering means all filters are at 'all').
+      idx++;
+      if (idx > 5) row.classList.add('collapsed-row');
+      else row.classList.remove('collapsed-row');
+      row.style.display = '';
+    } else {
+      // Restore collapse state (≤5 rows visible).
+      idx++;
+      if (idx > 5) {
+        row.classList.add('collapsed-row');
+        row.style.display = 'none';
+      } else {
+        row.style.display = match ? '' : 'none';
+      }
+    }
+  });
+}
+
+filterChips.forEach(chip => {
+  chip.addEventListener('click', () => {
+    filterChips.forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    activeCategory = chip.dataset.cat;
+    applyFilters();
+  });
+});
+
+kindBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    kindBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeKind = btn.dataset.kind;
+    applyFilters();
+  });
+});
+
+if (sourceBtns.length > 0) {
+  sourceBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      sourceBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeSource = btn.dataset.source;
+      applyFilters();
+    });
+  });
+}
+
+if (searchBox) {
+  searchBox.addEventListener('input', applyFilters);
+}
+
+// Task state filtering
+const taskStateBtns = document.querySelectorAll('#task-state-filters .filter-btn');
+const tasksTable = document.getElementById('tasks-table');
+const tasksShowMoreBtn = document.getElementById('tasks-show-more');
+
+if (taskStateBtns.length > 0 && tasksTable) {
+  taskStateBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      taskStateBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const state = btn.dataset.state;
+      const isFiltering = state !== 'all';
+      const rows = tasksTable.querySelectorAll('tbody tr');
+
+      if (tasksShowMoreBtn) {
+        tasksShowMoreBtn.style.display = isFiltering ? 'none' : '';
+        if (!isFiltering) {
+          tasksShowMoreBtn.textContent = tasksShowMoreBtn.dataset.collapsedLabel || ('Show all ' + rows.length + ' tasks');
+        }
+      }
+
+      let idx = 0;
+      rows.forEach(row => {
+        const match = state === 'all' || row.dataset.state === state;
+        if (isFiltering) {
+          row.style.display = match ? '' : 'none';
+          row.classList.remove('collapsed-row');
+        } else {
+          idx++;
+          row.classList.toggle('collapsed-row', idx > 15);
+          row.style.display = (match && idx <= 15) ? '' : (idx > 15 ? 'none' : '');
+        }
+      });
+    });
+  });
+}
+
+// Dynamic dashboard — progressive enhancement
+// Tries /api/status; if it responds, each loader shows its own section.
+// On failure, loads data.json for client-side search on static deployments.
+async function initDynamic() {
+  try {
+    const resp = await fetch('/api/status');
+    if (!resp.ok) {
+      _apiAvailable = false;
+      await _loadStaticSearchIndex();
+    } else {
+      _apiAvailable = true;
+      // Each load* function calls show()/hide() for its own section.
+      // The live nav group is shown automatically by show() when a child link appears.
+      loadSessionStats();
+      loadActivityHeatmap();
+      loadRecentSessions();
+      loadServices();
+      loadSchedule();
+      await _fetchRestartToken();
+      loadServiceHealth();
+      // Auto-refresh health every 30 seconds — always retry to recover from transient errors
+      setInterval(loadServiceHealth, 30000);
+      if (document.getElementById('dynamic-journals')) loadJournals();
+    }
+  } catch (e) {
+    // No backend — load static index for client-side search
+    _apiAvailable = false;
+    await _loadStaticSearchIndex();
+  }
+  // Re-trigger any search typed while we were probing (the null guard showed "Loading…")
+  const overlay = document.getElementById('search-overlay');
+  if (overlay && overlay.classList.contains('open')) {
+    const pending = document.getElementById('global-search-input').value.trim();
+    if (pending && pending.length >= 2) runSearch(pending, document.getElementById('search-type-filter').value);
+  }
+}
+
+async function loadSessionStats() {
+  try {
+    const resp = await fetch('/api/sessions/stats');
+    if (!resp.ok) { hide('session-stats'); return; }
+    const stats = await resp.json();
+    const grid = document.getElementById('session-stats-grid');
+    if (!grid || stats.total === 0) { hide('session-stats'); return; }
+
+    const rate = stats.success_rate != null ? (stats.success_rate * 100).toFixed(0) + '%' : 'N/A';
+    const dur = stats.duration != null && stats.duration.total_hours != null
+      ? stats.duration.total_hours.toFixed(1) + 'h' : 'N/A';
+
+    grid.innerHTML = [
+      card(stats.total, 'Sessions'),
+      card(stats.productive || 0, 'Productive'),
+      card(rate, 'Success Rate'),
+      card(dur, 'Total Time'),
+    ].join('');
+    show('session-stats');
+
+    const models = stats.by_model;
+    if (models && Object.keys(models).length > 0) {
+      const el = document.getElementById('session-stats-models');
+      let html = '<h3 style="font-size:1rem;margin:1rem 0 0.5rem">By Model</h3>';
+      for (const [m, s] of Object.entries(models)) {
+        const r = s.rate != null ? (s.rate * 100).toFixed(0) + '%' : '';
+        html += '<div style="display:flex;align-items:center;margin-bottom:0.3rem">'
+          + '<span style="width:120px;font-size:0.85rem;color:var(--text-dim);text-align:right;padding-right:0.75rem">' + esc(m) + '</span>'
+          + '<div style="height:20px;background:var(--accent);border-radius:3px;min-width:2px;width:' + (s.total / stats.total * 100).toFixed(1) + '%"></div>'
+          + '<span style="font-size:0.8rem;color:var(--text-dim);padding-left:0.5rem">' + s.total + ' (' + r + ')</span>'
+          + '</div>';
+      }
+      el.innerHTML = html;
+    }
+  } catch (e) { hide('session-stats'); }
+}
+
+// Session pagination state
+let _sessionsOffset = 0;
+const _sessionsLimit = 20;
+let _sessionsTotal = 0;
+let _filtersPopulated = false;
+
+function sessionsPagePrev() { loadRecentSessions(Math.max(0, _sessionsOffset - _sessionsLimit)); }
+function sessionsPageNext() { loadRecentSessions(_sessionsOffset + _sessionsLimit); }
+
+async function loadRecentSessions(offset) {
+  if (offset !== undefined) _sessionsOffset = offset;
+  try {
+    let url = '/api/sessions?limit=' + _sessionsLimit + '&offset=' + _sessionsOffset;
+    const harness = document.getElementById('session-filter-harness')?.value;
+    const model = document.getElementById('session-filter-model')?.value;
+    const outcome = document.getElementById('session-filter-outcome')?.value;
+    if (harness) url += '&harness=' + encodeURIComponent(harness);
+    if (model) url += '&model=' + encodeURIComponent(model);
+    if (outcome) url += '&outcome=' + encodeURIComponent(outcome);
+
+    const resp = await fetch(url);
+    if (!resp.ok) { hide('recent-sessions'); return; }
+    const data = await resp.json();
+    const sessions = data.sessions || [];
+    _sessionsTotal = data.total || 0;
+    _sessionsOffset = data.offset || 0;
+
+    const tbody = document.querySelector('#dynamic-sessions-table tbody');
+    if (!tbody) { hide('recent-sessions'); return; }
+
+    show('recent-sessions');
+
+    // Update count badge
+    const countEl = document.getElementById('sessions-count');
+    if (countEl) countEl.textContent = '(' + _sessionsTotal + ')';
+
+    if (sessions.length === 0 && _sessionsOffset === 0) {
+      const hasFilter = harness || model || outcome;
+      tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-dim);text-align:center;padding:1.5rem">'
+        + (hasFilter
+          ? 'No sessions match the selected filters.'
+          : 'No sessions found. For full session data install <code>pip install gptme-dashboard[sessions]</code>; basic session history from the gptme logs directory is auto-scanned.')
+        + '</td></tr>';
+      document.getElementById('sessions-pagination').style.display = 'none';
+      return;
+    }
+
+    tbody.innerHTML = sessions.map(s => {
+      const time = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
+      const dur = s.duration_seconds > 0 ? Math.round(s.duration_seconds / 60) + 'm' : '';
+      const cls = s.outcome === 'productive' ? 'tag-active' : s.outcome === 'noop' ? 'tag-deprecated' : '';
+      return '<tr>'
+        + '<td>' + esc(time) + '</td>'
+        + '<td>' + esc(s.harness || '') + '</td>'
+        + '<td>' + esc(s.model || '') + '</td>'
+        + '<td>' + (s.context_tier ? '<span class="tag">' + esc(s.context_tier) + '</span>' : '') + '</td>'
+        + '<td>' + esc(s.category || '') + '</td>'
+        + '<td><span class="tag ' + cls + '">' + esc(s.outcome || '') + '</span></td>'
+        + '<td>' + esc(dur) + '</td>'
+        + '</tr>';
+    }).join('');
+
+    // Update pagination
+    const pagDiv = document.getElementById('sessions-pagination');
+    if (_sessionsTotal > _sessionsLimit) {
+      pagDiv.style.display = 'flex';
+      const page = Math.floor(_sessionsOffset / _sessionsLimit) + 1;
+      const pages = Math.ceil(_sessionsTotal / _sessionsLimit);
+      document.getElementById('sessions-page-info').textContent = 'Page ' + page + ' of ' + pages;
+      document.getElementById('sessions-prev').disabled = _sessionsOffset === 0;
+      document.getElementById('sessions-next').disabled = !data.has_more;
+    } else {
+      pagDiv.style.display = 'none';
+    }
+
+    // Populate filter dropdowns once from stats
+    if (!_filtersPopulated) {
+      try {
+        const statsResp = await fetch('/api/sessions/stats');
+        if (statsResp.ok) {
+          _filtersPopulated = true;
+          const stats = await statsResp.json();
+          const harnessSelect = document.getElementById('session-filter-harness');
+          const modelSelect = document.getElementById('session-filter-model');
+          if (stats.by_harness) {
+            for (const h of Object.keys(stats.by_harness).sort()) {
+              const opt = document.createElement('option');
+              opt.value = h; opt.textContent = h;
+              harnessSelect.appendChild(opt);
+            }
+          }
+          if (stats.by_model) {
+            for (const m of Object.keys(stats.by_model).sort()) {
+              const opt = document.createElement('option');
+              opt.value = m; opt.textContent = m;
+              modelSelect.appendChild(opt);
+            }
+          }
+        }
+      } catch (_e) { /* stats not critical */ }
+    }
+  } catch (e) { hide('recent-sessions'); }
+}
+
+async function loadServices() {
+  try {
+    const resp = await fetch('/api/services');
+    if (!resp.ok) { hide('agent-services'); return; }
+    const data = await resp.json();
+    const services = data.services || [];
+    if (services.length === 0) { hide('agent-services'); return; }
+    const tbody = document.querySelector('#services-table tbody');
+    if (!tbody) { hide('agent-services'); return; }
+    tbody.innerHTML = services.map(s => {
+      const cls = s.active === 'active' ? 'tag-active' : 'tag-deprecated';
+      return '<tr>'
+        + '<td><strong>' + esc(s.name) + '</strong></td>'
+        + '<td><span class="tag ' + cls + '">' + esc(s.sub || s.active) + '</span></td>'
+        + '<td>' + esc(s.description) + '</td>'
+        + '</tr>';
+    }).join('');
+    show('agent-services');
+  } catch (e) { hide('agent-services'); }
+}
+
+async function loadSchedule() {
+  try {
+    const resp = await fetch('/api/schedule');
+    if (!resp.ok) { hide('agent-schedule'); return; }
+    const data = await resp.json();
+    const timers = data.timers || [];
+    if (timers.length === 0) { hide('agent-schedule'); return; }
+    const tbody = document.querySelector('#schedule-table tbody');
+    if (!tbody) { hide('agent-schedule'); return; }
+
+    function fmtTime(iso) {
+      if (!iso) return '<span style="color:var(--text-dim)">—</span>';
+      const d = new Date(iso);
+      const now = new Date();
+      const diffMs = d - now;
+      const absDiff = Math.abs(diffMs);
+      let rel = '';
+      if (absDiff < 60000) rel = 'just now';
+      else if (absDiff < 3600000) rel = Math.round(absDiff / 60000) + 'min';
+      else if (absDiff < 86400000) rel = Math.round(absDiff / 3600000) + 'h';
+      else rel = Math.round(absDiff / 86400000) + 'd';
+      if (rel !== 'just now') {
+        if (diffMs > 0) rel = 'in ' + rel;
+        else rel = rel + ' ago';
+      }
+      return '<span title="' + esc(d.toLocaleString()) + '">' + esc(rel) + '</span>';
+    }
+
+    // Sort by next run time (soonest first)
+    timers.sort((a, b) => {
+      if (!a.next) return 1;
+      if (!b.next) return -1;
+      return new Date(a.next) - new Date(b.next);
+    });
+
+    tbody.innerHTML = timers.map(t => {
+      return '<tr>'
+        + '<td><strong>' + esc(t.name) + '</strong></td>'
+        + '<td>' + esc(t.activates || '') + '</td>'
+        + '<td>' + fmtTime(t.last) + '</td>'
+        + '<td>' + fmtTime(t.next) + '</td>'
+        + '</tr>';
+    }).join('');
+    show('agent-schedule');
+  } catch (e) { hide('agent-schedule'); }
+}
+
+function formatUptime(seconds) {
+  if (seconds <= 0) return '-';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm';
+  return s + 's';
+}
+
+function formatMemory(bytes) {
+  if (!bytes || bytes <= 0) return '-';
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return bytes + ' B';
+}
+
+// Restart token — fetched once at startup from /api/services/restart-enabled.
+// Stored in JS memory; cross-origin scripts cannot read it (CORS blocked).
+let _restartToken = null;
+
+async function _fetchRestartToken() {
+  try {
+    const resp = await fetch('/api/services/restart-enabled');
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.enabled && data.token) { _restartToken = data.token; }
+    }
+  } catch (e) { /* ignore — restart buttons will be disabled */ }
+}
+
+async function restartService(name) {
+  if (!_restartToken) { alert('Restart not available — no token configured.'); return; }
+  if (!confirm('Restart ' + name + '?\n\nThe service will briefly stop before restarting.')) return;
+  try {
+    const resp = await fetch('/api/services/' + encodeURIComponent(name) + '/restart', {
+      method: 'POST',
+      headers: { 'X-Restart-Token': _restartToken },
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      _showRestartFlash(name + ' restarting…', 'success');
+      setTimeout(loadServiceHealth, 2000);
+    } else if (resp.status === 403) {
+      // Token may be stale (server restarted with a new auto-generated token).
+      // Re-fetch; if a new token is available, prompt the user to retry.
+      const prevToken = _restartToken;
+      _restartToken = null;
+      await _fetchRestartToken();
+      if (_restartToken && _restartToken !== prevToken) {
+        _showRestartFlash('Session refreshed — click ↺ again to restart.', 'error');
+      } else {
+        _showRestartFlash('Restart failed: invalid token. Reload the page and try again.', 'error');
+      }
+    } else {
+      _showRestartFlash('Error: ' + (data.error || 'Restart failed'), 'error');
+    }
+  } catch (e) {
+    _showRestartFlash('Restart request failed', 'error');
+  }
+}
+
+let _flashTimer = null;
+function _showRestartFlash(msg, type) {
+  let flash = document.getElementById('restart-flash');
+  if (!flash) {
+    flash = document.createElement('div');
+    flash.id = 'restart-flash';
+    Object.assign(flash.style, {
+      position: 'fixed', bottom: '1rem', right: '1rem',
+      padding: '0.5rem 1rem', borderRadius: '4px',
+      fontWeight: 'bold', zIndex: '9999',
+    });
+    document.body.appendChild(flash);
+  }
+  flash.textContent = msg;  // textContent is safe — do NOT change to innerHTML
+  flash.style.background = type === 'success' ? '#2ecc71' : '#e74c3c';
+  flash.style.color = '#fff';
+  flash.style.display = 'block';
+  if (_flashTimer !== null) clearTimeout(_flashTimer);
+  _flashTimer = setTimeout(() => { flash.style.display = 'none'; _flashTimer = null; }, 3000);
+}
+
+async function loadServiceHealth() {
+  try {
+    const resp = await fetch('/api/services/health');
+    if (!resp.ok) { hide('service-health'); return; }
+    const data = await resp.json();
+    const services = data.services || [];
+    const tbody = document.querySelector('#health-table tbody');
+    if (services.length === 0) { hide('service-health'); return; }
+    if (!tbody) { hide('service-health'); return; }
+
+    // Summary counts
+    const counts = {healthy: 0, warning: 0, degraded: 0, unhealthy: 0};
+    services.forEach(s => { counts[s.health] = (counts[s.health] || 0) + 1; });
+    const summaryEl = document.getElementById('health-summary');
+    if (summaryEl) {
+      const parts = [];
+      if (counts.healthy) parts.push(counts.healthy + ' healthy');
+      if (counts.warning) parts.push(counts.warning + ' warning');
+      if (counts.degraded) parts.push(counts.degraded + ' degraded');
+      if (counts.unhealthy) parts.push(counts.unhealthy + ' unhealthy');
+      summaryEl.textContent = '(' + parts.join(', ') + ')';
+    }
+
+    tbody.innerHTML = services.map(s => {
+      const healthCls = 'tag-' + s.health;
+      const statusCls = s.active === 'active' ? 'tag-active' : s.active === 'failed' ? 'tag-failed' : 'tag-deprecated';
+      const restartBtn = _restartToken
+        ? '<button class="restart-btn" onclick="restartService(' + JSON.stringify(s.name).replace(/"/g, '&quot;') + ')" title="Restart service">↺</button>'
+        : '<span class="restart-btn restart-btn-disabled" title="Restart not available">↺</span>';
+      return '<tr>'
+        + '<td><strong>' + esc(s.name) + '</strong></td>'
+        + '<td><span class="tag ' + healthCls + '">' + esc(s.health) + '</span></td>'
+        + '<td><span class="tag ' + statusCls + '">' + esc(s.sub || s.active) + '</span></td>'
+        + '<td>' + formatUptime(s.uptime_seconds) + '</td>'
+        + '<td>' + (s.restart_count || 0) + '</td>'
+        + '<td>' + formatMemory(s.memory_bytes) + '</td>'
+        + '<td>' + (s.recent_errors || 0) + '</td>'
+        + '<td><a class="logs-link" data-service="' + esc(s.name) + '" href="#">logs</a> ' + restartBtn + '</td>'
+        + '</tr>';
+    }).join('');
+
+    show('service-health');
+  } catch (e) { hide('service-health'); }
+}
+
+async function loadJournals() {
+  try {
+    const resp = await fetch('/api/journals?limit=20');
+    if (!resp.ok) { hide('dynamic-journals'); return; }
+    const journals = await resp.json();
+    if (!Array.isArray(journals) || journals.length === 0) { hide('dynamic-journals'); return; }
+    const tbody = document.querySelector('#dynamic-journal-table tbody');
+    if (!tbody) { hide('dynamic-journals'); return; }
+    tbody.innerHTML = journals.map(j =>
+      '<tr>'
+      + '<td>' + esc(j.date || '') + '</td>'
+      + '<td>' + esc(j.name || '') + '</td>'
+      + '<td style="color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.preview || '') + '</td>'
+      + '</tr>'
+    ).join('');
+    show('dynamic-journals');
+  } catch (e) { hide('dynamic-journals'); }
+}
+
+function hide(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = 'none';
+  // Also hide the corresponding nav link
+  const link = document.querySelector('.dashboard-nav-links a[href="#' + id + '"]');
+  if (link) link.style.display = 'none';
+  // Auto-hide live nav group if all its links are hidden
+  const liveGroup = document.getElementById('live-nav-group');
+  if (liveGroup) {
+    const visibleLinks = liveGroup.querySelectorAll('.dashboard-nav-links a:not([style*="display: none"])');
+    if (visibleLinks.length === 0) liveGroup.style.display = 'none';
+  }
+}
+function show(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = '';
+  // Also show the corresponding nav link
+  const link = document.querySelector('.dashboard-nav-links a[href="#' + id + '"]');
+  if (link) link.style.display = '';
+  // Show live nav group when a child becomes visible
+  const liveGroup = document.getElementById('live-nav-group');
+  if (liveGroup && liveGroup.contains(link)) liveGroup.style.display = '';
+}
+function card(v, l) { return '<div class="stat-card"><div class="number">' + v + '</div><div class="label">' + l + '</div></div>'; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Service log viewer
+let _logsService = '';
+
+function showServiceLogs(serviceName) {
+  _logsService = serviceName;
+  document.getElementById('logs-service-name').textContent = '(' + serviceName + ')';
+  show('service-logs');
+  document.getElementById('service-logs').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  loadServiceLogs();
+}
+
+function hideServiceLogs() {
+  _logsService = '';
+  hide('service-logs');
+}
+
+async function loadServiceLogs() {
+  if (!_logsService) return;
+  const since = document.getElementById('logs-since').value;
+  const priority = document.getElementById('logs-priority').value;
+  const tbody = document.querySelector('#logs-table tbody');
+  const statusEl = document.getElementById('logs-status');
+  if (!tbody) return;
+
+  statusEl.textContent = 'Loading...';
+  tbody.innerHTML = '';
+
+  try {
+    let url = '/api/services/logs?service=' + encodeURIComponent(_logsService)
+      + '&since=' + encodeURIComponent(since)
+      + '&lines=200';
+    if (priority) url += '&priority=' + encodeURIComponent(priority);
+
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      statusEl.textContent = err.error || 'Failed to load logs';
+      return;
+    }
+    const data = await resp.json();
+    const logs = data.logs || [];
+
+    if (logs.length === 0) {
+      statusEl.textContent = data.warning
+        ? 'Warning: ' + data.warning
+        : 'No log entries found for this time range.';
+      return;
+    }
+
+    statusEl.textContent = logs.length + ' entries (last ' + since + ')'
+      + (data.warning ? ' — Warning: ' + data.warning : '');
+
+    tbody.innerHTML = logs.map(entry => {
+      const ts = entry.timestamp ? new Date(entry.timestamp * 1000).toLocaleString() : '';
+      const prio = entry.priority || 'info';
+      const prioCls = 'tag-' + esc(prio);
+      return '<tr>'
+        + '<td>' + esc(ts) + '</td>'
+        + '<td><span class="tag ' + prioCls + '">' + esc(prio) + '</span></td>'
+        + '<td>' + esc(entry.message || '') + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) {
+    statusEl.textContent = 'Error loading logs: ' + e.message;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', initDynamic);
+
+async function loadActivityHeatmap() {
+  try {
+    const resp = await fetch('/api/activity?days=365');
+    if (!resp.ok) { hide('activity-heatmap'); return; }
+    const data = await resp.json();
+    if (data.error || !data.days || !data.days.length) { hide('activity-heatmap'); return; }
+
+    const days = data.days;
+    const maxCount = Math.max(...days.map(d => d.count), 1);
+
+    function level(count) {
+      if (count === 0) return 0;
+      const ratio = count / maxCount;
+      if (ratio <= 0.25) return 1;
+      if (ratio <= 0.5)  return 2;
+      if (ratio <= 0.75) return 3;
+      return 4;
+    }
+
+    // Pad front so first cell aligns with its day-of-week (Sun=0)
+    const firstDate = new Date(days[0].date + 'T00:00:00');
+    const pad = firstDate.getDay();
+    const padded = Array(pad).fill(null).concat(days);
+
+    // Group into columns of 7 (one per week)
+    const cols = [];
+    for (let i = 0; i < padded.length; i += 7) cols.push(padded.slice(i, i + 7));
+
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthsEl = document.getElementById('heatmap-months');
+    const gridEl   = document.getElementById('heatmap-grid');
+    if (!monthsEl || !gridEl) return;
+    monthsEl.innerHTML = '';
+    gridEl.innerHTML   = '';
+
+    let lastMonth = -1;
+    cols.forEach(col => {
+      // Month label: show on the first week of each new month
+      const firstDay = col.find(d => d !== null);
+      const labelEl  = document.createElement('span');
+      labelEl.className = 'heatmap-month-label';
+      if (firstDay) {
+        const m = new Date(firstDay.date + 'T00:00:00').getMonth();
+        if (m !== lastMonth) { labelEl.textContent = monthNames[m]; lastMonth = m; }
+      }
+      monthsEl.appendChild(labelEl);
+
+      const colEl = document.createElement('div');
+      colEl.className = 'heatmap-col';
+      col.forEach(day => {
+        const cell = document.createElement('span');
+        cell.className = 'heatmap-cell';
+        if (day) {
+          cell.dataset.level = level(day.count);
+          cell.title = day.count > 0
+            ? `${day.date}: ${day.count} session${day.count !== 1 ? 's' : ''}`
+            : day.date;
+        } else {
+          cell.style.background = 'transparent';
+        }
+        colEl.appendChild(cell);
+      });
+      gridEl.appendChild(colEl);
+    });
+
+    show('activity-heatmap');
+  } catch (e) { hide('activity-heatmap'); }
+}
+
+// Delegated handler for dynamically-rendered logs links (avoids fragile inline onclick).
+document.addEventListener('click', function(e) {
+  const link = e.target.closest('a.logs-link[data-service]');
+  if (!link) return;
+  e.preventDefault();
+  showServiceLogs(link.dataset.service);
+});
+</script>
+
+<script>
+/* === Global search === */
+let _searchTimer = null;
+let _searchSelected = -1;
+let _searchAbortController = null;
+// null = unknown, true = live API available, false = static mode (use data.json)
+let _apiAvailable = null;
+// Client-side search index loaded from data.json when API is unavailable
+let _staticSearchIndex = null;
+
+function openSearch() {
+  document.getElementById('search-overlay').classList.add('open');
+  document.getElementById('global-search-input').focus();
+  _searchSelected = -1;
+}
+
+function closeSearch() {
+  clearTimeout(_searchTimer);
+  if (_searchAbortController) _searchAbortController.abort();
+  document.getElementById('search-overlay').classList.remove('open');
+  document.getElementById('global-search-input').value = '';
+  document.getElementById('search-results-area').innerHTML =
+    '<div class="search-empty">Type to search across your workspace</div>';
+  document.getElementById('search-result-count').textContent = '';
+}
+
+function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) ? s : '#'; }
+
+/** Build a flat search index from data.json for client-side search on static sites. */
+function _buildClientIndex(data) {
+  const items = [];
+  // Returns '/path' when page_url or path is present; null when both absent (avoids broken links)
+  const pageUrl = (x) => (x.page_url || x.path) ? '/' + (x.page_url || x.path) : null;
+  const addItem = (type, title, category, source, keywords, excerpt, url) => {
+    if (url) items.push({ type, title: title || '', category: category || '',
+      source: source || '', keywords: keywords || [], excerpt: excerpt || '', url });
+  };
+  for (const g of (data.guidance || [])) {
+    addItem(g.kind || 'lesson', g.title || g.name, g.category, g.source,
+      g.keywords, g.description, pageUrl(g));
+  }
+  for (const t of (data.tasks || [])) {
+    addItem('task', t.title || t.id, t.state, '', t.tags, '', pageUrl(t));
+  }
+  for (const j of (data.journals || [])) {
+    addItem('journal', j.name || j.date, j.date, '', [], j.preview, pageUrl(j));
+  }
+  for (const s of (data.summaries || [])) {
+    addItem('summary', s.title || s.period, s.type, '', [], s.preview || '', pageUrl(s));
+  }
+  for (const p of (data.packages || [])) {
+    if (!p.has_page) continue;
+    addItem('package', p.name, '', p.source, [], p.description, pageUrl(p));
+  }
+  for (const p of (data.plugins || [])) {
+    if (!p.has_page) continue;
+    addItem('plugin', p.name, p.enabled == null ? '' : (p.enabled ? 'enabled' : 'disabled'), p.source, [], p.description,
+      pageUrl(p));
+  }
+  return items;
+}
+
+/** Simple client-side search against the static index built from data.json. */
+function _clientSearch(q, typeFilter, limit) {
+  if (!_staticSearchIndex) return { results: [], total: 0 };
+  const words = q.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length) return { results: [], total: 0 };
+  const scored = [];
+  for (const item of _staticSearchIndex) {
+    if (typeFilter && item.type !== typeFilter) continue;
+    const haystack = [item.title, item.category, item.excerpt, item.source, ...item.keywords].join(' ').toLowerCase();
+    const score = words.reduce((n, w) => n + (haystack.includes(w) ? 1 : 0), 0);
+    if (score > 0) scored.push({ score, item });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { results: scored.slice(0, limit).map(r => r.item), total: scored.length };
+}
+
+/** Load data.json and build the static search index (called once when API is unavailable).
+ *  Sets _staticSearchIndex to an array on success or false on failure (never stays null). */
+async function _loadStaticSearchIndex() {
+  if (_staticSearchIndex !== null) return;  // already loaded (or failed)
+  try {
+    const resp = await fetch('/data.json');
+    if (!resp.ok) {
+      console.warn('gptme-dashboard: /data.json fetch failed (' + resp.status + ') — static search unavailable');
+      _staticSearchIndex = false;
+      return;
+    }
+    const data = await resp.json();
+    _staticSearchIndex = _buildClientIndex(data);
+  } catch (_) { _staticSearchIndex = false; }
+}
+
+/** Render a list of result objects into the search results area. */
+function _renderResults(results, total, q) {
+  _searchSelected = -1;
+  if (results.length === 0) {
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">No results for <strong>' + esc(q) + '</strong></div>';
+    document.getElementById('search-result-count').textContent = '';
+    return;
+  }
+  document.getElementById('search-result-count').textContent =
+    total + ' result' + (total === 1 ? '' : 's') + (total > results.length ? ' (showing ' + results.length + ')' : '');
+  document.getElementById('search-results-area').innerHTML = results.map((r) => {
+    const title = esc(r.title || r.path || '(untitled)');
+    const badge = '<span class="search-badge">' + esc(r.type) + '</span>';
+    const sourceBadge = r.source ? '<span class="search-badge search-badge-source">' + esc(r.source) + '</span>' : '';
+    const excerpt = r.excerpt ? '<div class="search-result-excerpt">' + esc(r.excerpt.trim()) + '</div>' : '';
+    const url = safeUrl(r.url);
+    return '<a href="' + esc(url) + '" class="search-result">'
+      + '<div class="search-result-top">' + badge + '<span class="search-result-title">' + title + '</span>' + sourceBadge + '</div>'
+      + excerpt + '</a>';
+  }).join('');
+}
+
+async function runSearch(q, typeFilter) {
+  if (!q || q.length < 2) {
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">Type at least 2 characters to search</div>';
+    document.getElementById('search-result-count').textContent = '';
+    return;
+  }
+
+  // Still probing API availability — show loading placeholder and bail out
+  if (_apiAvailable === null) {
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">Loading search index…</div>';
+    document.getElementById('search-result-count').textContent = '';
+    return;
+  }
+
+  // Static mode: use client-side index built from data.json
+  if (_apiAvailable === false) {
+    if (_staticSearchIndex === null) {
+      // Index still loading (race: _apiAvailable set false before _loadStaticSearchIndex resolves)
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">Loading search index…</div>';
+      document.getElementById('search-result-count').textContent = '';
+      return;
+    }
+    if (_staticSearchIndex === false) {
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">Search unavailable — could not load static index</div>';
+      document.getElementById('search-result-count').textContent = '';
+      return;
+    }
+    const { results, total } = _clientSearch(q, typeFilter, 20);
+    _renderResults(results, total, q);
+    return;
+  }
+
+  // Abort any in-flight request to prevent stale results overwriting newer ones
+  if (_searchAbortController) _searchAbortController.abort();
+  _searchAbortController = new AbortController();
+  const signal = _searchAbortController.signal;
+
+  const params = new URLSearchParams({ q, limit: '20' });
+  if (typeFilter) params.set('type', typeFilter);
+  try {
+    const resp = await fetch('/api/search?' + params, { signal });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      document.getElementById('search-results-area').innerHTML =
+        '<div class="search-empty">' + esc(err.error || 'Search error (' + resp.status + ')') + '</div>';
+      return;
+    }
+    const data = await resp.json().catch(() => ({}));
+    _renderResults(data.results || [], data.total || 0, q);
+  } catch(e) {
+    if (e.name === 'AbortError') return;  // Superseded by newer request
+    document.getElementById('search-results-area').innerHTML =
+      '<div class="search-empty">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+document.getElementById('global-search-input').addEventListener('input', function() {
+  clearTimeout(_searchTimer);
+  const q = this.value.trim();
+  const typeFilter = document.getElementById('search-type-filter').value;
+  _searchTimer = setTimeout(() => runSearch(q, typeFilter), 250);
+});
+
+document.getElementById('search-type-filter').addEventListener('change', function() {
+  clearTimeout(_searchTimer);
+  const q = document.getElementById('global-search-input').value.trim();
+  runSearch(q, this.value);
+});
+
+document.getElementById('global-search-input').addEventListener('keydown', function(e) {
+  const results = document.querySelectorAll('.search-result');
+  if (e.key === 'Escape') { closeSearch(); return; }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    _searchSelected = Math.min(_searchSelected + 1, results.length - 1);
+    results.forEach((r, i) => r.classList.toggle('selected', i === _searchSelected));
+    if (results[_searchSelected]) results[_searchSelected].scrollIntoView({block:'nearest'});
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    _searchSelected = Math.max(_searchSelected - 1, -1);
+    results.forEach((r, i) => r.classList.toggle('selected', i === _searchSelected));
+    if (_searchSelected >= 0 && results[_searchSelected]) results[_searchSelected].scrollIntoView({block:'nearest'});
+  } else if (e.key === 'Enter' && _searchSelected >= 0) {
+    e.preventDefault();
+    if (results[_searchSelected]) results[_searchSelected].click();
+  }
+});
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
+      e.preventDefault();
+      openSearch();
+    }
+  }
+  if (e.key === 'Escape' && document.getElementById('search-overlay').classList.contains('open')) {
+    closeSearch();
+  }
+});
+</script>
+
+<script>
+/* === Section navigation ===
+ * Nav links smooth-scroll to the target section and highlight the active link.
+ * Scroll-spy updates the highlight as the user scrolls.
+ */
+(function () {
+  'use strict';
+
+  var navLinks = document.querySelectorAll('.dashboard-nav-links a[href^="#"]');
+
+  // Highlight the nav link matching the given section id
+  function setActive(id) {
+    navLinks.forEach(function (a) {
+      a.classList.toggle('nav-active', a.getAttribute('href') === '#' + id);
+    });
+  }
+
+  // Click → smooth scroll + highlight
+  navLinks.forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      var id = a.getAttribute('href').slice(1);
+      var el = document.getElementById(id);
+      if (!el) return;  // let browser handle missing targets
+      e.preventDefault();
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      history.replaceState(null, '', '#' + id);
+      setActive(id);
+    });
+  });
+
+  // Scroll-spy: update active link as user scrolls
+  var ticking = false;
+  window.addEventListener('scroll', function () {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(function () {
+      ticking = false;
+      var best = '';
+      navLinks.forEach(function (a) {
+        var id = a.getAttribute('href').slice(1);
+        var el = document.getElementById(id);
+        if (el && el.offsetParent !== null && el.getBoundingClientRect().top <= 120) best = id;
+      });
+      if (best) setActive(best);
+    });
+  });
+
+  // On load: scroll to hash target if present
+  if (location.hash) {
+    var el = document.getElementById(location.hash.slice(1));
+    if (el) {
+      el.scrollIntoView({ block: 'start' });
+      setActive(location.hash.slice(1));
+    }
+  }
+}());
+</script>
+{% endblock %}

@@ -1,0 +1,2091 @@
+"""Extract productivity signals from agent trajectory files.
+
+Supports four trajectory formats:
+- **gptme**: conversation.jsonl with top-level role/content/timestamp fields
+- **Claude Code**: session .jsonl with top-level type/message/timestamp fields
+- **Codex CLI**: JSONL with typed entries (session_meta, turn_context, response_item, event_msg)
+- **Copilot CLI**: JSONL with typed events (session.start, assistant.message, tool.*)
+
+Provides grounded reward signals for Thompson sampling and session analytics
+by analyzing actual transcripts rather than self-reported journals.
+
+Journals cannot be relied on for consistent structure. Trajectories are
+ground truth: every tool call, every error, every file write is recorded.
+"""
+
+from __future__ import annotations
+
+import glob as _glob
+import json
+import os
+import re
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+from .deliverables import build_deliverable_detail, project_deliverable_details
+
+# Regex for git commit lines in shell output (works for both harnesses)
+_COMMIT_RE = re.compile(r"\[(?:master|main|[a-zA-Z0-9_/-]+)\s+([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)")
+
+# Tools that write files in Claude Code
+# Note: gptme has a "patch" tool but Claude Code does not — no "Patch" here
+_CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
+
+_WARNING_PHRASE_RE = re.compile(r"error:|\bfailed\b|\bfailures?\b|\btraceback\b|\bexception\b")
+
+# Regex to detect background bash task output file paths in CC sessions.
+# When CC runs a Bash command in background mode, the tool result contains:
+# "Command running in background with ID: TASKID. Output is being written to: PATH"
+# The actual git commit output (which matches _COMMIT_RE) is in that file, not the result.
+# Note: paths are matched greedily up to the end of line to handle spaces in paths.
+_BG_TASK_RE = re.compile(r"Output is being written to: (.+\.output)")
+
+# Regex for gh pr merge success output.
+# Format: "✓ Squashed and merged pull request #N (title)"
+# This does NOT match _COMMIT_RE (no branch/hash format), so needs separate detection.
+_PR_MERGE_RE = re.compile(r"(?:Squashed and merged|Rebased and merged|Merged) pull request #(\d+)")
+
+# Marker injected by gptme-tooloutput-trimmer's summarization pass
+# (tooloutput_trimmer.hooks.trimmer.SUMMARIZATION_MARKER).  Hardcoded to
+# avoid a hard dep on the plugin; must stay in sync with the plugin string.
+_SUMMARIZATION_MARKER = "[Summarized previous tool outputs]"
+
+# Regex for GitHub CLI interactions that represent productive work but don't
+# produce commits or file writes (PR reviews, issue comments, PR comments).
+# These should count toward session productivity to avoid floor-grading
+# review/triage sessions. Matches the command being invoked, not just output.
+_GH_INTERACTION_RE = re.compile(
+    r"gh\s+(?:"
+    r"pr\s+(?:review|comment|close|reopen|merge|edit)"
+    r"|issue\s+(?:comment|close|reopen|edit|create)"
+    r"|api\s+repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)"
+    r")"
+)
+
+# Regex for gh pr create command detection (from Bash input).
+# Tracked separately from gh_interactions because PR submission is higher-value
+# work that should boost the session grade comparable to a real commit.
+_PR_CREATE_CMD_RE = re.compile(r"\bgh\s+pr\s+create\b")
+
+# Regex for gh issue close command detection (from Bash input).
+# Tracks explicit issue closures as a forward-progress signal (blocker removal).
+_ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
+
+# Regex for gh pr merge command detection (from Bash input).
+# Must be command-gated (not just output-gated) because _PR_MERGE_RE patterns
+# can appear in test files, file-read results, and other non-merge contexts.
+_GH_PR_MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
+
+
+def _record_deliverable_detail(
+    detail_by_value: dict[str, dict[str, object]],
+    *,
+    value: str,
+    kind: str,
+    provenance_class: str,
+    evidence: dict[str, object],
+) -> None:
+    """Record first-seen structured detail for a deliverable value."""
+    if not value or value in detail_by_value:
+        return
+    detail_by_value[value] = build_deliverable_detail(
+        value,
+        kind=kind,
+        provenance_class=provenance_class,
+        evidence=evidence,
+    )
+
+
+def _ordered_deliverable_details(
+    deliverables: list[str],
+    detail_by_value: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    """Project structured details into legacy order and fill any missing entries."""
+    return project_deliverable_details(
+        deliverables,
+        detail_by_value,
+        fallback_evidence={"source": "projection_fallback"},
+    )
+
+
+def _as_int(value: object) -> int | None:
+    """Return integer token counters without accepting bools or lossy floats."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+# Regex to extract `--repo OWNER/REPO` from a `gh` command string.
+# Used to learn the target repo for `gh pr merge`/`gh pr view` so we can
+# resolve the server-side merge-commit SHA after a squash merge.
+_GH_REPO_FLAG_RE = re.compile(r"--repo[=\s]+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
+
+# Regex to extract the PR number from a `gh pr merge <N>` style command.
+# Lets us attach `pr create` repo context to a later `pr merge` for the same PR
+# when only one side carries `--repo`.
+# The inner group accepts a flag plus an optional space-separated value whose
+# first character is neither `-` (next flag) nor a digit (the PR number), so
+# patterns like `gh pr merge --repo owner/repo 99 --squash` parse correctly.
+_GH_PR_MERGE_NUM_RE = re.compile(r"\bgh\s+pr\s+merge\s+(?:--?\S+(?:\s+[^-\d]\S*)?\s+)*(\d+)")
+
+# Regex to extract owner/repo from a PR URL produced by `gh pr create`.
+# Example: "https://github.com/owner/repo/pull/42" -> ("owner/repo", "42")
+_PR_CREATE_URL_REPO_RE = re.compile(r"https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
+
+# Fine-grained gh interaction regexes — split gh_interactions into signal types.
+# These are detected on the command input side (same as _GH_INTERACTION_RE).
+# The aggregate gh_interactions count is kept for backward compatibility.
+
+# PR code reviews submitted (gh pr review — higher value than plain comments)
+_GH_PR_REVIEW_CMD_RE = re.compile(r"gh\s+pr\s+review\b")
+
+# Comments posted: PR comments, issue comments, and direct API comment endpoints
+_GH_COMMENT_CMD_RE = re.compile(
+    r"gh\s+(?:pr|issue)\s+comment\b" r"|gh\s+api\s+repos/[^\s]+/(?:pulls|issues)/\d+/comments\b"
+)
+
+# Issues created (gh issue create — creation event, analogous to prs_submitted)
+_GH_ISSUE_CREATE_CMD_RE = re.compile(r"\bgh\s+issue\s+create\b")
+
+# Regex for CI failure investigation: `gh run view --log-failed` examines failing CI logs.
+# Detecting this command confirms the agent actively investigated a CI failure (not just
+# glanced at the summary). Only credited when the check returns non-empty output (real
+# failures found) AND the session subsequently produces commits (agent fixed something).
+_CI_FAILURE_LOG_CMD_RE = re.compile(r"gh\s+run\s+view\b.*--log-failed")
+
+
+def parse_trajectory(jsonl_path: Path) -> list[dict]:
+    """Parse a JSONL trajectory file into a list of records."""
+    msgs = []
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msgs.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return msgs
+
+
+def _detect_format(msgs: list[dict]) -> str:
+    """Detect trajectory format from parsed JSONL records.
+
+    Returns one of: 'gptme', 'claude_code', 'codex', 'copilot'.
+
+    Detection heuristics (checked in order):
+    - **Codex**: first record has type='session_meta' with originator='codex_exec'
+    - **Copilot**: first record has type='session.start' with producer='copilot-agent'
+    - **gptme**: any record has a top-level 'role' field
+    - **Claude Code**: any record has type in (user, assistant, result)
+
+    Scans all records (not just the first few) to handle CC trajectories that
+    begin with non-standard record types like 'queue-operation' or 'system_prompt'.
+    """
+    if msgs:
+        first = msgs[0]
+        # Codex: first line is always session_meta
+        if first.get("type") == "session_meta":
+            payload = first.get("payload") or {}
+            if payload.get("originator") in ("codex_exec", "codex_interactive"):
+                return "codex"
+        # Copilot: first line is always session.start
+        if first.get("type") == "session.start":
+            data = first.get("data") or {}
+            if data.get("producer") == "copilot-agent":
+                return "copilot"
+
+    for msg in msgs:
+        if "role" in msg:
+            return "gptme"
+        if msg.get("type") in ("user", "assistant", "result"):
+            return "claude_code"
+    return "gptme"  # default
+
+
+def detect_format(msgs: list[dict]) -> str:
+    """Public alias for trajectory format detection.
+
+    Exposes format detection as stable API while preserving _detect_format for
+    internal callers and backward compatibility.
+    """
+    return _detect_format(msgs)
+
+
+def _parse_timestamp(ts_str: str) -> datetime | None:
+    """Parse an ISO 8601 timestamp string, returning None on failure."""
+    if not ts_str:
+        return None
+    try:
+        from datetime import timezone as _tz
+
+        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_tz.utc)
+        return ts
+    except ValueError:
+        return None
+
+
+def _extract_path_from_args(args_str: str) -> str | None:
+    """Extract the 'path' field from a tool call's JSON args string."""
+    m = re.search(r'"path"\s*:\s*"([^"]+)"', args_str)
+    return m.group(1) if m else None
+
+
+def _resolve_merge_shas(pr_merges: list[str], pr_context: dict[int, str]) -> list[str]:
+    """For each 'PR #N' in pr_merges, look up merge commit SHA via gh CLI.
+
+    When a session runs ``gh pr merge --squash``, GitHub creates a new merge
+    commit *server-side*; the session trajectory never observes that SHA. This
+    helper calls ``gh pr view <N> --repo <owner/repo> --json mergeCommit`` after
+    the fact so the SHA can be added to deliverables and thus be reverse-indexed
+    for revert-attribution.
+
+    Returns a list of merge-commit SHAs (full 40-char hex). Silently skips:
+    - PR numbers with no known repo context (no --repo flag, no captured URL)
+    - gh CLI failures (missing binary, network, auth, non-zero exit)
+    - Timeouts
+    - Malformed SHA output (not 40 hex chars)
+    """
+    shas: list[str] = []
+    for pr_merge in pr_merges:
+        m = re.match(r"PR #(\d+)", pr_merge)
+        if not m:
+            continue
+        pr_num = int(m.group(1))
+        repo = pr_context.get(pr_num)
+        if not repo:
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    str(pr_num),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "mergeCommit",
+                    "-q",
+                    ".mergeCommit.oid",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if result.returncode != 0:
+            continue
+        sha = result.stdout.strip()
+        if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
+            shas.append(sha)
+    return shas
+
+
+def extract_signals(msgs: list[dict]) -> dict:
+    """Extract productivity signals from parsed gptme trajectory messages.
+
+    Returns a dict with counts and extracted deliverables — no LLM needed.
+
+    Tool call format in gptme trajectories:
+      @tool_name(call_id): {"arg": "value", ...}
+    Tool results are system messages with timestamps.
+    """
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    journal_paths: list[str] = []
+    retry_candidates: list[str] = []
+    timestamps: list[datetime] = []
+    steps = 0  # number of assistant turns that yielded to await tool results
+    detail_by_value: dict[str, dict[str, object]] = {}
+    summarizer_fired = False
+
+    # Track recent (tool, path) pairs for retry detection
+    recent_sigs: list[str] = []
+
+    for msg in msgs:
+        role = msg.get("role", "")
+        content = msg.get("content", "") or ""
+        ts_str = msg.get("timestamp", "")
+
+        # Parse timestamps for duration
+        if ts_str:
+            ts = _parse_timestamp(ts_str)
+            if ts is not None:
+                timestamps.append(ts)
+
+        if role == "assistant":
+            # Find all @tool_name(call_id): JSON_ARGS blocks.
+            blocks = re.split(r"(?=\n@\w+\()", "\n" + content)
+            step_has_tool = False
+            for block in blocks:
+                m = re.match(r"\n@(\w+)\(([^)]+)\):\s*(.*)", block, re.DOTALL)
+                if not m:
+                    continue
+                tool, _call_id, args_str = m.group(1), m.group(2), m.group(3)
+                tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                step_has_tool = True
+
+                if tool in ("save", "write", "patch", "edit"):
+                    path = _extract_path_from_args(args_str)
+                    if path:
+                        if "/journal/" not in path:
+                            file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": tool},
+                            )
+                            sig = f"{tool}:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append(tool)
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
+                        else:
+                            journal_paths.append(path)
+                    # No else: tool calls without extractable paths are not counted as
+                    # file writes. Placeholder strings like "<save>" would inflate the
+                    # unique-write count used in grade_signals and push unproductive
+                    # sessions into higher reward tiers.
+            if step_has_tool:
+                steps += 1
+
+        elif role == "system" and ts_str:
+            content_stripped = content.strip()
+
+            # Summarizer-fired detection: the trimmer plugin replaces evicted
+            # tool outputs with a system message starting with this marker.
+            if content_stripped.startswith(_SUMMARIZATION_MARKER):
+                summarizer_fired = True
+
+            # Error detection (guard applies to all conditions, not just the last)
+            if not content_stripped.startswith("Ran command:") and (
+                content_stripped.startswith("Error")
+                or "Error during execution:" in content[:100]
+                or "error:" in content[:80].lower()
+            ):
+                error_count += 1
+
+            # Git commit detection from shell output (finditer handles multi-commit pushes).
+            # Restrict to first 500 bytes: real git output appears early; reading a file
+            # that happens to contain git-log-style lines would produce false positives.
+            for commit_match in _COMMIT_RE.finditer(content[:500]):
+                commit_hash = commit_match.group(1)
+                commit_msg = commit_match.group(2).strip()
+                commit_value = f"{commit_msg} ({commit_hash})"
+                git_commits.append(commit_value)
+                _record_deliverable_detail(
+                    detail_by_value,
+                    value=commit_value,
+                    kind="commit",
+                    provenance_class="session_committed",
+                    evidence={"source": "trajectory", "tool_name": "shell"},
+                )
+
+    # Session duration
+    duration_s = 0
+    if len(timestamps) >= 2:
+        duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    # Combine deliverables: git commits + distinct file writes
+    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
+    retry_count = len(retry_candidates)
+
+    return {
+        "tool_calls": tool_calls,
+        "steps": steps,
+        "error_count": error_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
+        "session_duration_s": duration_s,
+        "retry_count": retry_count,
+        "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
+        "summarizer_fired": summarizer_fired,
+    }
+
+
+def grade_signals(signals: dict, *, category: str | None = None) -> float:
+    """Compute a graded reward (0.0-1.0) from trajectory signals.
+
+    Based on ground-truth evidence from the transcript:
+    - Git commits (strongest signal)
+    - PR merges (gh pr merge → counted as ~1.5 commits)
+    - PRs submitted (gh pr create → counted as ~1.2 commits)
+    - CI fixed (gh run view --log-failed → fix → push → counted as ~0.8 commits)
+    - Issues closed (blocker removal → counted as ~0.4 commits)
+    - File writes / patches
+    - Error rate penalty
+    - Retry penalty
+
+    Uses *effective_units* = commits + 1.5*pr_merges + 1.2*prs_submitted + 0.4*issues_closed
+    + 0.8*ci_fixed so that sessions with no direct commits but high forward progress
+    (e.g. submitting two PRs in worktrees, or merging reviewed PRs) are graded
+    comparably to commit-producing sessions.
+
+    Args:
+        signals: Raw signal dict from extract_signals* functions.
+        category: Optional session category hint. When the category is one
+            where commits are not the primary output (monitoring, research,
+            triage, social, self-review), two adjustments apply:
+            1. The threshold for the 0.55 reward tier is lowered from 3
+               effective writes to 1, preventing productive review/triage
+               sessions from being floor-graded.
+            2. Tool-active sessions with no writes or interactions get a
+               neutral 0.35 floor instead of 0.25, treating "correctly found
+               no work" scans as non-failures even when errors > 0 (e.g. gh
+               CLI returning non-zero for "no results found").
+    """
+    commits = len(signals["git_commits"])
+    # Use unique writes for tier placement — repeated edits to the same file
+    # should not inflate the grade tier beyond what the retry penalty recovers.
+    writes = len(set(signals["file_writes"]))
+    errors = signals["error_count"]
+    retries = signals["retry_count"]
+    total_tools = sum(signals["tool_calls"].values())
+    # gptme has a 'complete' tool that signals intentional session end (as opposed
+    # to running out of context or timing out). Small bonus for structured completion.
+    has_complete = "complete" in signals["tool_calls"]
+
+    # GitHub interactions (PR reviews, issue comments) count as productive work
+    gh_interactions = signals.get("gh_interactions", 0)
+
+    # Forward-progress signals: PR merges, submissions, issue closures, and CI fixes.
+    # These represent high-value work that may not produce direct commits
+    # (e.g. PRs submitted from /tmp/worktrees without touching the main repo).
+    pr_merges = len(signals.get("pr_merges", []))
+    prs_submitted = len(signals.get("prs_submitted", []))
+    issues_closed = signals.get("issues_closed", 0)
+    ci_fixed = int(signals.get("ci_fixed", False))
+
+    # Effective work units: weighted sum of all forward-progress signals.
+    # Weights: merge=1.5, commit=1.0, PR submit=1.2, ci_fixed=0.8, issue close=0.4.
+    # Merges scored above commits because they close a review loop (PR submit + reviewer feedback
+    # + address + merge). CI fix scored at 0.8 commits: significant debugging work (log
+    # investigation, root-cause analysis, fix, push) but may produce only 1 small commit.
+    effective_units = (
+        commits + 1.5 * pr_merges + 1.2 * prs_submitted + 0.4 * issues_closed + 0.8 * ci_fixed
+    )
+
+    # Categories where gh_interactions and file_writes are the PRIMARY output,
+    # not commits. For these, a single useful interaction is sufficient for the
+    # 0.55 "active" tier — don't floor-grade productive review/triage sessions.
+    _NON_COMMIT_CATS = {"pm-react", "research", "triage", "social", "self-review"}
+    is_non_commit_category = category in _NON_COMMIT_CATS
+
+    if effective_units == 0 and writes == 0 and gh_interactions == 0:
+        # Distinguish dead sessions (zero tool calls) from active-but-unproductive ones
+        if total_tools == 0:
+            reward = 0.10
+        elif is_non_commit_category:
+            # Non-commit categories (monitoring, triage, social, self-review, research)
+            # that ran tools but produced no writes/interactions are likely "correctly
+            # found no work" sessions, not failures. Give a neutral grade instead of
+            # the 0.25 floor — even when errors > 0. Errors in these categories often
+            # come from gh CLI commands returning non-zero for "no results found" or
+            # transient API issues, not actual session failures.
+            reward = 0.35
+        else:
+            reward = 0.25
+    elif effective_units == 0:
+        effective_writes = writes + gh_interactions
+        # Non-commit categories: any interaction clears the 0.55 tier floor.
+        # Commit-producing categories: require 3+ effective writes to hit 0.55.
+        if effective_writes >= 3 or (is_non_commit_category and effective_writes >= 1):
+            reward = 0.55
+        else:
+            reward = 0.40
+    elif effective_units < 1.5:
+        reward = 0.60
+    elif effective_units < 2.5:
+        reward = 0.70
+    elif effective_units < 3.5:
+        reward = 0.78
+    else:
+        reward = min(0.92, 0.80 + 0.03 * (effective_units - 4))
+
+    if total_tools > 0:
+        error_rate = errors / total_tools
+        if error_rate > 0.15:
+            reward -= 0.10
+        elif error_rate > 0.05:
+            reward -= 0.05
+
+    if retries >= 3:
+        reward -= 0.08
+    elif retries >= 1:
+        reward -= 0.03
+
+    if has_complete:
+        reward += 0.03
+
+    return max(0.0, min(1.0, reward))
+
+
+def is_productive(signals: dict) -> bool:
+    """Quick binary productive/noop classification from trajectory signals."""
+    return bool(
+        signals["git_commits"]
+        or len(set(signals["file_writes"])) >= 2
+        or signals.get("gh_interactions", 0) >= 1
+        or signals.get("prs_submitted")  # any PR submitted = productive
+        or signals.get("pr_merges")  # any PR merged = productive
+        or signals.get("issues_closed", 0) >= 1  # confirmed issue close = productive
+        or signals.get("ci_fixed", False)  # CI failure investigated and fixed = productive
+    )
+
+
+def extract_signals_cc(msgs: list[dict]) -> dict:
+    """Extract productivity signals from Claude Code .jsonl trajectories.
+
+    CC format: each record has a top-level 'type' field.
+    - type='assistant': message.content is a list; tool calls have type='tool_use'
+    - type='user': message.content is a list; tool results have type='tool_result'
+    - type='result': final session result record
+
+    Tool names for file writes: Write, Edit (input.file_path), NotebookEdit (input.notebook_path).
+    Errors: tool_result items with is_error=True.
+    Git commits: detected from Bash tool output content via regex.
+    GitHub interactions: detected from Bash tool input commands (gh pr review, etc.).
+    """
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    warning_phrase_count = 0  # soft error signal: "error", "failed", etc. in output
+    gh_interactions = 0  # count of productive GitHub CLI commands (reviews, comments)
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    journal_paths: list[str] = []
+    retry_candidates: list[str] = []
+    timestamps: list[datetime] = []
+    steps = 0  # number of assistant turns that yielded to await tool results
+    recent_sigs: list[str] = []
+    # Map tool_use id → tool name for filtering commit detection to Bash only
+    tool_id_to_name: dict[str, str] = {}
+    # Per-tool-call timing: map tool_use_id → (tool_name, dispatch_timestamp, batch_size)
+    tool_dispatch: dict[str, tuple[str, datetime, int]] = {}
+    tool_durations: dict[str, list[float]] = {}  # tool_name → list of durations (seconds)
+    # Forward-progress signals: PR submissions, merges, and issue closures.
+    prs_submitted: list[str] = []  # PR numbers/URLs for PRs created this session
+    pr_merges: list[
+        str
+    ] = []  # PR numbers confirmed merged this session (higher weight than submit)
+    issues_closed: int = 0  # count of confirmed successful gh issue close commands
+    # Fine-grained gh interaction signals (alongside aggregate gh_interactions).
+    reviews_submitted: int = 0  # count of gh pr review commands (code review)
+    comments_posted: int = 0  # count of gh pr/issue comment + api comment posts
+    issues_created: int = 0  # count of gh issue create commands
+    _pr_create_pending: set[str] = set()  # tool_use_ids awaiting pr create result
+    _issue_close_pending: set[str] = set()  # tool_use_ids awaiting issue close result
+    # CI fix tracking: detect sessions that investigated CI failures and then pushed fixes.
+    # Credited when: (1) gh run view --log-failed returns non-empty output (real failures),
+    # AND (2) the session produces git commits (agent actually fixed something).
+    _ci_failure_check_pending: set[str] = set()  # tool_use_ids awaiting CI failure log result
+    _ci_failure_found: bool = False  # True when a --log-failed check returned non-empty output
+    _pr_merge_pending: set[str] = set()  # tool_use_ids awaiting pr merge result
+    _all_direct_commit_hashes: set[str] = set()  # session-wide dedup for git commits
+    # Map PR number → "owner/repo" for post-session gh pr view lookups.
+    # Populated from (a) gh pr create URL output and (b) `--repo` flags on gh pr merge
+    # commands. Used by _resolve_merge_shas to fetch server-side merge-commit SHAs
+    # for squash-merged PRs (which the session never observes directly).
+    pr_context: dict[int, str] = {}
+    # Stash the repo flag extracted from a `gh pr merge` command at dispatch time,
+    # so it can be attributed to the actual PR number when the result is parsed.
+    _pr_merge_repo_by_tool_id: dict[str, str] = {}
+    # PR number extracted from `gh pr merge <N>` command (may be absent if the
+    # command used `gh pr merge` without an explicit number). Keyed by tool_use_id.
+    _pr_merge_num_by_tool_id: dict[str, int] = {}
+    detail_by_value: dict[str, dict[str, object]] = {}
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        # Parse top-level timestamp (present on user/assistant/result records)
+        ts = _parse_timestamp(record.get("timestamp", ""))
+        if ts is not None:
+            timestamps.append(ts)
+
+        if rec_type == "assistant":
+            content = record.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            step_has_tool = False
+            dispatch_ids: list[tuple[str, str]] = []
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    continue
+                tool = item.get("name", "")
+                if not tool:
+                    continue
+                tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                step_has_tool = True
+
+                # Track id → name for commit detection filtering and timing
+                tool_id = item.get("id", "")
+                if tool_id:
+                    tool_id_to_name[tool_id] = tool
+                    # Record dispatch ids for this assistant turn so each tool
+                    # can later be tagged with the final batch size of the turn.
+                    if ts is not None:
+                        dispatch_ids.append((tool_id, tool))
+
+                if tool in _CC_WRITE_TOOLS:
+                    inp = item.get("input", {})
+                    # NotebookEdit uses 'notebook_path'; all other write tools use 'file_path'
+                    path = (
+                        inp.get("notebook_path", "")
+                        if tool == "NotebookEdit"
+                        else inp.get("file_path", "")
+                    )
+                    if path:
+                        if "/journal/" not in path:
+                            file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": tool},
+                            )
+                            sig = f"{tool}:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append(tool)
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
+                        else:
+                            journal_paths.append(path)
+                    # No else: tool calls without extractable paths are not counted as
+                    # file writes — same rationale as the gptme path above.
+                elif tool == "Bash":
+                    # Detect GitHub CLI interactions (PR reviews, issue comments, etc.)
+                    # These represent productive work but don't produce commits/writes.
+                    cmd = item.get("input", {}).get("command", "")
+                    if _GH_INTERACTION_RE.search(cmd):
+                        gh_interactions += 1
+
+                    # Fine-grained gh interaction signal tracking.
+                    # Populated alongside the aggregate gh_interactions count.
+                    if _GH_PR_REVIEW_CMD_RE.search(cmd):
+                        reviews_submitted += 1
+                    if _GH_COMMENT_CMD_RE.search(cmd):
+                        comments_posted += 1
+                    if _GH_ISSUE_CREATE_CMD_RE.search(cmd):
+                        issues_created += 1
+
+                    # Track PR creation commands for output-side URL detection.
+                    # gh pr create does not appear in _GH_INTERACTION_RE intentionally —
+                    # it's a higher-value signal tracked separately as prs_submitted.
+                    if _PR_CREATE_CMD_RE.search(cmd):
+                        if tool_id:  # guard against empty tool_id
+                            _pr_create_pending.add(tool_id)
+
+                    # Track issue close commands for output-side confirmation.
+                    # Only count confirmed closes (not failed/permission-denied).
+                    if _ISSUE_CLOSE_CMD_RE.search(cmd):
+                        if tool_id:
+                            _issue_close_pending.add(tool_id)
+
+                    # Track CI failure log checks for output-side confirmation.
+                    # gh run view --log-failed returns non-empty output when failures exist.
+                    if _CI_FAILURE_LOG_CMD_RE.search(cmd):
+                        if tool_id:
+                            _ci_failure_check_pending.add(tool_id)
+
+                    # Track PR merge commands for output-side confirmation.
+                    # Must be command-gated: _PR_MERGE_RE can false-positive on
+                    # test fixtures and file reads that contain example output.
+                    if _GH_PR_MERGE_CMD_RE.search(cmd):
+                        if tool_id:
+                            _pr_merge_pending.add(tool_id)
+                            # Stash repo flag and PR number so the result parser
+                            # can build pr_context (PR# -> owner/repo) for the
+                            # later gh pr view mergeCommit lookup.
+                            repo_m = _GH_REPO_FLAG_RE.search(cmd)
+                            if repo_m:
+                                _pr_merge_repo_by_tool_id[tool_id] = repo_m.group(1)
+                            num_m = _GH_PR_MERGE_NUM_RE.search(cmd)
+                            if num_m:
+                                _pr_merge_num_by_tool_id[tool_id] = int(num_m.group(1))
+
+                    # Parse Bash commands for journal writes via cat heredoc redirects.
+                    # Many CC sessions write journals via heredoc (cat > path << EOF)
+                    # rather than the Write tool, so Write/Edit alone misses them.
+                    # Note: tee redirects are not currently handled (intentional scope limit).
+                    if "/journal/" in cmd:
+                        for m in re.finditer(
+                            r"cat\s*>>?\s*(.*?\.md)(?:\s+<<|\s*$)",
+                            cmd,
+                            re.MULTILINE,
+                        ):
+                            jpath = m.group(1).strip()
+                            if "/journal/" not in jpath:
+                                continue
+                            # Resolve common shell date expansions using
+                            # trajectory timestamps (more reliable than wall clock).
+                            # Handle both $(date ...) and \$(date ...) (escaped in heredocs).
+                            if "$(" in jpath and timestamps:
+                                latest_ts = max(timestamps)
+                                for pattern_str, replacement in [
+                                    ("$(date +%Y-%m-%d)", latest_ts.strftime("%Y-%m-%d")),
+                                    ("$(date +%H%M)", latest_ts.strftime("%H%M")),
+                                ]:
+                                    jpath = jpath.replace("\\" + pattern_str, replacement)
+                                    jpath = jpath.replace(pattern_str, replacement)
+                            # If unresolved ${VAR} remains, glob for a match.
+                            # Sort by proximity to session end time (not recency)
+                            # to avoid picking a different session's journal.
+                            if "${" in jpath:
+                                pattern = re.sub(r"\$\{[^}]+\}", "*", jpath)
+                                session_end = max(timestamps).timestamp() if timestamps else 0
+                                matches = sorted(
+                                    _glob.glob(pattern),
+                                    key=lambda p: (
+                                        abs(os.path.getmtime(p) - session_end)
+                                        if os.path.exists(p)
+                                        else float("inf")
+                                    ),
+                                )
+                                if matches:
+                                    jpath = matches[0]
+                                else:
+                                    continue  # no match found
+                            elif "$(" in jpath:
+                                continue  # unresolved command substitution
+                            # Only include paths that exist on disk — avoids false
+                            # positives from debug/inspect commands that print templates
+                            if not os.path.isfile(jpath):
+                                continue
+                            journal_paths.append(jpath)
+            if ts is not None and dispatch_ids:
+                batch_size = len(dispatch_ids)
+                for tool_id, tool in dispatch_ids:
+                    tool_dispatch[tool_id] = (tool, ts, batch_size)
+            if step_has_tool:
+                steps += 1
+
+        elif rec_type == "user":
+            content = record.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "tool_result":
+                    continue
+
+                tool_use_id = item.get("tool_use_id", "")
+
+                # Per-tool-call duration: match result back to dispatch.
+                # When an assistant message batches multiple tool calls, they all
+                # share the same dispatch timestamp. Divide by batch size so that
+                # total_tool_time_s reflects wall-clock time, not N×wall-clock.
+                if tool_use_id in tool_dispatch and ts is not None:
+                    dispatch_name, dispatch_ts, batch_size = tool_dispatch.pop(tool_use_id)
+                    dur = (ts - dispatch_ts).total_seconds() / max(batch_size, 1)
+                    if dur >= 0:
+                        tool_durations.setdefault(dispatch_name, []).append(dur)
+
+                if item.get("is_error"):
+                    error_count += 1
+                    continue
+
+                # Content can be a string or a list of content blocks
+                result_content = item.get("content", "")
+                if isinstance(result_content, list):
+                    result_str = " ".join(
+                        c.get("text", str(c)) if isinstance(c, dict) else str(c)
+                        for c in result_content
+                    )
+                else:
+                    result_str = str(result_content)
+
+                # Error/warning phrase detection in tool output (soft signal).
+                # Elevated counts indicate problems even when is_error is false.
+                # Scan both the prefix and suffix because many command failures
+                # print the actual error near the end of long outputs.
+                if len(result_str) <= 4000:
+                    _scan = result_str.lower()
+                else:
+                    _scan = (result_str[:2000] + "\n" + result_str[-2000:]).lower()
+                warning_phrase_count += len(_WARNING_PHRASE_RE.findall(_scan))
+
+                # Git commit detection: only from Bash tool output.
+                # Other tools (Read, Glob, Write) can return content containing
+                # commit-like patterns from files, which would be false positives.
+                if tool_id_to_name.get(tool_use_id) == "Bash":
+                    # Deduplicate commits across ALL Bash results in the session using
+                    # _all_direct_commit_hashes (session-level, not per-tool-call).
+                    # Rationale: the same commit can appear in multiple tool results
+                    # (e.g., git commit output, then git show/log in a later call).
+                    # Using a session-level set prevents double-counting when the same
+                    # hash appears in two separate Bash tool results.
+                    for commit_match in _COMMIT_RE.finditer(result_str):
+                        commit_hash = commit_match.group(1)
+                        if commit_hash in _all_direct_commit_hashes:
+                            continue  # already seen in an earlier tool result
+                        commit_msg = commit_match.group(2).strip()
+                        commit_value = f"{commit_msg} ({commit_hash})"
+                        git_commits.append(commit_value)
+                        _all_direct_commit_hashes.add(commit_hash)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=commit_value,
+                            kind="commit",
+                            provenance_class="session_committed",
+                            evidence={"source": "trajectory", "tool_name": "Bash"},
+                        )
+
+                    # Background bash tasks: when CC runs a command in background mode,
+                    # the tool result only contains a pointer to an output file like:
+                    # "Command running in background with ID: X. Output is being written to: PATH"
+                    # The actual git commit output (matching _COMMIT_RE) is in that file.
+                    # Skip hashes already seen in any direct result to avoid double-counting.
+                    for bg_match in _BG_TASK_RE.finditer(result_str):
+                        bg_path = bg_match.group(1)
+                        try:
+                            bg_content = Path(bg_path).read_text(errors="replace")
+                            for commit_match in _COMMIT_RE.finditer(bg_content):
+                                commit_hash = commit_match.group(1)
+                                if commit_hash in _all_direct_commit_hashes:
+                                    continue  # already captured from a direct result
+                                commit_msg = commit_match.group(2).strip()
+                                commit_value = f"{commit_msg} ({commit_hash})"
+                                git_commits.append(commit_value)
+                                _all_direct_commit_hashes.add(commit_hash)
+                                _record_deliverable_detail(
+                                    detail_by_value,
+                                    value=commit_value,
+                                    kind="commit",
+                                    provenance_class="session_committed",
+                                    evidence={
+                                        "source": "trajectory",
+                                        "tool_name": "Bash",
+                                        "background": True,
+                                    },
+                                )
+                        except OSError:
+                            pass  # File may not exist if session ran on a different host
+
+                    # gh pr merge detection: output format is
+                    # "✓ Squashed and merged pull request #N (title)"
+                    # which doesn't match _COMMIT_RE (no branch/hash format).
+                    # Tracked separately from git_commits so grade_signals can
+                    # weight merges at 1.5× (closing a review loop is higher-value
+                    # than a standalone commit).
+                    # MUST be command-gated: _PR_MERGE_RE can false-positive on test
+                    # fixtures and file reads that contain example "Merged pull request"
+                    # strings. Only credit a merge when the command was `gh pr merge`.
+                    if tool_use_id in _pr_merge_pending:
+                        _pr_merge_pending.discard(tool_use_id)
+                        repo_for_merge = _pr_merge_repo_by_tool_id.pop(tool_use_id, None)
+                        stashed_num = _pr_merge_num_by_tool_id.pop(tool_use_id, None)
+                        for merge_match in _PR_MERGE_RE.finditer(result_str):
+                            pr_num = merge_match.group(1)
+                            pr_merges.append(f"PR #{pr_num}")
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=f"merge PR #{pr_num}",
+                                kind="pull_request",
+                                provenance_class="session_committed",
+                                evidence={
+                                    "source": "trajectory",
+                                    "tool_name": "Bash",
+                                    "action": "gh_pr_merge",
+                                },
+                            )
+                            # Prefer repo extracted from the command itself;
+                            # do NOT overwrite context captured earlier from
+                            # the gh pr create URL output.
+                            if repo_for_merge and int(pr_num) not in pr_context:
+                                pr_context[int(pr_num)] = repo_for_merge
+                        # If the command specified a PR number explicitly but the
+                        # output didn't match (rare — silent success format change),
+                        # still record the repo so future sessions can pick it up.
+                        if (
+                            stashed_num is not None
+                            and repo_for_merge
+                            and stashed_num not in pr_context
+                        ):
+                            pr_context[stashed_num] = repo_for_merge
+
+                    # gh pr create detection: successful output contains a PR URL.
+                    # Only check when this tool_use_id was flagged as a pr create command.
+                    if tool_use_id in _pr_create_pending:
+                        _pr_create_pending.discard(tool_use_id)
+                        # Extract PR number AND owner/repo from the URL; the
+                        # owner/repo mapping is used later to look up the server-
+                        # side merge-commit SHA after `gh pr merge`.
+                        repo_match = _PR_CREATE_URL_REPO_RE.search(result_str)
+                        if repo_match:
+                            owner_repo = repo_match.group(1)
+                            pr_num_str = repo_match.group(2)
+                            prs_submitted.append(f"PR #{pr_num_str}")
+                            pr_context[int(pr_num_str)] = owner_repo
+
+                    # gh issue close confirmation: count only when result is not an error.
+                    # is_error=True is already handled above (continue), so reaching here
+                    # means the command succeeded — unlike command-side counting, this
+                    # avoids crediting failed closes (permission errors, non-existent issues).
+                    if tool_use_id in _issue_close_pending:
+                        _issue_close_pending.discard(tool_use_id)
+                        issues_closed += 1
+
+                    # CI failure log check confirmation: non-empty output means failures exist.
+                    # We don't require a subsequent CI pass in the same session — committing
+                    # after finding failures is sufficient evidence of debugging/fix work.
+                    if tool_use_id in _ci_failure_check_pending:
+                        _ci_failure_check_pending.discard(tool_use_id)
+                        # Guard against background-task pointer strings: when CC runs
+                        # `gh run view --log-failed` in background mode the immediate
+                        # result is "Output is being written to: PATH", not the actual
+                        # log output. Resolve the real content before checking non-empty.
+                        actual_str = result_str
+                        for bg_match in _BG_TASK_RE.finditer(result_str):
+                            bg_path = bg_match.group(1)
+                            try:
+                                actual_str = Path(bg_path).read_text(errors="replace")
+                            except OSError:
+                                actual_str = ""
+                            break
+                        if actual_str.strip():
+                            _ci_failure_found = True
+
+    duration_s = 0
+    if len(timestamps) >= 2:
+        duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    # ci_fixed: True when the session investigated CI failures (--log-failed returned
+    # non-empty output) AND produced commits (agent actually fixed the failure).
+    # Session-level signal (not per-cycle) since most sessions address one CI issue.
+    ci_fixed = _ci_failure_found and bool(git_commits)
+
+    # Resolve server-side merge-commit SHAs for squash-merged PRs. When a session
+    # runs `gh pr merge --squash`, GitHub creates the merge commit *server-side*
+    # and the session never observes that SHA — so it would be missing from
+    # deliverables and not reverse-indexed for revert attribution. Look it up
+    # via `gh pr view <N> --json mergeCommit` for every detected merge where we
+    # have repo context. Graceful on failure (no gh, network down, auth missing).
+    merge_shas = _resolve_merge_shas(pr_merges, pr_context)
+    for sha in merge_shas:
+        # Label commit message so grep / human-readable audits can tell these
+        # apart from locally-observed commits. The SHA is the load-bearing bit —
+        # that's what the harm-signal reverse index keys on.
+        commit_entry = f"merge-commit ({sha})"
+        if commit_entry not in git_commits:
+            git_commits.append(commit_entry)
+        _record_deliverable_detail(
+            detail_by_value,
+            value=commit_entry,
+            kind="merge_commit",
+            provenance_class="server_generated",
+            evidence={"source": "gh_api", "action": "gh_pr_merge"},
+        )
+
+    # pr_merges entries in deliverables: "merge PR #N" format for readability.
+    # git_commits now includes any resolved merge SHAs from the loop above, so
+    # they flow into deliverables here without extra bookkeeping.
+    deliverables = list(
+        dict.fromkeys(git_commits + [f"merge {m}" for m in pr_merges] + file_writes)
+    )
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
+
+    # Summarize per-tool-call timing: total and max per tool name.
+    # Enables detection of slow tests, long pre-commit hooks, and stalled tools.
+    tool_time_total: dict[str, float] = {}
+    tool_time_max: dict[str, float] = {}
+    for name, durs in tool_durations.items():
+        tool_time_total[name] = round(sum(durs), 1)
+        tool_time_max[name] = round(max(durs), 1)
+    total_tool_time_s = round(sum(tool_time_total.values()), 1)
+
+    return {
+        "tool_calls": tool_calls,
+        "steps": steps,
+        "error_count": error_count,
+        "warning_phrase_count": warning_phrase_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
+        "session_duration_s": duration_s,
+        "total_tool_time_s": total_tool_time_s,
+        "tool_time_total": tool_time_total,
+        "tool_time_max": tool_time_max,
+        "retry_count": len(retry_candidates),
+        "gh_interactions": gh_interactions,
+        "prs_submitted": prs_submitted,
+        "pr_merges": pr_merges,
+        "issues_closed": issues_closed,
+        "reviews_submitted": reviews_submitted,
+        "comments_posted": comments_posted,
+        "issues_created": issues_created,
+        "ci_fixed": ci_fixed,
+        "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
+    }
+
+
+def _message_content_bytes(msg: dict) -> int:
+    """Count UTF-8 bytes of message content (model-independent)."""
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        return sum(len(json.dumps(block, ensure_ascii=False).encode("utf-8")) for block in content)
+    if isinstance(content, str):
+        return len(content.encode("utf-8"))
+    return len(str(content).encode("utf-8"))
+
+
+def _content_bytes(value: object) -> int:
+    """Count UTF-8 bytes for arbitrary event payload content."""
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, list):
+        return sum(_content_bytes(item) for item in value)
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
+def _summarize_message_bytes(
+    messages: list[dict[str, object]],
+) -> tuple[int | None, int | None, int | None, int | None]:
+    """Summarize byte-level context growth from normalized message entries."""
+    if not messages:
+        return None, None, None, None
+
+    sys_prompt_bytes = 0
+    for msg in messages:
+        role = msg.get("role")
+        msg_bytes = msg.get("bytes")
+        if not isinstance(msg_bytes, int):
+            continue
+        if role == "user":
+            break
+        if role == "system":
+            sys_prompt_bytes += msg_bytes
+
+    first_turn_bytes = 0
+    for msg in messages:
+        msg_bytes = msg.get("bytes")
+        if not isinstance(msg_bytes, int):
+            continue
+        if msg.get("role") == "assistant":
+            break
+        first_turn_bytes += msg_bytes
+
+    context_peak_bytes = 0
+    cumulative = 0
+    for msg in messages:
+        msg_bytes = msg.get("bytes")
+        if not isinstance(msg_bytes, int):
+            continue
+        cumulative += msg_bytes
+        if msg.get("role") == "assistant":
+            context_before = cumulative - msg_bytes
+            if context_before > context_peak_bytes:
+                context_peak_bytes = context_before
+
+    session_total_bytes = sum(
+        msg_bytes for msg in messages if isinstance((msg_bytes := msg.get("bytes")), int)
+    )
+
+    return (
+        sys_prompt_bytes if sys_prompt_bytes > 0 else None,
+        first_turn_bytes if first_turn_bytes > 0 else None,
+        context_peak_bytes if context_peak_bytes > 0 else None,
+        session_total_bytes if session_total_bytes > 0 else None,
+    )
+
+
+def extract_usage_gptme(msgs: list[dict]) -> dict:
+    """Extract cumulative token usage from a gptme conversation.jsonl trajectory.
+
+    Reads token/cost data from msg.metadata, consistent with how gptme core
+    tracks costs in gptme.util.cost_display.gather_conversation_costs().
+
+    Only accumulates tokens from assistant turns (consistent with extract_usage_cc).
+    Records the last-seen model (consistent with extract_usage_cc).
+
+    Returns an empty dict if no usage data is found.
+    """
+    input_tokens = 0
+    output_tokens = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
+    cost = 0.0
+    model: str | None = None
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
+
+    # --- Byte-level metrics (model-independent; ErikBjare/bob#738) ---
+    sys_prompt_bytes: int | None = None
+    first_turn_bytes: int | None = None
+    context_peak_bytes: int | None = None
+    session_total_bytes: int | None = None
+
+    _sys_b = 0
+    _first_turn_b = 0
+    _peak_b = 0
+    _cumulative_b = 0
+    _total_b = 0
+    _first_assistant_seen = False
+    _first_user_seen = False
+    for msg in msgs:
+        role = msg.get("role")
+        if role is None:
+            continue
+        _cb = _message_content_bytes(msg)
+        _total_b += _cb
+        _cumulative_b += _cb
+        if not _first_user_seen:
+            if role == "user":
+                _first_user_seen = True
+            elif role == "system":
+                _sys_b += _cb
+        if not _first_assistant_seen:
+            if role == "assistant":
+                _first_assistant_seen = True
+            else:
+                _first_turn_b += _cb
+        if role == "assistant":
+            context_before = _cumulative_b - _cb
+            if context_before > _peak_b:
+                _peak_b = context_before
+
+    if _sys_b > 0:
+        sys_prompt_bytes = _sys_b
+    if _first_turn_b > 0:
+        first_turn_bytes = _first_turn_b
+    if _peak_b > 0:
+        context_peak_bytes = _peak_b
+    if _total_b > 0:
+        session_total_bytes = _total_b
+
+    for msg in msgs:
+        if msg.get("role") != "assistant":
+            continue
+
+        metadata = msg.get("metadata") or {}
+        if not metadata:
+            continue
+
+        # Last-seen model wins (consistent with extract_usage_cc)
+        m = metadata.get("model") or msg.get("model")
+        if m:
+            model = m
+
+        # Support both nested format (usage sub-dict) and legacy flat format
+        # Select source dict once per message to avoid per-field falsy fallback issues
+        usage = metadata.get("usage") or metadata
+        turn_input = _as_int(usage.get("input_tokens")) or 0
+        turn_output = _as_int(usage.get("output_tokens")) or 0
+        turn_cache_read = _as_int(usage.get("cache_read_tokens")) or 0
+        turn_cache_create = _as_int(usage.get("cache_creation_tokens")) or 0
+        turn_context = turn_input + turn_cache_read + turn_cache_create
+
+        input_tokens += turn_input
+        output_tokens += turn_output
+        cache_read_tokens += turn_cache_read
+        cache_creation_tokens += turn_cache_create
+        if sys_prompt_tokens is None and turn_context > 0:
+            sys_prompt_tokens = turn_context
+        context_peak_tokens = (
+            turn_context if context_peak_tokens is None else max(context_peak_tokens, turn_context)
+        )
+        cost += metadata.get("cost", 0.0)
+
+    total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
+    has_byte_metrics = any(
+        v is not None
+        for v in (sys_prompt_bytes, first_turn_bytes, context_peak_bytes, session_total_bytes)
+    )
+    if total_tokens == 0 and cost == 0.0 and not has_byte_metrics:
+        return {}
+    return {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "cost": cost,
+        "total_tokens": total_tokens,
+        "sys_prompt_tokens": sys_prompt_tokens,
+        "context_peak_tokens": context_peak_tokens,
+        "sys_prompt_bytes": sys_prompt_bytes,
+        "first_turn_bytes": first_turn_bytes,
+        "context_peak_bytes": context_peak_bytes,
+        "session_total_bytes": session_total_bytes,
+    }
+
+
+def extract_usage_cc(msgs: list[dict]) -> dict:
+    """Extract cumulative token usage from a Claude Code trajectory.
+
+    Each CC assistant turn stores a `message.usage` snapshot from the Anthropic API.
+    The fields represent per-API-call values (not cumulative context size):
+      - input_tokens: freshly processed (non-cached) input tokens for that turn
+      - cache_read_input_tokens: context served from the prompt cache
+      - cache_creation_input_tokens: tokens written to the prompt cache
+      - output_tokens: tokens generated by the model
+    Summing across turns gives the true session totals for billing/cost purposes.
+
+    Returns the last-seen model string alongside the totals.
+    Returns an empty dict if no usage data is found (e.g., no assistant turns).
+
+    This is the canonical way to get per-session token counts from CC trajectories,
+    as opposed to parsing systemd journal output (which is fragile).
+    """
+    input_tokens = 0
+    output_tokens = 0
+    cache_creation_tokens = 0
+    cache_read_tokens = 0
+    model: str | None = None
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
+
+    for record in msgs:
+        if record.get("type") != "assistant":
+            continue
+        msg = record.get("message", {})
+        usage = msg.get("usage") or {}
+        turn_input = _as_int(usage.get("input_tokens")) or 0
+        turn_output = _as_int(usage.get("output_tokens")) or 0
+        turn_cache_create = _as_int(usage.get("cache_creation_input_tokens")) or 0
+        turn_cache_read = _as_int(usage.get("cache_read_input_tokens")) or 0
+        turn_context = turn_input + turn_cache_create + turn_cache_read
+
+        input_tokens += turn_input
+        output_tokens += turn_output
+        cache_creation_tokens += turn_cache_create
+        cache_read_tokens += turn_cache_read
+        if usage and sys_prompt_tokens is None:
+            sys_prompt_tokens = turn_context
+        if usage:
+            context_peak_tokens = (
+                turn_context
+                if context_peak_tokens is None
+                else max(context_peak_tokens, turn_context)
+            )
+        if msg.get("model"):
+            model = msg["model"]
+
+    total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
+    if total_tokens == 0 and model is None:
+        # No assistant turns with usage data found
+        return {}
+    return {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "total_tokens": total_tokens,
+        "sys_prompt_tokens": sys_prompt_tokens,
+        "context_peak_tokens": context_peak_tokens,
+    }
+
+
+def extract_signals_codex(msgs: list[dict]) -> dict:
+    """Extract productivity signals from Codex CLI .jsonl trajectories.
+
+    Codex format uses typed entries:
+    - session_meta: session start metadata
+    - turn_context: per-turn context (model, cwd)
+    - response_item: messages and tool calls (function_call / function_call_output /
+      custom_tool_call for apply_patch)
+    - event_msg: events (token_count, task lifecycle)
+
+    File writes are detected from two sources:
+    - apply_patch (custom_tool_call): "Add File" / "Update File" directives in patch input
+    - exec_command (function_call): shell redirect patterns in the command string
+    Git commits are detected from exec_command and write_stdin outputs.
+    """
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    journal_paths: list[str] = []
+    retry_candidates: list[str] = []
+    timestamps: list[datetime] = []
+    steps = 0
+    recent_sigs: list[str] = []
+    detail_by_value: dict[str, dict[str, object]] = {}
+
+    # Track function_call ids for matching with their outputs
+    call_id_to_name: dict[str, str] = {}
+
+    # Steps count turns (bounded by turn_context records), not individual tool calls.
+    # When no turn_context is present, all function_calls fall into one implicit turn.
+    current_turn_has_tool = False
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        ts = _parse_timestamp(record.get("timestamp", ""))
+        if ts is not None:
+            timestamps.append(ts)
+
+        if rec_type == "turn_context":
+            # New turn boundary: finalize the previous turn's step count
+            if current_turn_has_tool:
+                steps += 1
+            current_turn_has_tool = False
+
+        elif rec_type == "response_item":
+            payload = record.get("payload") or {}
+            payload_type = payload.get("type", "")
+
+            # Codex uses custom_tool_call (not function_call) for apply_patch.
+            # Only "Add File" and "Update File" directives count as writes;
+            # "Delete File" removes files rather than writing them.
+            if payload_type == "custom_tool_call" and payload.get("name") == "apply_patch":
+                tool_calls["apply_patch"] = tool_calls.get("apply_patch", 0) + 1
+                current_turn_has_tool = True
+                patch_input = payload.get("input", "") or ""
+                if isinstance(patch_input, str):
+                    for patch_match in re.finditer(
+                        r"^\*\*\*\s+(?:Add|Update)\s+File:\s+(.+?)\s*$",
+                        patch_input,
+                        re.MULTILINE,
+                    ):
+                        path = patch_match.group(1).strip()
+                        if "/journal/" in path or path.startswith("journal/"):
+                            journal_paths.append(path)
+                        else:
+                            file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": "apply_patch"},
+                            )
+                            sig = f"apply_patch:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append("apply_patch")
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
+
+            elif payload_type == "function_call":
+                tool = payload.get("name", "")
+                if tool:
+                    tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                    current_turn_has_tool = True
+                    call_id = payload.get("call_id", "")
+                    if call_id:
+                        call_id_to_name[call_id] = tool
+
+                    # Detect file writes from exec_command arguments
+                    if tool == "exec_command":
+                        args = payload.get("arguments", "")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+                        if isinstance(args, dict):
+                            cmd = args.get("cmd") or ""
+                            # Detect redirects and file-writing commands.
+                            # >(?!=) excludes >= comparison operators in heredoc content.
+                            for write_match in re.finditer(
+                                r"(?:cat\s*>\s*|tee\s+(?:-\S+\s+)*|>(?!=)\s*)([^\s<>|&;]+)",
+                                cmd,
+                            ):
+                                path = write_match.group(1).strip("'\"")
+                                if path.startswith("/dev/"):
+                                    continue
+                                elif "/journal/" in path:
+                                    journal_paths.append(path)
+                                else:
+                                    file_writes.append(path)
+                                    _record_deliverable_detail(
+                                        detail_by_value,
+                                        value=path,
+                                        kind="file",
+                                        provenance_class="tool_authored",
+                                        evidence={
+                                            "source": "trajectory",
+                                            "tool_name": "exec_command",
+                                        },
+                                    )
+                                    sig = f"exec_command:{path}"
+                                    if sig in recent_sigs:
+                                        retry_candidates.append("exec_command")
+                                    recent_sigs.append(sig)
+                                    if len(recent_sigs) > 20:
+                                        recent_sigs.pop(0)
+
+            elif payload_type == "function_call_output":
+                output = payload.get("output") or ""
+                call_id = payload.get("call_id", "")
+                tool_name = call_id_to_name.get(call_id, "")
+
+                # Error detection from shell output
+                if "Process exited with code " in output:
+                    code_match = re.search(r"Process exited with code (\d+)", output)
+                    if code_match and code_match.group(1) != "0":
+                        error_count += 1
+
+                # Git commit detection from shell output. Codex uses a persistent
+                # shell session: an initial exec_command spawns the shell, and
+                # subsequent commands (including `git commit`) are piped through
+                # write_stdin — so the commit hash often appears in output
+                # attached to a write_stdin call. Codex outputs are also verbose
+                # (full file dumps), so scan a wider window than the legacy
+                # 500-char head.
+                if tool_name in ("exec_command", "write_stdin"):
+                    for commit_match in _COMMIT_RE.finditer(output[:8000]):
+                        commit_hash = commit_match.group(1)
+                        commit_msg = commit_match.group(2).strip()
+                        commit_value = f"{commit_msg} ({commit_hash})"
+                        git_commits.append(commit_value)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=commit_value,
+                            kind="commit",
+                            provenance_class="session_committed",
+                            evidence={"source": "trajectory", "tool_name": tool_name},
+                        )
+
+    # Finalize the last turn (not followed by another turn_context)
+    if current_turn_has_tool:
+        steps += 1
+
+    duration_s = 0
+    if len(timestamps) >= 2:
+        duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
+    return {
+        "tool_calls": tool_calls,
+        "steps": steps,
+        "error_count": error_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
+        "session_duration_s": duration_s,
+        "retry_count": len(retry_candidates),
+        "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
+    }
+
+
+# Tools that write files in Copilot CLI (subset of CC tools, lowercase)
+_COPILOT_WRITE_TOOLS = {"edit", "write", "create"}
+
+
+def extract_signals_copilot(msgs: list[dict]) -> dict:
+    """Extract productivity signals from Copilot CLI events.jsonl trajectories.
+
+    Copilot format uses typed events:
+    - session.start: session metadata (model, cwd, git context)
+    - assistant.message: agent responses with toolRequests[]
+    - tool.execution_complete: tool results with success flag
+    - assistant.turn_start/turn_end: turn boundaries
+
+    Tool names are lowercase (bash, edit, view, glob, grep).
+    """
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    journal_paths: list[str] = []
+    retry_candidates: list[str] = []
+    timestamps: list[datetime] = []
+    steps = 0
+    recent_sigs: list[str] = []
+    detail_by_value: dict[str, dict[str, object]] = {}
+
+    # Map toolCallId → tool name for filtering commit detection to bash only
+    call_id_to_name: dict[str, str] = {}
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        ts = _parse_timestamp(record.get("timestamp", ""))
+        if ts is not None:
+            timestamps.append(ts)
+
+        if rec_type == "assistant.message":
+            data = record.get("data") or {}
+            tool_requests = data.get("toolRequests") or []
+            step_has_tool = False
+
+            for req in tool_requests:
+                tool = req.get("name", "")
+                if not tool:
+                    continue
+                tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                step_has_tool = True
+
+                call_id = req.get("toolCallId", "")
+                if call_id:
+                    call_id_to_name[call_id] = tool
+
+                # File write detection from edit/write tools
+                if tool in _COPILOT_WRITE_TOOLS:
+                    args = req.get("arguments") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, ValueError):
+                            args = {}
+                    if isinstance(args, dict):
+                        path = args.get("path", "") or args.get("file_path", "")
+                    else:
+                        path = ""
+                    if path:
+                        if "/journal/" not in path:
+                            file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": tool},
+                            )
+                            sig = f"{tool}:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append(tool)
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
+                        else:
+                            journal_paths.append(path)
+
+            if step_has_tool:
+                steps += 1
+
+        elif rec_type == "tool.execution_complete":
+            data = record.get("data") or {}
+
+            # Error detection from tool failure
+            if data.get("success") is False:
+                error_count += 1
+
+            # Git commit detection from bash tool output
+            call_id = data.get("toolCallId", "")
+            tool_name = call_id_to_name.get(call_id, "")
+            if tool_name == "bash":
+                result = data.get("result") or {}
+                content = result.get("detailedContent", "") or result.get("content", "")
+                if isinstance(content, str):
+                    for commit_match in _COMMIT_RE.finditer(content[:500]):
+                        commit_hash = commit_match.group(1)
+                        commit_msg = commit_match.group(2).strip()
+                        commit_value = f"{commit_msg} ({commit_hash})"
+                        git_commits.append(commit_value)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=commit_value,
+                            kind="commit",
+                            provenance_class="session_committed",
+                            evidence={"source": "trajectory", "tool_name": "bash"},
+                        )
+
+        elif rec_type == "session.error":
+            error_count += 1
+
+    duration_s = 0
+    if len(timestamps) >= 2:
+        duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
+    return {
+        "tool_calls": tool_calls,
+        "steps": steps,
+        "error_count": error_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
+        "session_duration_s": duration_s,
+        "retry_count": len(retry_candidates),
+        "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
+    }
+
+
+def extract_usage_codex(msgs: list[dict]) -> dict:
+    """Extract model, token, and rate-limit info from Codex CLI trajectories.
+
+    Returns an empty dict if no model/usage data is found.
+    Omits the ``model`` key when usage data exists but the model was never
+    surfaced in a ``turn_context`` record.
+    """
+    model: str | None = None
+    rate_limit_primary: float | None = None
+    rate_limit_secondary: float | None = None
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
+    context_window: int | None = None
+    final_total: dict | None = None
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        if rec_type == "turn_context":
+            m = (record.get("payload") or {}).get("model")
+            if m:
+                model = m
+
+        elif rec_type == "event_msg":
+            payload = record.get("payload") or {}
+            if payload.get("type") == "token_count":
+                info = payload.get("info") or {}
+                if isinstance(info, dict):
+                    last = info.get("last_token_usage")
+                    if isinstance(last, dict):
+                        turn_input = _as_int(last.get("input_tokens"))
+                        if turn_input is not None:
+                            if sys_prompt_tokens is None:
+                                sys_prompt_tokens = turn_input
+                            context_peak_tokens = (
+                                turn_input
+                                if context_peak_tokens is None
+                                else max(context_peak_tokens, turn_input)
+                            )
+                    total = info.get("total_token_usage")
+                    if isinstance(total, dict):
+                        final_total = total
+                    context_window = _as_int(info.get("model_context_window")) or context_window
+
+                rl = payload.get("rate_limits") or {}
+                primary = rl.get("primary") or {}
+                secondary = rl.get("secondary") or {}
+                if primary.get("used_percent") is not None:
+                    rate_limit_primary = primary["used_percent"]
+                if secondary.get("used_percent") is not None:
+                    rate_limit_secondary = secondary["used_percent"]
+
+    if (
+        model is None
+        and rate_limit_primary is None
+        and rate_limit_secondary is None
+        and final_total is None
+        and context_peak_tokens is None
+    ):
+        return {}
+    result: dict = {}
+    if model is not None:
+        result["model"] = model
+    if rate_limit_primary is not None:
+        result["rate_limit_primary_pct"] = rate_limit_primary
+    if rate_limit_secondary is not None:
+        result["rate_limit_secondary_pct"] = rate_limit_secondary
+    if final_total is not None:
+        input_tokens = _as_int(final_total.get("input_tokens"))
+        output_tokens = _as_int(final_total.get("output_tokens"))
+        cached_input_tokens = _as_int(final_total.get("cached_input_tokens"))
+        total_tokens = _as_int(final_total.get("total_tokens"))
+        if input_tokens is not None:
+            result["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            result["output_tokens"] = output_tokens
+        if cached_input_tokens is not None:
+            result["cached_input_tokens"] = cached_input_tokens
+        if total_tokens is not None:
+            result["total_tokens"] = total_tokens
+    if sys_prompt_tokens is not None:
+        result["sys_prompt_tokens"] = sys_prompt_tokens
+    if context_peak_tokens is not None:
+        result["context_peak_tokens"] = context_peak_tokens
+    if context_window is not None:
+        result["context_window"] = context_window
+    return result
+
+
+def _extract_committed_files(git_commits: list[str]) -> list[str]:
+    """Extract file paths changed in commits by running git diff-tree.
+
+    Parses commit SHAs from the git_commits list (format: "message (sha)")
+    and returns all unique file paths changed across those commits.
+
+    For SHAs that don't resolve in the current repo, tries common submodule
+    directories as fallback (cross-repo commits from submodules).
+
+    Returns empty list if git is unavailable or SHAs can't be resolved.
+    """
+    import subprocess
+
+    shas = []
+    for entry in git_commits:
+        # Extract SHA from "commit message (abc1234)" format
+        m = re.search(r"\(([0-9a-f]{7,40})\)\s*$", entry)
+        if m:
+            shas.append(m.group(1))
+
+    if not shas:
+        return []
+
+    # Discover candidate repos: submodules + sibling git repos in ../
+    candidate_repos: list[str] = []
+
+    # Submodules
+    try:
+        result = subprocess.run(
+            ["git", "submodule", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                parts = line.strip().lstrip("+-U").split()
+                if len(parts) >= 2:
+                    candidate_repos.append(parts[1])
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Sibling directories that are git repos (../*)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            from pathlib import Path
+
+            workspace_root = Path(result.stdout.strip())
+            parent = workspace_root.parent
+            for sibling in parent.iterdir():
+                if sibling == workspace_root or not sibling.is_dir():
+                    continue
+                if (sibling / ".git").exists():
+                    candidate_repos.append(str(sibling))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    def _diff_tree(sha: str, cwd: str | None = None) -> list[str]:
+        try:
+            cmd = ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, cwd=cwd)
+            if result.returncode == 0:
+                return [line for line in result.stdout.strip().splitlines() if line]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return []
+
+    files: list[str] = []
+    for sha in shas:
+        found = _diff_tree(sha)
+        if not found:
+            for repo_path in candidate_repos:
+                found = _diff_tree(sha, cwd=repo_path)
+                if found:
+                    # Prefix with repo name for context
+                    from pathlib import Path as _Path
+
+                    repo_name = _Path(repo_path).name
+                    found = [f"{repo_name}/{f}" for f in found]
+                    break
+        files.extend(found)
+    return files
+
+
+def infer_category(signals: dict) -> str | None:
+    """Infer work category from commit messages, committed files, and file writes.
+
+    Uses three signal sources:
+    - Conventional commit prefixes and scopes from commit messages
+    - File paths changed in commits (via git diff-tree)
+    - File paths written by tools during the session
+
+    Returns a category string or None if insufficient signal (< 2 votes).
+    """
+    commits = signals.get("git_commits", [])
+    file_writes = signals.get("file_writes", [])
+
+    # Get actual files changed in commits
+    committed_files = _extract_committed_files(commits)
+
+    # (prefix, scope) pairs where the prefix vote is suppressed — the prefix
+    # is misleading for these. e.g. "docs(journal)" isn't content work,
+    # "chore(submodule)" isn't meaningful. But "feat(sessions)" IS real work.
+    _SUPPRESS_PREFIX_PAIRS = {
+        ("docs", "journal"),
+    }
+
+    # Count commit prefix signals (skip when prefix+scope pair is suppressed)
+    prefix_counts: dict[str, int] = {}
+    for commit in commits:
+        m = re.match(r"(\w+)\(([^)]+)\)", commit)
+        if m and (m.group(1).lower(), m.group(2).lower()) in _SUPPRESS_PREFIX_PAIRS:
+            continue
+        # Extract conventional commit prefix: "type(scope): msg (sha)"
+        m = re.match(r"(feat|fix|refactor|perf|test|ci|build|docs|style)\b", commit)
+        if m:
+            prefix_counts[m.group(1)] = prefix_counts.get(m.group(1), 0) + 1
+
+    # Count scope signals from commits (suppressed scopes are implicitly excluded
+    # because they have no entry in scope_to_category, not by explicit loop filtering)
+    scope_counts: dict[str, int] = {}
+    for commit in commits:
+        m = re.match(r"\w+\(([^)]+)\)", commit)
+        if m:
+            scope = m.group(1).lower()
+            scope_counts[scope] = scope_counts.get(scope, 0) + 1
+
+    def _dir_in_path(segment: str, p: str) -> bool:
+        """True if `segment` appears as a directory component in path `p`."""
+        return bool(re.search(r"(^|/)" + re.escape(segment) + r"(/|$)", p))
+
+    # Path-based signals from tool writes + committed files
+    # Committed files are ground truth — weight them higher than tool writes
+    all_paths: list[tuple[str, int]] = []
+    for p in file_writes:
+        all_paths.append((p, 1))
+    for p in committed_files:
+        all_paths.append((p, 2))  # committed files are stronger signal
+
+    path_signals: dict[str, int] = {}
+    for path, weight in all_paths:
+        p = path.lower()
+        if _dir_in_path("lesson", p) or _dir_in_path("lessons", p) or _dir_in_path("patterns", p):
+            path_signals["knowledge"] = path_signals.get("knowledge", 0) + weight
+        elif _dir_in_path("test", p) or _dir_in_path("tests", p) or "_test." in p or "test_" in p:
+            path_signals["code"] = path_signals.get("code", 0) + weight
+        elif _dir_in_path("scripts", p) or _dir_in_path("hooks", p) or _dir_in_path("ci", p):
+            path_signals["infrastructure"] = path_signals.get("infrastructure", 0) + weight
+        elif _dir_in_path("standup", p) or _dir_in_path("standups", p):
+            path_signals["coordination"] = path_signals.get("coordination", 0) + weight
+        elif _dir_in_path("tasks", p):
+            path_signals["triage"] = path_signals.get("triage", 0) + weight
+        elif p.endswith((".py", ".sh", ".ts", ".js", ".rs", ".go")):
+            path_signals["code"] = path_signals.get("code", 0) + weight
+
+    # Map commit prefixes → categories
+    prefix_to_category = {
+        "feat": "code",
+        "fix": "code",
+        "refactor": "code",
+        "perf": "code",
+        "test": "code",
+        "ci": "infrastructure",
+        "build": "infrastructure",
+        "docs": "content",
+        "style": "code",
+    }
+
+    # Scope overrides: certain scopes imply category regardless of prefix
+    # Canonical CASCADE categories — used for scope→self fallback below
+    CASCADE_CATEGORIES = frozenset(
+        {
+            "code",
+            "infrastructure",
+            "content",
+            "triage",
+            "cross-repo",
+            "self-review",
+            "strategic",
+            "research",
+            "monitoring",
+            "social",
+            "news",
+            "cleanup",
+            "pm-react",
+            "knowledge",
+            "coordination",
+            "novelty",
+        }
+    )
+
+    scope_to_category = {
+        "lessons": "knowledge",
+        "lesson": "knowledge",
+        "tasks": "triage",
+        "standup": "coordination",
+        "orchestration": "coordination",
+        "scripts": "infrastructure",
+        "hooks": "infrastructure",
+        "ci": "infrastructure",
+    }
+
+    # Tally votes
+    votes: dict[str, int] = {}
+    for prefix, count in prefix_counts.items():
+        cat = prefix_to_category.get(prefix)
+        if cat:
+            votes[cat] = votes.get(cat, 0) + count
+    for scope, count in scope_counts.items():
+        cat = scope_to_category.get(scope)
+        if cat:
+            # Scope signals are stronger than prefix alone
+            votes[cat] = votes.get(cat, 0) + count * 2
+        elif scope in CASCADE_CATEGORIES:
+            # Unknown scopes that match a valid CASCADE category → self-map
+            # This catches strategic/research/monitoring/social/news/self-review
+            # scopes that would otherwise fall through to the prefix vote only.
+            votes[scope] = votes.get(scope, 0) + count * 2
+    for cat, count in path_signals.items():
+        votes[cat] = votes.get(cat, 0) + count
+
+    # Fallback heuristic: sessions with significant GitHub interactions but no
+    # commit/file-write signals are monitoring sessions (PR reviews, issue triage,
+    # notification handling). Threshold of 2 avoids false-positives from sessions
+    # that post one incidental comment while doing something else.
+    # Checked before vote count so commit-free review sessions aren't left uncategorised.
+    if signals.get("gh_interactions", 0) >= 2 and not commits and not file_writes:
+        return "pm-react"
+
+    if not votes:
+        return None
+
+    best = max(votes, key=lambda k: votes[k])
+    # Require at least 2 votes for confident classification
+    if votes[best] < 2:
+        return None
+    return best
+
+
+def extract_usage_copilot(msgs: list[dict]) -> dict:
+    """Extract model info, byte-level context metrics, and output tokens from Copilot trajectories.
+
+    Copilot events expose ``outputTokens`` per assistant turn but not input tokens,
+    so ``sys_prompt_tokens`` / ``context_peak_tokens`` remain unavailable; callers
+    should fall back to byte-level estimates for those.  We sum ``outputTokens``
+    across all assistant messages to populate ``output_tokens``.
+
+    Model is extracted from ``session.model_change`` events (or ``session.start``).
+    Tool requests live on assistant messages and tool outputs live on
+    ``tool.execution_complete`` events, so both are counted in the byte-level
+    message flow to avoid underestimating context growth.
+
+    Returns an empty dict only when neither model info nor byte metrics are found.
+    """
+    model: str | None = None
+    messages: list[dict[str, object]] = []
+    total_output_tokens = 0
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+        data = record.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        if rec_type == "session.model_change":
+            m = data.get("newModel")
+            if m:
+                model = m
+        elif rec_type == "session.start" and model is None:
+            # Some versions may include model in start context
+            m = data.get("selectedModel")
+            if m:
+                model = m
+
+        if rec_type == "system.message":
+            messages.append({"role": "system", "bytes": _content_bytes(data.get("content"))})
+        elif rec_type == "user.message":
+            content = data.get("content")
+            if content is None:
+                content = data.get("text")
+            messages.append({"role": "user", "bytes": _content_bytes(content)})
+        elif rec_type == "assistant.message":
+            content = data.get("content")
+            if content is None:
+                content = data.get("text")
+            messages.append(
+                {
+                    "role": "assistant",
+                    "bytes": _content_bytes(content) + _content_bytes(data.get("toolRequests")),
+                }
+            )
+            tok = data.get("outputTokens")
+            if isinstance(tok, int) and tok > 0:
+                total_output_tokens += tok
+        elif rec_type == "tool.execution_complete":
+            payload = data.get("result")
+            if payload is None:
+                payload = data.get("error")
+            messages.append({"role": "tool", "bytes": _content_bytes(payload)})
+
+    sys_prompt_bytes, first_turn_bytes, context_peak_bytes, session_total_bytes = (
+        _summarize_message_bytes(messages)
+    )
+    if (
+        model is None
+        and sys_prompt_bytes is None
+        and first_turn_bytes is None
+        and context_peak_bytes is None
+        and session_total_bytes is None
+        and total_output_tokens == 0
+    ):
+        return {}
+
+    usage: dict[str, object] = {}
+    if model is not None:
+        usage["model"] = model
+    if sys_prompt_bytes is not None:
+        usage["sys_prompt_bytes"] = sys_prompt_bytes
+    if first_turn_bytes is not None:
+        usage["first_turn_bytes"] = first_turn_bytes
+    if context_peak_bytes is not None:
+        usage["context_peak_bytes"] = context_peak_bytes
+    if session_total_bytes is not None:
+        usage["session_total_bytes"] = session_total_bytes
+    if total_output_tokens > 0:
+        usage["output_tokens"] = total_output_tokens
+    return usage
+
+
+def extract_from_path(jsonl_path: Path) -> dict:
+    """Parse trajectory and return signals + grade in one call.
+
+    Auto-detects format: gptme, Claude Code, Codex, or Copilot.
+    Token usage is extracted when available (CC has full counts, Codex has
+    rate-limit percentages only, Copilot has model info only).
+
+    Accepts either a JSONL file path or a gptme session directory
+    (containing ``conversation.jsonl``).
+    """
+    # gptme sessions are directories; resolve to the JSONL file inside
+    if jsonl_path.is_dir():
+        candidate = jsonl_path / "conversation.jsonl"
+        if candidate.exists():
+            jsonl_path = candidate
+        else:
+            raise FileNotFoundError(
+                f"{jsonl_path} is a directory and does not contain conversation.jsonl"
+            )
+    msgs = parse_trajectory(jsonl_path)
+    fmt = detect_format(msgs)
+    if fmt == "claude_code":
+        signals = extract_signals_cc(msgs)
+        usage = extract_usage_cc(msgs)
+    elif fmt == "codex":
+        signals = extract_signals_codex(msgs)
+        usage = extract_usage_codex(msgs)
+    elif fmt == "copilot":
+        signals = extract_signals_copilot(msgs)
+        usage = extract_usage_copilot(msgs)
+    else:
+        signals = extract_signals(msgs)
+        usage = extract_usage_gptme(msgs)
+    inferred_category = infer_category(signals)
+    grade = grade_signals(signals, category=inferred_category)
+    result: dict = {
+        **signals,
+        "format": fmt,
+        "productive": is_productive(signals),
+        "grade": round(grade, 4),
+        "inferred_category": inferred_category,
+    }
+    if usage:
+        result["usage"] = usage
+    return result

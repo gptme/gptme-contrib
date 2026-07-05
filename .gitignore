@@ -1,0 +1,32 @@
+*.pyc
+__pycache__
+*.egg-info
+
+# Python build artifacts
+build/
+dist/
+
+# Secrets - never commit
+scripts/discord/logs/*
+scripts/*/.env
+scripts/*/.oauth-state
+scripts/*/.tokens.json
+scripts/.env
+*.oauth-state
+*.tokens.json
+
+.venv/
+venv/
+.gptme/
+
+# Task lock files (runtime state)
+state/locks/
+
+# Session state files (runtime state)
+state/sessions/
+
+# Stale directory from tasks->gptodo rename (PR #171)
+packages/tasks/
+
+# Dashboard build output
+_site/

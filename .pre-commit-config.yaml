@@ -1,0 +1,113 @@
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v5.0.0
+  hooks:
+  - id: check-yaml
+  - id: check-symlinks
+  - id: end-of-file-fixer
+  - id: trailing-whitespace
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.6.9
+  hooks:
+  - id: ruff
+    args: [ --fix ]
+  - id: ruff-format
+- repo: https://github.com/pre-commit/mirrors-mypy
+  rev: v1.12.0
+  hooks:
+  - id: mypy
+    additional_dependencies: [
+      "gptme @ git+https://github.com/gptme/gptme.git",
+      rich,
+      python-dotenv,
+      tweepy,
+      flask,
+      discord.py,
+      openai,
+      "python-frontmatter>=1.0.0",
+      types-tabulate,
+      types-docutils,
+      types-PyYAML,
+      types-requests,
+      types-click,
+      types-python-crontab,
+      exa_py,
+      types-Markdown,
+      pytest,
+      tomli,
+    ]
+    args: [--config-file=mypy.ini, --explicit-package-bases]
+    types: [python]
+    pass_filenames: true
+    exclude: ^(packages/(gptme-lessons-extras|gptme-runloops|gptme-contrib-lib|gptodo|gptmail|gptme-activity-summary|gptme-voice|gptme-dashboard|gptme-sessions|gptme-daily-briefing|gptme-codegraph|gptme-coordination|gptme-rag)/|plugins/)
+- repo: local
+  hooks:
+  - id: check-markdown-links
+    name: Check markdown links
+    description: Verifies that relative links in markdown files are valid.
+    entry: python3 scripts/precommit/check_markdown_links.py
+    language: system
+    types: [markdown]
+    pass_filenames: true
+
+  - id: validate-submodule-commits
+    name: Validate submodule commits exist upstream
+    description: Ensures submodule references point to commits that exist in upstream repos.
+    entry: python3 scripts/precommit/validate_submodule_commits.py
+    language: system
+    pass_filenames: false
+    always_run: true
+
+  - id: check-names
+    name: Check for agent-instance names
+    description: Verifies that we are not accidentally using names of agents or users in the shared scripts (should be configurable).
+    entry: make check-names
+    language: system
+    pass_filenames: false
+    always_run: true
+
+  - id: shellcheck
+    name: ShellCheck
+    description: Shell script linter for bash/sh files
+    entry: shellcheck
+    language: system
+    types: [shell]
+    args: ["--severity=warning"]
+
+  - id: typecheck-packages
+    name: Typecheck packages
+    description: Run mypy for all packages
+    entry: make typecheck-packages
+    language: system
+    pass_filenames: false
+    always_run: true
+    types: [python]
+
+  - id: validate-lesson-metadata
+    name: Validate lesson metadata
+    description: Ensures lesson files have proper metadata (keywords, valid YAML frontmatter).
+    entry: scripts/precommit/validate_lesson_metadata.py
+    language: python
+    additional_dependencies: [pyyaml]
+    types: [markdown]
+    files: ^lessons/
+    pass_filenames: true
+
+  - id: jscpd
+    name: Check for duplicate code (jscpd)
+    description: Detects copy-paste code duplication across the codebase.
+    entry: jscpd
+    language: node
+    additional_dependencies: ['jscpd@3.5.10']
+    pass_filenames: false
+    always_run: true
+    types_or: [python, javascript, shell, markdown]
+    args: ["--config", ".jscpd.json", "."]
+
+  - id: validate-markdown-codeblock-syntax
+    name: Validate markdown codeblock syntax
+    description: Ensures markdown codeblocks have language tags to prevent parsing cut-offs.
+    entry: scripts/precommit/validators/validate_markdown_codeblock_syntax.py
+    language: system
+    types: [markdown]
+    pass_filenames: true

@@ -1,0 +1,148 @@
+"""Pre-action audit receipt hook for gptme.
+
+Before each tool executes, appends one JSON line to an append-only ledger
+at ``~/.local/share/gptme/receipts.jsonl``.  The receipt captures enough
+context to answer "who authorized this action, when, and in what scope" —
+the minimal audit trail that would have surfaced the gptme-contrib#1175
+unauthorized self-merge incident at response time.
+
+Phase 1 (this module): ledger + receipt emission.
+Phase 2 (this module): scope-check gate — aborts out-of-scope actions when
+    violation_action is 'block', or emits a warning when 'warn' (default).
+    Configure via ``~/.config/gptme/scope.yaml`` or GPTME_SCOPE_MANIFEST.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+from collections.abc import Generator
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from gptme.hooks import HookType, register_hook
+
+try:
+    from gptme.hooks import current_session_id
+except ImportError:  # pragma: no cover - compatibility fallback for older gptme.
+    current_session_id: ContextVar[str | None] = ContextVar(
+        "current_session_id", default=None
+    )
+
+if TYPE_CHECKING:
+    from gptme.hooks import StopPropagation
+    from gptme.hooks.types import ToolExecutePreData
+    from gptme.message import Message
+
+from .scope_gate import check_scope_decision
+
+logger = logging.getLogger(__name__)
+
+_PATH_TARGET_TOOLS = {"save", "append", "patch", "patch_anchored", "morph"}
+
+# Default ledger path — respects XDG_DATA_HOME if set and non-empty.
+_DEFAULT_LEDGER = (
+    Path(os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share"))
+    / "gptme"
+    / "receipts.jsonl"
+)
+
+
+def _ledger_path() -> Path:
+    """Return the active ledger path, honouring GPTME_RECEIPTS_LEDGER env override."""
+    override = os.environ.get("GPTME_RECEIPTS_LEDGER")
+    return Path(override) if override else _DEFAULT_LEDGER
+
+
+def _make_receipt(
+    tool_name: str,
+    target: str,
+    workspace: Path | None,
+    session_id: str | None,
+    timestamp: str | None = None,
+) -> dict:
+    ts = timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    payload = {
+        "session_id": session_id or os.environ.get("GPTME_SESSION_ID", "unknown"),
+        "model": (
+            os.environ.get("GPTME_MODEL") or os.environ.get("CC_MODEL") or "unknown"
+        ),
+        "action_type": tool_name,
+        "target": target,
+        "workspace": str(workspace) if workspace else None,
+        "timestamp": ts,
+    }
+    # Deterministic hash of the receipt content for accidental-corruption checks.
+    blob = json.dumps(payload, sort_keys=True).encode()
+    payload["receipt_hash"] = "sha256:" + hashlib.sha256(blob).hexdigest()
+    return payload
+
+
+def _target_descriptor(tool_use: object) -> str:
+    """Return a bounded action target without logging file-write bodies."""
+    tool_name = getattr(tool_use, "tool", "unknown") or "unknown"
+    args = getattr(tool_use, "args", None) or []
+
+    if tool_name in _PATH_TARGET_TOOLS:
+        return str(args[0])[:512].strip() if args else ""
+
+    raw_content = getattr(tool_use, "content", "") or ""
+    return raw_content[:512].strip()
+
+
+def _receipt_pre(
+    data: ToolExecutePreData,
+) -> Generator[Message | StopPropagation, None, None]:
+    """Emit one receipt line to the ledger before the tool executes."""
+    if data.tool_use is None:
+        return
+
+    tool_name = getattr(data.tool_use, "tool", "unknown") or "unknown"
+    target = _target_descriptor(data.tool_use)
+
+    session_id = current_session_id.get()
+    receipt = _make_receipt(tool_name, target, data.workspace, session_id)
+
+    ledger = _ledger_path()
+    try:
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt) + "\n")
+        logger.debug("action-receipts: emitted receipt for %s", tool_name)
+    except OSError as exc:
+        # Never crash the agent over an audit write failure — log and move on.
+        logger.warning("action-receipts: failed to write receipt: %s", exc)
+
+    # Phase 2: scope-check gate.
+    decision = check_scope_decision(tool_name, target, data.workspace)
+    if decision.violation:
+        if decision.action == "block":
+            from gptme.hooks import StopPropagation  # noqa: PLC0415
+
+            yield StopPropagation(f"[scope-gate] BLOCKED: {decision.violation}")
+            return
+        else:
+            logger.warning(
+                "action-receipts: SCOPE VIOLATION (warn only): %s",
+                decision.violation,
+            )
+
+    return
+    yield  # make this a generator
+
+
+def register() -> None:
+    """Register the action receipt hook with gptme."""
+    register_hook(
+        "action_receipts.pre",
+        HookType.TOOL_EXECUTE_PRE,
+        _receipt_pre,
+        # Low priority — run after higher-priority hooks (confirm, snapshot).
+        # Negative so user hooks at 0 still fire first.
+        priority=-50,
+    )
+    logger.info("action-receipts: hook registered (ledger: %s)", _ledger_path())

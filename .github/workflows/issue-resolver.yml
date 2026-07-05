@@ -1,0 +1,191 @@
+name: Issue Resolver (opt-in draft PR)
+
+# Opt-in resolver: trusted users trigger a gptme run against a labeled issue,
+# or a `/gptme-resolve` comment macro, and the workflow either opens a draft PR
+# with proposed changes OR pushes an attempt branch and posts a failure
+# explanation. This is distinct from the warning-only hygiene Action in
+# `issue-hygiene.yml`.
+#
+# Design invariants (Phase 1):
+#   - Opt-in only (explicit label or macro), never fires on every issue.
+#   - Never auto-merges; always opens a DRAFT PR.
+#   - Preserves failed attempts as branches so the user can pick them up.
+#   - Idempotent: re-triggering updates the existing attempt branch.
+#   - Uploads gptme session log as an artifact for post-hoc inspection.
+#
+# Cross-repo usage (Phase 2): call this as a reusable workflow from any repo:
+#
+#   jobs:
+#     resolve:
+#       uses: gptme/gptme-contrib/.github/workflows/issue-resolver.yml@master
+#       secrets:
+#         gptme-provider-key: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# The `gptme-provider-key` secret is provider-agnostic: the resolve step routes
+# it to the env var gptme expects based on the key prefix (sk-ant- → Anthropic,
+# sk-or- → OpenRouter, AIza → Gemini, else → OpenAI). Pass whichever provider
+# key the calling repo has configured.
+#
+# The workflow fetches its own resolver scripts from gptme-contrib so the
+# calling repo does not need to include any gptme-contrib files.
+#
+# Source script: scripts/github_resolver/resolve_issue.py
+# Research note: knowledge/research/2026-04-23-openhands-resolver-runtime-patterns.md
+#                (lives in Bob's private brain repo; public summary in PR body)
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_call:
+    inputs:
+      issue-number:
+        description: "Issue number to resolve (defaults to triggering issue)."
+        required: false
+        type: number
+      model:
+        description: "Optional gptme --model override."
+        required: false
+        type: string
+      trigger-label:
+        description: "Label that activates the resolver when present."
+        required: false
+        type: string
+        default: gptme-resolve
+      trigger-macro:
+        description: "Macro that activates the resolver in issue comments."
+        required: false
+        type: string
+        default: "/gptme-resolve"
+    secrets:
+      gptme-provider-key:
+        description: "Provider key for gptme (any prefix: sk-ant- → Anthropic, sk-or- → OpenRouter, AIza → Gemini, else → OpenAI)."
+        required: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: |
+      (github.event_name == 'issues' && github.event.action == 'labeled'
+        && github.event.label.name == (inputs.trigger-label || 'gptme-resolve'))
+      || (github.event_name == 'issue_comment' && github.event.action == 'created'
+        && startsWith(github.event.comment.body, (inputs.trigger-macro || '/gptme-resolve'))
+        && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+      || github.event_name == 'workflow_call'
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Do not leave a write-capable token configured in the worktree the
+          # agent edits. The orchestrator pushes explicitly with GH_TOKEN after
+          # validating the result, so direct agent-side `git push` attempts fail
+          # closed even if the model ignores the prompt contract.
+          persist-credentials: false
+
+      - name: Fetch resolver scripts from gptme-contrib
+        # Always fetch from gptme-contrib so this workflow works both when
+        # triggered directly inside gptme-contrib AND when called as a
+        # reusable workflow (workflow_call) from an external repo. Without
+        # this step, `scripts/github_resolver/` would not exist in a
+        # caller's checkout.
+        #
+        # `actions/checkout` now requires a workspace-relative path, so stage
+        # the sparse checkout inside the workspace first, then move it out to
+        # runner.temp before the resolver touches git. Keeping the helper repo
+        # outside the target worktree prevents `git add -A` in the resolver
+        # from staging the scripts directory as a broken submodule reference.
+        #
+        # In reusable workflows, the `github` context belongs to the CALLER.
+        # `github.workflow_sha` resolves to the caller's workflow file SHA
+        # (e.g. the ErikBjare/bob commit), NOT gptme-contrib's SHA — so it
+        # will not exist in gptme-contrib and the checkout fails with
+        # "not our ref". Use `job.workflow_sha` / `job.workflow_repository`
+        # instead: these always resolve to THIS reusable workflow's own
+        # revision and repo, even when called cross-repo.
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .gptme-resolver-stage
+          sparse-checkout: |
+            scripts/github_resolver
+            scripts/github_actions_common
+          sparse-checkout-cone-mode: false
+
+      - name: Move resolver scripts out of repo worktree
+        run: |
+          stage_dir="$GITHUB_WORKSPACE/.gptme-resolver-stage"
+          target_dir="$RUNNER_TEMP/gptme-resolver"
+          rm -rf "$target_dir"
+          mv "$stage_dir" "$target_dir"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install gptme
+        # Use --prerelease=allow so the resolver gets the latest dev release, which
+        # includes the `avatar` field in AgentConfig (stable 0.31.0 predates #1198).
+        # Bob repos use gptme.toml with `[agent] avatar = "..."` and fail with
+        # `TypeError: AgentConfig.__init__() got an unexpected keyword argument 'avatar'`
+        # when gptme parses the config.
+        # Version floor: avatar (#1198) landed 2026-01-29 in the 0.31.1 dev series
+        # (v0.31.0 stable was released 2025-12-10, before #1198). 0.31.1.dev0+ is
+        # the smallest floor that guarantees avatar support.
+        run: uv tool install --prerelease=allow "gptme>=0.31.1.dev0"
+
+      - name: Resolve issue
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPTME_MODEL: ${{ inputs.model }}
+          GPTME_PROVIDER_KEY: ${{ secrets.gptme-provider-key }}
+        run: |
+          ISSUE_NUMBER="${{ inputs.issue-number || github.event.issue.number }}"
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "No issue number available; nothing to do."
+            exit 0
+          fi
+
+          # Route the provider key to the env var gptme expects for that
+          # provider. gptme auto-detects the provider by env var NAME (see
+          # gptme/init.py), so an Anthropic key in OPENAI_API_KEY would be
+          # used as an OpenAI key and 401. Detect by key prefix, mirroring
+          # gptme's own get_model_from_api_key(). Default → OPENAI_API_KEY,
+          # so existing OpenAI callers are unaffected.
+          if [ -n "$GPTME_PROVIDER_KEY" ]; then
+            case "$GPTME_PROVIDER_KEY" in
+              sk-ant-*) export ANTHROPIC_API_KEY="$GPTME_PROVIDER_KEY" ;;
+              sk-or-*)  export OPENROUTER_API_KEY="$GPTME_PROVIDER_KEY" ;;
+              AIza*)    export GEMINI_API_KEY="$GPTME_PROVIDER_KEY" ;;
+              *)        export OPENAI_API_KEY="$GPTME_PROVIDER_KEY" ;;
+            esac
+            unset GPTME_PROVIDER_KEY
+          fi
+
+          mkdir -p output
+          python "$RUNNER_TEMP/gptme-resolver/scripts/github_resolver/resolve_issue.py" \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue "$ISSUE_NUMBER" \
+            --output-dir output
+
+      - name: Upload session artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gptme-resolver-output
+          path: output/
+          retention-days: 30
+          if-no-files-found: ignore

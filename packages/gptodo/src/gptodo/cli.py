@@ -1,0 +1,6229 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "click>=8.0.0",
+#     "rich>=13.0.0",
+#     "python-frontmatter>=1.1.0",
+#     "tabulate>=0.9.0",
+#     "tomli>=2.0.1; python_version < '3.11'",
+# ]
+# [tool.uv]
+# exclude-newer = "2024-04-01T00:00:00Z"
+# ///
+
+"""Task verification and status CLI for gptme agents.
+
+Features:
+- Status views
+- Task metadata verification
+- Dependency validation
+- Link checking
+"""
+
+import json
+import logging
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import (
+    Any,
+    Dict,
+    List,
+    Set,
+)
+
+import click
+from gptodo.frontmatter_compat import frontmatter
+from rich.console import Console
+from rich.markup import escape as markup_escape
+from rich.table import Table
+from tabulate import tabulate
+
+# Import agent registry (Phase 1 of multi-agent coordination)
+from gptodo.agents import (
+    DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
+    cleanup_stale_agents,
+    list_agents,
+)
+
+# Import checker functionality (Issue #255: Claude Code-inspired patterns)
+from gptodo.checker import (
+    VALID_TRANSITIONS,
+    CheckerConfig,
+    poll_task_completion,
+    run_checker,
+)
+
+# Import dependency tree visualization (Issue #255)
+from gptodo.deptree import (
+    build_dependency_graph,
+    compute_unblocking_power,
+    detect_circular_dependencies,
+    get_dependency_tree,
+    render_full_dag_ascii,
+)
+
+# Import core business logic from lib
+from gptodo.lib import (
+    fetch_github_issues,
+    fetch_linear_issues,
+    generate_task_content,
+    generate_task_filename,
+    map_priority_from_labels,
+)
+
+# Import locking functionality (Phase 3 of Issue #240)
+from gptodo.locks import (
+    DEFAULT_LOCK_TIMEOUT_HOURS,
+    acquire_lock,
+    cleanup_expired_locks,
+    list_locks,
+    release_lock,
+)
+
+# Import subagent functionality (Issue #255: Multi-Agent Collaboration)
+from gptodo.subagent import (
+    check_session,
+    cleanup_sessions,
+    get_session_output,
+    kill_session,
+    list_sessions,
+    spawn_agent,
+)
+
+# Import unblocking functionality with fan-in support
+from gptodo.unblock import auto_unblock_with_fan_in
+
+# Import utilities directly from utils
+# Using absolute imports (not relative) for uv script compatibility
+from gptodo.utils import (
+    # Constants
+    CONFIGS,
+    STATE_EMOJIS,
+    STATE_STYLES,
+    # Data classes
+    DirectoryConfig,
+    StateChecker,
+    TaskInfo,
+    # Phase 5: Effective state CLI (bob#240)
+    compute_effective_state,
+    # URLs
+    extract_external_urls,
+    fetch_github_issue_details,
+    fetch_github_issue_state,
+    fetch_linear_issue_state,
+    fetch_url_state,
+    # Core utilities
+    check_links,
+    find_repo_root,
+    get_blocking_reasons,
+    # Cache
+    get_cache_path,
+    has_new_activity,
+    is_task_ready,
+    lint_frontmatter_fields,
+    task_has_waiting_blocker,
+    task_is_waiting_for_date,
+    task_matches_pool_filter,
+    task_pool,
+    load_cache,
+    load_tasks,
+    normalize_state,
+    # Phase 4: Effective state computation (bob#240)
+    parse_tracking_ref,
+    resolve_tasks,
+    save_cache,
+    task_to_dict,
+    update_task_state,
+)
+
+# Import generate-queue command (migrated from argparse to Click)
+from gptodo.generate_queue import generate_queue
+
+# Import worktree workflow (Issue #246)
+from gptodo.worktree import (
+    cleanup_merged_worktrees,
+    create_pr_from_worktree,
+    create_worktree,
+    get_worktree_status,
+    list_worktrees,
+    merge_worktree,
+    remove_worktree,
+)
+
+# Keep console instance for CLI output
+console = Console()
+
+
+@click.group()
+@click.option("-v", "--verbose", is_flag=True)
+@click.option(
+    "--tasks-dir",
+    type=click.Path(exists=False, file_okay=False, resolve_path=True),
+    envvar="GPTODO_TASKS_DIR",
+    help="Path to tasks directory (overrides auto-detection). Can also be set via GPTODO_TASKS_DIR env var.",
+)
+def cli(verbose, tasks_dir):
+    """gptodo — task management CLI for gptme agent workspaces.
+
+    Features:
+    - Status views (list, show, status, next, ready)
+    - Task metadata editing (edit): state, priority, tags, dependencies, and more
+    - Recurring tasks (recur: 7d, weekly, monthly, or cron expressions)
+    - Dependency validation and blocking analysis (effective, check-waiting, dep)
+    - Sub-agent spawning and management (spawn, sessions, run)
+    - GitHub/Linear issue import and syncing (import, fetch, sync)
+    - Task locking, claims, and stale detection
+    - Link checking and task integrity verification
+
+    Frontmatter fields (set via `gptodo edit TASK --set field value`):
+        state: backlog|todo|active|waiting|ready_for_review|done|cancelled|someday
+        priority: high|medium|low
+        task_type: project|action
+        assigned_to: bob|erik|alice|gordon (or any string)
+        created: ISO 8601 date/datetime
+        recur: 7d|14d|24h|weekly|monthly|cron-expression (recurring tasks)
+        wait: ISO 8601 date/datetime (hide from queue until this date)
+        next_action: string (GTD)
+        waiting_for: string (GTD)
+        waiting_since: date (GTD)
+        parent: string (parent task ID)
+        success_criterion: string (verifiable "done" gate)
+        tracking_issue: string (human URL of the live coordination issue/PR)
+        upstream_coordination_id: string (machine claim key, e.g. github:OWNER/REPO#NUM)
+        depends: list (deprecated, use requires)
+        requires: list (dependency references)
+        tags: list
+        tracking: list (external issue/PR URLs)
+        related: list
+        output_types: list
+
+    See https://github.com/gptme/gptme-contrib for full documentation.
+    """
+    log_level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=log_level)
+
+    # Set GPTODO_TASKS_DIR if provided via CLI
+    # This allows find_repo_root to pick it up
+    if tasks_dir:
+        os.environ["GPTODO_TASKS_DIR"] = tasks_dir
+
+
+@cli.command("show")
+@click.argument("task_id", required=False)
+def show_(task_id):
+    """Show detailed information about a task.
+
+    If task_id is not provided, it will show the first task found.
+    """
+    show(task_id)
+
+
+def show(task_id):
+    """Show detailed information about a task."""
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    if not task_id:
+        console.print("[red]Error: Task ID or filename required[/]")
+        return
+
+    # Load all tasks
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        return
+
+    # Sort tasks by creation date for consistent ID mapping
+    tasks.sort(key=lambda t: t.created)
+
+    # Find requested task
+    task = None
+    if task_id.isdigit():
+        # Get task by numeric ID
+        idx = int(task_id) - 1
+        if 0 <= idx < len(tasks):
+            task = tasks[idx]
+    else:
+        # Get task by name
+        task_name = task_id[:-3] if task_id.endswith(".md") else task_id
+        matching = [t for t in tasks if t.name == task_name]
+        if matching:
+            task = matching[0]
+
+    if not task:
+        console.print(f"[red]Error: Task {task_id} not found[/]")
+        return
+
+    # Create rich table for metadata
+    table = Table(show_header=False, box=None)
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+
+    # Add metadata rows
+    table.add_row("File", str(task.path.relative_to(repo_root)))
+    table.add_row("State", task.state or "unknown")
+    table.add_row("Created", task.created_ago)
+    table.add_row("Modified", task.modified_ago)
+    if task.priority:
+        table.add_row("Priority", STATE_EMOJIS.get(task.priority) or task.priority)
+    if task.tags:
+        table.add_row("Tags", ", ".join(task.tags))
+    if task.requires:
+        table.add_row("Requires", ", ".join(task.requires))
+    if task.subtasks.total > 0:
+        table.add_row("Subtasks", f"{task.subtasks.completed}/{task.subtasks.total} completed")
+    if task.issues:
+        table.add_row("Issues", ", ".join(task.issues))
+    if task.success_criterion:
+        table.add_row("Success Criterion", task.success_criterion)
+
+    # Print metadata table
+    console.print("\n[bold]Task Metadata:[/]")
+    console.print(table)
+
+    # Print content
+    console.print("\n[bold]Content:[/]")
+    post = frontmatter.load(task.path)  # Reload to get content
+    console.out(post.content, highlight=True)
+
+
+@cli.command("effective")
+@click.argument("task_id")
+def effective_(task_id: str):
+    """Show the effective state of a task including blocking reasons.
+
+    The effective state considers both the task's actual state AND its
+    dependencies. A task may be 'blocked' (virtual state) if its
+    dependencies are not resolved.
+
+    This is useful for debugging why a task shows as ready/blocked.
+    """
+    effective(task_id)
+
+
+def effective(task_id: str):
+    """Show effective state of a task."""
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        return
+
+    # Build task dictionary
+    all_tasks: Dict[str, TaskInfo] = {t.name: t for t in tasks}
+
+    # Find requested task
+    task = None
+    for t in tasks:
+        if t.name == task_id or task_id in str(t.path):
+            task = t
+            break
+
+    if not task:
+        console.print(f"[red]Task not found: {task_id}[/]")
+        return
+
+    # Load issue cache if available
+    cache_path = get_cache_path(repo_root)
+    issue_cache = load_cache(cache_path)
+
+    # Compute effective state
+    eff_state = compute_effective_state(task, all_tasks, issue_cache)
+    blocking_reasons = get_blocking_reasons(task, all_tasks, issue_cache)
+
+    # Display results
+    console.print(f"\n[bold]Task:[/] {task.name}")
+    console.print(f"[bold]File:[/] {task.path}")
+
+    # Style the states - STATE_STYLES returns (style, emoji) tuples
+    actual_style_tuple = STATE_STYLES.get(task.state or "unknown")
+    eff_style_tuple = STATE_STYLES.get(eff_state or "unknown")
+    actual_style = actual_style_tuple[0] if actual_style_tuple else "white"
+    eff_style = eff_style_tuple[0] if eff_style_tuple else "white"
+    actual_state = task.state or "unknown"
+
+    console.print(f"\n[bold]Actual State:[/]  [{actual_style}]{actual_state}[/]")
+    console.print(f"[bold]Effective State:[/] [{eff_style}]{eff_state}[/]")
+
+    if blocking_reasons:
+        console.print("\n[bold yellow]Blocking Reasons:[/]")
+        for reason in blocking_reasons:
+            console.print(f"  • {reason}")
+    else:
+        if task.requires:
+            console.print(f"\n[green]✓ All {len(task.requires)} dependencies resolved[/]")
+        else:
+            console.print("\n[dim]No dependencies defined[/]")
+
+    # Show requirements summary
+    if task.requires:
+        console.print("\n[bold]Requirements:[/]")
+        for req in task.requires:
+            if isinstance(req, str) and req.startswith(("http://", "https://")):
+                # URL requirement
+                cached = issue_cache.get(req) if issue_cache else None
+                if cached:
+                    state = cached.get("state", "unknown")
+                    style = "green" if state in ("CLOSED", "MERGED") else "yellow"
+                    console.print(f"  • [{style}]{req}[/] ({state})")
+                else:
+                    console.print(f"  • [dim]{req}[/] (not cached)")
+            else:
+                # Task requirement
+                dep_task = all_tasks.get(req)
+                if dep_task:
+                    dep_state = dep_task.state or "unknown"
+                    dep_style_tuple = STATE_STYLES.get(dep_state)
+                    dep_style = dep_style_tuple[0] if dep_style_tuple else "white"
+                    console.print(f"  • [{dep_style}]{req}[/] ({dep_state})")
+                else:
+                    console.print(f"  • [red]{req}[/] (missing)")
+
+
+@cli.command("list")
+@click.option(
+    "--sort",
+    type=click.Choice(["state", "date", "name", "completion"]),
+    default="date",
+    help="Sort by state, creation date, name, or completion percentage",
+)
+@click.option(
+    "--active-only",
+    is_flag=True,
+    help="Only show new and active tasks",
+)
+@click.option(
+    "--context",
+    type=str,
+    default=None,
+    help="Filter by context tag (e.g., @coding, @research)",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.option(
+    "--jsonl",
+    "output_jsonl",
+    is_flag=True,
+    help="Output as JSONL (one task per line) - compact for LLM consumption",
+)
+@click.option(
+    "--pool",
+    "pool_filter",
+    default="general",
+    help="Only show tasks in this pool. Use 'all' to see every pool, 'frontier' for frontier only. Default: 'general' (non-default pools hidden).",
+)
+@click.option(
+    "--exclude-pool",
+    "exclude_pool",
+    default=None,
+    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
+)
+def list_(sort, active_only, context, output_json, output_jsonl, pool_filter, exclude_pool):
+    """List all tasks in a table format."""
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print("No tasks found", file=sys.stderr)
+            print(json.dumps({"tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            print("No tasks found", file=sys.stderr)
+            return  # Empty output for JSONL
+        console.print("[red]No tasks found[/]")
+        return
+
+    # Create stable enumerated ID mapping based on creation date for ALL tasks
+    tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+    name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+    # Keep a mapping of all task names for dependency resolution
+    all_tasks_dict = {task.name: task for task in all_tasks}
+
+    # Filter tasks if active-only flag is set
+    tasks = all_tasks
+    if active_only:
+        tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+        if not tasks:
+            if output_json:
+                print("No new or active tasks found", file=sys.stderr)
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print("No new or active tasks found", file=sys.stderr)
+                return
+            console.print("[yellow]No new or active tasks found[/]")
+            return
+        if not output_json and not output_jsonl:
+            console.print("[blue]Showing only new and active tasks[/]\n")
+
+    # Filter by context if specified
+    if context:
+        # Normalize context tag (add @ if missing)
+        context_tag = context if context.startswith("@") else f"@{context}"
+        tasks = [task for task in tasks if context_tag in (task.tags or [])]
+        if not tasks:
+            if output_json:
+                print(f"No tasks found with context tag '{context_tag}'", file=sys.stderr)
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print(f"No tasks found with context tag '{context_tag}'", file=sys.stderr)
+                return
+            console.print(f"[yellow]No tasks found with context tag '{context_tag}'[/]")
+            return
+        if not output_json and not output_jsonl:
+            console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
+
+    # Apply pool filter (default: general only; --pool all to see every pool)
+    tasks = [
+        task
+        for task in tasks
+        if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
+    if not tasks:
+        if output_json:
+            print("No tasks found matching pool filter", file=sys.stderr)
+            print(json.dumps({"tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            print("No tasks found matching pool filter", file=sys.stderr)
+            return
+        console.print("[yellow]No tasks found matching pool filter[/]")
+        return
+
+    # Sort tasks for display based on option
+    if sort == "state":
+        tasks.sort(key=lambda t: (t.state or "", t.created))
+    elif sort == "name":
+        tasks.sort(key=lambda t: t.name)
+    elif sort == "completion":
+        # Calculate completion percentage, grouping tasks with no subtasks at the bottom
+        def completion_key(t):
+            if t.subtasks.total == 0:
+                return (0, t.created)  # Group at bottom, sort by date within group
+            completion_pct = t.subtasks.completed / t.subtasks.total
+            return (
+                1,
+                completion_pct,
+                t.created,
+            )  # Sort by completion %, newest first within same %
+
+        # Sort in reverse order to get:
+        # 1. Tasks with subtasks first (1 > 0)
+        # 2. Higher completion percentages first
+        # 3. Newer tasks first within same percentage
+        tasks.sort(key=completion_key, reverse=True)
+    else:  # default: date
+        tasks.sort(key=lambda t: t.created)
+
+    # JSONL output - one task per line (compact for LLM consumption)
+    if output_jsonl:
+        for task in tasks:
+            print(json.dumps(task_to_dict(task)))
+        return
+
+    # JSON output for machine consumption
+    if output_json:
+        result = {
+            "tasks": [task_to_dict(t) for t in tasks],
+            "count": len(tasks),
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    # Create display rows
+    display_rows = []
+    for task in tasks:
+        # Get stable enumerated ID for task
+        enum_id = name_to_enum_id[task.name]
+
+        # Calculate completion info
+        if task.subtasks.total > 0:
+            completion_pct = (task.subtasks.completed / task.subtasks.total) * 100
+            completion_str = f"{completion_pct:>3.0f}%"
+            name_with_count = f"{task.name} {task.subtasks}"
+        else:
+            completion_str = "  -"
+            name_with_count = task.name
+
+        # Format dependencies with enumerated IDs or task info
+        if task.requires:
+            dep_ids = []
+            for dep in task.requires:
+                if dep in all_tasks_dict:
+                    dep_task = all_tasks_dict[dep]
+                    # If dependency is in filtered list, show its ID
+                    if not active_only or dep_task.state in ["backlog", "active"]:
+                        dep_ids.append(str(name_to_enum_id[dep]))
+                    else:
+                        # Show task name and state for filtered out dependencies
+                        state_emoji = STATE_EMOJIS.get(dep_task.state or "untracked", "•")
+                        dep_ids.append(f"{dep} ({state_emoji})")
+                else:
+                    dep_ids.append(f"{dep} (missing)")
+            deps_str = ", ".join(dep_ids)
+        else:
+            deps_str = ""
+
+        # Add row with state emoji
+        state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        display_rows.append(
+            [
+                state_emoji,
+                f"{enum_id}. {name_with_count}",
+                task.created_ago,
+                STATE_EMOJIS.get(task.priority or "") or task.priority or "",
+                completion_str,
+                deps_str,
+            ]
+        )
+
+    # Print table
+    headers = ["", "Task", "Created", "Priority", "Complete", "Deps"]
+    # Only show dependencies column if any task has dependencies
+    has_deps = any(task.requires for task in tasks)
+    if not has_deps:
+        display_rows = [row[:-1] for row in display_rows]
+        headers = headers[:-1]
+
+    # Set column alignments and widths
+    colaligns = ["left", "left", "left", "center"]
+    colwidths = [2, None, None, None]
+    if has_deps:
+        colaligns.append("left")
+        colwidths.append(20)
+
+    console.print(
+        "\n"
+        + tabulate(
+            display_rows,
+            headers=headers,
+            tablefmt="simple",
+            maxcolwidths=colwidths,
+            colalign=colaligns,
+        )
+    )
+
+    # Print legend for tasks with dependencies
+    if has_deps:
+        tasks_with_deps = [(task, name_to_enum_id[task.name]) for task in tasks if task.requires]
+        if tasks_with_deps:
+            console.print("\nDependencies:")
+            for task, enum_id in tasks_with_deps:
+                dep_strs = []
+                for dep in task.requires:
+                    if dep in all_tasks_dict:
+                        dep_task = all_tasks_dict[dep]
+                        # If dependency is in filtered list, show its ID
+                        if not active_only or dep_task.state in ["backlog", "active"]:
+                            dep_strs.append(f"{dep} ({name_to_enum_id[dep]})")
+                        else:
+                            # Show task name and state for filtered out dependencies
+                            state_emoji = STATE_EMOJIS.get(dep_task.state or "untracked", "•")
+                            dep_strs.append(f"{dep} ({state_emoji})")
+                    else:
+                        dep_strs.append(f"{dep} (missing)")
+                dep_str = ", ".join(dep_strs)
+                console.print(f"  {task.name} ({enum_id}) -> {dep_str}")
+
+    # Print summary
+    state_counts: Dict[str, int] = {}
+    for task in tasks:
+        emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        state_counts[emoji] = state_counts.get(emoji, 0) + 1
+
+    summary = [f"{count} {state}" for state, count in state_counts.items()]
+    console.print(f"\nTotal: {len(tasks)} tasks ({', '.join(summary)})")
+
+
+def print_status_section(
+    console: Console, title: str, items: List[TaskInfo], show_state: bool = False
+):
+    """Print a section of the status output."""
+    if not items:
+        return
+
+    # Sort items by creation date (newest first)
+    items = sorted(items, key=lambda x: x.created, reverse=True)
+
+    # Get style for this section
+    state_name = title.split()[-1].lower()
+    style, emoji = STATE_STYLES.get(state_name, ("white", "•"))
+
+    # Limit backlog tasks to 5, show count of remaining
+    if state_name == "backlog":
+        if len(items) > 5:
+            display_items = items[:5]
+            remaining = len(items) - 5
+        else:
+            display_items = items
+            remaining = 0
+    else:
+        display_items = items
+        remaining = 0
+
+    # Print header with count and emoji
+    emoji = STATE_EMOJIS.get(state_name, "•")
+    console.print(f"\n{emoji} {title.upper()} ({len(items)}):")
+
+    # Print items
+    for task in display_items:
+        # Format display string
+        subtask_str = f" {task.subtasks}" if task.subtasks.total > 0 else ""
+        priority_str = f" [{task.priority}]" if task.priority else ""
+
+        # Get state info if needed
+        state_info = ""
+        if show_state:
+            # Use "untracked" for None state, with fallback to default style
+            state = task.state or "untracked"
+            _, state_text = STATE_STYLES.get(state, ("white", "•"))
+            state_info = f", {state_text}"
+
+        # Print task info
+        console.print(f"  {task.name}{subtask_str}{priority_str} ({task.created_ago}{state_info})")
+
+        # Show issues inline
+        if task.issues:
+            console.print(f"    ! {', '.join(task.issues)}")
+
+    # Show remaining count for new tasks
+    if remaining > 0:
+        console.print(f"  ... and {remaining} more")
+
+
+def print_summary(console: Console, results: Dict[str, List[TaskInfo]], config: DirectoryConfig):
+    """Print summary statistics."""
+    total = 0
+    state_counts: Dict[str, int] = {}
+
+    # Count tasks by state
+    for state, items in results.items():
+        count = len(items)
+        if count > 0:
+            total += count
+            state_counts[state] = count
+
+    # Build summary strings
+    summary_parts = []
+
+    # Add regular states first
+    for state in config.states:
+        if count := state_counts.get(state, 0):
+            style, state_text = STATE_STYLES.get(state, ("white", "•"))
+            emoji = STATE_EMOJIS.get(state, "•")
+            summary_parts.append(f"{count} {emoji}")
+
+    # Add special categories
+    if count := state_counts.get("untracked", 0):
+        summary_parts.append(f"{count} ❓")
+    if count := state_counts.get("issues", 0):
+        summary_parts.append(f"{count} ⚠️")
+
+    # Print compact summary
+    if summary_parts:
+        console.print(f"\n{config.emoji} Summary: {total} total ({', '.join(summary_parts)})")
+
+
+def _build_status_json(dir_type: str, results: Dict[str, List[TaskInfo]]) -> Dict[str, Any]:
+    """Build a JSON-serializable status payload for one directory type.
+
+    Shape:
+        {
+          "type": "tasks",
+          "tasks": [<task_to_dict>, ...],   # every task, all states
+          "summary": {
+            "total": int,
+            "by_state": {"active": int, "backlog": int, ...},
+            "issues": int,      # tasks with validation problems
+            "untracked": int,   # files with no state
+          }
+        }
+
+    Each task in check_all() lands in exactly one bucket, so the flattened
+    "tasks" list has no duplicates and `total` equals its length.
+    """
+    config = CONFIGS[dir_type]
+    by_state: Dict[str, int] = {}
+    tasks: List[Dict[str, Any]] = []
+
+    for state in config.states:
+        items = results.get(state, [])
+        if items:
+            by_state[state] = len(items)
+            tasks.extend(task_to_dict(t) for t in items)
+
+    issues = results.get("issues", [])
+    untracked = results.get("untracked", [])
+    tasks.extend(task_to_dict(t) for t in issues)
+    tasks.extend(task_to_dict(t) for t in untracked)
+
+    # Tasks with validation issues are bucketed separately in check_all() and
+    # excluded from state buckets, so we count them into by_state here to keep
+    # by_state consistent with tasks[] (both should reflect actual task state).
+    for task in issues:
+        if task.state:
+            by_state[task.state] = by_state.get(task.state, 0) + 1
+
+    return {
+        "type": dir_type,
+        "tasks": tasks,
+        "summary": {
+            "total": len(tasks),
+            "by_state": by_state,
+            "issues": len(issues),
+            "untracked": len(untracked),
+        },
+    }
+
+
+def _build_status_summary_from_task_dicts(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build the status JSON summary from a serialized task list."""
+    by_state: Dict[str, int] = {}
+    issues = 0
+    untracked = 0
+
+    for task in tasks:
+        state = task.get("state")
+        has_issues = bool(task.get("has_issues"))
+        if state:
+            by_state[state] = by_state.get(state, 0) + 1
+        elif not has_issues:
+            untracked += 1
+        if has_issues:
+            issues += 1
+
+    return {
+        "total": len(tasks),
+        "by_state": by_state,
+        "issues": issues,
+        "untracked": untracked,
+    }
+
+
+def check_directory(
+    console: Console,
+    dir_type: str,
+    repo_root: Path,
+    compact: bool = False,
+    summary_only: bool = False,
+) -> Dict[str, List[TaskInfo]]:
+    """Check and display status for a single directory type.
+
+    ``summary_only`` prints just the header and the summary line, skipping the
+    per-state task listing (used by ``--summary``, whose contract is "only show
+    summary"). The summary itself always prints, so callers must not print it a
+    second time.
+    """
+    config = CONFIGS[dir_type]
+    checker = StateChecker(repo_root, config)
+    results = checker.check_all()
+
+    # Print header with type-specific color. No trailing newline: the first
+    # section (and the summary) already lead with a blank line, so a trailing
+    # one here would double the gap under the header.
+    style, _ = STATE_STYLES.get(config.states[0], ("white", "•"))
+    console.print(f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]")
+
+    if not summary_only:
+        # Print sections in order
+        if results["issues"]:
+            print_status_section(
+                console,
+                "Issues Found",
+                results["issues"],
+                show_state=True,
+            )
+
+        if results["untracked"]:
+            print_status_section(
+                console,
+                "Untracked Files",
+                results["untracked"],
+            )
+
+        # Determine which states to show based on compact mode.
+        # Compact = the active work funnel: untriaged, triaged, in-flight,
+        # and awaiting verification. Exclude blocked, deferred, and terminal
+        # states so the short view stays focused on real work.
+        states_to_show = (
+            [s for s in ("backlog", "todo", "active", "ready_for_review") if s in config.states]
+            if compact
+            else config.states
+        )
+
+        # Print active states in order
+        for state in states_to_show:
+            if state in config.states and results.get(state):
+                print_status_section(
+                    console,
+                    state,
+                    results[state],
+                )
+
+    # Print summary
+    print_summary(console, results, config)
+
+    # Discoverability: show hidden non-default pool counts so they are never silently orphaned.
+    all_tasks_flat = [t for lst in results.values() for t in lst]
+    non_default = [t for t in all_tasks_flat if task_pool(t) != "general"]
+    if non_default:
+        pool_totals: Dict[str, list] = {}
+        for t in non_default:
+            p = task_pool(t)
+            if p not in pool_totals:
+                pool_totals[p] = [0, 0]  # [total, actionable]
+            pool_totals[p][0] += 1
+            if t.state in ("backlog", "active"):
+                pool_totals[p][1] += 1
+        parts = ", ".join(
+            f"{p}: {counts[0]} ({counts[1]} actionable)"
+            for p, counts in sorted(pool_totals.items())
+        )
+        console.print(
+            f"  [dim]Other pools: {parts} (use --pool {next(iter(pool_totals))} to view)[/]"
+        )
+
+    return results
+
+
+def print_total_summary(console: Console, all_results: Dict[str, Dict[str, List[TaskInfo]]]):
+    """Print summary of all directory types."""
+    table = Table(title="\n📊 Total Summary", show_header=False, title_style="bold")
+    table.add_column("Category", style="bold")
+    table.add_column("Count", justify="right")
+    table.add_column("Details", justify="left")
+
+    total_items = 0
+    total_issues = 0
+
+    # Process each directory type
+    for dir_type, results in all_results.items():
+        config = CONFIGS[dir_type]
+
+        # Calculate totals
+        type_total = sum(len(items) for items in results.values())
+        type_issues = len(results.get("issues", []))
+        total_items += type_total
+        total_issues += type_issues
+
+        if type_total == 0:
+            continue
+
+        # Build state summary
+        state_summary = []
+        for state in config.states:
+            if count := len(results.get(state, [])):
+                emoji = STATE_EMOJIS.get(state, "•")
+                state_summary.append(f"{count} {emoji}")
+
+        # Add special categories
+        if count := len(results.get("untracked", [])):
+            state_summary.append(f"{count} ❓")
+        if type_issues:
+            state_summary.append(f"{type_issues} ⚠️")
+
+        # Add row to table
+        table.add_row(
+            config.emoji + " " + config.type_name,
+            str(type_total),
+            " ".join(state_summary),
+        )
+
+    # Add separator and total row
+    if total_items > 0:
+        table.add_row("", "", "")  # Empty row as separator
+        table.add_row(
+            "[bold]Total[/]",
+            str(total_items),
+            f"[yellow]{total_issues} issues[/]" if total_issues else "",
+        )
+
+        console.print(table)
+
+
+def _detect_github_repo() -> str | None:
+    """Auto-detect GitHub repo from current git remote via gh CLI."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _show_github_issues(
+    console: Console,
+    repo_root: Path,
+    github_repo: str | None,
+    compact: bool,
+) -> None:
+    """Show open GitHub issues that don't have matching task files.
+
+    Fetches open issues from the GitHub repo, filters out any that are
+    already tracked via the `tracking` field in existing task files,
+    and displays the remainder as untracked GitHub issues.
+    """
+    # Detect repo if not provided
+    if not github_repo:
+        github_repo = _detect_github_repo()
+        if not github_repo:
+            console.print(
+                "[yellow]Could not detect GitHub repo. Use --repo owner/name to specify.[/]"
+            )
+            return
+
+    # Load existing tasks to find already-tracked issue URLs
+    tasks_dir = repo_root / "tasks"
+    existing_tasks = load_tasks(tasks_dir) if tasks_dir.exists() else []
+    tracked_urls: Set[str] = set()
+    for task in existing_tasks:
+        for url in extract_external_urls(task):
+            tracked_urls.add(url)
+
+    # Fetch open issues from GitHub
+    gh_issues = fetch_github_issues(
+        repo=github_repo, state="open", labels=[], assignee=None, limit=500
+    )
+    if not gh_issues:
+        console.print(f"\n🐙 No open GitHub issues in {github_repo}")
+        return
+
+    # Filter out already-tracked issues
+    untracked = [issue for issue in gh_issues if issue["tracking_ref"] not in tracked_urls]
+
+    # Display
+    tracked_count = len(gh_issues) - len(untracked)
+    if untracked:
+        console.print(
+            f"\n🐙 GitHub Issues — {github_repo} "
+            f"({len(untracked)} untracked, {tracked_count} already in tasks):"
+        )
+        for issue in untracked:
+            labels_str = ""
+            if issue.get("labels"):
+                labels_str = markup_escape(" [" + ", ".join(issue["labels"]) + "]")
+            console.print(f"  #{issue['number']}  {markup_escape(issue['title'])}{labels_str}")
+
+        if not compact:
+            console.print(
+                f"\n  [dim]Import with: gptodo import --source github --repo {github_repo}[/]"
+            )
+    else:
+        console.print(
+            f"\n🐙 GitHub Issues — {github_repo}: "
+            f"all {len(gh_issues)} open issues tracked in tasks ✓"
+        )
+
+
+@cli.command()
+@click.option("--type", type=click.Choice(list(CONFIGS.keys())), default="tasks")
+@click.option("--all", is_flag=True, help="Check all directory types")
+@click.option(
+    "--compact",
+    is_flag=True,
+    help="Show only the active work funnel: backlog, todo, active, ready_for_review",
+)
+@click.option("--summary", is_flag=True, help="Only show summary")
+@click.option("--issues", is_flag=True, help="Only show items with issues")
+@click.option(
+    "--github",
+    is_flag=True,
+    help="Include open GitHub issues not yet tracked as task files",
+)
+@click.option(
+    "--repo",
+    "github_repo",
+    default=None,
+    help="GitHub repo for --github (default: auto-detect via gh CLI)",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Emit machine-readable JSON instead of rendered output (stable contract for scripts)",
+)
+@click.option(
+    "--pool",
+    "pool_filter",
+    default=None,
+    help="Only show tasks in this pool (e.g. 'frontier', 'general'); applies to --json output",
+)
+@click.option(
+    "--exclude-pool",
+    "exclude_pool",
+    default=None,
+    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier'); applies to --json output",
+)
+def status(
+    type, all, compact, summary, issues, github, github_repo, output_json, pool_filter, exclude_pool
+):
+    """Show status of tasks and other tracked items."""
+    if not output_json and (pool_filter is not None or exclude_pool is not None):
+        raise click.UsageError("--pool/--exclude-pool are only supported with --json")
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    # Machine-readable output: stable contract for scripts (avoids grepping
+    # rich-rendered human output, which depends on emoji/formatting). The
+    # display-only flags (--compact/--summary/--issues/--github) are ignored;
+    # consumers filter the full task list themselves.
+    if output_json:
+        if all:
+            payload: Dict[str, Any] = {"all": True, "types": {}}
+            for type_name in CONFIGS.keys():
+                results = StateChecker(repo_root, CONFIGS[type_name]).check_all()
+                payload["types"][type_name] = _build_status_json(type_name, results)
+        else:
+            results = StateChecker(repo_root, CONFIGS[type]).check_all()
+            payload = _build_status_json(type, results)
+        # Apply pool filter to JSON task list (post-processing; avoids touching check_all())
+        if pool_filter is not None or exclude_pool is not None:
+
+            def _pool_of_task_dict(t: Dict[str, Any]) -> str:
+                return str(t.get("pool", "general"))
+
+            def _passes(t: Dict[str, Any]) -> bool:
+                p = _pool_of_task_dict(t)
+                if pool_filter is not None and p != pool_filter:
+                    return False
+                if exclude_pool is not None and p == exclude_pool:
+                    return False
+                return True
+
+            if "types" in payload:
+                for v in payload["types"].values():
+                    v["tasks"] = [t for t in v["tasks"] if _passes(t)]
+                    v["summary"] = _build_status_summary_from_task_dicts(v["tasks"])
+            else:
+                payload["tasks"] = [t for t in payload["tasks"] if _passes(t)]
+                payload["summary"] = _build_status_summary_from_task_dicts(payload["tasks"])
+        print(json.dumps(payload, indent=2))
+        return
+
+    # Collect results from all directories
+    all_results = {}
+
+    if all:
+        # Check all directory types
+        for type_name in CONFIGS.keys():
+            results = check_directory(console, type_name, repo_root, compact, summary_only=summary)
+            if results:  # Only include directories with items
+                all_results[type_name] = results
+
+            # Add separator between types if not last
+            if type_name != list(CONFIGS.keys())[-1]:
+                console.print("\n" + "─" * 50)
+
+        # Print total summary at the end
+        if len(all_results) > 1:
+            console.print("\n" + "─" * 50)
+            print_total_summary(console, all_results)
+
+    else:
+        # Check single directory type
+        results = check_directory(console, type, repo_root, compact, summary_only=summary)
+        if results:
+            all_results[type] = results
+
+    # Additional filtering based on options
+    if issues:
+        # Show only items with issues across all types
+        has_issues = False
+        for dir_type, results in all_results.items():
+            if issue_items := results.get("issues", []):
+                has_issues = True
+                config = CONFIGS[dir_type]
+                console.print(f"\n{config.emoji} {dir_type.title()} Issues:")
+                for item in issue_items:
+                    console.print(f"  • {item.name}: {', '.join(item.issues)}")
+
+        if not has_issues:
+            console.print("\n[green]No issues found![/]")
+
+    # Note: --summary is handled inside check_directory (summary_only), which
+    # prints the summary once. Re-printing it here would duplicate it.
+
+    # Show GitHub issues not yet tracked as task files
+    if github:
+        _show_github_issues(console, repo_root, github_repo, compact)
+    elif github_repo:
+        console.print("[yellow]Warning: --repo has no effect without --github[/]")
+
+
+@cli.command()
+@click.option("--fix", is_flag=True, help="Try to fix simple issues")
+@click.argument("task_files", nargs=-1, type=click.Path())
+def check(fix: bool, task_files: list[str]):
+    """Check task integrity and relationships.
+
+    If task files are provided, only check those files.
+    Otherwise, check all tasks in the tasks directory.
+    """
+    console = Console()
+
+    # Find repo root and tasks directory
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # ALWAYS load all tasks to build complete task_ids set for dependency checking.
+    # Capture per-file load errors so we can surface invisible tasks (files that
+    # fail to parse, e.g. broken YAML frontmatter, are otherwise silently dropped
+    # by load_tasks and the user sees a misleading "All N tasks verified" report).
+    load_errors: list[tuple[Path, str]] = []
+    all_tasks = load_tasks(tasks_dir, errors_out=load_errors)
+    if not all_tasks and not load_errors:
+        console.print("[yellow]No tasks found in tasks directory![/]")
+        return
+
+    # Build complete task_ids set from ALL tasks
+    task_ids = {task.id for task in all_tasks}
+
+    # Determine which tasks to validate
+    if task_files:
+        # Only validate the specified files
+        tasks_to_validate = []
+        for file in task_files:
+            path = Path(file)
+            # Handle different path formats from pre-commit
+            if path.is_absolute():
+                # Already absolute, use as-is
+                pass
+            elif str(path).startswith("tasks/"):
+                # Path includes tasks/ prefix, resolve from repo root
+                path = repo_root / path
+            else:
+                # Just filename, resolve from tasks_dir
+                path = tasks_dir / path
+            try:
+                file_errors: list[tuple[Path, str]] = []
+                file_tasks = load_tasks(path.parent, single_file=path, errors_out=file_errors)
+                if file_errors:
+                    existing_paths = {e[0] for e in load_errors}
+                    load_errors.extend(e for e in file_errors if e[0] not in existing_paths)
+                if file_tasks:
+                    tasks_to_validate.extend(file_tasks)
+                else:
+                    console.print(f"[yellow]Warning: No valid task found in {file}[/]")
+            except Exception as e:
+                console.print(f"[red]Error reading {file}: {e}[/]")
+        if not tasks_to_validate and not load_errors:
+            console.print("[yellow]No valid tasks to validate![/]")
+            return
+    else:
+        # Validate all tasks
+        tasks_to_validate = all_tasks
+
+    # Track dependencies in tasks being validated
+    tasks_with_deps = [task for task in tasks_to_validate if task.requires]
+
+    def has_cycle(task_id: str, visited: Set[str], path: Set[str]) -> bool:
+        """Check for circular dependencies."""
+        if task_id in path:
+            return True
+        if task_id in visited:
+            return False
+        visited.add(task_id)
+        path.add(task_id)
+        # Find task object to get its dependencies (search in ALL tasks)
+        task = next((t for t in all_tasks if t.id == task_id), None)
+        if task:
+            for dep in task.requires:
+                if has_cycle(dep, visited, path):
+                    return True
+        path.remove(task_id)
+        return False
+
+    # Group issues by type
+    validation_issues: list[str] = []
+    dependency_issues: list[str] = []
+    cycle_issues: list[str] = []
+
+    # Collect validation issues from tasks being validated
+    for task in tasks_to_validate:
+        if task.issues:
+            validation_issues.extend(f"{task.id}: {issue}" for issue in task.issues)
+
+    # Check for missing dependencies
+    for task in tasks_with_deps:
+        for dep in task.requires:
+            if dep not in task_ids:
+                dependency_issues.append(f"{task.id}: Dependency '{dep}' not found")
+
+    # Check for circular dependencies
+    for task in tasks_with_deps:
+        if has_cycle(task.id, set(), set()):
+            cycle_issues.append(f"Circular dependency detected involving task {task.id}")
+
+    # Check for broken links in task content
+    link_issues: list[str] = []
+    for task in tasks_to_validate:
+        try:
+            post = frontmatter.load(task.path)
+            broken = check_links(post.content, task.path, repo_root)
+            link_issues.extend(f"{task.id}: {b}" for b in broken)
+        except Exception as e:
+            link_issues.append(f"{task.id}: Error reading file: {e}")
+
+    # Report results by category
+    has_issues = False
+
+    if load_errors:
+        has_issues = True
+        console.print(
+            f"\n[bold red]Unloadable Task Files ({len(load_errors)}) — "
+            "these were silently dropped from selection:[/]"
+        )
+        for unloadable_path, err in load_errors:
+            console.print(f"  • {unloadable_path.relative_to(repo_root)}: {err}")
+
+    if validation_issues:
+        has_issues = True
+        console.print("\n[bold red]Validation Issues:[/]")
+        for issue in validation_issues:
+            console.print(f"  • {issue}")
+
+    if dependency_issues:
+        has_issues = True
+        console.print("\n[bold red]Dependency Issues:[/]")
+        for issue in dependency_issues:
+            console.print(f"  • {issue}")
+
+    if cycle_issues:
+        has_issues = True
+        console.print("\n[bold red]Circular Dependencies:[/]")
+        for issue in cycle_issues:
+            console.print(f"  • {issue}")
+
+    if link_issues:
+        has_issues = True
+        console.print("\n[bold red]Broken Links:[/]")
+        for issue in link_issues:
+            console.print(f"  • {issue}")
+
+    if has_issues:
+        if fix:
+            console.print("\n[yellow]Auto-fix not implemented yet[/]")
+            console.print("Suggested fixes:")
+            console.print("  • Add missing frontmatter fields")
+            console.print("  • Fix invalid state values")
+            console.print("  • Update or remove invalid dependencies")
+            console.print("  • Break circular dependencies")
+            console.print("  • Fix or remove broken links")
+        sys.exit(1)
+    else:
+        total = len(tasks_to_validate)
+        with_subtasks = sum(1 for t in tasks_to_validate if t.subtasks.total > 0)
+        console.print(
+            f"\n[bold green]✓ All {total} tasks verified successfully! "
+            f"({with_subtasks} with subtasks)[/]"
+        )
+
+
+@cli.command("check-waiting")
+@click.option("--fix", is_flag=True, help="Clear resolved waiting conditions")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed status")
+def check_waiting(fix: bool, verbose: bool):
+    """Check structured waiting_for conditions and report status.
+
+    Checks external conditions that tasks are waiting on:
+    - pr_ci: PR CI checks passing
+    - pr_merged: PR merged status
+    - comment: Comment matching pattern
+    - time: Specific time passed
+
+    Example waiting_for in task frontmatter:
+
+        waiting_for:
+          type: pr_ci
+          ref: "gptme/gptme#1217"
+    """
+    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
+
+    console = Console()
+
+    # Find repo root and tasks directory
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        console.print("[yellow]No tasks found in tasks directory![/]")
+        return
+
+    # Track results
+    resolved_count = 0
+    pending_count = 0
+    skipped_count = 0
+    changes_made = []
+
+    console.print("[bold]Checking structured waiting_for conditions...[/]\n")
+
+    for task in all_tasks:
+        # Skip completed tasks
+        if task.state in ["done", "cancelled"]:
+            continue
+
+        # Parse waiting_for conditions
+        conditions = parse_waiting_for(task.metadata)
+        if not conditions:
+            continue
+
+        # Skip task-only dependencies (handled by unblock.py)
+        checkable = [c for c in conditions if c.type != WaitType.TASK]
+        if not checkable:
+            skipped_count += 1
+            if verbose:
+                console.print(f"[dim]{task.id}: Only task deps (handled by unblock.py)[/]")
+            continue
+
+        # Check each condition
+        all_resolved = True
+        status_parts = []
+        for cond in checkable:
+            checked = check_condition(cond)
+            if checked.resolved:
+                status_parts.append(f"[green]✓ {checked.type.value}[/]")
+            else:
+                all_resolved = False
+                err = checked.error or "pending"
+                status_parts.append(f"[yellow]⏳ {checked.type.value}: {err}[/]")
+
+        # Report status
+        status_str = ", ".join(status_parts)
+        if all_resolved:
+            resolved_count += 1
+            console.print(f"[green]✓ {task.id}[/]: {status_str}")
+            if fix:
+                # Clear waiting_for from task
+                post = frontmatter.load(task.path)
+                post.metadata.pop("waiting_for", None)
+                post.metadata.pop("waiting_since", None)
+                with open(task.path, "w") as f:
+                    f.write(frontmatter.dumps(post))
+                changes_made.append(task.id)
+                console.print("  [cyan]→ Cleared waiting_for[/]")
+        else:
+            pending_count += 1
+            console.print(f"[yellow]⏳ {task.id}[/]: {status_str}")
+
+    # Summary
+    console.print("\n[bold]Summary:[/]")
+    console.print(f"  Resolved: [green]{resolved_count}[/]")
+    console.print(f"  Pending: [yellow]{pending_count}[/]")
+    if skipped_count and verbose:
+        console.print(f"  Skipped (task deps): [dim]{skipped_count}[/]")
+
+    if changes_made:
+        console.print(f"\n[cyan]Cleared waiting_for on {len(changes_made)} task(s):[/]")
+        for task_id in changes_made:
+            console.print(f"  • {task_id}")
+
+
+@cli.command("watch")
+@click.option(
+    "--interval",
+    "-i",
+    default=300,
+    type=int,
+    help="Check interval in seconds (default: 300 = 5 min)",
+)
+@click.option("--fix/--no-fix", default=True, help="Auto-clear resolved conditions")
+@click.option("--once", is_flag=True, help="Run once and exit (for testing)")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed status")
+def watch(interval: int, fix: bool, once: bool, verbose: bool):
+    """Daemon mode: continuously monitor waiting conditions.
+
+    Periodically checks all tasks with structured waiting_for conditions
+    and auto-clears resolved conditions. Designed for continuous operation.
+
+    Examples:
+        # Run with default 5-minute interval
+        gptodo watch
+
+        # Check every 2 minutes
+        gptodo watch --interval 120
+
+        # Single check (useful for cron/testing)
+        gptodo watch --once
+
+        # Report only, don't modify tasks
+        gptodo watch --no-fix
+    """
+    import signal
+    import time
+
+    from gptodo.waiting import WaitType, check_condition, parse_waiting_for
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Track state across iterations for change detection
+    previous_state: dict[str, dict] = {}  # task_id -> {condition_ref: resolved}
+    running = True
+
+    def signal_handler(sig, frame):
+        nonlocal running
+        console.print("\n[yellow]Received signal, stopping...[/]")
+        running = False
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    def run_check():
+        """Run a single check iteration."""
+        all_tasks = load_tasks(tasks_dir)
+        if not all_tasks:
+            return 0, 0, []
+
+        resolved_count = 0
+        pending_count = 0
+        changes = []
+
+        for task in all_tasks:
+            if task.state in ["done", "cancelled"]:
+                continue
+
+            conditions = parse_waiting_for(task.metadata)
+            checkable = [c for c in conditions if c.type != WaitType.TASK]
+            if not checkable:
+                continue
+
+            # Check conditions
+            all_resolved = True
+            task_changes = []
+            for cond in checkable:
+                checked = check_condition(cond)
+                key = f"{cond.type.value}:{cond.ref}"
+
+                # Track state change
+                prev = previous_state.get(task.id, {}).get(key, False)
+                if checked.resolved and not prev:
+                    task_changes.append(f"✓ {cond.type.value}")
+                if not checked.resolved:
+                    all_resolved = False
+
+                # Update state tracking
+                if task.id not in previous_state:
+                    previous_state[task.id] = {}
+                previous_state[task.id][key] = checked.resolved
+
+            if all_resolved:
+                resolved_count += 1
+                if fix:
+                    post = frontmatter.load(task.path)
+                    post.metadata.pop("waiting_for", None)
+                    post.metadata.pop("waiting_since", None)
+                    with open(task.path, "w") as f:
+                        f.write(frontmatter.dumps(post))
+                    changes.append((task.id, task_changes))
+            else:
+                pending_count += 1
+
+        return resolved_count, pending_count, changes
+
+    console.print("[bold]gptodo watch[/] - monitoring waiting conditions")
+    console.print(f"  Interval: {interval}s | Auto-fix: {fix} | Tasks: {tasks_dir}")
+    console.print()
+
+    iteration = 0
+    while running:
+        iteration += 1
+        timestamp = time.strftime("%H:%M:%S")
+
+        resolved, pending, changes = run_check()
+
+        # Report changes
+        if changes:
+            console.print(f"[cyan][{timestamp}][/] Changes detected:")
+            for task_id, task_changes in changes:
+                console.print(f"  [green]✓ {task_id}[/] - {', '.join(task_changes)}")
+        elif verbose:
+            console.print(
+                f"[dim][{timestamp}] Check #{iteration}: {resolved} resolved, {pending} pending[/]"
+            )
+
+        if once:
+            console.print(f"\n[bold]Final:[/] {resolved} resolved, {pending} pending")
+            break
+
+        # Sleep in small increments to handle signals promptly
+        for _ in range(interval):
+            if not running:
+                break
+            time.sleep(1)
+
+    console.print("[dim]Watch stopped[/]")
+
+
+# Add priority ranking to the top of the file, after imports
+@cli.command("edit")
+@click.argument("task_ids", nargs=-1, required=True)
+@click.option(
+    "--set",
+    "set_fields",
+    type=(str, str),
+    multiple=True,
+    help="Set a field value (state, priority, created). Pass 'none' to clear an optional field (e.g. --set waiting_since none).",
+)
+@click.option(
+    "--add",
+    "add_fields",
+    type=(str, str),
+    multiple=True,
+    help="Add value to a list field (depends, tags)",
+)
+@click.option(
+    "--remove",
+    "remove_fields",
+    type=(str, str),
+    multiple=True,
+    help="Remove value from a list field (depends, tags)",
+)
+@click.option(
+    "--set-subtask",
+    "set_subtask",
+    type=(str, str),
+    help="Set subtask state (subtask_text, state). State must be 'done' or 'todo'",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Bypass state-transition legality check. Required for illegal transitions "
+        "(e.g. active → todo). Use only when you know what you're doing — the "
+        "transition table exists to catch loop drift like watch-* tasks stuck in "
+        "'active' when they should be 'waiting'."
+    ),
+)
+def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
+    """Edit task metadata.
+
+    Recurring tasks:
+        Set `recur` on any task to make it repeating. When you mark a recurring
+        task as `done`, it auto-resets to `todo` with an updated `wait` date
+        computed from the current time + the recur interval. The task stays
+        hidden from `ready`/`next` until `wait` expires.
+
+        Supported recur values:
+            Nd      N days (e.g. 7d, 14d, 1d)
+            Nh      N hours (e.g. 24h, 6h)
+            weekly  7 days
+            monthly 30 days (calendar-approximate)
+            cron    Any 5/6-field cron expression (parsed but not evaluated
+                    by gptodo — accepted for compatibility with external tools)
+
+        Examples:
+            gptodo edit weekly-review --set recur 7d
+            gptodo edit daily-standup --set recur 24h
+            gptodo edit monthly-report --set recur monthly
+
+    Examples:
+        gptodo edit task-123 --set state active
+        gptodo edit task-123 --set priority high
+        gptodo edit task-123 --set created 2025-05-05T10:00:00+02:00
+        gptodo edit task-123 --add requires other-task
+        gptodo edit task-123 --add tag feature
+        gptodo edit task-123 --remove tag wip
+        gptodo edit task-123 --set state active --add tag feature --add requires other-task
+        gptodo edit task-123 --set-subtask "Handle simple responses" done
+
+    Clearing optional fields:
+        Pass 'none' as the value to clear (unset) an optional field.
+        Useful when transitioning a task to a terminal state (done/cancelled)
+        and removing now-stale waiting metadata:
+
+        gptodo edit task-123 --set waiting_for none --set waiting_since none
+        gptodo edit task-123 --set priority none
+        gptodo edit task-123 --set next_action none
+
+    Date formats:
+        The created field accepts ISO format dates:
+        - Date only: 2025-05-05
+        - Date and time: 2025-05-05T10:00:00
+        - With timezone: 2025-05-05T10:00:00+02:00
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        return
+
+    # Find tasks to edit
+    try:
+        target_tasks = resolve_tasks(task_ids, tasks, tasks_dir)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        return
+
+    # Validate all field operations before applying any changes
+    changes: list[tuple[str, str, str | None]] = []
+
+    # Define valid fields and their validation rules
+    VALID_FIELDS: dict[str, dict[str, object]] = {
+        # Required fields
+        "state": {"type": "enum", "values": CONFIGS["tasks"].states},
+        "created": {"type": "date"},
+        # Optional fields with validation
+        "priority": {"type": "enum", "values": ["high", "medium", "low", "none"]},
+        "task_type": {"type": "enum", "values": ["project", "action", "none"]},
+        # Real workspaces use named assignees (bob, erik, alice, etc.).
+        # Keep "none" as the explicit clear value; otherwise accept any string.
+        "assigned_to": {"type": "string"},
+        "waiting_since": {"type": "date"},
+        "wait": {"type": "date"},  # Hide from queue until this date
+        # Optional fields with arbitrary string values
+        "next_action": {"type": "string"},
+        "waiting_for": {"type": "string"},
+        "recur": {"type": "string"},  # Recurrence interval (7d, 24h, weekly, monthly)
+        "parent": {"type": "string"},  # Parent task ID (for subtasks)
+        "success_criterion": {"type": "string"},  # Verifiable "done" gate
+        "tracking_issue": {"type": "string"},  # Human URL of the live coordination issue/PR
+        "upstream_coordination_id": {"type": "string"},  # Machine claim key (github:OWNER/REPO#NUM)
+        # Auto-expire (Gordon 2026-07-01)
+        "expired_from": {"type": "string"},  # State the task came from before auto-expire
+        "expired_at": {"type": "date"},  # Date the task was auto-expired
+        # List fields handled separately via --add/--remove
+        "tags": {"type": "list"},
+        "depends": {"type": "list"},  # Deprecated, use requires instead
+        "blocks": {"type": "list"},  # Deprecated, use requires instead (note: different semantics)
+        "requires": {"type": "list"},  # Required dependencies (canonical)
+        "related": {"type": "list"},  # Related items (informational)
+        "discovered-from": {"type": "list"},  # Tasks this was discovered from
+        "output_types": {"type": "list"},
+        "tracking": {"type": "list"},  # External issue/PR tracking URLs
+    }
+
+    # Validate set operations
+    for field, value in set_fields:
+        # Check if field is valid
+        if field not in VALID_FIELDS:
+            console.print(
+                f"[red]Unknown field: {field}. Valid fields: {', '.join(sorted(VALID_FIELDS.keys()))}[/]"
+            )
+            return
+
+        field_spec = VALID_FIELDS[field]
+
+        # Handle "none" special value to clear field
+        if value == "none":
+            changes.append(("set", field, None))
+            continue
+
+        # List fields should use --add/--remove instead
+        if field_spec["type"] == "list":
+            console.print(
+                f"[red]Field '{field}' is a list field. Use --add or --remove instead of --set.[/]"
+            )
+            return
+
+        # Validate based on field type
+        if field_spec["type"] == "enum":
+            # For state field, normalize deprecated values
+            if field == "state":
+                normalized = normalize_state(value, warn=True)
+                if normalized != value:
+                    console.print(
+                        f"[yellow]Note: State '{value}' is deprecated, normalizing to '{normalized}'[/]"
+                    )
+                    value = normalized
+            if value not in field_spec["values"]:  # type: ignore[operator]
+                valid = ", ".join(field_spec["values"])  # type: ignore[arg-type]
+                console.print(f"[red]Invalid {field}: {value}. Valid values: {valid}[/]")
+                return
+
+            # State-transition legality check (Gordon 2026-07-01).
+            #
+            # For each target task, verify the current state can transition to
+            # `value`. Three severity tiers:
+            #
+            #   1. Reopening a terminal state (done/cancelled → anything):
+            #      BLOCK unless --force. Terminal states should be sticky.
+            #   2. Any other illegal transition (per VALID_TRANSITIONS):
+            #      WARN by default, but complete the edit. Set
+            #      GPTODO_STRICT_TRANSITIONS=1 to promote these to BLOCK.
+            #   3. Legal transition: silent (normal case).
+            #
+            # This catches the class of drift where watch-* tasks get flipped
+            # active→todo (should be `waiting`), while not breaking common
+            # shortcuts like todo→done that appear in existing tests + real
+            # workflows.
+            if field == "state":
+                terminal_reopens: list[tuple[str, str, str]] = []
+                other_illegal: list[tuple[str, str, str]] = []
+                strict = os.environ.get("GPTODO_STRICT_TRANSITIONS", "").lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                for task in target_tasks:
+                    current_state = normalize_state(
+                        task.metadata.get("state", "backlog") or "backlog", warn=False
+                    )
+                    if current_state == value:
+                        continue  # no-op
+                    allowed = VALID_TRANSITIONS.get(current_state, [])
+                    if value in allowed:
+                        continue  # legal
+                    entry = (task.name, current_state, value)
+                    # Terminal-state reopens are the strict subset:
+                    # done/cancelled have no allowed transitions.
+                    if not allowed:
+                        terminal_reopens.append(entry)
+                    else:
+                        other_illegal.append(entry)
+
+                if terminal_reopens and not force:
+                    console.print("[red]Refusing to reopen terminal state(s) without --force:[/]")
+                    for tname, cur, target in terminal_reopens:
+                        console.print(
+                            f"  {tname}: {cur} → {target}. Terminal states are sticky "
+                            "by design; use --force if you really mean it."
+                        )
+                    raise SystemExit(1)
+
+                if other_illegal and strict and not force:
+                    console.print(
+                        "[red]GPTODO_STRICT_TRANSITIONS=1 — refusing illegal "
+                        "transition(s) without --force:[/]"
+                    )
+                    for tname, cur, target in other_illegal:
+                        legal = VALID_TRANSITIONS.get(cur, [])
+                        legal_str = ", ".join(legal) if legal else "(terminal state)"
+                        console.print(
+                            f"  {tname}: {cur} → {target}. Legal from '{cur}': {legal_str}"
+                        )
+                    console.print(
+                        "[yellow]Hint: `gptodo transitions` shows the full table. "
+                        "Common gotcha: watch-* tasks blocked on a gate/signal "
+                        "belong in 'waiting' (with `wait:` / `waiting_for:`), "
+                        "not 'active'.[/]"
+                    )
+                    raise SystemExit(1)
+
+                if other_illegal and not force:
+                    # Non-strict: warn, don't block.
+                    console.print(
+                        "[yellow]Warning: illegal state transition(s) per "
+                        "gptodo transitions table. Proceeding — pass --force "
+                        "to silence this warning; set GPTODO_STRICT_TRANSITIONS=1 "
+                        "to block it instead:[/]"
+                    )
+                    for tname, cur, target in other_illegal:
+                        legal = VALID_TRANSITIONS.get(cur, [])
+                        legal_str = ", ".join(legal) if legal else "(terminal state)"
+                        console.print(
+                            f"  {tname}: {cur} → {target}. Legal from '{cur}': {legal_str}"
+                        )
+
+                if (terminal_reopens or other_illegal) and force:
+                    console.print("[yellow]--force: proceeding with illegal transition(s):[/]")
+                    for tname, cur, target in terminal_reopens + other_illegal:
+                        console.print(f"  {tname}: {cur} → {target} (forced)")
+        elif field_spec["type"] == "date":
+            # wait: accepts YYYY-MM-DD or YYYY-MM-DDTHH:MM; other date fields store full ISO datetime
+            if field == "wait":
+                from gptodo.utils import parse_wait
+
+                parsed = parse_wait(value)
+                if parsed is None:
+                    console.print(
+                        f"[red]Invalid {field} format. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM[/]"
+                    )
+                    return
+                if isinstance(parsed, datetime):
+                    value = parsed.isoformat()
+                else:
+                    value = parsed.isoformat()
+            elif field == "waiting_since":
+                # Accepts YYYY-MM-DD or full ISO datetime (e.g. YYYY-MM-DDTHH:MM:SS+00:00)
+                try:
+                    datetime.fromisoformat(value)
+                except ValueError:
+                    console.print(f"[red]Invalid {field} format. Use YYYY-MM-DD or ISO datetime[/]")
+                    return
+            else:
+                try:
+                    created_dt = datetime.fromisoformat(value)
+                    value = created_dt.isoformat()
+                except ValueError:
+                    console.print(
+                        f"[red]Invalid {field} date format. Use ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])[/]"
+                    )
+                    return
+        elif field_spec["type"] == "string":
+            if field == "recur":
+                from gptodo.utils import is_valid_recur_value
+
+                if not is_valid_recur_value(value):
+                    console.print(
+                        "[red]Invalid recur format. Use 7d, 24h, weekly, monthly, "
+                        "or a cron expression like '0 9 * * 1'[/]"
+                    )
+                    return
+            # Arbitrary string value - no validation needed
+
+        changes.append(("set", field, value))
+
+    # Validate subtask operation
+    if set_subtask:
+        subtask_text, state = set_subtask
+        if state not in ["done", "todo"]:
+            console.print(f"[red]Invalid subtask state: {state}. Valid values: done, todo[/]")
+            return
+        changes.append(("set_subtask", subtask_text, state))
+
+    # Canonical list fields in task metadata (no aliases)
+    CANONICAL_LIST_FIELDS = {
+        "tags",
+        "depends",
+        "requires",
+        "blocks",
+        "related",
+        "discovered-from",
+    }
+
+    # Allowed fields for --add/--remove operations (includes aliases)
+    ADDABLE_FIELDS = CANONICAL_LIST_FIELDS | {
+        "deps",
+        "tag",
+        "dep",
+        "require",
+        "block",
+    }
+
+    # Normalize field names (tag -> tags, dep -> depends, deps -> depends, require -> requires, block -> requires, blocks -> requires)
+    FIELD_ALIASES = {
+        "tag": "tags",
+        "dep": "depends",
+        "deps": "depends",
+        "require": "requires",
+        "block": "requires",
+        "blocks": "requires",
+    }
+
+    # Validate add/remove operations
+    for op, fields in [("add", add_fields), ("remove", remove_fields)]:
+        for field, value in fields:
+            if field not in ADDABLE_FIELDS:
+                console.print(
+                    f"[red]Cannot {op} to field: {field}. Use --{op} with deps/tags/requires/related/discovered-from.[/]"
+                )
+                return
+
+            # Warn about blocks → requires semantic change
+            if field in ("block", "blocks"):
+                console.print(
+                    "[yellow]Warning: 'blocks' is deprecated. Use 'requires' instead. "
+                    "Note: semantics have changed - 'requires' means dependencies this task needs, "
+                    "not tasks that this task blocks.[/]"
+                )
+
+            field = FIELD_ALIASES.get(field, field)
+            changes.append((op, field, value))
+
+    if not changes:
+        console.print("[red]No changes specified. Use --set, --add, or --remove.[/]")
+        return
+
+    # Show changes to be made
+    console.print("\nChanges to apply:")
+    for task in target_tasks:
+        task_changes = []
+
+        # Group changes by field for cleaner display
+        field_changes: dict[str, list[tuple[str, str | None]]] = {}
+        for op, field, value in changes:
+            if field not in field_changes:
+                field_changes[field] = []
+            field_changes[field].append((op, value))
+
+        # Show changes for each field
+        for field, field_ops in field_changes.items():
+            if field in CANONICAL_LIST_FIELDS:
+                current = task.metadata.get(field, [])
+                new = current.copy()
+
+                # Apply all operations for this field
+                for op, value in field_ops:
+                    if op == "add":
+                        new = list(set(new + [value]))
+                    else:  # remove
+                        new = [x for x in new if x != value]
+
+                if new != current:
+                    task_changes.append(f"{field}: {', '.join(current)} -> {', '.join(new)}")
+            else:
+                # For set operations, only show the final value
+                set_ops = [v for op, v in field_ops if op == "set"]
+                if set_ops:
+                    current = task.metadata.get(field)
+                    new = set_ops[-1]  # Use the last set value
+                    if new != current:
+                        task_changes.append(f"{field}: {current} -> {new}")
+
+        if task_changes:
+            console.print(f"  {task.name}:")
+            for change in task_changes:
+                console.print(f"    {change}")
+
+    # Apply changes
+    for task in target_tasks:
+        post = frontmatter.load(task.path)
+
+        # Apply all changes
+        for op, field, value in changes:
+            if op == "set_subtask":
+                # field is subtask_text, value is state ("done" or "todo")
+                subtask_text = field
+                state = value
+
+                # Parse markdown body to find and update subtask
+                lines = post.content.split("\n")
+                updated = False
+                for i, line in enumerate(lines):
+                    # Check if this line is a subtask checkbox with matching text
+                    if subtask_text in line and ("- [ ]" in line or "- [x]" in line):
+                        if state == "done":
+                            lines[i] = line.replace("- [ ]", "- [x]")
+                        else:  # state == "todo"
+                            lines[i] = line.replace("- [x]", "- [ ]")
+                        updated = True
+                        break
+
+                if not updated:
+                    console.print(f"[red]Subtask not found: {subtask_text}[/]")
+                    return
+
+                post.content = "\n".join(lines)
+            elif field in CANONICAL_LIST_FIELDS:
+                # Handle list fields (after normalization via FIELD_ALIASES)
+                current = post.metadata.get(field, [])
+                if op == "add":
+                    post.metadata[field] = list(set(current + [value]))
+                else:  # remove
+                    post.metadata[field] = [x for x in current if x != value]
+            else:  # set operation
+                if value is None:  # Clear field with "none" value
+                    post.metadata.pop(field, None)
+                else:
+                    # Normalize deprecated states at write time (defense in depth)
+                    if field == "state":
+                        value = normalize_state(value, warn=False)
+
+                    post.metadata[field] = value
+        # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
+        # AND waiting_for is either already present or being set in the same edit.
+        # Guarding on waiting_for prevents an injected waiting_since from triggering
+        # the pre-commit hook error "waiting_since requires waiting_for".
+        transitioning_to_waiting = any(
+            op == "set" and field == "state" and value == "waiting" for op, field, value in changes
+        )
+        waiting_for_present = post.metadata.get("waiting_for") or any(
+            op == "set" and field == "waiting_for" and value is not None
+            for op, field, value in changes
+        )
+        if (
+            transitioning_to_waiting
+            and waiting_for_present
+            and not post.metadata.get("waiting_since")
+        ):
+            from datetime import datetime as _dt, timezone as _tz
+
+            # Full ISO datetime for intra-day resolution (ErikBjare request, 2026-06-16).
+            # validate_task_frontmatter.py's validate_timestamp() accepts both YYYY-MM-DD
+            # and full ISO datetime via datetime.fromisoformat().
+            post.metadata["waiting_since"] = _dt.now(_tz.utc).isoformat(timespec="seconds")
+
+        # Strip now-stale actionable/blocker metadata when the edit lands the task
+        # in a terminal state (TASKS.md best-practice #7: terminal tasks must not
+        # keep next_action/waiting_for/waiting_since/wait). Recurring tasks reset to
+        # todo further below and must keep these fields, so skip when recur is set.
+        # tracking_issue / upstream_coordination_id are intentionally preserved for
+        # permanent traceability.
+        # cancelled is terminal regardless of recur; done skips cleanup only when recurring
+        # (recurrence reset below handles it).
+        if post.metadata.get("state") == "cancelled" or (
+            post.metadata.get("state") == "done" and not post.metadata.get("recur")
+        ):
+            for _stale_field in ("next_action", "waiting_for", "waiting_since", "wait"):
+                post.metadata.pop(_stale_field, None)
+
+        # Save changes
+        with open(task.path, "w") as f:
+            f.write(frontmatter.dumps(post))
+
+    # Check if any tasks were marked as done and run completion hook
+    state_changes = [(op, field, value) for op, field, value in changes if field == "state"]
+    if any(value == "done" for _, _, value in state_changes):
+        completed_task_ids = []
+        for task in target_tasks:
+            # Re-load task to get updated metadata
+            post = frontmatter.load(task.path)
+            if post.metadata.get("state") == "done":
+                # Handle recur: reset task to todo and advance wait: date
+                recur = post.metadata.get("recur")
+                if recur:
+                    from gptodo.utils import parse_recur_interval
+
+                    if parse_recur_interval(str(recur)) is None:
+                        completed_task_ids.append(task.id)
+                        continue
+                    from gptodo.utils import advance_wait, parse_wait
+
+                    current_wait = parse_wait(post.metadata.get("wait"))
+                    next_wait = advance_wait(current_wait, recur)
+                    post.metadata["state"] = "todo"
+                    post.metadata["wait"] = next_wait.isoformat()
+                    with open(task.path, "w") as f:
+                        f.write(frontmatter.dumps(post))
+                    console.print(
+                        f"[cyan]↩ {task.name} recurring — reset to todo, next wait: {next_wait}[/]"
+                    )
+                    continue  # skip done-completion logic for recurring tasks
+
+                completed_task_ids.append(task.id)
+
+                # Run task completion hook if configured via env var
+                import subprocess
+
+                hook_cmd = os.environ.get("HOOK_TASK_DONE")
+                if hook_cmd:
+                    try:
+                        subprocess.run([hook_cmd, task.id, task.name, str(repo_root)], check=False)
+                    except Exception as e:
+                        console.print(f"[yellow]Note: Task completion hook error: {e}[/]")
+
+        # Auto-unblock dependent tasks and handle fan-in completion
+        if completed_task_ids:
+            # Reload all tasks to get fresh state
+            all_tasks = load_tasks(tasks_dir)
+            unblocked = auto_unblock_with_fan_in(completed_task_ids, all_tasks, tasks_dir)
+            if unblocked:
+                console.print("\n[cyan]📋 Auto-unblocked/completed:[/]")
+                for task_name, action in unblocked:
+                    if "fan-in" in action:
+                        console.print(f"  [magenta]🎯[/] {task_name} ({action})")
+                    else:
+                        console.print(f"  [green]✓[/] {task_name} ({action})")
+
+    # Show success message
+    count = len(target_tasks)
+    console.print(f"[green]✓ Updated {count} task{'s' if count > 1 else ''}[/]")
+
+
+# States that cannot be claimed (already terminal or deliberately deferred/blocked).
+_CLAIM_REFUSED_STATES = {"waiting", "ready_for_review", "someday", "done", "cancelled"}
+# States that get auto-promoted to active on claim.
+_CLAIM_PROMOTABLE_STATES = {"backlog", "todo"}
+
+
+def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
+    """Resolve the agent name for a claim.
+
+    Order:
+        1. ``--agent NAME`` CLI override
+        2. ``GPTODO_AGENT_NAME`` env var
+        3. ``[agent].name`` from ``gptme.toml`` (lowercased)
+        4. fallback ``"agent"``
+    """
+    if override is not None:
+        stripped = override.strip()
+        if stripped:
+            return stripped
+
+    env_name = os.environ.get("GPTODO_AGENT_NAME", "").strip()
+    if env_name:
+        return env_name
+
+    gptme_toml = repo_root / "gptme.toml"
+    if gptme_toml.exists():
+        try:
+            try:
+                import tomllib  # type: ignore[import-not-found]
+            except ModuleNotFoundError:
+                try:
+                    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+                except ModuleNotFoundError:
+                    console.print(
+                        "[yellow]Warning: tomli is required on Python <3.11 to read "
+                        "gptme.toml; falling back to 'agent'[/]"
+                    )
+                    return "agent"
+
+            data = tomllib.loads(gptme_toml.read_text())
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            console.print(
+                f"[yellow]Warning: Failed to load {gptme_toml}: {exc}. Falling back to 'agent'.[/]"
+            )
+            return "agent"
+
+        agent_section = data.get("agent")
+        if isinstance(agent_section, dict):
+            name = agent_section.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip().lower()
+
+    return "agent"
+
+
+@cli.command("claim")
+@click.argument("task_id")
+@click.option("--agent", "agent_override", default=None, help="Agent name to record as owner.")
+def claim(task_id: str, agent_override: str | None):
+    """Claim a task for the current agent.
+
+    Sets ``state: active`` (for backlog/todo), records ``assigned_to`` and
+    ``assigned_at``, and refuses to claim waiting / ready_for_review /
+    someday / terminal tasks.
+
+    Agent name resolution: --agent flag, then GPTODO_AGENT_NAME env var,
+    then [agent].name from gptme.toml (lowercased), else "agent".
+
+    Examples:
+        gptodo claim my-task
+        gptodo claim my-task --agent bob
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        sys.exit(1)
+
+    try:
+        target_tasks = resolve_tasks([task_id], tasks, tasks_dir)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+    if len(target_tasks) != 1:
+        console.print(f"[red]claim requires exactly one task, got {len(target_tasks)}[/]")
+        sys.exit(1)
+
+    task = target_tasks[0]
+    agent = _resolve_agent_name(repo_root, agent_override)
+
+    current_state = normalize_state(task.metadata.get("state", "backlog"), warn=False)
+    current_assignee = task.metadata.get("assigned_to")
+    current_assigned_at = task.metadata.get("assigned_at")
+
+    if current_state in _CLAIM_REFUSED_STATES:
+        console.print(
+            f"[red]Refusing to claim {task.id}: state is '{current_state}'. "
+            "Resolve the blocker (or revive from someday) before claiming.[/]"
+        )
+        sys.exit(1)
+
+    # Idempotent no-op: already active, same owner, has assigned_at.
+    if current_state == "active" and current_assignee == agent and current_assigned_at is not None:
+        console.print(
+            f"[yellow]Already claimed:[/] {task.id} (owner={agent}, since={current_assigned_at})"
+        )
+        return
+
+    post = frontmatter.load(task.path)
+
+    new_state = "active" if current_state in _CLAIM_PROMOTABLE_STATES else current_state
+    if current_state in _CLAIM_PROMOTABLE_STATES:
+        post.metadata["state"] = new_state
+
+    post.metadata["assigned_to"] = agent
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    post.metadata["assigned_at"] = now_utc
+
+    with open(task.path, "w") as f:
+        f.write(frontmatter.dumps(post))
+
+    if current_state in _CLAIM_PROMOTABLE_STATES:
+        console.print(
+            f"[green]✓ Claimed[/] {task.id} (state: {current_state} → active, owner: {agent})"
+        )
+    elif current_assignee != agent:
+        prev = current_assignee or "unassigned"
+        console.print(f"[green]✓ Reassigned[/] {task.id} (owner: {prev} → {agent}, state: active)")
+    else:
+        console.print(f"[green]✓ Re-claimed[/] {task.id} (owner: {agent}, state: active)")
+
+
+@cli.command("tags")
+@click.option("--state", help="Filter by task state")
+@click.option("--list", "show_tasks", is_flag=True, help="List tasks for each tag")
+@click.argument("filter_tags", nargs=-1)
+def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
+    """List all tags and their task counts.
+
+    Examples:
+        tasks tags                    # Show all tags and counts
+        tasks tags --list            # Show tags with task lists
+        tasks tags --state active    # Only count active tasks
+        tasks tags automation ai     # Show specific tags
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[yellow]No tasks found![/]")
+        return
+
+    # Filter by state if specified
+    if state:
+        if state not in CONFIGS["tasks"].states:
+            console.print(f"[red]Invalid state: {state}[/]")
+            return
+        tasks = [t for t in tasks if t.state == state]
+        if not tasks:
+            console.print(f"[yellow]No tasks with state '{state}'[/]")
+            return
+        console.print(f"[blue]Showing tags for {state} tasks[/]\n")
+
+    # Collect tags and count tasks
+    tag_tasks: Dict[str, List[TaskInfo]] = {}
+    for task in tasks:
+        for tag in task.tags:
+            if tag not in tag_tasks:
+                tag_tasks[tag] = []
+            tag_tasks[tag].append(task)
+
+    if not tag_tasks:
+        console.print("[yellow]No tags found![/]")
+        return
+
+    # Filter tags if specified
+    if filter_tags:
+        filtered_tags = {}
+        for tag in filter_tags:
+            if tag in tag_tasks:
+                filtered_tags[tag] = tag_tasks[tag]
+            else:
+                console.print(f"[yellow]Warning: Tag '{tag}' not found[/]")
+        tag_tasks = filtered_tags
+        if not tag_tasks:
+            console.print("[yellow]No matching tags found![/]")
+            return
+
+    # Sort tags by frequency (most used first)
+    sorted_tags = sorted(tag_tasks.items(), key=lambda x: (-len(x[1]), x[0]))
+
+    # Print header
+    console.print("\n🏷️  Task Tags")
+
+    # Create rows for tabulate
+    rows = []
+    for tag, tag_task_list in sorted_tags:
+        count = len(tag_task_list)
+        # Always show tasks if specific tags were requested
+        if show_tasks or filter_tags:
+            # Sort tasks by state and name
+            tag_task_list.sort(key=lambda t: (t.state or "", t.name))
+            # Format task list with state emojis
+            task_list = []
+            for task in tag_task_list:
+                emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+                task_list.append(f"{emoji} {task.name}")
+            tasks_str = "\n".join(task_list)
+            rows.append([tag, str(count), tasks_str])
+        else:
+            rows.append([tag, str(count)])
+
+    # Print table using tabulate with simple format
+    headers = ["Tag", "Count", "Tasks"] if (show_tasks or filter_tags) else ["Tag", "Count"]
+    console.print(tabulate(rows, headers=headers, tablefmt="plain"))
+
+    # Print summary
+    total_tags = len(sorted_tags)
+    total_tasks = len(tasks)
+    tagged_tasks = len(set(task.name for tasks in tag_tasks.values() for task in tasks))
+    console.print(
+        f"\nFound {total_tags} tags across {tagged_tasks} tasks "
+        f"({total_tasks - tagged_tasks} untagged)"
+    )
+
+
+@cli.command("ready")
+@click.option(
+    "--state",
+    type=click.Choice(["backlog", "active", "ready_for_review", "someday", "both", "actionable"]),
+    default="both",
+    help=(
+        "Filter by task state. 'both' = backlog+active (default, current behavior). "
+        "'actionable' = backlog+active+ready_for_review (everything locally workable). "
+        "'ready_for_review' = only tasks awaiting local review/verification. "
+        "'someday' = explicitly query deferred tasks."
+    ),
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.option(
+    "--jsonl",
+    "output_jsonl",
+    is_flag=True,
+    help="Output as JSONL (one task per line) - compact for LLM consumption",
+)
+@click.option(
+    "--use-cache",
+    "use_cache",
+    is_flag=True,
+    help="Check URL-based requires against cached states (run 'fetch' first)",
+)
+@click.option(
+    "--pool",
+    "pool_filter",
+    default="general",
+    help="Only show tasks in this pool. Use 'all' to see every pool, 'frontier' for frontier only. Default: 'general' (non-default pools hidden).",
+)
+@click.option(
+    "--exclude-pool",
+    "exclude_pool",
+    default=None,
+    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
+)
+def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool):
+    """List all ready (unblocked) tasks.
+
+    Shows tasks that have no dependencies or whose dependencies are all completed.
+    Inspired by beads' `bd ready` command for finding work to do.
+
+    Use --json for machine-readable output in autonomous workflows.
+    Use --jsonl for compact one-task-per-line output (better with head -n).
+    Use --use-cache to also check URL-based 'requires' against cached issue states.
+    Use --pool to filter by work pool; default hides non-default pools (e.g. frontier).
+    Use --pool all to see every pool; --pool frontier for frontier only.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print("No tasks found", file=sys.stderr)
+            print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            print("No tasks found", file=sys.stderr)
+            return  # Empty output for JSONL
+        console.print("[yellow]No tasks found![/]")
+        return
+
+    # Create task lookup dictionary
+    tasks_dict = {task.name: task for task in all_tasks}
+
+    # Load cache if requested
+    issue_cache: Dict[str, Any] | None = None
+    if use_cache:
+        cache_path = get_cache_path(repo_root)
+        issue_cache = load_cache(cache_path)
+        if not issue_cache:
+            console.print("[yellow]Warning: Cache empty. Run 'gptodo fetch' first.[/]")
+
+    # Filter by state first
+    if state == "backlog":
+        filtered_tasks = [task for task in all_tasks if task.state == "backlog"]
+    elif state == "active":
+        filtered_tasks = [task for task in all_tasks if task.state == "active"]
+    elif state == "ready_for_review":
+        filtered_tasks = [task for task in all_tasks if task.state == "ready_for_review"]
+    elif state == "someday":
+        filtered_tasks = [task for task in all_tasks if task.state == "someday"]
+    elif state == "actionable":
+        filtered_tasks = [
+            task for task in all_tasks if task.state in ["backlog", "active", "ready_for_review"]
+        ]
+    else:  # both
+        filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+
+    # Apply pool filter (default: general only; --pool all to see every pool)
+    filtered_tasks = [
+        task
+        for task in filtered_tasks
+        if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
+
+    # Filter for ready (unblocked) tasks.
+    # ready_for_review tasks: work is done; skip dependency checks, only check waiting_for.
+    if state == "ready_for_review":
+        ready_tasks = [task for task in filtered_tasks if not task_has_waiting_blocker(task)]
+    elif state == "actionable":
+        # backlog/active go through full is_task_ready; ready_for_review only needs waiting check
+        ready_tasks = [
+            task
+            for task in filtered_tasks
+            if (task.state == "ready_for_review" and not task_has_waiting_blocker(task))
+            or (
+                task.state in ["backlog", "active"] and is_task_ready(task, tasks_dict, issue_cache)
+            )
+        ]
+    else:
+        ready_tasks = [
+            task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)
+        ]
+
+    if not ready_tasks:
+        if output_json:
+            print("No ready tasks found", file=sys.stderr)
+            print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            print("No ready tasks found", file=sys.stderr)
+            return  # Empty output for JSONL
+        console.print("[yellow]No ready tasks found![/]")
+        console.print("\n[dim]Tip: Try checking blocked tasks with --state to see dependencies[/]")
+        return
+
+    # Sort by priority (high to low) and then by creation date (oldest first)
+    ready_tasks.sort(
+        key=lambda t: (
+            -t.priority_rank,
+            t.created,
+        )
+    )
+
+    # JSONL output - one task per line (compact for LLM consumption)
+    if output_jsonl:
+        for task in ready_tasks:
+            print(json.dumps(task_to_dict(task)))
+        return
+
+    # JSON output for machine consumption
+    if output_json:
+        result = {
+            "ready_tasks": [task_to_dict(t) for t in ready_tasks],
+            "count": len(ready_tasks),
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    # Create table
+    table = Table(title=f"[bold green]Ready Tasks[/] ({len(ready_tasks)} unblocked)")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("State", style="blue")
+    table.add_column("Priority", style="yellow")
+    table.add_column("Task", style="white")
+    table.add_column("Subtasks", style="magenta")
+    table.add_column("Activity", style="green")  # New activity indicator
+
+    # Create stable enumerated ID mapping
+    tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+    name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+
+    for task in ready_tasks:
+        enum_id = name_to_enum_id[task.name]
+        state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        priority_emoji = STATE_EMOJIS.get(task.priority or "", "")
+
+        if task.subtasks.total > 0:
+            subtasks_str = f"{task.subtasks.completed}/{task.subtasks.total}"
+        else:
+            subtasks_str = "-"
+
+        # Check for new activity on tracked URLs (Issue #241)
+        activity_str = "-"
+        if use_cache and issue_cache:
+            tracking = task.metadata.get("tracking")
+            waiting_since = task.metadata.get("waiting_since")
+            if tracking and waiting_since:
+                # Handle tracking as list or string
+                tracking_urls = tracking if isinstance(tracking, list) else [tracking]
+                for url in tracking_urls:
+                    cached = issue_cache.get(url)
+                    if cached and has_new_activity(cached.get("updatedAt"), waiting_since):
+                        activity_str = "[bold green]🔔 NEW[/]"
+                        break
+
+        table.add_row(
+            str(enum_id),
+            state_emoji,
+            priority_emoji or (task.priority or ""),
+            task.name,
+            subtasks_str,
+            activity_str,
+        )
+
+    console.print(table)
+    console.print("\n[dim]Run [bold]gptodo next[/] to pick the top priority ready task[/]")
+
+
+@cli.command("next")
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.option(
+    "--use-cache",
+    "use_cache",
+    is_flag=True,
+    help="Check URL-based requires against cached states (run 'fetch' first)",
+)
+@click.option(
+    "--pool",
+    "pool_filter",
+    default="general",
+    help="Only consider tasks in this pool. Use 'all' to see every pool, 'frontier' for frontier only. Default: 'general' (non-default pools hidden).",
+)
+@click.option(
+    "--exclude-pool",
+    "exclude_pool",
+    default=None,
+    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
+)
+def next_(output_json, use_cache, pool_filter, exclude_pool):
+    """Show the highest priority ready (unblocked) task.
+
+    Picks from new or active tasks that have no dependencies
+    or whose dependencies are all completed.
+
+    Use --json for machine-readable output in autonomous workflows.
+    Use --use-cache to also check URL-based 'requires' against cached issue states.
+    Use --pool to filter by work pool; default hides non-default pools (e.g. frontier).
+    Use --pool all to see every pool; --pool frontier for frontier sessions only.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print("No tasks found", file=sys.stderr)
+            print(
+                json.dumps(
+                    {"next_task": None, "alternatives": [], "error": "No tasks found"},
+                    indent=2,
+                )
+            )
+            return
+        console.print("[yellow]No tasks found![/]")
+        return
+
+    # Create task lookup dictionary
+    tasks_dict = {task.name: task for task in all_tasks}
+
+    # Load cache if requested
+    issue_cache: Dict[str, Any] | None = None
+    if use_cache:
+        cache_path = get_cache_path(repo_root)
+        issue_cache = load_cache(cache_path)
+
+    # Filter for new or active tasks
+    workable_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+
+    # Apply pool filter (default: general only; --pool all to see every pool)
+    workable_tasks = [
+        task
+        for task in workable_tasks
+        if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
+
+    if not workable_tasks:
+        if output_json:
+            print("No new or active tasks found", file=sys.stderr)
+            print(
+                json.dumps(
+                    {
+                        "next_task": None,
+                        "alternatives": [],
+                        "error": "No new or active tasks found",
+                    },
+                    indent=2,
+                )
+            )
+            return
+        console.print("[yellow]No new or active tasks found![/]")
+        return
+
+    # Filter for ready (unblocked) tasks
+    ready_tasks = [task for task in workable_tasks if is_task_ready(task, tasks_dict, issue_cache)]
+
+    if not ready_tasks:
+        if output_json:
+            print("No ready tasks found", file=sys.stderr)
+            print(
+                json.dumps(
+                    {
+                        "next_task": None,
+                        "alternatives": [],
+                        "error": "No ready tasks found",
+                    },
+                    indent=2,
+                )
+            )
+            return
+        console.print("[yellow]No ready tasks found![/]")
+        console.print("\n[dim]All new/active tasks are blocked by dependencies.[/]")
+        console.print("[dim]Run [bold]gptodo ready --state both[/] to see all ready work[/]")
+        return
+
+    # Compute unblocking power to use as a secondary sort key
+    # Tasks that unblock more downstream work are preferred over equal-priority tasks
+    nodes = build_dependency_graph(all_tasks)
+    power = compute_unblocking_power(nodes)
+
+    # Sort tasks: priority (high first), then unblocking power (high first), then age (oldest first)
+    ready_tasks.sort(
+        key=lambda t: (
+            -t.priority_rank,
+            -power.get(t.name, 0),
+            t.created,
+        )
+    )
+
+    # Get the highest priority ready task
+    next_task = ready_tasks[0]
+
+    # JSON output for machine consumption
+    if output_json:
+        result = {
+            "next_task": task_to_dict(next_task),
+            "alternatives": [task_to_dict(t) for t in ready_tasks[1:4]],  # Top 3 alternatives
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    # Show task using same format as show command
+    console.print(f"\n[bold blue]🏃 Next Task:[/] (Priority: {next_task.priority or 'none'})")
+    # Call show command directly instead of using callback
+    show(next_task.name)
+
+
+@cli.command("stale")
+@click.option(
+    "--days",
+    default=30,
+    type=int,
+    help="Number of days without modification to consider stale (default: 30)",
+)
+@click.option(
+    "--state",
+    type=click.Choice(["active", "backlog", "waiting", "all"]),
+    default="active",
+    help="Filter by task state (default: active)",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.option(
+    "--jsonl",
+    "output_jsonl",
+    is_flag=True,
+    help="Output as JSONL (one task per line) - compact for LLM consumption",
+)
+@click.option(
+    "--pool",
+    "pool_filter",
+    default=None,
+    help="Only show tasks in this pool (e.g. 'frontier', 'general')",
+)
+@click.option(
+    "--exclude-pool",
+    "exclude_pool",
+    default=None,
+    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
+)
+def stale(
+    days: int,
+    state: str,
+    output_json: bool,
+    output_jsonl: bool,
+    pool_filter: str | None,
+    exclude_pool: str | None,
+):
+    """List stale tasks that haven't been modified recently.
+
+    Identifies tasks that may need review for completion, archival, or reassessment.
+    By default shows active tasks not modified in 30+ days.
+
+    Examples:
+        gptodo stale                              # Active tasks unchanged for 30+ days
+        gptodo stale --days 60                    # Active tasks unchanged for 60+ days
+        gptodo stale --state all                  # All tasks regardless of state
+        gptodo stale --state paused               # Only paused stale tasks
+        gptodo stale --json                       # Machine-readable output
+        gptodo stale --jsonl                      # One task per line (LLM-friendly)
+        gptodo stale --exclude-pool frontier      # Skip frontier-pool tasks
+    """
+    console = Console()
+
+    # Validate days parameter
+    if days <= 0:
+        if output_json:
+            print(json.dumps({"error": "--days must be a positive integer"}, indent=2))
+            raise SystemExit(1)
+        console.print("[red]Error: --days must be a positive integer[/]")
+        raise SystemExit(1)
+
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print("No tasks found", file=sys.stderr)
+            print(json.dumps({"stale_tasks": [], "count": 0}, indent=2))
+            return
+        if output_jsonl:
+            print("No tasks found", file=sys.stderr)
+            return  # Empty output for JSONL
+        console.print("[yellow]No tasks found![/]")
+        return
+
+    # Calculate cutoff date
+    cutoff = datetime.now() - timedelta(days=days)
+
+    # Filter by state
+    if state == "all":
+        state_filtered = all_tasks
+    else:
+        state_filtered = [task for task in all_tasks if task.state == state]
+
+    # Filter for stale tasks (not modified since cutoff)
+    stale_tasks = [task for task in state_filtered if task.modified < cutoff]
+
+    # Apply pool filter
+    if pool_filter is not None or exclude_pool is not None:
+        stale_tasks = [
+            task
+            for task in stale_tasks
+            if task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
+        ]
+
+    if not stale_tasks:
+        if output_json:
+            print(
+                f"No stale tasks found (threshold: {days} days, state: {state})",
+                file=sys.stderr,
+            )
+            print(json.dumps({"stale_tasks": [], "count": 0, "days_threshold": days}, indent=2))
+            return
+        if output_jsonl:
+            print(
+                f"No stale tasks found (threshold: {days} days, state: {state})",
+                file=sys.stderr,
+            )
+            return  # Empty output for JSONL when no tasks
+        console.print(f"[green]No stale tasks found![/] (threshold: {days} days, state: {state})")
+        return
+
+    # Sort by modification date (oldest first)
+    stale_tasks.sort(key=lambda t: t.modified)
+
+    # JSONL output - one task per line (compact for LLM consumption)
+    if output_jsonl:
+        for task in stale_tasks:
+            task_dict = task_to_dict(task)
+            task_dict["days_since_modified"] = (datetime.now() - task.modified).days
+            print(json.dumps(task_dict))
+        return
+
+    # JSON output for machine consumption
+    if output_json:
+        result = {
+            "stale_tasks": [
+                {
+                    **task_to_dict(t),
+                    "days_since_modified": (datetime.now() - t.modified).days,
+                }
+                for t in stale_tasks
+            ],
+            "count": len(stale_tasks),
+            "days_threshold": days,
+            "state_filter": state,
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    # Create table
+    table = Table(
+        title=f"[bold yellow]Stale Tasks[/] ({len(stale_tasks)} unchanged for {days}+ days)"
+    )
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("State", style="blue")
+    table.add_column("Days Stale", style="red", justify="right")
+    table.add_column("Task", style="white")
+    table.add_column("Progress", style="magenta")
+    table.add_column("Priority", style="yellow")
+
+    # Create stable enumerated ID mapping
+    tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+    name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+
+    for task in stale_tasks:
+        enum_id = name_to_enum_id[task.name]
+        state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        priority_emoji = STATE_EMOJIS.get(task.priority or "", "")
+        days_stale = (datetime.now() - task.modified).days
+
+        # Progress display
+        if task.subtasks.total > 0:
+            pct = int(task.subtasks.completed / task.subtasks.total * 100)
+            progress_str = f"{pct}% ({task.subtasks.completed}/{task.subtasks.total})"
+        else:
+            progress_str = "-"
+
+        table.add_row(
+            str(enum_id),
+            state_emoji,
+            str(days_stale),
+            task.name,
+            progress_str,
+            priority_emoji or (task.priority or "-"),
+        )
+
+    console.print(table)
+    console.print("\n[dim]Review these tasks for: completion, archival, or reassessment[/]")
+    console.print("[dim]Run [bold]gptodo show <id>[/] to inspect a task's details[/]")
+
+
+# =============================================================================
+# Auto-expire (Gordon 2026-07-01)
+#
+# Prevents the queue from growing unboundedly by auto-reaping tasks that have
+# sat quiet in eligible states (default: backlog, todo, someday) for longer
+# than the expire window (default: 90 days since `created`).
+#
+# Auto-expire fires from `created`, NOT `modified`, because a task that only
+# gets touched by lint/reformat still hasn't been *worked* — using mtime would
+# let queue drift hide behind incidental edits. If a task genuinely deserves
+# to survive the window, the operator should progress it (todo → active) or
+# park it (someday), not just poke at the file.
+#
+# Design choices:
+#   - `expired` is a *soft-terminal* state: it can be revived via
+#     `gptodo edit --set state <backlog|todo>` without --force. The point is
+#     unclutter, not permanent kill.
+#   - `expired_from` records the pre-expire state so revival can restore it.
+#   - Tasks with `recur:` set are NEVER auto-expired — they're legitimately
+#     dormant between fires. Same for tasks with a future `wait:` date.
+#   - Tasks in `active`, `waiting`, or `ready_for_review` are NEVER
+#     auto-expired regardless of age: they represent live work / blocked-on-
+#     external / awaiting-review. Age there is a symptom, not queue rot.
+# =============================================================================
+
+# Which states are eligible for auto-expire. Anything not on this list is
+# never reaped by `gptodo expire`, no matter how old.
+EXPIRE_ELIGIBLE_STATES: List[str] = ["backlog", "todo", "someday"]
+
+# Default window (days since `created`) after which an eligible task expires.
+# Configurable via `--days` on the CLI.
+EXPIRE_DEFAULT_DAYS: int = 90
+
+
+def _normalize_expire_datetime(value: datetime) -> datetime:
+    """Normalize datetimes used by `expire` to a comparable naive UTC form."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _task_is_expirable(task: TaskInfo, cutoff: datetime, eligible_states: List[str]) -> bool:
+    """Decide whether a task is a candidate for auto-expire.
+
+    Returns True when ALL of:
+      - task.state is in `eligible_states`
+      - task.created is on/before `cutoff`
+      - task has no `recur:` field (recurring tasks are legitimately dormant)
+      - task has no future `wait:` date (waited-on tasks aren't stale)
+      - task.priority is not "high" (high-priority tasks are intentionally kept)
+    """
+    if task.state not in eligible_states:
+        return False
+    if task.recur:
+        return False
+    if _normalize_expire_datetime(task.created) > cutoff:
+        return False
+    # Future wait: means the task is intentionally hidden until then; not stale.
+    if task_is_waiting_for_date(task):
+        return False
+    # High-priority tasks are explicitly important; don't silently reap them.
+    if task.priority == "high":
+        return False
+    return True
+
+
+@cli.command("expire")
+@click.option(
+    "--days",
+    default=EXPIRE_DEFAULT_DAYS,
+    type=int,
+    envvar="GPTODO_EXPIRE_DAYS",
+    show_default=True,
+    help=(
+        "Auto-expire tasks whose `created` date is older than this many days. "
+        "Can also be set via GPTODO_EXPIRE_DAYS env var."
+    ),
+)
+@click.option(
+    "--state",
+    "states",
+    multiple=True,
+    type=click.Choice(EXPIRE_ELIGIBLE_STATES),
+    help=(
+        "Restrict auto-expire to specific state(s). Repeatable. "
+        f"Default: {', '.join(EXPIRE_ELIGIBLE_STATES)}."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which tasks would expire without modifying files.",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Emit machine-readable JSON (stable contract for scripts).",
+)
+def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool):
+    """Auto-expire long-quiet tasks to unclutter the queue.
+
+    Walks task files, finds tasks in eligible states (default:
+    backlog/todo/someday) whose `created` date is older than `--days`, and
+    transitions them to `expired`. `expired_from` and `expired_at` are stamped
+    in frontmatter so revival is a one-liner:
+
+        gptodo edit <task> --set state backlog
+
+    Skipped by design:
+      - Tasks in active/waiting/ready_for_review (live work).
+      - Tasks with `recur:` set (legitimately dormant between fires).
+      - Tasks with a future `wait:` date (intentionally hidden).
+      - Tasks with `priority: high` (explicitly important, never silently reaped).
+
+    Examples:
+        gptodo expire                       # 90d default, all eligible states
+        gptodo expire --days 60             # tighter window
+        gptodo expire --state backlog       # only reap backlog
+        gptodo expire --dry-run             # preview, don't modify
+        gptodo expire --json                # machine-readable output
+    """
+    frontmatter_ = frontmatter  # local alias for clarity
+
+    if days <= 0:
+        msg = "--days must be a positive integer"
+        if output_json:
+            print(json.dumps({"error": msg}, indent=2))
+        else:
+            console.print(f"[red]Error: {msg}[/]")
+        raise SystemExit(1)
+
+    eligible = list(states) if states else list(EXPIRE_ELIGIBLE_STATES)
+
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "expired": [],
+                        "count": 0,
+                        "days_threshold": days,
+                        "eligible_states": eligible,
+                        "dry_run": dry_run,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console.print("[yellow]No tasks found![/]")
+        return
+
+    now = _normalize_expire_datetime(datetime.now(timezone.utc))
+    cutoff = now - timedelta(days=days)
+
+    candidates = [t for t in all_tasks if _task_is_expirable(t, cutoff, eligible)]
+    candidates.sort(key=lambda t: _normalize_expire_datetime(t.created))
+
+    expired_at_str = now.strftime("%Y-%m-%d")
+
+    expired_records: List[Dict[str, Any]] = []
+    for task in candidates:
+        created = _normalize_expire_datetime(task.created)
+        age_days = (now - created).days
+        record = {
+            "id": task.id,
+            "path": str(task.path.relative_to(repo_root)),
+            "from_state": task.state,
+            "created": created.strftime("%Y-%m-%d"),
+            "age_days": age_days,
+        }
+        if not dry_run:
+            # Stamp frontmatter and rewrite the file. We intentionally do this
+            # per-task rather than batching so a mid-run failure leaves the
+            # already-updated files consistent.
+            post = frontmatter_.load(task.path)
+            post.metadata["expired_from"] = task.state
+            post.metadata["expired_at"] = expired_at_str
+            post.metadata["state"] = "expired"
+            with open(task.path, "w") as f:
+                f.write(frontmatter_.dumps(post))
+        expired_records.append(record)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "expired": expired_records,
+                    "count": len(expired_records),
+                    "days_threshold": days,
+                    "eligible_states": eligible,
+                    "dry_run": dry_run,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if not expired_records:
+        console.print(
+            f"[green]No expirable tasks found[/] "
+            f"(threshold: {days} days, states: {', '.join(eligible)})."
+        )
+        return
+
+    verb = "Would expire" if dry_run else "Expired"
+    console.print(
+        f"\n[bold yellow]{verb} {len(expired_records)} task(s)[/] "
+        f"(threshold: {days} days, states: {', '.join(eligible)}):\n"
+    )
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Task", style="cyan")
+    table.add_column("From", style="yellow")
+    table.add_column("Age (days)", justify="right", style="red")
+    table.add_column("Created", style="dim")
+    for rec in expired_records:
+        table.add_row(
+            rec["id"],
+            rec["from_state"],
+            str(rec["age_days"]),
+            rec["created"],
+        )
+    console.print(table)
+
+    if dry_run:
+        console.print("\n[dim]Dry-run: no files modified. Re-run without --dry-run to apply.[/]")
+    else:
+        console.print(
+            "\n[dim]Revive with: [bold]gptodo edit <task> --set state <backlog|todo>[/].[/]"
+        )
+
+
+@cli.command("sync")
+@click.option(
+    "--update",
+    is_flag=True,
+    help="Update task states to match GitHub issue states",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.option(
+    "--use-cache",
+    "use_cache",
+    is_flag=True,
+    help="Use cached issue states instead of live API calls (run 'fetch' first)",
+)
+@click.option(
+    "--light",
+    is_flag=True,
+    help="Light sync: poll notifications to invalidate stale cache, then sync",
+)
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Full sync: refresh all cached URLs regardless of age, then sync",
+)
+@click.option(
+    "--changes-only",
+    is_flag=True,
+    help="Only show items where state changed from cached (detect stale queue entries)",
+)
+def sync(update, output_json, use_cache, light, full, changes_only):
+    """Sync task states with linked GitHub issues.
+
+    Finds tasks with tracking field in frontmatter and compares
+    their state with the linked GitHub issue state.
+
+    Sync modes (Phase 4 - bob#240):
+    --light: Poll GitHub notifications, invalidate relevant caches, refresh
+             affected URLs. Fast check for recent changes.
+    --full:  Refresh ALL external URLs regardless of cache age. Slower but
+             ensures complete cache freshness.
+
+    Use --update to automatically update task states to match issue states.
+    Use --json for machine-readable output.
+    Use --use-cache to check cached states (faster, run 'fetch' first).
+
+    GitHub state mapping:
+    - OPEN issue -> task should be active/new
+    - CLOSED issue -> task should be done
+    """
+    from .lib import extract_urls_from_notification, poll_github_notifications
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+    cache_path = get_cache_path(repo_root)
+
+    # Handle light/full sync modes (Phase 4 - bob#240)
+    if light and full:
+        console.print("[red]Error: Cannot use --light and --full together[/]")
+        return
+
+    if light:
+        # Light sync: Poll notifications to invalidate stale cache entries
+        console.print("[cyan]Light sync: Polling GitHub notifications...[/]")
+        cache = load_cache(cache_path)
+
+        notifications = poll_github_notifications()
+        if notifications:
+            urls_to_refresh: set[str] = set()
+            for notif in notifications:
+                urls = extract_urls_from_notification(notif)
+                urls_to_refresh.update(urls)
+
+            # Invalidate cache entries for URLs with notifications
+            invalidated = 0
+            for url in urls_to_refresh:
+                if url in cache:
+                    del cache[url]
+                    invalidated += 1
+
+            if invalidated > 0:
+                console.print(f"[yellow]Invalidated {invalidated} cache entries[/]")
+                save_cache(cache_path, cache)
+
+            # Fetch fresh states for invalidated URLs
+            if urls_to_refresh:
+                console.print(f"[cyan]Refreshing {len(urls_to_refresh)} URLs...[/]")
+                for url in urls_to_refresh:
+                    state_info = fetch_url_state(url)
+                    if state_info:
+                        cache[url] = {
+                            "state": state_info["state"],
+                            "source": state_info.get("source", "unknown"),
+                            "last_fetched": datetime.now(timezone.utc).isoformat(),
+                            "updatedAt": state_info.get("updatedAt"),
+                        }
+                save_cache(cache_path, cache)
+        else:
+            console.print("[dim]No new notifications found[/]")
+
+        # Continue with sync using updated cache
+        use_cache = True
+
+    if full:
+        # Full sync: Refresh ALL external URLs
+        console.print("[cyan]Full sync: Refreshing all external URLs...[/]")
+        all_tasks_for_scan = load_tasks(tasks_dir)
+
+        all_urls: set[str] = set()
+        for task in all_tasks_for_scan:
+            task_urls = extract_external_urls(task)
+            all_urls.update(task_urls)
+
+        if all_urls:
+            console.print(f"[cyan]Fetching {len(all_urls)} URLs...[/]")
+            cache = load_cache(cache_path)
+
+            fetched = 0
+            for url in sorted(all_urls):
+                state_info = fetch_url_state(url)
+                if state_info:
+                    cache[url] = {
+                        "state": state_info["state"],
+                        "source": state_info.get("source", "unknown"),
+                        "last_fetched": datetime.now(timezone.utc).isoformat(),
+                        "updatedAt": state_info.get("updatedAt"),
+                    }
+                    fetched += 1
+
+            save_cache(cache_path, cache)
+            console.print(f"[green]Refreshed {fetched} URLs[/]")
+
+        # Continue with sync using refreshed cache
+        use_cache = True
+
+    # Load cache if requested (or if light/full already set it)
+    cache_loaded = "cache" in dir() and cache  # Check if cache was already loaded
+    if use_cache and not cache_loaded:
+        cache = load_cache(cache_path)
+        if not cache:
+            console.print("[yellow]Warning: Cache is empty. Run 'gptodo fetch' first.[/]")
+    elif not use_cache:
+        cache = {}
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        console.print("[yellow]No tasks found![/]")
+        return
+
+    # Find tasks with tracking field
+    tasks_with_tracking = []
+    for task in all_tasks:
+        tracking = task.metadata.get("tracking")
+        if tracking:
+            # Handle tracking as either list or string for compatibility
+            tracking_urls = tracking if isinstance(tracking, list) else [tracking]
+            for tracking_url in tracking_urls:
+                tasks_with_tracking.append((task, tracking_url))
+
+    if not tasks_with_tracking:
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "synced_tasks": [],
+                        "count": 0,
+                        "message": "No tasks with tracking field found",
+                    },
+                    indent=2,
+                )
+            )
+            return
+        console.print("[yellow]No tasks with tracking field found![/]")
+        console.print(
+            "\n[dim]Add tracking to frontmatter: tracking: 'https://github.com/owner/repo/issues/123'[/]"
+        )
+        return
+
+    # Check each task against GitHub
+    results = []
+    for task, tracking_ref in tasks_with_tracking:
+        # Parse tracking reference (supports owner/repo#123 or full URL)
+        issue_info = parse_tracking_ref(tracking_ref)
+        if not issue_info:
+            results.append(
+                {
+                    "task": task.name,
+                    "tracking": tracking_ref,
+                    "error": "Could not parse tracking reference",
+                    "task_state": task.state,
+                    "issue_state": None,
+                    "in_sync": False,
+                }
+            )
+            continue
+
+        # Fetch issue state (from cache or live API)
+        issue_state = None
+        source = issue_info.get("source", "github")
+
+        if source == "github":
+            if use_cache:
+                # Try to find state in cache using URL format
+                # Construct URL from parsed info
+                issue_type = "issues"  # Default to issues
+                cache_url = (
+                    f"https://github.com/{issue_info['repo']}/{issue_type}/{issue_info['number']}"
+                )
+                cached = cache.get(cache_url)
+
+                # Also try pull request URL
+                if not cached:
+                    cache_url = (
+                        f"https://github.com/{issue_info['repo']}/pull/{issue_info['number']}"
+                    )
+                    cached = cache.get(cache_url)
+
+                if cached:
+                    issue_state = cached.get("state")
+
+            if issue_state is None and not use_cache:
+                # Fetch from GitHub API
+                issue_state = fetch_github_issue_state(issue_info["repo"], issue_info["number"])
+
+        elif source == "linear":
+            identifier = issue_info.get("identifier", "")
+            team = issue_info.get("team", "")
+
+            if use_cache:
+                # Try to find state in cache using Linear URL format
+                cache_url = f"https://linear.app/{team}/issue/{identifier}"
+                cached = cache.get(cache_url)
+                if cached:
+                    # Linear states need normalization to OPEN/CLOSED
+                    raw_state = cached.get("state")
+                    if raw_state in ("completed", "canceled"):
+                        issue_state = "CLOSED"
+                    elif raw_state:
+                        issue_state = "OPEN"
+
+            if issue_state is None and not use_cache:
+                # Fetch from Linear API
+                raw_state = fetch_linear_issue_state(identifier)
+                if raw_state:
+                    # Normalize Linear states to OPEN/CLOSED
+                    if raw_state in ("completed", "canceled"):
+                        issue_state = "CLOSED"
+                    else:
+                        issue_state = "OPEN"
+
+        if issue_state is None:
+            source_name = "Linear" if source == "linear" else "GitHub"
+            error_msg = (
+                "Issue not in cache (run 'gptodo fetch' first)"
+                if use_cache
+                else f"Could not fetch issue state from {source_name}"
+            )
+            results.append(
+                {
+                    "task": task.name,
+                    "tracking": tracking_ref,
+                    "error": error_msg,
+                    "task_state": task.state,
+                    "issue_state": None,
+                    "in_sync": False,
+                }
+            )
+            continue
+
+        # Determine expected task state based on issue state
+        expected_state = "done" if issue_state == "CLOSED" else (task.state or "active")
+        if issue_state == "OPEN" and task.state == "done":
+            expected_state = "active"  # Reopened issue
+
+        in_sync = (issue_state == "CLOSED" and task.state == "done") or (
+            issue_state == "OPEN" and task.state in ["backlog", "active", "waiting"]
+        )
+
+        # Check for new activity since waiting_since (Issue #241 feature)
+        updated_at = None
+        new_activity = False
+        waiting_since = task.metadata.get("waiting_since")
+
+        if source == "github":
+            if use_cache:
+                # Try to find updatedAt in cache using URL format
+                # Construct URL from parsed info
+                issue_type = "issues"  # Default to issues
+                cache_url = (
+                    f"https://github.com/{issue_info['repo']}/{issue_type}/{issue_info['number']}"
+                )
+                cached = cache.get(cache_url)  # Cache keyed by full URL
+                if cached:
+                    updated_at = cached.get("updatedAt")
+            else:
+                # Fetch details including updatedAt
+                details = fetch_github_issue_details(issue_info["repo"], issue_info["number"])
+                if details:
+                    updated_at = details.get("updatedAt")
+
+        # Check if there's new activity since waiting_since
+        if waiting_since and updated_at:
+            new_activity = has_new_activity(updated_at, waiting_since)
+
+        result = {
+            "task": task.name,
+            "tracking": tracking_ref,
+            "task_state": task.state,
+            "issue_state": issue_state,
+            "expected_state": expected_state,
+            "in_sync": in_sync,
+            "updated_at": updated_at,
+            "waiting_since": str(waiting_since) if waiting_since else None,
+            "new_activity": new_activity,
+        }
+
+        # Update task if requested and out of sync
+        if update and not in_sync:
+            if update_task_state(task.path, expected_state):
+                result["updated"] = True
+                result["new_state"] = expected_state
+            else:
+                result["error"] = "Failed to update task file"
+
+        results.append(result)
+
+    # Filter to changes only if requested
+    if changes_only:
+        results = [
+            r for r in results if not r.get("in_sync", False) or r.get("new_activity", False)
+        ]
+        if not results:
+            if output_json:
+                print(
+                    json.dumps(
+                        {"synced_tasks": [], "count": 0, "message": "No state changes detected"},
+                        indent=2,
+                    )
+                )
+            else:
+                console.print("[green]✓ No state changes detected - all tracked items in sync[/]")
+            return
+
+    # Output results
+    if output_json:
+        output = {
+            "synced_tasks": results,
+            "count": len(results),
+            "in_sync": sum(1 for r in results if r.get("in_sync", False)),
+            "out_of_sync": sum(1 for r in results if not r.get("in_sync", False)),
+            "with_new_activity": sum(1 for r in results if r.get("new_activity", False)),
+        }
+        if update:
+            output["updated"] = sum(1 for r in results if r.get("updated", False))
+        print(json.dumps(output, indent=2))
+        return
+
+    # Rich table output
+    table = Table(
+        title=f"[bold]Task-Issue Sync Status[/] ({len(results)} {'changed' if changes_only else 'tracked'})"
+    )
+    table.add_column("Task", style="cyan")
+    table.add_column("Issue", style="blue")
+    table.add_column("Task State", style="yellow")
+    table.add_column("Issue State", style="green")
+    table.add_column("Activity", style="magenta")
+    table.add_column("Status", style="white")
+
+    for result in results:
+        if result.get("error"):
+            status = f"[red]Error: {result['error']}[/]"
+        elif result.get("in_sync"):
+            status = "[green]✓ In sync[/]"
+        elif result.get("updated"):
+            status = f"[blue]→ Updated to {result['new_state']}[/]"
+        else:
+            status = (
+                f"[yellow]⚠ Out of sync (expected: {result.get('expected_state', 'unknown')})[/]"
+            )
+
+        # Activity indicator - shows if there's new activity since waiting_since
+        if result.get("new_activity"):
+            activity = "[bold green]🔔 NEW[/]"
+        elif result.get("waiting_since"):
+            activity = f"[dim]since {result['waiting_since']}[/]"
+        else:
+            activity = "[dim]—[/]"
+
+        table.add_row(
+            result["task"][:30],
+            result.get("tracking", "")[:25],
+            result.get("task_state", ""),
+            result.get("issue_state", "N/A"),
+            activity,
+            status,
+        )
+
+    console.print(table)
+
+    out_of_sync = sum(1 for r in results if not r.get("in_sync", False) and not r.get("error"))
+    if out_of_sync > 0 and not update:
+        console.print(f"\n[dim]Run with --update to sync {out_of_sync} out-of-sync tasks[/]")
+
+
+@cli.command()
+@click.argument("task_id")
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+def plan(task_id: str, output_json: bool):
+    """Show the impact of completing a task.
+
+    Analyzes what tasks would be unblocked if the specified task is completed.
+    Useful for prioritizing work based on impact.
+
+    The TASK_ID can be the numeric ID or task name.
+
+    Examples:
+        gptodo plan 5                   # Impact analysis for task #5
+        gptodo plan my-task-name        # By task name
+        gptodo plan 5 --json            # Machine-readable output
+    """
+    console = Console()
+
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        if output_json:
+            print(json.dumps({"error": "No tasks found"}, indent=2))
+            raise SystemExit(1)
+        console.print("[red]No tasks found![/]")
+        raise SystemExit(1)
+
+    # Create stable enumerated ID mapping
+    tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+    name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+    enum_id_to_task = {i: task for i, task in enumerate(tasks_by_date, 1)}
+
+    # Resolve task_id to actual task
+    task = None
+
+    # Try as numeric ID first
+    try:
+        numeric_id = int(task_id)
+        if numeric_id in enum_id_to_task:
+            task = enum_id_to_task[numeric_id]
+    except ValueError:
+        pass
+
+    # Try as task name
+    if task is None:
+        for t in all_tasks:
+            if t.name == task_id or t.name == task_id.replace("-", "_"):
+                task = t
+                break
+
+    if task is None:
+        if output_json:
+            print(json.dumps({"error": f"Task '{task_id}' not found"}, indent=2))
+            raise SystemExit(1)
+        console.print(f"[red]Task '{task_id}' not found![/]")
+        raise SystemExit(1)
+
+    # Find all tasks that depend on this task (reverse dependency lookup)
+    dependent_tasks = []
+    for t in all_tasks:
+        if task.name in t.requires:
+            dependent_tasks.append(t)
+
+    # Calculate impact score
+    # Scoring:
+    # - Base: 1 point per dependent task
+    # - Priority bonus: high=3, medium=2, low=1
+    # - State bonus: active=2, backlog=1 (these would benefit most from unblocking)
+    impact_score = 0.0
+    priority_weights = {"high": 3, "medium": 2, "low": 1}
+    state_weights = {"active": 2, "backlog": 1}
+
+    impact_details = []
+    for dep_task in dependent_tasks:
+        task_impact = 1.0  # Base score
+        task_impact += priority_weights.get(dep_task.priority or "", 0)
+        task_impact += state_weights.get(dep_task.state or "", 0)
+        impact_score += task_impact
+        impact_details.append(
+            {
+                "task": dep_task.name,
+                "state": dep_task.state or "unknown",
+                "priority": dep_task.priority or "none",
+                "impact_contribution": task_impact,
+            }
+        )
+
+    # Check if this task has unmet dependencies itself
+    unmet_dependencies = []
+    for dep_name in task.requires:
+        for t in all_tasks:
+            if t.name == dep_name and t.state not in ["done", "cancelled"]:
+                unmet_dependencies.append({"task": t.name, "state": t.state or "unknown"})
+                break
+
+    # JSON output
+    if output_json:
+        result = {
+            "task": task.name,
+            "task_id": name_to_enum_id[task.name],
+            "state": task.state or "unknown",
+            "priority": task.priority or "none",
+            "impact_analysis": {
+                "score": round(impact_score, 1),
+                "would_unblock": len(dependent_tasks),
+                "dependent_tasks": impact_details,
+            },
+            "blockers": {
+                "has_unmet_dependencies": len(unmet_dependencies) > 0,
+                "unmet_dependencies": unmet_dependencies,
+            },
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    # Rich console output
+    target_id = name_to_enum_id[task.name]
+    state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+
+    console.print(f"\n[bold cyan]Impact Analysis: {task.name}[/] (#{target_id})")
+    console.print(f"State: {state_emoji} {task.state or 'unknown'}")
+    console.print(f"Priority: {task.priority or 'none'}")
+
+    # Show unmet dependencies (blockers for this task)
+    if unmet_dependencies:
+        console.print(f"\n[bold red]⚠ Blocked by {len(unmet_dependencies)} unmet dependencies:[/]")
+        for dep in unmet_dependencies:
+            dep_emoji = STATE_EMOJIS.get(dep["state"], "•")
+            console.print(f"  - {dep_emoji} {dep['task']} ({dep['state']})")
+
+    # Show what would be unblocked
+    console.print(f"\n[bold green]Impact Score: {impact_score:.1f}[/]")
+
+    if dependent_tasks:
+        console.print(
+            f"\n[bold]Completing this task would unblock {len(dependent_tasks)} task(s):[/]"
+        )
+
+        table = Table()
+        table.add_column("Task", style="white")
+        table.add_column("State", style="blue")
+        table.add_column("Priority", style="yellow")
+        table.add_column("Impact", style="green", justify="right")
+
+        for detail in impact_details:
+            task_emoji = STATE_EMOJIS.get(str(detail["state"]), "•")
+            table.add_row(
+                str(detail["task"]),
+                f"{task_emoji} {detail['state']}",
+                str(detail["priority"]),
+                f"+{detail['impact_contribution']:.1f}",
+            )
+
+        console.print(table)
+    else:
+        console.print("\n[dim]No tasks depend on this task (leaf node).[/]")
+
+    # Summary recommendation
+    console.print()
+    if impact_score >= 5:
+        console.print(
+            "[bold green]High impact![/] Completing this task will significantly unblock progress."
+        )
+    elif impact_score >= 2:
+        console.print(
+            "[yellow]Moderate impact.[/] Consider prioritizing if other high-impact tasks are blocked."
+        )
+    else:
+        console.print("[dim]Low impact.[/] This is a leaf task or has few dependents.")
+
+
+# ============================================================================
+# Fetch Command - Cache external issue states
+# ============================================================================
+
+
+@cli.command("fetch")
+@click.option(
+    "--all",
+    "fetch_all",
+    is_flag=True,
+    help="Refresh all URLs ignoring cache age",
+)
+@click.option(
+    "--max-age",
+    type=click.IntRange(min=0),
+    default=3600,
+    help="Max cache age in seconds before refetch (default: 3600, must be >= 0)",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+@click.argument("urls", nargs=-1)
+def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...]):
+    """Fetch and cache external issue/PR states.
+
+    Retrieves state (open/closed) from GitHub URLs and caches locally.
+    This enables fast state checks in sync/ready commands without API calls.
+
+    By default, scans all tasks for external URLs in tracking, requires,
+    and related fields. Pass explicit URLs to fetch specific items.
+
+    Cache is stored in state/issue-cache.json.
+
+    Examples:
+        gptodo fetch                              # Fetch all external URLs from tasks
+        gptodo fetch --all                        # Refresh all (ignore cache age)
+        gptodo fetch https://github.com/o/r/issues/1  # Fetch specific URL
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    cache_path = get_cache_path(repo_root)
+    cache = load_cache(cache_path)
+    now = datetime.now(timezone.utc)
+
+    # Collect URLs to fetch
+    urls_to_fetch: Set[str] = set()
+
+    if urls:
+        # Explicit URLs provided
+        urls_to_fetch.update(urls)
+    else:
+        # Scan tasks for external URLs
+        tasks_dir = repo_root / "tasks"
+        all_tasks = load_tasks(tasks_dir)
+
+        for task in all_tasks:
+            task_urls = extract_external_urls(task)
+            urls_to_fetch.update(task_urls)
+
+    if not urls_to_fetch:
+        if output_json:
+            print(json.dumps({"fetched": 0, "cached": 0, "results": []}, indent=2))
+            return
+        console.print("[yellow]No external URLs found in tasks.[/]")
+        console.print("\n[dim]Add tracking, requires, or related URLs to task frontmatter.[/]")
+        return
+
+    # Filter by cache age if not --all
+    if not fetch_all:
+        fresh_urls = set()
+        for url in urls_to_fetch:
+            cached = cache.get(url)
+            if cached:
+                try:
+                    cached_time = datetime.fromisoformat(
+                        cached.get("last_fetched", "1970-01-01T00:00:00")
+                    )
+                    # Handle timezone-naive cached times by assuming UTC
+                    if cached_time.tzinfo is None:
+                        cached_time = cached_time.replace(tzinfo=timezone.utc)
+                    age_seconds = (now - cached_time).total_seconds()
+                    if age_seconds < max_age:
+                        fresh_urls.add(url)
+                except (ValueError, TypeError):
+                    # Malformed cache entry - treat as stale
+                    pass
+
+        stale_urls = urls_to_fetch - fresh_urls
+    else:
+        stale_urls = urls_to_fetch
+        fresh_urls = set()
+
+    # Fetch stale URLs
+    results = []
+    fetched_count = 0
+    error_count = 0
+
+    for url in sorted(stale_urls):
+        result = {"url": url}
+        state_info = fetch_url_state(url)
+
+        if state_info:
+            cache[url] = {
+                "state": state_info["state"],
+                "source": state_info.get("source", "unknown"),
+                "last_fetched": now.isoformat(),
+                # Store updatedAt for activity tracking (Issue #241)
+                "updatedAt": state_info.get("updatedAt"),
+            }
+            result["state"] = state_info["state"]
+            result["source"] = state_info.get("source", "unknown")
+            result["updatedAt"] = state_info.get("updatedAt") or ""
+            result["status"] = "fetched"
+            fetched_count += 1
+        else:
+            result["status"] = "error"
+            result["error"] = "Could not fetch state"
+            error_count += 1
+
+        results.append(result)
+
+    # Add cached results
+    for url in sorted(fresh_urls):
+        cached = cache.get(url, {})
+        results.append(
+            {
+                "url": url,
+                "state": cached.get("state"),
+                "source": cached.get("source"),
+                "status": "cached",
+                "cached_at": cached.get("last_fetched"),
+            }
+        )
+
+    # Save cache (even if only errors, to track last attempt)
+    save_cache(cache_path, cache)
+
+    # Output
+    if output_json:
+        output = {
+            "fetched": fetched_count,
+            "cached": len(fresh_urls),
+            "errors": error_count,
+            "total": len(urls_to_fetch),
+            "cache_path": str(cache_path),
+            "results": results,
+        }
+        print(json.dumps(output, indent=2))
+        return
+
+    # Rich table output
+    table = Table(title=f"[bold]Issue State Cache[/] ({len(urls_to_fetch)} URLs)")
+    table.add_column("URL", style="cyan", max_width=50)
+    table.add_column("State", style="green")
+    table.add_column("Source", style="blue")
+    table.add_column("Status", style="yellow")
+
+    for r in results:
+        url_display = r["url"]
+        if len(url_display) > 50:
+            url_display = "..." + url_display[-47:]
+
+        state = r.get("state", "N/A")
+        state_style = "green" if state == "OPEN" else "dim" if state == "CLOSED" else ""
+        source = r.get("source", "")
+
+        if r["status"] == "fetched":
+            status = "[green]✓ Fetched[/]"
+        elif r["status"] == "cached":
+            status = "[dim]⏸ Cached[/]"
+        else:
+            status = f"[red]✗ {r.get('error', 'Error')}[/]"
+
+        table.add_row(
+            url_display,
+            f"[{state_style}]{state}[/]" if state_style else state,
+            source,
+            status,
+        )
+
+    console.print(table)
+
+    # Summary
+    console.print(
+        f"\n[bold]Summary:[/] {fetched_count} fetched, {len(fresh_urls)} cached, {error_count} errors"
+    )
+    if fetched_count > 0:
+        console.print(f"[dim]Cache saved to: {cache_path}[/]")
+
+
+# =============================================================================
+# Import Command - Import tasks from GitHub/Linear
+# =============================================================================
+
+
+@cli.command("import")
+@click.option(
+    "--source",
+    type=click.Choice(["github", "linear"]),
+    required=True,
+    help="Source to import from (github or linear)",
+)
+@click.option(
+    "--repo",
+    help="GitHub repository in owner/repo format (required for github source)",
+)
+@click.option(
+    "--team",
+    help="Linear team key (required for linear source)",
+)
+@click.option(
+    "--state",
+    type=click.Choice(["open", "closed", "all"]),
+    default="open",
+    help="Filter by issue state",
+)
+@click.option(
+    "--label",
+    multiple=True,
+    help="Filter by label (GitHub only, can be used multiple times)",
+)
+@click.option(
+    "--assignee",
+    help="Filter by assignee (GitHub only, username or 'me')",
+)
+@click.option(
+    "--limit",
+    default=20,
+    type=click.IntRange(min=1, max=100),
+    help="Maximum number of issues to import (1-100)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be imported without creating files",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON for machine consumption",
+)
+def import_issues(
+    source: str,
+    repo: str | None,
+    team: str | None,
+    state: str,
+    label: tuple,
+    assignee: str | None,
+    limit: int,
+    dry_run: bool,
+    output_json: bool,
+):
+    """Import issues from GitHub or Linear as placeholder tasks.
+
+    Creates minimal task files with tracking frontmatter linking back
+    to the source. Existing tasks with matching tracking URLs are skipped
+    to avoid duplicates.
+
+    Examples:
+        # Import open issues from a GitHub repo
+        gptodo import --source github --repo gptme/gptme --state open
+
+        # Import issues with specific labels
+        gptodo import --source github --repo gptme/gptme --label bug
+
+        # Import from Linear (requires LINEAR_API_KEY)
+        gptodo import --source linear --team ENG
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Validate source-specific options
+    if source == "github" and not repo:
+        console.print("[red]Error: --repo is required for github source[/]")
+        sys.exit(1)
+    if source == "linear" and not team:
+        console.print("[red]Error: --team is required for linear source[/]")
+        sys.exit(1)
+
+    # Warn about ignored options
+    if source == "linear" and (label or assignee):
+        console.print("[yellow]Warning: --label and --assignee are not supported for Linear[/]")
+
+    # Ensure tasks directory exists
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load existing tasks to check for duplicates
+    existing_tasks = load_tasks(tasks_dir)
+    existing_tracking: Set[str] = set()
+    for task in existing_tasks:
+        tracking = task.metadata.get("tracking")
+        if tracking:
+            if isinstance(tracking, list):
+                existing_tracking.update(tracking)
+            else:
+                existing_tracking.add(tracking)
+
+    # Fetch issues based on source
+    if source == "github":
+        assert repo is not None  # Validated above
+        issues = fetch_github_issues(repo, state, list(label), assignee, limit)
+    else:  # linear
+        assert team is not None  # Validated above
+        issues = fetch_linear_issues(team, state, limit)
+
+    if not issues:
+        if output_json:
+            print(json.dumps({"imported": [], "count": 0, "message": "No issues found"}))
+            return
+        console.print("[yellow]No issues found matching criteria[/]")
+        return
+
+    # Process issues
+    imported = []
+    skipped = []
+    for issue in issues:
+        tracking_ref = issue["tracking_ref"]
+
+        # Check for duplicates
+        if tracking_ref in existing_tracking:
+            skipped.append(
+                {
+                    "title": issue["title"],
+                    "tracking_ref": tracking_ref,
+                    "reason": "Already exists in tasks",
+                }
+            )
+            continue
+
+        # Generate task filename
+        task_filename = generate_task_filename(issue["title"], issue["number"], source)
+        task_path = tasks_dir / task_filename
+
+        # Skip if file already exists
+        if task_path.exists():
+            skipped.append(
+                {
+                    "title": issue["title"],
+                    "tracking_ref": tracking_ref,
+                    "reason": f"File {task_filename} already exists",
+                }
+            )
+            continue
+
+        # Map priority from labels
+        priority = map_priority_from_labels(issue.get("labels", []))
+
+        # Generate task content
+        task_content = generate_task_content(issue, source, priority)
+
+        if dry_run:
+            imported.append(
+                {
+                    "title": issue["title"],
+                    "tracking_ref": tracking_ref,
+                    "filename": task_filename,
+                    "dry_run": True,
+                }
+            )
+        else:
+            # Create the task file
+            try:
+                task_path.write_text(task_content, encoding="utf-8")
+                imported.append(
+                    {
+                        "title": issue["title"],
+                        "tracking_ref": tracking_ref,
+                        "filename": task_filename,
+                        "created": True,
+                    }
+                )
+            except Exception as e:
+                skipped.append(
+                    {
+                        "title": issue["title"],
+                        "tracking_ref": tracking_ref,
+                        "reason": f"Failed to create file: {e}",
+                    }
+                )
+
+    # Output results
+    if output_json:
+        result = {
+            "imported": imported,
+            "skipped": skipped,
+            "count": len(imported),
+            "skipped_count": len(skipped),
+        }
+        if dry_run:
+            result["dry_run"] = True
+        print(json.dumps(result, indent=2))
+        return
+
+    # Rich output
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/] - No files created\n")
+
+    if imported:
+        table = Table(
+            title=f"[bold]{'Would Import' if dry_run else 'Imported'} ({len(imported)} issues)[/]"
+        )
+        table.add_column("Title", style="cyan", max_width=50)
+        table.add_column("Tracking", style="blue")
+        table.add_column("Filename", style="green")
+
+        for item in imported:
+            table.add_row(
+                item["title"][:50],
+                item["tracking_ref"],
+                item["filename"],
+            )
+        console.print(table)
+
+    if skipped:
+        console.print(f"\n[yellow]Skipped {len(skipped)} issues:[/]")
+        for item in skipped:
+            console.print(f"  - {item['title'][:40]}: {item['reason']}")
+
+    if not dry_run and imported:
+        console.print(f"\n[green]✓ Created {len(imported)} task files in {tasks_dir}[/]")
+        console.print("[dim]Run 'gptodo sync' to keep states synchronized[/]")
+
+
+# =============================================================================
+# Lock Commands (Phase 3 - Issue #240)
+# =============================================================================
+
+
+@cli.command("lock")
+@click.argument("task_id")
+@click.option(
+    "--worker",
+    "-w",
+    default=None,
+    help="Worker identifier (default: auto-generated from hostname/pid)",
+)
+@click.option(
+    "--timeout",
+    "-t",
+    default=DEFAULT_LOCK_TIMEOUT_HOURS,
+    type=float,
+    help=f"Lock timeout in hours (default: {DEFAULT_LOCK_TIMEOUT_HOURS})",
+)
+@click.option("--force", "-f", is_flag=True, help="Force acquire even if locked by another")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def lock_task(task_id: str, worker: str | None, timeout: float, force: bool, output_json: bool):
+    """Acquire a lock on a task.
+
+    Prevents multiple agents/processes from working on the same task.
+    Locks expire after timeout (default 4 hours).
+
+    Examples:
+        gptodo lock my-task
+        gptodo lock my-task --worker bob-session-123
+        gptodo lock my-task --timeout 2.0
+        gptodo lock my-task --force  # Steal lock from another worker
+    """
+    import socket
+
+    # Generate default worker ID if not provided
+    if worker is None:
+        worker = f"{socket.gethostname()}-{os.getpid()}"
+
+    repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
+    tasks_dir = repo_root / "tasks"
+
+    # First verify the task exists
+    all_tasks = load_tasks(tasks_dir)
+    tasks = resolve_tasks([task_id], all_tasks, tasks_dir)
+    if not tasks:
+        if output_json:
+            print(json.dumps({"success": False, "error": f"Task not found: {task_id}"}))
+        else:
+            console = Console()
+            console.print(f"[red]Error: Task not found: {task_id}[/]")
+        sys.exit(1)
+
+    task = tasks[0]
+    actual_task_id = task.id
+
+    # Attempt to acquire lock
+    success, existing = acquire_lock(actual_task_id, worker, timeout, repo_root, force)
+
+    if output_json:
+        result = {
+            "success": success,
+            "task_id": actual_task_id,
+            "worker": worker,
+            "timeout_hours": timeout,
+        }
+        if existing:
+            result["previous_lock"] = {
+                "worker": existing.worker,
+                "started": existing.started,
+                "expired": existing.is_expired(),
+            }
+        print(json.dumps(result, indent=2))
+    else:
+        console = Console()
+        if success:
+            if existing:
+                if force:
+                    console.print(f"[yellow]⚠ Stole lock from {existing.worker}[/]")
+                else:
+                    console.print(f"[dim]Previous lock by {existing.worker} had expired[/]")
+            console.print(f"[green]✓ Locked task: {actual_task_id}[/]")
+            console.print(f"[dim]  Worker: {worker}[/]")
+            console.print(f"[dim]  Timeout: {timeout} hours[/]")
+        else:
+            console.print(f"[red]✗ Failed to lock task: {actual_task_id}[/]")
+            if existing:
+                age = existing.age_hours()
+                console.print(f"[yellow]  Locked by: {existing.worker}[/]")
+                console.print(f"[yellow]  Since: {existing.started} ({age:.1f}h ago)[/]")
+                console.print("[dim]  Use --force to steal the lock[/]")
+            sys.exit(1)
+
+
+@cli.command("unlock")
+@click.argument("task_id")
+@click.option(
+    "--worker",
+    "-w",
+    default=None,
+    help="Worker identifier (must match lock owner unless --force)",
+)
+@click.option("--force", "-f", is_flag=True, help="Force release even if not owner")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def unlock_task(task_id: str, worker: str | None, force: bool, output_json: bool):
+    """Release a lock on a task.
+
+    By default, only the lock owner can release. Use --force to override.
+
+    Examples:
+        gptodo unlock my-task
+        gptodo unlock my-task --worker bob-session-123
+        gptodo unlock my-task --force
+    """
+    import socket
+
+    # Generate default worker ID if not provided
+    if worker is None:
+        worker = f"{socket.gethostname()}-{os.getpid()}"
+
+    repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
+    tasks_dir = repo_root / "tasks"
+
+    # Resolve task ID
+    all_tasks = load_tasks(tasks_dir)
+    tasks = resolve_tasks([task_id], all_tasks, tasks_dir)
+    actual_task_id = tasks[0].id if tasks else task_id
+
+    success, message = release_lock(actual_task_id, worker, repo_root, force)
+
+    if output_json:
+        result = {"success": success, "task_id": actual_task_id}
+        if message:
+            result["message"] = message
+        print(json.dumps(result, indent=2))
+    else:
+        console = Console()
+        if success:
+            console.print(f"[green]✓ Unlocked task: {actual_task_id}[/]")
+            if message:
+                console.print(f"[dim]  {message}[/]")
+        else:
+            console.print(f"[red]✗ Failed to unlock task: {actual_task_id}[/]")
+            if message:
+                console.print(f"[yellow]  {message}[/]")
+            sys.exit(1)
+
+
+@cli.command("locks")
+@click.option("--cleanup", is_flag=True, help="Remove expired locks")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def list_all_locks(cleanup: bool, output_json: bool):
+    """List all current task locks.
+
+    Shows which tasks are currently locked and by whom.
+    Use --cleanup to remove expired locks.
+
+    Examples:
+        gptodo locks
+        gptodo locks --cleanup
+        gptodo locks --json
+    """
+    repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
+
+    if cleanup:
+        removed = cleanup_expired_locks(repo_root)
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "removed": [
+                            {"task_id": lock.task_id, "worker": lock.worker} for lock in removed
+                        ],
+                        "count": len(removed),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console = Console()
+            if removed:
+                console.print(f"[green]✓ Removed {len(removed)} expired lock(s)[/]")
+                for lock in removed:
+                    console.print(f"[dim]  - {lock.task_id} (was: {lock.worker})[/]")
+            else:
+                console.print("[dim]No expired locks to remove[/]")
+        return
+
+    locks = list_locks(repo_root)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "locks": [
+                        {
+                            "task_id": lck.task_id,
+                            "worker": lck.worker,
+                            "started": lck.started,
+                            "timeout_hours": lck.timeout_hours,
+                            "age_hours": round(lck.age_hours(), 2),
+                            "expired": lck.is_expired(),
+                        }
+                        for lck in locks
+                    ],
+                    "count": len(locks),
+                },
+                indent=2,
+            )
+        )
+    else:
+        console = Console()
+        if not locks:
+            console.print("[dim]No active locks[/]")
+            return
+
+        table = Table(title="[bold]Task Locks[/]")
+        table.add_column("Task", style="cyan")
+        table.add_column("Worker", style="green")
+        table.add_column("Age", style="yellow")
+        table.add_column("Status", style="blue")
+
+        for lock in sorted(locks, key=lambda lck: lck.started, reverse=True):
+            age = lock.age_hours()
+            status = "[red]EXPIRED[/]" if lock.is_expired() else "[green]ACTIVE[/]"
+            table.add_row(
+                lock.task_id,
+                lock.worker,
+                f"{age:.1f}h",
+                status,
+            )
+
+        console.print(table)
+        console.print(f"\n[dim]Total: {len(locks)} lock(s)[/]")
+
+
+# =============================================================================
+# Add Command
+# =============================================================================
+
+
+@cli.command("add")
+@click.argument("title")
+@click.option(
+    "--priority",
+    type=click.Choice(["low", "medium", "high"]),
+    default="medium",
+    help="Task priority",
+)
+@click.option(
+    "--tags",
+    help="Comma-separated tags",
+)
+@click.option(
+    "--assigned-to",
+    default="bob",
+    help="Who the task is assigned to",
+)
+@click.option(
+    "--state",
+    type=click.Choice(
+        [
+            "backlog",
+            "todo",
+            "active",
+            "ready_for_review",
+            "waiting",
+            "someday",
+            "done",
+            "cancelled",
+            # Deprecated aliases (backward compatibility)
+            "new",
+            "paused",
+        ]
+    ),
+    default="backlog",
+    help="Initial task state",
+)
+@click.option(
+    "--type",
+    "task_type",
+    type=click.Choice(["action", "project"]),
+    default="action",
+    help="Task type (action=single-step, project=multi-step)",
+)
+def add(
+    title: str,
+    priority: str,
+    tags: str | None,
+    assigned_to: str,
+    state: str,
+    task_type: str,
+):
+    """Create a new task from title and optional stdin body.
+
+    The task filename is generated from the title by converting to lowercase
+    and replacing non-alphanumeric characters with hyphens.
+
+    If stdin is provided (piped), it becomes the task body.
+
+    Examples:
+        # Simple task
+        gptodo add "Fix the login bug"
+
+        # With options
+        gptodo add --priority high --tags infra,context "Improve context loading"
+
+        # With body from stdin
+        echo "Detailed description here" | gptodo add "Task with body"
+
+        # Multi-line body
+        gptodo add "Complex task" << 'EOF'
+        ## Subtasks
+        - [ ] First step
+        - [ ] Second step
+        EOF
+    """
+    import re
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Ensure tasks directory exists
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate slug from title
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower())
+    slug = slug.strip("-")[:50].rstrip("-")
+    filename = f"{slug}.md"
+    filepath = tasks_dir / filename
+
+    # Check for existing file with same name
+    if filepath.exists():
+        # Add timestamp suffix to make unique
+        timestamp = datetime.now().strftime("%H%M%S")
+        filename = f"{slug}-{timestamp}.md"
+        filepath = tasks_dir / filename
+
+    # Build frontmatter
+    now = datetime.now(timezone.utc)
+    frontmatter_data: dict[str, str | list[str]] = {
+        "state": state,
+        "created": now.isoformat(),
+        "priority": priority,
+        "task_type": task_type,
+        "assigned_to": assigned_to,
+    }
+
+    if tags:
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        if tag_list:
+            frontmatter_data["tags"] = tag_list
+
+    # Check for stdin input (body)
+    body = ""
+    # Check if stdin has data (non-blocking check)
+    if not sys.stdin.isatty():
+        # stdin is piped, read it
+        body = sys.stdin.read().strip()
+
+    # Build file content
+    lines = ["---"]
+    lines.append(f"state: {frontmatter_data['state']}")
+    lines.append(f"created: {frontmatter_data['created']}")
+    lines.append(f"priority: {frontmatter_data['priority']}")
+    lines.append(f"task_type: {frontmatter_data['task_type']}")
+    lines.append(f"assigned_to: {frontmatter_data['assigned_to']}")
+    if "tags" in frontmatter_data:
+        lines.append(f"tags: {json.dumps(frontmatter_data['tags'])}")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"# {title}")
+    lines.append("")
+
+    if body:
+        lines.append(body)
+        lines.append("")
+
+    content = "\n".join(lines)
+
+    # Write file
+    filepath.write_text(content)
+
+    console.print(f"[green]✓ Created task:[/] {filepath}")
+
+
+# =============================================================================
+# Sub-Agent Commands (Issue #255: Multi-Agent Collaboration)
+#
+
+
+def _execute_task_agent(
+    task_id: str,
+    prompt: str | None,
+    agent_type: str,
+    backend: str,
+    background: bool,
+    model: str | None,
+    timeout: int,
+    max_concurrent: int = 4,
+    system_prompt_file: str | None = None,
+    coordination: bool = False,
+    coordination_db: str | None = None,
+):
+    """Shared logic for run and spawn commands."""
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Check concurrency limit for background spawns
+    if background and max_concurrent > 0:
+        from .subagent import check_session, list_sessions
+
+        running = list_sessions(repo_root, status="running")
+        # Reconcile with actual tmux state
+        actually_running = []
+        for s in running:
+            checked = check_session(s.session_id, repo_root)
+            if checked and checked.status == "running":
+                actually_running.append(checked)
+
+        if len(actually_running) >= max_concurrent:
+            console.print(f"[yellow]⚠ Max concurrent agents ({max_concurrent}) reached[/]")
+            for s in actually_running:
+                console.print(f"  • {s.session_id[:8]} — {s.task_id}")
+            console.print(
+                "\nWait for agents to finish, or kill one with: [cyan]gptodo kill <session-id>[/]"
+            )
+            return
+
+    # Find the task
+    tasks = load_tasks(tasks_dir)
+    task = None
+
+    if task_id.isdigit():
+        tasks.sort(key=lambda t: t.created)
+        idx = int(task_id) - 1
+        if 0 <= idx < len(tasks):
+            task = tasks[idx]
+    else:
+        task_name = task_id[:-3] if task_id.endswith(".md") else task_id
+        matching = [t for t in tasks if t.name == task_name]
+        if matching:
+            task = matching[0]
+
+    if not task:
+        console.print(f"[red]Error: Task '{task_id}' not found[/]")
+        return
+
+    # Build prompt from task if not provided
+    if not prompt:
+        post = frontmatter.load(task.path)
+        prompt = f"""Work on this task:
+
+# {task.name}
+
+{post.content}
+
+Focus on making progress on this task. When done, summarize what you accomplished."""
+
+    action = "Spawning" if background else "Running"
+    console.print(f"[cyan]{action} {agent_type} agent for task:[/] {task.name}")
+    console.print(f"  Backend: {backend}")
+    if model:
+        console.print(f"  Model: {model}")
+    if timeout > 0:
+        console.print(f"  Timeout: {timeout}s ({timeout // 60}min)")
+    if system_prompt_file:
+        console.print(f"  System prompt: {system_prompt_file}")
+    if coordination or coordination_db:
+        console.print("  Coordination: enabled")
+        if coordination_db:
+            console.print(f"  Coordination DB: {coordination_db}")
+    if background:
+        console.print(f"  Background: {background}")
+
+    from typing import Literal, cast
+
+    session = spawn_agent(
+        task_id=task.name,
+        prompt=prompt,
+        agent_type=cast(Literal["general", "explore", "plan", "execute"], agent_type),
+        backend=cast(Literal["gptme", "claude"], backend),
+        background=background,
+        workspace=repo_root,
+        timeout=timeout,
+        model=model,
+        system_prompt_file=system_prompt_file,
+        coordination=coordination or bool(coordination_db),
+        coordination_db=coordination_db,
+    )
+
+    if session.status == "failed":
+        console.print(f"[red]✗ Failed to {action.lower()} agent:[/] {session.error}")
+        return
+
+    console.print(
+        f"[green]✓ Agent {'spawned' if background else 'completed'}:[/] {session.session_id}"
+    )
+
+    if background:
+        console.print(f"  tmux session: {session.tmux_session}")
+        console.print(f"Monitor with: [cyan]gptodo output {session.session_id}[/]")
+        console.print(f"Kill with: [cyan]gptodo kill {session.session_id}[/]")
+    else:
+        console.print(f"  Status: {session.status}")
+        if session.error:
+            console.print(f"  Error: {session.error}")
+
+
+@cli.command("run")
+@click.argument("task_id")
+@click.option(
+    "--prompt",
+    "-p",
+    type=str,
+    help="Custom prompt for the agent (default: derived from task)",
+)
+@click.option(
+    "--type",
+    "agent_type",
+    type=click.Choice(["general", "explore", "plan", "execute"]),
+    default="general",
+    help="Type of agent behavior",
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["gptme", "claude"]),
+    default="gptme",
+    help="Which backend to use",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default=None,
+    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5)",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    help="Timeout in seconds",
+)
+@click.option(
+    "--system-prompt-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to file with additional system prompt (claude backend only)",
+)
+@click.option(
+    "--coordination",
+    is_flag=True,
+    help="Enable inter-agent coordination (auto-generates agent ID, announces presence)",
+)
+@click.option(
+    "--coordination-db",
+    type=str,
+    default=None,
+    help="Path to coordination DB (implies --coordination)",
+)
+def run_cmd(
+    task_id: str,
+    prompt: str | None,
+    agent_type: str,
+    backend: str,
+    model: str | None,
+    timeout: int,
+    system_prompt_file: str | None,
+    coordination: bool,
+    coordination_db: str | None,
+):
+    """Run a task synchronously (foreground).
+
+    Executes the task and waits for completion. Use this when you want to:
+    - Work on a task and wait for results
+    - Run tasks that don't need background execution
+    - Get immediate feedback on task progress
+
+    For background/parallel execution, use 'gptodo spawn' instead.
+
+    Examples:
+        gptodo run my-task
+        gptodo run my-task --model openrouter/moonshotai/kimi-k2.5
+        gptodo run my-task --backend claude --type explore
+        gptodo run my-task --backend claude --coordination
+    """
+    _execute_task_agent(
+        task_id=task_id,
+        prompt=prompt,
+        agent_type=agent_type,
+        backend=backend,
+        background=False,
+        model=model,
+        timeout=timeout,
+        system_prompt_file=system_prompt_file,
+        coordination=coordination,
+        coordination_db=coordination_db,
+    )
+
+
+@cli.command("spawn")
+@click.argument("task_id")
+@click.option(
+    "--prompt",
+    "-p",
+    type=str,
+    help="Custom prompt for the agent (default: derived from task)",
+)
+@click.option(
+    "--type",
+    "agent_type",
+    type=click.Choice(["general", "explore", "plan", "execute"]),
+    default="general",
+    help="Type of agent to spawn",
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["gptme", "claude"]),
+    default="gptme",
+    help="Which backend to use",
+)
+@click.option(
+    "--foreground",
+    "-f",
+    is_flag=True,
+    help="Run in foreground instead of background (consider using 'run' command)",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default=None,
+    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5)",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=3000,
+    help="Timeout in seconds (default: 3000, ~50min; 0 to disable)",
+)
+@click.option(
+    "--system-prompt-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to file with additional system prompt (claude backend only)",
+)
+@click.option(
+    "--max-concurrent",
+    type=int,
+    default=4,
+    help="Max concurrent background agents (0 = unlimited)",
+)
+@click.option(
+    "--coordination",
+    is_flag=True,
+    help="Enable inter-agent coordination (auto-generates agent ID, announces presence)",
+)
+@click.option(
+    "--coordination-db",
+    type=str,
+    default=None,
+    help="Path to coordination DB (implies --coordination)",
+)
+def spawn_cmd(
+    task_id: str,
+    prompt: str | None,
+    agent_type: str,
+    backend: str,
+    foreground: bool,
+    model: str | None,
+    timeout: int,
+    max_concurrent: int,
+    system_prompt_file: str | None,
+    coordination: bool,
+    coordination_db: str | None,
+):
+    """Spawn a sub-agent in background (tmux).
+
+    Launches a gptme or claude subprocess and returns immediately.
+    Use this when you want to:
+    - Delegate work to a sub-agent while continuing other work
+    - Run multiple tasks in parallel
+    - Execute long-running tasks asynchronously
+
+    For synchronous execution, use 'gptodo run' instead.
+
+    Examples:
+        gptodo spawn my-task
+        gptodo spawn my-task --timeout 1800  # 30min timeout
+        gptodo spawn my-task --backend claude --system-prompt-file sysprompt.md
+        gptodo spawn my-task --backend claude --type explore
+        gptodo spawn my-task --backend claude --coordination
+        gptodo spawn my-task -f  # Foreground mode (prefer 'run' command)
+    """
+    _execute_task_agent(
+        task_id=task_id,
+        prompt=prompt,
+        agent_type=agent_type,
+        backend=backend,
+        background=not foreground,
+        model=model,
+        timeout=timeout,
+        max_concurrent=max_concurrent,
+        system_prompt_file=system_prompt_file,
+        coordination=coordination,
+        coordination_db=coordination_db,
+    )
+
+
+@cli.command("loop")
+@click.option(
+    "--max-tasks",
+    "-n",
+    type=int,
+    default=5,
+    help="Maximum number of tasks to process (default: 5)",
+)
+@click.option(
+    "--type",
+    "agent_type",
+    type=click.Choice(["general", "explore", "plan", "execute"]),
+    default="execute",
+    help="Type of agent to spawn for each task",
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["gptme", "claude"]),
+    default="gptme",
+    help="Which backend to use",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default=None,
+    help="Model to use (e.g. openrouter/moonshotai/kimi-k2.5)",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    help="Timeout per task in seconds",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be executed without running",
+)
+@click.option(
+    "--parallel",
+    "-p",
+    type=int,
+    default=1,
+    help="Number of parallel agents (1 = sequential)",
+)
+@click.option(
+    "--pool",
+    "pool_filter",
+    default="general",
+    help="Only process tasks in this pool. Use 'all' to see every pool, 'frontier' for frontier only. Default: 'general' (non-default pools hidden).",
+)
+@click.option(
+    "--exclude-pool",
+    "exclude_pool",
+    default=None,
+    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
+)
+def loop_cmd(
+    max_tasks: int,
+    agent_type: str,
+    backend: str,
+    model: str | None,
+    timeout: int,
+    dry_run: bool,
+    parallel: int,
+    pool_filter: str | None,
+    exclude_pool: str | None,
+):
+    """Process ready tasks in a loop.
+
+    Finds tasks that are ready (no unmet dependencies) and executes them
+    one by one until max-tasks is reached or no ready tasks remain.
+
+    This command is designed to be called by autonomous runs to churn
+    through ready work without manual intervention.
+
+    Examples:
+        gptodo loop                              # Process up to 5 ready tasks
+        gptodo loop -n 10                        # Process up to 10 tasks
+        gptodo loop --dry-run                    # Show what would run
+        gptodo loop -p 3                         # Run 3 tasks in parallel
+        gptodo loop --backend claude             # Use Claude backend
+        gptodo loop --pool frontier              # Only frontier-pool tasks
+        gptodo loop --exclude-pool frontier      # Skip frontier-pool tasks
+    """
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Find ready tasks
+    all_tasks_list = load_tasks(tasks_dir)
+    # Convert to dict for is_task_ready
+    all_tasks_dict: Dict[str, TaskInfo] = {t.name: t for t in all_tasks_list if t.name}
+    ready_tasks = [t for t in all_tasks_list if t.name and is_task_ready(t, all_tasks_dict)]
+
+    # Apply pool filter (default: general only; --pool all to see every pool)
+    ready_tasks = [
+        t
+        for t in ready_tasks
+        if task_matches_pool_filter(t, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
+
+    if not ready_tasks:
+        console.print("[yellow]No ready tasks found[/]")
+        return
+
+    # Sort by priority (high first)
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    ready_tasks.sort(key=lambda t: priority_order.get(t.priority or "medium", 1))
+
+    # Limit to max_tasks
+    tasks_to_run = ready_tasks[:max_tasks]
+
+    console.print(
+        f"[cyan]Found {len(ready_tasks)} ready tasks, will process {len(tasks_to_run)}[/]"
+    )
+
+    if dry_run:
+        console.print("\n[yellow]DRY RUN - would execute:[/]")
+        for i, task in enumerate(tasks_to_run, 1):
+            console.print(f"  {i}. {task.name} (priority: {task.priority})")
+        return
+
+    # Execute tasks
+    if parallel > 1:
+        # Parallel execution using spawn (background)
+        # All tasks run as background agents - use --max-tasks to limit total
+        console.print(f"\n[cyan]Spawning {len(tasks_to_run)} parallel agents...[/]")
+        for task in tasks_to_run:
+            console.print(f"\n[bold]Spawning: {task.name}[/]")
+            _execute_task_agent(
+                task_id=task.name,
+                prompt=None,
+                agent_type=agent_type,
+                backend=backend,
+                background=True,
+                model=model,
+                timeout=timeout,
+            )
+        console.print(f"\n[green]✓ Spawned {len(tasks_to_run)} agents[/]")
+        console.print("Monitor with: [cyan]gptodo sessions[/]")
+    else:
+        # Sequential execution
+        completed = 0
+        failed = 0
+        for i, task in enumerate(tasks_to_run, 1):
+            console.print(f"\n[bold]Task {i}/{len(tasks_to_run)}: {task.name}[/]")
+            try:
+                _execute_task_agent(
+                    task_id=task.name,
+                    prompt=None,
+                    agent_type=agent_type,
+                    backend=backend,
+                    background=False,
+                    model=model,
+                    timeout=timeout,
+                )
+                completed += 1
+            except Exception as e:
+                console.print(f"[red]Error: {e}[/]")
+                failed += 1
+
+        console.print(f"\n[green]✓ Loop complete: {completed} succeeded, {failed} failed[/]")
+
+
+@cli.command("sessions")
+@click.option(
+    "--status",
+    "-s",
+    type=click.Choice(["running", "completed", "failed", "killed"]),
+    help="Filter by status",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output as JSON",
+)
+def sessions_cmd(status: str | None, as_json: bool):
+    """List all sub-agent sessions.
+
+    Shows active and recent sub-agent sessions spawned via 'gptodo spawn'.
+    """
+    repo_root = find_repo_root(Path.cwd())
+    sessions = list_sessions(repo_root, status)
+
+    if as_json:
+        data = [
+            {
+                "session_id": s.session_id,
+                "task_id": s.task_id,
+                "agent_type": s.agent_type,
+                "backend": s.backend,
+                "status": s.status,
+                "started": s.started,
+            }
+            for s in sessions
+        ]
+        console.print(json.dumps(data, indent=2))
+        return
+
+    if not sessions:
+        console.print("[dim]No sessions found[/]")
+        return
+
+    table = Table(title="Sub-Agent Sessions")
+    table.add_column("ID", style="cyan")
+    table.add_column("Task")
+    table.add_column("Type")
+    table.add_column("Backend")
+    table.add_column("Status")
+    table.add_column("Started")
+
+    status_colors = {
+        "running": "yellow",
+        "completed": "green",
+        "failed": "red",
+        "killed": "dim",
+    }
+
+    for s in sessions:
+        color = status_colors.get(s.status, "white")
+        # Parse and format started time
+        started = datetime.fromisoformat(s.started.replace("Z", "+00:00"))
+        ago = datetime.now(timezone.utc) - started
+        if ago.days > 0:
+            ago_str = f"{ago.days}d ago"
+        elif ago.seconds >= 3600:
+            ago_str = f"{ago.seconds // 3600}h ago"
+        elif ago.seconds >= 60:
+            ago_str = f"{ago.seconds // 60}m ago"
+        else:
+            ago_str = "just now"
+
+        table.add_row(
+            s.session_id,
+            s.task_id,
+            s.agent_type,
+            s.backend,
+            f"[{color}]{s.status}[/]",
+            ago_str,
+        )
+
+    console.print(table)
+
+
+@cli.command("output")
+@click.argument("session_id")
+def output_cmd(session_id: str):
+    """Get output from a sub-agent session.
+
+    Shows the output from a running or completed session.
+    """
+    repo_root = find_repo_root(Path.cwd())
+
+    # First update session status
+    session = check_session(session_id, repo_root)
+    if session is None:
+        console.print(f"[red]Session '{session_id}' not found[/]")
+        return
+
+    console.print(f"[cyan]Session:[/] {session.session_id}")
+    console.print(f"[cyan]Task:[/] {session.task_id}")
+    console.print(f"[cyan]Status:[/] {session.status}")
+    console.print()
+
+    output = get_session_output(session_id, repo_root)
+    console.print(output)
+
+
+@cli.command("kill")
+@click.argument("session_id")
+def kill_cmd(session_id: str):
+    """Kill a running sub-agent session.
+
+    Terminates the tmux session for a background agent.
+    """
+    repo_root = find_repo_root(Path.cwd())
+
+    if kill_session(session_id, repo_root):
+        console.print(f"[green]✓ Killed session:[/] {session_id}")
+    else:
+        console.print(f"[red]✗ Could not kill session:[/] {session_id}")
+        console.print("  Session may not exist or already stopped")
+
+
+@cli.command("cleanup-sessions")
+@click.option(
+    "--older-than",
+    type=int,
+    default=24,
+    help="Remove sessions older than N hours",
+)
+def cleanup_sessions_cmd(older_than: int):
+    """Clean up old session files.
+
+    Removes completed/failed session files older than the specified time.
+    """
+    repo_root = find_repo_root(Path.cwd())
+    count = cleanup_sessions(repo_root, older_than)
+    console.print(f"[green]✓ Cleaned up {count} session(s)[/]")
+
+
+@cli.command("agents")
+@click.option("--cleanup", is_flag=True, help="Remove stale agent registrations")
+@click.option("--all", "show_all", is_flag=True, help="Include stale agents")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--timeout",
+    type=int,
+    default=DEFAULT_HEARTBEAT_TIMEOUT_MINUTES,
+    help=f"Heartbeat timeout in minutes (default: {DEFAULT_HEARTBEAT_TIMEOUT_MINUTES})",
+)
+def list_all_agents(cleanup: bool, show_all: bool, output_json: bool, timeout: int):
+    """List all registered agents.
+
+    Shows which agents are active and their current status.
+    Use --cleanup to remove stale agent registrations.
+
+    Examples:
+        gptodo agents
+        gptodo agents --cleanup
+        gptodo agents --all
+        gptodo agents --json
+    """
+    repo_root = Path(os.environ.get("TASKS_REPO_ROOT", "."))
+
+    if cleanup:
+        removed = cleanup_stale_agents(repo_root, timeout)
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "removed": removed,
+                        "count": len(removed),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console = Console()
+            if removed:
+                console.print(f"[green]✓ Removed {len(removed)} stale agent(s)[/]")
+                for agent_id in removed:
+                    console.print(f"[dim]  - {agent_id}[/]")
+            else:
+                console.print("[dim]No stale agents to remove[/]")
+        return
+
+    agents = list_agents(repo_root, include_stale=show_all, timeout_minutes=timeout)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "agent_id": agent.agent_id,
+                            "instance_type": agent.instance_type,
+                            "status": agent.status,
+                            "current_task": agent.current_task,
+                            "tasks_completed": agent.tasks_completed,
+                            "started": agent.started,
+                            "last_heartbeat": agent.last_heartbeat,
+                            "stale": agent.is_stale(timeout),
+                            "workspace": agent.workspace,
+                        }
+                        for agent in agents
+                    ],
+                    "count": len(agents),
+                },
+                indent=2,
+            )
+        )
+    else:
+        console = Console()
+        if not agents:
+            console.print("[dim]No registered agents[/]")
+            return
+
+        table = Table(title="[bold]Registered Agents[/]")
+        table.add_column("Agent ID", style="cyan")
+        table.add_column("Status", style="green")
+        table.add_column("Current Task", style="yellow")
+        table.add_column("Completed", style="blue")
+        table.add_column("Uptime", style="magenta")
+        table.add_column("Health", style="white")
+
+        for agent in agents:
+            # Calculate uptime
+            try:
+                started = datetime.fromisoformat(agent.started.replace("Z", "+00:00"))
+                uptime = datetime.now(timezone.utc) - started
+                hours = int(uptime.total_seconds() // 3600)
+                minutes = int((uptime.total_seconds() % 3600) // 60)
+                uptime_str = f"{hours}h {minutes}m"
+            except (ValueError, TypeError):
+                uptime_str = "?"
+
+            # Health status
+            if agent.is_stale(timeout):
+                health = "[red]STALE[/]"
+            else:
+                health = "[green]HEALTHY[/]"
+
+            # Status with color
+            status_colors = {
+                "starting": "yellow",
+                "idle": "blue",
+                "working": "green",
+                "waiting": "yellow",
+                "stopping": "red",
+            }
+            status_color = status_colors.get(agent.status, "white")
+            status_str = f"[{status_color}]{agent.status}[/]"
+
+            table.add_row(
+                agent.agent_id,
+                status_str,
+                agent.current_task or "-",
+                str(agent.tasks_completed),
+                uptime_str,
+                health,
+            )
+
+        console.print(table)
+
+
+@cli.command("subtask")
+@click.argument("parent_id")
+@click.option(
+    "--name",
+    "-n",
+    "subtask_names",
+    multiple=True,
+    required=True,
+    help="Subtask name (can specify multiple times)",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["sequential", "parallel", "fan-out-fan-in"]),
+    default="parallel",
+    help="Coordination mode for subtasks",
+)
+@click.option(
+    "--isolation",
+    type=click.Choice(["none", "worktree", "container"]),
+    default="none",
+    help="Isolation mode for subtasks",
+)
+@click.option(
+    "--priority",
+    type=click.Choice(["high", "medium", "low"]),
+    default=None,
+    help="Priority for all subtasks",
+)
+def subtask_cmd(
+    parent_id: str, subtask_names: tuple[str, ...], mode: str, isolation: str, priority: str | None
+):
+    """Create subtasks from a parent task.
+
+    Creates new task files with spawned_from set to the parent task,
+    and updates the parent task's spawned_tasks and coordination_mode.
+
+    This is for task decomposition, NOT for spawning agents.
+    For agent spawning, use 'gptodo spawn' or 'gptodo run'.
+
+    Examples:
+        gptodo subtask big-task -n subtask-1 -n subtask-2
+        gptodo subtask implement-api -n auth-endpoint -n users-endpoint
+        gptodo subtask feature-x -n part-a -n part-b --mode fan-out-fan-in
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        return
+
+    # Find parent task
+    parent_task = None
+    for task in tasks:
+        if task.name == parent_id or task.id == parent_id:
+            parent_task = task
+            break
+
+    if not parent_task:
+        console.print(f"[red]Parent task not found: {parent_id}[/]")
+        return
+
+    # Create subtask files
+    created_tasks = []
+    for subtask_name in subtask_names:
+        # Sanitize subtask name to filename
+        filename = subtask_name.lower().replace(" ", "-").replace("_", "-")
+        if not filename.endswith(".md"):
+            filename = f"{filename}.md"
+
+        subtask_path = tasks_dir / filename
+
+        if subtask_path.exists():
+            console.print(f"[yellow]Subtask already exists: {filename}[/]")
+            continue
+
+        # Create frontmatter for new subtask
+        now = datetime.now(timezone.utc)
+        fm = {
+            "state": "todo",
+            "created": now.isoformat(),
+            "spawned_from": parent_task.id,
+            "parallelizable": mode == "parallel",
+        }
+
+        if isolation != "none":
+            fm["isolation"] = isolation
+
+        if priority:
+            fm["priority"] = priority
+
+        # Write subtask file
+        content = "---\n"
+        for key, value in fm.items():
+            if isinstance(value, bool):
+                content += f"{key}: {str(value).lower()}\n"
+            else:
+                content += f"{key}: {value}\n"
+        content += "---\n\n"
+        content += f"# {subtask_name.replace('-', ' ').title()}\n\n"
+        content += f"Spawned from [{parent_task.id}](./{parent_task.path.name})\n\n"
+        content += "## Description\n\n[TODO]\n\n"
+        content += "## Acceptance Criteria\n\n- [ ] [TODO]\n"
+
+        subtask_path.write_text(content)
+        created_tasks.append(filename.replace(".md", ""))
+        console.print(f"[green]Created subtask: {filename}[/]")
+
+    if not created_tasks:
+        console.print("[yellow]No subtasks created[/]")
+        return
+
+    # Update parent task's spawned_tasks and coordination_mode
+    _update_parent_task(parent_task.path, created_tasks, mode)
+
+    console.print(f"\n[bold green]Created {len(created_tasks)} subtasks from {parent_task.id}[/]")
+    console.print(f"  Coordination mode: {mode}")
+    console.print(f"  Isolation: {isolation}")
+
+
+def _update_parent_task(parent_path: Path, new_subtasks: list[str], coordination_mode: str):
+    """Update parent task with spawned_tasks and coordination_mode."""
+    import re
+
+    content = parent_path.read_text()
+
+    # Find the frontmatter section
+    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    if not match:
+        return
+
+    frontmatter_text = match.group(1)
+    rest = content[match.end() :]
+
+    # Parse existing spawned_tasks if any
+    existing_spawned = []
+    spawned_match = re.search(r"^spawned_tasks:\s*\[(.*?)\]", frontmatter_text, re.MULTILINE)
+    if spawned_match:
+        existing = spawned_match.group(1)
+        if existing.strip():
+            existing_spawned = [t.strip().strip("'\"") for t in existing.split(",")]
+
+    # Combine with new tasks (avoid duplicates)
+    all_subtasks = list(dict.fromkeys(existing_spawned + new_subtasks))
+
+    # Update frontmatter
+    # Remove old spawned_tasks line if exists
+    frontmatter_text = re.sub(r"^spawned_tasks:.*\n?", "", frontmatter_text, flags=re.MULTILINE)
+    # Remove old coordination_mode line if exists
+    frontmatter_text = re.sub(r"^coordination_mode:.*\n?", "", frontmatter_text, flags=re.MULTILINE)
+
+    # Add new fields
+    subtasks_str = ", ".join(all_subtasks)
+    frontmatter_text = frontmatter_text.rstrip() + "\n"
+    frontmatter_text += f"spawned_tasks: [{subtasks_str}]\n"
+    frontmatter_text += f"coordination_mode: {coordination_mode}\n"
+
+    # Reconstruct file
+    new_content = f"---\n{frontmatter_text}---{rest}"
+    parent_path.write_text(new_content)
+
+
+# ============================================================================
+# Dependency Tree Commands (Issue #255: Claude Code-inspired improvements)
+# ============================================================================
+
+
+@cli.group("dep")
+def dep_group():
+    """Dependency management and visualization commands.
+
+    These commands help analyze task dependencies, detect cycles,
+    and visualize the dependency graph.
+    """
+    pass
+
+
+@dep_group.command("tree")
+@click.argument("task_id")
+@click.option(
+    "--format",
+    "-f",
+    type=click.Choice(["ascii", "mermaid"]),
+    default="ascii",
+    help="Output format (ascii or mermaid for diagrams)",
+)
+@click.option(
+    "--direction",
+    "-d",
+    type=click.Choice(["up", "down", "both"]),
+    default="both",
+    help="Direction: up (requires), down (required_by), both",
+)
+@click.option(
+    "--depth",
+    type=int,
+    default=5,
+    help="Maximum tree depth to display (default: 5)",
+)
+def dep_tree(task_id: str, format: str, direction: str, depth: int):
+    """Show dependency tree for a task.
+
+    Visualizes what a task requires (upstream) and what depends
+    on it (downstream) in ASCII or Mermaid format.
+
+    Examples:
+
+    \b
+        gptodo dep tree my-task
+        gptodo dep tree my-task --format mermaid
+        gptodo dep tree my-task --direction up --depth 3
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    tree = get_dependency_tree(
+        task_id=task_id,
+        repo_root=repo_root,
+        format=format,
+        direction=direction,
+        max_depth=depth,
+    )
+
+    if format == "mermaid":
+        console.print("[bold]Mermaid Graph:[/]")
+        console.print(f"```mermaid\n{tree}\n```")
+    else:
+        console.print(f"[bold]Dependency Tree: {task_id}[/]\n")
+        console.print(tree)
+
+
+@dep_group.command("check")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def dep_check(output_json: bool):
+    """Check for circular dependencies across all tasks.
+
+    Scans all tasks and reports any circular dependency chains found.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    from .utils import load_tasks
+
+    tasks = load_tasks(tasks_dir)
+    nodes = build_dependency_graph(tasks)
+    cycles = detect_circular_dependencies(nodes)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "cycles": [[n for n in cycle] for cycle in cycles],
+                    "count": len(cycles),
+                    "status": "warning" if cycles else "ok",
+                },
+                indent=2,
+            )
+        )
+    else:
+        if cycles:
+            console.print(f"[red]⚠️  Found {len(cycles)} circular dependency chain(s):[/]")
+            for cycle in cycles:
+                console.print(f"  • {' → '.join(cycle)}")
+        else:
+            console.print("[green]✓ No circular dependencies found[/]")
+
+
+@dep_group.command("dag")
+@click.option(
+    "--state",
+    "-s",
+    multiple=True,
+    help="Filter by state (can repeat: --state active --state backlog). Default: all non-terminal.",
+)
+@click.option(
+    "--power",
+    "show_power",
+    is_flag=True,
+    default=True,
+    help="Show unblocking power scores [N↑] (default: on)",
+)
+@click.option(
+    "--no-power",
+    "show_power",
+    flag_value=False,
+    help="Hide unblocking power scores",
+)
+def dep_dag(state: tuple[str, ...], show_power: bool):
+    """Show the full workspace dependency graph.
+
+    Renders all tasks with their dependency relationships as an ASCII graph,
+    with optional unblocking power scores showing which tasks unlock the most
+    downstream work.
+
+    Examples:
+
+    \b
+        gptodo dep dag                    # Full graph, non-terminal tasks
+        gptodo dep dag --state active     # Active tasks only
+        gptodo dep dag --no-power         # Hide unblocking power scores
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    from .utils import load_tasks
+
+    tasks = load_tasks(tasks_dir)
+    nodes = build_dependency_graph(tasks)
+
+    # Default: exclude terminal states
+    filter_states: set[str] | None = None
+    if state:
+        filter_states = set(state)
+    else:
+        terminal = {"done", "cancelled"}
+        filter_states = {
+            node.state
+            for node in nodes.values()
+            if not node.is_external and node.state not in terminal
+        }
+
+    power = compute_unblocking_power(nodes) if show_power else None
+
+    dag = render_full_dag_ascii(nodes, unblocking_power=power, filter_states=filter_states)
+
+    if not dag.strip():
+        console.print("[yellow]No tasks with dependencies found.[/]")
+        return
+
+    title = "Workspace Dependency DAG"
+    if filter_states:
+        title += f" ({', '.join(sorted(filter_states))})"
+    console.print(f"[bold]{title}[/]\n")
+    console.print(dag)
+
+    if show_power:
+        console.print("\n[dim][N↑] = unblocking power (# tasks transitively unblocked)[/]")
+
+
+# ============================================================================
+# Checker Pattern Commands (Issue #255: Claude Code-inspired task verification)
+# ============================================================================
+
+
+@cli.command("checker")
+@click.argument("task_id")
+@click.option("--poll", is_flag=True, help="Poll until task completes or times out")
+@click.option(
+    "--interval",
+    type=int,
+    default=30,
+    help="Polling interval in seconds (default: 30)",
+)
+@click.option(
+    "--max-polls",
+    type=int,
+    default=100,
+    help="Maximum number of polls before timeout (default: 100)",
+)
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--skip-subtasks",
+    is_flag=True,
+    help="Skip subtask completion verification",
+)
+@click.option(
+    "--skip-deps",
+    is_flag=True,
+    help="Skip dependency resolution verification",
+)
+def checker_cmd(
+    task_id: str,
+    poll: bool,
+    interval: int,
+    max_polls: int,
+    output_json: bool,
+    skip_subtasks: bool,
+    skip_deps: bool,
+):
+    """Run verification checks on a task.
+
+    The checker pattern verifies task state:
+    - Subtask completion (all done before marking done)
+    - Dependency resolution (deps resolved before active)
+    - State validity (valid state transitions)
+
+    Use --poll to continuously check until completion or timeout.
+
+    Examples:
+
+    \b
+        gptodo checker my-task
+        gptodo checker my-task --poll --interval 60
+        gptodo checker my-task --json
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    config = CheckerConfig(
+        poll_interval_seconds=interval,
+        max_polls=max_polls,
+        verify_subtasks=not skip_subtasks,
+        verify_dependencies=not skip_deps,
+    )
+
+    def on_poll(poll_num: int, result) -> bool:
+        """Callback for polling progress."""
+        if not output_json:
+            console.print(f"[dim]Poll {poll_num + 1}: {result.status} - {result.message}[/]")
+        return True  # Continue polling
+
+    if poll:
+        result = poll_task_completion(
+            task_id=task_id,
+            repo_root=repo_root,
+            config=config,
+            on_poll=on_poll,
+        )
+    else:
+        result = run_checker(task_id=task_id, repo_root=repo_root, config=config)
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "task_id": result.task_id,
+                    "timestamp": result.timestamp,
+                    "status": result.status,
+                    "message": result.message,
+                    "checks": result.checks,
+                    "fixes_created": result.fixes_created,
+                },
+                indent=2,
+            )
+        )
+    else:
+        # Status indicator
+        status_styles = {
+            "passed": "[green]✅ PASSED[/]",
+            "failed": "[red]❌ FAILED[/]",
+            "needs_attention": "[yellow]👀 NEEDS ATTENTION[/]",
+            "in_progress": "[blue]🏃 IN PROGRESS[/]",
+        }
+        console.print(f"\n{status_styles.get(result.status, result.status)}")
+        console.print(f"[bold]{result.message}[/]\n")
+
+        # Show check details
+        for check in result.checks:
+            icon = "✅" if check["passed"] else "❌"
+            console.print(f"  {icon} {check['check']}: {check['message']}")
+            if check.get("details"):
+                for key, value in check["details"].items():
+                    console.print(f"      {key}: {value}")
+
+
+@cli.command("transitions")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def transitions_cmd(output_json: bool):
+    """Show valid state transitions for tasks.
+
+    Displays which state transitions are allowed in the task workflow.
+    """
+    console = Console()
+
+    if output_json:
+        print(json.dumps(VALID_TRANSITIONS, indent=2))
+    else:
+        console.print("[bold]Valid State Transitions:[/]\n")
+        for state, next_states in VALID_TRANSITIONS.items():
+            if next_states:
+                console.print(f"  {state} → {', '.join(next_states)}")
+            else:
+                console.print(f"  {state} [dim](terminal state)[/]")
+        console.print("\n[dim]State flow: backlog → todo → active → ready_for_review → done[/]")
+        console.print("[dim]Alternate: active → waiting → active → done[/]")
+        console.print("[dim]Deferred:  any → someday → backlog/todo (revive when ready)[/]")
+
+
+@cli.command("lint")
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Emit findings as JSON",
+)
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Exit non-zero if any warnings are found (for CI use)",
+)
+@click.argument("task_files", nargs=-1, type=click.Path())
+def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> None:
+    """Lint task frontmatter for schema errors and unknown/deprecated fields.
+
+    Runs two classes of checks:
+
+    **Schema errors** (always exit 1): structural violations that make a task
+    file ambiguous or unsafe to parse — duplicate keys, space-separated
+    timestamps, leading-``#`` null values, missing required fields, invalid
+    enum values, bad ``assigned_to`` format.
+
+    **Warnings** (exit 1 only with ``--strict``): fields not in the known
+    schema (KNOWN_FRONTMATTER_FIELDS), deprecated field names, and inline
+    ``#`` in scalar values that may silently truncate the value.
+
+    Examples:
+        gptodo lint                          # lint all tasks
+        gptodo lint tasks/foo.md tasks/bar.md # lint specific files
+        gptodo lint --json                   # machine-readable
+        gptodo lint --strict                 # exit 1 on warnings too (CI)
+    """
+    from gptodo.validate_frontmatter import validate_schema  # noqa: PLC0415
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load task files
+    if task_files:
+        tasks: list[TaskInfo] = []
+        for file in task_files:
+            path = Path(file)
+            if not path.is_absolute():
+                if str(path).startswith("tasks/"):
+                    path = repo_root / path
+                else:
+                    path = tasks_dir / path
+            file_tasks = load_tasks(path.parent, single_file=path)
+            tasks.extend(file_tasks)
+    else:
+        tasks = load_tasks(tasks_dir)
+
+    if not tasks:
+        if output_json:
+            print(json.dumps({"findings": [], "count": 0}))
+        else:
+            console.print("[yellow]No tasks found[/]")
+        return
+
+    # Collect findings across all tasks
+    all_findings: list[dict] = []
+    for task in tasks:
+        # Schema errors — always fatal.
+        schema_warnings: list[str] = []
+        for error_msg in validate_schema(task.path, collect_warnings=schema_warnings):
+            all_findings.append(
+                {
+                    "task": task.name,
+                    "path": str(task.path.relative_to(repo_root)),
+                    "severity": "error",
+                    "field": "-",
+                    "message": error_msg,
+                }
+            )
+        # Ambiguous inline-'#' warnings from schema checks (non-fatal).
+        for warning_msg in schema_warnings:
+            all_findings.append(
+                {
+                    "task": task.name,
+                    "path": str(task.path.relative_to(repo_root)),
+                    "severity": "warning",
+                    "field": "-",
+                    "message": warning_msg,
+                }
+            )
+        # Field-level warnings (deprecated / unknown).
+        for severity, field, message in lint_frontmatter_fields(task.metadata):
+            all_findings.append(
+                {
+                    "task": task.name,
+                    "path": str(task.path.relative_to(repo_root)),
+                    "severity": severity,
+                    "field": field,
+                    "message": message,
+                }
+            )
+
+    has_errors = any(f["severity"] == "error" for f in all_findings)
+    has_warnings = any(f["severity"] != "error" for f in all_findings)
+
+    if output_json:
+        print(json.dumps({"findings": all_findings, "count": len(all_findings)}, indent=2))
+        if has_errors or (strict and has_warnings):
+            sys.exit(1)
+        return
+
+    # Human output — group by task, errors first
+    if not all_findings:
+        console.print(f"[green]✓ No frontmatter schema violations across {len(tasks)} task(s).[/]")
+        return
+
+    error_count = sum(1 for f in all_findings if f["severity"] == "error")
+    warning_count = sum(1 for f in all_findings if f["severity"] == "warning")
+    deprecated_count = sum(1 for f in all_findings if f["severity"] == "warn-deprecated")
+    unknown_count = sum(1 for f in all_findings if f["severity"] == "warn-unknown")
+
+    console.print(
+        f"\n[bold]Frontmatter lint — {len(all_findings)} finding(s) across "
+        f"{len({f['task'] for f in all_findings})} task(s):[/]"
+    )
+    if error_count:
+        console.print(f"  [bold red]{error_count}[/] schema error(s)")
+    if warning_count:
+        console.print(f"  [yellow]{warning_count}[/] schema warning(s)")
+    if deprecated_count:
+        console.print(f"  [red]{deprecated_count}[/] anti-design-goal / deprecated field(s)")
+    if unknown_count:
+        console.print(f"  [yellow]{unknown_count}[/] unknown field(s)")
+
+    # Group findings by task for readable output
+    by_task: Dict[str, list] = {}
+    for f in all_findings:
+        by_task.setdefault(f["task"], []).append(f)
+
+    for task_name in sorted(by_task.keys()):
+        console.print(f"\n[bold]{task_name}[/] ({by_task[task_name][0]['path']}):")
+        for f in by_task[task_name]:
+            if f["severity"] == "error":
+                console.print(f"  [bold red]ERROR[/] {f['message']}")
+            elif f["severity"] == "warning":
+                console.print(f"  [yellow]WARN[/] schema warning: {f['message']}")
+            elif f["severity"] == "warn-deprecated":
+                console.print(
+                    f"  [red]WARN[/] deprecated field [bold]{f['field']}[/]: {f['message']}"
+                )
+            else:
+                console.print(
+                    f"  [yellow]WARN[/] unknown field [bold]{f['field']}[/]: {f['message']}"
+                )
+
+    if has_errors or (strict and has_warnings):
+        sys.exit(1)
+
+
+# =============================================================================
+# Worktree Commands (Issue #246)
+# =============================================================================
+
+
+@cli.group("worktree")
+def worktree_group():
+    """Git worktree management for isolated agent execution.
+
+    Worktrees enable multiple agents to work on different features
+    simultaneously without conflicts. Each worktree gets its own
+    directory and branch.
+
+    Workflow:
+    1. Create worktree for task: gptodo worktree create <task-id>
+    2. Agent works in worktree, commits freely
+    3. On completion: create PR or merge locally
+    4. Cleanup: remove worktree after merge
+    """
+    pass
+
+
+@worktree_group.command("create")
+@click.argument("task_id")
+@click.option(
+    "--branch",
+    "-b",
+    help="Branch name (default: task-<task_id>)",
+)
+@click.option(
+    "--base",
+    default="origin/master",
+    help="Base branch to branch from (default: origin/master)",
+)
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def worktree_create_cmd(task_id: str, branch: str | None, base: str, output_json: bool):
+    """Create a worktree for isolated agent execution.
+
+    Creates a new git worktree with a fresh branch for the agent to
+    work in. The agent can commit freely without affecting the main branch.
+
+    Examples:
+
+    \b
+        gptodo worktree create my-task
+        gptodo worktree create my-task --branch feature/custom-name
+        gptodo worktree create my-task --base origin/develop
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    try:
+        info = create_worktree(
+            task_id=task_id,
+            branch_name=branch,
+            base_branch=base,
+            workspace=repo_root,
+        )
+
+        if output_json:
+            print(
+                json.dumps(
+                    {
+                        "path": str(info.path),
+                        "branch": info.branch,
+                        "task_id": info.task_id,
+                        "base_branch": info.base_branch,
+                        "status": info.status,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console.print("[green]✅ Created worktree:[/]")
+            console.print(f"  Path: {info.path}")
+            console.print(f"  Branch: {info.branch}")
+            console.print(f"  Base: {info.base_branch}")
+            console.print(f"\n[dim]cd {info.path} to start working[/]")
+
+    except RuntimeError as e:
+        if output_json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            console.print(f"[red]❌ Error: {e}[/]")
+        raise SystemExit(1) from e
+
+
+@worktree_group.command("list")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def worktree_list_cmd(output_json: bool):
+    """List all git worktrees.
+
+    Shows all worktrees in the repository with their branches and paths.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    worktrees = list_worktrees(repo_root)
+
+    if output_json:
+        print(json.dumps(worktrees, indent=2))
+    else:
+        if not worktrees:
+            console.print("[dim]No worktrees found[/]")
+            return
+
+        console.print("[bold]Git Worktrees:[/]\n")
+        for wt in worktrees:
+            path = wt.get("path", "unknown")
+            branch = wt.get("branch", "").replace("refs/heads/", "")
+            detached = wt.get("detached", False)
+
+            if detached:
+                console.print(f"  📁 {path}")
+                console.print(f"     [dim]HEAD: {wt.get('head', 'unknown')[:8]} (detached)[/]")
+            else:
+                console.print(f"  📁 {path}")
+                console.print(f"     [cyan]Branch: {branch}[/]")
+
+
+@worktree_group.command("status")
+@click.argument("worktree_path", type=click.Path(exists=True))
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def worktree_status_cmd(worktree_path: str, output_json: bool):
+    """Show status of a worktree.
+
+    Displays branch name, uncommitted changes, and commits ahead of origin/master.
+    """
+    console = Console()
+    status = get_worktree_status(Path(worktree_path))
+
+    if output_json:
+        print(json.dumps(status, indent=2))
+    else:
+        console.print(f"[bold]Worktree Status:[/] {status['path']}\n")
+        console.print(f"  Branch: [cyan]{status['branch']}[/]")
+        console.print(f"  Commits ahead: {status['commits_ahead']}")
+
+        if status["uncommitted_changes"]:
+            console.print("  [yellow]⚠️ Uncommitted changes:[/]")
+            for f in status["files_changed"][:10]:
+                console.print(f"    - {f}")
+            if len(status["files_changed"]) > 10:
+                console.print(f"    [dim]... and {len(status['files_changed']) - 10} more[/]")
+        else:
+            console.print("  [green]✅ Working tree clean[/]")
+
+
+@worktree_group.command("remove")
+@click.argument("worktree_path", type=click.Path())
+@click.option("--force", "-f", is_flag=True, help="Force removal even if dirty")
+@click.confirmation_option(prompt="Are you sure you want to remove this worktree?")
+def worktree_remove_cmd(worktree_path: str, force: bool):
+    """Remove a worktree.
+
+    Removes the worktree directory and unlinks it from git.
+    Use --force to remove even if there are uncommitted changes.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    if remove_worktree(Path(worktree_path), force=force, workspace=repo_root):
+        console.print(f"[green]✅ Removed worktree: {worktree_path}[/]")
+    else:
+        console.print("[red]❌ Failed to remove worktree[/]")
+        raise SystemExit(1)
+
+
+@worktree_group.command("pr")
+@click.argument("worktree_path", type=click.Path(exists=True))
+@click.option("--title", "-t", required=True, help="PR title")
+@click.option("--body", "-b", help="PR body/description")
+@click.option("--draft", is_flag=True, help="Create as draft PR")
+def worktree_pr_cmd(worktree_path: str, title: str, body: str | None, draft: bool):
+    """Create a PR from a worktree branch.
+
+    Pushes the worktree branch to origin and creates a GitHub PR.
+
+    Examples:
+
+    \b
+        gptodo worktree pr .worktrees/task-foo --title "feat: implement foo"
+        gptodo worktree pr .worktrees/task-foo -t "fix: bug" -b "Fixes #123" --draft
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    console.print("[dim]Pushing branch and creating PR...[/]")
+
+    pr_url = create_pr_from_worktree(
+        worktree_path=Path(worktree_path),
+        title=title,
+        body=body,
+        draft=draft,
+        workspace=repo_root,
+    )
+
+    if pr_url:
+        console.print(f"[green]✅ Created PR: {pr_url}[/]")
+    else:
+        console.print("[red]❌ Failed to create PR[/]")
+        raise SystemExit(1)
+
+
+@worktree_group.command("merge")
+@click.argument("worktree_path", type=click.Path(exists=True))
+@click.option(
+    "--target",
+    default="master",
+    help="Target branch to merge into (default: master)",
+)
+@click.option(
+    "--keep",
+    is_flag=True,
+    help="Keep worktree after merge (default: remove)",
+)
+@click.confirmation_option(prompt="Are you sure you want to merge this worktree?")
+def worktree_merge_cmd(worktree_path: str, target: str, keep: bool):
+    """Merge a worktree branch into target branch.
+
+    For local/swarm work that doesn't need a PR. Merges the worktree
+    branch into the target branch and optionally removes the worktree.
+
+    Examples:
+
+    \b
+        gptodo worktree merge .worktrees/task-foo
+        gptodo worktree merge .worktrees/task-foo --target develop
+        gptodo worktree merge .worktrees/task-foo --keep
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    if merge_worktree(
+        worktree_path=Path(worktree_path),
+        target_branch=target,
+        workspace=repo_root,
+        delete_after_merge=not keep,
+    ):
+        console.print(f"[green]✅ Merged worktree into {target}[/]")
+        if not keep:
+            console.print("[dim]Worktree removed[/]")
+    else:
+        console.print("[red]❌ Merge failed (conflict?)[/]")
+        raise SystemExit(1)
+
+
+@worktree_group.command("cleanup")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+def worktree_cleanup_cmd(output_json: bool):
+    """Remove worktrees whose branches have been merged.
+
+    Automatically cleans up worktrees that are no longer needed
+    because their branches have been merged into origin/master.
+    """
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+
+    count = cleanup_merged_worktrees(repo_root)
+
+    if output_json:
+        print(json.dumps({"cleaned_up": count}, indent=2))
+    else:
+        if count > 0:
+            console.print(f"[green]✅ Cleaned up {count} merged worktree(s)[/]")
+        else:
+            console.print("[dim]No merged worktrees to clean up[/]")
+
+
+# Register generate-queue as a top-level subcommand
+cli.add_command(generate_queue)
+
+
+if __name__ == "__main__":
+    cli()

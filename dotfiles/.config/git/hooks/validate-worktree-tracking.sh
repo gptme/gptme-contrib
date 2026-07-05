@@ -1,0 +1,117 @@
+#!/bin/bash
+# Validate worktree has correct upstream tracking before push
+# Fails if no upstream or upstream not on origin
+
+set -e
+
+# Get current branch
+current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+if [ -z "$current_branch" ]; then
+    exit 0  # Not in a git repo
+fi
+
+# Skip check on detached HEAD (common in submodules, rebases, branch deletions)
+if [ "$current_branch" = "HEAD" ]; then
+    exit 0
+fi
+
+# Skip check on master/main branches (usually tracked correctly)
+if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
+    exit 0
+fi
+
+# Read push refspecs from stdin early (stdin can only be read once).
+# Pre-push hook receives: local_ref local_sha remote_ref remote_sha
+ZERO="0000000000000000000000000000000000000000"
+push_remote_refs=()
+all_deletions=true
+any_pushed=false
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+    # Skip blank lines. An up-to-date push ("Everything up-to-date") makes git
+    # invoke the hook with empty stdin; the caller may forward a single empty
+    # line. Treating that as a real ref produced a false "no upstream" error.
+    [ -z "$local_sha$remote_ref" ] && continue
+    push_remote_refs+=("$remote_ref")
+    any_pushed=true
+    if [ "$local_sha" != "$ZERO" ]; then
+        all_deletions=false
+    fi
+done
+
+# Nothing actually being pushed (empty stdin / up-to-date) — nothing to validate.
+if [ "$any_pushed" = false ]; then
+    exit 0
+fi
+
+# Skip if push contains only branch deletions (e.g. `git push origin --delete BRANCH`).
+# The current branch's upstream is irrelevant when we're not pushing it.
+if [ "$all_deletions" = true ]; then
+    exit 0
+fi
+
+# Get upstream tracking branch
+upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
+
+if [ -z "$upstream" ]; then
+    # Check if this is a push to create new remote branch
+    new_branch_push=false
+    expected_ref="refs/heads/$current_branch"
+    for remote_ref in "${push_remote_refs[@]}"; do
+        if [ "$remote_ref" = "$expected_ref" ]; then
+            # Pushing to same-named branch on origin - likely creating new branch
+            new_branch_push=true
+            break
+        fi
+    done
+
+    if [ "$new_branch_push" = true ]; then
+        echo "ℹ️  No upstream set - assuming new branch push to origin/$current_branch"
+        exit 0
+    fi
+
+    echo "❌ Error: Branch '$current_branch' has no upstream tracking branch"
+    echo "   This can cause pushes to wrong location or branch."
+    echo "   Fix with: git branch --set-upstream-to=origin/$current_branch"
+    echo ""
+    exit 1
+fi
+
+# Verify upstream is on origin (not a local branch)
+if [[ ! "$upstream" =~ ^origin/ ]]; then
+    echo "⚠️  Warning: Branch '$current_branch' upstream is '$upstream' (not on origin)"
+    echo "   Expected: origin/$current_branch"
+    echo "   Fix with: git branch --set-upstream-to=origin/$current_branch"
+    echo ""
+    # Don't fail, just warn - might be intentional
+fi
+
+# CRITICAL: Block feature branches that track origin/master or origin/main.
+# This happens when git worktree add -b <branch> origin/master sets the upstream
+# to origin/master. A subsequent `git push` then pushes to master, bypassing PR review.
+#
+# Only block when the actual push destination is master/main — explicit pushes like
+# `git push origin feature:feature` are safe even with a misconfigured upstream.
+if [ "$upstream" = "origin/master" ] || [ "$upstream" = "origin/main" ]; then
+    # Check if any push destination is master or main
+    pushing_to_default=false
+    for remote_ref in "${push_remote_refs[@]}"; do
+        if [ "$remote_ref" = "refs/heads/master" ] || [ "$remote_ref" = "refs/heads/main" ]; then
+            pushing_to_default=true
+            break
+        fi
+    done
+    if [ "$pushing_to_default" = true ]; then
+        echo "🚫 ERROR: Branch '$current_branch' tracks '$upstream'!"
+        echo ""
+        echo "   This will push your feature branch directly to master/main."
+        echo "   This is almost always a mistake from worktree creation."
+        echo ""
+        echo "   Fix with:"
+        echo "     git branch --unset-upstream"
+        echo "     git push -u origin $current_branch"
+        echo ""
+        exit 1
+    fi
+fi
+
+exit 0

@@ -1,0 +1,743 @@
+"""Credential slot manager: offline safety checks for OAuth-backed slots.
+
+A "slot" is a named credential file next to the live one, e.g.:
+
+    ~/.claude/.credentials.json             # symlink → one of the slots below
+    ~/.claude/.credentials.json.bob         # slot "bob"
+    ~/.claude/.credentials.json.alice       # slot "alice"
+
+All checks here are **offline** — they inspect the file's stored
+``expiresAt`` and hash contents. Server-side token invalidation (valid
+``expiresAt`` but API returns 401) is out of scope; the agent's autonomous
+runner is expected to detect that via response classification.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable, TypedDict
+
+DEFAULT_LIVE_NAME = ".credentials.json"
+DEFAULT_SLOT_TEMPLATE = ".credentials.json.{sub}"
+DEFAULT_FINGERPRINT_TEMPLATE = ".credentials.json.{sub}.fingerprint.json"
+DEFAULT_GRACE_SECONDS = 300
+
+
+class DriftInfo(TypedDict):
+    """Result of :meth:`SlotManager.detect_live_slot_drift`.
+
+    ``drift`` is True when the live file matches no known slot — typically
+    after an operator ran ``/login`` (which rewrites the live file but
+    leaves the named slots untouched). In that state, an automated
+    ``switch_to(matching_slot)`` would silently restore a stale token.
+    """
+
+    drift: bool
+    matching_slot: str | None
+    live_hash: str | None
+    slot_hashes: dict[str, str]
+
+
+class IdentityDriftInfo(TypedDict):
+    """Result of :meth:`SlotManager.detect_slot_identity_drift`.
+
+    Identity drift means the slot's *current* refresh-token fingerprint
+    does not match the fingerprint captured at last :meth:`switch_to` /
+    :meth:`heal_drift_to`. This catches the scenario in ErikBjare/bob#769
+    where an operator (or stray ``claude /login``) writes a new OAuth
+    credential **through** the live symlink, silently replacing the slot's
+    identity while the hash-based drift check still sees a "matching"
+    live → slot pair.
+
+    Fields:
+
+    - ``drift``: True when stored fingerprint exists and disagrees with the
+      slot's current refresh token; False when they match or when no
+      fingerprint has been captured yet (caller should call
+      :meth:`capture_slot_fingerprint` on a fresh login).
+    - ``sub``: subscription name the check was run for.
+    - ``stored_fingerprint``: hash captured at last switch/heal, or None
+      when no fingerprint file exists yet.
+    - ``current_fingerprint``: hash of the slot's current refresh token,
+      or None when the slot file is missing or unreadable.
+    - ``reason``: short human-readable explanation suitable for logs.
+    """
+
+    drift: bool
+    sub: str
+    stored_fingerprint: str | None
+    current_fingerprint: str | None
+    reason: str
+
+
+@dataclass
+class SwitchResult:
+    """Outcome of a :meth:`SlotManager.switch_to` call.
+
+    ``ok`` is True when the symlink was updated. Otherwise ``reason`` gives
+    a short human-readable explanation ("deferred: autonomous sessions
+    active", "refusing: slot expired 7m ago", "slot missing: …"). Callers
+    choose whether to surface ``reason`` via print/log/telemetry.
+    """
+
+    ok: bool
+    reason: str
+    deferred_locks: list[str] = field(default_factory=list)
+
+
+def _parse_oauth_expiry(payload: object) -> datetime | None:
+    """Return the UTC ``expiresAt`` of a claudeAiOauth payload, or None.
+
+    The credential file format is::
+
+        {"claudeAiOauth": {"accessToken": ..., "expiresAt": <ms>, ...}}
+
+    ``expiresAt`` is a Unix epoch in milliseconds. Returns None for
+    missing/malformed payloads so callers can treat "unknown" distinctly
+    from "expired".
+    """
+    if not isinstance(payload, dict):
+        return None
+    oauth = payload.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    expires_ms = oauth.get("expiresAt")
+    if not isinstance(expires_ms, int | float):
+        return None
+    try:
+        return datetime.fromtimestamp(float(expires_ms) / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def read_slot_expiry(path: Path) -> datetime | None:
+    """Read ``expiresAt`` from an OAuth credential file.
+
+    Returns None for missing files, unreadable files, malformed JSON, or
+    payloads without a parseable ``claudeAiOauth.expiresAt`` field.
+    """
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return _parse_oauth_expiry(payload)
+
+
+def slot_is_fresh(
+    path: Path,
+    *,
+    grace_seconds: int = DEFAULT_GRACE_SECONDS,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """Check whether a slot's stored OAuth token is safe to switch into.
+
+    Offline, cheap, no network: only validates ``expiresAt``. Catches the
+    common case where a slot's token lapsed since it was last persisted.
+    Does NOT catch server-side token invalidation with a still-future
+    ``expiresAt`` — detect that in the agent's API response classifier.
+
+    Returns ``(is_fresh, reason)``.
+    """
+    if not path.exists():
+        return False, f"slot missing: {path.name}"
+    expiry = read_slot_expiry(path)
+    if expiry is None:
+        return False, f"unreadable or no expiresAt in {path.name}"
+    current = now or datetime.now(timezone.utc)
+    if expiry <= current + timedelta(seconds=grace_seconds):
+        age = int((current - expiry).total_seconds())
+        if age >= 0:
+            return False, f"expired {age // 60}m ago (at {expiry.isoformat()})"
+        return False, f"expires within grace ({-age}s left, at {expiry.isoformat()})"
+    return True, f"valid until {expiry.isoformat()}"
+
+
+def _hash_file(path: Path) -> str | None:
+    """Return sha256 of a file's contents, or None if unreadable."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _read_refresh_token(path: Path) -> str | None:
+    """Return ``claudeAiOauth.refreshToken`` from a slot file, or None.
+
+    Returns None for missing files, unreadable files, malformed JSON,
+    payloads without ``claudeAiOauth.refreshToken``, or non-string
+    refresh-token values.
+    """
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    oauth = payload.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    rt = oauth.get("refreshToken")
+    if not isinstance(rt, str) or not rt:
+        return None
+    return rt
+
+
+def compute_slot_fingerprint(path: Path) -> str | None:
+    """Return sha256 of the slot's refresh token, or None if unavailable.
+
+    Used as the per-slot identity fingerprint: the refresh token rotates
+    only when the OAuth flow actively exchanges it, so a sudden change
+    between two snapshots is a strong signal that the slot's identity was
+    silently replaced (see ErikBjare/bob#769).
+
+    Hashing the refresh token (rather than storing it verbatim) keeps the
+    fingerprint files free of additional credential material — they're
+    only useful for equality comparison, not for replay.
+    """
+    rt = _read_refresh_token(path)
+    if rt is None:
+        return None
+    return hashlib.sha256(rt.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class SlotManager:
+    """Manages a family of named OAuth credential slots sharing one live file.
+
+    Workspace-specific behavior (switch logging, rate-limit files,
+    usage-based strategy, rebalance state, …) stays in the caller. This
+    class only cares about:
+
+    - Where the slots live (``creds_dir``, ``slot_template``, ``live_name``)
+    - Which slot is currently active (symlink target)
+    - Whether a target slot is safe to switch into (``expiresAt``)
+    - Whether the live file drifted away from every named slot
+    - Actually flipping the symlink, with optional defer-if-busy guard
+
+    Parameters
+    ----------
+    creds_dir:
+        Directory holding the live file + named slots.
+    subscriptions:
+        Names of the slots to consider (e.g. ``["bob", "alice", "erik"]``).
+    slot_template:
+        ``str.format``-style template with one ``{sub}`` placeholder,
+        joined to ``creds_dir``. Defaults to ``.credentials.json.{sub}``.
+    live_name:
+        Filename of the live symlink inside ``creds_dir``. Defaults to
+        ``.credentials.json``.
+    grace_seconds:
+        Reject slots whose expiry is within this many seconds of ``now``.
+    lock_guard:
+        Optional zero-arg callable returning the names of holds that
+        should defer automated switches. When non-empty and ``force`` is
+        False, :meth:`switch_to` returns ``SwitchResult(ok=False,
+        reason="deferred: ...", deferred_locks=...)`` without touching
+        the symlink. Workspaces can point this at lock files, running
+        sessions, or any custom busy-signal.
+    on_switch:
+        Optional ``(sub, reason) -> None`` callback invoked on successful
+        symlink flips. Use it to persist a switch log without baking log
+        paths into this package.
+    logger:
+        Optional ``(msg) -> None`` callback. Defaults to dropping the
+        message silently so importers don't get unexpected stderr noise.
+    """
+
+    creds_dir: Path
+    subscriptions: list[str]
+    slot_template: str = DEFAULT_SLOT_TEMPLATE
+    live_name: str = DEFAULT_LIVE_NAME
+    fingerprint_template: str = DEFAULT_FINGERPRINT_TEMPLATE
+    grace_seconds: int = DEFAULT_GRACE_SECONDS
+    lock_guard: Callable[[], list[str]] | None = None
+    on_switch: Callable[[str, str], None] | None = None
+    logger: Callable[[str], None] | None = None
+
+    def __post_init__(self) -> None:
+        if "{sub}" not in self.slot_template:
+            raise ValueError(
+                f"slot_template must contain '{{sub}}', got: {self.slot_template!r}"
+            )
+        if "{sub}" not in self.fingerprint_template:
+            raise ValueError(
+                f"fingerprint_template must contain '{{sub}}', got: {self.fingerprint_template!r}"
+            )
+        if not self.subscriptions:
+            raise ValueError("subscriptions must be a non-empty list")
+
+    # ---- Path helpers ----
+
+    def slot_path(self, sub: str) -> Path:
+        """Absolute path to the named slot file."""
+        return self.creds_dir / self.slot_template.format(sub=sub)
+
+    def fingerprint_path(self, sub: str) -> Path:
+        """Absolute path to the per-slot fingerprint sidecar file."""
+        return self.creds_dir / self.fingerprint_template.format(sub=sub)
+
+    @property
+    def live_path(self) -> Path:
+        """Absolute path to the live credential file/symlink."""
+        return self.creds_dir / self.live_name
+
+    # ---- Introspection ----
+
+    def get_active_subscription(self) -> str | None:
+        """Return the slot name the live symlink points at, or None.
+
+        Resolves the symlink and compares against each slot's resolved
+        path. Returns None when the live file is a regular file (i.e.
+        drift — see :meth:`detect_live_slot_drift`), the symlink is
+        broken, or it doesn't match any known slot.
+        """
+        live = self.live_path
+        if not live.is_symlink():
+            return None
+        try:
+            target = live.resolve(strict=True)
+        except (FileNotFoundError, OSError):
+            # Broken symlink — cannot resolve target
+            return None
+        for sub in self.subscriptions:
+            slot = self.slot_path(sub)
+            try:
+                if target == slot.resolve(strict=True):
+                    return sub
+            except (FileNotFoundError, OSError):
+                continue
+        return None
+
+    def get_available_subscriptions(self) -> list[str]:
+        """Return subscriptions whose slot file exists on disk.
+
+        Does NOT check freshness — use :meth:`slot_is_fresh` for that.
+        """
+        return [sub for sub in self.subscriptions if self.slot_path(sub).exists()]
+
+    # ---- Freshness ----
+
+    def read_slot_expiry(self, sub: str) -> datetime | None:
+        """Return ``expiresAt`` of a named slot, or None if unreadable."""
+        return read_slot_expiry(self.slot_path(sub))
+
+    def slot_is_fresh(
+        self,
+        sub: str,
+        *,
+        grace_seconds: int | None = None,
+        now: datetime | None = None,
+    ) -> tuple[bool, str]:
+        """Offline freshness check for a named slot.
+
+        See module-level :func:`slot_is_fresh` for semantics. Uses
+        ``self.grace_seconds`` by default.
+        """
+        return slot_is_fresh(
+            self.slot_path(sub),
+            grace_seconds=grace_seconds
+            if grace_seconds is not None
+            else self.grace_seconds,
+            now=now,
+        )
+
+    # ---- Drift detection ----
+
+    def detect_live_slot_drift(self) -> DriftInfo | None:
+        """Check whether the live file matches any known slot.
+
+        Returns None when the live path doesn't exist at all (no file, no
+        symlink — nothing to compare). A broken live symlink (symlink
+        present, target missing) is reported as drift with
+        ``live_hash=None`` so callers can distinguish "no live file" from
+        "live symlink points at a deleted target" — the latter needs
+        repair, the former is a pristine state.
+
+        Otherwise returns a :class:`DriftInfo` with ``drift=True`` when no
+        slot hashes match, indicating that the live file was written by
+        something other than :meth:`switch_to` — most commonly an operator
+        running ``/login``.
+        """
+        live = self.live_path
+        broken_symlink = False
+        if not live.exists():
+            if live.is_symlink():
+                broken_symlink = True  # target missing — report as drift
+            else:
+                return None
+        slot_hashes: dict[str, str] = {}
+        for sub in self.subscriptions:
+            slot = self.slot_path(sub)
+            if not slot.exists():
+                continue
+            h = _hash_file(slot)
+            if h is None:
+                continue
+            slot_hashes[sub] = h
+        if broken_symlink:
+            return DriftInfo(
+                drift=True,
+                matching_slot=None,
+                live_hash=None,
+                slot_hashes=slot_hashes,
+            )
+        live_hash = _hash_file(live)
+        if live_hash is None:
+            return None
+        matching: str | None = None
+        for sub, h in slot_hashes.items():
+            if h == live_hash and matching is None:
+                matching = sub
+                break
+        return DriftInfo(
+            drift=matching is None,
+            matching_slot=matching,
+            live_hash=live_hash,
+            slot_hashes=slot_hashes,
+        )
+
+    # ---- Identity fingerprints ----
+
+    def read_stored_fingerprint(self, sub: str) -> str | None:
+        """Return the fingerprint captured at last switch/heal, or None."""
+        fp_path = self.fingerprint_path(sub)
+        try:
+            raw = fp_path.read_text()
+        except OSError:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        fp = payload.get("refresh_token_sha256")
+        if not isinstance(fp, str) or not fp:
+            return None
+        return fp
+
+    def capture_slot_fingerprint(self, sub: str) -> str | None:
+        """Capture the slot's current refresh-token fingerprint to disk.
+
+        Atomically writes ``fingerprint_path(sub)`` with the slot's current
+        refresh-token sha256 plus a captured-at timestamp. Returns the
+        fingerprint, or None when the slot file is missing / unreadable /
+        lacks a refresh token.
+
+        Callers should invoke this after performing a fresh OAuth login
+        for a slot, so :meth:`detect_slot_identity_drift` has a baseline
+        to compare against on later checks. :meth:`switch_to` and
+        :meth:`heal_drift_to` invoke it automatically on success.
+        """
+        fp = compute_slot_fingerprint(self.slot_path(sub))
+        if fp is None:
+            return None
+        payload = {
+            "refresh_token_sha256": fp,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "slot": sub,
+        }
+        fp_path = self.fingerprint_path(sub)
+        tmp = fp_path.with_suffix(fp_path.suffix + f".tmp{os.getpid()}")
+        try:
+            # Create at 0o600 from the start — no world-readable window before chmod
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(payload, sort_keys=True))
+            os.replace(tmp, fp_path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return fp
+
+    def detect_slot_identity_drift(self, sub: str) -> IdentityDriftInfo:
+        """Check whether ``sub``'s slot still holds the captured identity.
+
+        Compares the slot file's current refresh-token sha256 against the
+        fingerprint stored by the most recent :meth:`switch_to` /
+        :meth:`heal_drift_to` / :meth:`capture_slot_fingerprint` call.
+
+        Catches the failure mode in ErikBjare/bob#769: an operator (or
+        stray ``claude /login``) writes a new OAuth credential through the
+        live symlink, silently replacing the slot's identity. The classic
+        hash-based :meth:`detect_live_slot_drift` reports "no drift" in
+        that scenario because live and slot still hash-match — but they
+        now hold someone else's tokens.
+
+        Behavior matrix:
+
+        ============================== =====
+        Stored / Current               drift
+        ============================== =====
+        match                          False
+        mismatch (real identity drift) True
+        stored present, current None   True   (slot vanished or unreadable)
+        stored None, current any       False  (no baseline yet; ``reason`` says so)
+        both None                      False  (no slot file, no fingerprint)
+        ============================== =====
+        """
+        if sub not in self.subscriptions:
+            raise ValueError(
+                f"unknown subscription: {sub!r} (known: {self.subscriptions})"
+            )
+        stored = self.read_stored_fingerprint(sub)
+        current = compute_slot_fingerprint(self.slot_path(sub))
+        if stored is None and current is None:
+            return IdentityDriftInfo(
+                drift=False,
+                sub=sub,
+                stored_fingerprint=None,
+                current_fingerprint=None,
+                reason="no fingerprint stored and slot missing/unreadable",
+            )
+        if stored is None:
+            return IdentityDriftInfo(
+                drift=False,
+                sub=sub,
+                stored_fingerprint=None,
+                current_fingerprint=current,
+                reason="no fingerprint stored yet — call capture_slot_fingerprint after a fresh login",
+            )
+        if current is None:
+            return IdentityDriftInfo(
+                drift=True,
+                sub=sub,
+                stored_fingerprint=stored,
+                current_fingerprint=None,
+                reason="slot is missing or has no refresh token; cannot verify identity",
+            )
+        if stored != current:
+            return IdentityDriftInfo(
+                drift=True,
+                sub=sub,
+                stored_fingerprint=stored,
+                current_fingerprint=current,
+                reason="refresh token changed since last capture — slot identity may have been replaced",
+            )
+        return IdentityDriftInfo(
+            drift=False,
+            sub=sub,
+            stored_fingerprint=stored,
+            current_fingerprint=current,
+            reason="fingerprint matches",
+        )
+
+    # ---- Switching ----
+
+    def switch_to(
+        self,
+        sub: str,
+        reason: str,
+        *,
+        force: bool = False,
+    ) -> SwitchResult:
+        """Flip the live symlink to point at ``sub``'s slot file.
+
+        Safety guarantees:
+
+        - If ``force=False`` and ``lock_guard`` returns a non-empty list,
+          the switch is deferred and the symlink is not touched.
+        - If the target slot is expired or unreadable, the switch is
+          refused **regardless of** ``force`` — landing on a known-bad
+          credential just moves the 401 crash loop to the next run.
+        - On success, replaces the existing symlink atomically via a
+          temp-symlink + ``os.replace`` (single rename syscall) so no
+          concurrent reader sees a missing ``live_path``, then calls
+          ``on_switch``.
+
+        Returns a :class:`SwitchResult`. Callers decide whether to surface
+        ``reason`` via print / logging / telemetry.
+        """
+        if sub not in self.subscriptions:
+            msg = f"unknown subscription: {sub!r} (known: {self.subscriptions})"
+            self._log(msg)
+            return SwitchResult(ok=False, reason=msg)
+
+        if not force and self.lock_guard is not None:
+            active_locks = list(self.lock_guard())
+            if active_locks:
+                lock_desc = ", ".join(active_locks)
+                msg = (
+                    f"deferred: active lock(s) {lock_desc}; "
+                    f"would switch to {sub} ({reason})"
+                )
+                self._log(msg)
+                return SwitchResult(
+                    ok=False,
+                    reason=msg,
+                    deferred_locks=active_locks,
+                )
+
+        slot = self.slot_path(sub)
+        if not slot.exists():
+            msg = f"slot missing: {slot}"
+            self._log(msg)
+            return SwitchResult(ok=False, reason=msg)
+
+        fresh, fresh_reason = self.slot_is_fresh(sub)
+        if not fresh:
+            msg = f"refusing to switch to {sub}: {fresh_reason}"
+            self._log(msg)
+            return SwitchResult(ok=False, reason=msg)
+
+        live = self.live_path
+        tmp = self.creds_dir / (self.live_name + f".tmp{os.getpid()}")
+        try:
+            tmp.symlink_to(self.slot_template.format(sub=sub))
+            os.replace(tmp, live)  # atomic rename — no window where live_path is absent
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+        try:
+            self.capture_slot_fingerprint(sub)
+        except Exception as exc:
+            self._log(f"fingerprint capture failed for {sub}: {exc}")
+        if self.on_switch is not None:
+            self.on_switch(sub, reason)
+        return SwitchResult(ok=True, reason=f"switched to {sub}")
+
+    # ---- Healing ----
+
+    def heal_drift_to(
+        self,
+        sub: str,
+        *,
+        force: bool = False,
+    ) -> SwitchResult:
+        """Sync the drifted live file into ``sub``'s slot, then re-symlink.
+
+        When CC's OAuth refresh writes a fresh token to the live file, the
+        symlink is replaced by a regular file and the named slot snapshots
+        are stranded at the old token. :meth:`detect_live_slot_drift`
+        reports drift, and :meth:`switch_to` refuses to act because every
+        slot looks expired.
+
+        ``heal_drift_to`` resolves this by treating the live file as the
+        source of truth: copy live → ``sub``'s slot atomically, then replace
+        the live path with a symlink to the slot. The caller decides which
+        ``sub`` was active before the refresh (typically by inspecting a
+        switch log they own).
+
+        Refuses (returns ``ok=False`` with diagnostic ``reason``) when:
+
+        - ``sub`` is not in :attr:`subscriptions`
+        - No drift is detected
+        - Live is a symlink (drift implies a slot rewrite, not OAuth
+          refresh — ambiguous which slot to heal into)
+        - Live file is missing, unreadable, or has no ``claudeAiOauth``
+          payload
+        - Live token is expired or within ``grace_seconds`` of expiry
+        - ``force=False`` and :attr:`lock_guard` reports active locks
+
+        On success, :attr:`on_switch` is called with reason
+        ``"auto-heal drift (live cred resynced to slot)"`` so caller-owned
+        switch logs see the action.
+        """
+        if sub not in self.subscriptions:
+            msg = f"unknown subscription: {sub!r} (known: {self.subscriptions})"
+            self._log(msg)
+            return SwitchResult(ok=False, reason=msg)
+
+        drift = self.detect_live_slot_drift()
+        if drift is None or not drift["drift"]:
+            return SwitchResult(ok=False, reason="no drift")
+
+        live = self.live_path
+        if live.is_symlink():
+            return SwitchResult(
+                ok=False,
+                reason="live is a symlink — drift implies slot rewrite, not OAuth refresh",
+            )
+        if not live.exists():
+            return SwitchResult(ok=False, reason="live file missing")
+
+        try:
+            payload = json.loads(live.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return SwitchResult(
+                ok=False,
+                reason=f"live file unreadable or malformed JSON: {e}",
+            )
+        oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+        if not isinstance(oauth, dict):
+            return SwitchResult(
+                ok=False,
+                reason="live file missing claudeAiOauth payload",
+            )
+        expires_ms = oauth.get("expiresAt")
+        if not isinstance(expires_ms, int | float):
+            return SwitchResult(
+                ok=False,
+                reason="live file missing expiresAt",
+            )
+        try:
+            expiry = datetime.fromtimestamp(float(expires_ms) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError) as e:
+            return SwitchResult(
+                ok=False,
+                reason=f"live file expiresAt unparseable: {e}",
+            )
+        now = datetime.now(timezone.utc)
+        if expiry <= now + timedelta(seconds=self.grace_seconds):
+            return SwitchResult(
+                ok=False,
+                reason=f"live token expired or in grace ({expiry.isoformat()})",
+            )
+
+        if not force and self.lock_guard is not None:
+            active_locks = list(self.lock_guard())
+            if active_locks:
+                lock_desc = ", ".join(active_locks)
+                msg = f"deferred: active lock(s) {lock_desc}; would heal to {sub}"
+                self._log(msg)
+                return SwitchResult(
+                    ok=False,
+                    reason=msg,
+                    deferred_locks=active_locks,
+                )
+
+        target_slot = self.slot_path(sub)
+        slot_tmp = target_slot.with_suffix(target_slot.suffix + f".tmp{os.getpid()}")
+        link_tmp = self.creds_dir / (self.live_name + f".tmp{os.getpid()}")
+        try:
+            shutil.copy2(live, slot_tmp)
+            os.chmod(slot_tmp, 0o600)
+            os.replace(slot_tmp, target_slot)
+            link_tmp.symlink_to(self.slot_template.format(sub=sub))
+            os.replace(link_tmp, live)
+        except BaseException:
+            slot_tmp.unlink(missing_ok=True)
+            link_tmp.unlink(missing_ok=True)
+            raise
+
+        try:
+            self.capture_slot_fingerprint(sub)
+        except Exception as exc:
+            self._log(f"fingerprint capture failed for {sub}: {exc}")
+        if self.on_switch is not None:
+            self.on_switch(sub, "auto-heal drift (live cred resynced to slot)")
+        return SwitchResult(
+            ok=True,
+            reason=f"healed: synced live → {target_slot.name}, symlink restored",
+        )
+
+    # ---- Internals ----
+
+    def _log(self, msg: str) -> None:
+        if self.logger is not None:
+            self.logger(msg)

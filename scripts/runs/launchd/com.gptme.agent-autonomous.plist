@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gptme.agent-autonomous</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <!-- The setup script will replace AGENT_WORKSPACE with actual path -->
+        <string>cd AGENT_WORKSPACE && ./scripts/runs/launchd/autonomous-run.sh --workspace AGENT_WORKSPACE 2>&1 | head -10000</string>
+    </array>
+
+    <!-- Working directory (setup script replaces AGENT_WORKSPACE) -->
+    <key>WorkingDirectory</key>
+    <string>AGENT_WORKSPACE</string>
+
+    <!-- Schedule: Every hour at minute 0 during typical working hours (6am-8pm) -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+
+    <!-- Timeout: 1 hour -->
+    <key>TimeoutSeconds</key>
+    <integer>3600</integer>
+
+    <!-- Logging configuration (setup script replaces USER_HOME) -->
+    <key>StandardOutPath</key>
+    <string>USER_HOME/Library/Logs/gptme-agent/autonomous.log</string>
+    <key>StandardErrorPath</key>
+    <string>USER_HOME/Library/Logs/gptme-agent/autonomous.error.log</string>
+
+    <!-- Environment variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Ensure PATH includes common tool locations -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- API keys can be set here or in shell profile -->
+        <!-- The script sources ~/.profile, ~/.bash_profile, ~/.zshrc -->
+    </dict>
+
+    <!-- Don't run at load -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Oneshot job, don't keep alive -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Lower priority -->
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

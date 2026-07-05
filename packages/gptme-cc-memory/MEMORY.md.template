@@ -1,0 +1,28 @@
+# Project Memory
+
+This is the navigation index for your Claude Code memory files. Each entry should
+be under ~150 characters — the model scans this index to decide which memory files
+are worth reading in full.
+
+Memory files live as ``<name>.md`` in this directory. Use the four types:
+
+- ``user`` — who the user is (role, preferences, expertise)
+- ``feedback`` — behavioral rules from corrections
+- ``project`` — current work, goals, deadlines
+- ``reference`` — where to find things
+
+## User
+
+<!-- - [Memory Title](slug.md) — one-line hook (under 150 chars) -->
+
+## Feedback
+
+<!-- - [Memory Title](slug.md) — one-line hook (under 150 chars) -->
+
+## Project
+
+<!-- - [Memory Title](slug.md) — one-line hook (under 150 chars) -->
+
+## Reference
+
+<!-- - [Memory Title](slug.md) — one-line hook (under 150 chars) -->

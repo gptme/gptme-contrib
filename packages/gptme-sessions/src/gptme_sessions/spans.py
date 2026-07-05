@@ -1,0 +1,767 @@
+"""Per-tool-call span extraction from agent trajectory files.
+
+A ToolSpan is a single tool invocation: one tool called once, with its
+timing, input/output sizes, and success recorded. Sessions produce
+sequences of spans that tell the per-turn story of what the agent did
+and how long each operation took.
+
+Supports Claude Code, gptme, and codex JSONL formats.
+
+Design doc: knowledge/technical-designs/span-level-tracing-design.md
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+_EXIT_CODE_RE = re.compile(r"(?:Exit code|exit code):\s*(\d+)")
+
+# codex exec_command annotates the subprocess exit in its plaintext output as
+# "Process exited with code N".
+_CODEX_EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
+
+# gptme tool-use marker: `@tool_name(call-UUID-N): {json_args}` at the start
+# of a line. Args may be absent (e.g. `@todo(call-...-4): {}`).
+_GPTME_TOOL_RE = re.compile(
+    r"^@(\w+)\(call-([0-9a-f-]+)\):\s*(\{.*\})?\s*$",
+    re.MULTILINE,
+)
+
+# System messages that are NOT tool results — skipped during result pairing.
+_GPTME_NOISE_PREFIXES = (
+    "<system_warning>",
+    "<system_info>",
+    "<workspace-agents-warning>",
+    "<budget:",
+    "# Relevant Lessons",
+    "Shellcheck found potential issues",
+)
+
+# Matches fractional seconds (e.g. ".1", ".123") before a timezone offset or end-of-string.
+# Python 3.10 fromisoformat() only accepts exactly 3 or 6 fractional digits; 3.11+ accepts any.
+_FRAC_RE = re.compile(r"\.(\d+)(?=[+\-Z]|$)")
+
+
+def _normalize_ts(ts_str: str) -> str:
+    """Pad fractional seconds to 6 digits for Python 3.10 fromisoformat() compat."""
+
+    def _pad(m: re.Match[str]) -> str:
+        return "." + m.group(1).ljust(6, "0")[:6]
+
+    return _FRAC_RE.sub(_pad, ts_str.replace("Z", "+00:00"))
+
+
+def _parse_ts(ts_str: str | None) -> datetime | None:
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(_normalize_ts(ts_str))
+    except ValueError:
+        return None
+
+
+def _input_size(tool_input: object) -> int:
+    if isinstance(tool_input, dict):
+        return sum(len(str(v)) for v in tool_input.values())
+    return len(str(tool_input))
+
+
+def _output_size(content: object) -> int:
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(c.get("text", str(c))) if isinstance(c, dict) else len(str(c)) for c in content
+        )
+    return 0
+
+
+def _output_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(c.get("text", str(c)) if isinstance(c, dict) else str(c) for c in content)
+    return str(content)
+
+
+def _exit_code(content: object) -> int | None:
+    text = _output_text(content)
+    m = _EXIT_CODE_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def _as_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _as_float(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _split_int(value: int | None, parts: int, index: int) -> int | None:
+    if value is None:
+        return None
+    if parts <= 1:
+        return value
+    base, remainder = divmod(value, parts)
+    return base + (1 if index < remainder else 0)
+
+
+def _split_float(value: float | None, parts: int) -> float | None:
+    if value is None:
+        return None
+    return value / parts if parts > 1 else value
+
+
+@dataclass(frozen=True)
+class _TurnUsage:
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cost_usd: float | None = None
+
+    def split(self, parts: int, index: int) -> _TurnUsage:
+        return _TurnUsage(
+            model=self.model,
+            input_tokens=_split_int(self.input_tokens, parts, index),
+            output_tokens=_split_int(self.output_tokens, parts, index),
+            cache_creation_tokens=_split_int(self.cache_creation_tokens, parts, index),
+            cache_read_tokens=_split_int(self.cache_read_tokens, parts, index),
+            cost_usd=_split_float(self.cost_usd, parts),
+        )
+
+
+def _usage_has_data(usage: _TurnUsage) -> bool:
+    return any(
+        value is not None
+        for value in (
+            usage.model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_tokens,
+            usage.cache_read_tokens,
+            usage.cost_usd,
+        )
+    )
+
+
+def _cc_turn_usage(message: object) -> _TurnUsage | None:
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    model = message.get("model")
+    turn_usage = _TurnUsage(
+        model=model if isinstance(model, str) and model else None,
+        input_tokens=_as_int(usage.get("input_tokens")),
+        output_tokens=_as_int(usage.get("output_tokens")),
+        cache_creation_tokens=_as_int(usage.get("cache_creation_input_tokens")),
+        cache_read_tokens=_as_int(usage.get("cache_read_input_tokens")),
+    )
+    return turn_usage if _usage_has_data(turn_usage) else None
+
+
+def _gptme_turn_usage(record: dict) -> _TurnUsage | None:
+    metadata = record.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    raw_usage = metadata.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else metadata
+    if not isinstance(usage, dict):
+        usage = {}
+    model = metadata.get("model") or record.get("model")
+    turn_usage = _TurnUsage(
+        model=model if isinstance(model, str) and model else None,
+        input_tokens=_as_int(usage.get("input_tokens")),
+        output_tokens=_as_int(usage.get("output_tokens")),
+        cache_creation_tokens=_as_int(usage.get("cache_creation_tokens")),
+        cache_read_tokens=_as_int(usage.get("cache_read_tokens")),
+        cost_usd=_as_float(metadata.get("cost")),
+    )
+    return turn_usage if _usage_has_data(turn_usage) else None
+
+
+@dataclass
+class ToolSpan:
+    """A single tool invocation within an agent session.
+
+    Attributes:
+        span_id: Unique identifier for this span (UUID).
+        session_id: Parent session ID (trajectory filename stem by default).
+        tool_name: Tool that was invoked (e.g. "Bash", "Edit", "Read").
+        timestamp: ISO 8601 dispatch time (when the assistant sent the call).
+        duration_ms: Wall-clock milliseconds from dispatch to result arrival.
+            -1 when timestamps are unavailable or out-of-order.
+        success: False when the tool result carries ``is_error=True``.
+        input_size: Character count of the tool's input parameters.
+        output_size: Character count of the tool result content.
+        exit_code: For Bash spans, the subprocess exit code when annotated
+            in the result text ("Exit code: N"). None otherwise.
+        turn_index: 0-indexed assistant turn that dispatched this tool call.
+        model: Model used for the assistant turn, when present in the
+            trajectory.
+        input_tokens/output_tokens/cache_*: Optional per-turn token usage
+            attributed to this tool call. Batched tool calls split the
+            assistant turn's usage evenly across dispatched calls.
+        cost_usd: Optional per-turn cost attributed to this call when the
+            trajectory records cost directly.
+    """
+
+    span_id: str
+    session_id: str
+    tool_name: str
+    timestamp: str
+    duration_ms: int
+    success: bool
+    input_size: int
+    output_size: int
+    exit_code: int | None
+    turn_index: int
+    matched_lessons: list[str] = field(default_factory=list)
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cost_usd: float | None = None
+
+
+@dataclass
+class SpanAggregates:
+    """Session-level aggregates derived from a list of ToolSpans.
+
+    These fields are suitable for inclusion in SessionRecord as optional
+    fields (Phase 2 of the design doc).
+
+    Attributes:
+        retry_depth: Max consecutive same-tool calls where the preceding
+            call *failed*. A retry semantically implies the prior attempt
+            didn't work — without the failure gate, generic dispatcher
+            tools (Bash running distinct shell commands) inflate this to
+            uselessness. 0 means no failed-then-same-tool pattern; 2 means
+            two successive failed-tool calls followed by another same-tool
+            call. Proxy for stuck loops / flailing.
+    """
+
+    total_spans: int
+    error_spans: int
+    dominant_tool: str | None
+    avg_duration_ms: float
+    max_duration_ms: int
+    tool_counts: dict[str, int]
+    retry_depth: int
+
+    @property
+    def error_rate(self) -> float:
+        return self.error_spans / self.total_spans if self.total_spans else 0.0
+
+    @classmethod
+    def from_spans(cls, spans: list[ToolSpan]) -> SpanAggregates:
+        if not spans:
+            return cls(
+                total_spans=0,
+                error_spans=0,
+                dominant_tool=None,
+                avg_duration_ms=-1.0,
+                max_duration_ms=-1,
+                tool_counts={},
+                retry_depth=0,
+            )
+
+        tool_counts: dict[str, int] = {}
+        errors = 0
+        known_durations: list[int] = []
+
+        for span in spans:
+            tool_counts[span.tool_name] = tool_counts.get(span.tool_name, 0) + 1
+            if not span.success:
+                errors += 1
+            if span.duration_ms >= 0:
+                known_durations.append(span.duration_ms)
+
+        dominant = max(tool_counts, key=lambda k: tool_counts[k]) if tool_counts else None
+        avg_ms = sum(known_durations) / len(known_durations) if known_durations else -1.0
+        max_ms = max(known_durations) if known_durations else -1
+
+        # Retry depth: max consecutive same-tool calls where the preceding
+        # call failed. A retry semantically implies the previous attempt
+        # didn't work — without this gate, generic dispatcher tools (Bash
+        # running unrelated commands) inflate the signal to uselessness.
+        retry_depth = 0
+        streak = 0
+        for i in range(1, len(spans)):
+            if spans[i].tool_name == spans[i - 1].tool_name and not spans[i - 1].success:
+                streak += 1
+                retry_depth = max(retry_depth, streak)
+            else:
+                streak = 0
+
+        return cls(
+            total_spans=len(spans),
+            error_spans=errors,
+            dominant_tool=dominant,
+            avg_duration_ms=avg_ms,
+            max_duration_ms=max_ms,
+            tool_counts=tool_counts,
+            retry_depth=retry_depth,
+        )
+
+
+def extract_spans_from_cc_jsonl(
+    path: Path | str,
+    session_id: str | None = None,
+) -> list[ToolSpan]:
+    """Extract ToolSpan objects from a Claude Code JSONL trajectory file.
+
+    Parses assistant tool_use dispatches and user tool_result arrivals,
+    pairs them by tool_use_id, and computes per-span timing.
+
+    Args:
+        path: Path to the .jsonl trajectory file.
+        session_id: Session ID to assign to all spans. Defaults to the
+            filename stem (e.g. ``"abc123"`` for ``abc123.jsonl``).
+
+    Returns:
+        List of spans in chronological dispatch order.
+    """
+    path = Path(path)
+    if session_id is None:
+        session_id = path.stem
+
+    # pending maps tool_use_id → (tool_name, dispatch_ts, dispatch_ts_str,
+    #                             input_size, turn_index, attributed_usage)
+    pending: dict[str, tuple[str, datetime | None, str, int, int, _TurnUsage | None]] = {}
+    spans: list[ToolSpan] = []
+    turn_index = 0
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        rec_type = record.get("type")
+        ts = _parse_ts(record.get("timestamp"))
+        ts_str = record.get("timestamp", "")
+
+        if rec_type == "assistant":
+            message = record.get("message", {})
+            content = message.get("content", []) if isinstance(message, dict) else []
+            if not isinstance(content, list):
+                continue
+            tool_items = [
+                item
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "tool_use" and item.get("id")
+            ]
+            if not tool_items:
+                continue
+            turn_usage = _cc_turn_usage(message)
+            for idx, item in enumerate(tool_items):
+                tool_id = item.get("id", "")
+                tool_name = item.get("name", "unknown")
+                isize = _input_size(item.get("input", {}))
+                usage_share = turn_usage.split(len(tool_items), idx) if turn_usage else None
+                pending[tool_id] = (tool_name, ts, ts_str, isize, turn_index, usage_share)
+            turn_index += 1
+
+        elif rec_type == "user":
+            content = record.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "tool_result":
+                    continue
+                tool_use_id = item.get("tool_use_id", "")
+                if tool_use_id not in pending:
+                    continue
+                tool_name, dispatch_ts, dispatch_ts_str, isize, tidx, usage = pending.pop(
+                    tool_use_id
+                )
+                is_error = bool(item.get("is_error"))
+                result_content = item.get("content", "")
+                osize = _output_size(result_content)
+
+                dur_ms = -1
+                if dispatch_ts is not None and ts is not None:
+                    try:
+                        delta = (ts - dispatch_ts).total_seconds()
+                        if delta >= 0:
+                            dur_ms = int(delta * 1000)
+                    except TypeError:
+                        pass  # mixed tz-aware/naive timestamps – leave dur_ms as sentinel
+
+                exit_code = _exit_code(result_content) if tool_name == "Bash" else None
+
+                spans.append(
+                    ToolSpan(
+                        span_id=str(uuid.uuid4()),
+                        session_id=session_id,
+                        tool_name=tool_name,
+                        timestamp=dispatch_ts_str,
+                        duration_ms=dur_ms,
+                        success=not is_error,
+                        input_size=isize,
+                        output_size=osize,
+                        exit_code=exit_code,
+                        turn_index=tidx,
+                        model=usage.model if usage else None,
+                        input_tokens=usage.input_tokens if usage else None,
+                        output_tokens=usage.output_tokens if usage else None,
+                        cache_creation_tokens=usage.cache_creation_tokens if usage else None,
+                        cache_read_tokens=usage.cache_read_tokens if usage else None,
+                        cost_usd=usage.cost_usd if usage else None,
+                    )
+                )
+
+    return spans
+
+
+def _gptme_is_noise(content: str) -> bool:
+    """Return True if a system message is not a tool result (lesson, warning, etc.)."""
+    return any(content.startswith(p) for p in _GPTME_NOISE_PREFIXES)
+
+
+def _gptme_is_error_result(content: str) -> bool:
+    """Heuristic error detection for gptme tool results.
+
+    gptme doesn't emit a structured ``is_error`` flag the way CC does, so we
+    fall back to looking at the result text. Bash subprocess errors are caught
+    separately via ``_EXIT_CODE_RE`` on the caller side.
+    """
+    head = content.lstrip()[:80].lower()
+    return head.startswith("error:") or head.startswith("error ")
+
+
+def extract_spans_from_gptme_jsonl(
+    path: Path | str,
+    session_id: str | None = None,
+) -> list[ToolSpan]:
+    """Extract ToolSpan objects from a gptme conversation.jsonl trajectory.
+
+    gptme tool invocations appear in assistant messages as
+    ``@tool_name(call-UUID-N): {json_args}``. Results arrive as the next
+    non-pinned system message that isn't a lesson injection, system warning,
+    or shellcheck note. Pairing is by sequential FIFO order (gptme doesn't
+    echo the call-ID in the result).
+
+    Args:
+        path: Path to the gptme ``conversation.jsonl`` file.
+        session_id: Session ID to assign to all spans. Defaults to the name
+            of the parent directory (gptme's session naming convention).
+
+    Returns:
+        List of spans in chronological dispatch order.
+    """
+    path = Path(path)
+    if session_id is None:
+        # gptme convention: session lives in a directory, jsonl filename is
+        # always "conversation.jsonl". Use the directory name as session id.
+        session_id = path.parent.name or path.stem
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    # Pending tool dispatches awaiting their result.
+    # Each entry: (tool_name, call_id, dispatch_ts, dispatch_ts_str,
+    #              input_size, turn_index, attributed_usage)
+    pending: list[tuple[str, str, datetime | None, str, int, int, _TurnUsage | None]] = []
+    spans: list[ToolSpan] = []
+    turn_index = 0
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        role = record.get("role")
+        content = record.get("content", "")
+        if not isinstance(content, str):
+            continue
+        ts_str = record.get("timestamp", "")
+        ts = _parse_ts(ts_str)
+
+        if role == "assistant":
+            matches = list(_GPTME_TOOL_RE.finditer(content))
+            if not matches:
+                continue
+            turn_usage = _gptme_turn_usage(record)
+            for idx, m in enumerate(matches):
+                tool_name = m.group(1)
+                call_id = m.group(2)
+                args_str = m.group(3) or ""
+                try:
+                    args = json.loads(args_str) if args_str else {}
+                except json.JSONDecodeError:
+                    args = args_str  # fall back to raw string length
+                isize = _input_size(args)
+                usage_share = turn_usage.split(len(matches), idx) if turn_usage else None
+                pending.append((tool_name, call_id, ts, ts_str, isize, turn_index, usage_share))
+            turn_index += 1
+
+        elif role == "system":
+            if record.get("pinned"):
+                continue
+            if _gptme_is_noise(content):
+                continue
+            if not pending:
+                continue
+
+            tool_name, _call_id, dispatch_ts, dispatch_ts_str, isize, tidx, usage = pending.pop(0)
+            osize = len(content)
+
+            dur_ms = -1
+            if dispatch_ts is not None and ts is not None:
+                try:
+                    delta = (ts - dispatch_ts).total_seconds()
+                    if delta >= 0:
+                        dur_ms = int(delta * 1000)
+                except TypeError:
+                    pass  # mixed tz-aware/naive timestamps – leave sentinel
+
+            exit_code = _exit_code(content) if tool_name == "shell" else None
+            # Shell success: explicit nonzero exit code overrides text heuristic;
+            # missing exit code means "successful exit 0" (gptme only annotates nonzero)
+            if tool_name == "shell" and exit_code is not None:
+                success = exit_code == 0
+            else:
+                success = not _gptme_is_error_result(content)
+
+            spans.append(
+                ToolSpan(
+                    span_id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    timestamp=dispatch_ts_str,
+                    duration_ms=dur_ms,
+                    success=success,
+                    input_size=isize,
+                    output_size=osize,
+                    exit_code=exit_code,
+                    turn_index=tidx,
+                    model=usage.model if usage else None,
+                    input_tokens=usage.input_tokens if usage else None,
+                    output_tokens=usage.output_tokens if usage else None,
+                    cache_creation_tokens=usage.cache_creation_tokens if usage else None,
+                    cache_read_tokens=usage.cache_read_tokens if usage else None,
+                    cost_usd=usage.cost_usd if usage else None,
+                )
+            )
+
+    return spans
+
+
+# codex payload types that mark a model "turn" boundary between tool dispatches.
+_CODEX_TURN_MARKERS = {"reasoning", "agent_message", "message"}
+
+
+def _codex_exec_exit_code(output: str) -> int | None:
+    """Exit code from a codex ``exec_command`` plaintext output, if annotated."""
+    matches = _CODEX_EXIT_CODE_RE.findall(output)
+    return int(matches[-1]) if matches else None
+
+
+def _codex_custom_exit_code(output: str) -> int | None:
+    """Exit code from a codex ``custom_tool_call_output`` JSON metadata, if present.
+
+    The output is a JSON string shaped like
+    ``{"output": "...", "metadata": {"exit_code": 0, "duration_seconds": 0.0}}``.
+    Returns None when the payload isn't JSON or carries no integer exit code.
+    """
+    try:
+        parsed = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    meta = parsed.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    code = meta.get("exit_code")
+    return code if isinstance(code, int) else None
+
+
+def extract_spans_from_codex_jsonl(
+    path: Path | str,
+    session_id: str | None = None,
+) -> list[ToolSpan]:
+    """Extract ToolSpan objects from a codex ``rollout-*.jsonl`` trajectory.
+
+    codex records tool use as ``response_item`` envelopes. Regular tools
+    (``exec_command``, ``write_stdin``, MCP calls) appear as
+    ``payload.type == "function_call"`` paired with ``function_call_output`` by
+    ``call_id``; patch edits appear as ``custom_tool_call`` paired with
+    ``custom_tool_call_output``. Success is read from the subprocess exit code
+    annotated in the output (``Process exited with code N`` for exec, or
+    ``metadata.exit_code`` for custom tools); calls with no exit annotation are
+    treated as successful absent an error signal.
+
+    Args:
+        path: Path to the codex ``rollout-*.jsonl`` file.
+        session_id: Session ID to assign to all spans. Defaults to the
+            filename stem.
+
+    Returns:
+        List of spans in chronological dispatch order.
+    """
+    path = Path(path)
+    if session_id is None:
+        session_id = path.stem
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    # pending maps call_id → (tool_name, dispatch_ts, dispatch_ts_str,
+    #                         input_size, turn_index, is_custom, model)
+    pending: dict[str, tuple[str, datetime | None, str, int, int, bool, str | None]] = {}
+    spans: list[ToolSpan] = []
+    turn_index = 0
+    new_turn = False  # set by a turn marker; the next dispatch opens a new turn
+    current_model: str | None = None
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if record.get("type") == "turn_context":
+            payload = record.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+                current_model = payload["model"]
+            continue
+
+        if record.get("type") != "response_item":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        ts_str = record.get("timestamp", "")
+        ts = _parse_ts(ts_str)
+
+        if ptype in _CODEX_TURN_MARKERS:
+            new_turn = True
+            continue
+
+        if ptype in ("function_call", "custom_tool_call"):
+            call_id = payload.get("call_id", "")
+            if not call_id:
+                continue
+            tool_name = payload.get("name", "unknown")
+            is_custom = ptype == "custom_tool_call"
+            if is_custom:
+                isize = len(str(payload.get("input", "")))
+            else:
+                args_raw = payload.get("arguments", "")
+                try:
+                    args = json.loads(args_raw) if args_raw else {}
+                except (json.JSONDecodeError, TypeError):
+                    args = args_raw
+                isize = _input_size(args)
+            # A dispatch following a reasoning/message marker opens a new model
+            # turn; the very first dispatch stays at turn 0.
+            if new_turn:
+                turn_index += 1
+                new_turn = False
+            pending[call_id] = (
+                tool_name,
+                ts,
+                ts_str,
+                isize,
+                turn_index,
+                is_custom,
+                current_model,
+            )
+
+        elif ptype in ("function_call_output", "custom_tool_call_output"):
+            call_id = payload.get("call_id", "")
+            if call_id not in pending:
+                continue
+            tool_name, dispatch_ts, dispatch_ts_str, isize, tidx, is_custom, model = pending.pop(
+                call_id
+            )
+            output = payload.get("output", "")
+            output_str = output if isinstance(output, str) else str(output)
+            osize = len(output_str)
+
+            if is_custom:
+                exit_code = _codex_custom_exit_code(output_str)
+            else:
+                exit_code = _codex_exec_exit_code(output_str)
+            # Missing exit annotation (MCP calls, plan updates) => no error signal.
+            success = exit_code in (None, 0)
+
+            dur_ms = -1
+            if dispatch_ts is not None and ts is not None:
+                try:
+                    delta = (ts - dispatch_ts).total_seconds()
+                    if delta >= 0:
+                        dur_ms = int(delta * 1000)
+                except TypeError:
+                    pass  # mixed tz-aware/naive timestamps – leave sentinel
+
+            spans.append(
+                ToolSpan(
+                    span_id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    timestamp=dispatch_ts_str,
+                    duration_ms=dur_ms,
+                    success=success,
+                    input_size=isize,
+                    output_size=osize,
+                    exit_code=exit_code,
+                    turn_index=tidx,
+                    model=model,
+                )
+            )
+
+    return spans

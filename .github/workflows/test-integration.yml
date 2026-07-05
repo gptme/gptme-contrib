@@ -1,0 +1,63 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # Detect which paths changed to skip expensive jobs on unrelated PRs
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          code:
+            - 'packages/**'
+            - 'plugins/**'
+            - 'scripts/**'
+            - 'pyproject.toml'
+            - 'uv.lock'
+            - 'Makefile'
+            - '.github/workflows/test-integration.yml'
+
+  integration-tests:
+    needs: changes
+    # Always run on push to master; on PRs, only when code changed
+    if: github.event_name == 'push' || needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history for git hook tests
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          uv sync --all-packages
+
+      - name: Set up Git identity
+        run: |
+          git config --global user.email "test@test.com"
+          git config --global user.name "Test User"
+
+      - name: Run integration tests
+        run: |
+          make test-integration

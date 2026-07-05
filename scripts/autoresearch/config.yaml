@@ -1,0 +1,8 @@
+# Global autoresearch configuration
+# Shared across all experiments running in parallel.
+
+# Maximum total iterations per day across ALL experiments combined.
+# Individual experiments also have their own per-experiment cap (period_budget in experiment YAML).
+# Effective limit = min(per_experiment_budget, global_daily_budget / num_experiments).
+# Set to 0 or remove this file to disable the global cap.
+global_daily_budget: 30

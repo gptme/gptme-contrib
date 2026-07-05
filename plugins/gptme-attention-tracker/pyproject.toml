@@ -1,0 +1,21 @@
+[project]
+name = "gptme-attention-tracker"
+version = "0.1.0"
+description = "Attention tracking and routing for gptme - tracks context usage and manages HOT/WARM/COLD tiers"
+requires-python = ">=3.10"
+dependencies = [
+    "gptme>=0.27.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_attention_tracker"]

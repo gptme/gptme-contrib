@@ -1,0 +1,1471 @@
+#!/usr/bin/env python3
+"""Match gptme-style lessons against conversation context and inject relevant ones.
+
+Claude Code hook for two events:
+- UserPromptSubmit: matches against user's prompt text
+- PreToolUse: matches against tool input (file paths, commands, search patterns)
+  AND recent transcript context (tool outputs, assistant responses)
+
+The PreToolUse transcript context means lessons fire on *what happened* (e.g.
+"merge conflicts" in Bash output → conflict-resolution lesson), not only on
+*what's being requested* in the tool call. UserPromptSubmit fires once at
+session start, so PreToolUse is the primary trigger for autonomous runs.
+
+Both events inject relevant lessons as additionalContext for Claude Code.
+This replicates gptme's keyword-based lesson injection for Claude Code sessions.
+
+Lesson dirs are read from gptme.toml [lessons] dirs (single source of truth).
+Matching uses the same keyword/wildcard logic as gptme's LessonMatcher.
+Already-injected lessons are tracked via a session state file to avoid duplicates.
+
+## Installation
+
+Copy or symlink this file into your agent workspace:
+    cp match-lessons.py /path/to/workspace/.claude/hooks/match-lessons.py
+
+Then register it in your workspace Claude Code settings
+(.claude/settings.json in the workspace root):
+
+    {
+      "hooks": {
+        "UserPromptSubmit": [{
+          "hooks": [{
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py",
+            "timeout": 10
+          }]
+        }],
+        "PreToolUse": [{
+          "matcher": "Read|Bash|Grep|WebFetch|WebSearch",
+          "hooks": [{
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py",
+            "timeout": 10
+          }]
+        }]
+      }
+    }
+
+The hook auto-discovers your workspace root (the directory containing gptme.toml)
+and reads lesson dirs from [lessons] dirs in that config file.
+
+State directories (Thompson sampling, predictions, trajectories) are stored
+under workspace/state/ and created automatically on first use.
+"""
+
+import json
+import os
+import random
+import re
+import sys
+import time
+from pathlib import Path
+
+# PreToolUse throttle: minimum seconds between lesson matches
+PRETOOL_COOLDOWN_SECONDS = 15
+# Thompson sampling: weight of posterior mean in final score (additive)
+TS_WEIGHT = 1.0
+# Maximum lessons to inject per PreToolUse event
+MAX_PRETOOL_LESSONS = 3
+# Maximum lessons to inject per UserPromptSubmit event
+MAX_PROMPT_LESSONS = 5
+# Maximum predicted lessons to inject per event (on top of keyword matches)
+MAX_PREDICTED_LESSONS = 2
+# Minimum lift for a prediction to be injected (from model, but also enforced here)
+MIN_PREDICTION_LIFT = 2.0
+# Minimum TS posterior mean for predicted lessons (deprioritize known-noise lessons)
+MIN_PREDICTION_TS = 0.30
+# State directory for cross-invocation dedup (in /tmp, not workspace)
+STATE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-lesson-match"
+# Directories inside lesson dirs that should never be scanned for lessons.
+# node_modules: npm packages (e.g. Playwright) ship *.agent.md skill files
+# that get injected as harmful lessons when they match on keywords.
+_SKIP_DIR_PARTS = frozenset({"node_modules", ".git", "__pycache__", ".venv"})
+_SHORT_DESCRIPTOR_TOKENS = {
+    "ai",
+    "api",
+    "ci",
+    "cli",
+    "css",
+    "gui",
+    "html",
+    "json",
+    "llm",
+    "pr",
+    "ui",
+    "ux",
+    "vm",
+    "xml",
+    "yaml",
+}
+_DESCRIPTOR_STOPWORDS = {
+    "about",
+    "after",
+    "agent",
+    "agents",
+    "and",
+    "any",
+    "are",
+    "before",
+    "build",
+    "can",
+    "code",
+    "debug",
+    "does",
+    "for",
+    "from",
+    "get",
+    "how",
+    "into",
+    "just",
+    "make",
+    "need",
+    "only",
+    "other",
+    "our",
+    "out",
+    "over",
+    "process",
+    "project",
+    "run",
+    "set",
+    "should",
+    "task",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "there",
+    "these",
+    "this",
+    "those",
+    "through",
+    "tool",
+    "tools",
+    "use",
+    "used",
+    "using",
+    "when",
+    "where",
+    "which",
+    "with",
+    "work",
+    "your",
+}
+_DESCRIPTOR_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_/-]*")
+
+
+# --- Workspace discovery (all state paths derived from here) ---
+
+_workspace: Path | None = None
+
+
+def find_workspace() -> Path:
+    """Find the workspace root (where gptme.toml lives).
+
+    Walks up from the script location, then falls back to cwd.
+    Works correctly whether the script lives in .claude/hooks/ (inside the
+    workspace) or in gptme-contrib/scripts/claude-code-hooks/ (linked from
+    an agent workspace).
+    """
+    script_dir = Path(__file__).resolve().parent
+    for p in [script_dir, *script_dir.parents]:
+        if (p / "gptme.toml").exists():
+            return p
+    # Also try cwd (useful when invoked from workspace root)
+    for p in [Path.cwd(), *Path.cwd().parents]:
+        if (p / "gptme.toml").exists():
+            return p
+    # Fallback: current working directory
+    return Path.cwd()
+
+
+def get_workspace() -> Path:
+    """Return cached workspace root."""
+    global _workspace
+    if _workspace is None:
+        _workspace = find_workspace()
+    return _workspace
+
+
+def _ts_state_dir() -> Path:
+    """Thompson sampling state directory (workspace-relative)."""
+    return get_workspace() / "state" / "lesson-thompson"
+
+
+def _prediction_model_file() -> Path:
+    """Prediction model file (workspace-relative)."""
+    return get_workspace() / "state" / "lesson-predictions" / "prediction-model.json"
+
+
+def _trajectory_log_dir() -> Path:
+    """Trajectory log directory (workspace-relative)."""
+    return get_workspace() / "state" / "lesson-trajectories"
+
+
+# --- Lesson loading ---
+
+
+def load_lesson_dirs(workspace: Path) -> list[Path]:
+    """Read lesson dirs from gptme.toml [lessons] dirs."""
+    toml_path = workspace / "gptme.toml"
+    if not toml_path.exists():
+        return [workspace / "lessons"]
+
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            # tomllib/tomli unavailable — warn and fall back to default lessons dir.
+            # Configured dirs in gptme.toml [lessons] dirs are silently ignored.
+            # Fix: install tomli (Python < 3.11) or upgrade to Python 3.11+.
+            print(
+                "Warning: tomllib/tomli not available; gptme.toml [lessons] dirs ignored,"
+                " using default './lessons' only.",
+                file=sys.stderr,
+            )
+            return [workspace / "lessons"]
+
+    with open(toml_path, "rb") as f:
+        cfg = tomllib.load(f)
+
+    dirs = cfg.get("lessons", {}).get("dirs", ["lessons"])
+    return [workspace / d for d in dirs]
+
+
+def keyword_to_regex(keyword: str) -> "re.Pattern[str] | None":
+    """Convert a keyword (possibly with wildcards) to a compiled regex.
+
+    Same logic as gptme's _keyword_to_pattern:
+    - '*' becomes r'\\w*' (zero or more word chars)
+    - A bare '*' alone returns None (too broad)
+    """
+    keyword = keyword.strip()
+    if not keyword or keyword == "*":
+        return None
+
+    # Escape everything except *, then replace * with \w*
+    parts = keyword.split("*")
+    escaped = r"\w*".join(re.escape(p) for p in parts)
+    try:
+        return re.compile(escaped, re.IGNORECASE)
+    except re.error:
+        return None
+
+
+def match_keyword(keyword: str, text_lower: str) -> bool:
+    """Check if a keyword matches in text (with wildcard support)."""
+    pattern = keyword_to_regex(keyword)
+    if pattern is None:
+        return False
+    return bool(pattern.search(text_lower))
+
+
+def _extract_scalar_frontmatter_field(fm_str: str, field: str) -> str | None:
+    """Extract a simple top-level YAML scalar or block scalar without PyYAML."""
+    lines = fm_str.splitlines()
+    field_pattern = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
+
+    for index, line in enumerate(lines):
+        match = field_pattern.match(line)
+        if not match:
+            continue
+
+        raw_value = match.group(1).strip()
+        if raw_value and raw_value[0] in "|>":
+            block_lines: list[str] = []
+            for next_line in lines[index + 1 :]:
+                if next_line and not next_line.startswith((" ", "\t")):
+                    break
+                block_lines.append(next_line)
+
+            if not block_lines:
+                return ""
+
+            indents = [
+                len(block_line) - len(block_line.lstrip(" "))
+                for block_line in block_lines
+                if block_line.strip()
+            ]
+            trim = min(indents) if indents else 0
+            normalized = [
+                block_line[trim:] if trim else block_line for block_line in block_lines
+            ]
+            text = "\n".join(normalized).strip()
+            if raw_value[0] == ">":
+                return " ".join(
+                    part.strip() for part in text.splitlines() if part.strip()
+                )
+            return text
+
+        value = raw_value
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value.strip()
+
+    return None
+
+
+def _dedupe_strings(values: list[object]) -> list[str]:
+    """Strip and deduplicate strings while preserving first-seen order."""
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        cleaned = value.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+    return deduped
+
+
+def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
+    """Extract YAML frontmatter and body from markdown."""
+    if not content.startswith("---"):
+        return {}, content
+
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return {}, content
+
+    fm_str = parts[1]
+    body = parts[2].strip()
+
+    # Try yaml first, fall back to regex parsing
+    try:
+        import yaml
+
+        fm_yaml = yaml.safe_load(fm_str)
+        return (fm_yaml or {}), body
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Regex fallback for keywords and status
+    fm: dict[str, object] = {}
+    keywords: list[str] = []
+    inline = re.search(r"keywords:\s*\[(.*?)\]", fm_str, re.DOTALL)
+    if inline:
+        keywords = [kw.strip() for kw in re.findall(r'"([^"]+)"', inline.group(1))]
+    else:
+        keywords = [
+            kw.strip() for kw in re.findall(r'^\s*-\s*"([^"]+)"', fm_str, re.MULTILINE)
+        ]
+
+    if keywords:
+        fm["match"] = {"keywords": keywords}
+
+    m = re.search(r"status:\s*(\w+)", fm_str)
+    if m:
+        fm["status"] = m.group(1)
+
+    for field in ("name", "description", "when_to_use"):
+        value = _extract_scalar_frontmatter_field(fm_str, field)
+        if value is not None:
+            fm[field] = value
+
+    return fm, body
+
+
+def _string_list(value: object) -> list[str]:
+    """Normalize YAML string-or-list fields into a clean list."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _descriptor_tokens(text: str) -> set[str]:
+    """Tokenize routing descriptors from skill name/description/tags."""
+    tokens: set[str] = set()
+    for raw in _DESCRIPTOR_TOKEN_RE.findall(text.lower()):
+        for part in re.split(r"[-_/]", raw):
+            token = part.strip()
+            if not token:
+                continue
+            if len(token) < 3 and token not in _SHORT_DESCRIPTOR_TOKENS:
+                continue
+            if token not in _DESCRIPTOR_STOPWORDS:
+                tokens.add(token)
+            # Strip trailing "s" for simple plurals, but skip false positives
+            # where the singular is implausibly short or the ending strongly
+            # suggests an irregular/non-plural form (e.g. "status", "access").
+            if (
+                token.endswith("s")
+                and len(token) > 4
+                and not token.endswith("ss")  # "class", "access", "process"
+                and not token.endswith("us")  # "status", "focus"
+                and not token.endswith("is")  # "analysis", "basis"
+            ):
+                singular = token[:-1]
+                if len(singular) >= 3 and singular not in _DESCRIPTOR_STOPWORDS:
+                    tokens.add(singular)
+    return tokens
+
+
+def _score_skill_descriptor(lesson: dict, prompt_lower: str) -> tuple[float, list[str]]:
+    """Score skill routing metadata against prompt text."""
+    if not lesson.get("is_skill"):
+        return 0.0, []
+
+    prompt_tokens = _descriptor_tokens(prompt_lower)
+    if not prompt_tokens:
+        return 0.0, []
+
+    skill_name = str(lesson.get("skill_name") or "")
+    routing_text = str(lesson.get("when_to_use") or lesson.get("description") or "")
+    tags = [str(tag).strip() for tag in lesson.get("tags") or [] if str(tag).strip()]
+
+    name_overlap = prompt_tokens & _descriptor_tokens(skill_name)
+    description_overlap = prompt_tokens & _descriptor_tokens(routing_text)
+    tag_overlap = prompt_tokens & _descriptor_tokens(" ".join(tags))
+    total_overlap = name_overlap | description_overlap | tag_overlap
+
+    if len(total_overlap) < 2:
+        return 0.0, []
+
+    score = 0.0
+    matched_by: list[str] = []
+    if name_overlap:
+        score += min(1.2, 0.6 * len(name_overlap))
+        matched_by.append(f"name:{','.join(sorted(name_overlap)[:3])}")
+    if description_overlap:
+        score += min(1.2, 0.35 * len(description_overlap))
+        matched_by.append(f"description:{','.join(sorted(description_overlap)[:4])}")
+    if tag_overlap:
+        score += min(0.9, 0.45 * len(tag_overlap))
+        matched_by.append(f"tags:{','.join(sorted(tag_overlap)[:3])}")
+    return score, matched_by
+
+
+def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
+    """Scan lesson directories for lesson files with keyword frontmatter.
+
+    Deduplication rules (first-dir-wins, matching gptme#1594 behavior):
+    1. By resolved path: handles symlinks pointing to the same file
+    2. By filename: if lessons/X/foo.md exists, gptme-contrib/lessons/X/foo.md is skipped.
+       Local workspace lessons take priority over shared contrib lessons.
+    """
+    lessons = []
+    seen_paths: set[str] = set()
+    seen_names: set[str] = set()  # filename-based dedup: first dir wins
+
+    for lesson_dir in lesson_dirs:
+        if not lesson_dir.exists():
+            continue
+        for f in sorted(lesson_dir.rglob("*.md")):
+            if f.name == "README.md":
+                continue
+
+            # Skip files inside tool/cache directories — not lesson content.
+            if _SKIP_DIR_PARTS & set(f.relative_to(lesson_dir).parts):
+                continue
+
+            # Dedup by resolved path (handles symlinks across dirs)
+            resolved = str(f.resolve())
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+
+            # Skip archived lessons — but still register their name so that
+            # contrib copies are also suppressed (local archive wins over contrib).
+            # Use relative_to(lesson_dir) so parent path segments (e.g. a workspace
+            # living under /home/alice/archive/…) don't trigger false suppression.
+            if "archive" in f.relative_to(lesson_dir).parts:
+                if f.name != "SKILL.md":
+                    # Only suppress if no active (non-archived) copy exists in this
+                    # lesson_dir. Lexicographic sort puts archive/foo.md before foo.md
+                    # so naively registering here would suppress the active copy.
+                    active_copy = next(
+                        (
+                            p
+                            for p in lesson_dir.rglob(f.name)
+                            if "archive" not in p.relative_to(lesson_dir).parts
+                        ),
+                        None,
+                    )
+                    if active_copy is None:
+                        seen_names.add(f.name)
+                continue
+
+            # Dedup by filename (first lesson dir wins — local overrides contrib).
+            # Exception: SKILL.md files are always different skills, not duplicates.
+            if f.name != "SKILL.md" and f.name in seen_names:
+                continue
+            seen_names.add(f.name)
+
+            try:
+                content = f.read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+            fm, body = extract_frontmatter(content)
+
+            status = fm.get("status", "active")
+            if status != "active":
+                continue
+
+            match_data = fm.get("match", {})
+            if isinstance(match_data, dict):
+                raw_keywords = match_data.get("keywords", [])
+                raw_patterns = match_data.get("patterns", [])
+            else:
+                raw_keywords = []
+                raw_patterns = []
+
+            if isinstance(raw_keywords, str):
+                raw_keywords = [raw_keywords]
+            keywords = _dedupe_strings(
+                [*raw_keywords, *_string_list(fm.get("keywords"))]
+            )
+
+            if isinstance(raw_patterns, str):
+                raw_patterns = [raw_patterns]
+            patterns = _dedupe_strings(
+                [*raw_patterns, *_string_list(fm.get("patterns"))]
+            )
+
+            skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
+            lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
+            description = (
+                fm.get("description") if isinstance(fm.get("description"), str) else ""
+            )
+            when_to_use = (
+                fm.get("when_to_use") if isinstance(fm.get("when_to_use"), str) else ""
+            )
+            metadata_value = fm.get("metadata")
+            metadata = metadata_value if isinstance(metadata_value, dict) else {}
+            tags = _string_list(metadata.get("tags"))
+            harness_restrict = _string_list(metadata.get("harness"))
+
+            # Need at least some way to match
+            if not keywords and not patterns and not skill_name:
+                continue
+
+            # Extract title from first H1
+            title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
+            title = title_match.group(1).strip() if title_match else f.stem
+
+            lessons.append(
+                {
+                    "path": str(f),
+                    "title": title,
+                    "id": lesson_id,
+                    "keywords": keywords,
+                    "patterns": patterns,
+                    "skill_name": skill_name,
+                    "description": description,
+                    "when_to_use": when_to_use,
+                    "tags": tags,
+                    "harness_restrict": harness_restrict,
+                    "is_skill": f.name == "SKILL.md" or skill_name is not None,
+                    "body": body,
+                    "n_keywords": len(keywords),
+                }
+            )
+    return lessons
+
+
+def detect_harness() -> str:
+    """Detect the current runtime harness for lesson applicability filters."""
+    if os.environ.get("CLAUDECODE"):
+        return "claude-code"
+    if os.environ.get("CODEX") or os.environ.get("CODEX_INSTALLED"):
+        return "codex"
+    return "gptme"
+
+
+def filter_by_harness(lessons: list[dict], harness: str) -> list[dict]:
+    """Keep unrestricted lessons and lessons explicitly allowed for harness."""
+    filtered = []
+    for lesson in lessons:
+        restrict = lesson.get("harness_restrict") or []
+        if not restrict:
+            filtered.append(lesson)
+            continue
+        allowed = {str(value).strip() for value in restrict if str(value).strip()}
+        if harness in allowed:
+            filtered.append(lesson)
+    return filtered
+
+
+# --- Thompson sampling ---
+
+
+def load_ts_means(lesson_paths: list[str]) -> dict[str, float]:
+    """Load Thompson sampling posterior means for scored lesson re-ranking.
+
+    Returns dict mapping lesson_path → posterior mean effectiveness [0, 1].
+    Uses deterministic expected value (alpha / (alpha + beta)) for stable ranking.
+
+    Confounding correction: lessons marked confounded=true get a floor of 0.5.
+    These lessons fire in inherently hard sessions (CI failures, conflicts, blocked
+    tasks), so low E[p] reflects session difficulty, not lesson quality.
+    """
+    state_file = _ts_state_dir() / "bandit-state.json"
+    if not state_file.exists():
+        return {}
+    try:
+        data = json.loads(state_file.read_text())
+        arms = data.get("arms", {})
+        means: dict[str, float] = {}
+        for path in lesson_paths:
+            if path in arms:
+                arm = arms[path]
+                alpha = arm.get("alpha", 1.0)
+                beta_val = arm.get("beta", 1.0)
+                ep = alpha / (alpha + beta_val)
+                # Apply floor for confounded lessons (fire in hard session types)
+                if arm.get("confounded", False):
+                    ep = max(ep, 0.5)
+                means[path] = ep
+        return means
+    except Exception:
+        return {}
+
+
+# --- Prediction model ---
+
+
+def load_prediction_model() -> "dict | None":
+    """Load the co-occurrence prediction model for early lesson injection.
+
+    Returns the model dict or None if not available.
+    Model is built by scripts/build-lesson-predictions.py.
+    """
+    model_file = _prediction_model_file()
+    if not model_file.exists():
+        return None
+    try:
+        data: dict = json.loads(model_file.read_text())
+        if data.get("model_version") != 1:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def get_predicted_lessons(
+    matched_paths: list[str],
+    already_injected: set[str],
+    all_lessons: list[dict],
+    max_predictions: int = MAX_PREDICTED_LESSONS,
+) -> list[dict]:
+    """Get lessons predicted by co-occurrence with already-matched lessons.
+
+    When lesson A fires via keyword match, this checks the prediction model
+    for lessons B, C that historically co-occur with A at high lift. Returns
+    lesson dicts for predicted lessons that haven't been injected yet.
+
+    Prediction confidence is additionally gated by Thompson sampling posterior
+    means so known-noise lessons get deprioritized/filtered over time.
+    """
+    model = load_prediction_model()
+    if not model:
+        return []
+
+    co_preds = model.get("co_occurrence", {})
+    temporal = model.get("temporal", {})
+    titles = model.get("titles", {})
+
+    # Build reverse lookup: title → ALL model paths (handles duplicate titles
+    # across lessons/ and gptme-contrib/lessons/ — both paths may be co-occurrence
+    # triggers, so we need to check all of them)
+    title_to_model_paths: dict[str, list[str]] = {}
+    for model_path, title in titles.items():
+        title_to_model_paths.setdefault(title, []).append(model_path)
+
+    # Find matching lesson objects from the scanned lessons
+    lesson_by_path: dict[str, dict] = {les["path"]: les for les in all_lessons}
+    lesson_by_title: dict[str, dict] = {
+        les.get("title", ""): les for les in all_lessons if les.get("title")
+    }
+
+    # Collect all predicted paths with their best lift score
+    predicted: dict[str, float] = {}  # path → best lift
+
+    for matched_path in matched_paths:
+        # Try direct path lookup first, then title-based fallback
+        lookup_paths = [matched_path]
+        # Find title for this matched path
+        matched_title = titles.get(matched_path, "")
+        if not matched_title:
+            # Path not in model's titles — try scanning all_lessons for title
+            for les in all_lessons:
+                if les.get("path") == matched_path:
+                    matched_title = les.get("title", "")
+                    break
+        # Add ALL model paths with the same title (handles cross-path duplicates)
+        if matched_title and matched_title in title_to_model_paths:
+            for model_path in title_to_model_paths[matched_title]:
+                if model_path != matched_path:
+                    lookup_paths.append(model_path)
+
+        for lp in lookup_paths:
+            # Check co-occurrence predictions
+            for pred in co_preds.get(lp, []):
+                path = pred["path"]
+                lift = pred.get("lift", 0)
+                if lift >= MIN_PREDICTION_LIFT and path not in already_injected:
+                    if path not in matched_paths:  # Don't predict already-matched
+                        predicted[path] = max(predicted.get(path, 0), lift)
+
+            # Check temporal predictions (early→late)
+            for pred in temporal.get(lp, []):
+                path = pred["path"]
+                lift = pred.get("lift", 0)
+                if lift >= MIN_PREDICTION_LIFT and path not in already_injected:
+                    if path not in matched_paths:
+                        predicted[path] = max(predicted.get(path, 0), lift)
+
+    if not predicted:
+        return []
+
+    # Resolve path/title candidates to scanned lesson paths so we can apply
+    # Thompson means even when model path and runtime lesson path differ.
+    candidate_paths: set[str] = set()
+    path_candidates: dict[str, list[str]] = {}
+    for path in predicted:
+        candidates = [path]
+        pred_title = titles.get(path, "")
+        if pred_title:
+            title_match = lesson_by_title.get(pred_title)
+            if title_match:
+                candidates.append(title_match["path"])
+        # Dedup while preserving order
+        deduped: list[str] = []
+        seen = set()
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                deduped.append(c)
+                candidate_paths.add(c)
+        path_candidates[path] = deduped
+
+    ts_means = load_ts_means(list(candidate_paths))
+
+    # Sort by lift first; TS threshold then filters out low-confidence predictions
+    sorted_preds = sorted(predicted.items(), key=lambda x: -x[1])
+
+    results = []
+    for path, lift in sorted_preds:
+        lesson = lesson_by_path.get(path)
+        # Fallback: find by title if path doesn't match (cross-path dedup)
+        if not lesson:
+            pred_title = titles.get(path, "")
+            if pred_title:
+                lesson = lesson_by_title.get(pred_title)
+        if not lesson:
+            continue
+
+        # Choose best available TS mean across model path + resolved runtime path.
+        # Default 0.5 keeps behavior neutral when no TS state exists.
+        candidates = path_candidates.get(path, [path])
+        ts_mean = max((ts_means.get(c, 0.5) for c in candidates), default=0.5)
+        if ts_mean < MIN_PREDICTION_TS:
+            continue
+
+        results.append(
+            {
+                **lesson,
+                "predicted": True,
+                "prediction_lift": lift,
+                "prediction_ts_mean": ts_mean,
+                "matched_by": [f"predicted (lift={lift:.1f}x, ts={ts_mean:.2f})"],
+            }
+        )
+        if len(results) >= max_predictions:
+            break
+
+    return results
+
+
+def score_lessons(lessons: list[dict], prompt: str, max_results: int = 5) -> list[dict]:
+    """Match lessons against prompt text. Returns scored results.
+
+    Scoring: keyword/pattern matches + Thompson sampling posterior mean boost.
+    TS re-ranks by adding TS_WEIGHT * posterior_mean to keyword scores.
+    Lessons without TS data get the default 0.5 (neutral prior).
+    """
+    prompt_lower = prompt.lower()
+    results = []
+
+    for lesson in lessons:
+        score = 0.0
+        matched_by: list[str] = []
+
+        # Keyword matching (with wildcard support)
+        for kw in lesson["keywords"]:
+            if match_keyword(kw, prompt_lower):
+                score += 1.0
+                matched_by.append(kw)
+
+        # Pattern matching (full regex)
+        for pat in lesson["patterns"]:
+            try:
+                if re.search(pat, prompt_lower):
+                    score += 1.0
+                    matched_by.append(f"pattern:{pat[:30]}")
+            except re.error:
+                pass
+
+        # Skill name matching
+        if lesson.get("skill_name"):
+            name_lower = lesson["skill_name"].lower()
+            for variant in [name_lower, name_lower.replace("-", " ")]:
+                if variant in prompt_lower:
+                    score += 1.5
+                    matched_by.append(f"skill:{lesson['skill_name']}")
+                    break
+
+        descriptor_score, descriptor_matches = _score_skill_descriptor(
+            lesson, prompt_lower
+        )
+        if descriptor_score > 0:
+            score += descriptor_score
+            matched_by.extend(descriptor_matches)
+
+        if score > 0:
+            results.append({**lesson, "score": score, "matched_by": matched_by})
+
+    # Apply Thompson sampling re-ranking (always apply neutral prior for consistency).
+    # If ts_means is empty (no bandit state yet) every lesson gets +0.5, keeping
+    # relative order.  Once partial data exists the guard would produce non-monotonic
+    # ranking — lessons without data would lose the +0.5 boost while lessons with data
+    # gain it, making early bandit accumulation perturb rankings unpredictably.
+    if results:
+        ts_means = load_ts_means([r["path"] for r in results])
+        for r in results:
+            ts_mean = ts_means.get(r["path"], 0.5)  # 0.5 = neutral prior
+            r["score"] += TS_WEIGHT * ts_mean
+            r["ts_score"] = ts_mean
+
+    results.sort(key=lambda x: -x["score"])
+    return results[:max_results]
+
+
+# --- Holdout filtering (A/B testing) ---
+
+
+def parse_holdout_lessons_env(value: str | None = None) -> set[str]:
+    """Parse comma-separated lesson identifiers from HOLDOUT_LESSONS env var.
+
+    Supports multiple identifier formats: file stem, filename, full/partial path,
+    lesson ID (from frontmatter ``id`` field), or parent directory name (for SKILL.md).
+
+    Example::
+
+        HOLDOUT_LESSONS="browser-verification,strategic/scope-discipline.md"
+    """
+    raw = os.environ.get("HOLDOUT_LESSONS", "") if value is None else value
+    if not raw:
+        return set()
+    return {
+        token.strip().lower().replace("\\", "/")
+        for token in raw.split(",")
+        if token.strip()
+    }
+
+
+def is_held_out_lesson(lesson: dict, holdout_lessons: set[str]) -> bool:
+    """Return True if the lesson matches a configured holdout identifier."""
+    if not holdout_lessons:
+        return False
+
+    path = Path(str(lesson["path"]))
+    path_str = str(path).lower().replace("\\", "/")
+    identifiers = {
+        path_str,
+        path.name.lower(),
+        # For SKILL.md files, use parent dir name as identifier; otherwise file stem
+        (path.parent.name if path.name.lower() == "skill.md" else path.stem).lower(),
+    }
+
+    lesson_id = lesson.get("id")
+    if isinstance(lesson_id, str) and lesson_id.strip():
+        identifiers.add(lesson_id.strip().lower())
+
+    for token in holdout_lessons:
+        if token in identifiers:
+            return True
+        # Path suffix matching for partial paths like "strategic/foo.md"
+        if "/" in token or token.endswith(".md"):
+            normalized = token.lstrip("./")
+            if path_str == normalized or path_str.endswith(f"/{normalized}"):
+                return True
+
+    return False
+
+
+def filter_held_out_lessons(
+    lessons: list[dict], holdout_lessons: set[str]
+) -> list[dict]:
+    """Remove lessons selected for holdout from injection output."""
+    if not holdout_lessons:
+        return lessons
+    return [
+        lesson for lesson in lessons if not is_held_out_lesson(lesson, holdout_lessons)
+    ]
+
+
+# --- Randomized lesson-dropout for causal LOO ---
+# NOTE: Mirrors gptme/lessons/auto_include.py _apply_lesson_dropout / _log_dropout.
+# If dropout logic changes in gptme core, update here too (and vice versa).
+# Future: import from gptme core once the CC hook can safely depend on gptme being installed.
+
+
+def _get_dropout_epsilon() -> float:
+    """Get lesson-dropout probability from LESSON_DROPOUT_EPSILON env var (default 0.0)."""
+    raw = os.environ.get("LESSON_DROPOUT_EPSILON")
+    if raw is None:
+        return 0.0
+    try:
+        epsilon = float(raw)
+    except ValueError:
+        return 0.0
+    if epsilon <= 0.0:
+        return 0.0
+    return min(epsilon, 1.0)
+
+
+def _get_dropout_log_dir(workspace: Path) -> Path:
+    """Dropout log directory (LESSON_DROPOUT_LOG_DIR or workspace/state/lesson-dropout)."""
+    raw = os.environ.get("LESSON_DROPOUT_LOG_DIR")
+    return Path(raw) if raw else workspace / "state" / "lesson-dropout"
+
+
+def _log_dropout(
+    session_id: str, epsilon: float, withheld: list[dict], workspace: Path
+) -> None:
+    """Append a dropout record for causal LOO analysis. Failures are swallowed."""
+    try:
+        log_dir = _get_dropout_log_dir(workspace)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.time(),
+            "session_id": session_id,
+            "epsilon": epsilon,
+            "withheld": withheld,
+        }
+        with open(log_dir / f"{session_id}.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
+def _apply_lesson_dropout(
+    lessons: list[dict], session_id: str, workspace: Path
+) -> list[dict]:
+    """Randomly withhold lessons for causal leave-one-out analysis.
+
+    Controlled by LESSON_DROPOUT_EPSILON (float [0,1]). Default 0 = no-op.
+    Does NOT log — logging is done by _apply_lesson_dropout_multi which
+    collects withheld lessons from both pools into one unified record.
+    """
+    epsilon = _get_dropout_epsilon()
+    if epsilon <= 0.0 or not lessons:
+        return lessons
+
+    kept: list[dict] = []
+    for lesson in lessons:
+        if random.random() < epsilon:
+            # Withheld — skip
+            pass
+        else:
+            kept.append(lesson)
+
+    return kept
+
+
+def _apply_lesson_dropout_multi(
+    matches: list[dict],
+    predicted: list[dict],
+    session_id: str,
+    workspace: Path,
+) -> tuple[list[dict], list[dict]]:
+    """Apply dropout to both matches and predicted, logging ONE unified record.
+
+    Processes both pools together so that the analysis script receives a
+    single JSONL record per hook invocation containing all withheld lessons,
+    not two split records with partial withheld lists.
+    """
+    epsilon = _get_dropout_epsilon()
+
+    # Always log when epsilon>0, even if both pools are empty, so
+    # lesson-loo-analysis.py can distinguish treatment-group sessions
+    # (epsilon>0, possibly 0 withheld) from control-group sessions (epsilon=0).
+    if epsilon <= 0.0:
+        return matches, predicted
+
+    withheld: list[dict] = []
+
+    def _do_dropout(lessons: list[dict]) -> list[dict]:
+        kept: list[dict] = []
+        for lesson in lessons:
+            if random.random() < epsilon:
+                withheld.append(
+                    {"path": lesson["path"], "title": lesson.get("title", "")}
+                )
+            else:
+                kept.append(lesson)
+        return kept
+
+    kept_matches = _do_dropout(matches)
+    kept_predicted = _do_dropout(predicted)
+
+    _log_dropout(session_id, epsilon, withheld, workspace)
+    return kept_matches, kept_predicted
+
+
+# --- Session state for cross-invocation dedup ---
+
+
+def _state_file(session_id: str) -> Path:
+    """Get the state file path for a session."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # Sanitize session_id for filesystem
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
+    return STATE_DIR / f"{safe_id}.json"
+
+
+def load_session_state(session_id: str) -> dict:
+    """Load session state (injected lessons, last pretool time)."""
+    try:
+        sf = _state_file(session_id)
+        if sf.exists():
+            data = json.loads(sf.read_text())
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"injected": [], "last_pretool": 0}
+
+
+def save_session_state(session_id: str, state: dict) -> None:
+    """Save session state atomically (write-then-rename for POSIX safety)."""
+    try:
+        sf = _state_file(session_id)
+        tmp = sf.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(sf)  # atomic on POSIX; avoids partial reads under concurrent hooks
+    except Exception:
+        pass
+
+
+def get_already_injected(
+    session_id: str, transcript_path: str | None = None
+) -> set[str]:
+    """Get set of lesson paths already injected in this session.
+
+    Uses session state file as primary source, with transcript fallback.
+    """
+    injected: set[str] = set()
+
+    # From state file
+    state = load_session_state(session_id)
+    injected.update(state.get("injected", []))
+
+    # From transcript (catches lessons from before state tracking)
+    if transcript_path:
+        try:
+            with open(transcript_path, encoding="utf-8") as f:
+                for line in f:
+                    for m in re.finditer(r"\*Source: ([^*]+)\*", line):
+                        injected.add(m.group(1).strip())
+        except Exception:
+            pass
+
+    return injected
+
+
+# --- Match text extraction ---
+
+
+def build_pretool_match_text(tool_name: str, tool_input: dict) -> str:
+    """Build match text from PreToolUse tool name and input fields."""
+    parts = []
+
+    # Extract relevant fields from tool input
+    for key in (
+        "file_path",
+        "command",
+        "pattern",
+        "prompt",
+        "query",
+        "url",
+        "description",
+    ):
+        val = tool_input.get(key)
+        if val and isinstance(val, str):
+            parts.append(val)
+
+    return " ".join(parts)
+
+
+def extract_recent_transcript_text(
+    transcript_path: str | None,
+    max_messages: int = 1,
+    max_chars_per_message: int = 800,
+    max_total_chars: int = 1500,
+) -> str:
+    """Extract text from the most recent tool result in the transcript.
+
+    Broadens lesson matching beyond tool input — lessons can be triggered by
+    keywords appearing in tool outputs (e.g. "merge conflicts" in a Bash
+    output triggers the PR conflict lesson even if the user prompt is just
+    "fix it").
+
+    Only includes tool_result content (actual command outputs, errors, file
+    contents). Assistant text blocks are excluded — they contain incidental
+    keyword mentions from reasoning/discussion that cause ~90% false positive
+    rate (measured via LLM-as-judge in session 260).
+
+    Window reduced from 6→1 message (session 269): matching against 6 recent
+    tool outputs caused 95% noop rate because old outputs contain incidental
+    keywords. Only the MOST RECENT tool output is relevant for "what just
+    happened" lesson triggers.
+
+    Skips: system prompt, assistant text blocks, tool_use inputs.
+    Includes: tool_result content strings only (most recent).
+    """
+    if not transcript_path:
+        return ""
+    try:
+        texts: list[str] = []
+        with open(transcript_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                entry_type = entry.get("type", "")
+                message = entry.get("message", {})
+                role = message.get("role", "")
+                content = message.get("content", "")
+
+                # Tool result content only (skip assistant text — too noisy)
+                if entry_type == "user" and role == "user":
+                    if isinstance(content, list):
+                        for block in content:
+                            if (
+                                isinstance(block, dict)
+                                and block.get("type") == "tool_result"
+                            ):
+                                tool_content = block.get("content", "")
+                                if tool_content and isinstance(tool_content, str):
+                                    texts.append(tool_content[:max_chars_per_message])
+
+        recent = [t for t in texts if t.strip()][-max_messages:]
+        combined = "\n".join(recent)
+        # Strip system-reminder blocks (contain previously injected lessons)
+        # to prevent self-referential keyword matches (gptme-contrib#341)
+        combined = re.sub(
+            r"<system-reminder>.*?</system-reminder>",
+            "",
+            combined,
+            flags=re.DOTALL,
+        )
+        return combined[:max_total_chars]
+    except Exception:
+        return ""
+
+
+# --- Output helpers ---
+
+
+def emit_empty(event_name: str) -> None:
+    """Emit empty hook output (no context to inject)."""
+    # For PreToolUse, exit 0 with no output is cleanest — doesn't interfere
+    # with permissions. For UserPromptSubmit, we emit the standard structure.
+    if event_name == "UserPromptSubmit":
+        json.dump(
+            {"hookSpecificOutput": {"hookEventName": event_name}},
+            sys.stdout,
+        )
+
+
+def format_lessons(
+    matches: list[dict],
+    already_injected: set[str],
+    predicted: list[dict] | None = None,
+) -> str:
+    """Format matched + predicted lessons as markdown context."""
+    parts: list[str] = []
+
+    for m in matches:
+        if m["path"] in already_injected:
+            continue
+
+        # Don't inject keyword count metadata alongside content — it leaks
+        # matching internals and contributes to self-referential corpus matches
+        # when analysis tools grep session transcripts (gptme-contrib#341)
+        parts.append(f"### {m['title']}")
+        parts.append(f"*Source: {m['path']}*\n")
+        parts.append(m["body"])
+        parts.append("")
+
+    # Add predicted lessons (from co-occurrence model)
+    if predicted:
+        for p in predicted:
+            if p["path"] in already_injected:
+                continue
+            # Simplified header — no lift score metadata
+            parts.append(f"### {p['title']} (predicted)")
+            parts.append(f"*Source: {p['path']}*\n")
+            parts.append(p["body"])
+            parts.append("")
+
+    if not parts:
+        return ""
+
+    return "## Matched Lessons (auto-injected)\n\n" + "\n".join(parts)
+
+
+def extract_tool_sequence(
+    transcript_path: str | None, max_tools: int = 50
+) -> list[str]:
+    """Extract the sequence of tool names used so far in the session.
+
+    Reads the JSONL transcript and collects tool_use block names from assistant
+    messages. Returns the last `max_tools` tools to keep the sequence bounded.
+    """
+    if not transcript_path:
+        return []
+    try:
+        tools: list[str] = []
+        with open(transcript_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if entry.get("type") != "assistant":
+                    continue
+                msg = entry.get("message", {})
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            tools.append(block.get("name", "?"))
+        return tools[-max_tools:]
+    except Exception:
+        return []
+
+
+def log_trajectory_match(
+    session_id: str,
+    event_type: str,
+    tool_sequence: list[str],
+    current_tool: str,
+    matched_lessons: list[dict],
+    already_injected: set[str],
+) -> None:
+    """Append a trajectory-match record to the daily log for predict-early analysis.
+
+    Each record captures: when a lesson was matched, what tool sequence preceded it,
+    and which lesson fired. This builds the dataset for n-gram/co-occurrence analysis.
+
+    Log format: one JSON object per line in a daily file.
+    """
+    newly_matched = [m for m in matched_lessons if m["path"] not in already_injected]
+    if not newly_matched:
+        return
+
+    try:
+        log_dir = _trajectory_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"{time.strftime('%Y-%m-%d')}.jsonl"
+
+        # Build compact n-gram context (last 10 tools)
+        recent_tools = tool_sequence[-10:]
+
+        record = {
+            "ts": time.time(),
+            "session_id": session_id,
+            "event": event_type,
+            "current_tool": current_tool,
+            "tool_seq": recent_tools,
+            "tool_count": len(tool_sequence),
+            "lessons": [
+                {
+                    "path": m["path"],
+                    "title": m["title"],
+                    "score": m.get("score", 0),
+                    "matched_by": m.get("matched_by", []),
+                    **(
+                        {
+                            "predicted": True,
+                            "prediction_lift": m.get("prediction_lift", 0),
+                        }
+                        if m.get("predicted")
+                        else {}
+                    ),
+                }
+                for m in newly_matched
+            ],
+        }
+
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass  # Never fail the hook for logging
+
+
+def main():
+    # Read hook input from stdin
+    try:
+        hook_input = json.loads(sys.stdin.read())
+    except (json.JSONDecodeError, Exception):
+        sys.exit(0)
+
+    # Detect event type from hook_event_name (available in all hook inputs)
+    event_type = hook_input.get("hook_event_name", "UserPromptSubmit")
+    session_id = hook_input.get("session_id", "unknown")
+    transcript_path = hook_input.get("transcript_path")
+
+    # --- Build match text based on event type ---
+    if event_type == "UserPromptSubmit":
+        match_text = hook_input.get("prompt", "")
+        max_results = MAX_PROMPT_LESSONS
+
+    elif event_type == "PreToolUse":
+        # Throttle: skip if we matched recently
+        state = load_session_state(session_id)
+        elapsed = time.time() - state.get("last_pretool", 0)
+        if elapsed < PRETOOL_COOLDOWN_SECONDS:
+            sys.exit(0)
+
+        tool_name = hook_input.get("tool_name", "")
+        tool_input = hook_input.get("tool_input", {})
+        if not isinstance(tool_input, dict):
+            sys.exit(0)
+
+        tool_match_text = build_pretool_match_text(tool_name, tool_input)
+        # Also match against most recent tool output (not assistant text)
+        # so lessons fire on *what just happened* (e.g. merge conflict in
+        # last Bash output → inject conflict lesson for next tool call).
+        transcript_text = extract_recent_transcript_text(transcript_path)
+        match_text = (
+            f"{tool_match_text}\n{transcript_text}"
+            if transcript_text
+            else tool_match_text
+        )
+        max_results = MAX_PRETOOL_LESSONS
+
+    else:
+        # Unknown event type — no-op
+        sys.exit(0)
+
+    # Strip system-reminder blocks from match text — these contain previously
+    # injected lesson content whose keywords would self-referentially re-match
+    # (gptme-contrib#341). Filtering here covers both event types.
+    match_text = re.sub(
+        r"<system-reminder>.*?</system-reminder>",
+        "",
+        match_text,
+        flags=re.DOTALL,
+    )
+
+    if not match_text.strip():
+        emit_empty(event_type)
+        sys.exit(0)
+
+    # --- Scan and match lessons ---
+    workspace = get_workspace()
+    lesson_dirs = load_lesson_dirs(workspace)
+    lessons = scan_lessons(lesson_dirs)
+    lessons = filter_by_harness(lessons, detect_harness())
+    holdout_lessons = parse_holdout_lessons_env()
+
+    if not lessons:
+        emit_empty(event_type)
+        sys.exit(0)
+
+    raw_matches = score_lessons(lessons, match_text, max_results=max_results)
+    if not raw_matches:
+        emit_empty(event_type)
+        sys.exit(0)
+
+    # --- Dedup: skip already-injected lessons ---
+    already_injected = get_already_injected(session_id, transcript_path)
+
+    # --- Prediction: inject co-occurring lessons proactively ---
+    matched_paths = [
+        m["path"] for m in raw_matches if m["path"] not in already_injected
+    ]
+    predicted = get_predicted_lessons(
+        matched_paths, already_injected, lessons, MAX_PREDICTED_LESSONS
+    )
+
+    # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
+    matches = filter_held_out_lessons(raw_matches, holdout_lessons)
+    predicted = filter_held_out_lessons(predicted, holdout_lessons)
+
+    # --- Randomized dropout for causal LOO (mirrors gptme/lessons/auto_include.py) ---
+    matches, predicted = _apply_lesson_dropout_multi(
+        matches, predicted, session_id, workspace
+    )
+
+    context = format_lessons(matches, already_injected, predicted)
+
+    if not context:
+        emit_empty(event_type)
+        sys.exit(0)
+
+    # --- Update session state ---
+    state = load_session_state(session_id)
+    newly_injected = [m["path"] for m in matches if m["path"] not in already_injected]
+    predicted_injected = [
+        p["path"] for p in predicted if p["path"] not in already_injected
+    ]
+    existing = set(state.get("injected", []))
+    existing.update(newly_injected)
+    existing.update(predicted_injected)
+    state["injected"] = list(existing)
+    if event_type == "PreToolUse":
+        state["last_pretool"] = time.time()
+    save_session_state(session_id, state)
+
+    # --- Log trajectory data for predict-early analysis ---
+    tool_sequence = extract_tool_sequence(transcript_path)
+    current_tool = ""
+    if event_type == "PreToolUse":
+        current_tool = hook_input.get("tool_name", "")
+    # Include predicted lessons in trajectory logging (marked with "predicted" flag)
+    all_logged = matches + [
+        {**p, "predicted": True} for p in predicted if p["path"] not in already_injected
+    ]
+    log_trajectory_match(
+        session_id,
+        event_type,
+        tool_sequence,
+        current_tool,
+        all_logged,
+        already_injected,
+    )
+
+    # --- Emit result ---
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": event_type,
+            "additionalContext": context,
+        }
+    }
+    json.dump(result, sys.stdout)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

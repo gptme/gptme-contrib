@@ -1,0 +1,748 @@
+"""
+Fetch real GitHub activity metrics using `gh` CLI and `git log`.
+
+Provides actual commit counts, merged PRs, and closed issues
+instead of relying on LLM guessing.
+"""
+
+import json
+import logging
+import subprocess
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_REPOS = [
+    "ErikBjare/gptme-bob",
+    "gptme/gptme",
+    "gptme/gptme-contrib",
+]
+
+
+@dataclass
+class RepoActivity:
+    """Activity for a single repository."""
+
+    repo: str
+    commits: int = 0
+    merged_prs: list[dict[str, str]] = field(default_factory=list)
+    closed_issues: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class PRReview:
+    """A PR review received from someone."""
+
+    repo: str
+    pr_number: int
+    pr_title: str
+    reviewer: str
+    url: str = ""
+
+
+@dataclass
+class CrossRepoPR:
+    """A PR authored in a repo outside DEFAULT_REPOS."""
+
+    repo: str
+    number: int
+    title: str
+    state: str = ""  # "open", "merged", "closed"
+    url: str = ""
+
+
+@dataclass
+class UserEvent:
+    """A single GitHub event from the events API (productivity signal)."""
+
+    type: str  # e.g. PullRequestReviewEvent
+    repo: str
+    timestamp: datetime
+    line: str  # pre-rendered single-line description
+
+
+# Event types from users/<user>/events/public that are noisy / non-productivity,
+# or that duplicate data already captured by the search-based path (get_user_prs /
+# get_user_issues). Excluded from the events block.
+EVENT_TYPES_DROPPED = frozenset(
+    {
+        "WatchEvent",
+        "CreateEvent",
+        "DeleteEvent",
+        "ForkEvent",
+        # Duplicate the search-based PRs/issues data — drop to avoid double-counting.
+        "PullRequestEvent",
+        "IssuesEvent",
+    }
+)
+
+
+@dataclass
+class GitHubActivity:
+    """Aggregated GitHub activity across repos."""
+
+    start_date: date
+    end_date: date
+    repos: list[RepoActivity] = field(default_factory=list)
+    reviews_received: list[PRReview] = field(default_factory=list)
+    cross_repo_prs: list[CrossRepoPR] = field(default_factory=list)
+    events: list[UserEvent] = field(default_factory=list)
+
+    @property
+    def total_commits(self) -> int:
+        return sum(r.commits for r in self.repos)
+
+    @property
+    def total_prs_merged(self) -> int:
+        return sum(len(r.merged_prs) for r in self.repos)
+
+    @property
+    def total_issues_closed(self) -> int:
+        return sum(len(r.closed_issues) for r in self.repos)
+
+
+def _run_command(cmd: list[str], timeout: int = 30) -> str | None:
+    """Run a command and return stdout, or None on failure."""
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        logger.debug(
+            "Command failed (rc=%d): %s\nstderr: %s", result.returncode, cmd, result.stderr
+        )
+        return None
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.debug("Command error: %s: %s", cmd, e)
+        return None
+
+
+def _gh_available() -> bool:
+    """Check if the `gh` CLI is available and authenticated."""
+    return _run_command(["gh", "auth", "status"]) is not None
+
+
+def get_merged_prs(start: date, end: date, repo: str) -> list[dict[str, str]]:
+    """Get merged PRs for a repo in a date range."""
+    # gh search uses ISO dates; merged:YYYY-MM-DD..YYYY-MM-DD
+    output = _run_command(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "merged",
+            "--search",
+            f"merged:{start.isoformat()}..{end.isoformat()}",
+            "--json",
+            "number,title,url,mergedAt",
+            "--limit",
+            "100",
+        ]
+    )
+    if not output:
+        return []
+    try:
+        prs = json.loads(output)
+        return [
+            {
+                "number": str(pr.get("number", "")),
+                "title": pr.get("title", ""),
+                "url": pr.get("url", ""),
+            }
+            for pr in prs
+        ]
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def get_closed_issues(start: date, end: date, repo: str) -> list[dict[str, str]]:
+    """Get closed issues for a repo in a date range."""
+    output = _run_command(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "closed",
+            "--search",
+            f"closed:{start.isoformat()}..{end.isoformat()}",
+            "--json",
+            "number,title,url,closedAt",
+            "--limit",
+            "100",
+        ]
+    )
+    if not output:
+        return []
+    try:
+        issues = json.loads(output)
+        return [
+            {
+                "number": str(issue.get("number", "")),
+                "title": issue.get("title", ""),
+                "url": issue.get("url", ""),
+            }
+            for issue in issues
+        ]
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def get_commit_count(start: date, end: date, repo_path: str | None = None) -> int:
+    """Get commit count from git log for a date range."""
+    cmd = ["git"]
+    if repo_path:
+        cmd.extend(["-C", repo_path])
+    # --after is exclusive, so subtract 1 day; --before is exclusive, so add 1 day
+    cmd.extend(
+        [
+            "log",
+            f"--after={start - timedelta(days=1)}",
+            f"--before={end + timedelta(days=1)}",
+            "--oneline",
+        ]
+    )
+    output = _run_command(cmd)
+    if not output:
+        return 0
+    return len(output.strip().splitlines())
+
+
+def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRReview]:
+    """Get PR review comments received on our PRs in a date range."""
+    reviews: list[PRReview] = []
+    for repo in repos:
+        output = _run_command(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "all",
+                "--search",
+                f"updated:{start.isoformat()}..{end.isoformat()}",
+                "--json",
+                "number,title,url,reviews",
+                "--limit",
+                "50",
+            ]
+        )
+        if not output:
+            continue
+        try:
+            prs = json.loads(output)
+            for pr in prs:
+                for review in pr.get("reviews", []):
+                    author = review.get("author", {}).get("login", "")
+                    if author and author not in ("ErikBjare", "bot"):
+                        reviews.append(
+                            PRReview(
+                                repo=repo,
+                                pr_number=pr.get("number", 0),
+                                pr_title=pr.get("title", ""),
+                                reviewer=author,
+                                url=pr.get("url", ""),
+                            )
+                        )
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return reviews
+
+
+def get_cross_repo_prs(
+    start: date,
+    end: date,
+    author: str = "ErikBjare",
+    exclude_repos: list[str] | None = None,
+) -> list[CrossRepoPR]:
+    """Get PRs authored in repos outside the excluded list."""
+    if exclude_repos is None:
+        exclude_repos = DEFAULT_REPOS
+    output = _run_command(
+        [
+            "gh",
+            "search",
+            "prs",
+            "--author",
+            author,
+            "--created",
+            f"{start.isoformat()}..{end.isoformat()}",
+            "--json",
+            "repository,number,title,state,url",
+            "--limit",
+            "50",
+        ]
+    )
+    if not output:
+        return []
+    try:
+        prs = json.loads(output)
+        results: list[CrossRepoPR] = []
+        for pr in prs:
+            repo_info = pr.get("repository", {})
+            repo_name = repo_info.get("nameWithOwner", "")
+            # Only include repos outside excluded list
+            if repo_name and repo_name not in exclude_repos:
+                results.append(
+                    CrossRepoPR(
+                        repo=repo_name,
+                        number=pr.get("number", 0),
+                        title=pr.get("title", ""),
+                        state=pr.get("state", "").lower(),
+                        url=pr.get("url", ""),
+                    )
+                )
+        return results
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def get_user_repos(username: str, limit: int = 20) -> list[str]:
+    """Get a user's most active repos from GitHub.
+
+    Returns repos as 'owner/name' strings, sorted by recent push activity.
+    """
+    output = _run_command(
+        [
+            "gh",
+            "api",
+            f"users/{username}/repos",
+            "--jq",
+            ".[].full_name",
+            "-q",
+            f"per_page={limit}&sort=pushed&direction=desc&type=owner",
+        ]
+    )
+    if not output:
+        return []
+    return [line.strip() for line in output.strip().splitlines() if line.strip()]
+
+
+def get_user_prs(
+    start: date,
+    end: date,
+    author: str,
+) -> list[CrossRepoPR]:
+    """Get all PRs authored by a user in a date range (across all repos)."""
+    output = _run_command(
+        [
+            "gh",
+            "search",
+            "prs",
+            "--author",
+            author,
+            "--created",
+            f"{start.isoformat()}..{end.isoformat()}",
+            "--json",
+            "repository,number,title,state,url",
+            "--limit",
+            "100",
+        ]
+    )
+    if not output:
+        return []
+    try:
+        prs = json.loads(output)
+        results: list[CrossRepoPR] = []
+        for pr in prs:
+            repo_info = pr.get("repository", {})
+            repo_name = repo_info.get("nameWithOwner", "")
+            if repo_name:
+                results.append(
+                    CrossRepoPR(
+                        repo=repo_name,
+                        number=pr.get("number", 0),
+                        title=pr.get("title", ""),
+                        state=pr.get("state", "").lower(),
+                        url=pr.get("url", ""),
+                    )
+                )
+        return results
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def get_user_issues(
+    start: date,
+    end: date,
+    author: str,
+) -> list[dict[str, str]]:
+    """Get issues created by a user in a date range."""
+    output = _run_command(
+        [
+            "gh",
+            "search",
+            "issues",
+            "--author",
+            author,
+            "--created",
+            f"{start.isoformat()}..{end.isoformat()}",
+            "--json",
+            "repository,number,title,state,url",
+            "--limit",
+            "100",
+        ]
+    )
+    if not output:
+        return []
+    try:
+        issues = json.loads(output)
+        return [
+            {
+                "repo": issue.get("repository", {}).get("nameWithOwner", ""),
+                "number": str(issue.get("number", "")),
+                "title": issue.get("title", ""),
+                "state": issue.get("state", "").lower(),
+                "url": issue.get("url", ""),
+            }
+            for issue in issues
+        ]
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def get_user_commits(
+    start: date,
+    end: date,
+    author: str,
+) -> int:
+    """Get approximate commit count for a user via GitHub search."""
+    output = _run_command(
+        [
+            "gh",
+            "search",
+            "commits",
+            "--author",
+            author,
+            "--author-date",
+            f"{start.isoformat()}..{end.isoformat()}",
+            "--json",
+            "sha",
+            "--limit",
+            "100",
+        ]
+    )
+    if not output:
+        return 0
+    try:
+        commits = json.loads(output)
+        return len(commits)
+    except (json.JSONDecodeError, TypeError):
+        return 0
+
+
+def _render_event_line(event: dict) -> str | None:
+    """Render a single GitHub event as a one-line summary, or None to drop it.
+
+    Captures the productivity signals missing from search-based queries:
+    PR reviews, PR review comments, issue comments, and pushes. The full
+    `payload` schema is at https://docs.github.com/en/rest/activity/events.
+    """
+    etype = event.get("type", "")
+    if etype in EVENT_TYPES_DROPPED:
+        return None
+    payload = event.get("payload") or {}
+    repo = (event.get("repo") or {}).get("name", "?")
+
+    if etype == "PushEvent":
+        commits = payload.get("commits") or []
+        if not commits:
+            return None  # force-push or branch delete — no useful signal
+        ref = (payload.get("ref") or "").replace("refs/heads/", "")
+        msgs = [(c.get("message") or "").split("\n", 1)[0][:80] for c in commits[:3]]
+        return f"push {repo} ({ref}) — {len(commits)} commits: " + "; ".join(msgs)
+    if etype == "PullRequestReviewEvent":
+        pr = payload.get("pull_request") or {}
+        review = payload.get("review") or {}
+        return (
+            f"PR review ({review.get('state', '?')}) {repo}#{pr.get('number')}: "
+            f"{(pr.get('title') or '')[:80]}"
+        )
+    if etype == "PullRequestReviewCommentEvent":
+        pr = payload.get("pull_request") or {}
+        comment = payload.get("comment") or {}
+        body = (comment.get("body") or "").split("\n", 1)[0][:80]
+        return (
+            f"PR review-comment {repo}#{pr.get('number')}: {(pr.get('title') or '')[:60]} — {body}"
+        )
+    if etype == "IssueCommentEvent":
+        issue = payload.get("issue") or {}
+        comment = payload.get("comment") or {}
+        kind = "PR" if issue.get("pull_request") else "Issue"
+        body = (comment.get("body") or "").split("\n", 1)[0][:80]
+        return (
+            f"{kind} comment {repo}#{issue.get('number')}: "
+            f"{(issue.get('title') or '')[:60]} — {body}"
+        )
+    if etype == "CommitCommentEvent":
+        comment = payload.get("comment") or {}
+        sha = (comment.get("commit_id") or "")[:7]
+        body = (comment.get("body") or "").split("\n", 1)[0][:80]
+        return f"Commit comment {repo}@{sha}: {body}"
+    if etype == "ReleaseEvent":
+        rel = payload.get("release") or {}
+        return (
+            f"Release {payload.get('action', '?')} {repo}: "
+            f"{rel.get('tag_name')} ({(rel.get('name') or '')[:60]})"
+        )
+    return f"{etype} {repo}"
+
+
+def get_user_events(start: date, end: date, username: str, pages: int = 3) -> list[UserEvent]:
+    """Fetch a user's public events and filter to the date range.
+
+    The events API returns the most recent ~300 events going back ~90 days,
+    so a few pages cover typical daily/weekly windows. Events are returned
+    in chronological order (oldest first).
+    """
+    raw: list[dict] = []
+    for page in range(1, pages + 1):
+        output = _run_command(
+            [
+                "gh",
+                "api",
+                f"users/{username}/events/public?per_page=100&page={page}",
+            ]
+        )
+        if output is None:
+            break
+        try:
+            page_events = json.loads(output)
+        except (json.JSONDecodeError, TypeError):
+            break
+        if not page_events:
+            break
+        raw.extend(page_events)
+        # API returns newest-first. If the oldest event on this page is already
+        # before `start`, further pages will only be older — stop paging.
+        last_created = page_events[-1].get("created_at")
+        if last_created:
+            try:
+                last_date = datetime.fromisoformat(last_created.replace("Z", "+00:00")).date()
+                if last_date < start:
+                    break
+            except ValueError:
+                pass
+
+    events: list[UserEvent] = []
+    for event in raw:
+        created_at = event.get("created_at")
+        if not created_at:
+            continue
+        try:
+            ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        event_date = ts.date()
+        if event_date < start or event_date > end:
+            continue
+        line = _render_event_line(event)
+        if not line:
+            continue
+        events.append(
+            UserEvent(
+                type=event.get("type", ""),
+                repo=(event.get("repo") or {}).get("name", "?"),
+                timestamp=ts.astimezone(timezone.utc),
+                line=line,
+            )
+        )
+    events.sort(key=lambda e: e.timestamp)
+    return events
+
+
+def fetch_activity(
+    start: date,
+    end: date,
+    repos: list[str] | None = None,
+    workspace: str | None = None,
+) -> GitHubActivity:
+    """
+    Fetch GitHub activity for a date range (agent mode — uses DEFAULT_REPOS).
+
+    Args:
+        start: Start date (inclusive)
+        end: End date (inclusive)
+        repos: List of GitHub repos (owner/name). Defaults to DEFAULT_REPOS.
+        workspace: Path to local git workspace for commit counting.
+
+    Returns:
+        GitHubActivity with data from all repos.
+    """
+    if repos is None:
+        repos = DEFAULT_REPOS
+
+    activity = GitHubActivity(start_date=start, end_date=end)
+    has_gh = _gh_available()
+
+    for repo in repos:
+        repo_activity = RepoActivity(repo=repo)
+
+        if has_gh:
+            repo_activity.merged_prs = get_merged_prs(start, end, repo)
+            repo_activity.closed_issues = get_closed_issues(start, end, repo)
+
+        activity.repos.append(repo_activity)
+
+    # Get commit count from local workspace if available
+    if workspace:
+        commit_count = get_commit_count(start, end, workspace)
+        if activity.repos:
+            activity.repos[0].commits = commit_count
+        else:
+            activity.repos.append(RepoActivity(repo="local", commits=commit_count))
+
+    # Fetch reviews received and cross-repo PRs
+    if has_gh:
+        activity.reviews_received = get_reviews_received(start, end, repos)
+        activity.cross_repo_prs = get_cross_repo_prs(start, end)
+
+    return activity
+
+
+def fetch_user_activity(
+    start: date,
+    end: date,
+    username: str,
+) -> GitHubActivity:
+    """
+    Fetch GitHub activity for an arbitrary user (human mode).
+
+    Uses GitHub search APIs to find all PRs, issues, and commits
+    by the user, without requiring local repos or hardcoded repo lists.
+
+    Args:
+        start: Start date (inclusive)
+        end: End date (inclusive)
+        username: GitHub username to fetch activity for
+
+    Returns:
+        GitHubActivity with data aggregated from search results.
+    """
+    activity = GitHubActivity(start_date=start, end_date=end)
+
+    if not _gh_available():
+        logger.warning("gh CLI not available, skipping GitHub data")
+        return activity
+
+    # Get all PRs by this user
+    prs = get_user_prs(start, end, username)
+
+    # Group PRs by repo
+    repo_prs: dict[str, list[dict[str, str]]] = {}
+    for pr in prs:
+        repo = pr.repo
+        if repo not in repo_prs:
+            repo_prs[repo] = []
+        pr_dict = {
+            "number": str(pr.number),
+            "title": pr.title,
+            "url": pr.url,
+        }
+        repo_prs[repo].append(pr_dict)
+
+    # Get issues by this user
+    issues = get_user_issues(start, end, username)
+
+    # Group issues by repo
+    repo_issues: dict[str, list[dict[str, str]]] = {}
+    for issue in issues:
+        repo = issue.get("repo", "")
+        if repo not in repo_issues:
+            repo_issues[repo] = []
+        repo_issues[repo].append(issue)
+
+    # Get commit count
+    commit_count = get_user_commits(start, end, username)
+
+    # Build per-repo activity
+    all_repos = set(repo_prs.keys()) | set(repo_issues.keys())
+    for repo in sorted(all_repos):
+        merged = list(repo_prs.get(repo, []))
+        closed = repo_issues.get(repo, [])
+        repo_activity = RepoActivity(
+            repo=repo,
+            merged_prs=merged,
+            closed_issues=closed,
+        )
+        activity.repos.append(repo_activity)
+
+    # If we have commits but no repo-level data, add a summary entry
+    if commit_count > 0:
+        if activity.repos:
+            # Distribute to first repo as approximation
+            activity.repos[0].commits = commit_count
+        else:
+            activity.repos.append(RepoActivity(repo="github", commits=commit_count))
+
+    # Events API: captures PR reviews, review comments, issue comments, pushes
+    # — productivity signal that search APIs miss.
+    activity.events = get_user_events(start, end, username)
+
+    return activity
+
+
+def format_activity_for_prompt(activity: GitHubActivity) -> str:
+    """
+    Format GitHub activity as markdown for injection into LLM prompts.
+
+    Returns empty string if no activity data.
+    """
+    lines: list[str] = []
+
+    if (
+        activity.total_commits == 0
+        and activity.total_prs_merged == 0
+        and activity.total_issues_closed == 0
+        and not activity.events
+    ):
+        return ""
+
+    lines.append("## GitHub Activity (Real Data)")
+    lines.append(f"Period: {activity.start_date.isoformat()} to {activity.end_date.isoformat()}")
+    lines.append(f"- **Total commits**: {activity.total_commits}")
+    lines.append(f"- **PRs merged**: {activity.total_prs_merged}")
+    lines.append(f"- **Issues closed**: {activity.total_issues_closed}")
+    lines.append("")
+
+    for repo in activity.repos:
+        if not repo.merged_prs and not repo.closed_issues and repo.commits == 0:
+            continue
+        lines.append(f"### {repo.repo}")
+        if repo.commits:
+            lines.append(f"- Commits: {repo.commits}")
+        if repo.merged_prs:
+            lines.append("- Merged PRs:")
+            for pr in repo.merged_prs:
+                lines.append(f"  - #{pr['number']}: {pr['title']}")
+        if repo.closed_issues:
+            lines.append("- Closed Issues:")
+            for issue in repo.closed_issues:
+                lines.append(f"  - #{issue['number']}: {issue['title']}")
+        lines.append("")
+
+    if activity.events:
+        counts = Counter(e.type for e in activity.events)
+        summary = ", ".join(f"{t}:{n}" for t, n in counts.most_common())
+        lines.append("### GitHub Events (extended signal)")
+        lines.append(
+            f"Captures PR reviews, comments, pushes missed by search APIs. Types: {summary}"
+        )
+        for ev in activity.events:
+            lines.append(f"- {ev.line}")
+        lines.append("")
+
+    return "\n".join(lines)

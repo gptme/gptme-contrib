@@ -1,0 +1,728 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10,<3.12"
+# dependencies = [
+#   "gptme @ git+https://github.com/ErikBjare/gptme.git",
+#   "openai>=1.0.0",
+#   "pyyaml>=6.0.0",
+# ]
+# [tool.uv]
+# exclude-newer = "2024-01-01T00:00:00Z"
+# ///
+"""
+LLM integration for Twitter workflow.
+
+This module handles:
+1. Tweet evaluation using LLM
+2. Response generation
+3. Review assistance
+"""
+
+import json
+import logging
+import os
+from dataclasses import asdict, dataclass
+from enum import Enum
+from pathlib import Path
+from typing import (
+    Any,
+    Dict,
+    List,
+    Literal,
+    Tuple,
+    Type,
+    TypeVar,
+    cast,
+)
+
+import yaml
+from gptme.dirs import get_project_git_dir
+from gptme.llm import reply
+from gptme.llm.models import get_default_model
+from gptme.message import Message
+from gptme.prompts import prompt_workspace
+from rich.console import Console
+
+# Maximum output tokens for Twitter LLM calls.
+# Tweet evaluations/responses need ~200-500 tokens; 4096 is generous.
+# This prevents OpenRouter from reserving the model's full max_output (64k for Sonnet)
+# against the daily key budget, which causes 402 errors.
+# Without this: each request reserves ~$0.96 (64k * $15/M), exhausting a $10/day budget in ~10 requests.
+# With this: each request reserves ~$0.06 (4k * $15/M), allowing 160+ requests/day.
+TWITTER_MAX_TOKENS = 4096
+
+
+class TaskType(Enum):
+    """Types of LLM tasks"""
+
+    EVALUATE = "evaluate"
+    RESPONSE = "response"
+    REVIEW = "review"
+
+
+@dataclass
+class EvaluationResponse:
+    """Tweet evaluation response"""
+
+    # always reason first, "LLMs need tokens to think"
+    reasoning: str
+
+    relevance: float
+    engagement_type: str
+    priority: int
+    # Valid actions: "respond" (generate reply), "ignore" (skip)
+    action: Literal["respond", "ignore"]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EvaluationResponse":
+        action_str = str(data["action"])
+
+        # Validate that action is valid
+        if action_str not in ["respond", "ignore"]:
+            raise ValueError(f"Invalid action value: {action_str}")
+
+        # Use typing.cast to explicitly tell mypy about the type
+        action_literal = cast(Literal["respond", "ignore"], action_str)
+
+        return cls(
+            relevance=float(data["relevance"]),
+            engagement_type=str(data["engagement_type"]),
+            priority=int(data["priority"]),
+            action=action_literal,
+            reasoning=str(data["reasoning"]),
+        )
+
+    @classmethod
+    def example(cls) -> "EvaluationResponse":
+        """Example for LLM format documentation"""
+        return cls(
+            reasoning="Not relevant to our interests",
+            relevance=0.0,
+            engagement_type="none",
+            priority=0,
+            action="ignore",
+        )
+
+    @classmethod
+    def default(cls) -> "EvaluationResponse":
+        return cls(
+            relevance=0.0,
+            engagement_type="none",
+            priority=0,
+            action="ignore",
+            reasoning="Error processing LLM response",
+        )
+
+
+def _unescape_literal_newlines(text: str) -> str:
+    """Replace literal two-character '\\n' sequences with actual newlines.
+
+    Some LLMs emit JSON where newlines are double-escaped (\\n instead of \n).
+    json.loads leaves these as literal backslash-n pairs. This helper fixes
+    them so tweets render correctly instead of leaking escape sequences.
+    """
+    return text.replace("\\n", "\n")
+
+
+@dataclass
+class TweetResponse:
+    """Generated tweet response"""
+
+    # always reason first, "LLMs need tokens to think"
+    reasoning: str
+
+    text: str
+    type: str
+    thread_needed: bool
+    follow_up: str | None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TweetResponse":
+        return cls(
+            text=_unescape_literal_newlines(str(data["text"])),
+            type=str(data["type"]),
+            thread_needed=bool(data["thread_needed"]),
+            follow_up=_unescape_literal_newlines(str(data["follow_up"]))
+            if data.get("follow_up")
+            else None,
+            reasoning=str(data["reasoning"]),
+        )
+
+    @classmethod
+    def example(cls) -> "TweetResponse":
+        """Example for LLM format documentation"""
+        return cls(
+            reasoning="User asked about ActivityWatch features",
+            text="Thanks for the question! ActivityWatch...",
+            type="reply",
+            thread_needed=False,
+            follow_up=None,
+        )
+
+    @classmethod
+    def default(cls) -> "TweetResponse":
+        return cls(
+            reasoning="Could not parse LLM response",
+            text="Error processing response",
+            type="reply",
+            thread_needed=False,
+            follow_up=None,
+        )
+
+
+@dataclass
+class ReviewResult:
+    """Review criteria result"""
+
+    notes: str
+    passed: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ReviewResult":
+        # Handle all possible field names for backward compatibility
+        pass_value = data.get("passed", data.get("pass_", data.get("pass", False)))
+        return cls(
+            notes=str(data["notes"]),
+            passed=bool(pass_value),
+        )
+
+    @classmethod
+    def example(cls) -> "ReviewResult":
+        """Example for LLM format documentation"""
+        return cls(
+            notes="Clear and helpful",
+            passed=True,
+        )
+
+
+@dataclass
+class ReviewResponse:
+    """Tweet review response"""
+
+    criteria_results: Dict[str, ReviewResult]
+    recommendation: str
+    improvements: List[str]
+    reasoning: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ReviewResponse":
+        return cls(
+            criteria_results={
+                k: ReviewResult.from_dict(v)
+                for k, v in data["criteria_results"].items()
+            },
+            recommendation=str(data["recommendation"]),
+            improvements=[str(i) for i in data["improvements"]],
+            reasoning=str(data["reasoning"]),
+        )
+
+    @classmethod
+    def example(cls) -> "ReviewResponse":
+        """Example for LLM format documentation"""
+        return cls(
+            reasoning="Draft maintains professional tone and adds value",
+            criteria_results={"professional_tone": ReviewResult.example()},
+            recommendation="approve",
+            improvements=["Consider adding specific example"],
+        )
+
+    @classmethod
+    def default(cls) -> "ReviewResponse":
+        return cls(
+            criteria_results={},
+            recommendation="reject",
+            improvements=["Error processing review"],
+            reasoning="Could not parse LLM response",
+        )
+
+
+ResponseType = EvaluationResponse | TweetResponse | ReviewResponse
+
+
+# Initialize rich console
+console = Console()
+
+
+def load_config() -> Dict[Any, Any]:
+    """Load workflow configuration"""
+    config_path = Path(__file__).parent / "config" / "config.yml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    with config_path.open() as f:
+        return cast(Dict[Any, Any], yaml.safe_load(f))
+
+
+def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
+    """Create prompt for tweet evaluation"""
+    twitter_handle = os.environ.get("TWITTER_HANDLE")
+    if not twitter_handle:
+        raise ValueError(
+            "TWITTER_HANDLE env var must be set (e.g. export TWITTER_HANDLE=MyBotHandle)"
+        )
+    handle_lower = twitter_handle.lower()
+
+    # Include thread context if available. Annotate our own prior messages so
+    # the LLM doesn't read the thread as "two other parties" and conclude the
+    # conversation is already resolved.
+    thread_context = ""
+    in_thread = False
+    if tweet.get("thread_context"):
+        thread_context = "\nConversation Thread:\n"
+        for i, t in enumerate(tweet["thread_context"]):
+            author = t["author"]
+            is_us = author.lower() == handle_lower
+            if is_us:
+                in_thread = True
+            marker = " (US — our prior message)" if is_us else ""
+            thread_context += f"Tweet {i + 1} - @{author}{marker}: {t['text']}\n"
+
+    # Direct mention detection: handle appears in the tweet body itself.
+    tweet_text = tweet.get("text", "")
+    is_direct_mention = f"@{handle_lower}" in tweet_text.lower()
+
+    # Build identity context. Fire for direct mentions OR when we're in the
+    # thread — both cases need explicit identity to prevent confusion.
+    mention_note = ""
+    if is_direct_mention or in_thread:
+        mention_note = (
+            f"\nIMPORTANT: @{twitter_handle} IS our account — we are @{twitter_handle}."
+        )
+        if is_direct_mention:
+            mention_note += " This tweet is addressed TO us. Evaluate it as relevant to us personally."
+        if in_thread:
+            mention_note += (
+                f" Any prior @{twitter_handle} messages in the thread are OUR own replies;"
+                " their presence does NOT mean the conversation is resolved."
+                " Evaluate whether the most recent message from another party needs our response."
+            )
+
+    return f"""Evaluate this tweet for response suitability.
+
+Tweet: "{tweet_text}"
+Author: @{tweet["author"]}
+Context: {json.dumps(tweet.get("context", {}), indent=2)}
+{thread_context}{mention_note}
+
+Evaluation criteria:
+1. Relevance to our topics: {", ".join(config["evaluation"]["topics"])}
+2. Mentions of our projects: {", ".join(config["evaluation"]["projects"])}
+3. Type of engagement needed (if any):
+   {json.dumps(config["evaluation"]["triggers"], indent=2)}
+4. Sufficient context to provide a meaningful response
+
+Blacklist check:
+- Forbidden topics: {", ".join(config["blacklist"]["topics"])}
+- Spam patterns: {", ".join(config["blacklist"]["patterns"])}
+
+IMPORTANT: For the "action" field, use ONLY one of these values:
+- "respond" - Generate a response to this tweet
+- "ignore" - Skip this tweet, no response needed"""
+
+
+def create_response_prompt(tweet: Dict, eval_result: Dict, config: Dict) -> str:
+    """Create prompt for response generation"""
+    # Include thread context if available
+    thread_context = ""
+    if tweet.get("thread_context"):
+        thread_context = "\nConversation Thread:\n"
+        for i, t in enumerate(tweet["thread_context"]):
+            thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
+
+    return f"""Draft a response tweet.
+
+Original Tweet: "{tweet["text"]}"
+Author: @{tweet["author"]}
+Context: {json.dumps(tweet.get("context", {}), indent=2)}
+{thread_context}
+
+Evaluation:
+{json.dumps(eval_result, indent=2)}
+
+Response Guidelines:
+1. Use the workspace persona already loaded in the system prompt as the source of truth for voice
+2. Be direct, technical, and specific; sounding corporate, deferential, or sanitized is a failure
+3. Focus on technical accuracy
+4. Keep under 280 characters
+5. Use emojis only if they fit naturally; default to none
+6. Add concrete value to the discussion
+7. Demonstrate understanding of specific context from the thread and reference relevant details
+8. Do not promise follow-up, links, or artifacts unless they already exist in the provided context
+9. If a link is needed but unavailable, say so plainly instead of inserting a placeholder or vague promise
+10. NEVER write placeholder text like "[link would go here]", "[URL here]", "[insert link]",
+    "[media here]", or any bracket-enclosed instruction. If you don't have a specific URL
+    or media item to include, write a complete response without referencing it — either
+    omit the link entirely or say you'll share it separately as plain prose.
+
+Few-shot examples:
+{yaml.dump(config["templates"]["examples"])}"""
+
+
+def create_review_prompt(draft: Dict, config: Dict) -> str:
+    """Create prompt for draft review"""
+    # Build detailed criteria section
+    detailed_criteria = ""
+    if "criteria_descriptions" in config["review"]:
+        detailed_criteria = "\nDetailed Criteria:\n"
+        for criterion in config["review"]["criteria_descriptions"]:
+            detailed_criteria += f"- {criterion['name']}: {criterion['description']}\n"
+            if "examples" in criterion:
+                for example in criterion["examples"]:
+                    for status, text in example.items():
+                        detailed_criteria += f"  • {status.upper()}: {text}\n"
+
+    # Include thread context if available.
+    # `context` may be a free-text string for original tweets (no thread); only
+    # reply drafts have the structured `{original_tweet: {thread_context: [...]}}`
+    # shape. Defend against both at every level so a malformed/string context
+    # does not crash review.
+    thread_context = ""
+    ctx = draft.get("context")
+    if isinstance(ctx, dict):
+        original_tweet = ctx.get("original_tweet")
+        if isinstance(original_tweet, dict):
+            thread = original_tweet.get("thread_context")
+            if isinstance(thread, list):
+                # Build entries first; only emit the header when at least one
+                # well-formed tweet survives so an empty or all-malformed
+                # thread doesn't leave an orphaned "Thread Context:" header.
+                entries: list[str] = []
+                for tweet in thread:
+                    if not isinstance(tweet, dict):
+                        continue
+                    author = tweet.get("author", "?")
+                    text = tweet.get("text", "")
+                    entries.append(f"Tweet {len(entries) + 1} - @{author}: {text}")
+                if entries:
+                    thread_context = "\nThread Context:\n" + "\n".join(entries) + "\n"
+
+    return f"""Review this draft tweet.
+
+Draft Tweet: "{draft["text"]}"
+Type: {draft["type"]}
+Context: {json.dumps(draft.get("context", {}), indent=2)}
+{thread_context}
+
+Review Criteria:
+{yaml.dump(config["review"]["required_checks"])}
+{detailed_criteria}"""
+
+
+def get_system_prompt() -> Message:
+    """Get system prompt for Twitter interactions."""
+    workspace = get_project_git_dir()
+    context = prompt_workspace(workspace) if workspace else ""
+
+    def get_format_examples() -> Dict[str, Any]:
+        """Generate format examples from dataclasses"""
+        return {
+            "evaluation": asdict(EvaluationResponse.example()),
+            "response": asdict(TweetResponse.example()),
+            "review": asdict(ReviewResponse.example()),
+        }
+
+    formats = get_format_examples()
+
+    # Create Twitter-specific system prompt
+    agent_name = os.environ.get("AGENT_NAME", "Agent")
+    twitter_handle = os.environ.get("TWITTER_HANDLE")
+    if not twitter_handle:
+        raise ValueError(
+            "TWITTER_HANDLE env var must be set (e.g. export TWITTER_HANDLE=MyBotHandle)"
+        )
+    twitter_prompt = f"""You are {agent_name} (@{twitter_handle}), an AI agent who evaluates and responds to tweets.
+Your task is to evaluate tweets and generate appropriate responses while:
+1. Maintaining your established personality (direct, opinionated, occasionally witty)
+2. Focusing on technical topics and project updates
+3. Following Twitter best practices (character limits, emoji usage, etc.)
+
+IMPORTANT RESPONSE FORMAT:
+- Return ONLY a single JSON object
+- Do NOT include any other text, thinking, or commentary
+- Do NOT use multiple responses
+- Do NOT include <thinking> tags
+- Follow EXACTLY the JSON format for each task type:
+
+Evaluation format:
+{json.dumps(formats["evaluation"], indent=2)}
+
+Response format:
+{json.dumps(formats["response"], indent=2)}
+
+Review format:
+{json.dumps(formats["review"], indent=2)}
+
+Any analysis or thinking should be included in the "reasoning" field of the JSON."""
+
+    # Combine context and Twitter-specific prompt
+    system_prompt = f"{twitter_prompt}\n\n{context}"
+    return Message("system", system_prompt)
+
+
+T = TypeVar("T", EvaluationResponse, TweetResponse, ReviewResponse)
+
+
+def parse_llm_response(content: str, response_type: Type[T], task: TaskType) -> T:
+    """Parse LLM response into a typed response object.
+
+    Args:
+        content: The LLM response content to parse
+        response_type: The type to parse into (must implement ResponseProtocol)
+        task: Task type for error messages
+    """
+    try:
+        # Extract just the JSON part (between first { and last })
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start >= 0 and end > start:
+            json_str = content[start:end]
+            data = json.loads(json_str)
+            return response_type.from_dict(data)
+        raise json.JSONDecodeError("No JSON found", content, 0)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+        console.print(f"[red]Error: Could not parse LLM response for {task.value}: {e}")
+        console.print(content)
+        logging.exception(f"Error parsing LLM response for {task.value}")
+        return response_type.default()
+
+
+def _resolve_openrouter_api_key() -> str:
+    """Prefer Twitter/social-specific OpenRouter keys over the shared default."""
+    for env_var in (
+        "OPENROUTER_API_KEY_TWITTER",
+        "OPENROUTER_API_KEY_SOCIAL",
+        "OPENROUTER_API_KEY",
+    ):
+        value = os.environ.get(env_var, "")
+        if value:
+            return value
+    return ""
+
+
+def _resolve_scoped_openrouter_api_key() -> str:
+    """Return only Twitter/social-specific OpenRouter keys, if present."""
+    for env_var in ("OPENROUTER_API_KEY_TWITTER", "OPENROUTER_API_KEY_SOCIAL"):
+        value = os.environ.get(env_var, "")
+        if value:
+            return value
+    return ""
+
+
+def _reply_with_cc_subprocess(messages: list[Message], model_name: str) -> Message:
+    """Call Claude via CC OAuth subprocess, bypassing ANTHROPIC_API_KEY.
+
+    Fallback for when ANTHROPIC_API_KEY is absent or a placeholder (e.g. 'dummy-key').
+    The 'claude -p' CLI uses the OAuth subscription rather than a direct API key,
+    so it works even when the gptme config sets a dummy key to prevent CC conflicts.
+    """
+    import subprocess
+
+    env = os.environ.copy()
+    # Clear CC session vars so the subprocess doesn't attach to the parent session.
+    for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CC_SESSION_ID", "CC_MODEL"):
+        env.pop(k, None)
+    # This fallback exists specifically to bypass ANTHROPIC_API_KEY (absent or a
+    # dummy placeholder), so never forward it — the CLI would otherwise try to
+    # authenticate with it directly instead of using the OAuth subscription.
+    env.pop("ANTHROPIC_API_KEY", None)
+
+    # Build a combined prompt: system instructions followed by conversation turns.
+    parts = []
+    for msg in messages:
+        if msg.role == "system":
+            parts.append(f"<system>\n{msg.content}\n</system>")
+        elif msg.role == "user":
+            parts.append(msg.content)
+        elif msg.role == "assistant":
+            parts.append(f"<assistant>\n{msg.content}\n</assistant>")
+    prompt = "\n\n".join(parts)
+
+    # claude CLI understands Anthropic model names only, not OpenRouter-prefixed ones.
+    cc_model = model_name
+    if cc_model.startswith("openrouter/anthropic/"):
+        cc_model = cc_model[len("openrouter/anthropic/") :]
+    elif cc_model.startswith("openrouter/"):
+        cc_model = cc_model[len("openrouter/") :]
+    elif cc_model.startswith("anthropic/"):
+        cc_model = cc_model[len("anthropic/") :]
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--no-session-persistence", "--model", cc_model, prompt],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        logging.warning("CC subprocess timed out for twitter LLM call")
+        return Message("assistant", "")
+    except FileNotFoundError:
+        logging.warning("'claude' CLI not found; CC subprocess fallback unavailable")
+        return Message("assistant", "")
+
+    if result.returncode != 0:
+        logging.warning(
+            "CC subprocess failed (exit %d): %s", result.returncode, result.stderr[:200]
+        )
+        return Message("assistant", "")
+
+    return Message("assistant", result.stdout.strip())
+
+
+def _reply_with_max_tokens(messages: list[Message], model_name: str) -> Message:
+    """Call LLM with explicit max_tokens to control OpenRouter budget reservation.
+
+    OpenRouter reserves the model's full max_output against the daily key budget.
+    For Sonnet (max_output=64k), this means ~$0.96/request reserved even if only
+    ~200 tokens are actually generated. Setting max_tokens=4096 drops the
+    reservation to ~$0.06/request, allowing 160+ requests on a $10/day budget.
+
+    Use gptme's reply() by default now that it supports max_tokens. Keep the
+    direct OpenRouter call only for Twitter/social-specific key overrides, since
+    gptme caches provider clients and cannot yet swap OPENROUTER_API_KEY per call.
+    Falls back to CC subprocess when ANTHROPIC_API_KEY is absent or a placeholder.
+    """
+    scoped_api_key = _resolve_scoped_openrouter_api_key()
+    shared_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not scoped_api_key or scoped_api_key == shared_api_key:
+        # When ANTHROPIC_API_KEY is absent or a placeholder, gptme.llm.reply()
+        # would fail with AuthenticationError even if an OpenRouter key exists,
+        # because gptme resolves Anthropic models to the Anthropic API endpoint.
+        # Use CC subprocess (OAuth) as the primary path in that case, then fall
+        # back to OpenRouter only if the subprocess returns empty content.
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not anthropic_key or anthropic_key.lower().startswith("dummy"):
+            logging.debug(
+                "Using CC subprocess fallback (ANTHROPIC_API_KEY is dummy/absent)"
+            )
+            result = _reply_with_cc_subprocess(messages, model_name)
+            if result.content:
+                return result
+            # CC subprocess failed; try OpenRouter if a key is available.
+            any_openrouter_key = _resolve_openrouter_api_key()
+            if any_openrouter_key:
+                logging.debug(
+                    "CC subprocess returned empty; falling back to OpenRouter"
+                )
+                return reply(
+                    messages, model_name, stream=False, max_tokens=TWITTER_MAX_TOKENS
+                )
+            return result
+        return reply(
+            messages,
+            model_name,
+            stream=False,
+            max_tokens=TWITTER_MAX_TOKENS,
+        )
+
+    import openai
+
+    client = openai.OpenAI(
+        api_key=scoped_api_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    # Strip provider prefix for API call
+    # e.g. "openrouter/anthropic/claude-sonnet-4-5" -> "anthropic/claude-sonnet-4-5"
+    api_model = model_name
+    if api_model.startswith("openrouter/"):
+        api_model = api_model[len("openrouter/") :]
+
+    messages_dicts: list[dict[str, str]] = [
+        {"role": msg.role, "content": msg.content} for msg in messages
+    ]
+
+    response = client.chat.completions.create(
+        model=api_model,
+        messages=messages_dicts,  # type: ignore[arg-type]
+        max_tokens=TWITTER_MAX_TOKENS,
+        # temperature=0.5: intentional — provides balanced creativity for tweet generation.
+        # 0.0 (deterministic) would produce robotic outputs; the fallback gptme reply() uses
+        # whatever the model's default is (varies by model). Explicit 0.5 is more predictable.
+        temperature=0.5,
+    )
+
+    if not response.choices:
+        logging.warning("LLM returned empty choices list")
+        return Message("assistant", "")
+    content = response.choices[0].message.content or ""
+    return Message("assistant", content)
+
+
+def evaluate_tweet(tweet: Dict) -> EvaluationResponse:
+    """Evaluate tweet using LLM"""
+    config = load_config()
+    prompt = create_tweet_eval_prompt(tweet, config)
+
+    # Get LLM response
+    model = get_default_model()
+    if not model:
+        raise RuntimeError("default model not set")
+    messages = [get_system_prompt(), Message("user", prompt)]
+    response = _reply_with_max_tokens(messages, model.full)
+
+    return parse_llm_response(response.content, EvaluationResponse, TaskType.EVALUATE)
+
+
+def generate_response(
+    tweet: Dict, eval_result: EvaluationResponse
+) -> TweetResponse | None:
+    """Generate response using LLM"""
+    if eval_result.action != "respond":
+        return None
+
+    config = load_config()
+    # Convert dataclass to dict for JSON serialization
+    eval_dict = {
+        "relevance": eval_result.relevance,
+        "engagement_type": eval_result.engagement_type,
+        "priority": eval_result.priority,
+        "action": eval_result.action,
+        "reasoning": eval_result.reasoning,
+    }
+    prompt = create_response_prompt(tweet, eval_dict, config)
+
+    # Get LLM response
+    model = get_default_model()
+    if not model:
+        raise RuntimeError("default model not set")
+    messages = [get_system_prompt(), Message("user", prompt)]
+    response = _reply_with_max_tokens(messages, model.full)
+
+    return parse_llm_response(response.content, TweetResponse, TaskType.RESPONSE)
+
+
+def review_draft(draft: Dict) -> ReviewResponse:
+    """Review draft using LLM"""
+    config = load_config()
+    prompt = create_review_prompt(draft, config)
+
+    # Get LLM response
+    model = get_default_model()
+    if not model:
+        raise RuntimeError("default model not set")
+    messages = [get_system_prompt(), Message("user", prompt)]
+    response = _reply_with_max_tokens(messages, model.full)
+
+    return parse_llm_response(response.content, ReviewResponse, TaskType.REVIEW)
+
+
+def process_tweet(tweet: Dict) -> Tuple[EvaluationResponse, TweetResponse | None]:
+    """Process a tweet through evaluation and response generation"""
+    # Evaluate tweet
+    eval_result = evaluate_tweet(tweet)
+    console.print("Evaluation result:")
+    console.print(eval_result)
+
+    # Generate response if needed
+    response = None
+    if eval_result.action == "respond":
+        response = generate_response(tweet, eval_result)
+
+    return eval_result, response
+
+
+def verify_draft(draft: Dict) -> Tuple[bool, ReviewResponse]:
+    """Verify a draft tweet"""
+    review_result = review_draft(draft)
+    approved = review_result.recommendation == "approve"
+    return approved, review_result

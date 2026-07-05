@@ -1,0 +1,555 @@
+"""Sub-agent spawning and management for gptodo.
+
+Enables Claude Code-style sub-agent spawning via gptme subprocesses.
+Supports both foreground and background (tmux) execution.
+
+Implements Issue #255: "winning combination" multi-agent collaboration.
+
+Session data stored in state/sessions/ directory (gitignored).
+"""
+
+import json
+import logging
+import os
+import shlex
+import subprocess
+import uuid
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Literal
+
+logger = logging.getLogger(__name__)
+
+# Directory for session state files
+SESSIONS_DIR = "state/sessions"
+
+
+@dataclass
+class AgentSession:
+    """Represents a sub-agent session."""
+
+    session_id: str
+    task_id: str
+    agent_type: Literal["general", "explore", "plan", "execute"]
+    backend: Literal["gptme", "claude", "codex"]
+    started: str
+    status: Literal["running", "completed", "failed", "killed"]
+    tmux_session: str | None = None
+    output_file: str | None = None
+    error: str | None = None
+    completed_at: str | None = None
+
+
+def get_sessions_dir(workspace: Path | None = None) -> Path:
+    """Get the sessions directory, creating if needed."""
+    if workspace is None:
+        workspace = Path.cwd()
+    sessions_dir = workspace / SESSIONS_DIR
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    return sessions_dir
+
+
+def load_session(session_id: str, workspace: Path | None = None) -> AgentSession | None:
+    """Load a session by ID."""
+    sessions_dir = get_sessions_dir(workspace)
+    session_file = sessions_dir / f"{session_id}.json"
+
+    if not session_file.exists():
+        return None
+
+    try:
+        data = json.loads(session_file.read_text())
+        return AgentSession(**data)
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.error(f"Error loading session {session_id}: {e}")
+        return None
+
+
+def save_session(session: AgentSession, workspace: Path | None = None) -> Path:
+    """Save a session to disk."""
+    sessions_dir = get_sessions_dir(workspace)
+    session_file = sessions_dir / f"{session.session_id}.json"
+    session_file.write_text(json.dumps(asdict(session), indent=2))
+    return session_file
+
+
+def list_sessions(workspace: Path | None = None, status: str | None = None) -> list[AgentSession]:
+    """List all sessions, optionally filtered by status."""
+    sessions_dir = get_sessions_dir(workspace)
+    sessions = []
+
+    for session_file in sessions_dir.glob("*.json"):
+        session = load_session(session_file.stem, workspace)
+        if session:
+            if status is None or session.status == status:
+                sessions.append(session)
+
+    # Sort by start time, newest first
+    sessions.sort(key=lambda s: s.started, reverse=True)
+    return sessions
+
+
+def _setup_coordination(
+    workspace: Path,
+    coordination_db: str | None = None,
+) -> tuple[str, str, str]:
+    """Set up coordination for a spawned agent.
+
+    Auto-discovers the coordination system prompt and DB in the workspace.
+    Generates a unique agent ID and announces presence.
+
+    Args:
+        workspace: Working directory (repo root)
+        coordination_db: Explicit DB path, or None to auto-detect
+
+    Returns:
+        Tuple of (agent_id, db_path, system_prompt_path)
+
+    Raises:
+        FileNotFoundError: If coordination system prompt not found
+    """
+    # Auto-detect DB path
+    if coordination_db:
+        db_path = coordination_db
+    else:
+        db_path = str(workspace / "state" / "coordination" / "coord.db")
+
+    # Ensure DB directory exists
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Find system prompt file
+    system_prompt = workspace / "packages" / "coordination" / "agent-system-prompt.md"
+    if not system_prompt.exists():
+        raise FileNotFoundError(
+            f"Coordination system prompt not found at {system_prompt}. "
+            "Install the coordination package first."
+        )
+
+    # Generate agent ID
+    agent_id = f"agent_{uuid.uuid4().hex[:8]}"
+
+    # Pre-announce on coordination bus (best-effort)
+    try:
+        env = os.environ.copy()
+        env["COORDINATION_DB"] = db_path
+        subprocess.run(
+            ["coordination", "announce", agent_id],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
+            cwd=str(workspace),
+        )
+    except Exception:
+        logger.warning("Could not announce agent on coordination bus")
+
+    return agent_id, db_path, str(system_prompt)
+
+
+def spawn_agent(
+    task_id: str,
+    prompt: str,
+    agent_type: Literal["general", "explore", "plan", "execute"] = "general",
+    backend: Literal["gptme", "claude", "codex"] = "gptme",
+    background: bool = False,
+    workspace: Path | None = None,
+    timeout: int = 3000,
+    model: str | None = None,
+    clear_keys: bool | None = None,
+    system_prompt_file: str | None = None,
+    coordination: bool = False,
+    coordination_db: str | None = None,
+) -> AgentSession:
+    """Spawn a sub-agent to work on a task.
+
+    Args:
+        task_id: The task ID being worked on
+        prompt: The prompt/instructions for the agent
+        agent_type: Type of agent (general, explore, plan, execute)
+        backend: Which backend to use (gptme or claude)
+        background: If True, run in tmux session
+        workspace: Working directory for the agent
+        timeout: Timeout in seconds (both foreground and background)
+        model: Model to use (e.g. openrouter/moonshotai/kimi-k2.5@moonshotai)
+        clear_keys: If True, explicitly unset API keys (useful for backends
+            with their own auth like Claude Code/Codex). If None (default),
+            auto-detects based on backend (True for claude, False for gptme).
+        system_prompt_file: Path to file with additional system prompt content
+            (claude backend only, uses --append-system-prompt-file).
+        coordination: If True, enable inter-agent coordination (auto-generates
+            agent ID, announces presence, passes system prompt and COORDINATION_DB).
+        coordination_db: Explicit path to coordination DB (implies coordination=True).
+
+    Returns:
+        AgentSession with status and session_id
+    """
+    if workspace is None:
+        workspace = Path.cwd()
+
+    # Handle coordination setup
+    coord_db_path: str | None = None
+    if coordination or coordination_db:
+        # Raises FileNotFoundError if coordination package not installed — let it propagate
+        # so the user knows coordination is NOT active (fail loudly, not silently).
+        agent_id, coord_db_path, coord_prompt = _setup_coordination(workspace, coordination_db)
+        # Use coordination system prompt if none specified
+        if not system_prompt_file:
+            system_prompt_file = coord_prompt
+        # Prepend agent ID to prompt
+        prompt = (
+            f"Your agent ID is: {agent_id}. "
+            "Follow the coordination protocol in your system prompt. "
+            f"Start by checking your inbox and status.\n\n{prompt}"
+        )
+        logger.info(f"Coordination enabled: agent={agent_id}, db={coord_db_path}")
+
+    session_id = f"agent_{uuid.uuid4().hex[:8]}"
+    sessions_dir = get_sessions_dir(workspace)
+    output_file = sessions_dir / f"{session_id}.output"
+
+    session = AgentSession(
+        session_id=session_id,
+        task_id=task_id,
+        agent_type=agent_type,
+        backend=backend,
+        started=datetime.now(timezone.utc).isoformat(),
+        status="running",
+        output_file=str(output_file),
+    )
+
+    if background:
+        # Run in tmux for background execution
+        tmux_name = f"gptodo_{session_id}"
+        session.tmux_session = tmux_name
+
+        # Write prompt to a temp file to avoid tmux command-length limits
+        prompt_file = sessions_dir / f"{session_id}.prompt"
+        prompt_file.write_text(prompt)
+        safe_prompt_file = shlex.quote(str(prompt_file))
+        safe_output = shlex.quote(str(output_file))
+
+        # Both backends: redirect to file + tail -f for tmux pane visibility
+        # Wrap with timeout to prevent runaway sessions
+        timeout_prefix = f"timeout {timeout} " if timeout > 0 else ""
+        if backend == "gptme":
+            model_arg = f"--model {shlex.quote(model)}" if model else ""
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_prefix}gptme -n {model_arg} "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+        else:
+            model_arg = f"--model {shlex.quote(model)}" if model else ""
+            sysprompt_arg = (
+                f"--append-system-prompt-file {shlex.quote(system_prompt_file)}"
+                if system_prompt_file
+                else ""
+            )
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_prefix}claude -p {model_arg} {sysprompt_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+
+        # Build environment exports for critical API keys
+        # These may not be inherited by tmux detached sessions
+        #
+        # NOTE: For backends with their own auth (claude, codex), we can
+        # explicitly clear API keys to ensure they use OAuth subscription
+        # (flat-fee) rather than API keys (metered).
+        # If ANTHROPIC_API_KEY is in the env, Claude Code uses it, bypassing
+        # the subscription and hitting API rate limits.
+        env_exports = []
+        env_unsets = []  # Variables to explicitly unset
+
+        # Base environment variables needed by all backends
+        base_vars = ["PATH", "HOME"]
+
+        # API keys that backends might use
+        api_key_vars = [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+        ]
+
+        # Determine whether to clear API keys (auto-detect based on backend if not specified)
+        should_clear_keys = (
+            clear_keys if clear_keys is not None else (backend in ("claude", "codex"))
+        )
+
+        if should_clear_keys:
+            # For backends with their own auth: export only GPTME_* config vars
+            # and explicitly unset API keys to prevent interference
+            api_vars = ["GPTME_MODEL"]
+            # Unset API keys + Claude Code session blockers
+            env_unsets = api_key_vars + ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+        else:
+            # For gptme backend: export all API keys
+            api_vars = api_key_vars + ["GPTME_MODEL"]
+
+        for key in base_vars + api_vars:
+            value = os.environ.get(key)
+            if value:
+                # Export the variable inside the tmux session
+                env_exports.append(f"export {key}={shlex.quote(value)}")
+
+        # Inject COORDINATION_DB for coordinated agents
+        if coord_db_path:
+            env_exports.append(f"export COORDINATION_DB={shlex.quote(coord_db_path)}")
+
+        # Build env setup: unsets first (if any), then exports
+        env_commands = []
+        if env_unsets:
+            env_commands.append(f"unset {' '.join(env_unsets)}")
+        env_commands.extend(env_exports)
+        env_setup = "; ".join(env_commands) + "; " if env_commands else ""
+
+        # Use bash -l to ensure login shell behavior (sources .profile/.bashrc)
+        # This ensures PATH and other environment variables are properly set
+        # Note: workspace must be shell-quoted inside the command to handle paths with spaces
+        safe_workspace = shlex.quote(str(workspace))
+        full_cmd = f"bash -l -c {shlex.quote(f'cd {safe_workspace} && {env_setup}{shell_cmd}')}"
+
+        # Start tmux session
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", tmux_name, full_cmd],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            session.status = "failed"
+            session.error = f"Failed to start tmux: {result.stderr}"
+
+        save_session(session, workspace)
+        return session
+
+    # Foreground execution
+    if backend == "gptme":
+        cmd = ["gptme", "-n"]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.append(prompt)
+    else:
+        cmd = ["claude", "-p"]
+        if model:
+            cmd.extend(["--model", model])
+        if system_prompt_file:
+            cmd.extend(["--append-system-prompt-file", system_prompt_file])
+        cmd.extend(
+            [
+                "--dangerously-skip-permissions",
+                "--tools",
+                "default",
+                "--",
+                prompt,
+            ]
+        )
+
+    # Build environment for subprocess
+    # If clear_keys is enabled, create modified environment without API keys
+    should_clear_keys_fg = (
+        clear_keys if clear_keys is not None else (backend in ("claude", "codex"))
+    )
+    if should_clear_keys_fg:
+        # Copy environment and remove API keys
+        env = os.environ.copy()
+        for key in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+        ]:
+            env.pop(key, None)
+    else:
+        env = None  # Use inherited environment
+
+    # Inject COORDINATION_DB for coordinated agents (foreground)
+    if coord_db_path:
+        if env is None:
+            env = os.environ.copy()
+        env["COORDINATION_DB"] = coord_db_path
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=timeout if timeout > 0 else None,
+            env=env,
+        )
+
+        # Save output
+        output_file.write_text(result.stdout + "\n" + result.stderr)
+
+        session.status = "completed" if result.returncode == 0 else "failed"
+        session.completed_at = datetime.now(timezone.utc).isoformat()
+        if result.returncode != 0:
+            session.error = f"Exit code: {result.returncode}"
+
+    except subprocess.TimeoutExpired:
+        session.status = "failed"
+        session.error = f"Timeout after {timeout}s"
+    except Exception as e:
+        session.status = "failed"
+        session.error = str(e)
+
+    save_session(session, workspace)
+    return session
+
+
+def check_session(session_id: str, workspace: Path | None = None) -> AgentSession | None:
+    """Check status of a session and update if completed.
+
+    For background sessions, checks if tmux session still exists and
+    reads any available output.
+    """
+    session = load_session(session_id, workspace)
+    if session is None:
+        return None
+
+    if session.status != "running":
+        return session
+
+    if session.tmux_session:
+        # Check if tmux session still exists
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session.tmux_session],
+            capture_output=True,
+        )
+
+        if result.returncode != 0:
+            # Session ended, check output for exit code
+            session.status = "completed"
+            session.completed_at = datetime.now(timezone.utc).isoformat()
+
+            if session.output_file and Path(session.output_file).exists():
+                output = Path(session.output_file).read_text()
+                if "EXIT_CODE=0" in output:
+                    session.status = "completed"
+                elif "EXIT_CODE=124" in output:
+                    session.status = "failed"
+                    session.error = "Timed out"
+                elif "EXIT_CODE=" in output:
+                    session.status = "failed"
+                    session.error = "Non-zero exit code"
+
+            save_session(session, workspace)
+
+    return session
+
+
+def get_session_output(session_id: str, workspace: Path | None = None) -> str:
+    """Get output from a session."""
+    session = load_session(session_id, workspace)
+    if session is None:
+        return f"Session {session_id} not found"
+
+    output = ""
+
+    # For background sessions, also capture live tmux output
+    if session.tmux_session and session.status == "running":
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", session.tmux_session],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            output += f"=== Live Output ===\n{result.stdout}\n"
+
+    # Also read from output file if exists
+    if session.output_file and Path(session.output_file).exists():
+        output += f"=== Saved Output ===\n{Path(session.output_file).read_text()}\n"
+
+    return output or "No output available"
+
+
+def kill_session(session_id: str, workspace: Path | None = None) -> bool:
+    """Kill a running session."""
+    session = load_session(session_id, workspace)
+    if session is None:
+        return False
+
+    if session.status != "running":
+        return False
+
+    if session.tmux_session:
+        result = subprocess.run(
+            ["tmux", "kill-session", "-t", session.tmux_session],
+            capture_output=True,
+        )
+
+        session.status = "killed"
+        session.completed_at = datetime.now(timezone.utc).isoformat()
+        save_session(session, workspace)
+        return result.returncode == 0
+
+    return False
+
+
+def cleanup_sessions(
+    workspace: Path | None = None,
+    older_than_hours: int = 24,
+) -> int:
+    """Remove old session files and reconcile stale state.
+
+    First reconciles any "running" sessions whose tmux sessions have
+    exited (detects zombie state). Then removes session files for
+    terminated sessions older than the cutoff.
+
+    Returns count of sessions cleaned up.
+    """
+    sessions = list_sessions(workspace)
+    count = 0
+    sessions_dir = get_sessions_dir(workspace)
+    cutoff = datetime.now(timezone.utc).timestamp() - (older_than_hours * 3600)
+
+    # Phase 1: Reconcile "running" sessions with tmux state
+    for session in sessions:
+        if session.status == "running":
+            check_session(session.session_id, workspace)
+
+    # Reload after reconciliation (statuses may have changed)
+    sessions = list_sessions(workspace)
+
+    # Phase 2: Remove old terminated sessions
+    for session in sessions:
+        if session.status in ("completed", "failed", "killed"):
+            started = datetime.fromisoformat(session.started.replace("Z", "+00:00"))
+            if started.timestamp() < cutoff:
+                # Remove session file
+                session_file = sessions_dir / f"{session.session_id}.json"
+                if session_file.exists():
+                    session_file.unlink()
+                    count += 1
+
+                # Remove output file
+                if session.output_file:
+                    output_path = Path(session.output_file)
+                    if output_path.exists():
+                        output_path.unlink()
+
+                # Remove prompt file (used by background sessions)
+                prompt_file = sessions_dir / f"{session.session_id}.prompt"
+                if prompt_file.exists():
+                    prompt_file.unlink()
+
+    # Phase 3: Kill orphaned tmux sessions (gptodo_ prefix, no state file)
+    # Re-read sessions to avoid race: a new spawn between Phase 1 and now
+    # would create a tmux session not in our earlier snapshot.
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            fresh_sessions = list_sessions(workspace)
+            known_tmux = {s.tmux_session for s in fresh_sessions if s.tmux_session}
+            for tmux_name in result.stdout.strip().split("\n") if result.stdout.strip() else []:
+                tmux_name = tmux_name.strip()
+                if tmux_name.startswith("gptodo_") and tmux_name not in known_tmux:
+                    subprocess.run(
+                        ["tmux", "kill-session", "-t", tmux_name],
+                        capture_output=True,
+                    )
+                    count += 1
+    except FileNotFoundError:
+        pass  # tmux not installed
+
+    return count

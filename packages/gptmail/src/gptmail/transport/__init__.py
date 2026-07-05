@@ -1,0 +1,100 @@
+"""Transport seam for gptmail.
+
+gptmail is being folded into a single comms tool that serves both email
+(IMAP/SMTP) and inter-agent (filesystem/SSH) messaging. The two differ only in
+*how* a message is sent, listed, and read — the reply-tracking core
+(``ConversationTracker``) is shared across both, keyed by a ``channel`` field on
+each tracked message.
+
+This module defines the ``Transport`` Protocol: the narrow seam a CLI dispatches
+to regardless of the underlying medium. ``EmailTransport`` (see ``email.py``) is
+a thin adapter over the existing ``lib.AgentEmail`` IMAP/SMTP stack. A future
+``AgentTransport`` will implement the same Protocol over a filesystem inbox with
+**no email-stack imports**, so inter-agent messaging stays testable in isolation
+(no IMAP/SMTP infra). See task ``fold-agent-msg-into-gptmail-single-comms-tool``.
+"""
+
+from datetime import datetime
+from typing import Protocol, runtime_checkable
+
+__all__ = ["Transport", "EmailTransport", "AgentTransport"]
+
+
+@runtime_checkable
+class Transport(Protocol):
+    """A messaging transport: send, list, read, and locate a conversation.
+
+    Implementations are deliberately thin. Reply-tracking is **not** part of the
+    Protocol — it lives in the shared ``ConversationTracker``, which transports
+    stamp with their :attr:`channel`. This keeps the seam medium-agnostic and
+    lets a single tracker store answer cross-channel "what do I owe a reply to"
+    queries.
+    """
+
+    @property
+    def channel(self) -> str:
+        """Stable channel identifier stamped onto tracked messages.
+
+        E.g. ``"email"``, ``"agent"`` — used as the ``channel`` field on
+        ``MessageInfo``. Declared as a property (not a bare data attribute) so
+        ``@runtime_checkable`` ``isinstance()`` checks verify it on Python
+        3.10/3.11, where structural checks only cover method/property members.
+        A concrete class variable (``EmailTransport.channel = "email"``)
+        satisfies it structurally on all supported versions.
+        """
+        ...
+
+    def send(
+        self,
+        to: str,
+        subject: str,
+        content: str,
+        *,
+        reply_to: str | None = None,
+        references: list[str] | None = None,
+    ) -> str:
+        """Send a message and return its message ID.
+
+        Args:
+            to: Recipient identifier (email address, agent name, …).
+            subject: Message subject.
+            content: Message body (Markdown).
+            reply_to: Optional message ID this is a direct reply to.
+            references: Full ancestor chain for the ``References`` header.
+                When replying, pass the parent's ``References`` list with
+                ``reply_to`` appended so MUAs reconstruct the full thread.
+                If omitted and ``reply_to`` is set, defaults to ``[reply_to]``
+                (single-hop — correct for depth-1 replies).
+        """
+        ...
+
+    def list_inbox(self, folder: str = "inbox") -> list[tuple[str, str, datetime]]:
+        """List messages in a folder as ``(message_id, subject, timestamp)``."""
+        ...
+
+    def read(self, message_id: str, include_thread: bool = False) -> str:
+        """Return the rendered message body, optionally with its full thread."""
+        ...
+
+    def conversation_id_for(self, message_id: str) -> str:
+        """Return the ``ConversationTracker`` conversation_id for this message."""
+        ...
+
+
+# Re-exported lazily (PEP 562). ``EmailTransport`` and ``AgentTransport`` are
+# importable as ``gptmail.transport.X`` for convenience, but the import is
+# deferred to attribute access so that ``import gptmail.transport.agent`` does
+# NOT eagerly pull in ``.email`` (which imports the IMAP/SMTP stack via
+# ``lib.AgentEmail``). This is what keeps the agent transport usable in isolated
+# LXC sessions with no email infra — the guard test
+# ``test_agent_transport_no_email_imports.py`` enforces it at runtime.
+def __getattr__(name: str):  # noqa: D401
+    if name == "EmailTransport":
+        from .email import EmailTransport
+
+        return EmailTransport
+    if name == "AgentTransport":
+        from .agent import AgentTransport
+
+        return AgentTransport
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -1,0 +1,277 @@
+#!/bin/bash
+# Check GitHub notifications for the agent
+#
+# TODO: Future enhancements
+# - Fetch and display PR/issue details (status, author, labels, etc.)
+# - Group notifications by repository for better organization
+# - Show who mentioned/assigned you
+# - Highlight urgent items (review requests, direct mentions)
+# - Add filtering options (by repo, by reason, by type)
+# - Show thread context/preview of comment text
+# - Color coding by notification type/priority
+# - Show notification age/staleness
+# - Show comment authors in --verbose mode (requires extra API call per comment: gh api repos/OWNER/REPO/issues/NUM/comments | jq '.[-1].user.login')
+#   * Trade-off: Valuable context vs API rate limits and speed
+#   * Could batch fetch or cache to minimize calls
+
+show_usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo
+    echo "Options:"
+    echo "  --with-ids        Show notification IDs for marking as read"
+    echo "  --only-open       Filter out closed/merged PRs and issues"
+    echo "  --mark-read ID    Mark specific notification as read"
+    echo "  --mark-all-read   Mark all notifications as read"
+    echo "  -h, --help        Show this help"
+    echo
+    echo "Examples:"
+    echo "  $0                           # Show unread notifications (clean)"
+    echo "  $0 --with-ids                # Show notifications with IDs"
+    echo "  $0 --only-open               # Show only open PRs/issues"
+    echo "  $0 --mark-read 19518981563   # Mark specific notification as read"
+    echo "  $0 --mark-all-read           # Mark all as read"
+}
+
+# Parse options
+WITH_IDS=false
+ONLY_OPEN=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --with-ids)
+            WITH_IDS=true
+            shift
+            ;;
+        --only-open)
+            ONLY_OPEN=true
+            shift
+            ;;
+        --mark-read)
+            if [[ -n "$2" ]]; then
+                echo "📌 Marking notification $2 as read..."
+                gh api "/notifications/threads/$2" -X PATCH
+                echo "✅ Marked as read"
+                exit 0
+            else
+                echo "Error: --mark-read requires an ID"
+                exit 1
+            fi
+            ;;
+        --mark-all-read)
+            echo "📌 Marking all notifications as read..."
+            gh api notifications -X PUT
+            echo "✅ All notifications marked as read (processing in background)"
+            exit 0
+            ;;
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            show_usage
+            exit 1
+            ;;
+    esac
+done
+
+echo "📬 Checking GitHub notifications..."
+echo
+
+# Get ALL unread notifications first (excluding CI noise)
+ALL_NOTIFS=$(gh api notifications --jq '[.[] | select(.reason != "ci_activity")]')
+TOTAL_COUNT=$(echo "$ALL_NOTIFS" | jq '. | length')
+
+if [ "$TOTAL_COUNT" -eq 0 ]; then
+    echo "No unread notifications."
+    exit 0
+fi
+
+echo "Found $TOTAL_COUNT unread notification(s):"
+echo
+
+# Categorize by priority (sorted newest first)
+MENTIONS=$(echo "$ALL_NOTIFS" | jq '[.[] | select(.reason == "mention")] | sort_by(.updated_at) | reverse')
+ASSIGNS=$(echo "$ALL_NOTIFS" | jq '[.[] | select(.reason == "assign")] | sort_by(.updated_at) | reverse')
+REVIEWS=$(echo "$ALL_NOTIFS" | jq '[.[] | select(.reason == "review_requested")] | sort_by(.updated_at) | reverse')
+AUTHOR=$(echo "$ALL_NOTIFS" | jq '[.[] | select(.reason == "author")] | sort_by(.updated_at) | reverse')
+COMMENTS=$(echo "$ALL_NOTIFS" | jq '[.[] | select(.reason == "comment")] | sort_by(.updated_at) | reverse')
+OTHERS=$(echo "$ALL_NOTIFS" | jq '[.[] | select(.reason != "mention" and .reason != "assign" and .reason != "review_requested" and .reason != "author" and .reason != "comment")] | sort_by(.updated_at) | reverse')
+
+# Count each category
+MENTION_COUNT=$(echo "$MENTIONS" | jq '. | length')
+ASSIGN_COUNT=$(echo "$ASSIGNS" | jq '. | length')
+REVIEW_COUNT=$(echo "$REVIEWS" | jq '. | length')
+AUTHOR_COUNT=$(echo "$AUTHOR" | jq '. | length')
+COMMENT_COUNT=$(echo "$COMMENTS" | jq '. | length')
+OTHER_COUNT=$(echo "$OTHERS" | jq '. | length')
+
+# Helper function to check if PR/Issue is open (only called when ONLY_OPEN=true)
+is_item_open() {
+    local repo=$1
+    local number=$2
+    local type=$3
+    local state
+
+    case "$type" in
+        PullRequest)
+            # Use REST API to avoid consuming GraphQL quota (gh pr view uses GraphQL)
+            state=$(gh api "repos/$repo/pulls/$number" --jq '.state' 2>/dev/null || echo "unknown")
+            [[ "$state" == "open" ]]
+            ;;
+        Issue)
+            # Use REST API to avoid consuming GraphQL quota (gh issue view uses GraphQL)
+            state=$(gh api "repos/$repo/issues/$number" --jq '.state' 2>/dev/null || echo "unknown")
+            [[ "$state" == "open" ]]
+            ;;
+        *)
+            # For other types (discussions, releases), always show
+            return 0
+            ;;
+    esac
+}
+
+# Suppress notifications for PRs that are already merge-ready and where Bob has
+# already left a maintainer-facing "waiting only on a maintainer click" status
+# comment. These stay OPEN from the notification system's perspective, but
+# revisiting them produces fake-ready work and repeated comment churn.
+is_permission_blocked_merge_ready_pr() {
+    local repo=$1
+    local number=$2
+    local pr_json
+
+    pr_json=$(gh pr view "$number" --repo "$repo" \
+        --json state,mergeStateStatus,isDraft,statusCheckRollup 2>/dev/null) || return 1
+
+    local state merge_state is_draft non_success_count
+    state=$(echo "$pr_json" | jq -r '.state // ""')
+    merge_state=$(echo "$pr_json" | jq -r '.mergeStateStatus // ""')
+    is_draft=$(echo "$pr_json" | jq -r '.isDraft // false')
+    non_success_count=$(echo "$pr_json" | jq '[.statusCheckRollup[]? | select(.conclusion != "SUCCESS" and .conclusion != "SKIPPED")] | length')
+
+    [[ "$state" == "OPEN" ]] || return 1
+    [[ "$merge_state" == "CLEAN" ]] || return 1
+    [[ "$is_draft" == "false" ]] || return 1
+    [[ "$non_success_count" == "0" ]] || return 1
+
+    # Check Bob's full comment history, not just the last comment — later
+    # routine "CI is now green" status updates often bury the canonical
+    # waiting phrase without invalidating the acknowledgment. Matches the
+    # signal set used by activity-gate.sh so the two suppression paths stay
+    # aligned (see ErikBjare/bob#680).
+    local bot_comments
+    bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
+        --jq '[.[] | select(.user.login == "TimeToBuildBob") | .body] | join("\n")' 2>/dev/null) || return 1
+
+    [[ -n "$bot_comments" ]] || return 1
+
+    local lower
+    lower=$(printf '%s' "$bot_comments" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        *"waiting only on a maintainer click"*) return 0 ;;
+        *"waiting only on a maintainer merge click"*) return 0 ;;
+        *"ready to merge when convenient"*) return 0 ;;
+        *"blocked by missing mergepullrequest permission"*) return 0 ;;
+    esac
+    # "ready (to|for) merge @<maintainer>" — the @-mention indicates the ball
+    # is explicitly in the maintainer's court. Bare "ready to merge" is too
+    # broad, so we require the @-mention as the maintainer-handoff signal.
+    if printf '%s' "$lower" | grep -qE 'ready (to|for) merge @[a-z0-9_-]+'; then
+        return 0
+    fi
+    return 1
+}
+
+# Helper function to format compactly with smart timestamps (limit 10 per category)
+format_compact() {
+    local category=$1
+    local limit=10
+    local today
+    today=$(date +%Y-%m-%d)
+
+    echo "$category" | jq -r ".[] | \"\(.id)|\(.repository.full_name)|\(.subject.title)|\(.subject.type)|\(.subject.url)|\(.updated_at)\"" | head -$limit | while IFS='|' read -r id repo title type url timestamp; do
+        # If --only-open flag set, filter out closed/merged items
+        if [ "$ONLY_OPEN" = true ] && [[ "$type" == "PullRequest" || "$type" == "Issue" ]]; then
+            local number
+            number=$(echo "$url" | grep -oP '\d+$')
+            if ! is_item_open "$repo" "$number" "$type"; then
+                continue  # Skip closed/merged items
+            fi
+
+            if [[ "$type" == "PullRequest" ]] && is_permission_blocked_merge_ready_pr "$repo" "$number"; then
+                continue  # Skip fake-ready PR churn already blocked on maintainer merge permission
+            fi
+        fi
+
+        local date
+        local time
+        date=$(echo "$timestamp" | cut -d'T' -f1)
+        time=$(echo "$timestamp" | cut -d'T' -f2 | cut -d':' -f1,2)
+
+        local time_str
+        if [ "$date" = "$today" ]; then
+            time_str="$time"
+        else
+            time_str="$date"
+        fi
+
+        # Add type indicator
+        local type_indicator=""
+        case "$type" in
+            PullRequest) type_indicator="[PR]" ;;
+            Issue) type_indicator="[Issue]" ;;
+            *) type_indicator="[$type]" ;;
+        esac
+
+        if [ "$WITH_IDS" = true ]; then
+            echo "- $type_indicator $repo: $title ($time_str) [ID: $id]"
+        else
+            echo "- $type_indicator $repo: $title ($time_str)"
+        fi
+    done
+}
+
+# Show high-priority categories first
+if [ "$MENTION_COUNT" -gt 0 ]; then
+    echo "**Mentions** ($MENTION_COUNT):"
+    format_compact "$MENTIONS"
+    [ "$MENTION_COUNT" -gt 10 ] && echo "  ... and $((MENTION_COUNT - 10)) more"
+    echo
+fi
+
+if [ "$ASSIGN_COUNT" -gt 0 ]; then
+    echo "**Assigned** ($ASSIGN_COUNT):"
+    format_compact "$ASSIGNS"
+    [ "$ASSIGN_COUNT" -gt 10 ] && echo "  ... and $((ASSIGN_COUNT - 10)) more"
+    echo
+fi
+
+if [ "$REVIEW_COUNT" -gt 0 ]; then
+    echo "**Review Requests** ($REVIEW_COUNT):"
+    format_compact "$REVIEWS"
+    [ "$REVIEW_COUNT" -gt 10 ] && echo "  ... and $((REVIEW_COUNT - 10)) more"
+    echo
+fi
+
+if [ "$AUTHOR_COUNT" -gt 0 ]; then
+    echo "**Your Items** ($AUTHOR_COUNT):"
+    format_compact "$AUTHOR"
+    [ "$AUTHOR_COUNT" -gt 10 ] && echo "  ... and $((AUTHOR_COUNT - 10)) more"
+    echo
+fi
+
+if [ "$COMMENT_COUNT" -gt 0 ]; then
+    echo "**Comments** ($COMMENT_COUNT):"
+    format_compact "$COMMENTS"
+    [ "$COMMENT_COUNT" -gt 10 ] && echo "  ... and $((COMMENT_COUNT - 10)) more"
+    echo
+fi
+
+if [ "$OTHER_COUNT" -gt 0 ]; then
+    echo "**Other** ($OTHER_COUNT):"
+    format_compact "$OTHERS"
+    [ "$OTHER_COUNT" -gt 10 ] && echo "  ... and $((OTHER_COUNT - 10)) more"
+    echo
+fi
+
+echo "💡 Use ./scripts/github/check-notifications.sh --help for management options"

@@ -1,0 +1,1448 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10,<3.12"
+# dependencies = [
+#   "tweepy>=4.14.0",
+#   "rich>=13.0.0",
+#   "python-dotenv>=1.0.0",
+#   "click>=8.0.0",
+#   "flask>=3.0.0",
+#   "gptmail[oauth] @ git+https://github.com/gptme/gptme-contrib.git#subdirectory=packages/gptmail",
+# ]
+# [tool.uv]
+# exclude-newer = "2024-01-01T00:00:00Z"
+# ///
+"""
+Twitter Tool - Simple CLI to Twitter operations, for humans and AI agents.
+
+This tool supports both OAuth 1.0a and OAuth 2.0 authentication for Twitter API access.
+
+Authentication Methods:
+
+1. OAuth 2.0 (Recommended for agent Twitter)
+   Required environment variables:
+   - TWITTER_CLIENT_ID: OAuth 2.0 client ID
+   - TWITTER_CLIENT_SECRET: OAuth 2.0 client secret
+   - TWITTER_BEARER_TOKEN: Bearer token for read operations
+
+2. OAuth 1.0a (Legacy)
+   Required environment variables:
+   - TWITTER_API_KEY: OAuth 1.0a API key
+   - TWITTER_API_SECRET: OAuth 1.0a API secret
+   - TWITTER_ACCESS_TOKEN: OAuth 1.0a access token
+   - TWITTER_ACCESS_SECRET: OAuth 1.0a access token secret
+   - TWITTER_BEARER_TOKEN: Bearer token for read operations
+
+Usage:
+    ./twitter.py post "Hello world!"      # Post a tweet
+    ./twitter.py me                       # Read your tweets
+    ./twitter.py user @username           # Read another user's tweets
+    ./twitter.py replies --unanswered     # Check unanswered replies
+
+Authentication Flow:
+1. Tries OAuth 2.0 if client credentials are available
+2. Falls back to OAuth 1.0a if OAuth 2.0 fails or isn't configured
+3. Uses bearer token for read-only operations
+
+For OAuth 2.0 setup:
+1. Configure app in Twitter Developer Portal
+2. Add callback URL: http://localhost:9876 (for local development)
+3. Request scopes: tweet.read, tweet.write, users.read, follows.write
+4. Add client credentials to .env file
+"""
+
+import os
+import re
+import sys
+import warnings
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
+
+import click
+
+# Silence SyntaxWarning spam from tweepy's invalid escape sequences
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=SyntaxWarning, module="tweepy")
+    import tweepy
+
+from dotenv import load_dotenv
+from gptmail.communication_utils.auth import (
+    refresh_twitter_token_if_needed,
+    run_oauth_callback,
+    save_tokens_to_env,
+)
+from gptmail.communication_utils.auth.oauth import (
+    OAuthManager,
+)
+from gptmail.communication_utils.auth.tokens import (
+    TokenInfo,
+)
+from gptmail.communication_utils.messaging import (
+    split_thread,
+)
+from rich.console import Console
+from url_utils import validate_urls_in_text  # type: ignore[import-not-found]
+
+DEFAULT_SINCE = "7d"
+DEFAULT_LIMIT = 10
+
+# Initialize rich console (stderr=True so status messages don't pollute stdout
+# when callers capture stdout for JSON output, e.g. twitter-dispatch.sh)
+console = Console(stderr=True)
+
+
+@lru_cache(maxsize=1)
+def cached_get_me(client, user_auth: bool = False):
+    """
+    Cached wrapper for client.get_me() to reduce API calls.
+
+    This function caches the result of client.get_me() to avoid
+    hitting Twitter's rate limits with repeated calls. The result
+    won't change during execution, so caching is safe.
+
+    Returns:
+        The user information returned by client.get_me()
+
+    Usage:
+        # Instead of:
+        # user_id = client.get_me(user_auth=False).data.id
+
+        # Use:
+        # user_id = cached_get_me(client, user_auth=False).data.id
+    """
+    return client.get_me(user_auth=user_auth)
+
+
+def _get_user_auth(client) -> bool:
+    """Get the correct user_auth flag for a tweepy Client.
+
+    OAuth 1.0a clients need user_auth=True; OAuth 2.0 use False.
+    Set by load_twitter_client() as client._use_user_auth.
+    """
+    return getattr(client, "_use_user_auth", False)
+
+
+PLACEHOLDER_PATTERNS = [
+    r"\[link would go here\]",
+    r"\[link\s+here\]",
+    r"\[URL\s+here\]",
+    r"\[insert\s+link\]",
+    r"\[media\s+here\]",
+    r"\[image\s+here\]",
+    r"\[video\s+here\]",
+    r"\[gif\s+here\]",
+    r"\[TODO\]",
+    r"\[FIXME\]",
+    r"\[TBD\]",
+    r"\[PLACEHOLDER\]",
+]
+
+COMPILED_PLACEHOLDERS = [re.compile(p, re.IGNORECASE) for p in PLACEHOLDER_PATTERNS]
+
+
+def _find_placeholder_in_text(text: str) -> str | None:
+    """Return the first unresolved placeholder match in text, or None."""
+    for compiled in COMPILED_PLACEHOLDERS:
+        m = compiled.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _abort_on_placeholder_patterns(messages: list[str]) -> None:
+    """Abort if any message contains an unresolved placeholder pattern."""
+    for text in messages:
+        if not text:
+            continue
+        hit = _find_placeholder_in_text(text)
+        if hit:
+            console.print(f"[red]✗ Unresolved placeholder: '{hit}'[/red]")
+            console.print(
+                "[red]Aborting — the text contains an unresolved placeholder."
+                " This is a bug in the LLM drafting pipeline (the LLM emitted a"
+                " placeholder because it could not resolve the needed content at"
+                " draft time). Fix the pipeline to resolve any required URLs or"
+                " media before drafting, or write a concrete reply without the"
+                " placeholder.[/red]"
+            )
+            sys.exit(1)
+
+
+def _abort_on_bad_urls(messages: list[str]) -> None:
+    """Abort on HTTP 4xx/5xx URLs or unresolved placeholders before posting."""
+    _abort_on_placeholder_patterns(messages)
+    bad: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+
+    for text in messages:
+        if not text:
+            continue
+        for issue in validate_urls_in_text(text):
+            if issue in seen:
+                continue
+            seen.add(issue)
+            bad.append(issue)
+
+    if not bad:
+        return
+
+    for url, status in bad:
+        console.print(f"[red]✗ URL returns {status}: {url}[/red]")
+    console.print("[red]Aborting post — fix dead URLs before tweeting.[/red]")
+    sys.exit(1)
+
+
+def _verify_account_identity(username: str, console) -> None:
+    """Safety guard: verify the authenticated account matches the expected identity.
+
+    Prevents posting from the wrong account when misconfigured OAuth tokens
+    are present (e.g. a human's personal tokens used by an agent).
+    See ErikBjare/bob#479 for the incident that motivated this check.
+    """
+    expected = os.getenv("TWITTER_EXPECTED_USERNAME", "TimeToBuildBob")
+    if username.lower() != expected.lower():
+        console.print(
+            f"[red]SECURITY: Authenticated as @{username} but expected @{expected}!"
+        )
+        console.print("[red]Aborting to prevent posting from the wrong account.")
+        console.print("[red]Check TWITTER_ACCESS_TOKEN / TWITTER_ACCESS_SECRET in .env")
+        sys.exit(1)
+
+
+def load_twitter_client(
+    require_auth: bool = False, headless: bool = False
+) -> tweepy.Client:
+    """Initialize Twitter client with credentials from .env
+
+    Args:
+        require_auth: If True, authenticate with user context (needed for posting).
+        headless: If True, skip interactive OAuth 2.0 flow (browser-based) and
+            fall back directly to OAuth 1.0a when the saved token/refresh fails.
+            Use this in automated/headless environments where no user can interact
+            with a browser.
+
+    Note: We use override=True with load_dotenv() to ensure we always get
+    the latest tokens from .env. This is critical because after token refresh,
+    the new tokens are written to .env but os.environ still has the old values.
+    Twitter's refresh tokens are single-use (RFC 6749 Section 6), so using a
+    stale refresh token will result in a 400 Bad Request error.
+    """
+    load_dotenv(override=True)
+
+    # Resolve the .env path from THIS script's frame — critical because
+    # save_tokens_to_env() calls find_dotenv() from gptmail's installed location
+    # (often ~/.cache/uv/...) which can't find our workspace .env file.
+    from dotenv import find_dotenv
+
+    _env_path_str = find_dotenv()
+    _env_path = Path(_env_path_str) if _env_path_str else None
+    if not _env_path:
+        console.print("[yellow]Warning: could not locate .env file for token storage")
+
+    # Check for bearer token (required for read operations)
+    bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
+    if not bearer_token:
+        console.print("[red]Missing TWITTER_BEARER_TOKEN in .env")
+        sys.exit(1)
+
+    # Create client with appropriate authentication
+    # Initialize client based on authentication type
+    if require_auth:
+        api_key = os.getenv("TWITTER_API_KEY")
+        api_secret = os.getenv("TWITTER_API_SECRET")
+
+        # Check for OAuth 2.0 client credentials first
+        client_id = os.getenv("TWITTER_CLIENT_ID")
+        client_secret = os.getenv("TWITTER_CLIENT_SECRET")
+
+        if client_id and client_secret:
+            # Use OAuth 2.0 if client credentials are available
+            # console.print("[yellow]Debug: Using OAuth 2.0 authentication")
+            # console.print(f"  Client ID: {client_id[:8]}...")
+            # console.print(f"  Client Secret: {'*' * 8}...")
+
+            # Check for saved OAuth 2.0 tokens (access + refresh)
+            saved_token = os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN")
+            saved_refresh_token = os.getenv("TWITTER_OAUTH2_REFRESH_TOKEN")
+            saved_expires_at_str = os.getenv("TWITTER_OAUTH2_EXPIRES_AT")
+
+            # Try to use saved token with refresh if needed
+            if saved_token and saved_refresh_token and saved_expires_at_str:
+                try:
+                    # Parse expiration time
+                    expires_at = datetime.fromisoformat(saved_expires_at_str)
+
+                    # Create TokenInfo to check expiration
+                    token_info = TokenInfo(
+                        token=saved_token,
+                        expires_at=expires_at,
+                        refresh_token=saved_refresh_token,
+                    )
+
+                    if token_info.is_expired():
+                        console.print("[yellow]Access token expired, refreshing...")
+
+                        # Use cross-process locked refresh to avoid burning
+                        # Twitter's single-use rotating refresh tokens when two
+                        # processes (e.g. preflight + post) race simultaneously.
+                        oauth_manager = OAuthManager.for_twitter(
+                            client_id, client_secret
+                        )
+                        new_token_info, error = refresh_twitter_token_if_needed(
+                            oauth_manager, _env_path
+                        )
+
+                        if error or not new_token_info:
+                            raise Exception(error or "No token returned")
+
+                        saved_token = new_token_info.token
+                        console.print("[green]Token refreshed successfully")
+                    else:
+                        console.print("[yellow]Using saved OAuth 2.0 access token")
+
+                    # Create client with current token
+                    client = tweepy.Client(saved_token, wait_on_rate_limit=True)
+                    client._use_user_auth = False  # OAuth 2.0: use bearer token
+
+                    # Test the credentials
+                    test = cached_get_me(client, user_auth=False)
+                    if test.data:
+                        _verify_account_identity(test.data.username, console)
+                        console.print(
+                            f"[green]Successfully authenticated as @{test.data.username}"
+                        )
+                        return client
+                except Exception as e:
+                    console.print(f"[yellow]Saved token/refresh failed: {e}")
+                    if headless:
+                        console.print(
+                            "[yellow]Headless mode — skipping interactive OAuth 2.0, falling back to OAuth 1.0a"
+                        )
+                    else:
+                        console.print("[yellow]Starting new OAuth 2.0 flow...")
+            elif saved_token:
+                console.print(
+                    "[yellow]Saved token exists but missing refresh token or expiry"
+                )
+                if headless:
+                    console.print(
+                        "[yellow]Headless mode — skipping interactive OAuth 2.0, falling back to OAuth 1.0a"
+                    )
+                else:
+                    console.print(
+                        "[yellow]Starting new OAuth 2.0 flow to get complete credentials..."
+                    )
+            elif headless:
+                console.print(
+                    "[yellow]No saved OAuth 2.0 token in headless mode — skipping interactive OAuth 2.0, falling back to OAuth 1.0a"
+                )
+
+            if not headless:
+                try:
+                    # Initialize OAuth 2.0 handler
+                    oauth2_user_handler = tweepy.OAuth2UserHandler(
+                        client_id=client_id,
+                        client_secret=client_secret,
+                        redirect_uri="http://localhost:9876/callback",
+                        scope=[
+                            "tweet.read",
+                            "tweet.write",
+                            "users.read",
+                            "follows.write",
+                            "offline.access",
+                        ],
+                    )
+
+                    # Get authorization URL and provide it to the user
+                    auth_url = oauth2_user_handler.get_authorization_url()
+                    console.print(
+                        "[yellow]Please open this URL in your browser to authorize the application:"
+                    )
+                    console.print(f"[blue]{auth_url}")
+
+                    # Wait for OAuth callback using shared utility
+                    console.print(
+                        "[yellow]Waiting for authorization (timeout: 5 minutes)..."
+                    )
+                    try:
+                        response_code, full_url = run_oauth_callback(
+                            port=9876, timeout=300
+                        )
+                        # run_oauth_callback returns (None, None) on timeout
+                        # instead of raising — handle this explicitly
+                        if not response_code or not full_url:
+                            raise TimeoutError(
+                                "No authorization callback received within timeout"
+                            )
+                        console.print("[green]Authorization received!")
+                    except TimeoutError as e:
+                        console.print("[red]Error: Authorization timeout")
+                        console.print(f"[red]Details: {str(e)}")
+                        raise
+                    except Exception as e:
+                        console.print("[red]Error: Authorization failed")
+                        console.print(f"[red]Details: {str(e)}")
+                        raise
+
+                    # Get access token using the full callback URL
+                    access_token = oauth2_user_handler.fetch_token(
+                        authorization_response=full_url
+                    )
+                    # Log the raw response for debugging token persistence issues
+                    console.print(
+                        f"[dim]fetch_token response keys: {list(access_token.keys())}"
+                    )
+                    console.print(
+                        f"[dim]  expires_in={access_token.get('expires_in', 'MISSING')}"
+                    )
+                    console.print(
+                        f"[dim]  refresh_token={'present' if 'refresh_token' in access_token else 'MISSING'}"
+                    )
+
+                    # Save all tokens atomically to .env
+                    try:
+                        new_tokens: dict[str, str] = {
+                            "TWITTER_OAUTH2_ACCESS_TOKEN": access_token["access_token"],
+                        }
+
+                        if "refresh_token" in access_token:
+                            new_tokens["TWITTER_OAUTH2_REFRESH_TOKEN"] = access_token[
+                                "refresh_token"
+                            ]
+
+                        # Calculate expiration time (fallback to 2h if expires_in absent)
+                        if "expires_in" in access_token:
+                            expires_at = datetime.now(timezone.utc) + timedelta(
+                                seconds=access_token["expires_in"]
+                            )
+                        else:
+                            expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
+                            console.print(
+                                "[yellow]No expires_in in response, defaulting to 2h expiry"
+                            )
+                        new_tokens["TWITTER_OAUTH2_EXPIRES_AT"] = expires_at.isoformat()
+
+                        if not save_tokens_to_env(
+                            new_tokens,
+                            env_path=_env_path,
+                            comment="OAuth 2.0 tokens",
+                        ):
+                            console.print(
+                                "[red]Warning: failed to save OAuth tokens to .env"
+                            )
+
+                        # Update os.environ so subsequent calls in same process use new tokens
+                        for key, value in new_tokens.items():
+                            os.environ[key] = value
+
+                        if "refresh_token" in access_token:
+                            console.print(
+                                "[yellow]Saved OAuth 2.0 tokens with refresh capability"
+                            )
+                        else:
+                            console.print(
+                                "[yellow]Warning: No refresh token received (add 'offline.access' scope)"
+                            )
+                    except Exception as e:
+                        console.print(f"[red]Error saving token: {str(e)}")
+                        sys.exit(1)
+
+                    # Create client with OAuth 2.0 User Context authentication
+                    client = tweepy.Client(
+                        access_token[
+                            "access_token"
+                        ],  # Pass access token directly as first argument
+                        wait_on_rate_limit=True,
+                    )
+                    client._use_user_auth = False  # OAuth 2.0: use bearer token
+
+                    # Test the credentials with OAuth 2.0
+                    test = cached_get_me(client, user_auth=False)
+                    if test.data:
+                        _verify_account_identity(test.data.username, console)
+                        console.print(
+                            f"[green]Successfully authenticated as @{test.data.username}"
+                        )
+                        return client
+                    else:
+                        console.print(
+                            "[red]Could not get user info after OAuth 2.0 authentication"
+                        )
+                        sys.exit(1)
+
+                except tweepy.TweepyException as e:
+                    console.print(f"[red]OAuth 2.0 authentication failed: {str(e)}")
+                    console.print("[yellow]Falling back to OAuth 1.0a...")
+
+        # Fall back to OAuth 1.0a if OAuth 2.0 fails or isn't configured
+        console.print("[yellow]Debug: Using OAuth 1.0a authentication")
+
+        # Check for user auth credentials if needed
+        auth_vars = ["TWITTER_ACCESS_TOKEN", "TWITTER_ACCESS_SECRET"]
+        missing_auth = [var for var in auth_vars if not os.getenv(var)]
+        if missing_auth:
+            console.print("[red]This operation requires user authentication.")
+            console.print(f"Missing credentials: {', '.join(missing_auth)}")
+            sys.exit(1)
+
+        access_token = os.getenv("TWITTER_ACCESS_TOKEN")
+        access_secret = os.getenv("TWITTER_ACCESS_SECRET")
+
+        # Debug info for OAuth 1.0a credentials
+        console.print("[yellow]Debug: Using OAuth 1.0a authentication")
+        console.print(
+            f"  API Key: {api_key[:8]}..." if api_key else "  API Key: Missing"
+        )
+        console.print(
+            f"  API Secret: {'*' * 8}..." if api_secret else "  API Secret: Missing"
+        )
+        console.print(
+            f"  Access Token: {access_token[:8]}..."
+            if access_token
+            else "  Access Token: Missing"
+        )
+        console.print(
+            f"  Access Secret: {'*' * 8}..."
+            if access_secret
+            else "  Access Secret: Missing"
+        )
+
+        # Verify all OAuth credentials are present
+        if not all([api_key, api_secret, access_token, access_secret]):
+            console.print("[red]Error: Missing OAuth credentials")
+            missing = []
+            if not api_key:
+                missing.append("TWITTER_API_KEY")
+            if not api_secret:
+                missing.append("TWITTER_API_SECRET")
+            if not access_token:
+                missing.append("TWITTER_ACCESS_TOKEN")
+            if not access_secret:
+                missing.append("TWITTER_ACCESS_SECRET")
+            console.print(f"[red]Missing: {', '.join(missing)}")
+            sys.exit(1)
+
+        # Create OAuth 1.0a client
+        # First try creating the client
+        client = tweepy.Client(
+            consumer_key=api_key,
+            consumer_secret=api_secret,
+            access_token=access_token,
+            access_token_secret=access_secret,
+            wait_on_rate_limit=True,
+        )
+        client._use_user_auth = True  # OAuth 1.0a: must use user context
+
+        # Test the credentials with a simple API call
+        console.print("[yellow]Debug: Testing OAuth credentials...")
+        test = cached_get_me(client, user_auth=True)
+        if test.data:
+            _verify_account_identity(test.data.username, console)
+            console.print(f"[green]Successfully authenticated as @{test.data.username}")
+        else:
+            console.print("[red]Could not get user info after authentication")
+            sys.exit(1)
+
+        return client
+    else:
+        # For read operations, just use bearer token
+        console.print("[yellow]Debug: Using bearer token authentication")
+        console.print(f"  Bearer token: {bearer_token[:15]}...")
+
+        # Create client with only bearer token
+        client = tweepy.Client(
+            bearer_token=bearer_token,
+            consumer_key=None,
+            consumer_secret=None,
+            access_token=None,
+            access_token_secret=None,
+            return_type=tweepy.Response,
+            wait_on_rate_limit=True,
+        )
+    return client
+
+
+def parse_time(timestr: str) -> datetime:
+    """Parse time string like '24h', '7d' into datetime"""
+    if timestr.endswith("h"):
+        hours = int(timestr[:-1])
+        return datetime.now() - timedelta(hours=hours)
+    elif timestr.endswith("d"):
+        days = int(timestr[:-1])
+        return datetime.now() - timedelta(days=days)
+    else:
+        try:
+            return datetime.fromisoformat(timestr)
+        except ValueError:
+            console.print(f"[red]Invalid time format: {timestr}")
+            console.print("Use format like '24h', '7d', or ISO format")
+            sys.exit(1)
+
+
+def format_tweet_stats(tweet: tweepy.Tweet) -> str:
+    """Format engagement stats for a tweet"""
+    if not hasattr(tweet, "public_metrics"):
+        return ""
+
+    stats = []
+    m = tweet.public_metrics
+    stats.extend(
+        [
+            f"💟 {m['like_count']}" if m["like_count"] > 0 else "",
+            f"💬 {m['reply_count']}" if m["reply_count"] > 0 else "",
+            f"🔁 {m['retweet_count']}" if m["retweet_count"] > 0 else "",
+        ]
+    )
+    return " ".join(s for s in stats if s)
+
+
+def format_tweet_time(tweet: tweepy.Tweet) -> str:
+    """Format tweet timestamp"""
+    if not hasattr(tweet, "created_at"):
+        return "N/A"
+    return tweet.created_at.strftime("%Y-%m-%d %H:%M")  # type: ignore[no-any-return]
+
+
+def display_tweet(tweet: tweepy.Tweet, author_info: str | None = None) -> None:
+    """Display a single tweet with consistent formatting"""
+    console.print(f"[cyan]{format_tweet_time(tweet)}[/cyan]")
+    if author_info:
+        console.print(f"[green]From: {author_info}[/green]")
+    console.print(f"[magenta]Tweet ID: {tweet.id}[/magenta]")
+    console.print(f"[white]Tweet: {tweet.text}[/white]")
+
+    stats = format_tweet_stats(tweet)
+    if stats:
+        console.print(f"[blue]Stats: {stats}[/blue]")
+    console.print("─" * 50)
+
+
+def display_tweets(tweets: tweepy.Response, username: str) -> None:
+    """Display tweets in a consistent format"""
+    if not tweets.data:
+        console.print(f"[yellow]No tweets found for @{username}")
+        return
+
+    console.print(f"\n[bold]Recent tweets from @{username}:[/bold]\n")
+    for tweet in tweets.data:
+        display_tweet(tweet)
+
+
+@click.group()
+def cli() -> None:
+    """Twitter Tool - Simple CLI for Twitter operations"""
+    pass
+
+
+@cli.command()
+@click.option(
+    "--limit",
+    default=DEFAULT_LIMIT,
+    type=click.IntRange(5, 100),
+    help="Number of tweets (5-100)",
+)
+def me(limit: int) -> None:
+    """Read your own recent tweets"""
+    client = load_twitter_client(require_auth=True)
+
+    me = cached_get_me(client, user_auth=_get_user_auth(client))
+    username = me.data.username
+
+    # Remove @ if present
+    console.print(f"[yellow]Fetching tweets for @{username}")
+
+    # Get user ID
+    try:
+        user = client.get_user(username=username)
+        if not user.data:
+            console.print(f"[red]User @{username} not found")
+            sys.exit(1)
+    except tweepy.TweepyException as e:
+        console.print(f"[red]Error getting user info: {e}")
+        sys.exit(1)
+
+    # Get tweets
+    try:
+        tweets = client.get_users_tweets(
+            user.data.id,
+            max_results=limit,
+            exclude=["retweets", "replies"],
+            tweet_fields=["created_at", "public_metrics"],
+        )
+        display_tweets(tweets, username)
+    except tweepy.TweepyException as e:
+        console.print(f"[red]Error getting tweets: {e}")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("text")
+@click.option("--reply-to", help="Tweet ID to reply to")
+@click.option("--thread", is_flag=True, help="Post as thread (split by ---)")
+def post(text: str, reply_to: str | None, thread: bool) -> None:
+    """Post a tweet (requires OAuth authentication)"""
+    client = load_twitter_client(require_auth=True)
+
+    # Handle thread posting
+    if thread:
+        thread_messages = split_thread(text)
+        _abort_on_bad_urls([message.text for message in thread_messages])
+        reply_to_id: str | None = None
+
+        for message in thread_messages:
+            # Create tweet and get the response data
+            response = client.create_tweet(
+                text=message.text,
+                in_reply_to_tweet_id=reply_to_id,
+                user_auth=_get_user_auth(client),
+            )
+            if not response.data:
+                console.print("[red]Error: No response data from tweet creation")
+                sys.exit(1)
+
+            # Get the ID for the next reply
+            tweet_data = response.data
+            if not isinstance(tweet_data, dict):
+                console.print("[red]Error: Unexpected response data format")
+                sys.exit(1)
+
+            reply_to_id = tweet_data.get("id")
+            if not reply_to_id:
+                console.print("[red]Error: Could not get tweet ID from response")
+                sys.exit(1)
+
+            console.print(f"[green]Posted tweet: {message.text}")
+    else:
+        # Single tweet
+        _abort_on_bad_urls([text])
+        response = client.create_tweet(
+            text=text, in_reply_to_tweet_id=reply_to, user_auth=_get_user_auth(client)
+        )
+        if not response.data:
+            console.print("[red]Error: No response data from tweet creation")
+            sys.exit(1)
+
+        tweet_data = response.data
+        if not isinstance(tweet_data, dict):
+            console.print("[red]Error: Unexpected response data format")
+            sys.exit(1)
+
+        tweet_id = tweet_data.get("id")
+        if not tweet_id:
+            console.print("[red]Error: Could not get tweet ID from response")
+            sys.exit(1)
+
+        console.print(f"[green]Posted tweet: {text}")
+        console.print(f"[blue]Tweet ID: {tweet_id}")
+
+
+@cli.command()
+@click.argument("username")
+@click.option(
+    "--limit",
+    default=DEFAULT_LIMIT,
+    type=click.IntRange(5, 100),
+    help="Number of tweets (5-100)",
+)
+def user(username: str, limit: int) -> None:
+    """Read any user's tweets (uses bearer token)"""
+    client = load_twitter_client(require_auth=False)
+
+    # Remove @ if present
+    username = username.lstrip("@")
+
+    # Get user ID with error handling
+    try:
+        user = client.get_user(username=username)
+        if not user.data:
+            console.print(f"[red]User @{username} not found")
+            sys.exit(1)
+    except tweepy.TweepyException as e:
+        console.print(f"[red]Error getting user info: {e}")
+        sys.exit(1)
+
+    # Get tweets
+    try:
+        tweets = client.get_users_tweets(
+            user.data.id,
+            max_results=limit,
+            exclude=["retweets", "replies"],
+            tweet_fields=["created_at", "public_metrics"],
+        )
+        display_tweets(tweets, username)
+    except tweepy.TweepyException as e:
+        console.print(f"[red]Error getting tweets: {e}")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("usernames", nargs=-1, required=True)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be done without actually following"
+)
+def follow(usernames: tuple[str, ...], dry_run: bool) -> None:
+    """Follow one or more Twitter accounts (requires follows.write scope).
+
+    Note: If re-authorization is needed (scope not previously granted),
+    run 'twitter.py me' to trigger the OAuth flow with the updated scope.
+
+    Example: ./twitter.py follow karpathy AnthropicAI steipete
+    """
+    client = load_twitter_client(require_auth=True)
+
+    results: dict[str, list[str]] = {
+        "followed": [],
+        "already_following": [],
+        "errors": [],
+    }
+
+    for raw_username in usernames:
+        username = raw_username.lstrip("@")
+        try:
+            target = client.get_user(username=username)
+            if not target.data:
+                console.print(f"[red]User @{username} not found")
+                results["errors"].append(username)
+                continue
+
+            target_id = target.data.id
+
+            if dry_run:
+                console.print(
+                    f"[yellow][dry-run] Would follow @{username} (id={target_id})"
+                )
+                continue
+
+            response = client.follow_user(target_id, user_auth=_get_user_auth(client))
+            if response.data:
+                if response.data.get("following"):
+                    console.print(f"[green]Now following @{username}")
+                    results["followed"].append(username)
+                elif response.data.get("pending_follow"):
+                    console.print(
+                        f"[yellow]Follow request sent to @{username} (protected account)"
+                    )
+                    results["followed"].append(username)
+                else:
+                    console.print(f"[blue]Already following @{username}")
+                    results["already_following"].append(username)
+            else:
+                console.print(f"[red]Failed to follow @{username}: unexpected response")
+                results["errors"].append(username)
+
+        except tweepy.TweepyException as e:
+            error_msg = str(e)
+            if "402" in error_msg or "Payment Required" in error_msg:
+                console.print(
+                    f"[red]API credits exhausted — cannot follow @{username}.\n"
+                    "The X API uses pay-as-you-go billing. Add credits at https://developer.x.com "
+                    "or follow accounts manually via the web UI."
+                )
+                results["errors"].append(username)
+                # Abort remaining follows — no point retrying with no credits
+                remaining = [
+                    u.lstrip("@")
+                    for u in usernames
+                    if u.lstrip("@")
+                    not in results["followed"]
+                    + results["already_following"]
+                    + results["errors"]
+                ]
+                if remaining:
+                    console.print(
+                        f"[yellow]Skipping {len(remaining)} remaining account(s): "
+                        f"{', '.join('@' + u for u in remaining)}"
+                    )
+                    results["errors"].extend(remaining)
+                break
+            elif "403" in error_msg or "not authorized" in error_msg.lower():
+                console.print(
+                    f"[red]Authorization error for @{username}: missing 'follows.write' scope?\n"
+                    "Re-authorize by deleting your OAuth tokens and running 'twitter.py me'."
+                )
+            else:
+                console.print(f"[red]Error following @{username}: {e}")
+            results["errors"].append(username)
+
+    if not dry_run:
+        console.print(
+            f"\n[bold]Summary:[/bold] followed={len(results['followed'])}, "
+            f"already_following={len(results['already_following'])}, "
+            f"errors={len(results['errors'])}"
+        )
+        if results["errors"]:
+            console.print(f"[red]Errors: {', '.join(results['errors'])}")
+
+
+@cli.command()
+@click.option("--name", required=True, help="Name of the list to create")
+@click.option("--description", default=None, help="Description of the list")
+@click.option(
+    "--private/--public", default=None, help="Make the list private (default: public)"
+)
+@click.option(
+    "--add", "usernames", multiple=True, help="Username(s) to add to the list"
+)
+def create_list(
+    name: str, description: str | None, private: bool | None, usernames: tuple[str, ...]
+) -> None:
+    """Create a new Twitter list and optionally add initial members.
+
+    Requires lists.write OAuth scope (re-authorize with --force-reauth if needed).
+
+    Example: ./twitter.py create-list --name "AI Interesting" --add garrytan --add karpathy --add NousResearch
+    """
+    client = load_twitter_client(require_auth=True)
+
+    try:
+        response = client.create_list(
+            name=name,
+            description=description,
+            private=private,
+            user_auth=_get_user_auth(client),
+        )
+        if response.data:
+            list_id = response.data.get("id")
+            list_name = response.data.get("name")
+            console.print(f"[green]Created list '{list_name}' (id={list_id})")
+
+            if usernames:
+                console.print(f"[yellow]Adding {len(usernames)} member(s)...")
+                for username in usernames:
+                    username_clean = username.lstrip("@")
+                    try:
+                        user = client.get_user(username=username_clean)
+                        if user.data:
+                            resp = client.add_list_member(
+                                list_id, user.data.id, user_auth=_get_user_auth(client)
+                            )
+                            if resp.data and resp.data.get("is_member"):
+                                console.print(f"  [green]+ @{username_clean}")
+                            else:
+                                console.print(
+                                    f"  [red]Failed to add @{username_clean} (is_member=False)"
+                                )
+                        else:
+                            console.print(f"  [red]User @{username_clean} not found")
+                    except tweepy.TweepyException as e:
+                        console.print(f"  [red]Error adding @{username_clean}: {e}")
+            console.print(
+                f"\n[dim]Fetch list tweets with: timeline --list-id {list_id}"
+            )
+        else:
+            console.print("[red]Failed to create list")
+
+    except tweepy.TweepyException as e:
+        console.print(f"[red]Error creating list: {e}")
+
+
+@cli.command()
+@click.argument("list_id")
+@click.option(
+    "--user", "usernames", multiple=True, required=True, help="Username(s) to add"
+)
+def list_add(list_id: str, usernames: tuple[str, ...]) -> None:
+    """Add one or more members to an existing list.
+
+    Example: ./twitter.py list-add 123456789 --user garrytan --user karpathy
+    """
+    client = load_twitter_client(require_auth=True)
+
+    console.print(f"[yellow]Adding {len(usernames)} member(s) to list {list_id}...")
+    results: dict[str, list[str]] = {"added": [], "errors": []}
+
+    for username in usernames:
+        username_clean = username.lstrip("@")
+        try:
+            user = client.get_user(username=username_clean)
+            if not user.data:
+                console.print(f"  [red]User @{username_clean} not found")
+                results["errors"].append(username_clean)
+                continue
+
+            resp = client.add_list_member(
+                list_id, user.data.id, user_auth=_get_user_auth(client)
+            )
+            if resp.data and resp.data.get("is_member"):
+                console.print(f"  [green]+ @{username_clean}")
+                results["added"].append(username_clean)
+            else:
+                console.print(
+                    f"  [red]Failed to add @{username_clean} (is_member=False)"
+                )
+                results["errors"].append(username_clean)
+
+        except tweepy.TweepyException as e:
+            console.print(f"  [red]Error adding @{username_clean}: {e}")
+            results["errors"].append(username_clean)
+
+    console.print(
+        f"\n[bold]Summary:[/bold] added={len(results['added'])}, errors={len(results['errors'])}"
+    )
+
+
+@cli.command()
+@click.argument("username")
+@click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
+@click.option(
+    "--limit", default=DEFAULT_LIMIT, help="Maximum number of mentions to fetch"
+)
+def mentions(username: str, since: str, limit: int) -> None:
+    """Check mentions of a specific user"""
+    client = load_twitter_client(require_auth=False)
+
+    # Remove @ if present
+    username = username.lstrip("@")
+
+    # Get user ID
+    user = client.get_user(username=username)
+    if not user.data:
+        console.print(f"[red]User @{username} not found")
+        sys.exit(1)
+
+    # Get mentions since the specified time
+    start_time = parse_time(since)
+    query = f"@{username} -from:{username}"  # Exclude self-mentions
+    mentions = client.search_recent_tweets(
+        query=query,
+        max_results=limit,
+        start_time=start_time,
+        tweet_fields=["created_at", "author_id", "public_metrics"],
+        expansions=["author_id"],
+        user_fields=["username"],
+    )
+
+    if not mentions.data:
+        console.print(f"[yellow]No mentions found for @{username}")
+        return
+
+    # Create lookup for user info
+    users = (
+        {user.id: user for user in mentions.includes["users"]}
+        if mentions.includes
+        else {}
+    )
+
+    # Display mentions
+    console.print(f"\n[bold]Recent mentions of @{username}:[/bold]\n")
+
+    for tweet in mentions.data:
+        # Get author username
+        author = users.get(tweet.author_id, None)
+        author_name = f"@{author.username}" if author else str(tweet.author_id)
+        display_tweet(tweet, author_name)
+
+
+@cli.command()
+@click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
+@click.option(
+    "--limit", default=DEFAULT_LIMIT, help="Maximum number of replies to fetch"
+)
+@click.option("--unanswered", is_flag=True, help="Show only unanswered tweets")
+def replies(since: str, limit: int, unanswered: bool) -> None:
+    """Check replies to our tweets"""
+    client = load_twitter_client(require_auth=True)
+
+    me = cached_get_me(client, user_auth=_get_user_auth(client))
+    if not me.data:
+        console.print("[red]Could not get user information")
+        sys.exit(1)
+
+    # Get mentions since the specified time
+    start_time = parse_time(since)
+    mentions = client.get_users_mentions(
+        me.data.id,
+        max_results=limit,
+        start_time=start_time,
+        user_auth=_get_user_auth(client),
+        expansions=["author_id", "in_reply_to_user_id"],
+        tweet_fields=["created_at", "author_id", "public_metrics"],
+    )
+
+    tweets = [tweet for tweet in mentions.data or []]
+    if unanswered:
+        tweets = [tweet for tweet in tweets if tweet.public_metrics["reply_count"] == 0]
+
+    if not tweets:
+        console.print("[yellow]No replies found")
+        return
+
+    # Display replies
+    console.print("\n[bold]Recent Replies:[/bold]\n")
+
+    for tweet in tweets:
+        # Get author info from expansions if available
+        author_info = f"@{tweet.author_id}"  # Default to ID
+        if mentions.includes and "users" in mentions.includes:
+            for user in mentions.includes["users"]:
+                if user.id == tweet.author_id:
+                    author_info = f"@{user.username}"
+                    break
+
+        display_tweet(tweet, author_info)
+
+
+@cli.command()
+@click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
+@click.option(
+    "--limit", default=DEFAULT_LIMIT, help="Maximum number of replies to fetch"
+)
+@click.option("--unanswered", is_flag=True, help="Show only unanswered tweets")
+def quotes(since: str, limit: int, unanswered: bool) -> None:
+    """Check quotes of our tweets"""
+    client = load_twitter_client(require_auth=True)
+
+    # Get our user ID with OAuth 2.0
+    me = client.get_me(user_auth=_get_user_auth(client))
+    if not me.data:
+        console.print("[red]Could not get user information")
+        sys.exit(1)
+
+    # Get quotes since the specified time
+    start_time = parse_time(since)
+    query = (
+        f"url:{me.data.username}"  # Search for tweets containing links to our tweets
+    )
+    quotes = client.search_recent_tweets(
+        query=query,
+        max_results=limit,
+        start_time=start_time,
+        tweet_fields=["created_at", "author_id", "public_metrics"],
+        expansions=["author_id"],
+        user_fields=["username"],
+    )
+
+    tweets = [tweet for tweet in quotes.data or []]
+    if unanswered:
+        tweets = [tweet for tweet in tweets if tweet.public_metrics["reply_count"] == 0]
+
+    if not tweets:
+        console.print("[yellow]No quotes found")
+        return
+
+    # Create lookup for user info
+    users = (
+        {user.id: user for user in quotes.includes["users"]} if quotes.includes else {}
+    )
+
+    # Display quotes in a simpler format
+    console.print("\n[bold]Recent Quotes:[/bold]")
+
+    for tweet in tweets:
+        # Get author username
+        author = users.get(tweet.author_id, None)
+        author_name = f"@{author.username}" if author else str(tweet.author_id)
+
+        # Format engagement stats
+        stats = []
+        if hasattr(tweet, "public_metrics"):
+            m = tweet.public_metrics
+            stats.extend(
+                [
+                    f"💟 {m['like_count']}" if m["like_count"] > 0 else "",
+                    f"💬 {m['reply_count']}" if m["reply_count"] > 0 else "",
+                    f"🔁 {m['retweet_count']}" if m["retweet_count"] > 0 else "",
+                ]
+            )
+        stats_str = " ".join(s for s in stats if s)
+
+        # Print tweet details
+        console.print(f"\n[cyan]{tweet.created_at.strftime('%Y-%m-%d %H:%M')}[/cyan]")
+        console.print(f"[green]From: {author_name}[/green]")
+        console.print(f"[white]Quote: {tweet.text}[/white]")
+        console.print(f"[blue]Stats: {stats_str}[/blue]")
+        console.print(f"[magenta]ID: {tweet.id}[/magenta]")
+        console.print("─" * 50)
+
+
+@cli.command()
+@click.option("--since", default=DEFAULT_SINCE, help="Time window (e.g. 24h, 7d)")
+@click.option(
+    "--limit", default=DEFAULT_LIMIT, help="Maximum number of tweets to fetch"
+)
+@click.option("--list-id", help="Twitter list ID to fetch from")
+def timeline(since: str, limit: int, list_id: str | None) -> None:
+    """Read home timeline or list timeline"""
+    client = load_twitter_client(require_auth=True)
+
+    start_time = parse_time(since)
+
+    if list_id:
+        # Get tweets from list
+        try:
+            tweets = client.get_list_tweets(
+                list_id,
+                max_results=limit,
+                start_time=start_time,
+                tweet_fields=["created_at", "author_id", "public_metrics"],
+                expansions=["author_id"],
+                user_fields=["username"],
+                user_auth=_get_user_auth(client),
+            )
+            source = f"list {list_id}"
+        except tweepy.TweepyException as e:
+            console.print(f"[red]Error getting list tweets: {e}")
+            sys.exit(1)
+    else:
+        # Get tweets from home timeline
+        try:
+            tweets = client.get_home_timeline(
+                max_results=limit,
+                start_time=start_time,
+                tweet_fields=["created_at", "author_id", "public_metrics"],
+                expansions=["author_id"],
+                user_fields=["username"],
+                user_auth=_get_user_auth(client),
+            )
+            source = "home timeline"
+        except tweepy.TweepyException as e:
+            console.print(f"[red]Error getting timeline: {e}")
+            sys.exit(1)
+
+    if not tweets.data:
+        console.print(f"[yellow]No tweets found in {source}")
+        return
+
+    # Create lookup for user info
+    users = (
+        {user.id: user for user in tweets.includes["users"]} if tweets.includes else {}
+    )
+
+    # Display tweets
+    console.print(f"\n[bold]Recent tweets from {source}:[/bold]\n")
+    for tweet in tweets.data:
+        # Get author info
+        author = users.get(tweet.author_id, None)
+        author_name = f"@{author.username}" if author else str(tweet.author_id)
+        display_tweet(tweet, author_name)
+
+
+@cli.command()
+@click.argument("tweet_id")
+@click.option("--limit", default=100, help="Maximum number of tweets to fetch per page")
+@click.option(
+    "--max-pages", default=5, help="Maximum number of pagination pages to fetch"
+)
+@click.option("--verbose", is_flag=True, help="Show detailed debug information")
+@click.option(
+    "--structure", is_flag=True, help="Show thread structure with indentation"
+)
+def thread(
+    tweet_id: str, limit: int, max_pages: int, verbose: bool, structure: bool
+) -> None:
+    """Read a complete conversation thread given a tweet ID
+
+    This command will:
+    1. Fetch the specified tweet
+    2. Get its conversation ID
+    3. Retrieve all tweets in that conversation using pagination
+    4. Display the tweets in chronological order with reply structure
+    """
+    client = load_twitter_client(require_auth=False)
+
+    if verbose:
+        console.print(f"[blue]Fetching tweet with ID: {tweet_id}")
+
+    # Get the original tweet with comprehensive metadata
+    try:
+        tweet = client.get_tweet(
+            tweet_id,
+            tweet_fields=[
+                "created_at",
+                "author_id",
+                "public_metrics",
+                "conversation_id",
+                "in_reply_to_user_id",
+                "referenced_tweets",
+            ],
+            expansions=["author_id", "referenced_tweets.id", "in_reply_to_user_id"],
+            user_fields=["username", "name", "profile_image_url"],
+        )
+    except Exception as e:
+        console.print(f"[red]Error fetching original tweet: {e}")
+        return
+
+    if not tweet.data:
+        console.print("[yellow]Tweet not found")
+        return
+
+    # Get the conversation ID
+    conversation_id = tweet.data.conversation_id or tweet_id
+    if verbose:
+        console.print(f"[blue]Found conversation ID: {conversation_id}")
+        console.print(
+            f"[blue]Retrieving conversation thread with pagination (max {max_pages} pages)"
+        )
+
+    # Initialize variables for pagination
+    all_tweets = {tweet.data.id: tweet.data}  # Start with original tweet
+    all_users = {}
+    next_token = None
+    page_count = 0
+
+    # If tweet includes have users, add them to all_users
+    if tweet.includes and "users" in tweet.includes:
+        all_users.update({user.id: user for user in tweet.includes["users"]})
+
+    # Paginated retrieval of conversation tweets
+    while page_count < max_pages:
+        try:
+            # Prepare pagination parameters
+            kwargs = {
+                "query": f"conversation_id:{conversation_id}",
+                "max_results": limit,
+                "tweet_fields": [
+                    "created_at",
+                    "author_id",
+                    "public_metrics",
+                    "in_reply_to_user_id",
+                    "referenced_tweets",
+                ],
+                "expansions": [
+                    "author_id",
+                    "referenced_tweets.id",
+                    "in_reply_to_user_id",
+                ],
+                "user_fields": ["username", "name", "profile_image_url"],
+            }
+
+            # Add pagination token if available
+            if next_token:
+                kwargs["next_token"] = next_token
+
+            # Execute the search
+            conversation = client.search_recent_tweets(**kwargs)
+            page_count += 1
+
+            if verbose:
+                console.print(
+                    f"[blue]Retrieved page {page_count} of conversation thread"
+                )
+
+            # Process results
+            if conversation.data:
+                if verbose:
+                    console.print(
+                        f"[blue]Found {len(conversation.data)} tweets on this page"
+                    )
+
+                # Add tweets to our collection, avoiding duplicates
+                for reply in conversation.data:
+                    all_tweets[reply.id] = reply
+
+                # Add users to our collection
+                if conversation.includes and "users" in conversation.includes:
+                    all_users.update(
+                        {user.id: user for user in conversation.includes["users"]}
+                    )
+
+            # Check if there are more pages
+            if (
+                not hasattr(conversation, "meta")
+                or "next_token" not in conversation.meta
+            ):
+                if verbose:
+                    console.print("[blue]No more pages available")
+                break
+
+            next_token = conversation.meta["next_token"]
+
+        except Exception as e:
+            console.print(
+                f"[red]Error retrieving conversation page {page_count + 1}: {e}"
+            )
+            break
+
+    # No tweets found
+    if not all_tweets:
+        console.print("[yellow]No tweets found in conversation")
+        return
+
+    # Display thread statistics
+    console.print(f"\n[bold]Conversation Thread[/bold] (ID: {conversation_id})")
+    console.print(f"[blue]Retrieved {len(all_tweets)} tweets from {page_count} page(s)")
+
+    # Sort tweets chronologically
+    sorted_tweets = sorted(all_tweets.values(), key=lambda t: t.created_at)
+
+    # Build the thread structure if requested
+    if structure:
+        # Create a mapping of tweets by ID for easy lookup
+        tweets_by_id = {t.id: t for t in sorted_tweets}
+
+        # Create a reply structure mapping
+        reply_to = {}
+        for t in sorted_tweets:
+            if hasattr(t, "referenced_tweets") and t.referenced_tweets:
+                for ref in t.referenced_tweets:
+                    if ref.type == "replied_to":
+                        reply_to[t.id] = ref.id
+                        break
+
+        # Determine indentation levels
+        root_id = sorted_tweets[0].id  # Assume first tweet is root
+        for t in sorted_tweets:
+            if not hasattr(t, "referenced_tweets") or not t.referenced_tweets:
+                root_id = t.id
+                break
+
+        # Display the thread with indentation
+        console.print("\n[bold]Thread Structure:[/bold]\n")
+        displayed = set()
+
+        def display_thread(tweet_id, level=0):
+            """Recursively display a tweet and its replies with indentation"""
+            if tweet_id in displayed or tweet_id not in tweets_by_id:
+                return
+
+            tweet_obj = tweets_by_id[tweet_id]
+            displayed.add(tweet_id)
+
+            # Get author info
+            author = all_users.get(tweet_obj.author_id, None)
+            author_name = f"@{author.username}" if author else str(tweet_obj.author_id)
+
+            # Display with indentation
+            indent = "  " * level
+            console.print(f"\n{indent}[cyan]{format_tweet_time(tweet_obj)}[/cyan]")
+            console.print(f"{indent}[green]From: {author_name}[/green]")
+            console.print(f"{indent}[white]{tweet_obj.text}[/white]")
+
+            stats = format_tweet_stats(tweet_obj)
+            if stats:
+                console.print(f"{indent}[blue]Stats: {stats}[/blue]")
+
+            # Find and display replies
+            replies = [
+                t_id
+                for t_id, reply_to_id in reply_to.items()
+                if reply_to_id == tweet_id
+            ]
+            for reply_id in replies:
+                display_thread(reply_id, level + 1)
+
+        # Start with the root tweet
+        display_thread(root_id)
+
+        # Display any remaining tweets that weren't caught in the tree structure
+        remaining = set(tweets_by_id.keys()) - displayed
+        if remaining:
+            console.print(
+                "\n[yellow]Additional tweets in conversation (structure unclear):[/yellow]"
+            )
+            for tweet_id in sorted(
+                [tid for tid in remaining], key=lambda tid: tweets_by_id[tid].created_at
+            ):
+                display_thread(tweet_id, 0)
+    else:
+        # Simple chronological display
+        console.print("\n[bold]Chronological Order:[/bold]\n")
+        for tweet_obj in sorted_tweets:
+            author = all_users.get(tweet_obj.author_id, None)
+            author_name = f"@{author.username}" if author else str(tweet_obj.author_id)
+            display_tweet(tweet_obj, author_name)
+
+
+if __name__ == "__main__":
+    cli()
