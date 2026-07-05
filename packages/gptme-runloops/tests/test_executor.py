@@ -482,7 +482,10 @@ def test_full_cycle_with_custom_executor():
         (workspace / "logs").mkdir()
         loop = TestLoop(workspace, "test", executor=mock_executor)
 
-        with patch("gptme_runloops.base.git_pull_with_retry", return_value=True):
+        with (
+            patch("gptme_runloops.base.git_pull_with_retry", return_value=True),
+            patch.object(loop, "_record_session"),
+        ):
             exit_code = loop.run()
             assert exit_code == 0
 
