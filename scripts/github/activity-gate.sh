@@ -225,7 +225,8 @@ discover_repos() {
 # Raising the defaults to 480s / 600s / 600s drops those lanes to ~375 / 300 /
 # 300 fetches/hr (~975/hr total) without changing cadence.
 #
-# Override via env: GH_CACHE_TTL_PR / GH_CACHE_TTL_ISSUE / GH_CACHE_TTL_RUN (seconds).
+# Override via env: GH_CACHE_TTL_PR / GH_CACHE_TTL_ISSUE / GH_CACHE_TTL_RUN (seconds),
+# GH_CACHE_LOCK_TIMEOUT (seconds).
 # Set any to 0 to bypass the cache (useful for diagnostics).
 GH_CACHE_DIR="${GH_CACHE_DIR:-$STATE_DIR/gh-cache}"
 # Increased from 240→480 and 300→600 (2026-05-21) after GraphQL rate-limit regression.
@@ -235,6 +236,30 @@ GH_CACHE_DIR="${GH_CACHE_DIR:-$STATE_DIR/gh-cache}"
 GH_CACHE_TTL_PR="${GH_CACHE_TTL_PR:-480}"
 GH_CACHE_TTL_ISSUE="${GH_CACHE_TTL_ISSUE:-600}"
 GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-600}"
+GH_CACHE_LOCK_TIMEOUT="${GH_CACHE_LOCK_TIMEOUT:-30}"
+
+gh_cache_fetch_and_store() {
+    local producer="$1" cache_file="$2" safe_key="$3" has_fallback="$4" fallback="${5-}"
+    local out tmp_file
+    if out=$(eval "$producer"); then
+        if [ -n "$out" ]; then
+            tmp_file=$(mktemp "$GH_CACHE_DIR/${safe_key}.json.tmp.XXXXXX" 2>/dev/null || printf '')
+            if [ -n "$tmp_file" ]; then
+                # Write via temp file + rename so readers never observe partial JSON.
+                if ! printf '%s' "$out" > "$tmp_file" || ! mv "$tmp_file" "$cache_file"; then
+                    rm -f "$tmp_file"
+                fi
+            fi
+        fi
+        printf '%s' "$out"
+        return 0
+    fi
+    if [ "$has_fallback" = "1" ]; then
+        printf '%s' "$fallback"
+        return 0
+    fi
+    return 1
+}
 
 # Read cached value if fresh enough, else run the producer command and cache its
 # stdout. The producer is passed as a single shell-evaluated string so callers
@@ -285,11 +310,13 @@ gh_cache_get_or_fetch() {
     # After acquiring the lock, re-check the cache (double-checked locking):
     # a sibling session may have populated it while we waited.
     local lock_file="$GH_CACHE_DIR/${safe_key}.lock"
-    local out tmp_file
+    local has_fallback=0
+    [ $# -ge 4 ] && has_fallback=1
     if command -v flock &>/dev/null; then
         {
-        flock -w "${GH_CACHE_LOCK_TIMEOUT:-30}" -x 200 2>/dev/null || true
-        # Double-check after acquiring lock: another session may have populated cache
+        flock -w "$GH_CACHE_LOCK_TIMEOUT" -x 200 2>/dev/null || true
+        # Double-check after waiting for the lock: another session may have populated cache.
+        # If the lock timed out, the fetch below proceeds without blocking forever.
         if [ -f "$cache_file" ]; then
             local mtime2
             mtime2=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo "")
@@ -301,45 +328,11 @@ gh_cache_get_or_fetch() {
                 fi
             fi
         fi
-        if out=$(eval "$producer"); then
-            if [ -n "$out" ]; then
-                tmp_file=$(mktemp "$GH_CACHE_DIR/${safe_key}.json.tmp.XXXXXX" 2>/dev/null || printf '')
-                if [ -n "$tmp_file" ]; then
-                    # Write via temp file + rename so readers never observe partial JSON.
-                    if ! printf '%s' "$out" > "$tmp_file" || ! mv "$tmp_file" "$cache_file"; then
-                        rm -f "$tmp_file"
-                    fi
-                fi
-            fi
-            printf '%s' "$out"
-            return 0
-        fi
-        if [ $# -ge 4 ]; then
-            printf '%s' "$fallback"
-            return 0
-        fi
-        return 1
+        gh_cache_fetch_and_store "$producer" "$cache_file" "$safe_key" "$has_fallback" "$fallback"
     } 200>"$lock_file"
     else
         # flock not available (macOS, Alpine, minimal containers): direct fetch
-        if out=$(eval "$producer"); then
-            if [ -n "$out" ]; then
-                tmp_file=$(mktemp "$GH_CACHE_DIR/${safe_key}.json.tmp.XXXXXX" 2>/dev/null || printf '')
-                if [ -n "$tmp_file" ]; then
-                    # Write via temp file + rename so readers never observe partial JSON.
-                    if ! printf '%s' "$out" > "$tmp_file" || ! mv "$tmp_file" "$cache_file"; then
-                        rm -f "$tmp_file"
-                    fi
-                fi
-            fi
-            printf '%s' "$out"
-            return 0
-        fi
-        if [ $# -ge 4 ]; then
-            printf '%s' "$fallback"
-            return 0
-        fi
-        return 1
+        gh_cache_fetch_and_store "$producer" "$cache_file" "$safe_key" "$has_fallback" "$fallback"
     fi
 }
 
