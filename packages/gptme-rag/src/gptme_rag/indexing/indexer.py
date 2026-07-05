@@ -280,6 +280,20 @@ class Indexer:
         )
         logger.debug(f"Reset collection: {self.collection_name}")
 
+    def _refresh_collection(self) -> None:
+        """Re-bind the collection handle without wiping data.
+
+        Use this to recover from a stale Collection object after chromadb
+        internally recreated the collection (e.g. during a reset_collection
+        call on a concurrent path).  Unlike reset_collection, this never
+        deletes documents — it only refreshes the cached reference.
+        """
+        self.collection = self.client.get_collection(
+            name=self.collection_name,
+            embedding_function=self.embedding_function,
+        )
+        logger.debug(f"Refreshed collection handle: {self.collection_name}")
+
     def add_document(self, document: Document) -> None:
         """Add a single document to the index."""
         document = self._generate_doc_id(document)
@@ -304,6 +318,13 @@ class Indexer:
         try:
             self.collection.delete(where=where)
             logger.debug(f"Deleted documents matching: {where}")
+        except NotFoundError:
+            # The cached Collection object is stale (collection was recreated).
+            # Re-bind and retry once — never wipe the index to recover from this.
+            logger.debug("Collection handle stale on delete; refreshing and retrying")
+            self._refresh_collection()
+            self.collection.delete(where=where)
+            logger.debug(f"Deleted documents matching: {where} (after refresh)")
         except Exception as e:
             # A failed delete must not escalate into deleting the whole
             # collection. Surface the error to the caller instead.
