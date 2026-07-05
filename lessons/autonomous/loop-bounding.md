@@ -39,14 +39,14 @@ for i in range(max_iterations):
             break
     else:
         stall_count=0
-    last_progress_signal=process_signal
+    last_progress_signal = progress_signal
 
     run_iteration()
 
 ```
 
 ## Outcome
-Prevents silent cost drift from runaway loops and catches stalls that neither an iteration cap nor a timeout alone would detect. A loop that's technically still running but making no progress is functionally the same failure as one that's crashed this pattern treats it that way.
+Prevents silent cost drift from runaway loops and catches stalls that neither an iteration cap nor a timeout alone would detect. A loop that's technically still running but making no progress is functionally the same failure as one that's crashed — this pattern treats it that way.
 ## Related
 - [Autonomous Operation Safety](./autonomous-operation-safety.md) - security isolation during autonomous work
-- [Safe Operation Patterns](./safe-operation-patterns.md) - GREEN/YELLOW/RED classification
+- [Safe Operation Patterns](./safe-operation-patterns.md) - GREEN/YELLOW/RED classification END
