@@ -240,6 +240,12 @@ GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-600}"
 # stdout. The producer is passed as a single shell-evaluated string so callers
 # can include flags and pipes.
 #
+# Thundering-herd prevention: when the cache is stale, a flock-based lock
+# serializes concurrent callers. The first caller acquires the lock, fetches,
+# and writes the cache. Subsequent callers, after the lock is released,
+# find the cache fresh via double-checked locking and return immediately
+# without making another GitHub API call. Requires util-linux flock (Linux).
+#
 # Args:
 #   $1 — cache key (filesystem-safe; will be normalized)
 #   $2 — TTL seconds (0 = no cache)
@@ -261,6 +267,7 @@ gh_cache_get_or_fetch() {
     # Normalize key: replace slashes with `-`
     local safe_key="${key//\//-}"
     local cache_file="$GH_CACHE_DIR/${safe_key}.json"
+    # Fast path: cache is fresh — return without acquiring a lock
     if [ -f "$cache_file" ]; then
         local mtime
         mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo "")
@@ -272,25 +279,46 @@ gh_cache_get_or_fetch() {
             fi
         fi
     fi
+    # Slow path: cache is stale or missing. Serialize with flock to prevent the
+    # thundering-herd pattern where N concurrent monitoring sessions simultaneously
+    # see an expired cache and each fires a separate GitHub API call.
+    # After acquiring the lock, re-check the cache (double-checked locking):
+    # a sibling session may have populated it while we waited.
+    local lock_file="$GH_CACHE_DIR/${safe_key}.lock"
     local out tmp_file
-    if out=$(eval "$producer"); then
-        if [ -n "$out" ]; then
-            tmp_file=$(mktemp "$GH_CACHE_DIR/${safe_key}.json.tmp.XXXXXX" 2>/dev/null || printf '')
-            if [ -n "$tmp_file" ]; then
-                # Write via temp file + rename so readers never observe partial JSON.
-                if ! printf '%s' "$out" > "$tmp_file" || ! mv "$tmp_file" "$cache_file"; then
-                    rm -f "$tmp_file"
+    {
+        flock -x 200
+        # Double-check after acquiring lock: another session may have populated cache
+        if [ -f "$cache_file" ]; then
+            local mtime2
+            mtime2=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo "")
+            if [ -n "$mtime2" ]; then
+                local age2=$(( $(date +%s) - mtime2 ))
+                if [ "$age2" -lt "$ttl" ]; then
+                    cat "$cache_file"
+                    return 0
                 fi
             fi
         fi
-        printf '%s' "$out"
-        return 0
-    fi
-    if [ $# -ge 4 ]; then
-        printf '%s' "$fallback"
-        return 0
-    fi
-    return 1
+        if out=$(eval "$producer"); then
+            if [ -n "$out" ]; then
+                tmp_file=$(mktemp "$GH_CACHE_DIR/${safe_key}.json.tmp.XXXXXX" 2>/dev/null || printf '')
+                if [ -n "$tmp_file" ]; then
+                    # Write via temp file + rename so readers never observe partial JSON.
+                    if ! printf '%s' "$out" > "$tmp_file" || ! mv "$tmp_file" "$cache_file"; then
+                        rm -f "$tmp_file"
+                    fi
+                fi
+            fi
+            printf '%s' "$out"
+            return 0
+        fi
+        if [ $# -ge 4 ]; then
+            printf '%s' "$fallback"
+            return 0
+        fi
+        return 1
+    } 200>"$lock_file"
 }
 
 # Fetch all PR data once per repo, with all fields needed by every check
