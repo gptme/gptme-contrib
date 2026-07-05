@@ -1,0 +1,282 @@
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+from gptme_rag.indexing.document import Document
+from gptme_rag.indexing.indexer import Indexer
+
+
+@pytest.fixture
+def test_docs():
+    return [
+        Document(
+            content="This is a test document about Python programming.",
+            metadata={"source": "test1.txt", "category": "programming"},
+            doc_id="1",
+        ),
+        Document(
+            content="Another document discussing machine learning.",
+            metadata={"source": "test2.txt", "category": "ml"},
+            doc_id="2",
+        ),
+    ]
+
+
+def test_document_from_file(tmp_path):
+    # Create a test file
+    test_file = tmp_path / "test.txt"
+    test_content = "Test content"
+    test_file.write_text(test_content)
+
+    # Create document from file
+    docs = list(Document.from_file(test_file))
+    assert len(docs) > 0
+    doc = docs[0]  # Get the first document
+
+    assert doc.content == test_content
+    assert doc.source_path == test_file
+    assert doc.metadata["filename"] == "test.txt"
+    assert doc.metadata["extension"] == ".txt"
+
+
+def test_indexer_add_document(indexer, test_docs):
+    # Add single document
+    indexer.add_document(test_docs[0])
+    results, distances, _ = indexer.search("Python programming")
+
+    assert len(results) > 0
+    assert "Python programming" in results[0].content
+    assert len(distances) > 0
+
+
+def test_indexer_add_documents(indexer, test_docs):
+    # Reset collection to ensure clean state
+    indexer.reset_collection()
+
+    # Add multiple documents
+    indexer.add_documents(test_docs)
+
+    # Verify documents were added
+    results = indexer.collection.get()
+    assert len(results["documents"]) == len(test_docs), "Not all documents were added"
+
+    # Search for programming-related content
+    prog_results, prog_distances, _ = indexer.search("programming")
+    assert len(prog_results) > 0
+    assert any("Python" in doc.content for doc in prog_results)
+    assert len(prog_distances) > 0
+
+    # Search for ML-related content
+    ml_results, ml_distances, _ = indexer.search("machine learning")
+    assert len(ml_results) > 0, "No results found for 'machine learning'"
+    assert any(
+        "machine learning" in doc.content.lower() for doc in ml_results
+    ), f"Expected 'machine learning' in results: {[doc.content for doc in ml_results]}"
+    assert len(ml_distances) > 0, "No distances returned"
+
+
+def test_indexer_directory(indexer, tmp_path):
+    # Create test files in different directories with different extensions
+    docs_dir = tmp_path / "docs"
+    src_dir = tmp_path / "src"
+    docs_dir.mkdir()
+    src_dir.mkdir()
+
+    # Create markdown files in docs
+    (docs_dir / "guide.md").write_text("Python programming guide")
+    (docs_dir / "tutorial.md").write_text("JavaScript tutorial")
+
+    # Create Python files in src
+    (src_dir / "main.py").write_text("def main(): print('Hello')")
+    (src_dir / "utils.py").write_text("def util(): return True")
+
+    # Create a text file in root
+    (tmp_path / "notes.txt").write_text("Random notes")
+
+    # Index everything
+    indexer.index_directory(tmp_path)
+
+    # Test extension filter (*.md)
+    md_results, _, _ = indexer.search(
+        "programming",
+        path_filters=("*.md",),
+    )
+    assert len(md_results) > 0
+    assert all(doc.metadata["source"].endswith(".md") for doc in md_results)
+
+    # Test directory pattern (src/*.py)
+    py_results, _, _ = indexer.search(
+        "def",
+        path_filters=(str(src_dir / "*.py"),),
+    )
+    assert len(py_results) > 0
+    assert all(
+        Path(doc.metadata["source"]).parent.name == "src" and doc.metadata["source"].endswith(".py")
+        for doc in py_results
+    )
+
+    # Test multiple patterns
+    multi_results, _, _ = indexer.search(
+        "programming",
+        path_filters=("*.md", "*.py"),
+    )
+    assert len(multi_results) > 0
+    assert all(doc.metadata["source"].endswith((".md", ".py")) for doc in multi_results)
+
+    # Test with path and filter combined
+    docs_md_results, _, _ = indexer.search(
+        "tutorial",
+        paths=[docs_dir],
+        path_filters=("*.md",),
+    )
+    assert len(docs_md_results) > 0
+    assert all(
+        Path(doc.metadata["source"]).parent.name == "docs"
+        and doc.metadata["source"].endswith(".md")
+        for doc in docs_md_results
+    )
+
+
+def test_indexer_directory_is_idempotent(indexer, tmp_path):
+    """Repeated directory indexing should replace existing chunks, not duplicate them."""
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "guide.md").write_text("Python programming guide")
+    (docs_dir / "tutorial.md").write_text("JavaScript tutorial")
+
+    assert indexer.index_directory(docs_dir, glob_pattern="**/*.md") == 2
+    first = indexer.collection.get()
+    assert len(first["ids"]) > 0
+
+    assert indexer.index_directory(docs_dir, glob_pattern="**/*.md") == 2
+    second = indexer.collection.get()
+
+    assert len(second["ids"]) == len(first["ids"])
+    assert len(set(second["ids"])) == len(second["ids"])
+
+
+def test_path_matching(indexer):
+    # Test the _matches_paths method directly
+    doc = Document(
+        content="test",
+        metadata={"source": "/home/user/project/docs/guide.md"},
+        doc_id="test",
+    )
+
+    # Test simple extension filter
+    assert indexer._matches_paths(doc, path_filters=("*.md",))
+    assert not indexer._matches_paths(doc, path_filters=("*.py",))
+
+    # Test directory pattern
+    assert indexer._matches_paths(doc, path_filters=("docs/*.md",))
+    assert not indexer._matches_paths(doc, path_filters=("src/*.md",))
+
+    # Test multiple patterns
+    assert indexer._matches_paths(doc, path_filters=("*.py", "*.md"))
+    assert indexer._matches_paths(doc, path_filters=("src/*.py", "docs/*.md"))
+
+    # Test with exact paths
+    assert indexer._matches_paths(doc, paths=[Path("/home/user/project/docs")])
+    assert not indexer._matches_paths(doc, paths=[Path("/home/user/project/src")])
+
+    # Test combining paths and filters
+    assert indexer._matches_paths(
+        doc,
+        paths=[Path("/home/user/project/docs")],
+        path_filters=("*.md",),
+    )
+    assert not indexer._matches_paths(
+        doc,
+        paths=[Path("/home/user/project/docs")],
+        path_filters=("*.py",),
+    )
+
+
+def test_add_document_failure_does_not_wipe_collection(indexer, test_docs, monkeypatch):
+    """A failed add must raise, not destroy the existing index (data-loss regression)."""
+    indexer.add_document(test_docs[0])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated add failure")
+
+    monkeypatch.setattr(indexer.collection, "add", boom)
+    with pytest.raises(RuntimeError, match="simulated add failure"):
+        indexer.add_document(test_docs[1])
+
+    got = indexer.collection.get(ids=[test_docs[0].doc_id])
+    assert len(got["ids"]) == 1, "existing documents must survive a failed add"
+
+
+def test_delete_documents_failure_does_not_wipe_collection(indexer, test_docs, monkeypatch):
+    """A failed delete must raise, not escalate into deleting the whole collection."""
+    indexer.add_documents(test_docs)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated delete failure")
+
+    monkeypatch.setattr(indexer.collection, "delete", boom)
+    with pytest.raises(RuntimeError, match="simulated delete failure"):
+        indexer.delete_documents({"category": "ml"})
+
+    got = indexer.collection.get()
+    assert len(got["ids"]) == len(test_docs), "documents must survive a failed delete"
+
+
+def test_generated_doc_id_is_stable():
+    """Documents without explicit IDs should not duplicate across processes."""
+    indexer = Indexer(embedding_function="default")
+    doc_a = Document(
+        content="same content",
+        metadata={"source": "/tmp/a.md", "chunk_index": 0},
+    )
+    doc_b = Document(
+        content="same content",
+        metadata={"source": "/tmp/a.md", "chunk_index": 0},
+    )
+    doc_c = Document(
+        content="same content",
+        metadata={"source": "/tmp/b.md", "chunk_index": 0},
+    )
+
+    assert indexer._generate_doc_id(doc_a).doc_id == indexer._generate_doc_id(doc_b).doc_id
+    assert indexer._generate_doc_id(doc_a).doc_id != indexer._generate_doc_id(doc_c).doc_id
+
+
+def test_compute_relevance_score_handles_empty_query():
+    """Explain-mode scoring should not divide by zero for an empty query."""
+    indexer = Indexer(embedding_function="default")
+    doc = Document(content="content", metadata={"source": "test.txt"}, doc_id="doc")
+
+    score, scores = indexer.compute_relevance_score(doc, distance=0.2, query="")
+    explanation = indexer.explain_scoring("", doc, 0.2, scores)
+
+    assert score == sum(scores.values())
+    assert scores["term_overlap"] == 0.0
+    assert explanation["explanations"]["term_overlap"].startswith("Term overlap 0.0%")
+
+
+def test_compute_relevance_score_accepts_iso_last_modified():
+    """Document.from_file stores ISO metadata; recency scoring must parse it."""
+    indexer = Indexer(embedding_function="default")
+    doc = Document(
+        content="fresh content",
+        metadata={
+            "source": "fresh.txt",
+            "last_modified": datetime.now().isoformat(),
+        },
+        doc_id="fresh",
+    )
+
+    score, scores = indexer.compute_relevance_score(doc, distance=0.2, query="fresh")
+    explanation = indexer.explain_scoring("fresh", doc, 0.2, scores)
+
+    assert score > scores["base"]
+    assert scores["recency_boost"] > 0.0
+    assert explanation["explanations"]["recency_boost"].startswith("Modified ")
+
+
+def test_reset_collection_preserves_embedding_metadata(indexer):
+    """reset_collection must recreate with the same embedding model metadata."""
+    indexer.reset_collection()
+    metadata = indexer.collection.metadata or {}
+    assert metadata.get("embedding_model") == indexer.embedding_model_name
