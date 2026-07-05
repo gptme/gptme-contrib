@@ -171,9 +171,7 @@ def test_cache_performance_improvement(indexed_documents):
 
     # Cache hit should be significantly faster
     # Allow some variance, but cache should be at least 2x faster
-    assert (
-        time2 < time1 * 0.5
-    ), f"Cache hit ({time2:.4f}s) not faster than miss ({time1:.4f}s)"
+    assert time2 < time1 * 0.5, f"Cache hit ({time2:.4f}s) not faster than miss ({time1:.4f}s)"
 
     # Results should be identical
     assert docs1[0].content == docs2[0].content

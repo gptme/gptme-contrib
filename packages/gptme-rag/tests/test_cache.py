@@ -52,6 +52,7 @@ class TestCacheKey:
         cache_dict = {key1: "value"}
         assert cache_dict[key2] == "value"
 
+
 class TestCacheEntry:
     """Tests for CacheEntry class."""
 
@@ -252,8 +253,8 @@ class TestSmartRAGCache:
             keys.append(key)
 
             entry = CacheEntry(
-            document_contents=["content"] * 10,
-            document_metadatas=[{}] * 10,
+                document_contents=["content"] * 10,
+                document_metadatas=[{}] * 10,
                 document_ids=[f"doc{i}.md"] * 10,  # Make it take space
                 distances=[0.9] * 10,
                 created_at=datetime.now(),

@@ -73,17 +73,13 @@ def test_search_benchmark(temp_docs):
 def test_watch_benchmark(temp_docs):
     """Test file watching benchmark."""
     benchmark = RagBenchmark()
-    result = benchmark.run_watch_benchmark(
-        temp_docs, duration=1.0, updates_per_second=5.0
-    )
+    result = benchmark.run_watch_benchmark(temp_docs, duration=1.0, updates_per_second=5.0)
 
     assert result.operation == "file_watching"
     assert result.duration >= 1.0
     assert result.memory_usage > 0
     assert result.throughput > 0
-    assert (
-        result.additional_metrics["updates_per_second"] >= 4.0
-    )  # Allow some timing variance
+    assert result.additional_metrics["updates_per_second"] >= 4.0  # Allow some timing variance
 
 
 def test_print_results(capsys):

@@ -1,9 +1,8 @@
 test:
-	poetry run pytest --cov=gptme_rag --durations=5
+	uv run pytest tests/ -v -m "not slow"
 
-# run linting, typechecking, and tests
-check:
-	pre-commit run --all-files
+test-all:
+	uv run pytest tests/ -v
 
 typecheck:
-	pre-commit run mypy --all-files
+	uv run --with mypy mypy src/ --ignore-missing-imports

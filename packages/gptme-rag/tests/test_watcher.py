@@ -52,9 +52,7 @@ def test_file_watcher_pattern_matching(tmp_path, indexer):
 
 def test_file_watcher_ignore_patterns(tmp_path, indexer):
     """Test that ignore patterns work correctly."""
-    with FileWatcher(
-        indexer, [str(tmp_path)], ignore_patterns=["*.ignore"], update_delay=0
-    ):
+    with FileWatcher(indexer, [str(tmp_path)], ignore_patterns=["*.ignore"], update_delay=0):
         # Create an ignored file and a normal file
         ignored_file = tmp_path / "test.ignore"
         normal_file = tmp_path / "test.txt"
@@ -105,9 +103,7 @@ def test_file_watcher_move(tmp_path, indexer):
         # Final verification
         results, _, _ = indexer.search("Test content")
         assert len(results) == 1, "Expected exactly one result"
-        assert (
-            results[0].metadata["filename"] == dst_file.name
-        ), "Wrong filename in metadata"
+        assert results[0].metadata["filename"] == dst_file.name, "Wrong filename in metadata"
 
 
 def test_file_watcher_delete(tmp_path, indexer):
@@ -165,9 +161,7 @@ def test_file_watcher_delete_one_of_many(tmp_path, indexer):
         # file_b source should not appear in any results
         all_docs = indexer.list_documents(group_by_source=True)
         sources = [doc.metadata.get("source", "") for doc in all_docs]
-        assert not any(
-            file_b.name in s for s in sources
-        ), "Deleted file should not appear in index"
+        assert not any(file_b.name in s for s in sources), "Deleted file should not appear in index"
 
 
 def test_file_watcher_batch_updates(tmp_path, indexer):

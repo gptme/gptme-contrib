@@ -68,8 +68,7 @@ def test_context_assembly_token_limit():
     # Create documents with very long content
     long_docs = [
         Document(
-            content="A"
-            * 1000,  # Much longer content that will definitely exceed token limit
+            content="A" * 1000,  # Much longer content that will definitely exceed token limit
             metadata={"source": f"doc{i}.txt"},
             doc_id=str(i),
         )
@@ -97,9 +96,7 @@ def test_context_assembly_all_components(assembler, test_docs):
     system_prompt = "You are a helpful AI assistant."
     query = "Tell me about programming"
 
-    context = assembler.assemble_context(
-        test_docs, system_prompt=system_prompt, user_query=query
-    )
+    context = assembler.assemble_context(test_docs, system_prompt=system_prompt, user_query=query)
 
     # Check all components are present
     assert system_prompt in context.content
