@@ -286,8 +286,9 @@ gh_cache_get_or_fetch() {
     # a sibling session may have populated it while we waited.
     local lock_file="$GH_CACHE_DIR/${safe_key}.lock"
     local out tmp_file
-    {
-        flock -x 200
+    if command -v flock &>/dev/null; then
+        {
+        flock -w "${GH_CACHE_LOCK_TIMEOUT:-30}" -x 200 2>/dev/null || true
         # Double-check after acquiring lock: another session may have populated cache
         if [ -f "$cache_file" ]; then
             local mtime2
@@ -319,6 +320,27 @@ gh_cache_get_or_fetch() {
         fi
         return 1
     } 200>"$lock_file"
+    else
+        # flock not available (macOS, Alpine, minimal containers): direct fetch
+        if out=$(eval "$producer"); then
+            if [ -n "$out" ]; then
+                tmp_file=$(mktemp "$GH_CACHE_DIR/${safe_key}.json.tmp.XXXXXX" 2>/dev/null || printf '')
+                if [ -n "$tmp_file" ]; then
+                    # Write via temp file + rename so readers never observe partial JSON.
+                    if ! printf '%s' "$out" > "$tmp_file" || ! mv "$tmp_file" "$cache_file"; then
+                        rm -f "$tmp_file"
+                    fi
+                fi
+            fi
+            printf '%s' "$out"
+            return 0
+        fi
+        if [ $# -ge 4 ]; then
+            printf '%s' "$fallback"
+            return 0
+        fi
+        return 1
+    fi
 }
 
 # Fetch all PR data once per repo, with all fields needed by every check
