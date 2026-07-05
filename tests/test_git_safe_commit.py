@@ -669,6 +669,26 @@ def test_safe_commit_rechecks_dirty_worktree_after_waiting_for_lock(git_repo: Pa
     assert sha_before == sha_after
 
 
+@pytest.mark.parametrize("timeout_value", ["abc", "-1", "0", "00"])
+def test_safe_commit_rejects_invalid_lock_timeout(git_repo: Path, timeout_value: str):
+    """Bad lock timeout env vars should fail with a configuration error."""
+    (git_repo / "commit.txt").write_text("commit me\n")
+
+    env = os.environ.copy()
+    env["GIT_SAFE_COMMIT_LOCK_TIMEOUT"] = timeout_value
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "commit.txt", "-m", "test: invalid lock timeout"],
+        cwd=git_repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "GIT_SAFE_COMMIT_LOCK_TIMEOUT must be a positive integer" in result.stderr
+    assert "timed out waiting for commit lock" not in result.stderr
+
+
 def test_safe_commit_serialization(git_repo: Path):
     """Two concurrent safe-commits don't interfere with each other."""
     # Create and stage two files

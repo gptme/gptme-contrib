@@ -361,7 +361,20 @@ resolve_pre_commit_hook() {
     return 1
 }
 
-LOCK_TIMEOUT=60
+LOCK_TIMEOUT=${GIT_SAFE_COMMIT_LOCK_TIMEOUT:-60}
+case "$LOCK_TIMEOUT" in
+    *[!0-9]*)
+        echo "error: GIT_SAFE_COMMIT_LOCK_TIMEOUT must be a positive integer number of seconds" >&2
+        exit 1
+        ;;
+    *[1-9]*)
+        ;;
+    *)
+        echo "error: GIT_SAFE_COMMIT_LOCK_TIMEOUT must be a positive integer number of seconds" >&2
+        exit 1
+        ;;
+esac
+
 exec 9>"$LOCKFILE"
 if ! flock --timeout "$LOCK_TIMEOUT" 9; then
     echo "error: timed out waiting for commit lock" >&2
