@@ -322,9 +322,18 @@ class Indexer:
             # The cached Collection object is stale (collection was recreated).
             # Re-bind and retry once — never wipe the index to recover from this.
             logger.debug("Collection handle stale on delete; refreshing and retrying")
-            self._refresh_collection()
-            self.collection.delete(where=where)
-            logger.debug(f"Deleted documents matching: {where} (after refresh)")
+            try:
+                self._refresh_collection()
+                self.collection.delete(where=where)
+                logger.debug(f"Deleted documents matching: {where} (after refresh)")
+            except NotFoundError as retry_err:
+                # Collection still missing after refresh (race condition).
+                # Surface the error to the caller instead.
+                logger.error(
+                    f"Error deleting documents (stale handle, recovery failed): {retry_err}",
+                    exc_info=True,
+                )
+                raise
         except Exception as e:
             # A failed delete must not escalate into deleting the whole
             # collection. Surface the error to the caller instead.
