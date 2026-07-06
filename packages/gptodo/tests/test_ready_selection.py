@@ -327,3 +327,151 @@ def test_ready_for_review_not_silenced_by_stale_requires(tmp_path: Path, monkeyp
     payload = json.loads(payload_text)
     ids = [t["id"] for t in payload["ready_tasks"]]
     assert "review-task" in ids, "ready_for_review task must not be hidden by stale requires"
+
+
+def test_ready_default_includes_todo_tasks(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo ready` (default) must surface todo tasks.
+
+    Regression: `todo` is canonical in VALID_TRANSITIONS (backlog → todo →
+    active) but was excluded from the default ready filter, so triaged
+    tasks were invisible to work selection until manually flipped to active.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "triaged-task",
+        state="todo",
+        created="2026-07-06T00:00:00",
+    )
+    write_task(
+        tasks_dir,
+        "backlog-task",
+        state="backlog",
+        created="2026-07-06T01:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = sorted(t["id"] for t in payload["ready_tasks"])
+    assert "triaged-task" in ids
+    assert "backlog-task" in ids
+
+
+def test_ready_actionable_includes_todo_tasks(tmp_path: Path, monkeypatch) -> None:
+    """`--state actionable` must include todo tasks (they are locally workable)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "triaged-task",
+        state="todo",
+        created="2026-07-06T00:00:00",
+    )
+    write_task(
+        tasks_dir,
+        "review-task",
+        state="ready_for_review",
+        created="2026-07-06T01:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--state", "actionable", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = sorted(t["id"] for t in payload["ready_tasks"])
+    assert ids == ["review-task", "triaged-task"]
+
+
+def test_ready_state_todo_filter(tmp_path: Path, monkeypatch) -> None:
+    """`--state todo` must be a valid explicit filter."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "triaged-task",
+        state="todo",
+        created="2026-07-06T00:00:00",
+    )
+    write_task(
+        tasks_dir,
+        "backlog-task",
+        state="backlog",
+        created="2026-07-06T01:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--state", "todo", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = [t["id"] for t in payload["ready_tasks"]]
+    assert ids == ["triaged-task"]
+
+
+def test_ready_todo_task_still_respects_dependencies(tmp_path: Path, monkeypatch) -> None:
+    """A todo task blocked by an open dependency must NOT count as ready."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "blocked-todo",
+        state="todo",
+        created="2026-07-06T00:00:00",
+        requires=["open-dep"],
+    )
+    write_task(
+        tasks_dir,
+        "open-dep",
+        state="active",
+        created="2026-07-06T01:00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["ready", "--json"])
+
+    assert result.exit_code == 0
+    payload_text = result.output.split("\nNo ready tasks found", 1)[0]
+    payload = json.loads(payload_text)
+    ids = [t["id"] for t in payload["ready_tasks"]]
+    assert "blocked-todo" not in ids
+    assert "open-dep" in ids
+
+
+def test_next_surfaces_todo_task(tmp_path: Path, monkeypatch) -> None:
+    """`gptodo next` must consider todo tasks as workable."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "triaged-task",
+        state="todo",
+        created="2026-07-06T00:00:00",
+        priority="high",
+    )
+    write_task(
+        tasks_dir,
+        "backlog-task",
+        state="backlog",
+        created="2026-07-06T01:00:00",
+        priority="low",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["next", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["next_task"]["id"] == "triaged-task"
