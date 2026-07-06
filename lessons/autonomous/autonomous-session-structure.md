@@ -7,7 +7,7 @@ match:
   - structured autonomous session
   - autonomous work phases
   session_categories: [autonomous, self-review]
-status: active
+status: archived
 ---
 
 # Autonomous Session Structure
