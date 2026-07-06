@@ -33,7 +33,8 @@ jobs:
             branch="automation/community-plugins"
             git checkout -B "$branch"
             git commit -m "chore(community-plugins): weekly refresh"
-            git push --force origin "HEAD:refs/heads/$branch"
+            git fetch origin "$branch" 2>/dev/null || true
+            git push --force-with-lease origin "HEAD:refs/heads/$branch"
             if pr_url="$(gh pr view "$branch" --repo "$GITHUB_REPOSITORY" --json url --jq .url 2>/dev/null)"; then
               echo "Updated existing pull request: $pr_url"
             else
