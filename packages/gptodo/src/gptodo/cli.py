@@ -457,7 +457,7 @@ def list_(sort, active_only, context, output_json, output_jsonl, pool_filter, ex
     # Filter tasks if active-only flag is set
     tasks = all_tasks
     if active_only:
-        tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+        tasks = [task for task in all_tasks if task.state in ["backlog", "todo", "active"]]
         if not tasks:
             if output_json:
                 print("No new or active tasks found", file=sys.stderr)
@@ -568,7 +568,7 @@ def list_(sort, active_only, context, output_json, output_jsonl, pool_filter, ex
                 if dep in all_tasks_dict:
                     dep_task = all_tasks_dict[dep]
                     # If dependency is in filtered list, show its ID
-                    if not active_only or dep_task.state in ["backlog", "active"]:
+                    if not active_only or dep_task.state in ["backlog", "todo", "active"]:
                         dep_ids.append(str(name_to_enum_id[dep]))
                     else:
                         # Show task name and state for filtered out dependencies
@@ -630,7 +630,7 @@ def list_(sort, active_only, context, output_json, output_jsonl, pool_filter, ex
                     if dep in all_tasks_dict:
                         dep_task = all_tasks_dict[dep]
                         # If dependency is in filtered list, show its ID
-                        if not active_only or dep_task.state in ["backlog", "active"]:
+                        if not active_only or dep_task.state in ["backlog", "todo", "active"]:
                             dep_strs.append(f"{dep} ({name_to_enum_id[dep]})")
                         else:
                             # Show task name and state for filtered out dependencies
@@ -889,7 +889,7 @@ def check_directory(
             if p not in pool_totals:
                 pool_totals[p] = [0, 0]  # [total, actionable]
             pool_totals[p][0] += 1
-            if t.state in ("backlog", "active"):
+            if t.state in ("backlog", "todo", "active"):
                 pool_totals[p][1] += 1
         parts = ", ".join(
             f"{p}: {counts[0]} ({counts[1]} actionable)"
@@ -2378,11 +2378,13 @@ def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
 @cli.command("ready")
 @click.option(
     "--state",
-    type=click.Choice(["backlog", "active", "ready_for_review", "someday", "both", "actionable"]),
+    type=click.Choice(
+        ["backlog", "todo", "active", "ready_for_review", "someday", "both", "actionable"]
+    ),
     default="both",
     help=(
-        "Filter by task state. 'both' = backlog+active (default, current behavior). "
-        "'actionable' = backlog+active+ready_for_review (everything locally workable). "
+        "Filter by task state. 'both' = backlog+todo+active (default). "
+        "'actionable' = backlog+todo+active+ready_for_review (everything locally workable). "
         "'ready_for_review' = only tasks awaiting local review/verification. "
         "'someday' = explicitly query deferred tasks."
     ),
@@ -2460,6 +2462,8 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     # Filter by state first
     if state == "backlog":
         filtered_tasks = [task for task in all_tasks if task.state == "backlog"]
+    elif state == "todo":
+        filtered_tasks = [task for task in all_tasks if task.state == "todo"]
     elif state == "active":
         filtered_tasks = [task for task in all_tasks if task.state == "active"]
     elif state == "ready_for_review":
@@ -2468,10 +2472,12 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
         filtered_tasks = [task for task in all_tasks if task.state == "someday"]
     elif state == "actionable":
         filtered_tasks = [
-            task for task in all_tasks if task.state in ["backlog", "active", "ready_for_review"]
+            task
+            for task in all_tasks
+            if task.state in ["backlog", "todo", "active", "ready_for_review"]
         ]
     else:  # both
-        filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+        filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "todo", "active"]]
 
     # Apply pool filter (default: general only; --pool all to see every pool)
     filtered_tasks = [
@@ -2485,13 +2491,15 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     if state == "ready_for_review":
         ready_tasks = [task for task in filtered_tasks if not task_has_waiting_blocker(task)]
     elif state == "actionable":
-        # backlog/active go through full is_task_ready; ready_for_review only needs waiting check
+        # backlog/todo/active go through full is_task_ready;
+        # ready_for_review only needs waiting check
         ready_tasks = [
             task
             for task in filtered_tasks
             if (task.state == "ready_for_review" and not task_has_waiting_blocker(task))
             or (
-                task.state in ["backlog", "active"] and is_task_ready(task, tasks_dict, issue_cache)
+                task.state in ["backlog", "todo", "active"]
+                and is_task_ready(task, tasks_dict, issue_cache)
             )
         ]
     else:
@@ -2649,7 +2657,7 @@ def next_(output_json, use_cache, pool_filter, exclude_pool):
         issue_cache = load_cache(cache_path)
 
     # Filter for new or active tasks
-    workable_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+    workable_tasks = [task for task in all_tasks if task.state in ["backlog", "todo", "active"]]
 
     # Apply pool filter (default: general only; --pool all to see every pool)
     workable_tasks = [
