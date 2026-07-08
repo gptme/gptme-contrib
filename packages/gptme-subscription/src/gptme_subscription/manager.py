@@ -256,7 +256,17 @@ class SubscriptionManager:
 
     # ---- Usage check ----
 
-    def check_usage(self, no_cache: bool = False) -> dict[str, Any] | None:
+    def check_usage(
+        self, no_cache: bool = False, stale_cache: Path | None = None
+    ) -> dict[str, Any] | None:
+        """Return usage data, with optional stale-cache fallback on lock contention.
+
+        When the usage script fails (e.g. `/tmp/claude-usage-scrape.lock` held
+        by a concurrent ``subscription-usage-history.py`` run), passing
+        ``stale_cache`` causes us to fall back to the last-known-good JSON file
+        instead of propagating ``None`` to the caller.  The caller decides which
+        slot file to use; ``cli._cmd_evaluate`` passes the active-slot path.
+        """
         script = self.config.usage_script
         if script is None or not script.exists():
             return None
@@ -269,6 +279,14 @@ class SubscriptionManager:
                 return dict(json.loads(result.stdout))
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
             pass
+        # Stale-cache fallback: prefer a degraded reading over "could not check usage"
+        if stale_cache is not None and stale_cache.exists():
+            try:
+                data = json.loads(stale_cache.read_text())
+                if data.get("_ok"):
+                    return dict(data)
+            except (json.JSONDecodeError, OSError):
+                pass
         return None
 
     # ---- Rate limit ----

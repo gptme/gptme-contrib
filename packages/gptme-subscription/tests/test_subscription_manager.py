@@ -61,6 +61,62 @@ def test_check_usage_returns_none_for_non_executable_script(tmp_path: Path) -> N
     assert sm.check_usage() is None
 
 
+def test_check_usage_stale_cache_fallback_on_script_failure(tmp_path: Path) -> None:
+    # Script exists but is not executable → simulates lock-contention failure
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\necho '{}'\n")
+    usage_script.chmod(0o644)
+    sm = _make_manager(tmp_path, usage_script=usage_script)
+
+    stale_data = {
+        "seven_day": {"utilization": 0.3},
+        "five_hour": {"utilization": 0.1},
+        "_ok": True,
+        "_sub": "bob",
+    }
+    stale_cache = tmp_path / "stale-bob.json"
+    stale_cache.write_text(json.dumps(stale_data))
+
+    result = sm.check_usage(stale_cache=stale_cache)
+    assert result is not None
+    assert result["seven_day"]["utilization"] == pytest.approx(0.3)
+
+
+def test_check_usage_stale_cache_not_used_when_script_succeeds(tmp_path: Path) -> None:
+    fresh_data = {"seven_day": {"utilization": 0.9}, "five_hour": {"utilization": 0.5}}
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text(f"#!/bin/sh\necho '{json.dumps(fresh_data)}'\n")
+    usage_script.chmod(0o755)
+    sm = _make_manager(tmp_path, usage_script=usage_script)
+
+    stale_data = {
+        "seven_day": {"utilization": 0.1},
+        "five_hour": {"utilization": 0.0},
+        "_ok": True,
+    }
+    stale_cache = tmp_path / "stale.json"
+    stale_cache.write_text(json.dumps(stale_data))
+
+    result = sm.check_usage(stale_cache=stale_cache)
+    # Should return the fresh result, not the stale fallback
+    assert result is not None
+    assert result["seven_day"]["utilization"] == pytest.approx(0.9)
+
+
+def test_check_usage_stale_cache_skipped_when_not_ok(tmp_path: Path) -> None:
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\nexit 1\n")
+    usage_script.chmod(0o755)
+    sm = _make_manager(tmp_path, usage_script=usage_script)
+
+    stale_data = {"seven_day": {"utilization": 0.5}, "_ok": False}
+    stale_cache = tmp_path / "stale.json"
+    stale_cache.write_text(json.dumps(stale_data))
+
+    # _ok=False → stale cache should not be used
+    assert sm.check_usage(stale_cache=stale_cache) is None
+
+
 def test_detect_external_switch_ignores_unreadable_log(tmp_path: Path) -> None:
     sm = _make_manager(tmp_path)
     sm.config.switch_log.mkdir()

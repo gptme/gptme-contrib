@@ -501,7 +501,10 @@ def _cmd_evaluate(args: argparse.Namespace, sm: SubscriptionManager) -> int:
     sm.detect_external_switch()
 
     active = sm.get_active_subscription()
-    usage = sm.check_usage()
+    # Fall back to the per-slot stale cache when the live probe fails (e.g. lock
+    # contention from a concurrent subscription-usage-history.py scrape).
+    stale_cache = Path(f"/tmp/claude-usage-{active}.json") if active else None
+    usage = sm.check_usage(stale_cache=stale_cache)
     rebalance_state = sm.load_rebalance_state()
     decision = sm.evaluate(usage, active, rebalance_state=rebalance_state)
     decision_dict = decision.to_dict()
