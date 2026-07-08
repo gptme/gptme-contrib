@@ -32,7 +32,7 @@ Follow this step-by-step workflow:
 
 **1) Decide scope**
 - If trivial docs/journal → commit on master.
-- If non-trivial/needs review → ask; then branch + PR if approved.
+- If non-trivial/needs review → use a branch + PR.
 - Avoid: creating branches/PRs for tiny edits.
 
 **2) Prepare working tree**
@@ -87,7 +87,6 @@ git checkout feature-branch  # Switch to feature branch
 
 **6) Push/PR**
 - Push and open PRs per your project's workflow guidelines.
-- For autonomous agents: push and open PRs after committing non-trivial changes — don't wait for a request.
 - If on a feature branch and review is desired: push and open PR with a clear title/body.
 
 ## Outcome
@@ -101,9 +100,6 @@ Following this pattern results in:
 ## Related
 - [Git Worktree Workflow](./git-worktree-workflow.md) - For working on external PRs, including push verification (read together!)
 - [When to Rebase PRs](./when-to-rebase-prs.md) - When to rebase
-
-## LOO Analysis Note
-LOO 2026-07-08: Δ=−0.047 (n=211, recent_Δ=−0.049, trigger_acc=0.27, dir=86%). The "don't push unless requested" rule actively suppressed autonomous push actions, creating measurable quality drag. Replaced with project-workflow-aware guidance that treats autonomous agents as first-class users.
 
 ## Origin
 Established 2025-08-08 from user/agent session to reduce review overhead and PR noise.
