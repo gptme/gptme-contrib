@@ -345,8 +345,8 @@ gh_cache_get_or_fetch() {
 }
 
 # Fetch all PR data once per repo, with all fields needed by every check
-# function. Cache state-tracked checks, but let merge-sensitive callers opt out
-# so they always see live merge status.
+# function. Cache state-tracked checks, but let merge-sensitive callers use a
+# short TTL (GH_CACHE_TTL_LIVE_PR, default 180s) instead of the generic 480s.
 fetch_pr_data_with_ttl() {
     local repo=$1
     local ttl=$2
@@ -613,7 +613,8 @@ check_master_ci() {
 
 # Check for merge conflicts on open PRs (DIRTY or CONFLICTING status).
 # Intentionally NOT state-tracked — conflicts should nag every run until resolved.
-# Callers should pass live PR data (fetch_live_pr_data), not the cached view.
+# Callers should pass live PR data (fetch_live_pr_data), which uses a short TTL
+# (~minutes) for reasonably current conflict status without uncached GraphQL calls.
 check_merge_conflicts() {
     local repo=$1
     local prs=$2
