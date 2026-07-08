@@ -124,8 +124,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --author    GitHub username to check PRs/issues for (required)"
-            echo "  --org       GitHub org to scan all repos from (required)"
-            echo "  --repo      Additional repo to check (can be repeated)"
+            echo "  --org       GitHub org to scan all repos from (optional when --repo is used)"
+            echo "  --repo      Repo to check (can be repeated; required when --org is omitted)"
             echo "  --state-dir Directory for state tracking files (default: /tmp/github-activity-gate-state)"
             echo "  --format    Output format: 'markdown' (default) or 'jsonl' (one JSON object per item)"
             echo ""
@@ -137,8 +137,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [ -z "$AUTHOR" ] || [ -z "$ORG" ]; then
-    echo "Error: --author and --org are required" >&2
+if [ -z "$AUTHOR" ]; then
+    echo "Error: --author is required" >&2
+    exit 2
+fi
+# --org is optional when --repo flags are provided; required otherwise
+if [ -z "$ORG" ] && [ ${#EXTRA_REPOS[@]} -eq 0 ]; then
+    echo "Error: --org or at least one --repo is required" >&2
     exit 2
 fi
 
