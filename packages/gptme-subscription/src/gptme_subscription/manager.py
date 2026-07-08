@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import re
 import subprocess
@@ -30,6 +31,8 @@ from gptme_subscription.observation import (
 from gptme_subscription.routing import (
     compute_window_pacing,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---- Public types ----
 
@@ -256,7 +259,17 @@ class SubscriptionManager:
 
     # ---- Usage check ----
 
-    def check_usage(self, no_cache: bool = False) -> dict[str, Any] | None:
+    def check_usage(
+        self, no_cache: bool = False, stale_cache: Path | None = None
+    ) -> dict[str, Any] | None:
+        """Return usage data, with optional stale-cache fallback on lock contention.
+
+        When the usage script fails (e.g. `/tmp/claude-usage-scrape.lock` held
+        by a concurrent ``subscription-usage-history.py`` run), passing
+        ``stale_cache`` causes us to fall back to the last-known-good JSON file
+        instead of propagating ``None`` to the caller.  The caller decides which
+        slot file to use; ``cli._cmd_evaluate`` passes the active-slot path.
+        """
         script = self.config.usage_script
         if script is None or not script.exists():
             return None
@@ -269,6 +282,31 @@ class SubscriptionManager:
                 return dict(json.loads(result.stdout))
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
             pass
+        # Stale-cache fallback: prefer a degraded reading over "could not check usage"
+        _STALE_MAX_AGE_S = 4 * 3600  # 4 hours — don't route on an ancient snapshot
+        if stale_cache is not None and stale_cache.exists():
+            try:
+                age_s = (
+                    datetime.now(tz=timezone.utc).timestamp()
+                    - stale_cache.stat().st_mtime
+                )
+                if age_s > _STALE_MAX_AGE_S:
+                    logger.warning(
+                        "check_usage: stale cache %s is %.0fh old (max %.0fh) — skipping",
+                        stale_cache,
+                        age_s / 3600,
+                        _STALE_MAX_AGE_S / 3600,
+                    )
+                else:
+                    data = json.loads(stale_cache.read_text())
+                    if data.get("_ok"):
+                        logger.warning(
+                            "check_usage: live probe failed, returning stale cache (age %.0fs)",
+                            age_s,
+                        )
+                        return {**data, "_stale": True}
+            except (json.JSONDecodeError, OSError):
+                pass
         return None
 
     # ---- Rate limit ----
@@ -590,6 +628,7 @@ class SubscriptionManager:
             active
             and isinstance(_weekly_resets_in, int | float)
             and _weekly_resets_in > 0
+            and not usage.get("_stale")
         ):
             self.record_sub_reset_time(active, float(_weekly_resets_in), usage)
 

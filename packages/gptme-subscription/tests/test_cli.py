@@ -79,7 +79,9 @@ class FakeManager:
     def get_active_subscription(self) -> str:
         return self._active
 
-    def check_usage(self, no_cache: bool = False) -> dict[str, object]:
+    def check_usage(
+        self, no_cache: bool = False, stale_cache: Path | None = None
+    ) -> dict[str, object]:
         self.check_usage_calls.append(no_cache)
         return self._post_switch_usage if no_cache else self._initial_usage
 
