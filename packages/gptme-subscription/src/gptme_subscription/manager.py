@@ -628,6 +628,7 @@ class SubscriptionManager:
             active
             and isinstance(_weekly_resets_in, int | float)
             and _weekly_resets_in > 0
+            and not usage.get("_stale")
         ):
             self.record_sub_reset_time(active, float(_weekly_resets_in), usage)
 

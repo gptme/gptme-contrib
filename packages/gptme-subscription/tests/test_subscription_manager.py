@@ -233,6 +233,28 @@ def test_evaluate_records_observation_for_active_primary(tmp_path: Path) -> None
     assert entry["sonnet_weekly_utilization"] == pytest.approx(0.30)
 
 
+def test_evaluate_does_not_record_observation_for_stale_usage(
+    tmp_path: Path,
+) -> None:
+    """``evaluate`` must skip ``record_sub_reset_time`` when usage came from the
+    stale-cache fallback.  Stale ``resets_in_seconds`` stamped against ``now``
+    computes a reset deadline hours too far in the future.
+    """
+    sm = _make_manager(tmp_path)
+    usage = {
+        "seven_day": {"utilization": 0.42, "resets_in_seconds": 3 * 24 * 3600},
+        "five_hour": {"utilization": 0.10, "resets_in_seconds": 3 * 3600},
+        "seven_day_sonnet": {"utilization": 0.30},
+        "_stale": True,
+    }
+
+    sm.evaluate(usage, "bob")
+
+    assert (
+        not sm.config.reset_times_file.exists()
+    ), "record_sub_reset_time must not be called when usage._stale=True"
+
+
 def test_evaluate_skips_stale_fallback_picks_fresh(tmp_path: Path) -> None:
     sm = _make_manager(tmp_path)
     # alice is stale (17 days), erik is fresh
