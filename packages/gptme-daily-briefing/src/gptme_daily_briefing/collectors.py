@@ -69,14 +69,15 @@ def collect_blockers(repo: str, label: str, limit: int = 6) -> list[str]:
     if not out:
         return []
     try:
-        blockers = [
-            f"#{item['number']}: {item['title']}"
-            for item in json.loads(out)
-            if "pull_request" not in item
-        ]
-        return blockers[:limit]
-    except (json.JSONDecodeError, KeyError, TypeError):
+        data = json.loads(out)
+    except json.JSONDecodeError:
         return []
+    if not isinstance(data, list):
+        return []
+    blockers = [
+        f"#{item['number']}: {item['title']}" for item in data if "pull_request" not in item
+    ]
+    return blockers[:limit]
 
 
 def collect_active_tasks(workspace_root: Path, limit: int = 6) -> list[str]:
