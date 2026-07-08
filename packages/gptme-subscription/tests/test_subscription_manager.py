@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -80,6 +82,26 @@ def test_check_usage_stale_cache_fallback_on_script_failure(tmp_path: Path) -> N
     result = sm.check_usage(stale_cache=stale_cache)
     assert result is not None
     assert result["seven_day"]["utilization"] == pytest.approx(0.3)
+    assert (
+        result.get("_stale") is True
+    ), "stale fallback must be flagged with _stale=True"
+
+
+def test_check_usage_stale_cache_rejected_when_too_old(tmp_path: Path) -> None:
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\nexec ''  # always fail\n")
+    usage_script.chmod(0o755)
+    sm = _make_manager(tmp_path, usage_script=usage_script)
+
+    stale_data = {"seven_day": {"utilization": 0.3}, "_ok": True}
+    stale_cache = tmp_path / "stale-old.json"
+    stale_cache.write_text(json.dumps(stale_data))
+    # Back-date the file past the 4-hour max-age limit
+    old_mtime = time.time() - (5 * 3600)
+    os.utime(stale_cache, (old_mtime, old_mtime))
+
+    # Cache is too old → must not be used even though _ok=True
+    assert sm.check_usage(stale_cache=stale_cache) is None
 
 
 def test_check_usage_stale_cache_not_used_when_script_succeeds(tmp_path: Path) -> None:

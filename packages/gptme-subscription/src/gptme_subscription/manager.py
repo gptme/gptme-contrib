@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import re
 import subprocess
@@ -30,6 +31,8 @@ from gptme_subscription.observation import (
 from gptme_subscription.routing import (
     compute_window_pacing,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---- Public types ----
 
@@ -280,11 +283,28 @@ class SubscriptionManager:
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
             pass
         # Stale-cache fallback: prefer a degraded reading over "could not check usage"
+        _STALE_MAX_AGE_S = 4 * 3600  # 4 hours — don't route on an ancient snapshot
         if stale_cache is not None and stale_cache.exists():
             try:
-                data = json.loads(stale_cache.read_text())
-                if data.get("_ok"):
-                    return dict(data)
+                age_s = (
+                    datetime.now(tz=timezone.utc).timestamp()
+                    - stale_cache.stat().st_mtime
+                )
+                if age_s > _STALE_MAX_AGE_S:
+                    logger.warning(
+                        "check_usage: stale cache %s is %.0fh old (max %.0fh) — skipping",
+                        stale_cache,
+                        age_s / 3600,
+                        _STALE_MAX_AGE_S / 3600,
+                    )
+                else:
+                    data = json.loads(stale_cache.read_text())
+                    if data.get("_ok"):
+                        logger.warning(
+                            "check_usage: live probe failed, returning stale cache (age %.0fs)",
+                            age_s,
+                        )
+                        return {**data, "_stale": True}
             except (json.JSONDecodeError, OSError):
                 pass
         return None
