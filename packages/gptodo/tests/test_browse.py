@@ -264,6 +264,7 @@ class TestBrowsePagerContentFormat:
         # Should contain separators (visual dividers between tasks)
         assert "═" in output or "---" in output or "===" in output
 
+
 class TestBrowseFzfMode:
     """Test fzf interactive mode."""
 
