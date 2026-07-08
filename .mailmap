@@ -1,0 +1,15 @@
+# Canonicalize commit attribution (display-only; does not rewrite history).
+#
+# Bob's canonical identity is `Bob <bob@superuserlabs.org>`. Historical drift put
+# some commits under non-canonical identities:
+#   - timetolearnbob@gmail.com — a typo-blend of Bob's two real accounts, from a
+#     repo-local user.email override that shadowed the correct global config
+#     (fixed by the global identity guard, gptme-contrib#1245).
+#   - Bob <timetolearnalice@gmail.com> — Bob-authored commits that went out under
+#     Alice's email. Mapped by NAME+email so Alice's own commits are untouched.
+#   - timetobuildbob@gmail.com / GitHub noreply — valid alternate Bob identities,
+#     consolidated for clean `git shortlog` / attribution.
+Bob <bob@superuserlabs.org> <timetolearnbob@gmail.com>
+Bob <bob@superuserlabs.org> Bob <timetolearnalice@gmail.com>
+Bob <bob@superuserlabs.org> <timetobuildbob@gmail.com>
+Bob <bob@superuserlabs.org> <189876176+TimeToBuildBob@users.noreply.github.com>

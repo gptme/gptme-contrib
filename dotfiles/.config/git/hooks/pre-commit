@@ -53,6 +53,43 @@ else
     fi
 fi
 
+# --- Part 0.5: Validate git commit identity (~1ms, runs unconditionally) ---
+# Guards against a repo-local user.email override that shadows the correct global
+# identity. Historical corruption: bob@timetobuildbob.com and timetolearnbob@gmail.com
+# (typo-blends of Bob's two real identities) landed in submodules/worktrees whose
+# local config overrode ~/.gitconfig. The brain repo enforces this via prek, but
+# that only covers the brain — this GLOBAL hook covers EVERY repo Bob commits in
+# (submodules like gptme-contrib, projects/*, /tmp worktrees).
+# Bypass (rare, deliberate): ALLOW_GIT_IDENTITY=1 git commit ...
+# Forkable: an optional allowed-identities.conf (next to allowed-repos.conf) may
+# define IDENTITY_ALLOWLIST=(...) to override the built-in Bob defaults.
+if [ "${ALLOW_GIT_IDENTITY:-0}" != "1" ]; then
+    IDENTITY_ALLOWLIST=(
+        "bob@superuserlabs.org"
+        "timetobuildbob@gmail.com"
+    )
+    # shellcheck source=/dev/null
+    source "$HOOK_DIR/../allowed-identities.conf" 2>/dev/null || true
+    COMMIT_EMAIL="$(git config user.email 2>/dev/null || echo "")"
+    if [ -z "$COMMIT_EMAIL" ]; then
+        echo -e "${RED}ABORT: git user.email is not set — refusing to commit with an unknown identity.${NC}"
+        echo    "   Fix: git config user.email bob@superuserlabs.org"
+        exit 1
+    fi
+    _identity_ok=false
+    for _allowed in "${IDENTITY_ALLOWLIST[@]}"; do
+        [ "$COMMIT_EMAIL" = "$_allowed" ] && { _identity_ok=true; break; }
+    done
+    if [ "$_identity_ok" != "true" ]; then
+        echo -e "${RED}ABORT: git user.email '${COMMIT_EMAIL}' is NOT an allowed identity.${NC}"
+        echo    "   Allowed: ${IDENTITY_ALLOWLIST[*]}"
+        echo    "   This usually means a repo-local config override shadowed the correct global identity."
+        echo    "   Fix in THIS repo:  git config user.email bob@superuserlabs.org"
+        echo    "   (bypass if truly intended: ALLOW_GIT_IDENTITY=1 git commit ...)"
+        exit 1
+    fi
+fi
+
 # --- Part 1: Prevent master commits (allowlist approach) ---
 # By default, master/main commits are blocked in ALL repos.
 # Only repos matching ALLOWED_PATTERNS or detected as agent workspaces are allowed.

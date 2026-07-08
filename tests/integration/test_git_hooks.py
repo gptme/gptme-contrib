@@ -310,6 +310,100 @@ def test_hooks_exist():
     assert (HOOKS_DIR / "pre-commit").exists(), "pre-commit hook not found"
 
 
+def run_pre_commit_hook(repo_path: Path, email: str) -> subprocess.CompletedProcess:
+    """Stage a change and invoke the pre-commit hook directly with a given
+    committing identity. Runs the hook script directly (the fixture disables
+    core.hooksPath) so we exercise the hook logic, not git's dispatch."""
+    hook_path = repo_path / ".git" / "hooks" / "pre-commit"
+    if not hook_path.exists():
+        pytest.skip("pre-commit hook not found")
+
+    clean_env = _clean_git_env()
+    # Put the repo on a feature branch so the master-commit guard is not the
+    # thing that aborts (we want to isolate the identity check).
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "feature-identity-test"],
+        cwd=repo_path,
+        capture_output=True,
+        env=clean_env,
+    )
+    subprocess.run(
+        ["git", "config", "--local", "user.email", email],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        env=clean_env,
+    )
+    (repo_path / "change.txt").write_text("content")
+    subprocess.run(
+        ["git", "add", "change.txt"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        env=clean_env,
+    )
+    return subprocess.run(
+        ["bash", str(hook_path)],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        env=clean_env,
+    )
+
+
+class TestGitIdentityValidation:
+    """Part 0.5 of the pre-commit hook: block non-allowlisted commit identities."""
+
+    def test_disallowed_email_is_blocked(self, hook_env):
+        """A typo-blend / wrong identity (the historical corruption) must abort."""
+        result = run_pre_commit_hook(hook_env, "timetolearnbob@gmail.com")
+        assert result.returncode != 0
+        assert "NOT an allowed identity" in (result.stdout + result.stderr)
+
+    def test_allowed_email_passes_identity_check(self, hook_env):
+        """A canonical Bob identity must NOT trip the identity guard."""
+        result = run_pre_commit_hook(hook_env, "bob@superuserlabs.org")
+        # The hook may exit non-zero for unrelated later parts (e.g. no prek),
+        # but the identity guard specifically must not fire.
+        assert "NOT an allowed identity" not in (result.stdout + result.stderr)
+        assert "user.email is not set" not in (result.stdout + result.stderr)
+
+    def test_bypass_env_skips_identity_check(self, hook_env):
+        """ALLOW_GIT_IDENTITY=1 skips the guard for deliberate exceptions."""
+        hook_path = hook_env / ".git" / "hooks" / "pre-commit"
+        clean_env = _clean_git_env()
+        clean_env["ALLOW_GIT_IDENTITY"] = "1"
+        subprocess.run(
+            ["git", "checkout", "-q", "-b", "feature-bypass-test"],
+            cwd=hook_env,
+            capture_output=True,
+            env=clean_env,
+        )
+        subprocess.run(
+            ["git", "config", "--local", "user.email", "timetolearnbob@gmail.com"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=clean_env,
+        )
+        (hook_env / "b.txt").write_text("x")
+        subprocess.run(
+            ["git", "add", "b.txt"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=clean_env,
+        )
+        result = subprocess.run(
+            ["bash", str(hook_path)],
+            cwd=hook_env,
+            capture_output=True,
+            text=True,
+            env=clean_env,
+        )
+        assert "NOT an allowed identity" not in (result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     # Allow running as standalone script
     pytest.main([__file__, "-v"])
