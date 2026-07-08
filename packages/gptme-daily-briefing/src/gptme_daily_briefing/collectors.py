@@ -75,7 +75,7 @@ def collect_blockers(repo: str, label: str, limit: int = 6) -> list[str]:
             if "pull_request" not in item
         ]
         return blockers[:limit]
-    except (json.JSONDecodeError, KeyError):
+    except (json.JSONDecodeError, KeyError, TypeError):
         return []
 
 
