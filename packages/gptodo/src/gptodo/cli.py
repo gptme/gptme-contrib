@@ -173,6 +173,8 @@ BROWSE_FILTER_STATES = [
     "done",
     "cancelled",
 ]
+
+
 def _normalize_browse_state(filter_state: str | None) -> str | None:
     """Normalize and validate browse state filters."""
     if filter_state is None:
