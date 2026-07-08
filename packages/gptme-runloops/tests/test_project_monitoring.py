@@ -638,3 +638,131 @@ def test_execute_no_work(workspace):
 
         assert result.exit_code == 0
         assert result.success is True
+
+
+def _notification(
+    notif_id: str,
+    subject_type: str,
+    subject_url: str,
+    latest_comment_url: str = "",
+    reason: str = "mention",
+    repo: str = "owner/repo",
+    title: str = "Test notification",
+) -> dict:
+    """Build a GitHub notification payload as returned by `gh api notifications`."""
+    return {
+        "id": notif_id,
+        "reason": reason,
+        "unread": True,
+        "repository": {"full_name": repo},
+        "subject": {
+            "title": title,
+            "type": subject_type,
+            "url": subject_url,
+            "latest_comment_url": latest_comment_url,
+        },
+    }
+
+
+def _run_check_notifications(run, notifications):
+    """Invoke check_notifications with a mocked `gh api notifications` call."""
+    mock_result = MagicMock(returncode=0, stdout=json.dumps(notifications))
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run", return_value=mock_result
+    ):
+        return run.check_notifications()
+
+
+def test_check_notifications_handles_commit_comments(workspace):
+    """Commit-comment notifications must yield a WorkItem with a commit HTML URL."""
+    run = ProjectMonitoringRun(workspace)
+    items = _run_check_notifications(
+        run,
+        [
+            _notification(
+                "1",
+                "Commit",
+                "https://api.github.com/repos/owner/repo/commits/abc123def456",
+                latest_comment_url="https://api.github.com/repos/owner/repo/comments/789",
+            )
+        ],
+    )
+
+    assert len(items) == 1
+    item = items[0]
+    assert item.item_type == "notification"
+    assert item.number == 789
+    assert (
+        item.url
+        == "https://github.com/owner/repo/commit/abc123def456#commitcomment-789"
+    )
+    assert "Type: Commit" in item.details
+
+
+def test_check_notifications_pull_request_still_works(workspace):
+    """PullRequest notifications keep their existing behavior."""
+    run = ProjectMonitoringRun(workspace)
+    items = _run_check_notifications(
+        run,
+        [
+            _notification(
+                "2",
+                "PullRequest",
+                "https://api.github.com/repos/owner/repo/pulls/123",
+                reason="review_requested",
+            )
+        ],
+    )
+
+    assert len(items) == 1
+    assert items[0].number == 123
+    assert items[0].url == "https://github.com/owner/repo/pull/123"
+
+    # Processed notifications are recorded in state so they aren't re-surfaced
+    state_file = run.state_dir / "notifications.state"
+    assert "2" in state_file.read_text().split("\n")
+
+
+def test_check_notifications_unparseable_not_marked_processed(workspace):
+    """Notifications we can't parse must NOT be marked processed.
+
+    Previously they were saved to state on first sight and permanently
+    skipped, even if a later code update (e.g. commit-comment support)
+    made them parseable.
+    """
+    run = ProjectMonitoringRun(workspace)
+    items = _run_check_notifications(
+        run,
+        [
+            _notification(
+                "3",
+                "Discussion",
+                "https://api.github.com/repos/owner/repo/discussions/55",
+            )
+        ],
+    )
+
+    assert items == []
+    state_file = run.state_dir / "notifications.state"
+    assert "3" not in state_file.read_text().split("\n")
+
+
+def test_check_notifications_previously_processed_skipped(workspace):
+    """Already-processed notifications are skipped but kept in state."""
+    run = ProjectMonitoringRun(workspace)
+    state_file = run.state_dir / "notifications.state"
+    state_file.write_text("4")
+
+    items = _run_check_notifications(
+        run,
+        [
+            _notification(
+                "4",
+                "PullRequest",
+                "https://api.github.com/repos/owner/repo/pulls/44",
+            )
+        ],
+    )
+
+    assert items == []
+    assert "4" in state_file.read_text().split("\n")

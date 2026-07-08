@@ -800,10 +800,10 @@ class ProjectMonitoringRun(BaseRunLoop):
 
             for notif in relevant_notifications:
                 notif_id = notif["id"]
-                current_notifications.add(notif_id)
 
                 # Skip if already processed
                 if notif_id in prev_notifications:
+                    current_notifications.add(notif_id)
                     continue
 
                 repo = notif["repository"]["full_name"]
@@ -813,21 +813,38 @@ class ProjectMonitoringRun(BaseRunLoop):
                 subject_url = subject.get("url", "")
                 reason = notif.get("reason", "")
 
-                # Extract number from URL if it's a PR or Issue
+                # Extract number and HTML URL based on subject type
                 number = None
+                html_url = None
                 if subject_url and subject_type in ["PullRequest", "Issue"]:
                     # URL format: https://api.github.com/repos/owner/repo/pulls/123
                     # or https://api.github.com/repos/owner/repo/issues/123
                     match = re.search(r"/(pulls|issues)/(\d+)$", subject_url)
                     if match:
                         number = int(match.group(2))
+                        html_url = f"https://github.com/{repo}/{'pull' if subject_type == 'PullRequest' else 'issues'}/{number}"
+                elif subject_type == "Commit":
+                    # Commit comment: extract comment ID from latest_comment_url
+                    # URL format: https://api.github.com/repos/owner/repo/comments/456
+                    comment_url = subject.get("latest_comment_url", "")
+                    match = re.search(r"/comments/(\d+)$", comment_url)
+                    if match:
+                        number = int(match.group(1))
+                        # Extract commit SHA for the HTML URL
+                        # subject.url format: https://api.github.com/repos/owner/repo/commits/sha
+                        commit_match = re.search(r"/commits/([0-9a-f]+)$", subject_url)
+                        commit_sha = commit_match.group(1) if commit_match else ""
+                        html_url = f"https://github.com/{repo}/commit/{commit_sha}#commitcomment-{number}"
 
                 if not number:
-                    # Skip notifications without a PR/issue number
+                    # Don't mark as processed — may become parseable after code updates
+                    self.logger.debug(
+                        f"Skipping notification {notif_id} ({subject_type}): no number extracted"
+                    )
                     continue
 
-                # Create HTML URL for the item
-                html_url = f"https://github.com/{repo}/{'pull' if subject_type == 'PullRequest' else 'issues'}/{number}"
+                # Only mark as processed after successfully creating a work item
+                current_notifications.add(notif_id)
 
                 details = f"Notification reason: {reason}\nType: {subject_type}"
 
@@ -837,7 +854,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                         item_type="notification",
                         number=number,
                         title=title,
-                        url=html_url,
+                        url=html_url or "",
                         details=details,
                     )
                 )
