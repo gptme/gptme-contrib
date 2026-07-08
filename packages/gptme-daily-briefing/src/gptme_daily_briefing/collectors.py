@@ -74,9 +74,12 @@ def collect_blockers(repo: str, label: str, limit: int = 6) -> list[str]:
         return []
     if not isinstance(data, list):
         return []
-    blockers = [
-        f"#{item['number']}: {item['title']}" for item in data if "pull_request" not in item
-    ]
+    try:
+        blockers = [
+            f"#{item['number']}: {item['title']}" for item in data if "pull_request" not in item
+        ]
+    except KeyError:
+        return []
     return blockers[:limit]
 
 
