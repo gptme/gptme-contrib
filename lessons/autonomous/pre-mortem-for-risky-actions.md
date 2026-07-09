@@ -8,9 +8,7 @@ match:
   - "risk assessment before action"
   - "what could go wrong with this change"
   - "irreversible change"
-  - "force push"
-  - "rm -rf"
-  session_categories: [code, infrastructure, cleanup]
+  session_categories: [infrastructure, cleanup]
 target_grade: alignment
 status: active
 ---
