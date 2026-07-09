@@ -32,7 +32,7 @@ Follow this step-by-step workflow:
 
 **1) Decide scope**
 - If trivial docs/journal → commit on master.
-- If non-trivial/needs review → use a branch + PR.
+- If non-trivial/needs review → ask; then branch + PR if approved.
 - Avoid: creating branches/PRs for tiny edits.
 
 **2) Prepare working tree**
