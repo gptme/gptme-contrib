@@ -547,7 +547,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
             harness_restrict = _string_list(metadata.get("harness"))
 
             _raw_sc = (
-                match_data.get("session_categories", [])
+                match_data.get("session_categories") or []
                 if isinstance(match_data, dict)
                 else []
             )
