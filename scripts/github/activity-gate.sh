@@ -85,9 +85,10 @@
 #   API efficiency: cached PR data is fetched once per repo via fetch_pr_data()
 #   and shared across the state-tracked checks (PR updates, CI failures,
 #   Greptile sweep). Merge-sensitive checks (merge conflicts, merge-ready) use
-#   a live PR fetch each run so they don't inherit cache staleness.
+#   a short-TTL fetch (GH_CACHE_TTL_LIVE_PR, default 180s) instead of bypassing
+#   cache entirely, keeping merge-conflict detection fresh within ~4 minutes.
 #   This reduces gh pr list calls from 3N to ~1.5N on average (where N = number
-#   of repos), while preserving the "nag every run" merge-conflict contract.
+#   of repos), while cutting uncached live-PR calls by ~50%.
 #   The repo list from discover_repos() is cached for 1 hour.
 #
 #   Parallelism: Per-repo work runs concurrently (up to 8 repos at once).
@@ -225,17 +226,24 @@ discover_repos() {
 # Raising the defaults to 480s / 600s / 600s drops those lanes to ~375 / 300 /
 # 300 fetches/hr (~975/hr total) without changing cadence.
 #
-# Override via env: GH_CACHE_TTL_PR / GH_CACHE_TTL_ISSUE / GH_CACHE_TTL_RUN (seconds),
-# GH_CACHE_LOCK_TIMEOUT (seconds).
+# Override via env: GH_CACHE_TTL_PR / GH_CACHE_TTL_ISSUE / GH_CACHE_TTL_RUN /
+# GH_CACHE_TTL_LIVE_PR / GH_CACHE_LOCK_TIMEOUT (seconds).
 # Set any to 0 to bypass the cache (useful for diagnostics).
 GH_CACHE_DIR="${GH_CACHE_DIR:-$STATE_DIR/gh-cache}"
 # Increased from 240→480 and 300→600 (2026-05-21) after GraphQL rate-limit regression.
 # At a 2-minute cadence, the PR-data lane drops from ~750 fetches/hr to ~375/hr
 # (75% cache hit instead of 50%).
+# GH_CACHE_TTL_LIVE_PR (default 180s) added 2026-07-08: the live-PR fetch lane for
+# merge-sensitive checks (conflicts, merge-ready, review state) was unbounded (TTL=0),
+# costing 1 extra GraphQL call per repo with open PRs per monitoring cycle. With a
+# 180s TTL and 2-minute cadence, repos with PRs still get a fresh fetch every ~4
+# minutes while halving live-PR GraphQL calls (~75/hr per repo vs ~150/hr).
+# Set to 0 to restore the original uncached behaviour (useful for debugging).
 # See: tasks/github-graphql-rate-limit-regression.md
 GH_CACHE_TTL_PR="${GH_CACHE_TTL_PR:-480}"
 GH_CACHE_TTL_ISSUE="${GH_CACHE_TTL_ISSUE:-600}"
 GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-600}"
+GH_CACHE_TTL_LIVE_PR="${GH_CACHE_TTL_LIVE_PR:-180}"
 GH_CACHE_LOCK_TIMEOUT="${GH_CACHE_LOCK_TIMEOUT:-30}"
 
 gh_cache_fetch_and_store() {
@@ -337,8 +345,8 @@ gh_cache_get_or_fetch() {
 }
 
 # Fetch all PR data once per repo, with all fields needed by every check
-# function. Cache state-tracked checks, but let merge-sensitive callers opt out
-# so they always see live merge status.
+# function. Cache state-tracked checks, but let merge-sensitive callers use a
+# short TTL (GH_CACHE_TTL_LIVE_PR, default 180s) instead of the generic 480s.
 fetch_pr_data_with_ttl() {
     local repo=$1
     local ttl=$2
@@ -357,10 +365,11 @@ fetch_pr_data() {
     fetch_pr_data_with_ttl "$1" "$GH_CACHE_TTL_PR"
 }
 
-# Live view for merge-sensitive checks. They intentionally bypass the cache so
-# conflict nagging and merge readiness reflect the current branch state.
+# Live view for merge-sensitive checks. Uses GH_CACHE_TTL_LIVE_PR (default 180s)
+# to cache merge-status fetches across consecutive 2-minute monitoring cycles.
+# Set GH_CACHE_TTL_LIVE_PR=0 to restore uncached behaviour for debugging.
 fetch_live_pr_data() {
-    fetch_pr_data_with_ttl "$1" 0
+    fetch_pr_data_with_ttl "$1" "$GH_CACHE_TTL_LIVE_PR"
 }
 
 # Check whether the last activity on a PR was from someone worth responding to.
@@ -604,7 +613,8 @@ check_master_ci() {
 
 # Check for merge conflicts on open PRs (DIRTY or CONFLICTING status).
 # Intentionally NOT state-tracked — conflicts should nag every run until resolved.
-# Callers should pass live PR data (fetch_live_pr_data), not the cached view.
+# Callers should pass live PR data (fetch_live_pr_data), which uses a short TTL
+# (~minutes) for reasonably current conflict status without uncached GraphQL calls.
 check_merge_conflicts() {
     local repo=$1
     local prs=$2
