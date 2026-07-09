@@ -54,6 +54,7 @@ under workspace/state/ and created automatically on first use.
 """
 
 import json
+import math
 import os
 import random
 import re
@@ -545,6 +546,15 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
             tags = _string_list(metadata.get("tags"))
             harness_restrict = _string_list(metadata.get("harness"))
 
+            _raw_sc = (
+                match_data.get("session_categories") or []
+                if isinstance(match_data, dict)
+                else []
+            )
+            session_categories = _dedupe_strings(
+                [_raw_sc] if isinstance(_raw_sc, str) else _raw_sc
+            )
+
             # Need at least some way to match
             if not keywords and not patterns and not skill_name:
                 continue
@@ -565,6 +575,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
                     "when_to_use": when_to_use,
                     "tags": tags,
                     "harness_restrict": harness_restrict,
+                    "session_categories": session_categories,
                     "is_skill": f.name == "SKILL.md" or skill_name is not None,
                     "body": body,
                     "n_keywords": len(keywords),
@@ -592,6 +603,44 @@ def filter_by_harness(lessons: list[dict], harness: str) -> list[dict]:
             continue
         allowed = {str(value).strip() for value in restrict if str(value).strip()}
         if harness in allowed:
+            filtered.append(lesson)
+    return filtered
+
+
+def detect_session_category() -> "str | None":
+    """Detect the current session category from environment variables.
+
+    Autonomous sessions set CASCADE_CATEGORY via autonomous-run.sh.
+    Other run types may set GRADE_CATEGORY or WORKER_CATEGORY.
+    Returns lowercase category string, or None if unknown.
+    """
+    for var in (
+        "CASCADE_CATEGORY",
+        "CASCADE_EXECUTION_CATEGORY",
+        "GRADE_CATEGORY",
+        "WORKER_CATEGORY",
+    ):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return val.lower()
+    return None
+
+
+def filter_by_session_category(
+    lessons: list[dict], category: "str | None"
+) -> list[dict]:
+    """Keep lessons with no session_categories restriction or matching current category.
+
+    Lessons that explicitly restrict to specific session categories are filtered out
+    when running in a different category, reducing irrelevant lesson injection.
+    If category is unknown (None), all lessons pass through.
+    """
+    if not category:
+        return lessons
+    filtered = []
+    for lesson in lessons:
+        cats = lesson.get("session_categories") or []
+        if not cats or category in {c.lower() for c in cats}:
             filtered.append(lesson)
     return filtered
 
@@ -787,17 +836,86 @@ def get_predicted_lessons(
     return results
 
 
-def score_lessons(lessons: list[dict], prompt: str, max_results: int = 5) -> list[dict]:
+# --- BM25 semantic scoring ---
+
+_BM25_K1 = 1.2
+_BM25_B = 0.75
+_BM25_WEIGHT = 0.4  # additive weight for BM25 score contribution
+_BM25_MIN_SCORE = 0.8  # minimum BM25 score to add contribution
+
+
+def _build_bm25_index(lessons: list[dict]) -> dict:
+    """Build BM25 index over lesson descriptions, titles, and keywords.
+
+    Used to semantically score lessons against match text, complementing
+    keyword matching with soft semantic overlap detection.
+    """
+    corpus: list[list[str]] = []
+    for lesson in lessons:
+        doc = " ".join(
+            [
+                lesson.get("description") or "",
+                lesson.get("title") or "",
+                " ".join(lesson.get("keywords") or []),
+                lesson.get("when_to_use") or "",
+            ]
+        )
+        corpus.append(re.findall(r"[a-z0-9]+", doc.lower()))
+
+    N = len(corpus)
+    avg_dl = sum(len(d) for d in corpus) / max(N, 1)
+    df: dict[str, int] = {}
+    for doc_tokens in corpus:  # renamed: avoids shadowing the str `doc` defined above
+        for term in set(doc_tokens):
+            df[term] = df.get(term, 0) + 1
+
+    return {"corpus": corpus, "df": df, "N": N, "avg_dl": avg_dl}
+
+
+def _bm25_score(query_terms: list[str], doc_terms: list[str], index: dict) -> float:
+    """Compute BM25 score for query_terms against a document's term list."""
+    k1, b = _BM25_K1, _BM25_B
+    N, avg_dl = index["N"], index["avg_dl"]
+    dl = len(doc_terms)
+    if not dl or not query_terms:
+        return 0.0
+
+    tf: dict[str, int] = {}
+    for term in doc_terms:
+        tf[term] = tf.get(term, 0) + 1
+
+    df = index["df"]
+    score = 0.0
+    for term in query_terms:
+        if term not in tf:
+            continue
+        tf_td = tf[term]
+        df_t = df.get(term, 0)
+        idf = math.log((N - df_t + 0.5) / (df_t + 0.5) + 1)
+        tf_norm = (tf_td * (k1 + 1)) / (tf_td + k1 * (1 - b + b * dl / max(avg_dl, 1)))
+        score += idf * tf_norm
+
+    return score
+
+
+def score_lessons(
+    lessons: list[dict],
+    prompt: str,
+    max_results: int = 5,
+    bm25_index: "dict | None" = None,
+) -> list[dict]:
     """Match lessons against prompt text. Returns scored results.
 
-    Scoring: keyword/pattern matches + Thompson sampling posterior mean boost.
+    Scoring: keyword/pattern matches + BM25 semantic overlap + Thompson sampling posterior mean boost.
     TS re-ranks by adding TS_WEIGHT * posterior_mean to keyword scores.
     Lessons without TS data get the default 0.5 (neutral prior).
+    BM25 adds semantic scoring over description/title/keywords when an index is provided.
     """
     prompt_lower = prompt.lower()
+    query_terms = re.findall(r"[a-z0-9]+", prompt_lower) if bm25_index else []
     results = []
 
-    for lesson in lessons:
+    for i, lesson in enumerate(lessons):
         score = 0.0
         matched_by: list[str] = []
 
@@ -831,6 +949,14 @@ def score_lessons(lessons: list[dict], prompt: str, max_results: int = 5) -> lis
         if descriptor_score > 0:
             score += descriptor_score
             matched_by.extend(descriptor_matches)
+
+        # BM25 semantic scoring (soft matching over description + title + keywords)
+        if bm25_index is not None and query_terms:
+            doc_terms = bm25_index["corpus"][i]
+            bm_score = _bm25_score(query_terms, doc_terms, bm25_index)
+            if bm_score >= _BM25_MIN_SCORE:
+                score += _BM25_WEIGHT * bm_score
+                matched_by.append(f"bm25:{bm_score:.2f}")
 
         if score > 0:
             results.append({**lesson, "score": score, "matched_by": matched_by})
@@ -1387,13 +1513,18 @@ def main():
     lesson_dirs = load_lesson_dirs(workspace)
     lessons = scan_lessons(lesson_dirs)
     lessons = filter_by_harness(lessons, detect_harness())
+    session_cat = detect_session_category()
+    lessons = filter_by_session_category(lessons, session_cat)
+    bm25_index = _build_bm25_index(lessons) if lessons else None
     holdout_lessons = parse_holdout_lessons_env()
 
     if not lessons:
         emit_empty(event_type)
         sys.exit(0)
 
-    raw_matches = score_lessons(lessons, match_text, max_results=max_results)
+    raw_matches = score_lessons(
+        lessons, match_text, max_results=max_results, bm25_index=bm25_index
+    )
     if not raw_matches:
         emit_empty(event_type)
         sys.exit(0)
