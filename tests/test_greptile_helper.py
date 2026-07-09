@@ -512,28 +512,36 @@ def test_marker_trigger_does_not_mask_new_backdated_head():
 def test_marker_trigger_without_response_does_not_suppress():
     """Marker matches the current head but Greptile's comment was last updated
     BEFORE our trigger (no response yet) → not proof of processing → the
-    SHA-mismatch path must still report re-review needed (downstream in-flight
-    guards handle pacing)."""
+    SHA-mismatch path must still report re-review needed.
+
+    The trigger is acked and older than ACK_GRACE_SECONDS (2h) → "stale-acked",
+    which bypasses the no-new-commit guard — so the ONLY path that could
+    suppress here is the marker check in _needs_re_review. If the marker logic
+    falsely treated the pre-trigger comment update as a response, status would
+    read already-reviewed. Otherwise the status command reports the stuck-acked
+    state as "stale" (normalized from stale-acked) — still actionable."""
     fixture = {
         "pr_number": 1249,
         "raw_comments": [
-            # Greptile comment last updated 50min ago — BEFORE our 30min-ago trigger
+            # Greptile comment last updated 3h ago — BEFORE our 2.5h-ago trigger
             _make_greptile_comment(
-                4, reviewed_at=_iso_ago(minutes=90), updated_at=_iso_ago(minutes=50)
+                4, reviewed_at=_iso_ago(minutes=240), updated_at=_iso_ago(minutes=180)
             ),
             _make_trigger_comment(
-                "test-user", _iso_ago(minutes=30), head_sha="beef1234"
+                "test-user", _iso_ago(minutes=150), head_sha="beef1234"
             ),
         ],
-        "raw_reviews": [_make_greptile_review("0abc1234", _iso_ago(minutes=90))],
-        "raw_pr": {"head": {"sha": "beef1234"}, "created_at": _iso_ago(minutes=180)},
-        "raw_commits": [_make_commit(_iso_ago(minutes=60))],
-        "bot_reaction_count": 0,
+        "raw_reviews": [_make_greptile_review("0abc1234", _iso_ago(minutes=240))],
+        "raw_pr": {"head": {"sha": "beef1234"}, "created_at": _iso_ago(minutes=300)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=200))],
+        # Acked, and trigger age (2.5h) > ACK_GRACE_SECONDS (2h) → stale-acked
+        "bot_reaction_count": 1,
     }
     status = _run_helper("status", fixture)
-    assert (
-        status.stdout.strip() == "needs-re-review"
-    ), f"Unanswered trigger must not suppress, got: {status.stdout.strip()}"
+    assert status.stdout.strip() in {
+        "stale",
+        "needs-re-review",
+    }, f"Unanswered trigger must stay actionable, got: {status.stdout.strip()}"
 
 
 def test_trigger_embeds_head_sha_marker():
