@@ -606,7 +606,7 @@ def test_trigger_re_reviews_after_score_5_when_new_commits_land():
 
 
 def test_max_retries_guard_blocks_after_repeated_triggers():
-    """3 triggers since last review (Greptile acked but never reviewed) → blocked.
+    """1 trigger since last review (== MAX_RE_TRIGGERS=1) → blocked per-cycle.
 
     Regression test for gptme#1651 (2026-03-18): 7 @greptileai review comments
     posted in one day because the 20-min ACK_GRACE_SECONDS expiry kept marking
@@ -617,16 +617,14 @@ def test_max_retries_guard_blocks_after_repeated_triggers():
         "pr_number": 1651,
         "raw_comments": [
             _make_greptile_comment(4, reviewed_at=reviewed_at),
-            # Three re-review triggers posted after the review, none responded to
-            _make_trigger_comment("test-user", _iso_ago(minutes=90)),
+            # One re-review trigger posted after the review (at the per-cycle threshold of 1)
             _make_trigger_comment("test-user", _iso_ago(minutes=60)),
-            _make_trigger_comment("test-user", _iso_ago(minutes=30)),
         ],
         "raw_commits": [
             _make_commit(_iso_ago(minutes=10)),  # New commits since review
         ],
         "raw_pr": {"created_at": _iso_ago(minutes=180)},
-        "bot_reaction_count": 1,  # Greptile acks each trigger but never posts a review
+        "bot_reaction_count": 1,  # Greptile acks the trigger but never posts a review
     }
     # check: should block (max retries reached)
     result = _run_helper("check", fixture)
@@ -647,7 +645,7 @@ def test_max_retries_guard_blocks_after_repeated_triggers():
 
 
 def test_max_retries_guard_allows_below_threshold():
-    """2 triggers since last review (< MAX_RE_TRIGGERS=3) → NOT blocked, should re-trigger.
+    """0 triggers since last review (< MAX_RE_TRIGGERS=1) → NOT blocked, should re-trigger.
 
     Lower-bound boundary check: the guard only fires at >= threshold, not below.
     """
@@ -656,9 +654,7 @@ def test_max_retries_guard_allows_below_threshold():
         "pr_number": 1651,
         "raw_comments": [
             _make_greptile_comment(4, reviewed_at=reviewed_at),
-            # Two re-review triggers posted after the review (below the threshold of 3)
-            _make_trigger_comment("test-user", _iso_ago(minutes=60)),
-            _make_trigger_comment("test-user", _iso_ago(minutes=30)),
+            # No re-review triggers posted after the review (below the threshold of 1)
         ],
         "raw_commits": [
             _make_commit(_iso_ago(minutes=10)),  # New commits since review
@@ -670,7 +666,7 @@ def test_max_retries_guard_allows_below_threshold():
     status = _run_helper("status", fixture)
     assert (
         status.stdout.strip() != "in-progress"
-    ), f"Should NOT block at count=2 (< MAX_RE_TRIGGERS=3), got: {status.stdout.strip()}"
+    ), f"Should NOT block at count=0 (< MAX_RE_TRIGGERS=1), got: {status.stdout.strip()}"
 
 
 # --- Tests for local trigger-timestamp file (API propagation delay guard) ---
@@ -688,11 +684,11 @@ def test_trigger_writes_local_timestamp_on_success():
         "pr_number": 555,
         "raw_comments": [
             _make_greptile_comment(3, reviewed_at=reviewed_at),
-            _make_trigger_comment("test-user", _iso_ago(minutes=45)),
+            # No prior triggers in this review cycle (so MAX_RE_TRIGGERS=1 doesn't block)
         ],
         "raw_commits": [_make_commit(_iso_ago(minutes=10))],
         "raw_pr": {"created_at": _iso_ago(minutes=120)},
-        "bot_reaction_count": 1,
+        "bot_reaction_count": 0,
     }
     result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"

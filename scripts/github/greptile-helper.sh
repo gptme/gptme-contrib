@@ -33,14 +33,14 @@ REPO="${2:-}"
 PR_NUMBER="${3:-}"
 TRIGGER_GRACE_SECONDS="${TRIGGER_GRACE_SECONDS:-900}"
 ACK_GRACE_SECONDS="${ACK_GRACE_SECONDS:-1200}"
-MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-3}"  # Max re-review triggers per review cycle before backing off
+MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-1}"  # Max re-review triggers per review cycle before backing off
 # Hard ceiling on TOTAL trigger comments we've ever posted on a PR, independent of
 # review cycles. MAX_RE_TRIGGERS resets to 0 every time Greptile posts a fresh review,
 # so a PR stuck in a fix→re-review→trigger loop (e.g. a mergeable-but-human-gated
 # product PR that keeps getting polish commits) can be triggered unboundedly — one per
 # PM run, indefinitely. This cap counts our lifetime triggers and backs off + escalates
 # once exceeded. Incident: 2026-06-16, cloud#401 hit 25 triggers, #2906 25, #408 19.
-MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-8}"
+MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-3}"
 GITHUB_AUTHOR="${GITHUB_AUTHOR:-$(gh api user --jq .login 2>/dev/null || echo "")}"
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
