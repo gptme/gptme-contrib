@@ -476,3 +476,149 @@ def test_scan_lessons_includes_id(hook, tmp_path):
     by_title = {r["title"]: r for r in results}
     assert by_title["With ID"]["id"] == "custom-lesson-id"
     assert by_title["No ID"]["id"] is None
+
+
+# --- session_categories ---
+
+
+def test_scan_lessons_extracts_session_categories(hook, tmp_path):
+    """scan_lessons populates session_categories from match.session_categories."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "categorized.md").write_text(
+        "---\nmatch:\n  keywords:\n    - trigger\n  session_categories:\n    - code\n    - infrastructure\nstatus: active\n---\n# Categorized\n\nContent.\n"
+    )
+    (lessons_dir / "uncategorized.md").write_text(
+        "---\nmatch:\n  keywords:\n    - other\nstatus: active\n---\n# Uncategorized\n\nContent.\n"
+    )
+    results = hook.scan_lessons([lessons_dir])
+    by_title = {r["title"]: r for r in results}
+    assert by_title["Categorized"]["session_categories"] == ["code", "infrastructure"]
+    assert by_title["Uncategorized"]["session_categories"] == []
+
+
+def test_filter_by_session_category_keeps_unrestricted(hook, tmp_path):
+    """Lessons without session_categories pass through regardless of category."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "unrestricted.md").write_text(
+        "---\nmatch:\n  keywords:\n    - keyword\nstatus: active\n---\n# Unrestricted\n\nContent.\n"
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    result = hook.filter_by_session_category(lessons, "cleanup")
+    assert len(result) == 1
+
+
+def test_filter_by_session_category_keeps_matching(hook, tmp_path):
+    """Lessons whose session_categories include current category are kept."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "code-only.md").write_text(
+        "---\nmatch:\n  keywords:\n    - code\n  session_categories:\n    - code\nstatus: active\n---\n# Code Only\n\nContent.\n"
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    kept = hook.filter_by_session_category(lessons, "code")
+    assert len(kept) == 1
+    dropped = hook.filter_by_session_category(lessons, "cleanup")
+    assert len(dropped) == 0
+
+
+def test_filter_by_session_category_none_keeps_all(hook, tmp_path):
+    """Unknown category (None) keeps all lessons unchanged."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "restricted.md").write_text(
+        "---\nmatch:\n  keywords:\n    - x\n  session_categories:\n    - strategic\nstatus: active\n---\n# Restricted\n\nContent.\n"
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    result = hook.filter_by_session_category(lessons, None)
+    assert len(result) == 1
+
+
+def test_detect_session_category_from_env(hook, monkeypatch):
+    """detect_session_category reads CASCADE_CATEGORY env var."""
+    monkeypatch.setenv("CASCADE_CATEGORY", "research")
+    for var in ("CASCADE_EXECUTION_CATEGORY", "GRADE_CATEGORY", "WORKER_CATEGORY"):
+        monkeypatch.delenv(var, raising=False)
+    assert hook.detect_session_category() == "research"
+
+
+def test_detect_session_category_fallback_vars(hook, monkeypatch):
+    """detect_session_category falls back to GRADE_CATEGORY when CASCADE_CATEGORY unset."""
+    monkeypatch.delenv("CASCADE_CATEGORY", raising=False)
+    monkeypatch.delenv("CASCADE_EXECUTION_CATEGORY", raising=False)
+    monkeypatch.setenv("GRADE_CATEGORY", "social")
+    monkeypatch.delenv("WORKER_CATEGORY", raising=False)
+    assert hook.detect_session_category() == "social"
+
+
+def test_detect_session_category_none_when_unset(hook, monkeypatch):
+    """detect_session_category returns None when no category env vars are set."""
+    for var in (
+        "CASCADE_CATEGORY",
+        "CASCADE_EXECUTION_CATEGORY",
+        "GRADE_CATEGORY",
+        "WORKER_CATEGORY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    assert hook.detect_session_category() is None
+
+
+# --- BM25 scoring ---
+
+
+def test_bm25_index_built_from_lessons(hook, tmp_path):
+    """_build_bm25_index returns a valid index with corpus matching lesson count."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    for i in range(3):
+        (lessons_dir / f"lesson{i}.md").write_text(
+            f"---\ndescription: lesson about topic {i}\nmatch:\n  keywords:\n    - kw{i}\nstatus: active\n---\n# Lesson {i}\n\nContent.\n"
+        )
+    lessons = hook.scan_lessons([lessons_dir])
+    index = hook._build_bm25_index(lessons)
+    assert len(index["corpus"]) == 3
+    assert index["N"] == 3
+    assert index["avg_dl"] > 0
+
+
+def test_bm25_score_relevant_higher_than_unrelated(hook):
+    """_bm25_score gives higher scores to relevant docs than unrelated ones."""
+    doc_relevant = ["python", "merge", "conflict", "resolution"]
+    doc_unrelated = ["javascript", "async", "promise", "then"]
+    index = {
+        "corpus": [doc_relevant, doc_unrelated],
+        "df": {
+            "python": 1,
+            "merge": 1,
+            "conflict": 1,
+            "resolution": 1,
+            "javascript": 1,
+            "async": 1,
+            "promise": 1,
+            "then": 1,
+        },
+        "N": 2,
+        "avg_dl": 4.0,
+    }
+    query = ["merge", "conflict"]
+    score_relevant = hook._bm25_score(query, doc_relevant, index)
+    score_unrelated = hook._bm25_score(query, doc_unrelated, index)
+    assert score_relevant > score_unrelated
+    assert score_unrelated == 0.0
+
+
+def test_score_lessons_with_bm25_index(hook, tmp_path):
+    """score_lessons accepts bm25_index and does not crash."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "lesson.md").write_text(
+        "---\ndescription: handles merge conflict resolution\nmatch:\n  keywords:\n    - merge conflict\nstatus: active\n---\n# Merge Lesson\n\nContent.\n"
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    index = hook._build_bm25_index(lessons)
+    results = hook.score_lessons(lessons, "merge conflict resolution", bm25_index=index)
+    assert len(results) == 1
+    # BM25 match tag should appear in matched_by
+    has_bm25 = any("bm25" in tag for tag in results[0].get("matched_by", []))
+    assert has_bm25
