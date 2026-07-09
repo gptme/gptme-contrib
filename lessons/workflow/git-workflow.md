@@ -86,7 +86,7 @@ git checkout feature-branch  # Switch to feature branch
 - In the superproject: `git add <submodule>` and commit ("chore: bump …").
 
 **6) Push/PR**
-- Don't push or open PRs unless requested.
+- Push and open PRs per your project's workflow guidelines.
 - If on a feature branch and review is desired: push and open PR with a clear title/body.
 
 ## Outcome
