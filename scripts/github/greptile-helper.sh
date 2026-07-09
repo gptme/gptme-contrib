@@ -324,7 +324,7 @@ _our_trigger_status() {
     # Max-retries guard: if we've already triggered N times since the last Greptile review
     # without a new review landing, stop retrying. Prevents infinite loops when Greptile
     # acks (reacts with +1) but never posts a review (e.g., gptme#1651: 7 triggers, 0 reviews).
-    if [ -n "$review_cutoff" ] && [ "${count_since_review:-0}" -ge "${MAX_RE_TRIGGERS:-3}" ]; then
+    if [ -n "$review_cutoff" ] && [ "${count_since_review:-0}" -ge "${MAX_RE_TRIGGERS:-1}" ]; then
         echo "in-progress"
         return 0
     fi
