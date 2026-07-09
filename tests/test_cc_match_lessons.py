@@ -533,7 +533,9 @@ def test_filter_by_session_category_case_insensitive(hook, tmp_path):
     lessons = hook.scan_lessons([lessons_dir])
     # detect_session_category always returns lowercase; YAML "Code" must still match
     kept = hook.filter_by_session_category(lessons, "code")
-    assert len(kept) == 1, "Mixed-case YAML category should match lowercase env-var category"
+    assert (
+        len(kept) == 1
+    ), "Mixed-case YAML category should match lowercase env-var category"
     dropped = hook.filter_by_session_category(lessons, "cleanup")
     assert len(dropped) == 0
 
