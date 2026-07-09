@@ -25,6 +25,13 @@ state/locks/
 # Session state files (runtime state)
 state/sessions/
 
+# Coordination runtime state
+state/coordination/
+
+# GitHub API cache (runtime)
+state/gh-api-cache/
+state/github-graphql-log.jsonl
+
 # Stale directory from tasks->gptodo rename (PR #171)
 packages/tasks/
 
