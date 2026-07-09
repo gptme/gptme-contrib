@@ -118,13 +118,18 @@ def _make_greptile_comment(
     }
 
 
-def _make_trigger_comment(author: str, created_at: str) -> dict:
+def _make_trigger_comment(
+    author: str, created_at: str, head_sha: str | None = None
+) -> dict:
+    body = "@greptileai review"
+    if head_sha:
+        body += f"\n\n<!-- greptile-helper head-sha: {head_sha} -->"
     return {
         "id": 12345,
         "user": {"login": author},
         "created_at": created_at,
         "updated_at": created_at,
-        "body": "@greptileai review",
+        "body": body,
     }
 
 
@@ -431,6 +436,128 @@ def test_sha_match_skips_re_review_even_when_date_says_yes():
     }
     status = _run_helper("status", fixture)
     assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
+
+
+def test_inplace_comment_response_to_marker_trigger_suppresses_re_review():
+    """Regression for gptme-contrib#1246 spam: Greptile responds to a re-review
+    trigger by updating its issue comment in-place, never advancing the formal
+    review's commit_id. The SHA mismatch alone would say "re-review needed"
+    forever. Our trigger comment carries a head-SHA marker matching the current
+    head, and Greptile's comment was updated after that trigger → Greptile has
+    already processed this head → suppress."""
+    fixture = {
+        "pr_number": 1246,
+        "raw_comments": [
+            # Greptile comment created 90min ago, updated in-place 20min ago
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=90), updated_at=_iso_ago(minutes=20)
+            ),
+            # Our trigger 40min ago, posted for the current head
+            _make_trigger_comment(
+                "test-user", _iso_ago(minutes=40), head_sha="beef1234"
+            ),
+        ],
+        # Formal review stuck on a stale commit (SHA mismatch with head)
+        "raw_reviews": [_make_greptile_review("0abc1234", _iso_ago(minutes=90))],
+        "raw_pr": {"head": {"sha": "beef1234"}, "created_at": _iso_ago(minutes=180)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=60))],
+        "bot_reaction_count": 1,
+    }
+    result = _run_helper("check", fixture)
+    assert result.returncode == 2, (
+        f"In-place response for current head must suppress re-trigger. "
+        f"stderr: {result.stderr}"
+    )
+
+    status = _run_helper("status", fixture)
+    assert (
+        status.stdout.strip() == "already-reviewed"
+    ), f"Expected already-reviewed, got: {status.stdout.strip()}"
+
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"Should NOT have posted a trigger, got: {gh_log}"
+
+
+def test_marker_trigger_does_not_mask_new_backdated_head():
+    """Greptile P1 on gptme-contrib#1247: a new HEAD whose committer.date is older
+    than Greptile's comment edit must still get a re-review. The marker shows our
+    trigger was for the PREVIOUS head; the current head differs → re-review needed,
+    regardless of commit dates (written-locally-then-pushed commits look old)."""
+    fixture = {
+        "pr_number": 1247,
+        "raw_comments": [
+            # Greptile responded in-place 20min ago...
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=90), updated_at=_iso_ago(minutes=20)
+            ),
+            # ...to our trigger for the previous head
+            _make_trigger_comment(
+                "test-user", _iso_ago(minutes=40), head_sha="beef1234"
+            ),
+        ],
+        "raw_reviews": [_make_greptile_review("0abc1234", _iso_ago(minutes=90))],
+        # New head pushed after Greptile's comment edit, but with an OLD
+        # committer.date (45min ago) — a date compare would wrongly suppress.
+        "raw_pr": {"head": {"sha": "f00d5678"}, "created_at": _iso_ago(minutes=180)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=45))],
+        "bot_reaction_count": 0,
+    }
+    status = _run_helper("status", fixture)
+    assert (
+        status.stdout.strip() == "needs-re-review"
+    ), f"New head must not be masked by comment timestamp, got: {status.stdout.strip()}"
+
+
+def test_marker_trigger_without_response_does_not_suppress():
+    """Marker matches the current head but Greptile's comment was last updated
+    BEFORE our trigger (no response yet) → not proof of processing → the
+    SHA-mismatch path must still report re-review needed (downstream in-flight
+    guards handle pacing)."""
+    fixture = {
+        "pr_number": 1249,
+        "raw_comments": [
+            # Greptile comment last updated 50min ago — BEFORE our 30min-ago trigger
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=90), updated_at=_iso_ago(minutes=50)
+            ),
+            _make_trigger_comment(
+                "test-user", _iso_ago(minutes=30), head_sha="beef1234"
+            ),
+        ],
+        "raw_reviews": [_make_greptile_review("0abc1234", _iso_ago(minutes=90))],
+        "raw_pr": {"head": {"sha": "beef1234"}, "created_at": _iso_ago(minutes=180)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=60))],
+        "bot_reaction_count": 0,
+    }
+    status = _run_helper("status", fixture)
+    assert (
+        status.stdout.strip() == "needs-re-review"
+    ), f"Unanswered trigger must not suppress, got: {status.stdout.strip()}"
+
+
+def test_trigger_embeds_head_sha_marker():
+    """A posted trigger comment must embed the current head SHA so future
+    _needs_re_review calls can match in-place responses to this exact head."""
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 780,
+        "raw_comments": [
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at
+            ),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"head": {"sha": "beef1234"}, "created_at": _iso_ago(minutes=120)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Re-triggered successfully" in result.stdout
+    assert "@greptileai review" in gh_log
+    assert (
+        "greptile-helper head-sha: beef1234" in gh_log
+    ), f"Trigger body must embed the head SHA marker. log: {gh_log}"
 
 
 def test_no_pr_review_object_falls_back_to_date_heuristic():
