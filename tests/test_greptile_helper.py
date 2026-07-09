@@ -980,3 +980,63 @@ def test_local_timestamp_from_previous_cycle_does_not_block():
     assert (
         status.stdout.strip() != "in-progress"
     ), f"Pre-review local TS should not block re-review, got: {status.stdout.strip()}"
+
+
+def test_stale_unacked_trigger_no_new_commits_does_not_retrigger():
+    """Regression for gptme-contrib#1246 spam: old unacked trigger + no new commits
+    since the trigger + SHA mismatch must NOT re-trigger.
+
+    Before the stale-bypass fix, a 'stale' (unacked) trigger behaved the same as
+    'stale-acked' and bypassed the no-new-commit guard, causing repeated @greptileai
+    review comments every 15+ min with no new pushes.
+
+    After the fix: 'stale' (never acked by Greptile) keeps the no-new-commit guard
+    active. The status command must report 'already-reviewed' (treated as up-to-date)
+    and check/trigger must NOT re-trigger.
+
+    Timeline:
+      R1 = 90min ago  Greptile reviews at OLDSHA (formal PR review)
+      C1 = 35min ago  New commit pushed (HEAD = NEWSHA, SHA mismatch vs R1)
+      T1 = 30min ago  We trigger re-review; Greptile never acks (no bot_reaction)
+      Now:            No commits since T1 → stale unacked trigger; no-new-commit guard fires
+    """
+    fixture = {
+        "pr_number": 1246,
+        "raw_comments": [
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=90), updated_at=_iso_ago(minutes=90)
+            ),
+            # Trigger 30min ago, NOT acked by Greptile (bot_reaction_count=0) → stale
+            _make_trigger_comment("test-user", _iso_ago(minutes=30)),
+        ],
+        # Formal review on OLDSHA; current head is NEWSHA → SHA mismatch
+        "raw_reviews": [_make_greptile_review("OLDSHA", _iso_ago(minutes=90))],
+        "raw_pr": {"head": {"sha": "NEWSHA"}, "created_at": _iso_ago(minutes=180)},
+        # Commit at 35min ago (BEFORE our 30min-ago trigger) → no new commits since trigger
+        "raw_commits": [_make_commit(_iso_ago(minutes=35))],
+        "bot_reaction_count": 0,  # Never acked → "stale" (not "stale-acked")
+    }
+
+    # status: no new commits since stale trigger → treated as up-to-date
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "already-reviewed", (
+        f"Stale unacked trigger + no new commits must report already-reviewed "
+        f"(not spam-retrigger). Got: {status.stdout.strip()!r}"
+    )
+
+    # check: must block (exit 2 = already-reviewed / nothing new to review)
+    result = _run_helper("check", fixture)
+    assert result.returncode == 2, (
+        f"check must block re-trigger (exit 2) when stale unacked + no new commits. "
+        f"stderr: {result.stderr}"
+    )
+
+    # trigger: must NOT post a new comment
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert (
+        result.returncode == 0
+    ), f"trigger must exit 0 (skipped), stderr: {result.stderr}"
+    assert not gh_log, (
+        f"trigger must NOT post @greptileai review comment on stale+no-new-commits. "
+        f"Got log: {gh_log!r}"
+    )
