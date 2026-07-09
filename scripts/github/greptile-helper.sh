@@ -219,9 +219,29 @@ _needs_re_review() {
     if [ -n "$reviewed_sha" ]; then
         head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || head_sha=""
         if [ -n "$head_sha" ]; then
-            # Re-review needed iff Greptile's last review was on a different commit.
-            [ "$reviewed_sha" != "$head_sha" ]
-            return
+            if [ "$reviewed_sha" = "$head_sha" ]; then
+                return 1  # Formal PR review is on the current head — no re-review needed.
+            fi
+            # SHA mismatch: Greptile's formal PR review is on a stale commit. However,
+            # Greptile often responds to re-review triggers via in-place issue comment
+            # update rather than a new formal PR review. If the issue comment was updated
+            # AFTER the current HEAD commit date, Greptile has already processed our trigger
+            # for this commit — suppress to avoid spam.
+            # Root cause of #1246 spam (3 triggers in 2.5h, 2026-07-09): SHA mismatch kept
+            # returning "re-review needed" indefinitely, while in-place comment updates
+            # advanced review_cutoff past the in-cycle trigger, causing
+            # _no_new_commit_since_our_last_trigger to fail open on every PM cycle.
+            local _sha_info _sha_reviewed_at _sha_head_commit_date
+            _sha_info=$(_greptile_review_info) || _sha_info=""
+            _sha_reviewed_at=$(echo "$_sha_info" | _json_field "reviewed_at") || _sha_reviewed_at=""
+            if [ -n "$_sha_reviewed_at" ] && [ "$_sha_reviewed_at" != "null" ]; then
+                _sha_head_commit_date=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" 2>/dev/null \
+                    | jq -rs '[.[][] | .commit.committer.date] | sort | last // ""' 2>/dev/null) || _sha_head_commit_date=""
+                if [ -n "$_sha_head_commit_date" ] && _timestamp_gt "$_sha_reviewed_at" "$_sha_head_commit_date" 2>/dev/null; then
+                    return 1  # Issue comment updated after HEAD commit — Greptile responded, no re-trigger.
+                fi
+            fi
+            return 0  # Re-review needed: formal review is stale and no recent issue-comment response.
         fi
     fi
 
