@@ -275,14 +275,14 @@ def test_check_blocks_recently_acknowledged_trigger():
 
 
 def test_check_retries_acknowledged_trigger_after_timeout():
-    """Stale trigger (> 20min, bot ack, no review) → still awaiting-initial-review; check skips."""
+    """Stale-acked trigger (> 2h ACK_GRACE_SECONDS, bot ack, no review) → still awaiting-initial-review; check skips."""
     fixture = {
         "pr_number": 123,
         "raw_comments": [
-            _make_trigger_comment("test-user", _iso_ago(minutes=25)),
+            _make_trigger_comment("test-user", _iso_ago(minutes=130)),
         ],
         "raw_commits": [],
-        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "raw_pr": {"created_at": _iso_ago(minutes=200)},
         "bot_reaction_count": 1,
     }
     result = _run_helper("check", fixture)
@@ -688,10 +688,12 @@ def test_trigger_writes_local_timestamp_on_success():
         "pr_number": 555,
         "raw_comments": [
             _make_greptile_comment(3, reviewed_at=reviewed_at),
-            _make_trigger_comment("test-user", _iso_ago(minutes=45)),
+            # trigger > ACK_GRACE_SECONDS (7200s = 120min) old + acked = stale-acked
+            # → stale-acked bypasses no-new-commit guard, so trigger fires
+            _make_trigger_comment("test-user", _iso_ago(minutes=130)),
         ],
         "raw_commits": [_make_commit(_iso_ago(minutes=10))],
-        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "raw_pr": {"created_at": _iso_ago(minutes=200)},
         "bot_reaction_count": 1,
     }
     result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
