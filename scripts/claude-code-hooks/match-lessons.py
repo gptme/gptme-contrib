@@ -640,7 +640,7 @@ def filter_by_session_category(
     filtered = []
     for lesson in lessons:
         cats = lesson.get("session_categories") or []
-        if not cats or category in cats:
+        if not cats or category in {c.lower() for c in cats}:
             filtered.append(lesson)
     return filtered
 

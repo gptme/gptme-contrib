@@ -523,6 +523,23 @@ def test_filter_by_session_category_keeps_matching(hook, tmp_path):
     assert len(dropped) == 0
 
 
+def test_filter_by_session_category_case_insensitive(hook, tmp_path):
+    """YAML session_categories are matched case-insensitively against the detected (lowercase) category."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "code-only.md").write_text(
+        "---\nmatch:\n  keywords:\n    - code\n  session_categories:\n    - Code\nstatus: active\n---\n# Code Only Mixed Case\n\nContent.\n"
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    # detect_session_category always returns lowercase; YAML "Code" must still match
+    kept = hook.filter_by_session_category(lessons, "code")
+    assert (
+        len(kept) == 1
+    ), "Mixed-case YAML category should match lowercase env-var category"
+    dropped = hook.filter_by_session_category(lessons, "cleanup")
+    assert len(dropped) == 0
+
+
 def test_filter_by_session_category_none_keeps_all(hook, tmp_path):
     """Unknown category (None) keeps all lessons unchanged."""
     lessons_dir = tmp_path / "lessons"
