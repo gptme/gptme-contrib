@@ -194,6 +194,22 @@ _has_greptile_review() {
     echo "$info" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('has_review') else 1)" 2>/dev/null
 }
 
+# --- Helper: extract the head-SHA marker from a trigger comment body ---
+# Trigger comments embed the PR head SHA they were posted for (see trigger command):
+#   @greptileai review\n\n<!-- greptile-helper head-sha: <sha> -->
+# Reads a comment JSON object on stdin, prints the marker SHA or "".
+_marker_sha_from_body() {
+    # Reset EXIT trap — runs in a $() subshell that inherits the parent's trap.
+    trap - EXIT
+    jq -r '.body // "" | [capture("greptile-helper head-sha: (?<s>[0-9a-fA-F]{7,40})")] | if length == 0 then "" else .[0].s end' 2>/dev/null
+}
+
+# --- Helper: our most recent @greptileai trigger comment (JSON object or {}) ---
+_our_last_trigger_json() {
+    trap - EXIT
+    _issue_comments_json | jq "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | sort_by(.created_at) | last // {}" 2>/dev/null || echo "{}"
+}
+
 # --- Helper: check if re-review is needed (new commits since latest review) ---
 # Returns 0 = re-review needed, 1 = no re-review needed
 #
@@ -204,6 +220,9 @@ _has_greptile_review() {
 # the review but the date compare skipped the re-trigger, leaving a hardened PR
 # stuck on a stale low score. A SHA mismatch is unambiguous and loop-safe: once
 # Greptile reviews the head, reviewed_sha == head_sha → it stops re-triggering.
+# On SHA mismatch, one more server-side check runs before declaring "re-review
+# needed": Greptile often responds to triggers via in-place issue-comment update
+# (never advancing the formal review's commit_id) — see the marker check inline.
 #
 # FALLBACK (date-based): when Greptile posted only an issue comment and no PR
 # review object carries a commit_id, fall back to the original committer.date
@@ -219,9 +238,42 @@ _needs_re_review() {
     if [ -n "$reviewed_sha" ]; then
         head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || head_sha=""
         if [ -n "$head_sha" ]; then
-            # Re-review needed iff Greptile's last review was on a different commit.
-            [ "$reviewed_sha" != "$head_sha" ]
-            return
+            if [ "$reviewed_sha" = "$head_sha" ]; then
+                return 1  # Formal PR review is on the current head — no re-review needed.
+            fi
+            # SHA mismatch: Greptile's formal PR review is on a stale commit. However,
+            # Greptile often responds to re-review triggers via in-place issue comment
+            # update rather than a new formal PR review, so the formal review's commit_id
+            # can stay stale forever while Greptile is in fact up to date.
+            # Root cause of #1246 spam (3 triggers in 2.5h, 2026-07-09): SHA mismatch kept
+            # returning "re-review needed" indefinitely, while in-place comment updates
+            # advanced review_cutoff past the in-cycle trigger, causing
+            # _no_new_commit_since_our_last_trigger to fail open on every PM cycle.
+            #
+            # Detection uses server-side data ONLY: our trigger comments embed the head
+            # SHA they were posted for (see trigger command). If our latest trigger was
+            # for the CURRENT head and Greptile's issue comment was updated after that
+            # trigger, Greptile already processed this head — suppress the re-trigger.
+            # Deliberately NOT a committer.date comparison: commit dates lag push time
+            # (written locally, pushed later — gptme#2987), so a date compare masks
+            # genuinely-new heads (Greptile P1 on #1247). SHA equality plus comment
+            # timestamps are both server-side and unambiguous.
+            # Legacy triggers without the marker fall through to "re-review needed"
+            # (pre-#1247 behavior); the next marker-carrying trigger self-heals the PR.
+            local _last_trigger _trig_sha _trig_created _sha_info _sha_reviewed_at
+            _last_trigger=$(_our_last_trigger_json)
+            _trig_sha=$(echo "$_last_trigger" | _marker_sha_from_body) || _trig_sha=""
+            if [ -n "$_trig_sha" ] && [ "$_trig_sha" = "$head_sha" ]; then
+                _trig_created=$(echo "$_last_trigger" | _json_field "created_at") || _trig_created=""
+                _sha_info=$(_greptile_review_info) || _sha_info=""
+                _sha_reviewed_at=$(echo "$_sha_info" | _json_field "reviewed_at") || _sha_reviewed_at=""
+                if [ -n "$_trig_created" ] \
+                    && [ -n "$_sha_reviewed_at" ] && [ "$_sha_reviewed_at" != "null" ] \
+                    && _timestamp_gt "$_sha_reviewed_at" "$_trig_created" 2>/dev/null; then
+                    return 1  # Greptile responded (in-place) after our trigger for this exact head.
+                fi
+            fi
+            return 0  # Re-review needed: formal review is stale, no confirmed response for this head.
         fi
     fi
 
@@ -441,9 +493,21 @@ trigger)
                 exit 0
             fi
             echo "  [greptile] Re-triggering @greptileai review on $REPO#$PR_NUMBER (new commits landed after the last review)..."
+            # Embed the current head SHA so _needs_re_review can later tell whether an
+            # in-place Greptile comment update was a response to a trigger for THIS head
+            # (SHA equality instead of committer.date heuristics — see gptme#2987).
+            # If the head can't be read, post a plain trigger: the marker is an
+            # optimization, and _needs_re_review treats marker-less triggers as legacy.
+            _head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || _head_sha=""
+            _trigger_body="@greptileai review"
+            if [ -n "$_head_sha" ]; then
+                _trigger_body="$_trigger_body
+
+<!-- greptile-helper head-sha: $_head_sha -->"
+            fi
             # Use REST API instead of `gh pr comment` (GraphQL) — REST has a
             # separate 5000/hour quota that's rarely exhausted.
-            if gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="@greptileai review" --silent 2>/dev/null; then
+            if gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
                 # Record trigger timestamp locally — fast-path guard against GitHub API
                 # propagation delay that causes sequential callers to see "no trigger"
                 # and re-trigger. See: 2026-03-19 INCIDENT #5.
