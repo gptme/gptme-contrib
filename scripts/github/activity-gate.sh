@@ -1183,18 +1183,18 @@ for repo in $all_repos; do
     (
         # Cached PR data drives the state-tracked checks.
         pr_data=$(fetch_pr_data "$repo")
-        # Merge-sensitive checks need live status every run, but only for repos
-        # that actually have open author PRs. When the cached lane already shows
-        # no open PRs, a live merge-status fetch can only return the same empty
-        # set, so skip the GraphQL call. On a multi-repo org most repos have zero
-        # open author PRs at any moment, so this removes the dominant idle-time
-        # GraphQL burner without weakening live merge detection for repos that do
-        # have PRs. See tasks/github-graphql-rate-limit-regression.md.
-        if [ "$(printf '%s' "$pr_data" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]; then
-            live_pr_data=$(fetch_live_pr_data "$repo")
-        else
-            live_pr_data="[]"
-        fi
+        # Always fetch live PR data for merge-sensitive checks (conflicts,
+        # merge-ready, review state). The live lane uses GH_CACHE_TTL_LIVE_PR
+        # (default 180s) to cap GraphQL calls to ~20/hr per repo.
+        #
+        # Previously this was gated on pr_data.length > 0: when the 480s cache
+        # showed [], we hardcoded live_pr_data=[] instead of calling
+        # fetch_live_pr_data. That assumption was wrong: a PR opened after the
+        # last 480s cache write is invisible for up to 480s, even though the
+        # 180s live cache would re-fetch and find it. Removing the gate fixes
+        # the fresh-PR detection gap (contrib#1259 sat at CLEAN+MERGEABLE+5/5
+        # for ~1h because the stale [] cache skipped the live fetch).
+        live_pr_data=$(fetch_live_pr_data "$repo")
         repo_items=""
 
         items=$(check_pr_updates "$repo" "$pr_data" 2>/dev/null || true)
