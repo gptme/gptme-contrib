@@ -104,6 +104,9 @@ def _run(args: list[str]) -> str:
 
 
 def _parse_iso(value: str) -> datetime:
+    # Replace 'Z' suffix with '+00:00' for fromisoformat compatibility
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
