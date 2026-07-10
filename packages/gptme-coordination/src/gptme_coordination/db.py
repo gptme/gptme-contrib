@@ -88,7 +88,7 @@ def resolve_coordination_db_path(
     Priority order:
     1. ``COORDINATION_DB`` environment variable
     2. Explicit ``repo_root`` from the caller
-    3. Workspace env vars: ``BOB_WORKSPACE``, ``AGENT_WORKSPACE``, ``WORKSPACE``
+    3. Workspace env vars: ``BOB_WORKSPACE``, ``AGENT_WORKSPACE``
     4. Git root discovered from ``cwd`` (or the current directory)
     5. ``cwd``-relative fallback outside a git repo
 
@@ -97,6 +97,10 @@ def resolve_coordination_db_path(
     inadvertently write state into the submodule directory instead of the brain
     repo.  Any agent that sets ``BOB_WORKSPACE`` or ``AGENT_WORKSPACE`` gets the
     correct DB path regardless of its working directory.
+
+    Note: the generic ``WORKSPACE`` variable is intentionally excluded — it is
+    set by GitHub Actions and many CI systems to the checkout directory, which
+    would silently redirect coordination state in unrelated environments.
     """
 
     environment = os.environ if env is None else env
@@ -109,9 +113,12 @@ def resolve_coordination_db_path(
     # Check agent workspace env vars before running git rev-parse.  A script
     # running with CWD inside a submodule (e.g. gptme-contrib) would otherwise
     # resolve the git root to the submodule root and write state there.
-    for var in ("BOB_WORKSPACE", "AGENT_WORKSPACE", "WORKSPACE"):
+    # Only accept absolute paths to guard against relative or tilde values.
+    for var in ("BOB_WORKSPACE", "AGENT_WORKSPACE"):
         if workspace := environment.get(var):
-            return Path(workspace) / DEFAULT_DB_PATH
+            p = Path(workspace)
+            if p.is_absolute():
+                return p / DEFAULT_DB_PATH
 
     base_dir = Path.cwd() if cwd is None else Path(cwd)
     try:

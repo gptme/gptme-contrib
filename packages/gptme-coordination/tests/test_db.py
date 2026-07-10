@@ -85,8 +85,8 @@ class TestResolveCoordinationDbPath:
             result = resolve_coordination_db_path(cwd=submodule, env=env)
             assert result == brain_dir / "state/coordination/coord.db"
 
-    def test_workspace_beats_git_root(self):
-        """WORKSPACE takes priority over git root discovery."""
+    def test_workspace_env_var_ignored(self):
+        """Generic WORKSPACE env var (e.g. from GitHub Actions) is ignored."""
         with tempfile.TemporaryDirectory() as tmp:
             brain_dir = Path(tmp) / "brain"
             brain_dir.mkdir()
@@ -95,7 +95,17 @@ class TestResolveCoordinationDbPath:
             subprocess.run(["git", "init"], cwd=submodule, capture_output=True)
             env = {"WORKSPACE": str(brain_dir)}
             result = resolve_coordination_db_path(cwd=submodule, env=env)
-            assert result == brain_dir / "state/coordination/coord.db"
+            # WORKSPACE is intentionally not consulted — should fall back to git root
+            assert result == submodule / "state/coordination/coord.db"
+
+    def test_relative_workspace_path_ignored(self):
+        """Relative BOB_WORKSPACE paths are skipped (absolute paths only)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = resolve_coordination_db_path(
+                cwd=tmp, env={"BOB_WORKSPACE": "relative/path"}
+            )
+            # relative path is ignored — falls back to git root or cwd
+            assert result == Path(tmp) / "state/coordination/coord.db"
 
     def test_bob_workspace_priority_over_agent_workspace(self):
         """BOB_WORKSPACE takes priority over AGENT_WORKSPACE."""
