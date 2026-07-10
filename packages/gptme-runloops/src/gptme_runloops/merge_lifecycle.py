@@ -101,13 +101,23 @@ class MergeLifecycleAction(Enum):
 class InstructionKind(Enum):
     """Which fix-instruction template to inject into the session prompt.
 
-    The template *bodies* (lib.sh:423-517 heredocs) are deliberately NOT
-    ported here — that is step 2 of the migration (prompt-template
-    consolidation). This enum is the seam between the two steps.
+    This enum is the seam between the decision port (step 1, contrib#1261)
+    and the prompt-template port (step 2): decisions name a kind, and
+    :func:`gptme_runloops.prompt_templates.render_instruction` renders its
+    body.
+
+    The first two members are produced by the merge-lifecycle decisions in
+    this module. The ``GREPTILE_NEEDS_*`` members correspond to the
+    ``build_item_investigate`` arms keyed by the poller's
+    ``greptile_needs_fix`` / ``greptile_needs_improvement`` item types —
+    rendered by the same template module but selected by item type, not by
+    a decision here.
     """
 
     LOCAL_GREPTILE_FIX = "local_greptile_fix"  # lib.sh:425-470
     CROSS_REPO_GREPTILE_REFRESH = "cross_repo_greptile_refresh"  # lib.sh:474-517
+    GREPTILE_NEEDS_FIX = "greptile_needs_fix"  # lib.sh:886-912
+    GREPTILE_NEEDS_IMPROVEMENT = "greptile_needs_improvement"  # lib.sh:913-932
 
 
 class SelfMergeBlockClass(Enum):

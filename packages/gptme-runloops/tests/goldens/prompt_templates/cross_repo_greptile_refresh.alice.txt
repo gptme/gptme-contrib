@@ -1,0 +1,40 @@
+### Also: Address Greptile Review Findings (cross-repo)
+
+This PR (ErikBjare/alice#7) has a Greptile review that is stale or below
+the score floor. The confidence score is driven by the **summary-comment body**,
+not the inline P2 nits — fixing only inline threads leaves the score unchanged.
+
+**STEP 1 — Read the score-DRIVING findings in the summary comment (do this FIRST):**
+```bash
+# The Greptile SUMMARY comment is an ISSUE comment containing "Confidence Score",
+# the confirmed-errors prose, and the per-file "Important Files Changed" notes.
+gh api repos/ErikBjare/alice/issues/7/comments --paginate \
+  --jq '.[] | select(.user.login | test("greptile"; "i"))
+            | select(.body | test("Confidence Score"; "i")) | .body'
+```
+
+**STEP 2 — Read the inline review threads (usually P2 nits, a SUBSET):**
+```bash
+gh api repos/ErikBjare/alice/pulls/7/comments \
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body}'
+```
+
+**Fix the substantive errors from the summary body FIRST**, then the inline
+findings (P1/P2/P3). After fixing AND pushing commits, re-trigger Greptile:
+```bash
+# ONLY call this AFTER pushing fix commits — NEVER trigger without actual fixes
+bash /srv/agents/alice/workspace/scripts/github/greptile-helper.sh trigger ErikBjare/alice 7
+```
+Then run `POLL_BUDGET_SEC=1800 bash /srv/agents/alice/workspace/scripts/github/pr-address-wait-and-merge.sh --repo ErikBjare/alice 7` to wait for the re-review.
+- Exit 0: merged — done
+- Exit 2: new findings — address them, push, reply, re-run once more
+- Exit 3: poll budget exhausted — stop; next monitoring cycle will continue
+
+⚠️ **If you cannot fix the issues this session, do NOT re-trigger Greptile.**
+**NEVER post raw `@greptileai review` directly — ALWAYS use the helper script (has spam guards).**
+Multiple sessions may see the same state; the helper's flock+age guards prevent concurrent spam.
+
+**Do NOT loop to chase 5/5.** Address the summary-body findings, re-review
+**once**, and if the score still does not clear the floor after the findings are
+genuinely addressed, **stop and leave it for human review** (the self-merge gate
+correctly blocks below-floor merges; don't auto-merge below floor).
