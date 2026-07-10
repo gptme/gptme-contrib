@@ -271,13 +271,13 @@ bash {greptile_helper} trigger {repo} {number}
 
 _NEEDS_FIX_SECTIONS = {
     "title": "Greptile Score Fix Needed (score < 4/5)",
-    # NOTE(parity): the jq object in both investigate arms is malformed —
-    # `body: (.body | split("\n")[0:5] | join(" ")}` never closes the `(`
-    # opened after `body:`, so jq fails at runtime with a syntax error.
-    # The sibling pr_update arm (lib.sh:688) has the closing paren, which
-    # is the drift tell. Preserved byte-for-byte; fixing the jq is a
-    # switchover-time decision. (`\n` inside split() is the literal
-    # two-character sequence the bash `\\n` renders — correct jq, kept.)
+    # NOTE(parity): the jq object in both investigate arms was originally
+    # malformed — `body: (.body | split("\n")[0:5] | join(" ")}` never
+    # closed the `(` opened after `body:` (a runtime jq syntax error the
+    # sibling pr_update arm, lib.sh:688, never had). Fixed in bash by
+    # ErikBjare/bob#1067; this template and the goldens mirror the fixed
+    # form. (`\n` inside split() is the literal two-character sequence the
+    # bash `\\n` renders — correct jq, kept.)
     "read_commands": (
         "# Read the PR and full Greptile review comments\n"
         "gh pr view {number} --repo {repo}\n"
@@ -285,7 +285,7 @@ _NEEDS_FIX_SECTIONS = {
         "\n"
         "# Get Greptile's review comments (the ones that need fixing)\n"
         "gh api repos/{repo}/pulls/{number}/comments \\\n"
-        '  --jq \'.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\\n")[0:5] | join(" ")}\'\n'
+        '  --jq \'.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\\n")[0:5] | join(" "))}\'\n'
         "\n"
         "# Get Greptile's summary review comment (contains score like 3/5 or 4/5)\n"
         "gh api repos/{repo}/issues/{number}/comments \\\n"
@@ -309,13 +309,13 @@ _NEEDS_FIX_SECTIONS = {
 
 _NEEDS_IMPROVEMENT_SECTIONS = {
     "title": "Greptile Score Improvement (score = 4/5)",
-    # NOTE(parity): same malformed jq as greptile_needs_fix (missing `)`),
-    # with [0:3] instead of [0:5]. Preserved.
+    # NOTE(parity): same jq as greptile_needs_fix (see the fix note there;
+    # bash fixed in ErikBjare/bob#1067), with [0:3] instead of [0:5].
     "read_commands": (
         "# Read the PR and Greptile review comments\n"
         "gh pr view {number} --repo {repo}\n"
         "gh api repos/{repo}/pulls/{number}/comments \\\n"
-        '  --jq \'.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\\n")[0:3] | join(" ")}\''
+        '  --jq \'.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\\n")[0:3] | join(" "))}\''
     ),
     "assessment": (
         "This PR scored 4/5 — minor issues from Greptile. Address them if quick; **leave it untouched if trivial** (do NOT re-trigger just because you looked at it).\n"

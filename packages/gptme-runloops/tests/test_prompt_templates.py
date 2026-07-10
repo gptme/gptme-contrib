@@ -8,6 +8,11 @@ ca7aa17a2899dbe676fba7074fc5c4dd61d25fe4 (lines 425-470, 474-517, 886-912,
 match them byte-for-byte — this is what lets the later brain-side switchover
 PR prove "same prompts out".
 
+The two investigate goldens were re-captured from
+c7f4ac657549d3254b716f4d8590617dcd853dba (ErikBjare/bob#1067), which fixed
+the unbalanced-paren jq malformation in both ``build_item_investigate``
+greptile arms.
+
 Regenerate the goldens from a checkout of the brain repo with::
 
     source scripts/github/project-monitoring-lib.sh
@@ -164,17 +169,18 @@ def test_number_accepts_str_and_int() -> None:
     [InstructionKind.GREPTILE_NEEDS_FIX, InstructionKind.GREPTILE_NEEDS_IMPROVEMENT],
     ids=lambda k: k.value,
 )
-def test_investigate_jq_malformation_is_preserved(kind: InstructionKind) -> None:
-    # NOTE(parity): the bash investigate arms ship a jq object whose
-    # `body: (...` group is never closed — a runtime jq syntax error the
-    # sibling pr_update arm does not have. The port preserves it; this test
-    # pins the quirk so an accidental "fix" fails loudly (fixing it is a
-    # switchover-time decision).
+def test_investigate_jq_is_well_formed(kind: InstructionKind) -> None:
+    # NOTE(parity): the bash investigate arms originally shipped a jq object
+    # whose `body: (...` group was never closed — a runtime jq syntax error
+    # the sibling pr_update arm did not have. The port preserved the quirk
+    # (pinned here as test_investigate_jq_malformation_is_preserved) until
+    # the bash was fixed in ErikBjare/bob#1067; both sides now render
+    # balanced, parseable jq and this test pins the FIXED form.
     out = render_instruction(kind, CONTEXTS["bob"])
     jq_line = next(
         line for line in out.splitlines() if "split(" in line and "join(" in line
     )
-    assert jq_line.count("(") == jq_line.count(")") + 1
+    assert jq_line.count("(") == jq_line.count(")")
 
 
 def test_step2_qualifier_drift_is_preserved() -> None:
