@@ -923,9 +923,11 @@ has_maintainer_waiting_comment() {
 # session can't merge and has nothing else to do), so merge_ready should be
 # suppressed there and handed to a maintainer instead.
 #
-# FAIL-OPEN: on any API error or unexpected output we return 0 (assume mergeable)
-# so a transient gh failure never silently hides a genuinely mergeable PR. The
-# cost is one bounded gh call per repo per cycle (cached by the caller).
+# FAIL-OPEN: on any API error or unexpected output we return 0 (assume the bot
+# can merge), so an API failure doesn't silently suppress a genuinely mergeable
+# PR. Stderr is swallowed intentionally — API blips are transient, and noise on
+# every cycle is worse than a missed permission downgrade (the next cycle retries).
+# Cost: one bounded gh call per repo per cycle (cached by the caller).
 bot_can_merge() {
     local repo=$1
     local can
@@ -1059,10 +1061,13 @@ check_merge_ready() {
         fi
         if [ "$bot_lacks_merge" = "1" ]; then
             # Only post from a real (jsonl) dispatch pass, not a markdown preview.
+            # Only write the state file when the comment is actually posted: in
+            # markdown mode we skip without writing, so the next jsonl run still
+            # sees this PR as fresh and can post the maintainer-waiting comment.
             if [ "$FORMAT" = "jsonl" ]; then
                 post_maintainer_waiting_comment "$repo" "$pr_number" "$greptile_score"
+                echo "${head_sha}:${now}" > "$state_file"
             fi
-            echo "${head_sha}:${now}" > "$state_file"
             continue
         fi
 

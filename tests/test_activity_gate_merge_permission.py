@@ -93,7 +93,12 @@ sys.exit(0)
 
 
 def _run_gate(
-    tmp: Path, state_dir: Path, *, can_merge: str, marker: Path
+    tmp: Path,
+    state_dir: Path,
+    *,
+    can_merge: str,
+    marker: Path,
+    fmt: str = "jsonl",
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -119,7 +124,7 @@ def _run_gate(
             "--state-dir",
             str(state_dir),
             "--format",
-            "jsonl",
+            fmt,
         ],
         capture_output=True,
         text=True,
@@ -154,3 +159,41 @@ def test_mergeable_repo_still_emits_merge_ready() -> None:
         assert result.returncode in (0, 1), result.stderr
         assert "merge_ready" in result.stdout, result.stdout
         assert not marker.exists(), "no maintainer comment should be posted"
+
+
+def test_markdown_mode_does_not_write_state_file() -> None:
+    """In markdown preview mode, pull-only repos must NOT write the state file.
+
+    If the state file were written during a markdown pass, the subsequent jsonl
+    dispatch pass (the one that actually posts comments and emits items) would
+    see the state file within its 12 h cooldown window and skip the PR entirely
+    — the maintainer-waiting comment would never be posted.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        marker = tmp / "comment_marker"
+
+        # First pass: markdown mode (preview) — pull-only repo
+        result = _run_gate(
+            tmp, state_dir, can_merge="false", marker=marker, fmt="markdown"
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert "merge_ready" not in result.stdout
+
+        # No comment should be posted in markdown mode
+        assert not marker.exists(), "no comment should be posted in markdown mode"
+
+        # No state file should be written — the next jsonl pass must still fire
+        state_files = list(state_dir.glob("*-merge-ready.state"))
+        assert not state_files, f"state file written during markdown pass; next jsonl run would skip the PR: {state_files}"
+
+        # Second pass: jsonl mode — NOW the comment should be posted
+        result2 = _run_gate(
+            tmp, state_dir, can_merge="false", marker=marker, fmt="jsonl"
+        )
+        assert result2.returncode in (0, 1), result2.stderr
+        assert "merge_ready" not in result2.stdout
+        assert marker.exists(), "jsonl run must post the maintainer-waiting comment"
+        assert marker.read_text().count("comment:") == 1, marker.read_text()
