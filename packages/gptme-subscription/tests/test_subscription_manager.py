@@ -255,6 +255,26 @@ def test_evaluate_does_not_record_observation_for_stale_usage(
     ), "record_sub_reset_time must not be called when usage._stale=True"
 
 
+def test_evaluate_ignores_stale_sonnet_window(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    usage = {
+        "seven_day": {"utilization": 0.42, "resets_in_seconds": 3 * 24 * 3600},
+        "five_hour": {"utilization": 0.10, "resets_in_seconds": 3 * 3600},
+        "seven_day_sonnet": {
+            "utilization": 1.0,
+            "resets_in_seconds": 357 * 24 * 3600,
+            "_stale": True,
+            "_stale_source": "fallback_cache",
+        },
+    }
+
+    decision = sm.evaluate(usage, "bob")
+
+    assert decision.action == "stay"
+    assert decision.target == "bob"
+    assert "Sonnet weekly" not in decision.reason
+
+
 def test_evaluate_skips_stale_fallback_picks_fresh(tmp_path: Path) -> None:
     sm = _make_manager(tmp_path)
     # alice is stale (17 days), erik is fresh

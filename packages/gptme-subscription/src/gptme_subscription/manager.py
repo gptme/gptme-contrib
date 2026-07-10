@@ -607,11 +607,21 @@ class SubscriptionManager:
             d.reason = "could not check usage"
             return d
 
-        weekly = usage.get("seven_day", {}).get("utilization", 0)
-        five_hour = usage.get("five_hour", {}).get("utilization", 0)
-        five_hour_resets_in = usage.get("five_hour", {}).get("resets_in_seconds", 0)
-        sonnet_weekly = usage.get("seven_day_sonnet", {}).get("utilization", 0)
-        sonnet_resets_in = usage.get("seven_day_sonnet", {}).get("resets_in_seconds", 0)
+        def _usage_window(key: str) -> dict[str, Any]:
+            value = usage.get(key)
+            if isinstance(value, dict) and not value.get("_stale"):
+                return value
+            return {}
+
+        weekly_window = _usage_window("seven_day")
+        five_hour_window = _usage_window("five_hour")
+        sonnet_window = _usage_window("seven_day_sonnet")
+
+        weekly = weekly_window.get("utilization", 0)
+        five_hour = five_hour_window.get("utilization", 0)
+        five_hour_resets_in = five_hour_window.get("resets_in_seconds", 0)
+        sonnet_weekly = sonnet_window.get("utilization", 0)
+        sonnet_resets_in = sonnet_window.get("resets_in_seconds", 0)
 
         d.weekly_utilization = weekly
         d.five_hour_utilization = five_hour
@@ -623,7 +633,7 @@ class SubscriptionManager:
         # for the primary slot — downstream readers (Bob's vitals subscription
         # pacing, ``subscription-usage-history.py``) then can't pick up the
         # primary's weekly_utilization between probes.
-        _weekly_resets_in = usage.get("seven_day", {}).get("resets_in_seconds")
+        _weekly_resets_in = weekly_window.get("resets_in_seconds")
         if (
             active
             and isinstance(_weekly_resets_in, int | float)
@@ -705,7 +715,7 @@ class SubscriptionManager:
                     d.hold_until = _hold_until.isoformat()
                     return d
 
-            _resets_in_weekly = usage.get("seven_day", {}).get("resets_in_seconds", 0)
+            _resets_in_weekly = weekly_window.get("resets_in_seconds", 0)
             if (
                 not _fr_blocked
                 and isinstance(_resets_in_weekly, int | float)
