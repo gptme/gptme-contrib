@@ -38,13 +38,15 @@ class TestResolveCoordinationDbPath:
             # Use a subdirectory as cwd so git-discovery result differs from fallback.
             subdir = git_root / "sub"
             subdir.mkdir()
-            result = resolve_coordination_db_path(cwd=subdir)
+            # Pass empty env so workspace env vars don't shadow git-root discovery.
+            result = resolve_coordination_db_path(cwd=subdir, env={})
             assert result == git_root / "state/coordination/coord.db"
 
     def test_fallback_when_not_in_git_repo(self):
         """Falls back to cwd-relative path when outside a git repo."""
         with tempfile.TemporaryDirectory() as tmp:
-            result = resolve_coordination_db_path(cwd=tmp)
+            # Pass empty env so workspace env vars don't shadow the cwd fallback.
+            result = resolve_coordination_db_path(cwd=tmp, env={})
             assert result == Path(tmp) / "state/coordination/coord.db"
 
     def test_env_overrides_git_root(self):
@@ -56,6 +58,64 @@ class TestResolveCoordinationDbPath:
             subprocess.run(["git", "init"], cwd=git_root, capture_output=True)
             env = {"COORDINATION_DB": str(custom)}
             result = resolve_coordination_db_path(cwd=git_root, env=env)
+            assert result == custom
+
+    def test_bob_workspace_beats_git_root(self):
+        """BOB_WORKSPACE takes priority over git root discovery."""
+        with tempfile.TemporaryDirectory() as tmp:
+            brain_dir = Path(tmp) / "brain"
+            brain_dir.mkdir()
+            # cwd points at a submodule git root (gptme-contrib equivalent)
+            submodule = Path(tmp) / "gptme-contrib"
+            submodule.mkdir()
+            subprocess.run(["git", "init"], cwd=submodule, capture_output=True)
+            env = {"BOB_WORKSPACE": str(brain_dir)}
+            result = resolve_coordination_db_path(cwd=submodule, env=env)
+            assert result == brain_dir / "state/coordination/coord.db"
+
+    def test_agent_workspace_beats_git_root(self):
+        """AGENT_WORKSPACE takes priority over git root discovery."""
+        with tempfile.TemporaryDirectory() as tmp:
+            brain_dir = Path(tmp) / "brain"
+            brain_dir.mkdir()
+            submodule = Path(tmp) / "gptme-contrib"
+            submodule.mkdir()
+            subprocess.run(["git", "init"], cwd=submodule, capture_output=True)
+            env = {"AGENT_WORKSPACE": str(brain_dir)}
+            result = resolve_coordination_db_path(cwd=submodule, env=env)
+            assert result == brain_dir / "state/coordination/coord.db"
+
+    def test_workspace_beats_git_root(self):
+        """WORKSPACE takes priority over git root discovery."""
+        with tempfile.TemporaryDirectory() as tmp:
+            brain_dir = Path(tmp) / "brain"
+            brain_dir.mkdir()
+            submodule = Path(tmp) / "gptme-contrib"
+            submodule.mkdir()
+            subprocess.run(["git", "init"], cwd=submodule, capture_output=True)
+            env = {"WORKSPACE": str(brain_dir)}
+            result = resolve_coordination_db_path(cwd=submodule, env=env)
+            assert result == brain_dir / "state/coordination/coord.db"
+
+    def test_bob_workspace_priority_over_agent_workspace(self):
+        """BOB_WORKSPACE takes priority over AGENT_WORKSPACE."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bob_dir = Path(tmp) / "bob"
+            agent_dir = Path(tmp) / "agent"
+            bob_dir.mkdir()
+            agent_dir.mkdir()
+            env = {"BOB_WORKSPACE": str(bob_dir), "AGENT_WORKSPACE": str(agent_dir)}
+            result = resolve_coordination_db_path(cwd=tmp, env=env)
+            assert result == bob_dir / "state/coordination/coord.db"
+
+    def test_coordination_db_beats_workspace_vars(self):
+        """COORDINATION_DB still wins even when BOB_WORKSPACE is set."""
+        with tempfile.TemporaryDirectory() as tmp:
+            brain_dir = Path(tmp) / "brain"
+            brain_dir.mkdir()
+            custom = Path(tmp) / "explicit.db"
+            env = {"COORDINATION_DB": str(custom), "BOB_WORKSPACE": str(brain_dir)}
+            result = resolve_coordination_db_path(cwd=tmp, env=env)
             assert result == custom
 
     def test_default_env_defaults_to_os_environ(self):
