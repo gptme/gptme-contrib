@@ -1,0 +1,18 @@
+
+### Greptile Score Improvement (score = 4/5)
+```bash
+# Read the PR and Greptile review comments
+gh pr view 7 --repo ErikBjare/alice
+gh api repos/ErikBjare/alice/pulls/7/comments \
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\n")[0:3] | join(" ")}'
+```
+
+This PR scored 4/5 — minor issues from Greptile. Address them if quick; **leave it untouched if trivial** (do NOT re-trigger just because you looked at it).
+Re-trigger ONLY if you actually pushed fixes:
+```bash
+bash /srv/agents/alice/workspace/scripts/github/greptile-helper.sh trigger ErikBjare/alice 7
+```
+
+⚠️ **Never re-trigger without having pushed at least one fix commit.**
+NEVER post raw `@greptileai review` directly — ALWAYS use the helper script above.
+If you skip fixing (issues are truly trivial or out of scope), leave the PR alone and do NOT re-trigger.

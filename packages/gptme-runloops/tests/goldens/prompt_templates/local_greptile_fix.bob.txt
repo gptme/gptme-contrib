@@ -1,0 +1,42 @@
+### Also: Address Greptile Review Findings
+
+This PR has a Greptile review below the score floor (or unresolved findings).
+The confidence score is driven by the **summary-comment body**, not the inline
+P2 nits. Fixing only inline threads leaves the score unchanged (fake remediation).
+
+**STEP 1 — Read the score-DRIVING findings in the summary comment (do this FIRST):**
+```bash
+# The Greptile SUMMARY comment is an ISSUE comment (not an inline thread). It
+# contains "Confidence Score", the confirmed-errors prose, and the per-file
+# "Important Files Changed" notes — THESE are what move the score. Read them:
+gh api repos/gptme/gptme-contrib/issues/1234/comments --paginate \
+  --jq '.[] | select(.user.login | test("greptile"; "i"))
+            | select(.body | test("Confidence Score"; "i")) | .body'
+```
+
+**STEP 2 — Read the inline review threads (usually just P2 nits, a SUBSET):**
+```bash
+gh api repos/gptme/gptme-contrib/pulls/1234/comments \
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body}'
+```
+
+**Fix the substantive errors from the summary body FIRST**, then the inline
+findings (P1/P2/P3). A fix that only touches inline nits forces an extra
+round-trip and the score does not move.
+
+**After addressing the findings:**
+1. Push fixes and reply to each comment thread individually with the fix SHA
+2. Run `POLL_BUDGET_SEC=1800 bash /home/bob/bob/scripts/github/pr-address-wait-and-merge.sh --repo gptme/gptme-contrib 1234`
+   - Exit 0: merged — done
+   - Exit 2: Greptile re-reviewed and found new issues — read the new unresolved threads, fix them, push, reply, then re-run the command once more
+   - Exit 3: poll budget exhausted without Greptile re-review completing — stop; next monitoring cycle will continue
+
+⚠️ **If you cannot fix the findings, do NOT re-trigger Greptile and do NOT call pr-address-wait-and-merge.sh.**
+NEVER post raw `@greptileai review` comments — the pr-address-wait-and-merge.sh script triggers Greptile internally.
+Only call it AFTER you have actually pushed fix commits.
+
+**Do NOT loop to chase 5/5.** A confidence score is a holistic judgment, not a
+resolved-thread counter — some PRs will not reach 5/5 even after every stated
+finding is genuinely addressed. Address the summary-body findings, re-review
+**once**, and if the score still does not clear the floor, **stop and leave it
+for human review** (the self-merge gate correctly blocks below-floor merges).
