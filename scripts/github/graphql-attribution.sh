@@ -14,16 +14,17 @@
 
 set -euo pipefail
 
-# Derive log dir without subprocess: prefer env var, then WORKSPACE, then script-relative.
+# Derive log dir without subprocess: prefer explicit env var, then agent-specific
+# workspace vars (absolute paths only), then script-relative.
 # BOB_GRAPHQL_LOG_DIR must be set in high-call-rate environments (e.g. PM service) to
 # avoid spawning `git rev-parse --show-toplevel` on every invocation.
+# Note: generic WORKSPACE is intentionally excluded — it is set by GitHub Actions and
+# many CI systems to the checkout root, which would silently misdirect logs.
 if [ -n "${BOB_GRAPHQL_LOG_DIR:-}" ]; then
     LOG_DIR="$BOB_GRAPHQL_LOG_DIR"
-elif [ -n "${WORKSPACE:-}" ]; then
-    LOG_DIR="$WORKSPACE/state"
-elif [ -n "${BOB_WORKSPACE:-}" ]; then
+elif [ -n "${BOB_WORKSPACE:-}" ] && [[ "${BOB_WORKSPACE}" = /* ]]; then
     LOG_DIR="$BOB_WORKSPACE/state"
-elif [ -n "${AGENT_WORKSPACE:-}" ]; then
+elif [ -n "${AGENT_WORKSPACE:-}" ] && [[ "${AGENT_WORKSPACE}" = /* ]]; then
     LOG_DIR="$AGENT_WORKSPACE/state"
 else
     # Pure-bash fallback: derive from script's own path without forking.
@@ -350,14 +351,14 @@ _is_cacheable_call() {
 }
 
 # Pure-bash FNV-1a cache key — sets _CACHE_KEY global; call directly, not via $().
-# Replaces printf|md5sum|cut pipeline (3 subprocesses → 0). Uses stride-2 sampling
-# over first 200 chars for speed; collision risk is negligible for gh command strings.
+# Replaces printf|md5sum|cut pipeline (3 subprocesses → 0). Hashes every character
+# in the first 200 chars to avoid collisions from strings differing in even positions.
 _CACHE_KEY=""
 _cache_key() {
     local s="$*" h=2166136261 i c
     local len="${#s}"
     (( len > 200 )) && len=200
-    for (( i=0; i<len; i+=2 )); do
+    for (( i=0; i<len; i+=1 )); do
         printf -v c '%d' "'${s:$i:1}" 2>/dev/null || c=31
         (( h = (h ^ c) * 16777619 & 0xFFFFFFFF ))
     done
