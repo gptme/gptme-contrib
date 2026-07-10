@@ -622,9 +622,20 @@ def write_worker_result_manifest(
     functions are injected (they live in the caller's workspace packages,
     not here). Missing or non-dict record → silently returns.
 
+    ``build_worker_result`` must return a manifest that already contains the
+    ``git_refs``, ``task``, and ``artifact_paths`` submaps (the real
+    ``agent_events.build_worker_result`` always does).
+
     NOTE(parity): ``int(number)`` raises on an empty/non-numeric PR number
     (worker.sh:565), killing the manifest step under the bash ``|| true`` —
     the record then simply never gains ``worker_result_path``. Preserved.
+
+    NOTE(parity): the submap enrichment below hard-indexes ``git_refs``/
+    ``task``/``artifact_paths`` exactly like worker.sh:595-600 — a builder
+    that omits them raises before the manifest is written, and the record
+    never gains ``worker_result_path``, same as the heredoc dying under its
+    ``|| true``. Softening this (setdefault) would silently accept manifests
+    the bash rejects; a behavior change for the switchover to consider.
     """
     record_path = Path(record_file)
     if not record_path.is_file():
