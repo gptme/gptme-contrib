@@ -260,7 +260,7 @@ def show(task_id, render=False):
         # Use FZF_PREVIEW_COLUMNS if available (set by fzf for preview commands)
         # so Rich wraps at the correct width — prevents fzf wrap arrows and
         # ensures code block backgrounds extend to full width
-        preview_width = int(os.environ.get("FZF_PREVIEW_COLUMNS", 0)) or None
+        preview_width = int(os.environ.get("FZF_PREVIEW_COLUMNS") or 0) or None
         console = Console(
             force_terminal=True,
             width=preview_width,
@@ -785,9 +785,9 @@ exec "${EDITOR:-nano}" "$1" </dev/tty >/dev/tty 2>/dev/tty
     # Reload: reads state files and calls browse-list with appropriate args
     Path(sd, "reload.sh").write_text(
         f"""#!/bin/sh
-sort=$(cat {sd}/sort 2>/dev/null || echo date)
-state=$(cat {sd}/state 2>/dev/null || echo "")
-project=$(cat {sd}/project 2>/dev/null || echo "")
+sort=$(cat "{sd}/sort" 2>/dev/null || echo date)
+state=$(cat "{sd}/state" 2>/dev/null || echo "")
+project=$(cat "{sd}/project" 2>/dev/null || echo "")
 args="--sort $sort"
 if [ "$state" = "all" ]; then
     args="$args --all"
@@ -805,7 +805,7 @@ gptodo browse-list $args
     Path(sd, "sort-picker.sh").write_text(
         f"""#!/bin/sh
 choice=$(printf 'date\\npriority\\nmodified\\nname' | fzf --no-sort --header 'Sort by:')
-[ -n "$choice" ] && printf '%s' "$choice" > {sd}/sort
+[ -n "$choice" ] && printf '%s' "$choice" > "{sd}/sort"
 """
     )
 
@@ -815,14 +815,14 @@ choice=$(printf 'date\\npriority\\nmodified\\nname' | fzf --no-sort --header 'So
 choice=$(printf 'open tasks (default)\\nall states\\nbacklog only\\nsomeday only\\ntodo only\\nactive only\\nwaiting only\\nready for review only' \\
   | fzf --no-sort --header 'Filter by state:')
 case "$choice" in
-  "open tasks"*) printf '' > {sd}/state;;
-  "all"*) printf 'all' > {sd}/state;;
-  "backlog"*) printf 'backlog' > {sd}/state;;
-  "someday"*) printf 'someday' > {sd}/state;;
-  "todo"*) printf 'todo' > {sd}/state;;
-  "active"*) printf 'active' > {sd}/state;;
-  "waiting"*) printf 'waiting' > {sd}/state;;
-  "ready for review"*) printf 'ready_for_review' > {sd}/state;;
+  "open tasks"*) printf '' > "{sd}/state";;
+  "all"*) printf 'all' > "{sd}/state";;
+  "backlog"*) printf 'backlog' > "{sd}/state";;
+  "someday"*) printf 'someday' > "{sd}/state";;
+  "todo"*) printf 'todo' > "{sd}/state";;
+  "active"*) printf 'active' > "{sd}/state";;
+  "waiting"*) printf 'waiting' > "{sd}/state";;
+  "ready for review"*) printf 'ready_for_review' > "{sd}/state";;
 esac
 """
     )
@@ -873,18 +873,18 @@ action=$(printf '%s\\n' \\
 task="$1"
 
 case "$action" in
-  "Sort by date") printf 'date' > {sd}/sort;;
-  "Sort by priority") printf 'priority' > {sd}/sort;;
-  "Sort by modified") printf 'modified' > {sd}/sort;;
-  "Sort by name") printf 'name' > {sd}/sort;;
-  "Filter: open tasks"*) printf '' > {sd}/state;;
-  "Filter: all"*) printf 'all' > {sd}/state;;
-  "Filter: backlog"*) printf 'backlog' > {sd}/state;;
-  "Filter: someday"*) printf 'someday' > {sd}/state;;
-  "Filter: todo"*) printf 'todo' > {sd}/state;;
-  "Filter: active"*) printf 'active' > {sd}/state;;
-  "Filter: waiting"*) printf 'waiting' > {sd}/state;;
-  "Filter: ready for review"*) printf 'ready_for_review' > {sd}/state;;
+  "Sort by date") printf 'date' > "{sd}/sort";;
+  "Sort by priority") printf 'priority' > "{sd}/sort";;
+  "Sort by modified") printf 'modified' > "{sd}/sort";;
+  "Sort by name") printf 'name' > "{sd}/sort";;
+  "Filter: open tasks"*) printf '' > "{sd}/state";;
+  "Filter: all"*) printf 'all' > "{sd}/state";;
+  "Filter: backlog"*) printf 'backlog' > "{sd}/state";;
+  "Filter: someday"*) printf 'someday' > "{sd}/state";;
+  "Filter: todo"*) printf 'todo' > "{sd}/state";;
+  "Filter: active"*) printf 'active' > "{sd}/state";;
+  "Filter: waiting"*) printf 'waiting' > "{sd}/state";;
+  "Filter: ready for review"*) printf 'ready_for_review' > "{sd}/state";;
   "Change state"*"backlog") gptodo edit "$task" --set state backlog;;
   "Change state"*"someday") gptodo edit "$task" --set state someday;;
   "Change state"*"todo") gptodo edit "$task" --set state todo;;
@@ -893,9 +893,9 @@ case "$action" in
   "Change state"*"ready_for_review") gptodo edit "$task" --set state ready_for_review;;
   "Change state"*"done") gptodo edit "$task" --set state done;;
   "Change state"*"cancelled") gptodo edit "$task" --set state cancelled;;
-  "Edit in"*) sh {sd}/edit-task.sh {rr}/tasks/"$task".md;;
-  "Git blame") git -C {rr} blame --date=short -- tasks/"$task".md | ${{PAGER:-less}};;
-  "Git log"*) git -C {rr} log --follow --oneline --color -- tasks/"$task".md | ${{PAGER:-less -R}};;
+  "Edit in"*) sh "{sd}/edit-task.sh" "{rr}/tasks/$task.md";;
+  "Git blame") git -C "{rr}" blame --date=short -- tasks/"$task".md | ${{PAGER:-less}};;
+  "Git log"*) git -C "{rr}" log --follow --oneline --color -- tasks/"$task".md | ${{PAGER:-less -R}};;
 esac
 """
     )
@@ -1049,18 +1049,22 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
         # Keyboard hints in border label (spans full window width)
         border_label = " ? Actions │ ^S Sort │ ^F Filter │ ^T State │ ^E Edit │ ^B Blame │ ^L Log │ ^P Preview │ ^R Raw │ ^W Layout "
 
+        # Shell-quoted path aliases for embedding in fzf bind commands
+        sd_q = f'"{state_dir}"'
+        rr_q = f'"{repo_root}"'
+
         # Reload command (reads state files, calls browse-list)
-        reload_cmd = f"sh {state_dir}/reload.sh"
+        reload_cmd = f"sh {sd_q}/reload.sh"
 
         # Build keybindings
         bind_list = [
-            f"?:execute(sh {state_dir}/palette.sh {{1}})+reload({reload_cmd})",
-            f"ctrl-s:execute(sh {state_dir}/sort-picker.sh)+reload({reload_cmd})",
-            f"ctrl-f:execute(sh {state_dir}/filter-picker.sh)+reload({reload_cmd})",
-            f"ctrl-t:execute(sh {state_dir}/state-change.sh {{1}})+reload({reload_cmd})",
-            f"ctrl-e:execute(sh {state_dir}/edit-task.sh {repo_root}/tasks/{{1}}.md)+reload({reload_cmd})",
-            f"ctrl-b:change-preview(git -C {repo_root} blame --date=short -- tasks/{{1}}.md)+change-preview-label( Git Blame )",
-            f"ctrl-l:change-preview(git -C {repo_root} log --follow --oneline --color -- tasks/{{1}}.md)+change-preview-label( Git Log )",
+            f"?:execute(sh {sd_q}/palette.sh {{1}})+reload({reload_cmd})",
+            f"ctrl-s:execute(sh {sd_q}/sort-picker.sh)+reload({reload_cmd})",
+            f"ctrl-f:execute(sh {sd_q}/filter-picker.sh)+reload({reload_cmd})",
+            f"ctrl-t:execute(sh {sd_q}/state-change.sh {{1}})+reload({reload_cmd})",
+            f"ctrl-e:execute(sh {sd_q}/edit-task.sh {rr_q}/tasks/{{1}}.md)+reload({reload_cmd})",
+            f"ctrl-b:change-preview(git -C {rr_q} blame --date=short -- tasks/{{1}}.md)+change-preview-label( Git Blame )",
+            f"ctrl-l:change-preview(git -C {rr_q} log --follow --oneline --color -- tasks/{{1}}.md)+change-preview-label( Git Log )",
             "ctrl-p:change-preview(gptodo show --render {1})+change-preview-label( Task Preview )",
             "ctrl-r:change-preview(gptodo show {1})+change-preview-label( Raw Markdown )",
             "ctrl-w:change-preview-window(right:60%:wrap|down:75%:wrap)+refresh-preview",
