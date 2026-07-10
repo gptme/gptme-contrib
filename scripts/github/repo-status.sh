@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# gh colorizes --json output when it thinks stdout is a TTY, which breaks jq.
+export GH_FORCE_TTY=0
+
 # Get GitHub user (from auth or env var)
 GH_USER="${GH_USER:-$(gh api user -q .login 2>/dev/null || echo "")}"
 
