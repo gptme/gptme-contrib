@@ -279,6 +279,11 @@ class WorkClaimManager:
                     conn.execute("ROLLBACK")
                     return None
 
+                # Recompute expiry after the callback so the TTL starts from
+                # when we actually write the claim, not before the check ran.
+                expires_str = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
                 new_epoch = int(row["epoch"]) + 1
                 hmac_val = None
                 if secret is not None:
