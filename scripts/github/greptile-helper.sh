@@ -32,7 +32,7 @@ set -euo pipefail
 REPO="${2:-}"
 PR_NUMBER="${3:-}"
 TRIGGER_GRACE_SECONDS="${TRIGGER_GRACE_SECONDS:-900}"
-ACK_GRACE_SECONDS="${ACK_GRACE_SECONDS:-1200}"
+ACK_GRACE_SECONDS="${ACK_GRACE_SECONDS:-7200}"  # 2h — Greptile can be slow; only flag as stuck after this long
 MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-3}"  # Max re-review triggers per review cycle before backing off
 # Hard ceiling on TOTAL trigger comments we've ever posted on a PR, independent of
 # review cycles. MAX_RE_TRIGGERS resets to 0 every time Greptile posts a fresh review,
@@ -40,7 +40,9 @@ MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-3}"  # Max re-review triggers per review cyc
 # product PR that keeps getting polish commits) can be triggered unboundedly — one per
 # PM run, indefinitely. This cap counts our lifetime triggers and backs off + escalates
 # once exceeded. Incident: 2026-06-16, cloud#401 hit 25 triggers, #2906 25, #408 19.
-MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-8}"
+# Incident 2026-07-09: lowered from 8 → 5; multiple PRs hit 4+ triggers before the
+# cap fired, which Erik flagged as spam. Lower cap + stale-bypass fix below.
+MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-5}"
 GITHUB_AUTHOR="${GITHUB_AUTHOR:-$(gh api user --jq .login 2>/dev/null || echo "")}"
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
@@ -294,9 +296,11 @@ _needs_re_review() {
 }
 
 # --- Helper: check our last trigger comment + its reactions ---
-# Returns: "none" | "in-progress" | "stale"
-# "in-progress" = recent trigger (< 15min), or Greptile acked it recently and hasn't reviewed yet
-# "stale" = last trigger is still the latest cycle, but it's older than the grace window
+# Returns: "none" | "in-progress" | "stale" | "stale-acked"
+# "in-progress"  = recent trigger (< 15min), or Greptile acked it within ACK_GRACE_SECONDS and hasn't reviewed yet
+# "stale"        = trigger was never acked by Greptile; old (> TRIGGER_GRACE_SECONDS). Apply no-new-commit guard.
+# "stale-acked"  = Greptile acked our trigger but never posted a review after ACK_GRACE_SECONDS. Truly stuck;
+#                  callers should bypass the no-new-commit guard to unstick it.
 _our_trigger_status() {
     local review_cutoff="${1:-}"
 
@@ -401,10 +405,22 @@ _our_trigger_status() {
         return 0
     }
 
-    if [ "${bot_ack_count:-0}" -gt 0 ] && [ "${comment_age_seconds:-9999}" -lt "$ACK_GRACE_SECONDS" ]; then
-        echo "in-progress"
+    if [ "${bot_ack_count:-0}" -gt 0 ]; then
+        if [ "${comment_age_seconds:-9999}" -lt "$ACK_GRACE_SECONDS" ]; then
+            # Greptile acked and review is still in progress (within 2h grace window).
+            echo "in-progress"
+        else
+            # Greptile acked our trigger (👀/+1) but never posted a review after a long
+            # wait — truly stuck. Return "stale-acked" so callers can bypass the
+            # no-new-commit guard and re-trigger to unstick it.
+            echo "stale-acked"
+        fi
     else
-        # No bot ack, or ack is too old without a review landing → stale, safe to retry.
+        # Greptile never acked this trigger. Return plain "stale" so callers still
+        # apply the no-new-commit guard — only re-trigger if a new commit exists.
+        # Without this distinction, every PM session firing 15+ min after the last
+        # trigger re-triggers even when nothing was pushed (root cause: 2026-07-09,
+        # gptme-contrib#1246 got 4 triggers in <3h with no new commits).
         echo "stale"
     fi
 }
@@ -423,19 +439,20 @@ check)
                 exit 2  # Ceiling hit — skip (same as "already reviewed, nothing to do")
             fi
             reviewed_at=$( _greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
-            # Check trigger status BEFORE the no-new-commit guard. If stale (Greptile acked
-            # but never posted a review), allow re-trigger even without new commits so the
-            # acked-but-not-reviewed failure mode (gptme#1651) can escape.
+            # Check trigger status BEFORE the no-new-commit guard. If stale-acked (Greptile
+            # acked but never posted a review after a long wait), allow re-trigger even
+            # without new commits so the acked-but-not-reviewed failure mode (gptme#1651)
+            # can escape. Plain "stale" (never acked) still applies the no-new-commit guard.
             trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
             if [ "$trigger_status" = "in-progress" ]; then
                 exit 1  # Re-review trigger in-flight
             fi
             # Root guard: no new commit since our last in-cycle trigger → not safe to trigger.
-            # Exception: trigger_status=stale means Greptile acked but never reviewed —
-            # skip this guard so the stale-retry path can fire and recover the stuck PR.
-            # Pass reviewed_at so the guard only considers triggers from the current review
-            # cycle (pre-review "spent" triggers must not gate the next re-review).
-            if [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
+            # ONLY bypass for "stale-acked" (Greptile acked but never reviewed = truly stuck).
+            # "stale" (never acked) must NOT bypass this guard: re-trigger only with new commits.
+            # Root cause of 2026-07-09 spam (gptme-contrib#1246): "stale" (no ack, old trigger)
+            # bypassed this guard, causing re-triggers every 15+ min with zero new commits.
+            if [ "$trigger_status" != "stale-acked" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
                 exit 2  # Nothing pushed since our last in-cycle trigger — treat as up-to-date.
             fi
             exit 0  # Re-review needed
@@ -474,9 +491,10 @@ trigger)
                 exit 0
             fi
             reviewed_at=$( _greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
-            # Check trigger status BEFORE the no-new-commit guard. If stale (Greptile acked
-            # but never posted a review), allow re-trigger even without new commits so the
-            # acked-but-not-reviewed failure mode (gptme#1651) can escape.
+            # Check trigger status BEFORE the no-new-commit guard. If stale-acked (Greptile
+            # acked but never posted a review after a long wait), allow re-trigger even
+            # without new commits so the acked-but-not-reviewed failure mode (gptme#1651)
+            # can escape. Plain "stale" (never acked) still applies the no-new-commit guard.
             trigger_status=$(_our_trigger_status "$reviewed_at" || echo "in-progress")
             if [ "$trigger_status" = "in-progress" ]; then
                 echo "  [greptile] Re-review trigger in-flight on $REPO#$PR_NUMBER. Skipping."
@@ -485,10 +503,12 @@ trigger)
             # ROOT GUARD: never re-review without a new commit since OUR last in-cycle trigger.
             # _needs_re_review (SHA-based) stays true when Greptile acks but doesn't advance
             # its review commit_id to head, so this catches the "re-reviewing without pushing"
-            # spam (gptme#2908). Exception: trigger_status=stale means Greptile acked but
-            # never reviewed — skip the guard and allow re-trigger to escape the stuck state.
-            # Pass reviewed_at: guard must only fire against in-cycle triggers (post-review).
-            if [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
+            # spam (gptme#2908). Exception: trigger_status=stale-acked means Greptile acked
+            # our trigger but never posted a review — skip the guard to escape that stuck state.
+            # Plain "stale" (trigger was never acked) must NOT bypass the guard — only re-trigger
+            # when new commits exist. Root cause of 2026-07-09 spam (gptme-contrib#1246):
+            # "stale" (no ack) bypassed this guard, causing triggers every 15+ min with no pushes.
+            if [ "$trigger_status" != "stale-acked" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
                 echo "  [greptile] SKIP: $REPO#$PR_NUMBER has no new commits since our last @greptileai review trigger. Not re-reviewing (nothing was pushed)."
                 exit 0
             fi
@@ -543,9 +563,13 @@ status)
                 if [ "$trigger_status" = "in-progress" ]; then
                     echo "in-progress"
                 # Root guard: no new commit since our last in-cycle trigger → report as up-to-date.
-                # Exception: stale means Greptile acked but never reviewed → needs-re-review.
-                elif [ "$trigger_status" != "stale" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
+                # Exception: stale-acked means Greptile acked but never reviewed → needs-re-review.
+                # "stale-acked" is the internal name; the status command normalizes it to "stale"
+                # for callers (pr-greptile-trigger.py checks for ACTIONABLE_STATES = {"stale", ...}).
+                elif [ "$trigger_status" != "stale-acked" ] && _no_new_commit_since_our_last_trigger "$reviewed_at"; then
                     echo "already-reviewed"
+                elif [ "$trigger_status" = "stale-acked" ]; then
+                    echo "stale"
                 else
                     echo "needs-re-review"
                 fi

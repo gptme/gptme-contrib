@@ -280,14 +280,14 @@ def test_check_blocks_recently_acknowledged_trigger():
 
 
 def test_check_retries_acknowledged_trigger_after_timeout():
-    """Stale trigger (> 20min, bot ack, no review) → still awaiting-initial-review; check skips."""
+    """Stale-acked trigger (> ACK_GRACE_SECONDS=7200s=120min, bot ack, no review) → still awaiting-initial-review; check skips."""
     fixture = {
         "pr_number": 123,
         "raw_comments": [
-            _make_trigger_comment("test-user", _iso_ago(minutes=25)),
+            _make_trigger_comment("test-user", _iso_ago(minutes=130)),
         ],
         "raw_commits": [],
-        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "raw_pr": {"created_at": _iso_ago(minutes=200)},
         "bot_reaction_count": 1,
     }
     result = _run_helper("check", fixture)
@@ -512,28 +512,36 @@ def test_marker_trigger_does_not_mask_new_backdated_head():
 def test_marker_trigger_without_response_does_not_suppress():
     """Marker matches the current head but Greptile's comment was last updated
     BEFORE our trigger (no response yet) → not proof of processing → the
-    SHA-mismatch path must still report re-review needed (downstream in-flight
-    guards handle pacing)."""
+    SHA-mismatch path must still report re-review needed.
+
+    The trigger is acked and older than ACK_GRACE_SECONDS (2h) → "stale-acked",
+    which bypasses the no-new-commit guard — so the ONLY path that could
+    suppress here is the marker check in _needs_re_review. If the marker logic
+    falsely treated the pre-trigger comment update as a response, status would
+    read already-reviewed. Otherwise the status command reports the stuck-acked
+    state as "stale" (normalized from stale-acked) — still actionable."""
     fixture = {
         "pr_number": 1249,
         "raw_comments": [
-            # Greptile comment last updated 50min ago — BEFORE our 30min-ago trigger
+            # Greptile comment last updated 3h ago — BEFORE our 2.5h-ago trigger
             _make_greptile_comment(
-                4, reviewed_at=_iso_ago(minutes=90), updated_at=_iso_ago(minutes=50)
+                4, reviewed_at=_iso_ago(minutes=240), updated_at=_iso_ago(minutes=180)
             ),
             _make_trigger_comment(
-                "test-user", _iso_ago(minutes=30), head_sha="beef1234"
+                "test-user", _iso_ago(minutes=150), head_sha="beef1234"
             ),
         ],
-        "raw_reviews": [_make_greptile_review("0abc1234", _iso_ago(minutes=90))],
-        "raw_pr": {"head": {"sha": "beef1234"}, "created_at": _iso_ago(minutes=180)},
-        "raw_commits": [_make_commit(_iso_ago(minutes=60))],
-        "bot_reaction_count": 0,
+        "raw_reviews": [_make_greptile_review("0abc1234", _iso_ago(minutes=240))],
+        "raw_pr": {"head": {"sha": "beef1234"}, "created_at": _iso_ago(minutes=300)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=200))],
+        # Acked, and trigger age (2.5h) > ACK_GRACE_SECONDS (2h) → stale-acked
+        "bot_reaction_count": 1,
     }
     status = _run_helper("status", fixture)
-    assert (
-        status.stdout.strip() == "needs-re-review"
-    ), f"Unanswered trigger must not suppress, got: {status.stdout.strip()}"
+    assert status.stdout.strip() in {
+        "stale",
+        "needs-re-review",
+    }, f"Unanswered trigger must stay actionable, got: {status.stdout.strip()}"
 
 
 def test_trigger_embeds_head_sha_marker():
@@ -815,10 +823,12 @@ def test_trigger_writes_local_timestamp_on_success():
         "pr_number": 555,
         "raw_comments": [
             _make_greptile_comment(3, reviewed_at=reviewed_at),
-            _make_trigger_comment("test-user", _iso_ago(minutes=45)),
+            # trigger > ACK_GRACE_SECONDS (7200s = 120min) old + acked = stale-acked
+            # → stale-acked bypasses no-new-commit guard, so trigger fires
+            _make_trigger_comment("test-user", _iso_ago(minutes=130)),
         ],
         "raw_commits": [_make_commit(_iso_ago(minutes=10))],
-        "raw_pr": {"created_at": _iso_ago(minutes=120)},
+        "raw_pr": {"created_at": _iso_ago(minutes=200)},
         "bot_reaction_count": 1,
     }
     result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
@@ -970,3 +980,63 @@ def test_local_timestamp_from_previous_cycle_does_not_block():
     assert (
         status.stdout.strip() != "in-progress"
     ), f"Pre-review local TS should not block re-review, got: {status.stdout.strip()}"
+
+
+def test_stale_unacked_trigger_no_new_commits_does_not_retrigger():
+    """Regression for gptme-contrib#1246 spam: old unacked trigger + no new commits
+    since the trigger + SHA mismatch must NOT re-trigger.
+
+    Before the stale-bypass fix, a 'stale' (unacked) trigger behaved the same as
+    'stale-acked' and bypassed the no-new-commit guard, causing repeated @greptileai
+    review comments every 15+ min with no new pushes.
+
+    After the fix: 'stale' (never acked by Greptile) keeps the no-new-commit guard
+    active. The status command must report 'already-reviewed' (treated as up-to-date)
+    and check/trigger must NOT re-trigger.
+
+    Timeline:
+      R1 = 90min ago  Greptile reviews at OLDSHA (formal PR review)
+      C1 = 35min ago  New commit pushed (HEAD = NEWSHA, SHA mismatch vs R1)
+      T1 = 30min ago  We trigger re-review; Greptile never acks (no bot_reaction)
+      Now:            No commits since T1 → stale unacked trigger; no-new-commit guard fires
+    """
+    fixture = {
+        "pr_number": 1246,
+        "raw_comments": [
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=90), updated_at=_iso_ago(minutes=90)
+            ),
+            # Trigger 30min ago, NOT acked by Greptile (bot_reaction_count=0) → stale
+            _make_trigger_comment("test-user", _iso_ago(minutes=30)),
+        ],
+        # Formal review on OLDSHA; current head is NEWSHA → SHA mismatch
+        "raw_reviews": [_make_greptile_review("OLDSHA", _iso_ago(minutes=90))],
+        "raw_pr": {"head": {"sha": "NEWSHA"}, "created_at": _iso_ago(minutes=180)},
+        # Commit at 35min ago (BEFORE our 30min-ago trigger) → no new commits since trigger
+        "raw_commits": [_make_commit(_iso_ago(minutes=35))],
+        "bot_reaction_count": 0,  # Never acked → "stale" (not "stale-acked")
+    }
+
+    # status: no new commits since stale trigger → treated as up-to-date
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "already-reviewed", (
+        f"Stale unacked trigger + no new commits must report already-reviewed "
+        f"(not spam-retrigger). Got: {status.stdout.strip()!r}"
+    )
+
+    # check: must block (exit 2 = already-reviewed / nothing new to review)
+    result = _run_helper("check", fixture)
+    assert result.returncode == 2, (
+        f"check must block re-trigger (exit 2) when stale unacked + no new commits. "
+        f"stderr: {result.stderr}"
+    )
+
+    # trigger: must NOT post a new comment
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert (
+        result.returncode == 0
+    ), f"trigger must exit 0 (skipped), stderr: {result.stderr}"
+    assert not gh_log, (
+        f"trigger must NOT post @greptileai review comment on stale+no-new-commits. "
+        f"Got log: {gh_log!r}"
+    )
