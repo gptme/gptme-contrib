@@ -234,19 +234,21 @@ class WorkClaimManager:
         """
         ttl = ttl_minutes or self.default_ttl_minutes
         conn = self.db.conn
-        # Compute the expiry once and reuse it for both the HMAC and the
-        # stored expires_at column. Previously these were two separate clock
-        # reads (this Python computation for the HMAC, and a second
-        # SQLite-evaluated datetime('now', ...) for the stored value); when
-        # the two reads straddled a second boundary, the stored HMAC could
-        # never verify against the stored expires_at. Single-sourcing the
-        # expiry string makes the stored signature correct by construction.
-        expires_str = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
 
         conn.execute("BEGIN IMMEDIATE")
         try:
+            # Compute the expiry once and reuse it for both the HMAC and the
+            # stored expires_at column. Previously these were two separate clock
+            # reads (this Python computation for the HMAC, and a second
+            # SQLite-evaluated datetime('now', ...) for the stored value); when
+            # the two reads straddled a second boundary, the stored HMAC could
+            # never verify against the stored expires_at. Single-sourcing the
+            # expiry string makes the stored signature correct by construction.
+            # Computing it after BEGIN IMMEDIATE ensures the lock-wait time
+            # does not shorten the effective TTL.
+            expires_str = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
             row = conn.execute(
                 "SELECT claimer, expires_at, status, epoch, hmac FROM work WHERE task_id = ?",
                 (task_id,),
