@@ -915,6 +915,49 @@ has_maintainer_waiting_comment() {
     return 1
 }
 
+# Return 0 if the bot account has merge permission on $repo, 1 if it does not.
+#
+# A bot contributing to an external/upstream repo via a fork typically has
+# pull-only access — it can open PRs but can NEVER self-merge. Dispatching a
+# monitoring session for a merge-ready PR on such a repo is always a NOOP (the
+# session can't merge and has nothing else to do), so merge_ready should be
+# suppressed there and handed to a maintainer instead.
+#
+# FAIL-OPEN: on any API error or unexpected output we return 0 (assume the bot
+# can merge), so an API failure doesn't silently suppress a genuinely mergeable
+# PR. Stderr is swallowed intentionally — API blips are transient, and noise on
+# every cycle is worse than a missed permission downgrade (the next cycle retries).
+# Cost: one bounded gh call per repo per cycle (cached by the caller).
+bot_can_merge() {
+    local repo=$1
+    local can
+    can=$(gh api "repos/$repo" \
+        --jq '.permissions | ((.push // false) or (.maintain // false) or (.admin // false))' \
+        2>/dev/null) || return 0
+    [ "$can" = "true" ]
+}
+
+# Post a one-time "waiting only on a maintainer click" status comment on a
+# merge-ready PR the bot cannot self-merge (pull-only access to an external
+# repo). This does two things at once:
+#   1. Surfaces the ready PR to the maintainer (optionally @-mentioning
+#      $MAINTAINER_HANDLE) so the ready-to-merge backlog is visible.
+#   2. Arms has_maintainer_waiting_comment (the comment contains the canonical
+#      anchor phrase), so subsequent cycles suppress the re-emit churn.
+# Best-effort: a failed comment post is non-fatal (the next cycle retries).
+post_maintainer_waiting_comment() {
+    local repo=$1 number=$2 score=$3
+    local mention=""
+    [ -n "${MAINTAINER_HANDLE:-}" ] && mention="@${MAINTAINER_HANDLE} "
+    local greptile_note=""
+    [ -n "$score" ] && [ "$score" != "null" ] && greptile_note=" (Greptile ${score}/5)"
+    local body
+    body="CI-green and mergeable${greptile_note} — **waiting only on a maintainer click**.
+
+${mention}This PR is ready to merge, but the bot has pull-only access to this repo and can't self-merge — surfacing it here so it isn't lost. The monitoring loop will stop re-flagging it now that this note is posted."
+    gh pr comment "$number" --repo "$repo" --body "$body" >/dev/null 2>&1 || true
+}
+
 # Find PRs that are ready to merge: CI green, no conflicts, and Greptile score
 # is acceptable (>= 5/5, or no Greptile review at all for simple PRs).
 #
@@ -930,9 +973,17 @@ has_maintainer_waiting_comment() {
 # that HEAD even after the cooldown expires. The state file is still bumped so
 # subsequent runs follow the normal cooldown path once a new HEAD arrives.
 #
+# Permission suppression: If the bot lacks merge permission on the repo (pull-only
+# access to an external/upstream repo), it can never self-merge, so a dispatched
+# session is always a NOOP. Instead of emitting (and re-emitting every cooldown),
+# we post a one-time maintainer-waiting comment (see post_maintainer_waiting_comment)
+# to surface the ready PR to a human, then suppress — the comment arms
+# has_maintainer_waiting_comment so future cycles take the suppression path above.
+#
 # API cost: +1 comments fetch per CLEAN/MERGEABLE candidate that passes the
-# Greptile and cooldown gates. Typical workload is a handful of PRs per cycle,
-# so the added cost is negligible compared to the existing PR search calls.
+# Greptile and cooldown gates, plus +1 permissions fetch per repo (once per cycle,
+# only when the repo has such a candidate). Typical workload is a handful of PRs
+# per cycle, so the added cost is negligible compared to the existing PR search calls.
 check_merge_ready() {
     local repo=$1
     local prs=$2
@@ -940,6 +991,12 @@ check_merge_ready() {
 
     local repo_safe="${repo//\//-}"
     local cooldown_seconds=43200  # 12 hours
+
+    # Resolve merge permission once per repo (not per PR): pull-only repos can
+    # never self-merge, so their ready PRs are handed to a maintainer instead of
+    # dispatched as NOOP sessions. Computed lazily below on first candidate so a
+    # repo with zero merge-ready PRs pays no permission-check cost.
+    local bot_lacks_merge=""  # "": unknown, "0": can merge, "1": cannot
 
     # Filter to PRs with CLEAN merge state and MERGEABLE status
     echo "$prs" | jq -c '.[] | select(.mergeStateStatus == "CLEAN" and .mergeable == "MERGEABLE")' | while read -r pr_data; do
@@ -991,6 +1048,26 @@ check_merge_ready() {
         # refreshed into a different status).
         if has_maintainer_waiting_comment "$repo" "$pr_number"; then
             echo "${head_sha}:${now}" > "$state_file"
+            continue
+        fi
+
+        # Permission suppression: if the bot can't self-merge this repo (pull-only
+        # access), emitting merge_ready only dispatches a NOOP session. Instead,
+        # surface the ready PR to a maintainer once (which also arms the comment
+        # suppression above for future cycles), then skip the emit. Permission is
+        # per-repo, so resolve it lazily on the first candidate and reuse.
+        if [ -z "$bot_lacks_merge" ]; then
+            if bot_can_merge "$repo"; then bot_lacks_merge="0"; else bot_lacks_merge="1"; fi
+        fi
+        if [ "$bot_lacks_merge" = "1" ]; then
+            # Only post from a real (jsonl) dispatch pass, not a markdown preview.
+            # Only write the state file when the comment is actually posted: in
+            # markdown mode we skip without writing, so the next jsonl run still
+            # sees this PR as fresh and can post the maintainer-waiting comment.
+            if [ "$FORMAT" = "jsonl" ]; then
+                post_maintainer_waiting_comment "$repo" "$pr_number" "$greptile_score"
+                echo "${head_sha}:${now}" > "$state_file"
+            fi
             continue
         fi
 
