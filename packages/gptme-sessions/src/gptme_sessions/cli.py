@@ -3014,6 +3014,50 @@ def search(
         click.echo()
 
 
+@cli.command()
+@click.argument("path_or_ref")
+@click.option("--line", type=int, default=None, help="Blame a single line (file path only)")
+@click.option(
+    "--limit", type=int, default=10, show_default=True, help="Max commits (whole-file mode)"
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--records",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to session-records.jsonl (default: auto-detected from git root)",
+)
+def blame(
+    path_or_ref: str,
+    line: int | None,
+    limit: int,
+    as_json: bool,
+    records: Path | None,
+) -> None:
+    """Attribute a file path or GitHub ref (owner/repo#N) to its authoring session(s).
+
+    PATH_OR_REF is either a repo-relative (or absolute) file path, or a GitHub
+    PR/issue ref in the form ``owner/repo#123``.
+
+    Examples:
+
+    \b
+        gptme-sessions blame scripts/watchdog.py
+        gptme-sessions blame scripts/watchdog.py --line 42
+        gptme-sessions blame gptme/gptme-contrib#1252
+    """
+    from .blame import BlameResult, blame as _blame, render_json, render_text
+
+    try:
+        result: BlameResult = _blame(path_or_ref, line=line, limit=limit, records=records)
+    except (ValueError, RuntimeError) as exc:
+        raise click.UsageError(str(exc)) from exc
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(render_json(result) if as_json else render_text(result))
+
+
 def main() -> int:
     """Entry point for console_scripts (backward-compatible wrapper).
 
