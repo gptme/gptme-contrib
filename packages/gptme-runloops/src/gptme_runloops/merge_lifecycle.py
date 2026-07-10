@@ -328,7 +328,18 @@ def cross_repo_review_applicable(
     if item.repo == config.primary_repo:
         return False
     # grep -qE semantics: unanchored search (patterns carry their own anchors).
-    return re.search(config.greptile_repos_pattern, item.repo) is not None
+    # NOTE(parity): `grep -qE` exits non-zero on an invalid pattern, which the
+    # bash `if` treats as no-match — a malformed policy regex silently gates
+    # the phase off, it never aborts the run. Mirror that instead of letting
+    # re.error propagate.
+    try:
+        return re.search(config.greptile_repos_pattern, item.repo) is not None
+    except re.error:
+        logger.warning(
+            "invalid greptile_repos_pattern %r — treating as no-match",
+            config.greptile_repos_pattern,
+        )
+        return False
 
 
 def classify_greptile_helper_status(status: str) -> LifecycleDecision:
@@ -422,7 +433,13 @@ def head_advanced(cur_head: str, last_attempt_head: str | None) -> bool:
     """
     # NOTE(parity): an empty cur_head ("" — unparseable dedupe key) never
     # counts after the first observation, because `bool(cur_head)` gates the
-    # comparison in the poller.
+    # comparison in the poller. The converse edge is also preserved: a stream
+    # of ONLY empty-head emits counts on every emit (last_attempt_head stays
+    # None because `cur_head or last_head` never stores ""), so a PR whose
+    # dedupe keys never parse escalates on re-emits alone — identical
+    # expression in pr-merge-health-poll.py:489-491,500. Unreachable in
+    # practice (dedupe keys embed the probed head SHA) and pre-existing; a
+    # real fix belongs upstream in the poller, not in this parity port.
     return last_attempt_head is None or (
         bool(cur_head) and cur_head != last_attempt_head
     )
@@ -460,10 +477,19 @@ def decide_greptile_attempt(
         # actual fix attempts exhaust the counter.
         if "last_attempt_head" in updated:
             return AttemptDecision.ESCALATE, updated
+        # NOTE(parity): the reset clears count/escalated but deliberately
+        # leaves first_attempt_at untouched (poll.py:443) — a later
+        # re-escalation reports the original legacy start time, not the
+        # start of the head-gated counter window.
         updated.update({"escalated": False, "escalated_at": None, "count": 0})
 
     count = int(updated.get("count", 0))
 
+    # NOTE(parity): the cap is checked BEFORE the post-rebase grace
+    # (poll.py:449-460), so a PR already at max_attempts escalates even when
+    # this emit is the post-rebase re-review — the grace only applies while
+    # budget remains. Preserved; changing the precedence is a behavior
+    # change for the switchover to consider.
     if count >= max_attempts:
         updated.update(
             {

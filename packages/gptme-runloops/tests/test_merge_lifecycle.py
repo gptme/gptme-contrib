@@ -293,6 +293,20 @@ def test_phase_b_applicability(
     )
 
 
+def test_phase_b_invalid_pattern_gates_off_without_crashing() -> None:
+    # NOTE(parity): `grep -qE` exits non-zero on a malformed pattern, which
+    # the bash `if` treats as no-match — a policy typo must gate the phase
+    # off, never abort the run.
+    bad = LifecycleConfig(
+        primary_repo="ErikBjare/bob", greptile_repos_pattern="^(gptme/("
+    )
+    assert cross_repo_review_applicable(make_item(), bad) is False
+    io = FakeIO(check=SelfMergeCheckResult(False, ("CI is not fully green",)))
+    result = run_merge_lifecycle(make_item(), bad, io)  # must not raise
+    assert io.called("greptile_status") == 0
+    assert result.skip_item is False
+
+
 # --- Phase B status routing (lib.sh:586-604) ---
 
 
@@ -596,6 +610,33 @@ def test_attempt_empty_head_never_counts_after_first_observation() -> None:
     assert decision is AttemptDecision.DISPATCH_FREE
     assert updated["count"] == 1
     assert updated["last_attempt_head"] == "h1"
+
+
+def test_attempt_empty_head_only_stream_counts_every_emit() -> None:
+    # NOTE(parity): when EVERY emit has an empty head (dedupe key never
+    # parses), last_attempt_head stays None (`"" or None`), so each emit
+    # counts and the PR escalates on re-emits alone. Identical expression in
+    # pr-merge-health-poll.py:489-491,500; unreachable in practice. Locked
+    # in as parity — an upstream poller fix would change this test.
+    entry: dict[str, Any] = {}
+    decision, entry = decide_greptile_attempt(entry, "", 3, NOW, score=3)
+    assert decision is AttemptDecision.DISPATCH
+    for expected_count in (2, 3):
+        decision, entry = decide_greptile_attempt(entry, "", 3, NOW, score=3)
+        assert decision is AttemptDecision.DISPATCH
+        assert entry["count"] == expected_count
+        assert entry["last_attempt_head"] is None
+    decision, entry = decide_greptile_attempt(entry, "", 3, NOW, score=3)
+    assert decision is AttemptDecision.ESCALATE
+
+
+def test_attempt_legacy_reset_preserves_first_attempt_at() -> None:
+    # NOTE(parity): the legacy-escalation reset keeps first_attempt_at
+    # (poll.py:443) — re-escalation reports the original legacy start time.
+    entry = {"count": 3, "escalated": True, "first_attempt_at": "2026-01-01T00:00:00"}
+    decision, updated = decide_greptile_attempt(entry, "h1", 3, NOW, score=3)
+    assert decision is AttemptDecision.DISPATCH
+    assert updated["first_attempt_at"] == "2026-01-01T00:00:00"
 
 
 @pytest.mark.parametrize(
