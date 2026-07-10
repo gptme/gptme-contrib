@@ -104,7 +104,7 @@ def _run(args: list[str]) -> str:
 
 
 def _parse_iso(value: str) -> datetime:
-    # Replace 'Z' suffix with '+00:00' for fromisoformat compatibility
+    # Python 3.10 fromisoformat() doesn't support the 'Z' UTC suffix (added in 3.11)
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     dt = datetime.fromisoformat(value)
