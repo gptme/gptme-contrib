@@ -108,17 +108,18 @@ def test_failed_pr_fetch_does_not_seed_cache() -> None:
 
         first, first_count = _run_gate(tmp, state_dir, fail_pr_list=True)
         assert first.returncode in (0, 1), first.stderr
-        # Failed cached fetch returns the empty fallback, so the live merge-status
-        # fetch is skipped (re-calling a failing API would only burn another
-        # GraphQL call). One PR-list call total this run.
-        assert first_count == 1
+        # Both the cached and live PR fetches fire. The cached fetch fails (no
+        # cache written), so the live fetch also misses the cache and fails too.
+        # Two PR-list calls total, neither populates the cache.
+        assert first_count == 2
         assert not cache_file.exists(), "failed gh pr list must not populate cache"
 
         second, second_count = _run_gate(tmp, state_dir, fail_pr_list=False)
         assert second.returncode in (0, 1), second.stderr
-        # Re-fetch succeeds and seeds the cache; the result is an empty PR list,
-        # so the live fetch is still skipped (no open PRs to check). +1 call.
-        assert second_count == 2, "second run should re-fetch after prior failure"
+        # Re-fetch succeeds: cached write populates the cache; live lane uses the
+        # same freshly-written cache (age ~0 < GH_CACHE_TTL_LIVE_PR). One new
+        # call in run 2, cumulative total = 3 (2 from run 1 + 1 here).
+        assert second_count == 3, "second run should re-fetch after prior failure"
         assert cache_file.exists(), "successful gh pr list should populate cache"
 
 
@@ -187,6 +188,7 @@ def _run_gate_jsonl(
     tmp: Path,
     state_dir: Path,
     fake_gh_source: str,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(fake_gh_source)
@@ -197,6 +199,8 @@ def _run_gate_jsonl(
     env = os.environ.copy()
     env["GH_PR_LIST_CALL_COUNT"] = str(count_file)
     env["PATH"] = f"{tmp}:{env['PATH']}"
+    if extra_env:
+        env.update(extra_env)
 
     result = subprocess.run(
         [
@@ -221,19 +225,26 @@ def _run_gate_jsonl(
 
 
 def test_merge_conflict_check_bypasses_pr_cache() -> None:
+    # Set GH_CACHE_TTL_LIVE_PR=0 so the live lane always fetches fresh data
+    # regardless of the shared pr-data cache age. This tests the invariant
+    # that merge-conflict detection is not suppressed within the 480s pr-data
+    # cache window: a PR that becomes DIRTY between runs must be flagged on the
+    # very next run, not after the cache expires.
+    live_uncached = {"GH_CACHE_TTL_LIVE_PR": "0"}
+
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         state_dir = tmp / "state"
         state_dir.mkdir()
 
         first, first_count = _run_gate_jsonl(
-            tmp, state_dir, FAKE_GH_CONFLICT_REGRESSION
+            tmp, state_dir, FAKE_GH_CONFLICT_REGRESSION, extra_env=live_uncached
         )
         assert first.returncode in (0, 1), first.stderr
         assert first_count == 2, "first run should do cached + live PR fetches"
 
         second, second_count = _run_gate_jsonl(
-            tmp, state_dir, FAKE_GH_CONFLICT_REGRESSION
+            tmp, state_dir, FAKE_GH_CONFLICT_REGRESSION, extra_env=live_uncached
         )
         assert second.returncode in (0, 1), second.stderr
         assert (
@@ -275,11 +286,13 @@ sys.exit(0)
 """
 
 
-def test_empty_repo_skips_live_pr_fetch() -> None:
-    """A repo with no open author PRs should do exactly one PR-list fetch
-    per run (the cached lane). The live merge-status fetch is skipped because
-    it could only re-fetch the same empty set — this removes the dominant
-    idle-time GraphQL burner. See github-graphql-rate-limit-regression."""
+def test_empty_repo_live_pr_fetch_uses_shared_cache() -> None:
+    """A repo with no open author PRs should produce exactly one actual GraphQL
+    round-trip per run. The live fetch (fetch_live_pr_data) IS called — the gate
+    that previously skipped it for empty repos was removed — but both the cached
+    and live lanes share the same cache key, so the live hit is free from the
+    cache written by the cached lane moments before. Net: 1 PR-list call per run.
+    See github-graphql-rate-limit-regression and contrib#1259."""
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         state_dir = tmp / "state"
@@ -287,11 +300,14 @@ def test_empty_repo_skips_live_pr_fetch() -> None:
 
         first, first_count = _run_gate_jsonl(tmp, state_dir, FAKE_GH_EMPTY_PRS)
         assert first.returncode in (0, 1), first.stderr
-        # Only the cached fetch fires; live fetch is skipped (was 2 before).
-        assert first_count == 1, "empty repo should do one PR fetch, not two"
+        # Cached fetch fires (cache miss), live fetch is served from the
+        # just-written cache (age ~0 < GH_CACHE_TTL_LIVE_PR). 1 call total.
+        assert first_count == 1, "empty repo should do one actual PR fetch, not two"
 
-        # Second run: cached [] is still fresh, live still skipped -> no calls.
+        # Second run: both lanes hit fresh cache -> no calls.
         second, second_count = _run_gate_jsonl(tmp, state_dir, FAKE_GH_EMPTY_PRS)
         assert second.returncode in (0, 1), second.stderr
-        assert second_count == 1, "second run should add no PR fetches for empty repo"
+        assert (
+            second_count == 1
+        ), "second run should add no actual PR fetches for empty repo"
         assert "merge_conflict" not in second.stdout, second.stdout
