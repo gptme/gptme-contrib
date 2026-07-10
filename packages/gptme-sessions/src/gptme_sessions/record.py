@@ -204,6 +204,8 @@ class SessionRecord:
     # Outcome
     outcome: str = "unknown"  # productive, noop, violated_policy, failed
     exit_code: int | None = None  # process exit code (124 = timeout)
+    failure_reason: str | None = None  # coarse harness failure class (see failure_capture.py)
+    error: str | None = None  # stderr tail or trajectory error snippet when harness failed
     duration_seconds: int = 0
     token_count: int | None = None
     input_tokens: int | None = None
@@ -272,7 +274,7 @@ class SessionRecord:
 
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
-    # ``failure_reason``, ``recommended_confidence``, ``notes``).
+    # ``recommended_confidence``, ``notes``).
     _legacy_fields: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:

@@ -34,6 +34,7 @@ from .deliverables import (
     project_deliverable_details,
 )
 from .discovery import extract_project, extract_session_name
+from .failure_capture import capture_session_failure
 from .record import SessionRecord
 from .signals import extract_from_path
 from .smell import compute_smell_score
@@ -250,6 +251,9 @@ def post_session(
     deliverables: list[str] | None = None,
     journal_path: str | None = None,
     session_id: str | None = None,
+    harness_stderr_path: Path | None = None,
+    failure_reason: str | None = None,
+    error: str | None = None,
 ) -> PostSessionResult:
     """Record a completed agent session and extract trajectory signals.
 
@@ -320,6 +324,16 @@ def post_session(
         the first ``/journal/`` write in the trajectory signals.
     session_id:
         Override the auto-generated session ID.
+    harness_stderr_path:
+        Optional path to a harness stderr log (e.g. gptme ``2>>`` capture from
+        ``run.sh``). Used with the trajectory to populate ``failure_reason`` and
+        ``error`` when ``exit_code`` is non-zero.
+    failure_reason:
+        Optional override for the coarse failure class. When ``None`` and the
+        session failed, computed automatically.
+    error:
+        Optional override for error detail text. When ``None`` and the session
+        failed, extracted from ``harness_stderr_path`` / trajectory.
 
     Returns
     -------
@@ -715,6 +729,25 @@ def post_session(
         record_kwargs["session_total_bytes"] = session_total_bytes
     if summarizer_fired is not None:
         record_kwargs["summarizer_fired"] = summarizer_fired
+
+    if exit_code != 0:
+        if failure_reason is None or error is None:
+            auto_reason, auto_error = capture_session_failure(
+                exit_code=exit_code,
+                duration_seconds=duration_seconds,
+                input_tokens=input_tokens,
+                trajectory_path=trajectory_path,
+                harness_stderr_path=harness_stderr_path,
+            )
+            if failure_reason is None:
+                failure_reason = auto_reason
+            if error is None:
+                error = auto_error
+        if failure_reason is not None:
+            record_kwargs["failure_reason"] = failure_reason
+        if error is not None:
+            record_kwargs["error"] = error
+
     record = SessionRecord(**record_kwargs)
     if grade is not None:
         record.set_productivity_grade(grade)
