@@ -1374,3 +1374,71 @@ def test_dot_slash_prefixed_root_readme_is_spec_like() -> None:
     # GitHub API never produces ./-prefixed paths, but harden against it anyway.
     assert self_merge_check.is_spec_like_doc("./README.md") is True
     assert self_merge_check.is_spec_like_doc("./ARCHITECTURE.md") is True
+
+
+# --- fetch_pr PR-number mismatch guard ---
+
+
+def test_fetch_pr_raises_on_number_mismatch() -> None:
+    """fetch_pr must raise RuntimeError when the gh response carries a different PR number.
+
+    Root cause: graphql-attribution.sh's on-disk cache had a stride-2 hash that
+    caused PR numbers differing by 1 (e.g. 1256 vs 1257) to collide. The cache
+    returned stale data with the wrong url/head_sha while the caller-supplied number
+    was used for CheckResult.number, producing a silent mismatch.
+    """
+    # Simulate the shim returning cached data for PR #1256 when #1257 was requested.
+    stale_payload = json.dumps(
+        {
+            "number": 1256,
+            "title": "stale cached PR",
+            "url": "https://github.com/gptme/gptme-contrib/pull/1256",
+            "author": {"login": "TimeToBuildBob"},
+            "statusCheckRollup": [],
+            "isDraft": False,
+            "state": "OPEN",
+            "reviewDecision": None,
+            "headRefOid": "8a27c142stale",
+            "mergeStateStatus": "CLEAN",
+        }
+    )
+
+    with (
+        patch.object(self_merge_check, "run_gh", return_value=stale_payload),
+        patch.object(self_merge_check, "_fetch_pr_files", return_value=[]),
+    ):
+        with pytest.raises(
+            RuntimeError, match="PR data mismatch.*1257.*returned.*1256"
+        ):
+            self_merge_check.fetch_pr("gptme/gptme-contrib", 1257)
+
+
+def test_fetch_pr_raises_on_missing_number() -> None:
+    """fetch_pr must raise when the gh response omits the 'number' field entirely.
+
+    A malformed or truncated cache payload with no 'number' key previously
+    passed the guard (None is not None → False) and let stale url/headRefOid
+    through. With the is-not-None guard removed, None != requested_number
+    triggers the same RuntimeError, ensuring fail-closed behaviour.
+    """
+    malformed_payload = json.dumps(
+        {
+            # 'number' key intentionally absent
+            "title": "malformed PR",
+            "url": "https://github.com/gptme/gptme-contrib/pull/9999",
+            "author": {"login": "TimeToBuildBob"},
+            "statusCheckRollup": [],
+            "isDraft": False,
+            "state": "OPEN",
+            "reviewDecision": None,
+            "headRefOid": "deadbeefmalformed",
+            "mergeStateStatus": "CLEAN",
+        }
+    )
+
+    with (
+        patch.object(self_merge_check, "run_gh", return_value=malformed_payload),
+        patch.object(self_merge_check, "_fetch_pr_files", return_value=[]),
+    ):
+        with pytest.raises(RuntimeError, match="PR data mismatch.*1257.*None"):
+            self_merge_check.fetch_pr("gptme/gptme-contrib", 1257)
