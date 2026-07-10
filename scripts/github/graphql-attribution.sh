@@ -76,13 +76,20 @@ else
 fi
 
 # --- Pre-compute effective auth identity for cache key namespacing ---
-# When GH_TOKEN/GITHUB_TOKEN are set, use them directly (zero subprocesses).
-# Otherwise fall back to `gh auth token` (one subprocess per invocation, not
-# per call) so that stored-credential sessions get distinct cache namespaces.
+# Checks env-var tokens first (zero subprocesses), then falls back to
+# `gh auth token` (one subprocess per invocation, not per call) so that
+# stored-credential sessions also get distinct cache namespaces.
+# Enterprise hosts may use GH_ENTERPRISE_TOKEN/GITHUB_ENTERPRISE_TOKEN
+# instead of GH_TOKEN/GITHUB_TOKEN — check both chains.
 # This must use REAL_GH_BIN to avoid recursive wrapper invocation.
-_GH_EFFECTIVE_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+_GH_HOST="${GH_HOST:-github.com}"
+if [ "$_GH_HOST" = "github.com" ]; then
+    _GH_EFFECTIVE_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+else
+    _GH_EFFECTIVE_TOKEN="${GH_ENTERPRISE_TOKEN:-${GITHUB_ENTERPRISE_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}}"
+fi
 if [ -z "$_GH_EFFECTIVE_TOKEN" ]; then
-    _GH_EFFECTIVE_TOKEN=$("$REAL_GH_BIN" auth token --hostname "${GH_HOST:-github.com}" 2>/dev/null || printf 'unknown')
+    _GH_EFFECTIVE_TOKEN=$("$REAL_GH_BIN" auth token --hostname "$_GH_HOST" 2>/dev/null || printf 'unknown')
 fi
 
 # --- Detect if this is a GraphQL-backed call ---
@@ -371,7 +378,7 @@ _is_cacheable_call() {
 # GH_API_CACHE_TTL=0 to bypass the cache entirely.
 _CACHE_KEY=""
 _cache_key() {
-    local s="${GH_HOST:-github.com}:${_GH_EFFECTIVE_TOKEN}:$*" h=2166136261 i c
+    local s="${_GH_HOST}:${_GH_EFFECTIVE_TOKEN}:$*" h=2166136261 i c
     local len="${#s}"
     for (( i=0; i<len; i+=1 )); do
         printf -v c '%d' "'${s:$i:1}" 2>/dev/null || c=31
