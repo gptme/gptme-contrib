@@ -353,12 +353,15 @@ _is_cacheable_call() {
 # Pure-bash FNV-1a cache key — sets _CACHE_KEY global; call directly, not via $().
 # Replaces printf|md5sum|cut pipeline (3 subprocesses → 0). Hashes every character
 # of the full argument string (stride-1, no length cap) to avoid collisions.
-# GH_HOST is prepended so calls against different GitHub instances never share
-# cache entries. Note: the cache trades freshness for cost; callers needing
-# guaranteed-fresh data should set GH_API_CACHE_TTL=0 to bypass it entirely.
+# GH_HOST and the effective token are prepended so calls against different
+# GitHub instances or authenticated identities never share cache entries. The
+# token is mixed into the hash (not stored), so the cache filename reveals
+# nothing about the credential. Callers needing guaranteed-fresh data should
+# set GH_API_CACHE_TTL=0 to bypass the cache entirely.
 _CACHE_KEY=""
 _cache_key() {
-    local s="${GH_HOST:-github.com}:$*" h=2166136261 i c
+    local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    local s="${GH_HOST:-github.com}:${token}:$*" h=2166136261 i c
     local len="${#s}"
     for (( i=0; i<len; i+=1 )); do
         printf -v c '%d' "'${s:$i:1}" 2>/dev/null || c=31
