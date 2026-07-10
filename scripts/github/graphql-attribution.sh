@@ -352,10 +352,14 @@ _is_cacheable_call() {
 
 # Pure-bash FNV-1a cache key — sets _CACHE_KEY global; call directly, not via $().
 # Replaces printf|md5sum|cut pipeline (3 subprocesses → 0). Hashes every character
-# in the first 200 chars to avoid collisions from strings differing in even positions.
+# in the first 200 chars (stride-1, not stride-2) to avoid collisions from strings
+# differing at odd positions. GH_HOST is prepended so calls against different GitHub
+# instances never share cache entries.
+# Note: the cache trades freshness for cost; callers needing guaranteed-fresh data
+# should set GH_API_CACHE_TTL=0 to bypass it entirely.
 _CACHE_KEY=""
 _cache_key() {
-    local s="$*" h=2166136261 i c
+    local s="${GH_HOST:-github.com}:$*" h=2166136261 i c
     local len="${#s}"
     (( len > 200 )) && len=200
     for (( i=0; i<len; i+=1 )); do
@@ -402,10 +406,11 @@ _run_with_cache() {
         mv -f "$tmp_file" "$out_file"
         printf -v now '%(%s)T' -1
         printf '%s\n' "$now" > "$ts_file"
+        _log_graphql_call "$caller_pid" "$query_hash" "$query_preview" "done" "$points_est"
     else
         rm -f "$tmp_file"
+        _log_graphql_call "$caller_pid" "$query_hash" "$query_preview" "failed" "$points_est"
     fi
-    _log_graphql_call "$caller_pid" "$query_hash" "$query_preview" "done" "$points_est"
     return "$gh_exit"
 }
 
