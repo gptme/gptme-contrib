@@ -1,0 +1,54 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected": "orphan_no_delivery",
+      "field": "outcome",
+      "name": "outcome_str",
+      "raw_json": "{\"outcome\": \"orphan_no_delivery\", \"needs_fallback_reply\": true, \"fallback_reply_posted\": false, \"detail\": null, \"count\": 3}"
+    },
+    {
+      "expected": "true",
+      "field": "needs_fallback_reply",
+      "name": "bool_true",
+      "raw_json": "{\"outcome\": \"orphan_no_delivery\", \"needs_fallback_reply\": true, \"fallback_reply_posted\": false, \"detail\": null, \"count\": 3}"
+    },
+    {
+      "expected": "false",
+      "field": "fallback_reply_posted",
+      "name": "bool_false",
+      "raw_json": "{\"outcome\": \"orphan_no_delivery\", \"needs_fallback_reply\": true, \"fallback_reply_posted\": false, \"detail\": null, \"count\": 3}"
+    },
+    {
+      "expected": "",
+      "field": "detail",
+      "name": "null_value",
+      "raw_json": "{\"outcome\": \"orphan_no_delivery\", \"needs_fallback_reply\": true, \"fallback_reply_posted\": false, \"detail\": null, \"count\": 3}"
+    },
+    {
+      "expected": "3",
+      "field": "count",
+      "name": "int_value",
+      "raw_json": "{\"outcome\": \"orphan_no_delivery\", \"needs_fallback_reply\": true, \"fallback_reply_posted\": false, \"detail\": null, \"count\": 3}"
+    },
+    {
+      "expected": "",
+      "field": "nope",
+      "name": "missing_field",
+      "raw_json": "{\"outcome\": \"orphan_no_delivery\", \"needs_fallback_reply\": true, \"fallback_reply_posted\": false, \"detail\": null, \"count\": 3}"
+    },
+    {
+      "expected": "",
+      "field": "outcome",
+      "name": "invalid_json",
+      "raw_json": "{nope"
+    },
+    {
+      "expected": "",
+      "field": "outcome",
+      "name": "scalar_json",
+      "raw_json": "\"handled\""
+    }
+  ]
+}

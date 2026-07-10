@@ -1,0 +1,110 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected_entry_sans_timestamp": {
+        "decision": "eligible",
+        "gate_exit_code": 0,
+        "item_types": [
+          "pr_update",
+          "merge_ready"
+        ],
+        "pr_number": 1234,
+        "reason": "all green",
+        "repo": "gptme/gptme-contrib",
+        "session_id": "sess-g1",
+        "session_start": "2026-07-10T12:00:00+00:00"
+      },
+      "gate_exit_code": 0,
+      "gate_json": "{\"decision\": \"eligible\", \"reason\": \"all green\"}",
+      "name": "gate_pass_json",
+      "timestamp_present": true,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "_w_started_iso": "2026-07-10T12:00:00+00:00",
+        "_wait_merge_gate_json": "{\"decision\": \"eligible\", \"reason\": \"all green\"}",
+        "_wait_merge_gate_log": "<WS>/logs/gate-gate_pass_json.jsonl",
+        "_wait_merge_gate_status": "0",
+        "item_number": "1234",
+        "item_repo": "gptme/gptme-contrib",
+        "item_session_id": "sess-g1",
+        "item_types": "pr_update merge_ready"
+      }
+    },
+    {
+      "expected_entry_sans_timestamp": {
+        "gate_exit_code": 2,
+        "item_types": [
+          "pr_update",
+          "merge_ready"
+        ],
+        "pr_number": 1234,
+        "repo": "gptme/gptme-contrib",
+        "session_id": "sess-g1",
+        "session_start": "2026-07-10T12:00:00+00:00"
+      },
+      "gate_exit_code": 2,
+      "gate_json": "",
+      "name": "empty_gate_json",
+      "timestamp_present": true,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "_w_started_iso": "2026-07-10T12:00:00+00:00",
+        "_wait_merge_gate_json": "",
+        "_wait_merge_gate_log": "<WS>/logs/gate-empty_gate_json.jsonl",
+        "_wait_merge_gate_status": "2",
+        "item_number": "1234",
+        "item_repo": "gptme/gptme-contrib",
+        "item_session_id": "sess-g1",
+        "item_types": "pr_update merge_ready"
+      }
+    },
+    {
+      "expected_entry_sans_timestamp": {
+        "gate_exit_code": 1,
+        "item_types": [
+          "pr_update",
+          "merge_ready"
+        ],
+        "pr_number": 1234,
+        "repo": "gptme/gptme-contrib",
+        "session_id": "sess-g1",
+        "session_start": "2026-07-10T12:00:00+00:00"
+      },
+      "gate_exit_code": 1,
+      "gate_json": "[1, 2]",
+      "name": "non_dict_gate_json",
+      "timestamp_present": true,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "_w_started_iso": "2026-07-10T12:00:00+00:00",
+        "_wait_merge_gate_json": "[1, 2]",
+        "_wait_merge_gate_log": "<WS>/logs/gate-non_dict_gate_json.jsonl",
+        "_wait_merge_gate_status": "1",
+        "item_number": "1234",
+        "item_repo": "gptme/gptme-contrib",
+        "item_session_id": "sess-g1",
+        "item_types": "pr_update merge_ready"
+      }
+    },
+    {
+      "expected_entry_sans_timestamp": null,
+      "gate_exit_code": 0,
+      "gate_json": "{nope",
+      "name": "invalid_gate_json_dies",
+      "timestamp_present": false,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "_w_started_iso": "2026-07-10T12:00:00+00:00",
+        "_wait_merge_gate_json": "{nope",
+        "_wait_merge_gate_log": "<WS>/logs/gate-invalid_gate_json_dies.jsonl",
+        "_wait_merge_gate_status": "0",
+        "item_number": "1234",
+        "item_repo": "gptme/gptme-contrib",
+        "item_session_id": "sess-g1",
+        "item_types": "pr_update merge_ready"
+      }
+    }
+  ]
+}

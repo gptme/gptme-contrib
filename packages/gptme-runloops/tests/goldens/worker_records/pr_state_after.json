@@ -1,0 +1,31 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "content": "{\"pr_state_after\": \"merged\"}",
+      "expected": "MERGED",
+      "name": "merged_lowercase"
+    },
+    {
+      "content": "{\"outcome\": \"unknown\"}",
+      "expected": "",
+      "name": "missing_key"
+    },
+    {
+      "content": "[1]",
+      "expected": "",
+      "name": "non_dict"
+    },
+    {
+      "content": "{nope",
+      "expected": "",
+      "name": "invalid_json"
+    },
+    {
+      "content": null,
+      "expected": "",
+      "name": "missing_file"
+    }
+  ]
+}

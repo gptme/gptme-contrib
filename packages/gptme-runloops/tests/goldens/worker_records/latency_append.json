@@ -1,0 +1,77 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected_call": {
+        "ack_result": {
+          "acked": true
+        },
+        "handled_at": "2026-07-10T12:00:00+00:00",
+        "item": {
+          "number": 42,
+          "repo": "gptme/gptme",
+          "types": [
+            "pr_update"
+          ]
+        },
+        "latency_context": [
+          {
+            "at": "2026-07-10T10:00:00+00:00",
+            "event": "comment"
+          }
+        ],
+        "outcome": "handled",
+        "repo_root": "<WS>",
+        "session_id": "sess-l1"
+      },
+      "name": "full_inputs",
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "_latency_outcome": "handled",
+        "_w_started_iso": "2026-07-10T12:00:00+00:00",
+        "item_ack_result_json": "{\"acked\": true}",
+        "item_json": "{\"repo\": \"gptme/gptme\", \"number\": 42, \"types\": [\"pr_update\"]}",
+        "item_latency_context_json": "[{\"event\": \"comment\", \"at\": \"2026-07-10T10:00:00+00:00\"}]",
+        "item_session_id": "sess-l1"
+      }
+    },
+    {
+      "expected_call": {
+        "ack_result": null,
+        "handled_at": "2026-07-10T13:00:00+00:00",
+        "item": {
+          "number": 7,
+          "repo": "gptme/gptme"
+        },
+        "latency_context": [],
+        "outcome": "orphan_no_delivery",
+        "repo_root": "<WS>",
+        "session_id": "sess-l2"
+      },
+      "name": "empty_context_and_ack",
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "_latency_outcome": "orphan_no_delivery",
+        "_w_started_iso": "2026-07-10T13:00:00+00:00",
+        "item_ack_result_json": "",
+        "item_json": "{\"repo\": \"gptme/gptme\", \"number\": 7}",
+        "item_latency_context_json": "",
+        "item_session_id": "sess-l2"
+      }
+    },
+    {
+      "expected_call": null,
+      "name": "empty_item_json_dies",
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "_latency_outcome": "failed",
+        "_w_started_iso": "2026-07-10T14:00:00+00:00",
+        "item_ack_result_json": "",
+        "item_json": "",
+        "item_latency_context_json": "",
+        "item_session_id": "sess-l3"
+      }
+    }
+  ]
+}

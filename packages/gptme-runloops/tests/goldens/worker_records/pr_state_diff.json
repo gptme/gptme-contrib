@@ -1,0 +1,143 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected_record": {
+        "deliverables": [
+          "deadbeefcafe",
+          "note",
+          "bbb222"
+        ],
+        "outcome": "unknown",
+        "pr_head_oid_after": "bbb222",
+        "pr_head_oid_before": "aaa111",
+        "pr_merge_commit_after": "ccc333",
+        "pr_state_after": "MERGED",
+        "pr_state_before": "OPEN"
+      },
+      "gh_fail": false,
+      "gh_output": "{\"state\": \"MERGED\", \"headRefOid\": \"BBB222\", \"mergeCommit\": {\"oid\": \"CCC333\"}}",
+      "name": "head_advance_merged_no_upgrade_pkg",
+      "record_before": {
+        "deliverables": [
+          "deadbeefcafe",
+          "DEADBEEFCAFE",
+          "  note  ",
+          ""
+        ],
+        "outcome": "unknown"
+      },
+      "upgrade_hook": false,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "item_number": "1234",
+        "item_pr_before_json": "{\"state\": \"open\", \"headRefOid\": \"AAA111\", \"mergeCommit\": null}",
+        "item_record_file": "<WS>/records/prdiff-head_advance_merged_no_upgrade_pkg.json",
+        "item_repo": "gptme/gptme-contrib"
+      }
+    },
+    {
+      "expected_record": {
+        "deliverables": [
+          "def2"
+        ],
+        "outcome": "productive",
+        "outcome_upgrade_seen": true,
+        "pr_head_oid_after": "def2",
+        "pr_head_oid_before": "abc1",
+        "pr_merge_commit_after": "raw-string-oid",
+        "pr_state_after": "MERGED",
+        "pr_state_before": "OPEN"
+      },
+      "gh_fail": false,
+      "gh_output": "{\"state\": \"MERGED\", \"headRefOid\": \"def2\", \"mergeCommit\": \"raw-string-oid\"}",
+      "name": "upgrade_hook_present",
+      "record_before": {
+        "deliverables": [],
+        "outcome": "unknown"
+      },
+      "upgrade_hook": true,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "item_number": "42",
+        "item_pr_before_json": "{\"state\": \"OPEN\", \"headRefOid\": \"abc1\", \"mergeCommit\": null}",
+        "item_record_file": "<WS>/records/prdiff-upgrade_hook_present.json",
+        "item_repo": "gptme/gptme"
+      }
+    },
+    {
+      "expected_record": {
+        "deliverables": [
+          "One",
+          "Two"
+        ],
+        "outcome": "productive"
+      },
+      "gh_fail": true,
+      "gh_output": null,
+      "name": "empty_before_gh_fails",
+      "record_before": {
+        "deliverables": [
+          "One",
+          "one",
+          "Two"
+        ],
+        "outcome": "productive"
+      },
+      "upgrade_hook": false,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "item_number": "7",
+        "item_pr_before_json": "",
+        "item_record_file": "<WS>/records/prdiff-empty_before_gh_fails.json",
+        "item_repo": "gptme/gptme"
+      }
+    },
+    {
+      "expected_record": [
+        1,
+        2
+      ],
+      "gh_fail": false,
+      "gh_output": "{}",
+      "name": "non_dict_record_untouched",
+      "record_before": "[1, 2]",
+      "upgrade_hook": false,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "item_number": "8",
+        "item_pr_before_json": "",
+        "item_record_file": "<WS>/records/prdiff-non_dict_record_untouched.json",
+        "item_repo": "gptme/gptme"
+      }
+    },
+    {
+      "expected_record": {
+        "deliverables": [
+          "bbb"
+        ],
+        "outcome": "unknown",
+        "pr_head_oid_after": "bbb",
+        "pr_head_oid_before": "aaa",
+        "pr_state_after": "OPEN",
+        "pr_state_before": "OPEN"
+      },
+      "gh_fail": false,
+      "gh_output": "{\"state\": \"OPEN\", \"headRefOid\": \"bbb\", \"mergeCommit\": null}",
+      "name": "non_list_deliverables",
+      "record_before": {
+        "deliverables": "not-a-list",
+        "outcome": "unknown"
+      },
+      "upgrade_hook": false,
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "item_number": "9",
+        "item_pr_before_json": "{\"state\": \"OPEN\", \"headRefOid\": \"aaa\", \"mergeCommit\": null}",
+        "item_record_file": "<WS>/records/prdiff-non_list_deliverables.json",
+        "item_repo": "gptme/gptme"
+      }
+    }
+  ]
+}
