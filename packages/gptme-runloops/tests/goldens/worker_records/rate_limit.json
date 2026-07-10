@@ -1,0 +1,61 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected_info": "seven_day\t1760000000",
+      "log_lines": [
+        "{\"type\":\"other\"}",
+        "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"seven_day\",\"resetsAt\":1760000000}}"
+      ],
+      "name": "rejected_with_reset"
+    },
+    {
+      "expected_info": "\t",
+      "log_lines": [
+        "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\"}}"
+      ],
+      "name": "rejected_missing_keys"
+    },
+    {
+      "expected_info": "",
+      "log_lines": [
+        "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"rateLimitType\":\"five_hour\"}}"
+      ],
+      "name": "non_rejected_only"
+    },
+    {
+      "expected_info": "five_hour\t123",
+      "log_lines": [
+        "",
+        "not json at all {",
+        "{\"type\":\"assistant\",\"message\":\"hi\"}",
+        "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"resetsAt\":123}}"
+      ],
+      "name": "rejection_after_noise"
+    },
+    {
+      "expected_info": "",
+      "log_lines": [
+        "{\"type\":\"rate_limit_event\",\"rate_limit_info\":\"oops\"}",
+        "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"resetsAt\":123}}"
+      ],
+      "name": "non_dict_info_aborts"
+    },
+    {
+      "expected_info": "",
+      "log_lines": [
+        "{\"type\":\"assistant\"}"
+      ],
+      "name": "no_event"
+    },
+    {
+      "expected_info": "first\t1",
+      "log_lines": [
+        "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"first\",\"resetsAt\":1}}",
+        "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"second\",\"resetsAt\":2}}"
+      ],
+      "name": "first_rejection_wins"
+    }
+  ]
+}

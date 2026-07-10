@@ -1,0 +1,87 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected_fallback_outcome": "failed",
+      "expected_record": {
+        "category": "pm-react",
+        "duration_seconds": 44,
+        "exit_code": 1,
+        "harness": "claude-code",
+        "model": "unknown",
+        "outcome": "failed",
+        "run_type": "monitoring",
+        "session_id": "sess-f1",
+        "source": "stub-session-record"
+      },
+      "name": "failed_exit_empty_model",
+      "vars": {
+        "BACKEND": "claude-code",
+        "ITEM_TIMEOUT": "0",
+        "WORKSPACE": "<WS>",
+        "item_duration": "44",
+        "item_exit_code": "1",
+        "item_model": "",
+        "item_record_file": "<WS>/records/fb-failed_exit_empty_model.json",
+        "item_session_id": "sess-f1",
+        "item_trajectory_path": ""
+      }
+    },
+    {
+      "expected_fallback_outcome": "unknown",
+      "expected_record": {
+        "category": "pm-react",
+        "duration_seconds": 600,
+        "exit_code": 124,
+        "harness": "gptme",
+        "model": "anthropic/claude-sonnet-4.5",
+        "outcome": "unknown",
+        "run_type": "monitoring",
+        "session_id": "sess-f2",
+        "source": "stub-session-record",
+        "timeout_seconds": 600,
+        "trajectory_path": "<WS>/traj/fallback-traj.jsonl"
+      },
+      "name": "timeout_exit_with_trajectory",
+      "vars": {
+        "BACKEND": "gptme",
+        "ITEM_TIMEOUT": "600",
+        "WORKSPACE": "<WS>",
+        "item_duration": "600",
+        "item_exit_code": "124",
+        "item_model": "anthropic/claude-sonnet-4.5",
+        "item_record_file": "<WS>/records/fb-timeout_exit_with_trajectory.json",
+        "item_session_id": "sess-f2",
+        "item_trajectory_path": "<WS>/traj/fallback-traj.jsonl"
+      }
+    },
+    {
+      "expected_fallback_outcome": "unknown",
+      "expected_record": {
+        "category": "pm-react",
+        "duration_seconds": 10,
+        "exit_code": 0,
+        "harness": "copilot-cli",
+        "model": "gpt-5",
+        "outcome": "unknown",
+        "run_type": "monitoring",
+        "session_id": "sess-f3",
+        "source": "stub-session-record",
+        "timeout_seconds": 300
+      },
+      "name": "clean_exit",
+      "vars": {
+        "BACKEND": "copilot-cli",
+        "ITEM_TIMEOUT": "300",
+        "WORKSPACE": "<WS>",
+        "item_duration": "10",
+        "item_exit_code": "0",
+        "item_model": "gpt-5",
+        "item_record_file": "<WS>/records/fb-clean_exit.json",
+        "item_session_id": "sess-f3",
+        "item_trajectory_path": ""
+      }
+    }
+  ]
+}

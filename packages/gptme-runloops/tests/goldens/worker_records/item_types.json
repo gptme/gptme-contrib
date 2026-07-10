@@ -1,0 +1,40 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected_json": [
+        "pr_update",
+        "merge_ready"
+      ],
+      "name": "case_0",
+      "text": "pr_update merge_ready"
+    },
+    {
+      "expected_json": [
+        "pr_update",
+        "ci_failure",
+        "issue_mention"
+      ],
+      "name": "case_1",
+      "text": "pr_update\nci_failure  issue_mention"
+    },
+    {
+      "expected_json": [],
+      "name": "case_2",
+      "text": ""
+    },
+    {
+      "expected_json": [],
+      "name": "case_3",
+      "text": "   "
+    },
+    {
+      "expected_json": [
+        "single"
+      ],
+      "name": "case_4",
+      "text": "single"
+    }
+  ]
+}

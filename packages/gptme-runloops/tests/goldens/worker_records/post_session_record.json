@@ -1,0 +1,95 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected_record": {
+        "category": "pm-react",
+        "duration_seconds": 321,
+        "exit_code": 0,
+        "grade": "stub-grade",
+        "harness": "claude-code",
+        "model": "claude-opus-4",
+        "outcome": "stub-outcome",
+        "run_type": "monitoring",
+        "session_id": "sess-aaa",
+        "sessions_dir": "<WS>/records",
+        "timeout_seconds": 1800,
+        "trajectory_path": "<WS>/traj/cc-session.jsonl",
+        "trigger": "timer"
+      },
+      "heredoc_exit": 0,
+      "name": "full_with_trajectory_and_timeout",
+      "vars": {
+        "BACKEND": "claude-code",
+        "ITEM_TIMEOUT": "1800",
+        "WORKSPACE": "<WS>",
+        "item_duration": "321",
+        "item_exit_code": "0",
+        "item_model": "claude-opus-4",
+        "item_record_file": "<WS>/records/ps-full_with_trajectory_and_timeout.json",
+        "item_session_id": "sess-aaa",
+        "item_trajectory_path": "<WS>/traj/cc-session.jsonl"
+      }
+    },
+    {
+      "expected_record": {
+        "category": "pm-react",
+        "duration_seconds": 5,
+        "exit_code": 1,
+        "grade": "stub-grade",
+        "harness": "gptme",
+        "model": null,
+        "outcome": "stub-outcome",
+        "run_type": "monitoring",
+        "session_id": "sess-bbb",
+        "sessions_dir": "<WS>/records",
+        "trajectory_path": null,
+        "trigger": "timer"
+      },
+      "heredoc_exit": 0,
+      "name": "empty_model_no_timeout_no_trajectory",
+      "vars": {
+        "BACKEND": "gptme",
+        "ITEM_TIMEOUT": "0",
+        "WORKSPACE": "<WS>",
+        "item_duration": "5",
+        "item_exit_code": "1",
+        "item_model": "",
+        "item_record_file": "<WS>/records/ps-empty_model_no_timeout_no_trajectory.json",
+        "item_session_id": "sess-bbb",
+        "item_trajectory_path": ""
+      }
+    },
+    {
+      "expected_record": {
+        "category": "pm-react",
+        "duration_seconds": 900,
+        "exit_code": 124,
+        "grade": "stub-grade",
+        "harness": "codex",
+        "model": "gpt-5.2-codex",
+        "outcome": "stub-outcome",
+        "run_type": "monitoring",
+        "session_id": "sess-ccc",
+        "sessions_dir": "<WS>/records",
+        "timeout_seconds": 900,
+        "trajectory_path": null,
+        "trigger": "timer"
+      },
+      "heredoc_exit": 0,
+      "name": "missing_trajectory_file",
+      "vars": {
+        "BACKEND": "codex",
+        "ITEM_TIMEOUT": "900",
+        "WORKSPACE": "<WS>",
+        "item_duration": "900",
+        "item_exit_code": "124",
+        "item_model": "gpt-5.2-codex",
+        "item_record_file": "<WS>/records/ps-missing_trajectory_file.json",
+        "item_session_id": "sess-ccc",
+        "item_trajectory_path": "<WS>/traj/does-not-exist.jsonl"
+      }
+    }
+  ]
+}

@@ -1,0 +1,248 @@
+{
+  "_generated_from": "ErikBjare/bob scripts/github/project-monitoring-worker.sh @ 98e7da0eb18543c53ca7f7ee207eb679010ccffb",
+  "_note": "<WS> is the workspace-root placeholder; see test docstring.",
+  "cases": [
+    {
+      "expected_manifest": {
+        "artifact_paths": {
+          "record_path": "<WS>/records/wr-completed_with_oids_and_head_advance.json",
+          "trajectory_path": "<WS>/traj/wr-traj.jsonl"
+        },
+        "blocked_reason": null,
+        "deliverables": [
+          "Pushed deadbeefcafe and DEADBEEF",
+          "PR gptme/gptme#42"
+        ],
+        "duration_seconds": 100,
+        "exit_code": 0,
+        "git_refs": {
+          "commit_oids": [
+            "deadbeefcafe",
+            "deadbeef",
+            "def7654321"
+          ],
+          "end_commit": "def7654321",
+          "start_commit": "abc1234567"
+        },
+        "model": "claude-opus-4",
+        "schema_version": 3,
+        "session_id": "sess-w1",
+        "status": "completed",
+        "task": {
+          "intended_category": "pm-react",
+          "issue_number": 1234,
+          "item_types": [
+            "pr_update",
+            "merge_ready"
+          ],
+          "recorded_outcome": "productive",
+          "repo": "gptme/gptme-contrib",
+          "run_type": "monitoring"
+        },
+        "work_item_id": "gptme/gptme-contrib#1234",
+        "worker": {
+          "id": "project-monitoring-sess-w1",
+          "kind": "project-monitoring-worker"
+        }
+      },
+      "expected_record": {
+        "deliverables": [
+          "Pushed deadbeefcafe and DEADBEEF",
+          "PR gptme/gptme#42",
+          "Pushed deadbeefcafe and DEADBEEF"
+        ],
+        "outcome": "productive",
+        "pr_head_oid_after": "def7654321",
+        "pr_head_oid_before": "ABC1234567",
+        "run_type": "monitoring",
+        "trajectory_path": "<WS>/traj/wr-traj.jsonl",
+        "worker_artifact_paths": {
+          "record_path": "<WS>/records/wr-completed_with_oids_and_head_advance.json",
+          "trajectory_path": "<WS>/traj/wr-traj.jsonl"
+        },
+        "worker_git_refs": {
+          "commit_oids": [
+            "deadbeefcafe",
+            "deadbeef",
+            "def7654321"
+          ],
+          "end_commit": "def7654321",
+          "start_commit": "abc1234567"
+        },
+        "worker_intended_category": "pm-react",
+        "worker_manifest_schema": "bob.worker-result.v3",
+        "worker_result_path": "<WS>/records/wr-completed_with_oids_and_head_advance.worker-result.json",
+        "worker_status": "completed"
+      },
+      "name": "completed_with_oids_and_head_advance",
+      "record_before": {
+        "deliverables": [
+          "Pushed deadbeefcafe and DEADBEEF",
+          "PR gptme/gptme#42",
+          "Pushed deadbeefcafe and DEADBEEF"
+        ],
+        "outcome": "productive",
+        "pr_head_oid_after": "def7654321",
+        "pr_head_oid_before": "ABC1234567",
+        "run_type": "monitoring",
+        "trajectory_path": "<WS>/traj/wr-traj.jsonl"
+      },
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "item_duration": "100",
+        "item_exit_code": "0",
+        "item_model": "claude-opus-4",
+        "item_number": "1234",
+        "item_record_file": "<WS>/records/wr-completed_with_oids_and_head_advance.json",
+        "item_repo": "gptme/gptme-contrib",
+        "item_session_id": "sess-w1",
+        "item_types": "pr_update merge_ready"
+      }
+    },
+    {
+      "expected_manifest": {
+        "artifact_paths": {
+          "record_path": "<WS>/records/wr-blocked_75_non_list_deliverables.json",
+          "trajectory_path": null
+        },
+        "blocked_reason": "stub-blocked",
+        "deliverables": [],
+        "duration_seconds": 3,
+        "exit_code": 75,
+        "git_refs": {
+          "commit_oids": [],
+          "end_commit": null,
+          "start_commit": null
+        },
+        "model": null,
+        "schema_version": 3,
+        "session_id": "sess-w2",
+        "status": "failed",
+        "task": {
+          "intended_category": "pm-react",
+          "issue_number": 999,
+          "item_types": [
+            "issue_mention"
+          ],
+          "recorded_outcome": "",
+          "repo": "ErikBjare/bob",
+          "run_type": "monitoring"
+        },
+        "work_item_id": "ErikBjare/bob#999",
+        "worker": {
+          "id": "project-monitoring-sess-w2",
+          "kind": "project-monitoring-worker"
+        }
+      },
+      "expected_record": {
+        "deliverables": {
+          "nope": 1
+        },
+        "outcome": "",
+        "worker_artifact_paths": {
+          "record_path": "<WS>/records/wr-blocked_75_non_list_deliverables.json"
+        },
+        "worker_blocked_reason": "stub-blocked",
+        "worker_git_refs": {
+          "commit_oids": [],
+          "end_commit": null,
+          "start_commit": null
+        },
+        "worker_intended_category": "pm-react",
+        "worker_manifest_schema": "bob.worker-result.v3",
+        "worker_result_path": "<WS>/records/wr-blocked_75_non_list_deliverables.worker-result.json",
+        "worker_status": "failed"
+      },
+      "name": "blocked_75_non_list_deliverables",
+      "record_before": {
+        "deliverables": {
+          "nope": 1
+        },
+        "outcome": ""
+      },
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "item_duration": "3",
+        "item_exit_code": "75",
+        "item_model": "",
+        "item_number": "999",
+        "item_record_file": "<WS>/records/wr-blocked_75_non_list_deliverables.json",
+        "item_repo": "ErikBjare/bob",
+        "item_session_id": "sess-w2",
+        "item_types": "issue_mention"
+      }
+    },
+    {
+      "expected_manifest": {
+        "artifact_paths": {
+          "record_path": "<WS>/records/wr-status_missing_falls_back_failed.json",
+          "trajectory_path": null
+        },
+        "blocked_reason": null,
+        "deliverables": [
+          "no oids here"
+        ],
+        "duration_seconds": 9,
+        "exit_code": 99,
+        "git_refs": {
+          "commit_oids": [],
+          "end_commit": null,
+          "start_commit": null
+        },
+        "model": "gpt-5",
+        "schema_version": 3,
+        "session_id": "sess-w3",
+        "status": null,
+        "task": {
+          "intended_category": "pm-react",
+          "issue_number": 5,
+          "item_types": [
+            "ci_failure"
+          ],
+          "recorded_outcome": "",
+          "repo": "gptme/gptme",
+          "run_type": "monitoring"
+        },
+        "work_item_id": "gptme/gptme#5",
+        "worker": {
+          "id": "project-monitoring-sess-w3",
+          "kind": "project-monitoring-worker"
+        }
+      },
+      "expected_record": {
+        "deliverables": [
+          "no oids here"
+        ],
+        "worker_artifact_paths": {
+          "record_path": "<WS>/records/wr-status_missing_falls_back_failed.json"
+        },
+        "worker_git_refs": {
+          "commit_oids": [],
+          "end_commit": null,
+          "start_commit": null
+        },
+        "worker_intended_category": "pm-react",
+        "worker_manifest_schema": "bob.worker-result.v3",
+        "worker_result_path": "<WS>/records/wr-status_missing_falls_back_failed.worker-result.json",
+        "worker_status": "failed"
+      },
+      "name": "status_missing_falls_back_failed",
+      "record_before": {
+        "deliverables": [
+          "no oids here"
+        ]
+      },
+      "vars": {
+        "WORKSPACE": "<WS>",
+        "item_duration": "9",
+        "item_exit_code": "99",
+        "item_model": "gpt-5",
+        "item_number": "5",
+        "item_record_file": "<WS>/records/wr-status_missing_falls_back_failed.json",
+        "item_repo": "gptme/gptme",
+        "item_session_id": "sess-w3",
+        "item_types": "ci_failure"
+      }
+    }
+  ]
+}
