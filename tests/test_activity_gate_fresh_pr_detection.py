@@ -180,3 +180,143 @@ def test_fresh_pr_detected_despite_stale_pr_data_cache() -> None:
             "should be detected as merge_ready once the live cache expires, "
             f"but gate output was: {result.stdout!r}"
         )
+
+
+# Fake gh: same as FAKE_GH_FRESH_PR but the issue comments API returns a Greptile
+# review comment with Score: 4/5.  Used to verify that check_greptile_scores is
+# called with live data when pr_data=[] so the greptile.state file is seeded and
+# check_merge_ready is blocked from emitting merge_ready.
+FAKE_GH_FRESH_PR_LOW_GREPTILE = r"""#!/usr/bin/env python3
+from __future__ import annotations
+import json, os, sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+
+def pr_list_payload():
+    return [{
+        "number": int(os.environ.get("TEST_PR_NUMBER", "1259")),
+        "title": "fix(pm-dispatch): LRU ordering within lanes",
+        "updatedAt": "2026-07-10T00:00:00Z",
+        "comments": [],
+        "latestReviews": [],
+        "statusCheckRollup": None,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "headRefOid": os.environ.get("TEST_HEAD_SHA", "abc123def456"),
+        "isDraft": False,
+    }]
+
+if not argv:
+    sys.exit(2)
+
+if argv[0] == "pr" and len(argv) > 1 and argv[1] == "list":
+    print(json.dumps(pr_list_payload()))
+    sys.exit(0)
+
+if argv[0] == "repo" and len(argv) > 1 and argv[1] == "list":
+    sys.exit(0)
+
+if argv[0] in ("issue", "run") and len(argv) > 1 and argv[1] == "list":
+    print("[]")
+    sys.exit(0)
+
+if argv[0] == "pr" and len(argv) > 1 and argv[1] == "comment":
+    sys.exit(0)
+
+if argv[0] == "api":
+    path = argv[1] if len(argv) > 1 else ""
+    jq = argv[argv.index("--jq") + 1] if "--jq" in argv else ""
+    # Permission probe: bot can merge.
+    if "repos/" in path and "permissions" in jq:
+        print("true")
+        sys.exit(0)
+    # Issue comments endpoint is called in two different ways:
+    # 1. check_greptile_scores: --jq with "greptile" → return the extracted
+    #    score digit (as gh --jq would after filtering), not raw JSON.
+    # 2. has_maintainer_waiting_comment / suppression checks: --jq WITHOUT
+    #    "greptile" → return [] (no prior bot comments).
+    if "issues" in path and "comments" in path:
+        if "greptile" in jq:
+            # Simulate gh --jq output: just the captured digit "4", one per line.
+            print("4")
+        else:
+            print("[]")
+        sys.exit(0)
+    if "notifications" in path:
+        sys.exit(0)
+    print("[]")
+    sys.exit(0)
+
+sys.exit(0)
+"""
+
+
+def test_fresh_pr_with_low_greptile_score_is_not_merge_ready() -> None:
+    """Regression: a fresh PR with Greptile score 4/5 (below the 5/5 floor) must
+    NOT be emitted as merge_ready even when pr_data=[] (stale cache).
+
+    Before the fix: check_greptile_scores received pr_data=[] and returned
+    immediately without seeding the greptile.state file.  check_merge_ready then
+    found no state file and treated the PR as having no Greptile review —
+    "missing state file = OK to merge" — and incorrectly emitted merge_ready.
+
+    After the fix: check_greptile_scores falls back to live_pr_data when
+    pr_data=[], seeds the state file with score=4, and check_merge_ready reads
+    the state file, sees 4 < 5, and suppresses the merge_ready emit.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Pre-populate the shared PR cache with [] (stale empty snapshot).
+        cache_dir = state_dir / "gh-cache"
+        cache_dir.mkdir()
+        cache_file = cache_dir / f"pr-{TEST_REPO.replace('/', '-')}.json"
+        cache_file.write_text("[]")
+
+        # Set cache mtime to 150s ago so it is stale for the live TTL (100s)
+        # but still fresh for the long-TTL (300s) — same conditions as the
+        # detection test above.
+        old_time = time.time() - 150
+        os.utime(str(cache_file), (old_time, old_time))
+
+        fake_gh = tmp / "gh"
+        fake_gh.write_text(FAKE_GH_FRESH_PR_LOW_GREPTILE)
+        fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+
+        env = os.environ.copy()
+        env["PATH"] = f"{tmp}:{env['PATH']}"
+        env["TEST_PR_NUMBER"] = str(TEST_PR_NUMBER)
+        env["TEST_HEAD_SHA"] = TEST_HEAD_SHA
+        env["GH_CACHE_TTL_PR"] = "300"
+        env["GH_CACHE_TTL_LIVE_PR"] = "100"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--author",
+                "test-author",
+                "--org",
+                "testorg",
+                "--repo",
+                TEST_REPO,
+                "--state-dir",
+                str(state_dir),
+                "--format",
+                "jsonl",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert result.returncode in (0, 1), result.stderr
+
+        assert '"type":"merge_ready"' not in result.stdout, (
+            "PR with Greptile score 4/5 (below floor 5/5) discovered via the live "
+            "fetch (pr_data=[]) must NOT be emitted as merge_ready — "
+            "check_greptile_scores must be called with live_pr_data as fallback "
+            f"to seed the greptile.state file. Gate output: {result.stdout!r}"
+        )

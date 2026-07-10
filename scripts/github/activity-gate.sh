@@ -1212,7 +1212,15 @@ for repo in $all_repos; do
         items=$(check_merge_conflicts "$repo" "$live_pr_data" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
-        items=$(check_greptile_scores "$repo" "$pr_data" 2>/dev/null || true)
+        # Use live_pr_data as fallback when cached data is empty: ensures
+        # check_greptile_scores seeds its state file even for PRs discovered only
+        # by the live fetch, so check_merge_ready can't bypass the Greptile floor
+        # on a PR whose greptile.state file was never written.
+        greptile_input="$pr_data"
+        if [ "$greptile_input" = "[]" ] || [ -z "$greptile_input" ]; then
+            greptile_input="$live_pr_data"
+        fi
+        items=$(check_greptile_scores "$repo" "$greptile_input" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         # Must run AFTER check_greptile_scores (reads its state files) and with
