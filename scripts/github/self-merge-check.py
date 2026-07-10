@@ -479,10 +479,10 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
     # wrong url/head_sha while the correct number comes from the function argument.
     # Incident: gptme-contrib#1257 returned #1256's url+SHA after stride-2 collision.
     returned_number = pr.get("number")
-    if returned_number is not None and returned_number != number:
+    if returned_number != number:
         raise RuntimeError(
-            f"PR data mismatch for {repo}#{number}: gh returned data for #{returned_number}. "
-            f"Possible cache key collision in gh wrapper. "
+            f"PR data mismatch for {repo}#{number}: gh returned data for #{returned_number!r}. "
+            f"Possible cache key collision in gh wrapper or malformed payload. "
             f"Try GH_API_CACHE_TTL=0 to bypass the cache."
         )
 

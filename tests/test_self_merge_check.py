@@ -1411,3 +1411,34 @@ def test_fetch_pr_raises_on_number_mismatch() -> None:
             RuntimeError, match="PR data mismatch.*1257.*returned.*1256"
         ):
             self_merge_check.fetch_pr("gptme/gptme-contrib", 1257)
+
+
+def test_fetch_pr_raises_on_missing_number() -> None:
+    """fetch_pr must raise when the gh response omits the 'number' field entirely.
+
+    A malformed or truncated cache payload with no 'number' key previously
+    passed the guard (None is not None → False) and let stale url/headRefOid
+    through. With the is-not-None guard removed, None != requested_number
+    triggers the same RuntimeError, ensuring fail-closed behaviour.
+    """
+    malformed_payload = json.dumps(
+        {
+            # 'number' key intentionally absent
+            "title": "malformed PR",
+            "url": "https://github.com/gptme/gptme-contrib/pull/9999",
+            "author": {"login": "TimeToBuildBob"},
+            "statusCheckRollup": [],
+            "isDraft": False,
+            "state": "OPEN",
+            "reviewDecision": None,
+            "headRefOid": "deadbeefmalformed",
+            "mergeStateStatus": "CLEAN",
+        }
+    )
+
+    with (
+        patch.object(self_merge_check, "run_gh", return_value=malformed_payload),
+        patch.object(self_merge_check, "_fetch_pr_files", return_value=[]),
+    ):
+        with pytest.raises(RuntimeError, match="PR data mismatch.*1257.*None"):
+            self_merge_check.fetch_pr("gptme/gptme-contrib", 1257)
