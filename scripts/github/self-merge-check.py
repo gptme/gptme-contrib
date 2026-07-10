@@ -472,6 +472,20 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
         raise RuntimeError(f"Failed to fetch PR metadata for {repo}#{number}")
 
     pr = cast(dict[str, Any], json.loads(raw))
+
+    # Defensive check: the returned PR number must match what was requested.
+    # A cache key collision in the gh shim (e.g. graphql-attribution.sh with a
+    # stride-2 hash) can return stale data for a different PR number, producing
+    # wrong url/head_sha while the correct number comes from the function argument.
+    # Incident: gptme-contrib#1257 returned #1256's url+SHA after stride-2 collision.
+    returned_number = pr.get("number")
+    if returned_number is not None and returned_number != number:
+        raise RuntimeError(
+            f"PR data mismatch for {repo}#{number}: gh returned data for #{returned_number}. "
+            f"Possible cache key collision in gh wrapper. "
+            f"Try GH_API_CACHE_TTL=0 to bypass the cache."
+        )
+
     pr["files"] = _fetch_pr_files(repo, number)
     return pr
 
