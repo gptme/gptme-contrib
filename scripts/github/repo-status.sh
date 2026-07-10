@@ -4,8 +4,14 @@
 
 set -euo pipefail
 
-# gh colorizes --json output when it thinks stdout is a TTY, which breaks jq.
-export GH_FORCE_TTY=0
+# gh colorizes --json/--jq output whenever it thinks stdout is a TTY, which
+# breaks downstream jq. GH_FORCE_TTY is NOT a boolean: gh treats ANY set value
+# (including "0") as "force TTY output" (optionally parsed as display width),
+# so exporting GH_FORCE_TTY=0 (#1266) caused the exact corruption it meant to
+# prevent. Unset it, and set NO_COLOR so a real PTY (context pipelines capture
+# through one) cannot re-enable colorized JSON either.
+unset GH_FORCE_TTY
+export NO_COLOR=1
 
 # Get GitHub user (from auth or env var)
 GH_USER="${GH_USER:-$(gh api user -q .login 2>/dev/null || echo "")}"
