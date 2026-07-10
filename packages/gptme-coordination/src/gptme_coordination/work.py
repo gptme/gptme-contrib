@@ -234,6 +234,16 @@ class WorkClaimManager:
         """
         ttl = ttl_minutes or self.default_ttl_minutes
         conn = self.db.conn
+        # Compute the expiry once and reuse it for both the HMAC and the
+        # stored expires_at column. Previously these were two separate clock
+        # reads (this Python computation for the HMAC, and a second
+        # SQLite-evaluated datetime('now', ...) for the stored value); when
+        # the two reads straddled a second boundary, the stored HMAC could
+        # never verify against the stored expires_at. Single-sourcing the
+        # expiry string makes the stored signature correct by construction.
+        expires_str = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
 
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -246,22 +256,19 @@ class WorkClaimManager:
                 # Task doesn't exist — auto-submit and claim it
                 hmac_val = None
                 if secret is not None:
-                    py_expires = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
                     hmac_val = self.compute_hmac(
                         agent_id,
                         task_id,
                         1,
-                        py_expires,
+                        expires_str,
                         secret,
                     )
                 conn.execute(
                     """INSERT INTO work (task_id, claimer, epoch, claimed_at,
                         expires_at, status, metadata, hmac)
                     VALUES (?, ?, 1, datetime('now'),
-                        datetime('now', ? || ' minutes'), 'claimed', ?, ?)""",
-                    (task_id, agent_id, str(ttl), metadata, hmac_val),
+                        ?, 'claimed', ?, ?)""",
+                    (task_id, agent_id, expires_str, metadata, hmac_val),
                 )
             elif row["status"] == "completed":
                 # Allow reclaiming if no check or check passes
@@ -273,14 +280,11 @@ class WorkClaimManager:
                 new_epoch = int(row["epoch"]) + 1
                 hmac_val = None
                 if secret is not None:
-                    py_expires = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
                     hmac_val = self.compute_hmac(
                         agent_id,
                         task_id,
                         new_epoch,
-                        py_expires,
+                        expires_str,
                         secret,
                     )
 
@@ -288,14 +292,14 @@ class WorkClaimManager:
                     """UPDATE work
                     SET claimer = ?, epoch = epoch + 1,
                         claimed_at = datetime('now'),
-                        expires_at = datetime('now', ? || ' minutes'),
+                        expires_at = ?,
                         status = 'claimed',
                         result = NULL,
                         completed_at = NULL,
                         metadata = COALESCE(?, metadata),
                         hmac = ?
                     WHERE task_id = ? AND status = 'completed'""",
-                    (agent_id, str(ttl), metadata, hmac_val, task_id),
+                    (agent_id, expires_str, metadata, hmac_val, task_id),
                 )
                 if conn.execute("SELECT changes()").fetchone()[0] == 0:
                     conn.execute("ROLLBACK")
@@ -315,14 +319,11 @@ class WorkClaimManager:
                 hmac_val = None
 
                 if secret is not None:
-                    py_expires = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
                     hmac_val = self.compute_hmac(
                         agent_id,
                         task_id,
                         new_epoch,
-                        py_expires,
+                        expires_str,
                         secret,
                     )
 
@@ -330,7 +331,7 @@ class WorkClaimManager:
                     """UPDATE work
                     SET claimer = ?, epoch = epoch + 1,
                         claimed_at = datetime('now'),
-                        expires_at = datetime('now', ? || ' minutes'),
+                        expires_at = ?,
                         status = 'claimed',
                         result = NULL,
                         completed_at = NULL,
@@ -340,7 +341,7 @@ class WorkClaimManager:
                         AND (status IN ('available', 'abandoned')
                              OR (status = 'claimed'
                                  AND expires_at < datetime('now')))""",
-                    (agent_id, str(ttl), metadata, hmac_val, task_id),
+                    (agent_id, expires_str, metadata, hmac_val, task_id),
                 )
                 if conn.execute("SELECT changes()").fetchone()[0] == 0:
                     conn.execute("ROLLBACK")
@@ -350,9 +351,6 @@ class WorkClaimManager:
                 # Recompute HMAC when we have a secret (expiry changes, so old HMAC is stale)
                 hmac_val = None
                 if secret is not None:
-                    py_expires = (datetime.now(UTC) + timedelta(minutes=ttl)).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
                     new_epoch = (
                         row["epoch"]
                         if "epoch" in row.keys()
@@ -366,16 +364,16 @@ class WorkClaimManager:
                         agent_id,
                         task_id,
                         new_epoch,
-                        py_expires,
+                        expires_str,
                         secret,
                     )
                 conn.execute(
                     """UPDATE work
-                    SET expires_at = datetime('now', ? || ' minutes'),
+                    SET expires_at = ?,
                         metadata = COALESCE(?, metadata),
                         hmac = ?
                     WHERE task_id = ? AND claimer = ?""",
-                    (str(ttl), metadata, hmac_val, task_id, agent_id),
+                    (expires_str, metadata, hmac_val, task_id, agent_id),
                 )
             else:
                 # Held by another agent and not expired

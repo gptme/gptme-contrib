@@ -254,6 +254,122 @@ class TestHMACStaleOnReclaim:
         assert abandoned.hmac is None, "abandon() must clear stale HMAC"
 
 
+class TestExpiryHmacCoherence:
+    """The stored HMAC must always verify against the stored expires_at.
+
+    Regression test for a bug where the HMAC was computed over a
+    Python-clock expiry string, while a *separate* SQLite-evaluated
+    ``datetime('now', ...)`` call computed the stored ``expires_at``. When
+    the two clock reads straddled a second boundary, the stored HMAC could
+    never verify against the stored row. This held only probabilistically
+    before the fix (two clock reads) and holds by construction after it
+    (single clock read reused for both).
+    """
+
+    def test_fresh_claim_hmac_matches_stored_expiry(
+        self, work: WorkClaimManager
+    ) -> None:
+        from gptme_coordination.auth import verify_hmac
+
+        secret = b"s"
+        claim = work.claim("agent-x", "task-fresh", ttl_minutes=60, secret=secret)
+        assert claim is not None
+
+        row = work.db.conn.execute(
+            "SELECT expires_at, epoch, hmac FROM work WHERE task_id = ?",
+            ("task-fresh",),
+        ).fetchone()
+        assert verify_hmac(
+            secret,
+            row["hmac"],
+            "agent-x",
+            "task-fresh",
+            row["epoch"],
+            row["expires_at"],
+        )
+
+    def test_reclaim_of_expired_claim_hmac_matches_stored_expiry(
+        self, work: WorkClaimManager
+    ) -> None:
+        from gptme_coordination.auth import verify_hmac
+
+        secret = b"s"
+        work.claim("agent-a", "task-expired", ttl_minutes=60, secret=secret)
+        # Manually backdate expires_at to force the CAS "expired claim" path.
+        work.db.conn.execute(
+            "UPDATE work SET expires_at = datetime('now', '-1 seconds') WHERE task_id = ?",
+            ("task-expired",),
+        )
+
+        claim = work.claim("agent-b", "task-expired", ttl_minutes=60, secret=secret)
+        assert claim is not None
+        assert claim.claimer == "agent-b"
+
+        row = work.db.conn.execute(
+            "SELECT expires_at, epoch, hmac FROM work WHERE task_id = ?",
+            ("task-expired",),
+        ).fetchone()
+        assert verify_hmac(
+            secret,
+            row["hmac"],
+            "agent-b",
+            "task-expired",
+            row["epoch"],
+            row["expires_at"],
+        )
+
+    def test_reclaim_of_completed_task_hmac_matches_stored_expiry(
+        self, work: WorkClaimManager
+    ) -> None:
+        from gptme_coordination.auth import verify_hmac
+
+        secret = b"s"
+        work.claim("agent-a", "task-completed", ttl_minutes=60, secret=secret)
+        work.complete("agent-a", "task-completed")
+
+        claim = work.claim("agent-b", "task-completed", ttl_minutes=60, secret=secret)
+        assert claim is not None
+        assert claim.claimer == "agent-b"
+
+        row = work.db.conn.execute(
+            "SELECT expires_at, epoch, hmac FROM work WHERE task_id = ?",
+            ("task-completed",),
+        ).fetchone()
+        assert verify_hmac(
+            secret,
+            row["hmac"],
+            "agent-b",
+            "task-completed",
+            row["epoch"],
+            row["expires_at"],
+        )
+
+    def test_extend_own_claim_hmac_matches_stored_expiry(
+        self, work: WorkClaimManager
+    ) -> None:
+        from gptme_coordination.auth import verify_hmac
+
+        secret = b"s"
+        work.claim("agent-a", "task-extend", ttl_minutes=60, secret=secret)
+
+        claim = work.claim("agent-a", "task-extend", ttl_minutes=60, secret=secret)
+        assert claim is not None
+        assert claim.claimer == "agent-a"
+
+        row = work.db.conn.execute(
+            "SELECT expires_at, epoch, hmac FROM work WHERE task_id = ?",
+            ("task-extend",),
+        ).fetchone()
+        assert verify_hmac(
+            secret,
+            row["hmac"],
+            "agent-a",
+            "task-extend",
+            row["epoch"],
+            row["expires_at"],
+        )
+
+
 class TestAuthCompatibility:
     def test_verify_hmac_matches_work_claim_manager(
         self, work: WorkClaimManager
