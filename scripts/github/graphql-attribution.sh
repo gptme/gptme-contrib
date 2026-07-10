@@ -75,6 +75,16 @@ else
     [ -n "$REAL_GH_BIN" ] || REAL_GH_BIN="gh"
 fi
 
+# --- Pre-compute effective auth identity for cache key namespacing ---
+# When GH_TOKEN/GITHUB_TOKEN are set, use them directly (zero subprocesses).
+# Otherwise fall back to `gh auth token` (one subprocess per invocation, not
+# per call) so that stored-credential sessions get distinct cache namespaces.
+# This must use REAL_GH_BIN to avoid recursive wrapper invocation.
+_GH_EFFECTIVE_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+if [ -z "$_GH_EFFECTIVE_TOKEN" ]; then
+    _GH_EFFECTIVE_TOKEN=$("$REAL_GH_BIN" auth token --hostname "${GH_HOST:-github.com}" 2>/dev/null || printf 'unknown')
+fi
+
 # --- Detect if this is a GraphQL-backed call ---
 # Matches:
 #   gh api graphql
@@ -353,15 +363,15 @@ _is_cacheable_call() {
 # Pure-bash FNV-1a cache key — sets _CACHE_KEY global; call directly, not via $().
 # Replaces printf|md5sum|cut pipeline (3 subprocesses → 0). Hashes every character
 # of the full argument string (stride-1, no length cap) to avoid collisions.
-# GH_HOST and the effective token are prepended so calls against different
-# GitHub instances or authenticated identities never share cache entries. The
-# token is mixed into the hash (not stored), so the cache filename reveals
-# nothing about the credential. Callers needing guaranteed-fresh data should
-# set GH_API_CACHE_TTL=0 to bypass the cache entirely.
+# GH_HOST and the effective token (pre-computed from GH_TOKEN/GITHUB_TOKEN or
+# `gh auth token` fallback) are prepended so calls against different GitHub
+# instances or authenticated identities never share cache entries. The token is
+# mixed into the hash (not stored), so cache filenames reveal nothing about the
+# credential. Callers needing guaranteed-fresh data should set
+# GH_API_CACHE_TTL=0 to bypass the cache entirely.
 _CACHE_KEY=""
 _cache_key() {
-    local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-    local s="${GH_HOST:-github.com}:${token}:$*" h=2166136261 i c
+    local s="${GH_HOST:-github.com}:${_GH_EFFECTIVE_TOKEN}:$*" h=2166136261 i c
     local len="${#s}"
     for (( i=0; i<len; i+=1 )); do
         printf -v c '%d' "'${s:$i:1}" 2>/dev/null || c=31
