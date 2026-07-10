@@ -4,7 +4,7 @@
 # Read the PR and Greptile review comments
 gh pr view 1234 --repo gptme/gptme-contrib
 gh api repos/gptme/gptme-contrib/pulls/1234/comments \
-  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\n")[0:3] | join(" ")}'
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\n")[0:3] | join(" "))}'
 ```
 
 This PR scored 4/5 — minor issues from Greptile. Address them if quick; **leave it untouched if trivial** (do NOT re-trigger just because you looked at it).

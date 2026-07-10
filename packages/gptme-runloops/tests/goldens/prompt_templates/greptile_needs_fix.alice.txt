@@ -7,7 +7,7 @@ gh pr view 7 --repo ErikBjare/alice --comments
 
 # Get Greptile's review comments (the ones that need fixing)
 gh api repos/ErikBjare/alice/pulls/7/comments \
-  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\n")[0:5] | join(" ")}'
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\n")[0:5] | join(" "))}'
 
 # Get Greptile's summary review comment (contains score like 3/5 or 4/5)
 gh api repos/ErikBjare/alice/issues/7/comments \
