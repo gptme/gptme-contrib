@@ -884,6 +884,71 @@ class DispatchResult:
     fallback_items: list[SlotItem] = field(default_factory=list)
 
 
+# --- LRU lane ordering (slot-starvation fairness) ---
+
+# Same convention as the bash runtime's per-slot dispatch cooldown markers
+# (``record_slot_dispatch`` in project-monitoring-dispatch.sh writes
+# ``<slot_safe>.ts`` files holding an epoch timestamp).
+DISPATCH_COOLDOWN_DIR_ENV = "PM_DISPATCH_COOLDOWN_DIR"
+DEFAULT_DISPATCH_COOLDOWN_DIR = "/tmp/bob-pm-dispatch-cooldown"
+
+
+def _item_types(data: dict[str, Any]) -> list[str]:
+    item_types = data.get("types") or []
+    if not isinstance(item_types, list) or not item_types:
+        t = data.get("type")
+        item_types = [t] if isinstance(t, str) else []
+    return item_types
+
+
+def _item_slot_safe(data: dict[str, Any]) -> str:
+    """Slot-key of a grouped-item dict, sanitized like the bash slot_safe."""
+    key = derive_slot_key(
+        str(data.get("repo") or ""),
+        data.get("number"),
+        _item_types(data),
+        data.get("title"),
+    )
+    return _sanitize_unit_name(key)
+
+
+def _last_dispatch_epoch(slot_safe: str, cooldown_dir: Path) -> int:
+    """Epoch of the slot's last dispatch, 0 when never dispatched / unreadable."""
+    try:
+        return int((cooldown_dir / f"{slot_safe}.ts").read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def order_lane_lru(
+    lane_items: list[dict[str, Any]], cooldown_dir: Path | None = None
+) -> list[dict[str, Any]]:
+    """Order a lane's items least-recently-dispatched first (starvation fairness).
+
+    The dispatch loop consumes each lane file top-to-bottom under a global slot
+    cap, so without ordering, whatever the gate pipeline emitted first wins the
+    remaining cap every cycle and long-blocked items (e.g. sub-floor-Greptile
+    PRs) starve indefinitely (observed 2026-07-09: ``skipped_cap`` 13-31/hour
+    while the same early items re-dispatched).
+
+    Ordering: never-dispatched items first (no cooldown marker → epoch 0), then
+    ascending by last-dispatch epoch. The sort is stable, so ties — including a
+    fresh cooldown dir after reboot — preserve the original gate order, i.e.
+    this degrades gracefully to the previous behavior. Freshness is preserved:
+    a brand-new mention has no marker and therefore sorts first anyway.
+    """
+    if cooldown_dir is None:
+        cooldown_dir = Path(
+            os.environ.get(DISPATCH_COOLDOWN_DIR_ENV) or DEFAULT_DISPATCH_COOLDOWN_DIR
+        )
+    if not cooldown_dir.is_dir():
+        return list(lane_items)
+    return sorted(
+        lane_items,
+        key=lambda data: _last_dispatch_epoch(_item_slot_safe(data), cooldown_dir),
+    )
+
+
 def _partition_jsonl_io(
     fast_path: Path,
     slow_path: Path,
@@ -892,8 +957,9 @@ def _partition_jsonl_io(
     """Partition grouped items JSONL from stdin or *items* into fast/slow lane files.
 
     Reads JSONL from *stdin* when *items* is ``None`` (the primary bash-bridge path).
-    Each JSONL line is parsed, lane-classified, and appended to the corresponding file.
-    Silently skips blank lines.
+    Each JSONL line is parsed, lane-classified, ordered least-recently-dispatched
+    first within its lane (see ``order_lane_lru``), and written to the
+    corresponding file. Silently skips blank lines.
     Ensures both output files exist on return even when no items are written.
     """
     fast_path.parent.mkdir(parents=True, exist_ok=True)
@@ -902,6 +968,7 @@ def _partition_jsonl_io(
     slow_path.touch()
     if items is None:
         # Read JSONL from stdin (bash bridge path)
+        lanes: dict[str, list[dict[str, Any]]] = {"fast": [], "slow": []}
         for raw in sys.stdin:
             raw = raw.strip()
             if not raw:
@@ -911,14 +978,11 @@ def _partition_jsonl_io(
             except json.JSONDecodeError:
                 logger.warning("skipping unparseable JSONL line: %.80s", raw)
                 continue
-            item_types = data.get("types") or []
-            if not isinstance(item_types, list) or not item_types:
-                t = data.get("type")
-                item_types = [t] if isinstance(t, str) else []
-            lane = classify_lane(item_types)
-            target_path = slow_path if lane == "slow" else fast_path
+            lanes[classify_lane(_item_types(data))].append(data)
+        for lane, target_path in (("fast", fast_path), ("slow", slow_path)):
             with target_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(data, ensure_ascii=False) + "\n")
+                for data in order_lane_lru(lanes[lane]):
+                    fh.write(json.dumps(data, ensure_ascii=False) + "\n")
         return
 
     # Direct SlotItem path (Python-to-Python)

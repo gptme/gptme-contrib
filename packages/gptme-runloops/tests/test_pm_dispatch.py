@@ -11,6 +11,7 @@ import pytest
 from gptme_runloops.pm_dispatch import (
     DEFAULT_FAST_BURST_ALLOWANCE,
     DEFAULT_SLOT_CAP,
+    DISPATCH_COOLDOWN_DIR_ENV,
     MIN_BANDIT_OBSERVATIONS,
     SLOW_LANE_TYPES,
     DispatchLedger,
@@ -28,6 +29,7 @@ from gptme_runloops.pm_dispatch import (
     derive_slot_key,
     dispatch_grouped_items,
     is_direct_mention,
+    order_lane_lru,
     partition_items,
     resolve_lane_model,
 )
@@ -1626,3 +1628,89 @@ class TestRecordBanditOutcomeCLI:
                     str(tmp_path),
                 ]
             )
+
+
+class TestOrderLaneLru:
+    """LRU lane ordering — slot-starvation fairness (never-dispatched first)."""
+
+    @staticmethod
+    def _item(number: int, types: list[str] | None = None) -> dict:
+        return {
+            "repo": "foo/bar",
+            "number": number,
+            "types": types or ["pr_update"],
+        }
+
+    @staticmethod
+    def _mark(cooldown_dir, number: int, epoch: int) -> None:
+        (cooldown_dir / f"foo-bar-{number}.ts").write_text(f"{epoch}\n")
+
+    def test_never_dispatched_sorts_first(self, tmp_path):
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        self._mark(cooldown, 1, 1_700_000_000)
+        items = [self._item(1), self._item(2)]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        assert [i["number"] for i in ordered] == [2, 1]
+
+    def test_lru_order_oldest_dispatch_first(self, tmp_path):
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        self._mark(cooldown, 1, 3000)
+        self._mark(cooldown, 2, 1000)
+        self._mark(cooldown, 3, 2000)
+        items = [self._item(1), self._item(2), self._item(3)]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        assert [i["number"] for i in ordered] == [2, 3, 1]
+
+    def test_ties_preserve_original_order(self, tmp_path):
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        items = [self._item(5), self._item(3), self._item(9)]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        assert [i["number"] for i in ordered] == [5, 3, 9]
+
+    def test_missing_cooldown_dir_is_noop(self, tmp_path):
+        items = [self._item(2), self._item(1)]
+
+        ordered = order_lane_lru(items, cooldown_dir=tmp_path / "absent")
+
+        assert [i["number"] for i in ordered] == [2, 1]
+
+    def test_unreadable_marker_counts_as_never_dispatched(self, tmp_path):
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        (cooldown / "foo-bar-1.ts").write_text("not-a-number\n")
+        self._mark(cooldown, 2, 1000)
+        items = [self._item(2), self._item(1)]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        # 1's garbage marker reads as epoch 0 -> sorts before 2.
+        assert [i["number"] for i in ordered] == [1, 2]
+
+    def test_partition_stdin_orders_lanes_lru(self, tmp_path, monkeypatch):
+        """End-to-end: the bash-bridge stdin path writes lanes in LRU order."""
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        # Slow lane: 1 dispatched recently, 2 long ago, 3 never.
+        self._mark(cooldown, 1, 2_000_000_000)
+        self._mark(cooldown, 2, 1_000_000_000)
+        monkeypatch.setenv(DISPATCH_COOLDOWN_DIR_ENV, str(cooldown))
+
+        stdin_lines = "".join(json.dumps(self._item(n)) + "\n" for n in (1, 2, 3))
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_lines))
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+
+        _partition_jsonl_io(fast_path, slow_path)
+
+        slow = [json.loads(line) for line in slow_path.read_text().splitlines() if line]
+        assert [i["number"] for i in slow] == [3, 2, 1]
+        assert fast_path.read_text() == ""
