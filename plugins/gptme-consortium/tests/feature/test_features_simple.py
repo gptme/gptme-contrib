@@ -227,4 +227,4 @@ class TestIntegration:
         from gptme_consortium.tools.consortium import consortium_tool
 
         assert consortium_tool.functions
-        assert query_consortium in consortium_tool.functions
+        assert any(f.name == "query_consortium" for f in consortium_tool.functions)

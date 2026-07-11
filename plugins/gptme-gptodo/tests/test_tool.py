@@ -14,7 +14,7 @@ def test_tool_spec():
 
 def test_functions_registered():
     """Test that all expected functions are registered."""
-    func_names = {f.__name__ for f in tool.functions}
+    func_names = {f.name for f in tool.functions}
     expected = {
         "delegate",
         "check_agent",
