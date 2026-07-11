@@ -24,11 +24,7 @@ test-unit:  ## Run unit tests (tests/ excluding tests/integration/)
 	@echo "Running unit tests..."
 	uv run --with pytest --with rich pytest tests/ \
 		--ignore=tests/integration/ \
-		--ignore=tests/test_agent_msg.py \
 		-v
-	@echo "Note: test_agent_msg.py excluded — tests reference scripts/agent-msg.py's old"
-	@echo "      get_messages_dir() API which was removed when the script became a thin"
-	@echo "      shim over gptmail.agent_cli. See packages/gptmail/ for the new API."
 
 typecheck: typecheck-packages  ## Run all type checks
 
