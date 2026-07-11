@@ -11,6 +11,7 @@ from gptme_sessions.failure_capture import (
     FAILURE_REASON_PRE_RESPONSE,
     FAILURE_REASON_RATE_LIMIT,
     FAILURE_REASON_TIMEOUT,
+    _record_has_any_content,
     _trajectory_has_assistant,
     capture_session_failure,
     classify_failure_reason,
@@ -129,6 +130,55 @@ def test_trajectory_has_assistant_cc_nested_format(tmp_path: Path):
     }
     traj.write_text(json.dumps(cc_record) + "\n", encoding="utf-8")
     assert _trajectory_has_assistant(traj) is True
+
+
+def test_trajectory_has_assistant_cc_tool_use_only(tmp_path: Path):
+    """CC assistant turns with only tool_use blocks must be detected (Greptile P1)."""
+    traj = tmp_path / "conversation.jsonl"
+    cc_record = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "toolu_abc", "name": "Bash", "input": {"cmd": "ls"}}
+            ],
+        },
+    }
+    traj.write_text(json.dumps(cc_record) + "\n", encoding="utf-8")
+    assert _trajectory_has_assistant(traj) is True
+
+
+def test_capture_cc_tool_use_only_not_pre_response(tmp_path: Path):
+    """A CC assistant turn with only tool_use must not get pre_response_api_failure."""
+    traj = tmp_path / "conversation.jsonl"
+    cc_record = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "toolu_abc", "name": "Bash", "input": {}}],
+        },
+    }
+    traj.write_text(json.dumps(cc_record) + "\n", encoding="utf-8")
+    reason, _ = capture_session_failure(
+        exit_code=1,
+        duration_seconds=45,
+        input_tokens=0,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+    assert reason == FAILURE_REASON_NONZERO
+
+
+def test_record_has_any_content_tool_use():
+    """_record_has_any_content returns True for tool_use-only CC assistant turns."""
+    rec = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "toolu_x", "name": "Read", "input": {}}],
+        },
+    }
+    assert _record_has_any_content(rec) is True
 
 
 def test_capture_cc_session_with_assistant_not_pre_response(tmp_path: Path):

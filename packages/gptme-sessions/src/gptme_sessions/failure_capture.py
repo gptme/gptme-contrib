@@ -50,18 +50,33 @@ def _record_is_assistant(rec: dict) -> bool:
 
 
 def _record_content_text(rec: dict) -> str:
-    """Extract flattened content string from flat or CC nested record."""
+    """Extract flattened text string from flat or CC nested record."""
     # Flat format
     content = rec.get("content") or rec.get("text") or ""
     if content:
         return str(content)
-    # CC nested: message.content is a list of typed blocks
+    # CC nested: message.content is a list of typed blocks — extract text blocks only
     msg = rec.get("message") or {}
     msg_content = msg.get("content") or ""
     if isinstance(msg_content, list):
         parts = [block.get("text") or "" for block in msg_content if isinstance(block, dict)]
         return " ".join(p for p in parts if p)
     return str(msg_content)
+
+
+def _record_has_any_content(rec: dict) -> bool:
+    """Return True if the record has any content (text or tool-use blocks).
+
+    Unlike _record_content_text, this treats tool_use-only assistant turns as
+    non-empty — the model already responded even if it only issued tool calls.
+    """
+    if rec.get("content") or rec.get("text"):
+        return True
+    msg = rec.get("message") or {}
+    msg_content = msg.get("content")
+    if isinstance(msg_content, list):
+        return bool(msg_content)
+    return bool(msg_content)
 
 
 def _trajectory_has_assistant(trajectory_path: Path | None) -> bool:
@@ -77,7 +92,7 @@ def _trajectory_has_assistant(trajectory_path: Path | None) -> bool:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if _record_is_assistant(rec) and _record_content_text(rec).strip():
+                if _record_is_assistant(rec) and _record_has_any_content(rec):
                     return True
     except OSError:
         return False
