@@ -463,7 +463,9 @@ def test_reply_with_cc_subprocess_success(
     assert "-p" in cmd
     assert "--no-session-persistence" in cmd
     assert "--model" in cmd
-    assert "anthropic/claude-sonnet-4-5" in cmd
+    # llm.py strips "anthropic/" prefix before passing to the claude CLI
+    assert "claude-sonnet-4-5" in cmd
+    assert "anthropic/claude-sonnet-4-5" not in cmd
     # Combined prompt must contain both system and user parts
     prompt_arg = cmd[-1]
     assert "You are a helpful agent." in prompt_arg

@@ -203,6 +203,9 @@ def test_git_reset_hard_discards_commits_and_untracked_files(tmp_path: Path) -> 
     _run_git(worktree, "config", "user.email", "test@example.com")
     _run_git(worktree, "config", "user.name", "Test")
     _run_git(worktree, "config", "commit.gpgsign", "false")
+    # Disable global git hooks so environment-specific identity guards don't
+    # block commits using the test fixture's email address.
+    _run_git(worktree, "config", "core.hooksPath", "/dev/null")
     (worktree / "README.md").write_text("initial\n")
     _run_git(worktree, "add", "README.md")
     _run_git(worktree, "commit", "-q", "-m", "initial")

@@ -1,4 +1,4 @@
-.PHONY: help test typecheck test-packages typecheck-packages test-plugins check-names list-packages list-plugins
+.PHONY: help test typecheck test-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
 
 # Plugins not yet CI-ready (tests exist but weren't validated before dynamic discovery)
 # TODO: Fix these tests and remove from exclude list - see GitHub issue tracking
@@ -14,11 +14,21 @@ PLUGIN_DIRS := $(shell find plugins -maxdepth 1 -mindepth 1 -type d ! -type l 2>
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-test: test-packages test-plugins test-integration  ## Run all tests
+test: test-packages test-plugins test-integration test-unit  ## Run all tests
 
 test-integration:  ## Run integration tests (git hooks, etc.)
 	@echo "Running integration tests..."
 	uv run --with pytest pytest tests/integration/ -v
+
+test-unit:  ## Run unit tests (tests/ excluding tests/integration/)
+	@echo "Running unit tests..."
+	uv run --with pytest --with rich pytest tests/ \
+		--ignore=tests/integration/ \
+		--ignore=tests/test_agent_msg.py \
+		-v
+	@echo "Note: test_agent_msg.py excluded — tests reference scripts/agent-msg.py's old"
+	@echo "      get_messages_dir() API which was removed when the script became a thin"
+	@echo "      shim over gptmail.agent_cli. See packages/gptmail/ for the new API."
 
 typecheck: typecheck-packages  ## Run all type checks
 
