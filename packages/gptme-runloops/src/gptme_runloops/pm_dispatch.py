@@ -884,6 +884,77 @@ class DispatchResult:
     fallback_items: list[SlotItem] = field(default_factory=list)
 
 
+# --- Human-review dispatch priority (§7b human > bot) ---
+#
+# Erik's CHANGES_REQUESTED review on gptme/gptme#3178 (2026-07-11) was emitted
+# by the gate every cycle but skipped_cap twice while all slots drained a
+# 3-day bot-priority backlog. The §7b "human > bot" invariant was only
+# enforced in suppression logic (cooldown bypass), not in dispatch ordering or
+# capacity. These tokens are emitted by activity-gate.sh into the item
+# ``detail`` field (they survive build_grouped_jsonl's ``join("; ")`` the same
+# way the ``mention`` reason token does) and consumed here for lane ordering
+# and by the bash dispatcher for the bounded cap-overflow rule.
+
+# A human's latest review on the PR is CHANGES_REQUESTED — blocking merge.
+HUMAN_PRIORITY_CHANGES_REQUESTED = "human_changes_requested"
+# The most recent comment/review actor on the PR is a human (non-bot, non-self).
+HUMAN_PRIORITY_ACTIVITY = "human_activity"
+
+_HUMAN_PRIORITY_RANKS = {
+    HUMAN_PRIORITY_CHANGES_REQUESTED: 0,
+    HUMAN_PRIORITY_ACTIVITY: 1,
+}
+DEFAULT_PRIORITY_RANK = 2
+
+# Bounded overflow: at most this many slots above the global cap may be
+# consumed by human-priority items (mirrored by the bash dispatcher's
+# PM_HUMAN_OVERFLOW_ALLOWANCE, default 1).
+HUMAN_PRIORITY_OVERFLOW_ALLOWANCE = 1
+
+
+def item_priority_rank(detail: str | None) -> int:
+    """Priority rank of an item from its ``detail`` tokens (lower = first).
+
+    Tokens are ``"; "``-joined in the detail field (same convention as
+    :func:`is_direct_mention`), so exact-token matching avoids false positives
+    on free text. Returns the best (lowest) rank present:
+    0 = human CHANGES_REQUESTED, 1 = human activity, 2 = default (bot/none).
+    """
+    rank = DEFAULT_PRIORITY_RANK
+    for tok in (detail or "").split(";"):
+        tok_rank = _HUMAN_PRIORITY_RANKS.get(tok.strip())
+        if tok_rank is not None and tok_rank < rank:
+            rank = tok_rank
+    return rank
+
+
+def detail_is_human_priority(detail: str | None) -> bool:
+    """True when the item's detail carries a human-priority token."""
+    return item_priority_rank(detail) < DEFAULT_PRIORITY_RANK
+
+
+def human_priority_allows_overflow(
+    detail: str | None,
+    running_slots: int,
+    slot_cap: int,
+    overflow_allowance: int = HUMAN_PRIORITY_OVERFLOW_ALLOWANCE,
+) -> bool:
+    """Cap-overflow rule: may a human-priority item dispatch above the cap?
+
+    Chosen over slot *reservation* because reservation permanently cuts bot
+    throughput to ``cap - 1`` even when no human item exists and requires
+    classifying already-running units by priority. Overflow is strictly
+    additive and self-bounding: ``running_slots`` counts every live slot
+    (including a previously granted overflow slot), so at most
+    *overflow_allowance* slots ever run above the cap.
+    """
+    if not detail_is_human_priority(detail):
+        return False
+    if overflow_allowance <= 0:
+        return False
+    return running_slots < slot_cap + overflow_allowance
+
+
 # --- LRU lane ordering (slot-starvation fairness) ---
 
 # Same convention as the bash runtime's per-slot dispatch cooldown markers
@@ -931,22 +1002,32 @@ def order_lane_lru(
     PRs) starve indefinitely (observed 2026-07-09: ``skipped_cap`` 13-31/hour
     while the same early items re-dispatched).
 
-    Ordering: never-dispatched items first (no cooldown marker → epoch 0), then
-    ascending by last-dispatch epoch. The sort is stable, so ties — including a
-    fresh cooldown dir after reboot — preserve the original gate order, i.e.
-    this degrades gracefully to the previous behavior. Freshness is preserved:
-    a brand-new mention has no marker and therefore sorts first anyway.
+    Ordering: human-priority items first (§7b human > bot — see
+    :func:`item_priority_rank`; CHANGES_REQUESTED ahead of plain human
+    activity), then within each priority class never-dispatched items first
+    (no cooldown marker → epoch 0), then ascending by last-dispatch epoch.
+    The sort is stable, so ties — including a fresh cooldown dir after
+    reboot — preserve the original gate order, i.e. with no human-priority
+    items this degrades gracefully to pure LRU / the previous behavior.
+    Freshness is preserved: a brand-new mention has no marker and therefore
+    sorts first anyway.
     """
     if cooldown_dir is None:
         cooldown_dir = Path(
             os.environ.get(DISPATCH_COOLDOWN_DIR_ENV) or DEFAULT_DISPATCH_COOLDOWN_DIR
         )
-    if not cooldown_dir.is_dir():
-        return list(lane_items)
-    return sorted(
-        lane_items,
-        key=lambda data: _last_dispatch_epoch(_item_slot_safe(data), cooldown_dir),
-    )
+    have_cooldown = cooldown_dir.is_dir()
+
+    def _key(data: dict[str, Any]) -> tuple[int, int]:
+        detail = data.get("detail")
+        epoch = (
+            _last_dispatch_epoch(_item_slot_safe(data), cooldown_dir)
+            if have_cooldown
+            else 0
+        )
+        return (item_priority_rank(detail if isinstance(detail, str) else None), epoch)
+
+    return sorted(lane_items, key=_key)
 
 
 def _partition_jsonl_io(
