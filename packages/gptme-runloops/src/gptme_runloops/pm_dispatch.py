@@ -995,12 +995,17 @@ def _slot_in_cooldown(slot_safe: str, cooldown_secs: int, cooldown_dir: Path) ->
 
 
 def _write_slot_dispatch_marker(slot_safe: str, cooldown_dir: Path) -> None:
-    """Record that *slot_safe* was just dispatched (mirrors ``record_slot_dispatch``)."""
+    """Record that *slot_safe* was just dispatched (mirrors ``record_slot_dispatch``).
+
+    Best-effort: on ``OSError`` a warning is logged and the marker is skipped,
+    meaning no cooldown suppression for that slot.  This matches the bash
+    reference, which also does not roll back if the file write fails.
+    """
     try:
         cooldown_dir.mkdir(parents=True, exist_ok=True)
         (cooldown_dir / f"{slot_safe}.ts").write_text(str(int(time.time())))
-    except OSError:
-        pass  # best-effort; a missing marker just means no cooldown suppression
+    except OSError as e:
+        logger.warning("Failed to write dispatch marker for %s: %s", slot_safe, e)
 
 
 def _item_types(data: dict[str, Any]) -> list[str]:
@@ -1164,6 +1169,15 @@ def dispatch_grouped_items(
     -------
     DispatchResult
         Summary of what was launched, skipped, or set aside as fallback.
+
+    Notes
+    -----
+    Cooldown markers are written **optimistically** — before the caller performs
+    the actual external launch (e.g. ``systemd-run``).  If the external launch
+    fails after this function returns, the marker remains, suppressing re-dispatch
+    for up to *cooldown_secs*.  This matches the bash reference
+    (``project-monitoring-dispatch.sh``) where ``record_slot_dispatch`` is called
+    immediately before ``systemd-run`` with no rollback on failure.
     """
     if cooldown_secs is None:
         _env_val = os.environ.get(DISPATCH_COOLDOWN_SECS_ENV, "")

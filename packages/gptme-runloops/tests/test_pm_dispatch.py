@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -1919,6 +1920,22 @@ class TestSlotCooldownHelpers:
         _write_slot_dispatch_marker("slot-a", tmp_path)
         ts = int((tmp_path / "slot-a.ts").read_text().strip())
         assert ts > 1000
+
+    def test_write_marker_oserror_logs_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """OSError on marker write emits a warning (not a silent pass)."""
+        ro_dir = tmp_path / "readonly"
+        ro_dir.mkdir()
+        ro_dir.chmod(0o555)
+        try:
+            with caplog.at_level(logging.WARNING, logger="gptme_runloops.pm_dispatch"):
+                _write_slot_dispatch_marker("slot-z", ro_dir)
+            assert any(
+                "slot-z" in r.message for r in caplog.records
+            ), "Expected warning mentioning slot name"
+        finally:
+            ro_dir.chmod(0o755)
 
 
 def _slot_safe_for(repo: str, number: int, types: list[str]) -> str:
