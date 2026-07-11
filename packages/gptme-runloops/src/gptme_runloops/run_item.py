@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -445,9 +445,9 @@ def write_claude_rate_limit_block(
 
     reset = str(rejection.resets_at or "")
     if reset and reset != "0":
-        until = datetime.fromtimestamp(int(reset), tz=UTC)
+        until = datetime.fromtimestamp(int(reset), tz=timezone.utc)
     else:
-        until = (now or datetime.now(UTC)) + timedelta(hours=6)
+        until = (now or datetime.now(timezone.utc)) + timedelta(hours=6)
     block_path.write_text(until.isoformat(), encoding="utf-8")
     return block_path
 
