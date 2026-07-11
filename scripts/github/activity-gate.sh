@@ -390,7 +390,7 @@ fetch_live_pr_data() {
 # Called only in the ambiguous case: updatedAt > watermark but no new comment/review.
 # Returns the actor login on stdout, or empty on error / when no recognized event found.
 # Failure direction: empty output → caller falls through to existing emit behavior.
-# Event types checked: push, draft toggle, label/assignee changes.
+# Event types checked: regular push, force push, draft toggle, label/assignee/review-request changes.
 # Args: <owner/repo> <pr_number>
 fetch_pr_noncomment_actor() {
     local repo=$1
@@ -400,23 +400,32 @@ fetch_pr_noncomment_actor() {
     gh api graphql -f query="{
       repository(owner: \"${owner}\", name: \"${reponame}\") {
         pullRequest(number: ${pr_number}) {
-          timelineItems(last: 3, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT]) {
+          timelineItems(last: 3, itemTypes: [PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) {
             nodes {
               __typename
+              ... on PullRequestCommit { commit { author { user { login } } } }
               ... on HeadRefForcePushedEvent { actor { login } }
               ... on ReadyForReviewEvent { actor { login } }
               ... on ConvertToDraftEvent { actor { login } }
               ... on LabeledEvent { actor { login } }
               ... on UnlabeledEvent { actor { login } }
               ... on AssignedEvent { actor { login } }
+              ... on UnassignedEvent { actor { login } }
+              ... on ReviewRequestedEvent { actor { login } }
+              ... on ReviewRequestRemovedEvent { actor { login } }
             }
           }
         }
       }
     }" --jq \
         '.data.repository.pullRequest.timelineItems.nodes
-         | map(select(.actor != null and .actor.login != null))
-         | last | .actor.login // empty' \
+         | map(
+             if .actor != null and .actor.login != null then .actor.login
+             elif .commit != null and .commit.author.user.login != null then .commit.author.user.login
+             else null end
+           )
+         | map(select(. != null))
+         | last // empty' \
         2>/dev/null || true
 }
 

@@ -194,6 +194,42 @@ def test_external_push_after_external_comment_still_emits_pr_update() -> None:
         )
 
 
+def test_fetch_pr_noncomment_actor_includes_regular_push_event() -> None:
+    """P1 regression: PULL_REQUEST_COMMIT must be in the itemTypes list.
+
+    HEAD_REF_FORCE_PUSHED_EVENT only covers force pushes.  A normal `git push`
+    creates PULL_REQUEST_COMMIT timeline items — without this type in the query
+    the helper returns empty for every regular push, leaving the common
+    self-push path unsuppressed.
+    """
+    content = SCRIPT.read_text()
+    assert "PULL_REQUEST_COMMIT" in content, (
+        "fetch_pr_noncomment_actor must include PULL_REQUEST_COMMIT in itemTypes "
+        "to detect regular (non-force) pushes. Without it, normal git pushes by "
+        "the author return an empty actor and fall through to emit pr_update."
+    )
+
+
+def test_fetch_pr_noncomment_actor_includes_metadata_removal_events() -> None:
+    """P2 regression: metadata-removal event types must be in the itemTypes list.
+
+    ASSIGNED_EVENT is present but UNASSIGNED_EVENT, REVIEW_REQUESTED_EVENT, and
+    REVIEW_REQUEST_REMOVED_EVENT were missing.  Author-triggered metadata removals
+    bump updatedAt without a comment, causing spurious pr_update dispatches.
+    """
+    content = SCRIPT.read_text()
+    for event_type in (
+        "UNASSIGNED_EVENT",
+        "REVIEW_REQUESTED_EVENT",
+        "REVIEW_REQUEST_REMOVED_EVENT",
+    ):
+        assert event_type in content, (
+            f"fetch_pr_noncomment_actor must include {event_type} in itemTypes. "
+            "Missing metadata-removal events leave author-triggered updatedAt "
+            "bumps uncovered, producing spurious pr_update dispatches."
+        )
+
+
 def test_timeline_api_error_falls_through_to_emit() -> None:
     """On timeline API error (empty return), fall through to existing emit behavior.
 
