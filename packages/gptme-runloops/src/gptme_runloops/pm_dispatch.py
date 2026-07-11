@@ -994,18 +994,21 @@ def _slot_in_cooldown(slot_safe: str, cooldown_secs: int, cooldown_dir: Path) ->
     return (int(time.time()) - last) < cooldown_secs
 
 
-def _write_slot_dispatch_marker(slot_safe: str, cooldown_dir: Path) -> None:
+def _write_slot_dispatch_marker(slot_safe: str, cooldown_dir: Path) -> bool:
     """Record that *slot_safe* was just dispatched (mirrors ``record_slot_dispatch``).
 
-    Best-effort: on ``OSError`` a warning is logged and the marker is skipped,
-    meaning no cooldown suppression for that slot.  This matches the bash
-    reference, which also does not roll back if the file write fails.
+    Returns ``True`` on success, ``False`` on ``OSError`` (a warning is logged).
+    Callers should skip dispatch when ``False`` is returned: dispatching without
+    a marker would let the same slot re-dispatch on the next cycle, defeating the
+    cooldown entirely.
     """
     try:
         cooldown_dir.mkdir(parents=True, exist_ok=True)
         (cooldown_dir / f"{slot_safe}.ts").write_text(str(int(time.time())))
+        return True
     except OSError as e:
         logger.warning("Failed to write dispatch marker for %s: %s", slot_safe, e)
+        return False
 
 
 def _item_types(data: dict[str, Any]) -> list[str]:
@@ -1282,10 +1285,24 @@ def dispatch_grouped_items(
                     )
                 continue
 
-            # Slot available — register and record
+            # Slot available — write marker first; skip if write fails so the
+            # next cycle's cooldown check still gates this slot correctly.
+            if not _write_slot_dispatch_marker(slot_safe, _cooldown_dir):
+                result.skipped_cooldown += 1
+                if ledger:
+                    ledger.append(
+                        LedgerEntry.now(
+                            phase="skipped_cooldown",
+                            lane=lane,
+                            dispatch_id=key,
+                            unit_name=f"{unit_prefix}-{slot_safe}",
+                            item_refs=[key],
+                            note=f"marker_write_failed key={key}",
+                        )
+                    )
+                continue
             _active[key] = f"{unit_prefix}-{slot_safe}"
             _active_lanes[key] = lane
-            _write_slot_dispatch_marker(slot_safe, _cooldown_dir)
             result.launched += 1
             if ledger:
                 ledger.append(

@@ -1924,18 +1924,24 @@ class TestSlotCooldownHelpers:
     def test_write_marker_oserror_logs_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ):
-        """OSError on marker write emits a warning (not a silent pass)."""
+        """OSError on marker write emits a warning and returns False."""
         ro_dir = tmp_path / "readonly"
         ro_dir.mkdir()
         ro_dir.chmod(0o555)
         try:
             with caplog.at_level(logging.WARNING, logger="gptme_runloops.pm_dispatch"):
-                _write_slot_dispatch_marker("slot-z", ro_dir)
+                result = _write_slot_dispatch_marker("slot-z", ro_dir)
+            assert result is False
             assert any(
                 "slot-z" in r.message for r in caplog.records
             ), "Expected warning mentioning slot name"
         finally:
             ro_dir.chmod(0o755)
+
+    def test_write_marker_success_returns_true(self, tmp_path: Path):
+        """Successful marker write returns True."""
+        assert _write_slot_dispatch_marker("slot-ok", tmp_path) is True
+        assert (tmp_path / "slot-ok.ts").exists()
 
 
 def _slot_safe_for(repo: str, number: int, types: list[str]) -> str:
@@ -2106,3 +2112,23 @@ class TestDispatchGroupedItemsCooldown:
         )
         assert result.skipped_cooldown == 0
         assert result.launched == 1
+
+    def test_marker_write_failure_skips_dispatch(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """If the marker write fails, the slot is skipped (not launched) to
+        preserve cooldown integrity and prevent re-dispatch storms."""
+        item = make_item(repo="a/x", number=1, types=["notification"])
+        ro_dir = tmp_path / "readonly"
+        ro_dir.mkdir()
+        ro_dir.chmod(0o555)
+        try:
+            with caplog.at_level(logging.WARNING, logger="gptme_runloops.pm_dispatch"):
+                result = dispatch_grouped_items(
+                    [item], slot_cap=5, cooldown_secs=600, cooldown_dir=ro_dir
+                )
+            assert result.launched == 0
+            assert result.skipped_cooldown == 1
+            assert any("Failed to write" in r.message for r in caplog.records)
+        finally:
+            ro_dir.chmod(0o755)
