@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -880,6 +881,7 @@ class DispatchResult:
     launched: int = 0
     skipped_active: int = 0
     skipped_cap: int = 0
+    skipped_cooldown: int = 0
     failed: int = 0
     fallback_items: list[SlotItem] = field(default_factory=list)
 
@@ -962,6 +964,43 @@ def human_priority_allows_overflow(
 # ``<slot_safe>.ts`` files holding an epoch timestamp).
 DISPATCH_COOLDOWN_DIR_ENV = "PM_DISPATCH_COOLDOWN_DIR"
 DEFAULT_DISPATCH_COOLDOWN_DIR = "/tmp/bob-pm-dispatch-cooldown"
+
+# Per-slot dispatch cooldown (ErikBjare/bob#788). Mirrors bash
+# PM_DISPATCH_COOLDOWN_SECS (default 600, 0 = disabled).
+DISPATCH_COOLDOWN_SECS_ENV = "PM_DISPATCH_COOLDOWN_SECS"
+DEFAULT_DISPATCH_COOLDOWN_SECS = 600
+
+
+def _resolve_cooldown_dir(cooldown_dir: Path | None) -> Path:
+    return cooldown_dir or Path(
+        os.environ.get(DISPATCH_COOLDOWN_DIR_ENV) or DEFAULT_DISPATCH_COOLDOWN_DIR
+    )
+
+
+def _slot_in_cooldown(slot_safe: str, cooldown_secs: int, cooldown_dir: Path) -> bool:
+    """True when *slot_safe* was dispatched within *cooldown_secs* seconds.
+
+    Mirrors bash ``slot_dispatch_in_cooldown()`` in
+    ``project-monitoring-dispatch.sh``.  Returns False when cooldown_secs ≤ 0,
+    when no marker exists, or when the marker is unreadable.
+    """
+    if cooldown_secs <= 0:
+        return False
+    marker = cooldown_dir / f"{slot_safe}.ts"
+    try:
+        last = int(marker.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return (int(time.time()) - last) < cooldown_secs
+
+
+def _write_slot_dispatch_marker(slot_safe: str, cooldown_dir: Path) -> None:
+    """Record that *slot_safe* was just dispatched (mirrors ``record_slot_dispatch``)."""
+    try:
+        cooldown_dir.mkdir(parents=True, exist_ok=True)
+        (cooldown_dir / f"{slot_safe}.ts").write_text(str(int(time.time())))
+    except OSError:
+        pass  # best-effort; a missing marker just means no cooldown suppression
 
 
 def _item_types(data: dict[str, Any]) -> list[str]:
@@ -1087,6 +1126,8 @@ def dispatch_grouped_items(
     slot_cap: int = DEFAULT_SLOT_CAP,
     fast_burst_allowance: int = DEFAULT_FAST_BURST_ALLOWANCE,
     ledger: DispatchLedger | None = None,
+    cooldown_secs: int | None = None,
+    cooldown_dir: Path | None = None,
 ) -> DispatchResult:
     """Orchestrate slot dispatch for a list of grouped work items.
 
@@ -1110,12 +1151,29 @@ def dispatch_grouped_items(
         fast worker is active.
     ledger
         Optional ``DispatchLedger`` for telemetry recording.
+    cooldown_secs
+        Per-slot dispatch cooldown in seconds (mirrors bash
+        ``PM_DISPATCH_COOLDOWN_SECS``, default 600, 0 = disabled).  When
+        ``None``, reads ``PM_DISPATCH_COOLDOWN_SECS`` from the environment,
+        falling back to ``DEFAULT_DISPATCH_COOLDOWN_SECS``.
+    cooldown_dir
+        Directory for cooldown timestamp markers.  Defaults to
+        ``PM_DISPATCH_COOLDOWN_DIR`` env var or ``DEFAULT_DISPATCH_COOLDOWN_DIR``.
 
     Returns
     -------
     DispatchResult
         Summary of what was launched, skipped, or set aside as fallback.
     """
+    if cooldown_secs is None:
+        _env_val = os.environ.get(DISPATCH_COOLDOWN_SECS_ENV, "")
+        try:
+            cooldown_secs = (
+                int(_env_val) if _env_val else DEFAULT_DISPATCH_COOLDOWN_SECS
+            )
+        except ValueError:
+            cooldown_secs = DEFAULT_DISPATCH_COOLDOWN_SECS
+    _cooldown_dir = _resolve_cooldown_dir(cooldown_dir)
     # In-memory slot tracker for this dispatch cycle.
     _active: dict[str, str] = {}  # slot_key -> unit_name
     _active_lanes: dict[str, str] = {}  # slot_key -> lane
@@ -1143,6 +1201,7 @@ def dispatch_grouped_items(
     for lane, lane_items in [("fast", fast), ("slow", slow)]:
         for item in lane_items:
             key = derive_slot_key(item.repo, item.number, item.types, item.title)
+            slot_safe = _sanitize_unit_name(key)
 
             if _is_busy(key):
                 result.skipped_active += 1
@@ -1152,12 +1211,44 @@ def dispatch_grouped_items(
                             phase="skipped_active",
                             lane=lane,
                             dispatch_id=key,
-                            unit_name=f"{unit_prefix}-{_sanitize_unit_name(key)}",
+                            unit_name=f"{unit_prefix}-{slot_safe}",
                             item_refs=[key],
                             note=f"slot_already_active key={key}",
                         )
                     )
                 continue
+
+            # Cooldown backstop (ErikBjare/bob#788): skip re-dispatch within
+            # the cooldown window even if the prior worker already finished.
+            # Two bypasses mirror the bash dispatcher:
+            #   (a) merge_conflict items — gate doesn't state-track conflicts,
+            #       so they nag every run; a pr_update cooldown on the same slot
+            #       must never suppress a freshly-detected conflict.
+            #   (b) comment-driven items (pr_update/assigned_issue) whose detail
+            #       carries a human-priority token — human follow-ups always get
+            #       a session, same as merge_conflict (pm-cooldown task).
+            if _slot_in_cooldown(slot_safe, cooldown_secs, _cooldown_dir):
+                _has_conflict = "merge_conflict" in item.types
+                _is_comment_driven = bool(
+                    set(item.types) & {"pr_update", "assigned_issue"}
+                )
+                _bypass = _has_conflict or (
+                    _is_comment_driven and detail_is_human_priority(item.detail)
+                )
+                if not _bypass:
+                    result.skipped_cooldown += 1
+                    if ledger:
+                        ledger.append(
+                            LedgerEntry.now(
+                                phase="skipped_cooldown",
+                                lane=lane,
+                                dispatch_id=key,
+                                unit_name=f"{unit_prefix}-{slot_safe}",
+                                item_refs=[key],
+                                note=f"dispatch_cooldown key={key}",
+                            )
+                        )
+                    continue
 
             if not mgr.slot_is_available(lane):
                 result.skipped_cap += 1
@@ -1168,7 +1259,7 @@ def dispatch_grouped_items(
                             phase="skipped_cap",
                             lane=lane,
                             dispatch_id=key,
-                            unit_name=f"{unit_prefix}-{_sanitize_unit_name(key)}",
+                            unit_name=f"{unit_prefix}-{slot_safe}",
                             item_refs=[key],
                             running_units=_count_running(),
                             cap=slot_cap,
@@ -1178,8 +1269,9 @@ def dispatch_grouped_items(
                 continue
 
             # Slot available — register and record
-            _active[key] = f"{unit_prefix}-{_sanitize_unit_name(key)}"
+            _active[key] = f"{unit_prefix}-{slot_safe}"
             _active_lanes[key] = lane
+            _write_slot_dispatch_marker(slot_safe, _cooldown_dir)
             result.launched += 1
             if ledger:
                 ledger.append(

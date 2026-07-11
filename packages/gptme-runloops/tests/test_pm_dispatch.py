@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,9 @@ from gptme_runloops.pm_dispatch import (
     _bandit_observation_count,
     _partition_jsonl_io,
     _resolve_model_with_bandit,
+    _sanitize_unit_name,
+    _slot_in_cooldown,
+    _write_slot_dispatch_marker,
     append_full_ledger_entry,
     build_full_ledger_entry,
     classify_item_work_type,
@@ -58,6 +62,7 @@ def make_item(
     number: int | None = 42,
     types: list[str] | None = None,
     title: str = "Test item",
+    detail: str = "",
 ) -> SlotItem:
     return SlotItem(
         repo=repo,
@@ -67,6 +72,7 @@ def make_item(
         url=f"https://github.com/{repo}/pull/{number}"
         if number is not None
         else f"https://github.com/{repo}",
+        detail=detail,
     )
 
 
@@ -618,6 +624,14 @@ class TestSlotManager:
 
 
 class TestDispatchGroupedItems:
+    @pytest.fixture(autouse=True)
+    def _isolate_cooldown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Point PM_DISPATCH_COOLDOWN_DIR at an empty tmp dir so production markers
+        don't affect tests that don't explicitly test cooldown behavior."""
+        monkeypatch.setenv(DISPATCH_COOLDOWN_DIR_ENV, str(tmp_path / "cooldown"))
+
     def test_empty_items(self):
         result = dispatch_grouped_items([])
         assert result.launched == 0
@@ -1865,3 +1879,213 @@ class TestHumanPriorityOverflow:
 
     def test_below_cap_is_trivially_allowed_for_human(self):
         assert human_priority_allows_overflow(self.HUMAN, running_slots=2, slot_cap=5)
+
+
+# ---------------------------------------------------------------------------
+# Cooldown helpers
+# ---------------------------------------------------------------------------
+
+
+class TestSlotCooldownHelpers:
+    def test_no_marker_returns_false(self, tmp_path: Path):
+        assert not _slot_in_cooldown("slot-a-b-1", 600, tmp_path)
+
+    def test_fresh_marker_returns_true(self, tmp_path: Path):
+        (tmp_path / "slot-a-b-1.ts").write_text(str(int(time.time())))
+        assert _slot_in_cooldown("slot-a-b-1", 600, tmp_path)
+
+    def test_expired_marker_returns_false(self, tmp_path: Path):
+        (tmp_path / "slot-a-b-1.ts").write_text(str(int(time.time()) - 700))
+        assert not _slot_in_cooldown("slot-a-b-1", 600, tmp_path)
+
+    def test_zero_secs_always_false(self, tmp_path: Path):
+        (tmp_path / "slot-a-b-1.ts").write_text(str(int(time.time())))
+        assert not _slot_in_cooldown("slot-a-b-1", 0, tmp_path)
+
+    def test_write_marker_creates_file(self, tmp_path: Path):
+        _write_slot_dispatch_marker("slot-a-b-1", tmp_path)
+        marker = tmp_path / "slot-a-b-1.ts"
+        assert marker.exists()
+        ts = int(marker.read_text().strip())
+        assert abs(ts - int(time.time())) <= 2
+
+    def test_write_marker_creates_dir(self, tmp_path: Path):
+        cooldown_dir = tmp_path / "nested" / "cooldown"
+        _write_slot_dispatch_marker("slot-x", cooldown_dir)
+        assert (cooldown_dir / "slot-x.ts").exists()
+
+    def test_write_marker_overwrites(self, tmp_path: Path):
+        (tmp_path / "slot-a.ts").write_text("1000")
+        _write_slot_dispatch_marker("slot-a", tmp_path)
+        ts = int((tmp_path / "slot-a.ts").read_text().strip())
+        assert ts > 1000
+
+
+def _slot_safe_for(repo: str, number: int, types: list[str]) -> str:
+    return _sanitize_unit_name(derive_slot_key(repo, number, types))
+
+
+# ---------------------------------------------------------------------------
+# dispatch_grouped_items — cooldown integration
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchGroupedItemsCooldown:
+    def test_fresh_marker_skips_item(self, tmp_path: Path):
+        item = make_item(repo="a/x", number=1, types=["notification"])
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['notification'])}.ts").write_text(
+            str(int(time.time()))
+        )
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 1
+        assert result.launched == 0
+
+    def test_expired_marker_dispatches(self, tmp_path: Path):
+        item = make_item(repo="a/x", number=1, types=["notification"])
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['notification'])}.ts").write_text(
+            str(int(time.time()) - 700)
+        )
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 0
+        assert result.launched == 1
+
+    def test_zero_cooldown_disables_skip(self, tmp_path: Path):
+        item = make_item(repo="a/x", number=1, types=["notification"])
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['notification'])}.ts").write_text(
+            str(int(time.time()))
+        )
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=0, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 0
+        assert result.launched == 1
+
+    def test_merge_conflict_bypasses_cooldown(self, tmp_path: Path):
+        """merge_conflict items always bypass the cooldown (bypass a)."""
+        item = make_item(repo="a/x", number=1, types=["merge_conflict"])
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['merge_conflict'])}.ts").write_text(
+            str(int(time.time()))
+        )
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 0
+        assert result.launched == 1
+
+    def test_pr_update_with_human_activity_bypasses_cooldown(self, tmp_path: Path):
+        """pr_update with human_activity detail bypasses cooldown (bypass b)."""
+        item = make_item(
+            repo="a/x", number=1, types=["pr_update"], detail="human_activity"
+        )
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['pr_update'])}.ts").write_text(
+            str(int(time.time()))
+        )
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 0
+        assert result.launched == 1
+
+    def test_pr_update_with_changes_requested_bypasses_cooldown(self, tmp_path: Path):
+        """pr_update with human_changes_requested detail bypasses cooldown."""
+        item = make_item(
+            repo="a/x",
+            number=1,
+            types=["pr_update"],
+            detail="human_changes_requested",
+        )
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['pr_update'])}.ts").write_text(
+            str(int(time.time()))
+        )
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 0
+        assert result.launched == 1
+
+    def test_pr_update_without_human_detail_respects_cooldown(self, tmp_path: Path):
+        """pr_update with no human detail (bot re-fire) respects cooldown."""
+        item = make_item(repo="a/x", number=1, types=["pr_update"])
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['pr_update'])}.ts").write_text(
+            str(int(time.time()))
+        )
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 1
+        assert result.launched == 0
+
+    def test_assigned_issue_with_human_activity_bypasses_cooldown(self, tmp_path: Path):
+        """assigned_issue with human_activity detail bypasses cooldown."""
+        item = make_item(
+            repo="a/x", number=1, types=["assigned_issue"], detail="human_activity"
+        )
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['assigned_issue'])}.ts").write_text(
+            str(int(time.time()))
+        )
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 0
+        assert result.launched == 1
+
+    def test_marker_written_on_launch(self, tmp_path: Path):
+        """dispatch_grouped_items writes a cooldown marker after launch."""
+        item = make_item(repo="a/x", number=1, types=["notification"])
+        cd = tmp_path / "cd"
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.launched == 1
+        marker = cd / f"{_slot_safe_for('a/x', 1, ['notification'])}.ts"
+        assert marker.exists()
+        ts = int(marker.read_text().strip())
+        assert abs(ts - int(time.time())) <= 2
+
+    def test_cooldown_skipped_recorded_in_ledger(
+        self, tmp_path: Path, ledger_path: Path
+    ):
+        """skipped_cooldown items appear in the ledger with phase='skipped_cooldown'."""
+        item = make_item(repo="a/x", number=1, types=["notification"])
+        cd = tmp_path / "cd"
+        cd.mkdir()
+        (cd / f"{_slot_safe_for('a/x', 1, ['notification'])}.ts").write_text(
+            str(int(time.time()))
+        )
+        ledger = DispatchLedger(ledger_path)
+        dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd, ledger=ledger
+        )
+        entries = ledger.read()
+        phases = [e.phase for e in entries]
+        assert "skipped_cooldown" in phases
+
+    def test_no_marker_dir_no_skip(self, tmp_path: Path):
+        """Nonexistent cooldown dir means no markers → no skips."""
+        item = make_item(repo="a/x", number=1, types=["notification"])
+        cd = tmp_path / "nonexistent"
+        result = dispatch_grouped_items(
+            [item], slot_cap=5, cooldown_secs=600, cooldown_dir=cd
+        )
+        assert result.skipped_cooldown == 0
+        assert result.launched == 1
