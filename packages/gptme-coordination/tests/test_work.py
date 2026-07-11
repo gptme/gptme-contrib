@@ -370,6 +370,43 @@ class TestExpiryHmacCoherence:
         )
 
 
+class TestExpiryHandoff:
+    """A holder's expired claim can be taken over by another agent, and the
+    original holder loses the ability to complete it — the two invariants
+    together (deny stale complete, allow live reclaim) are what make expiry
+    handoff safe. Combines the effects covered separately by
+    ``TestComplete.test_complete_after_expiry_is_denied`` (#1198) and
+    ``TestExpiryHmacCoherence`` (#1265) into one end-to-end scenario.
+    """
+
+    def test_second_agent_claims_over_expired_claim_and_original_holder_cannot_complete(
+        self, work: WorkClaimManager
+    ) -> None:
+        first = work.claim("agent-a", "task-1")
+        assert first is not None
+        assert first.epoch == 1
+
+        # Backdate expires_at to simulate a TTL that has elapsed.
+        work.db.conn.execute(
+            "UPDATE work SET expires_at = datetime('now', '-1 seconds') WHERE task_id = ?",
+            ("task-1",),
+        )
+
+        second = work.claim("agent-b", "task-1")
+        assert second is not None
+        assert second.claimer == "agent-b"
+        assert second.epoch == 2, "reclaim of an expired claim must bump the epoch"
+
+        # The original holder's complete() must fail now that agent-b holds it.
+        assert work.complete("agent-a", "task-1") is False
+
+        # The new holder can complete normally.
+        assert work.complete("agent-b", "task-1") is True
+        claim = work.get("task-1")
+        assert claim is not None
+        assert claim.status == "completed"
+
+
 class TestAuthCompatibility:
     def test_verify_hmac_matches_work_claim_manager(
         self, work: WorkClaimManager
