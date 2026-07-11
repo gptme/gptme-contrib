@@ -131,18 +131,22 @@ def commits_for_path(path: str, limit: int = 10) -> list[Attribution]:
             "log",
             "--follow",
             f"--max-count={limit}",
-            "--format=%H%x1f%aI%x1f%an%x1f%s%x1f%(trailers:key=Git-Session-Id,valueonly)",
+            "--format=%H%x1f%aI%x1f%an%x1f%s%x1f%(trailers:key=Git-Session-Id,valueonly,separator=%x1e)",
             "--",
             path,
         ]
     )
     result: list[Attribution] = []
-    for line in out.splitlines():
+    # Use split('\n') not splitlines(): Python's splitlines() treats \x1e (ASCII
+    # Record Separator) as a line boundary, which would corrupt records when \x1e
+    # is used as the within-field separator for multiple trailer values.
+    for line in out.split("\n"):
         if not line:
             continue
         parts = line.split("\x1f", 4)
         sha, when, author, subject = parts[:4]
-        trailer_sid = parts[4].strip() if len(parts) > 4 else ""
+        # Multiple trailers are joined by \x1e; take only the first value.
+        trailer_sid = parts[4].split("\x1e")[0].strip() if len(parts) > 4 else ""
         result.append(
             Attribution(
                 sha=sha,
@@ -164,13 +168,14 @@ def commit_for_line(path: str, line: int) -> list[Attribution]:
             "git",
             "show",
             "-s",
-            "--format=%aI%x1f%an%x1f%s%x1f%(trailers:key=Git-Session-Id,valueonly)",
+            "--format=%aI%x1f%an%x1f%s%x1f%(trailers:key=Git-Session-Id,valueonly,separator=%x1e)",
             sha,
         ]
     )
     parts = meta.split("\x1f", 3)
     when, author, subject = parts[:3]
-    trailer_sid = parts[3].strip() if len(parts) > 3 else ""
+    # Multiple trailers are joined by \x1e; take only the first value.
+    trailer_sid = parts[3].split("\x1e")[0].strip() if len(parts) > 3 else ""
     return [
         Attribution(
             sha=sha,

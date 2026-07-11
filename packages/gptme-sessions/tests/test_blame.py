@@ -18,7 +18,9 @@ from gptme_sessions.blame import (
     _traj_path_matches,
     attribute,
     attribute_all,
+    commit_for_line,
     commits_for_github_ref,
+    commits_for_path,
     consolidated_records_sources,
     enrich_with_trajectory,
     load_windows,
@@ -326,6 +328,82 @@ def test_commits_for_github_ref_gh_unavailable(monkeypatch, capsys):
     assert atts == []
     captured = capsys.readouterr()
     assert "warning" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
+# commits_for_path / commit_for_line — duplicate trailer safety
+# ---------------------------------------------------------------------------
+
+
+def _fake_run_git_log(stdout: str):
+    """Return a monkeypatch-compatible callable that fakes subprocess.run output."""
+
+    def _fake(args, **kwargs):
+        result = MagicMock()
+        result.stdout = stdout
+        result.returncode = 0
+        return result
+
+    return _fake
+
+
+def test_commits_for_path_single_trailer(monkeypatch):
+    """Normal single-trailer commit is parsed correctly."""
+    sha = "abc123def456"
+    line = f"{sha}\x1f2026-06-01T10:00:00+00:00\x1fBob\x1ffix: something\x1fsess-abc"
+    monkeypatch.setattr(subprocess, "run", _fake_run_git_log(line))
+    atts = commits_for_path("scripts/foo.py")
+    assert len(atts) == 1
+    assert atts[0].sha == sha
+    assert atts[0].trailer_session_id == "sess-abc"
+
+
+def test_commits_for_path_duplicate_trailers(monkeypatch):
+    """A commit with two Git-Session-Id trailers (separator=\\x1e) picks the first value."""
+    sha = "abc123def456"
+    # git emits multiple trailer values joined by \x1e (our separator= spec)
+    trailer_field = "sess-first\x1esess-second"
+    line = f"{sha}\x1f2026-06-01T10:00:00+00:00\x1fBob\x1ffix: something\x1f{trailer_field}"
+    monkeypatch.setattr(subprocess, "run", _fake_run_git_log(line))
+    atts = commits_for_path("scripts/foo.py")
+    assert len(atts) == 1
+    assert atts[0].trailer_session_id == "sess-first"
+
+
+def test_commits_for_path_no_trailer(monkeypatch):
+    """A commit without a Git-Session-Id trailer sets trailer_session_id to None."""
+    sha = "abc123def456"
+    line = f"{sha}\x1f2026-06-01T10:00:00+00:00\x1fBob\x1ffix: something\x1f"
+    monkeypatch.setattr(subprocess, "run", _fake_run_git_log(line))
+    atts = commits_for_path("scripts/foo.py")
+    assert len(atts) == 1
+    assert atts[0].trailer_session_id is None
+
+
+def test_commit_for_line_duplicate_trailers(monkeypatch):
+    """commit_for_line picks the first Git-Session-Id when duplicates appear."""
+    sha = "abc123def456"
+
+    call_count = 0
+
+    def _fake(args, **kwargs):
+        nonlocal call_count
+        result = MagicMock()
+        call_count += 1
+        if call_count == 1:
+            # git blame --porcelain output: first line is "<sha> ..."
+            result.stdout = f"{sha} 1 1 1\nauthor Bob"
+        else:
+            # git show output: \x1f-delimited, trailer field has two values joined by \x1e
+            result.stdout = (
+                "2026-06-01T10:00:00+00:00\x1fBob\x1ffix: something\x1fsess-first\x1esess-second"
+            )
+        return result
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    atts = commit_for_line("scripts/foo.py", 42)
+    assert len(atts) == 1
+    assert atts[0].trailer_session_id == "sess-first"
 
 
 # ---------------------------------------------------------------------------
