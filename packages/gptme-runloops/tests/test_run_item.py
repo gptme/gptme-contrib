@@ -203,18 +203,22 @@ def test_execute_kills_runner_process_group_on_sigterm(tmp_path: Path) -> None:
     assert sig == signal.SIGTERM
 
 
-def test_cli_run_item_calls_post_session_on_sigterm(tmp_path: Path) -> None:
-    """Interrupted run must still write bookkeeping via run_post_session."""
+def test_cli_run_item_calls_post_session_hooks_on_sigterm(tmp_path: Path) -> None:
+    """Interrupted run must invoke the hooks pipeline, not just call run_post_session."""
     work_file = tmp_path / "work.jsonl"
     work_file.write_text(json.dumps(item().raw) + "\n", encoding="utf-8")
-    post_session_calls: list[RunItemOutcome] = []
+    make_record_calls: list[dict] = []
+
+    # Use real RunPostSessionHooks with a spy on the fallback path (make_record).
+    # Exceptions inside run_post_session are swallowed, so even if the file write
+    # fails, make_record is called first — proving the pipeline ran on interrupt.
+    spy_hooks = RunPostSessionHooks(
+        make_record=lambda **kw: make_record_calls.append(kw) or kw
+    )
 
     with (
         patch("gptme_runloops.cli.execute_plan", side_effect=KeyboardInterrupt),
-        patch(
-            "gptme_runloops.cli.run_post_session",
-            side_effect=lambda outcome, *_a, **_kw: post_session_calls.append(outcome),
-        ),
+        patch("gptme_runloops.cli.RunPostSessionHooks", return_value=spy_hooks),
     ):
         result = CliRunner().invoke(
             main,
@@ -229,10 +233,9 @@ def test_cli_run_item_calls_post_session_on_sigterm(tmp_path: Path) -> None:
             ],
         )
 
-    assert (
-        len(post_session_calls) == 1
-    ), "run_post_session must be called even on SIGTERM"
-    assert post_session_calls[0].exit_code == 143
+    assert len(make_record_calls) == 1, "make_record hook must fire even on SIGTERM"
+    assert make_record_calls[0]["harness"] == "codex"
+    assert make_record_calls[0]["outcome"] == "failed"  # fallback_outcome(143)
     # CliRunner converts re-raised KeyboardInterrupt to SystemExit(1)
     assert result.exit_code == 1
 

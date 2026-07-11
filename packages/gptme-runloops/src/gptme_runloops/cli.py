@@ -374,15 +374,17 @@ def run_item(
                 )
 
             item_hooks = replace(hooks, claim=claim, abandon=abandon)
+        # step 5 brain shim will replace RunPostSessionHooks() with real callables;
+        # one shared instance so both normal and interrupted paths use the same hooks.
+        post_session_hooks = RunPostSessionHooks()
         try:
             outcome = execute_plan(plan, item, item_hooks)
         except KeyboardInterrupt:
             # SIGTERM: run.sh group already killed; still write the record.
             outcome = RunItemOutcome(item, plan, 143, 0)
-            run_post_session(outcome, RunPostSessionHooks(), workspace=workspace)
+            run_post_session(outcome, post_session_hooks, workspace=workspace)
             raise
-        # Post-session bookkeeping (step 5 brain shim wires real callables).
-        run_post_session(outcome, RunPostSessionHooks(), workspace=workspace)
+        run_post_session(outcome, post_session_hooks, workspace=workspace)
         exit_code = outcome.exit_code or exit_code
         if outcome.rate_limited:
             break
