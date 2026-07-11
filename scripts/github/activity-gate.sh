@@ -386,6 +386,49 @@ fetch_live_pr_data() {
     fetch_pr_data_with_ttl "$1" "$GH_CACHE_TTL_LIVE_PR"
 }
 
+# Fetch the actor of the most recent non-comment event that bumped updatedAt.
+# Called only in the ambiguous case: updatedAt > watermark but no new comment/review.
+# Returns the actor login on stdout, or empty on error / when no recognized event found.
+# Failure direction: empty output → caller falls through to existing emit behavior.
+# Event types checked: regular push, force push, draft toggle, label/assignee/review-request changes.
+# Args: <owner/repo> <pr_number>
+fetch_pr_noncomment_actor() {
+    local repo=$1
+    local pr_number=$2
+    local owner="${repo%%/*}"
+    local reponame="${repo##*/}"
+    gh api graphql -f query="{
+      repository(owner: \"${owner}\", name: \"${reponame}\") {
+        pullRequest(number: ${pr_number}) {
+          timelineItems(last: 3, itemTypes: [PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) {
+            nodes {
+              __typename
+              ... on PullRequestCommit { commit { author { user { login } } } }
+              ... on HeadRefForcePushedEvent { actor { login } }
+              ... on ReadyForReviewEvent { actor { login } }
+              ... on ConvertToDraftEvent { actor { login } }
+              ... on LabeledEvent { actor { login } }
+              ... on UnlabeledEvent { actor { login } }
+              ... on AssignedEvent { actor { login } }
+              ... on UnassignedEvent { actor { login } }
+              ... on ReviewRequestedEvent { actor { login } }
+              ... on ReviewRequestRemovedEvent { actor { login } }
+            }
+          }
+        }
+      }
+    }" --jq \
+        '.data.repository.pullRequest.timelineItems.nodes
+         | map(
+             if .actor != null and .actor.login != null then .actor.login
+             elif .commit != null and .commit.author.user.login != null then .commit.author.user.login
+             else null end
+           )
+         | map(select(. != null))
+         | last // empty' \
+        2>/dev/null || true
+}
+
 # Check whether the last activity on a PR was from someone worth responding to.
 # Returns 0 (true) if actionable, 1 if it should be skipped.
 # Skips only two cases:
@@ -503,6 +546,29 @@ check_pr_updates() {
             local last_check
             last_check=$(cat "$state_file")
             if [[ "$updated_at" > "$last_check" ]]; then
+                # Gap A: detect non-comment updatedAt bumps (push, draft toggle,
+                # label/assignee change). If the most recent comment/review predates
+                # the stored watermark, the bump came from a non-comment event.
+                # Fetch timelineItems to check the actor; suppress if it is AUTHOR.
+                # Failure direction: on error, fall through to has_actionable_update.
+                local latest_comment_time
+                latest_comment_time=$(echo "$pr_data" | jq -r '
+                    [
+                        (.comments[-1] | select(. != null) | .createdAt),
+                        (.latestReviews | sort_by(.submittedAt) | last | select(. != null) | .submittedAt)
+                    ]
+                    | map(select(. != null)) | max // ""
+                ' 2>/dev/null)
+                if [ -z "$latest_comment_time" ] || ! [[ "$latest_comment_time" > "$last_check" ]]; then
+                    local noncomment_actor
+                    noncomment_actor=$(fetch_pr_noncomment_actor "$repo" "$pr_number" 2>/dev/null || true)
+                    if [ "$noncomment_actor" = "$AUTHOR" ]; then
+                        # Self-triggered non-comment bump — skip, still advance watermark
+                        echo "$updated_at" > "$state_file"
+                        continue
+                    fi
+                fi
+
                 # Check if the update was from someone we should respond to
                 if has_actionable_update "$pr_data"; then
                     local pr_title priority_tokens item_detail
