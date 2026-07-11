@@ -10,11 +10,15 @@
 #   2 = usage error
 #
 # Usage:
-#   activity-gate.sh --author AUTHOR --org ORG [--repo EXTRA_REPO]... [--state-dir DIR]
+#   activity-gate.sh --author AUTHOR [--org ORG] [--repo EXTRA_REPO]... [--state-dir DIR]
+#   (--org and --repo are mutually exclusive or combinable; at least one is required)
 #
 # Examples:
-#   # Check gptme org + specific repos
+#   # Check gptme org + specific extra repo
 #   activity-gate.sh --author TimeToBuildBob --org gptme --repo ErikBjare/bob
+#
+#   # Check specific repos only (no org scan — saves GraphQL budget)
+#   activity-gate.sh --author TimeToBuildBob --repo gptme/gptme --repo gptme/gptme-contrib
 #
 #   # Use as a gate before spawning an LLM session
 #   if work=$(./activity-gate.sh --author MyBot --org myorg); then
@@ -117,15 +121,15 @@ while [[ $# -gt 0 ]]; do
         --state-dir) STATE_DIR="$2"; shift 2 ;;
         --format) FORMAT="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 --author AUTHOR --org ORG [--repo EXTRA_REPO]... [--state-dir DIR] [--format FORMAT]"
+            echo "Usage: $0 --author AUTHOR [--org ORG] [--repo EXTRA_REPO]... [--state-dir DIR] [--format FORMAT]"
             echo ""
             echo "Checks GitHub for actionable activity. Exits 0 with work items on stdout"
             echo "if activity found, exits 1 silently if nothing to do."
             echo ""
             echo "Options:"
             echo "  --author    GitHub username to check PRs/issues for (required)"
-            echo "  --org       GitHub org to scan all repos from (required)"
-            echo "  --repo      Additional repo to check (can be repeated)"
+            echo "  --org       GitHub org to scan all repos from (optional if --repo provided)"
+            echo "  --repo      Repo to check, e.g. owner/repo (can be repeated; replaces --org if no org given)"
             echo "  --state-dir Directory for state tracking files (default: /tmp/github-activity-gate-state)"
             echo "  --format    Output format: 'markdown' (default) or 'jsonl' (one JSON object per item)"
             echo ""
@@ -137,8 +141,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [ -z "$AUTHOR" ] || [ -z "$ORG" ]; then
-    echo "Error: --author and --org are required" >&2
+if [ -z "$AUTHOR" ]; then
+    echo "Error: --author is required" >&2
+    exit 2
+fi
+if [ -z "$ORG" ] && [ ${#EXTRA_REPOS[@]} -eq 0 ]; then
+    echo "Error: --org or at least one --repo is required" >&2
     exit 2
 fi
 
@@ -189,6 +197,12 @@ emit_item() {
 }
 
 discover_repos() {
+    # When --org is omitted, only EXTRA_REPOS (--repo flags) are scanned.
+    if [ -z "$ORG" ]; then
+        for r in "${EXTRA_REPOS[@]}"; do echo "$r"; done
+        return
+    fi
+
     # Cache repo list for 1 hour by default — org membership rarely changes.
     # Override with GH_CACHE_TTL_REPO (seconds).
     local cache_file="$STATE_DIR/repo-list-${ORG}.cache"
