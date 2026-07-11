@@ -157,6 +157,52 @@ def test_execute_resolves_trajectory_and_blocks_confirmed_rate_limit(
     assert blocked == [RateLimitRejection("seven_day_sonnet", 123)]
 
 
+def test_execute_kills_runner_process_group_on_sigterm(tmp_path: Path) -> None:
+    """SIGTERM during execute_plan kills the child process group and abandons the claim."""
+    import os
+    import signal
+    import threading
+
+    plan = plan_run_item(item(), config(tmp_path))
+    abandoned: list[str] = []
+    killpg_calls: list[tuple[int, int]] = []
+    _real_killpg = os.killpg
+
+    def _track_killpg(pgid: int, sig: int) -> None:
+        killpg_calls.append((pgid, sig))
+        _real_killpg(pgid, sig)
+
+    def _send_sigterm() -> None:
+        import time
+
+        time.sleep(0.05)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    t = threading.Thread(target=_send_sigterm, daemon=True)
+    t.start()
+
+    with patch("os.killpg", side_effect=_track_killpg):
+        try:
+            execute_plan(
+                plan,
+                item(),
+                RunItemHooks(
+                    # sh -c ignores extra positional args that _runner_command appends
+                    runner=("sh", "-c", "sleep 10"),
+                    claim=lambda _key: True,
+                    abandon=abandoned.append,
+                ),
+            )
+        except KeyboardInterrupt:
+            pass
+
+    t.join(timeout=2)
+    assert abandoned == [plan.claim_key], "claim must be abandoned in finally"
+    assert len(killpg_calls) == 1, "process group must be killed exactly once"
+    _, sig = killpg_calls[0]
+    assert sig == signal.SIGTERM
+
+
 def test_load_items_skips_malformed_lines(tmp_path: Path) -> None:
     work_file = tmp_path / "work.jsonl"
     work_file.write_text("not json\n" + json.dumps(item().raw) + "\n", encoding="utf-8")

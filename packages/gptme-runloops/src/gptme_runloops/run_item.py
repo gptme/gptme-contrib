@@ -461,8 +461,14 @@ def execute_plan(
     started = time.monotonic()
     started_epoch = int(time.time())
     old_handler = signal.getsignal(signal.SIGTERM)
+    proc: subprocess.Popen[bytes] | None = None
 
     def _terminate(_signum: int, _frame: Any) -> None:
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                proc.terminate()
         raise KeyboardInterrupt("SIGTERM")
 
     signal.signal(signal.SIGTERM, _terminate)
@@ -479,7 +485,10 @@ def execute_plan(
                 Path.home(),
                 Path("/tmp"),
             )
-        completed = subprocess.run(_runner_command(plan, hooks), env=env, check=False)
+        proc = subprocess.Popen(
+            _runner_command(plan, hooks), env=env, start_new_session=True
+        )
+        returncode = proc.wait()
         trajectory_path = None
         if hooks.resolve_trajectory is not None:
             trajectory_path = hooks.resolve_trajectory(
@@ -491,7 +500,7 @@ def execute_plan(
             )
         rate_limited = False
         if (
-            completed.returncode
+            returncode
             and plan.backend == "claude-code"
             and trajectory_path is not None
             and hooks.trajectory_lines
@@ -506,7 +515,7 @@ def execute_plan(
         return RunItemOutcome(
             item,
             plan,
-            completed.returncode,
+            returncode,
             int(time.monotonic() - started),
             rate_limited=rate_limited,
             trajectory_path=trajectory_path,
