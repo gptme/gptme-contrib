@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -253,7 +253,7 @@ def test_write_claude_rate_limit_block_unknown_reset_defaults_to_6h(
     path = write_claude_rate_limit_block(
         RateLimitRejection("requests", 0),
         tmp_path,
-        now=datetime(2026, 1, 1, tzinfo=UTC),
+        now=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     assert path.name == "claude-code-rate-limited-until.txt"
     assert path.read_text(encoding="utf-8") == "2026-01-01T06:00:00+00:00"
