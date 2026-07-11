@@ -5,11 +5,7 @@ repos:
   - id: check-yaml
   - id: check-symlinks
   - id: end-of-file-fixer
-    # run_item goldens are byte-exact captures of bash prompt builders whose
-    # output legitimately ends without a newline — "fixing" them breaks parity.
-    exclude: ^packages/gptme-runloops/tests/goldens/run_item/
   - id: trailing-whitespace
-    exclude: ^packages/gptme-runloops/tests/goldens/run_item/
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.6.9
   hooks:
