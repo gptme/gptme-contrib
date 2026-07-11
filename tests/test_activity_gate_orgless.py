@@ -38,8 +38,14 @@ from pathlib import Path
 argv = sys.argv[1:]
 log = os.environ.get("GH_CALL_LOG", "")
 if log:
+    # Log the subcommand plus, for repo-scoped calls, WHICH repo was hit —
+    # so tests can assert every explicit --repo was actually scanned rather
+    # than one repo being scanned twice.
+    entry = " ".join(argv[:2])
+    if "--repo" in argv:
+        entry += " " + argv[argv.index("--repo") + 1]
     with Path(log).open("a") as fh:
-        fh.write(" ".join(argv[:2]) + "\n")
+        fh.write(entry + "\n")
 
 if not argv:
     sys.exit(2)
@@ -114,9 +120,12 @@ def test_orgless_repo_mode_is_a_valid_invocation() -> None:
         assert (
             "required" not in result.stderr
         ), f"must not report a usage error: {result.stderr!r}"
-        # Both explicit repos were scanned (PR data fetched per repo).
-        pr_calls = [c for c in calls if c == "pr list"]
-        assert len(pr_calls) >= 2, f"expected per-repo pr list calls, got: {calls}"
+        # Both explicit repos were scanned (PR data fetched for EACH repo,
+        # not one repo scanned twice).
+        scanned = {c.split()[-1] for c in calls if c.startswith("pr list ")}
+        assert (
+            {"owner/repo-x", "owner/repo-y"} <= scanned
+        ), f"every explicit --repo must be scanned; scanned={scanned}, calls: {calls}"
 
 
 def test_orgless_repo_mode_skips_org_enumeration() -> None:
@@ -127,7 +136,7 @@ def test_orgless_repo_mode_skips_org_enumeration() -> None:
         )
 
         assert result.returncode in (0, 1), result.stderr
-        assert "repo list" not in calls, (
+        assert not any(c.startswith("repo list") for c in calls), (
             f"org enumeration must be skipped in org-less mode "
             f"(that is the GraphQL saving the mode exists for); calls: {calls}"
         )
@@ -153,11 +162,13 @@ def test_org_mode_still_enumerates_org() -> None:
         )
 
         assert result.returncode in (0, 1), result.stderr
-        assert (
-            "repo list" in calls
+        assert any(
+            c.startswith("repo list") for c in calls
         ), f"--org mode must enumerate org repos via gh repo list; calls: {calls}"
         # Enumerated repos are then scanned.
-        assert "pr list" in calls, f"org repos must be scanned; calls: {calls}"
+        assert any(
+            c.startswith("pr list") for c in calls
+        ), f"org repos must be scanned; calls: {calls}"
 
 
 def test_orgless_output_is_well_formed_jsonl_when_work_found() -> None:
