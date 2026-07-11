@@ -34,8 +34,8 @@ import queue
 import re
 import socket
 import threading
+from importlib.util import find_spec
 
-import requests
 from gptme.tools.base import ToolSpec
 from gptme.util import console
 from gptme.util.sound import (
@@ -71,15 +71,10 @@ def _request_timeout() -> float:
     return DEFAULT_REQUEST_TIMEOUT
 
 
-# Check for TTS-specific imports
-has_tts_imports = False
-try:
-    import numpy as np  # fmt: skip
-    import scipy.io.wavfile as wavfile  # fmt: skip
-
-    has_tts_imports = True
-except (ImportError, OSError):
-    has_tts_imports = False
+# Check for TTS-specific deps without importing them: importing scipy takes
+# ~0.3s and this module is imported during tool listing (e.g. gptme --help).
+# numpy/scipy are imported lazily at the synthesis call sites instead.
+has_tts_imports = all(find_spec(mod) is not None for mod in ("numpy", "scipy"))
 
 
 # --- Backend selection -------------------------------------------------------
@@ -385,6 +380,15 @@ def clean_for_speech(content: str) -> str:
 
 def _synthesize_server(chunk: str):
     """Synthesize a chunk via the local tts_server.py. Returns (sample_rate, data)."""
+    try:
+        import requests
+        import scipy.io.wavfile as wavfile
+    except (ImportError, OSError):
+        log.warning(
+            "TTS deps unavailable (scipy/requests failed to import); skipping chunk"
+        )
+        return None
+
     url = f"http://{host}:{port}/tts"
     params: dict[str, str | float] = {"text": chunk, "speed": current_speed}
     if voice := os.getenv("GPTME_TTS_VOICE"):
@@ -420,6 +424,15 @@ def _synthesize_openrouter(chunk: str):
     Uses the ``pcm`` response format (uncompressed 16-bit mono @ 24kHz) so no
     audio decoder is needed and latency stays low.
     """
+    try:
+        import numpy as np
+        import requests
+    except (ImportError, OSError):
+        log.warning(
+            "TTS deps unavailable (numpy/requests failed to import); skipping chunk"
+        )
+        return None
+
     api_key = _get_openrouter_api_key()
     if not api_key:
         log.warning("OpenRouter TTS backend selected but OPENROUTER_API_KEY is not set")
