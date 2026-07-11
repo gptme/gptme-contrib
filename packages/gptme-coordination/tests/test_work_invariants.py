@@ -42,6 +42,12 @@ from pathlib import Path
 from gptme_coordination.db import CoordinationDB
 from gptme_coordination.work import WorkClaimManager
 
+# Explicitly pin the start method so worker import paths are always available.
+# The default varies by platform (fork on Linux, spawn on macOS/Windows), and
+# spawn re-executes the pytest entry point in each child, which can make the
+# stress tests fail before reaching the claim lifecycle at all.
+_MP_CTX = multiprocessing.get_context("fork")
+
 # CI-friendly sizes: the suite completes in a few seconds. Bump locally when
 # hunting a suspected race (the invariant checks don't change with scale).
 N_WORKERS = 6
@@ -99,6 +105,7 @@ def _churn_worker(
     rng = random.Random(seed)
     events: list[tuple[str, int]] = []
     lost_holds = 0
+    held: set[str] = set()  # keys this worker currently holds
     db, work = _open_manager(db_path)
     with db:
         for _ in range(iterations):
@@ -109,7 +116,14 @@ def _churn_worker(
                 continue
             if claim is None:
                 continue
-            events.append((key, claim.epoch))
+            # Exclude same-holder renewals: if a previous release hit an
+            # OperationalError the worker may re-claim its still-held key,
+            # which returns the existing epoch (not a new CAS slot).  Recording
+            # that epoch again would produce a false duplicate and break the
+            # gapless-sequence assertion.
+            if key not in held:
+                events.append((key, claim.epoch))
+                held.add(key)
             # Hold the claim briefly so concurrent claim/complete paths
             # actually observe rows in 'claimed' status — instant release
             # would leave the contention windows empty and the invariants
@@ -124,6 +138,8 @@ def _churn_worker(
                 released = False
             if not released:
                 lost_holds += 1
+            else:
+                held.discard(key)
     return events, lost_holds
 
 
@@ -136,7 +152,7 @@ class TestMutualExclusion:
         args = [
             (db_path, f"contrib-stress-w{i}", keys, SEED + i) for i in range(N_WORKERS)
         ]
-        with multiprocessing.Pool(N_WORKERS) as pool:
+        with _MP_CTX.Pool(N_WORKERS) as pool:
             results = pool.map(_claim_once_worker, args)
 
         all_wins = [win for wins in results for win in wins]
@@ -163,7 +179,7 @@ class TestMutualExclusion:
             )
             for i in range(N_WORKERS)
         ]
-        with multiprocessing.Pool(N_WORKERS) as pool:
+        with _MP_CTX.Pool(N_WORKERS) as pool:
             results = pool.map(_churn_worker, args)
 
         events = [event for evts, _lost in results for event in evts]
