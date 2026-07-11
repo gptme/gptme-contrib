@@ -204,7 +204,9 @@ def test_synthesize_openrouter_builds_request_and_decodes_pcm(monkeypatch):
         captured.update(url=url, headers=headers, json=json)
         return FakeResp()
 
-    monkeypatch.setattr(tts_mod.requests, "post", fake_post)
+    # requests is imported lazily inside _synthesize_openrouter, so patch the
+    # real module rather than a (nonexistent) tts module attribute
+    monkeypatch.setattr("requests.post", fake_post)
 
     sample_rate, data = tts_mod._synthesize_openrouter("Hello")
 
