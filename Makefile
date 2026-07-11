@@ -22,7 +22,7 @@ test-integration:  ## Run integration tests (git hooks, etc.)
 
 test-unit:  ## Run unit tests (tests/ excluding tests/integration/)
 	@echo "Running unit tests..."
-	uv run --with pytest --with rich pytest tests/ \
+	uv run --with pytest --with rich --with ./packages/gptmail pytest tests/ \
 		--ignore=tests/integration/ \
 		-v
 
