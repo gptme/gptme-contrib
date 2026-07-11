@@ -2129,6 +2129,13 @@ def run_work_file(
 
         promote_notification_states(config)
 
+        # NOTE(parity): successes = total - failures, exactly like the bash
+        # (`_item_successes=$(( group_count - _item_failures ))`,
+        # project-monitoring.sh:713-714) — so self-merged, claim-denied, and
+        # rate-limit-skipped items count as "successes" here too. Inaccurate,
+        # but the step-5 ledger A/B needs identical accounting on both paths;
+        # fixing the metric is a post-cutover behavior change (both sides of
+        # the A/B would otherwise diverge on every skip).
         successes = group_count - failures
         duration = int(time.time()) - run_start
         _append_ledger(
