@@ -15,11 +15,13 @@ from gptme_runloops.project_monitoring import ProjectMonitoringRun
 from gptme_runloops.run_item import (
     RunItemConfig,
     RunItemHooks,
+    RunPostSessionHooks,
     execute_plan,
     load_items,
     plan_run_item,
     prepare_monitoring_trajectory_snapshot,
     resolve_monitoring_trajectory,
+    run_post_session,
     write_claude_rate_limit_block,
 )
 from gptme_runloops.team import TeamRun
@@ -372,6 +374,8 @@ def run_item(
 
             item_hooks = replace(hooks, claim=claim, abandon=abandon)
         outcome = execute_plan(plan, item, item_hooks)
+        # Post-session bookkeeping (step 5 brain shim wires real callables).
+        run_post_session(outcome, RunPostSessionHooks(), workspace=workspace)
         exit_code = outcome.exit_code or exit_code
         if outcome.rate_limited:
             break

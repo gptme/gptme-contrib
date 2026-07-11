@@ -12,7 +12,7 @@ import signal
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,7 +21,15 @@ from typing import Any
 from gptme_runloops.merge_lifecycle import InstructionKind, WorkItem
 from gptme_runloops.pm_dispatch import is_direct_mention
 from gptme_runloops.prompt_templates import PromptContext, render_instruction
-from gptme_runloops.worker_records import RateLimitRejection, parse_rate_limit_rejection
+from gptme_runloops.worker_records import (
+    RateLimitRejection,
+    fallback_outcome,
+    parse_rate_limit_rejection,
+    update_record_pr_state,
+    write_fallback_session_record,
+    write_post_session_record,
+    write_worker_result_manifest,
+)
 
 DEFAULT_TIMEOUT = 900
 ASSIGNED_ISSUE_TIMEOUT = 1500
@@ -507,6 +515,137 @@ def execute_plan(
         signal.signal(signal.SIGTERM, old_handler)
         if hooks.abandon is not None:
             hooks.abandon(plan.claim_key)
+
+
+@dataclass(frozen=True)
+class RunPostSessionHooks:
+    """Injectable bookkeeping callables for :func:`run_post_session`.
+
+    All fields are ``None`` by default; a ``None`` hook skips that step,
+    matching the bash ``|| true`` tolerance in worker.sh.
+    """
+
+    # Primary record writer: gptme_sessions.post_session.post_session
+    post_session: Callable[..., Any] | None = None
+    # SessionStore factory: lambda path: SessionStore(sessions_dir=path)
+    make_store: Callable[[Path], Any] | None = None
+    # Fallback record factory: lambda **kw: SessionRecord(**kw).to_dict()
+    make_record: Callable[..., Mapping[str, Any]] | None = None
+    # metaproductivity.pr_outcome.upgrade_outcome_from_pr_state (optional)
+    upgrade_outcome: Callable[[dict[str, Any]], Any] | None = None
+    # agent_events.worker_results.build_worker_result
+    build_worker_result: Callable[..., dict[str, Any]] | None = None
+    # agent_events.worker_results.write_worker_result
+    write_worker_result: Callable[[Path, Mapping[str, Any]], Any] | None = None
+    # agent_events.worker_results.load_worker_result
+    load_worker_result: Callable[[Path], Mapping[str, Any] | None] | None = None
+
+
+def run_post_session(
+    outcome: RunItemOutcome,
+    hooks: RunPostSessionHooks,
+    *,
+    workspace: Path,
+    pr_state_before_json: str = "",
+) -> None:
+    """Write post-session bookkeeping records for a completed plan execution.
+
+    Mirrors worker.sh:283-627. Each step is guarded by ``|| true``-equivalent
+    exception swallowing: a failure in one step does not abort subsequent steps.
+    Skipped-claim outcomes write no record (same as the bash guard at :278).
+
+    Call this after :func:`execute_plan` returns, even on non-zero exits —
+    the record is the primary artifact that session quality analysis needs.
+
+    ``pr_state_before_json`` should be the raw JSON from a
+    ``gh pr view --json state,headRefOid,mergeCommit`` call taken *before*
+    :func:`execute_plan`; an empty string silently skips the before-state
+    fields (worker.sh parity when ``_before_json`` was not captured).
+    """
+    if outcome.skipped_claimed:
+        return
+
+    plan = outcome.plan
+    item = outcome.item
+    record_file = Path(plan.record_file)
+    trajectory_path_str = (
+        str(outcome.trajectory_path) if outcome.trajectory_path else None
+    )
+
+    # Step 1: Primary record via gptme_sessions (worker.sh:283-323).
+    primary_ok = False
+    if hooks.post_session is not None and hooks.make_store is not None:
+        try:
+            write_post_session_record(
+                record_file,
+                harness=plan.backend,
+                model=plan.model,
+                session_id=plan.session_id,
+                exit_code=outcome.exit_code,
+                duration_seconds=outcome.duration_seconds,
+                item_timeout=plan.timeout_seconds,
+                trajectory_path=trajectory_path_str,
+                post_session=hooks.post_session,
+                make_store=hooks.make_store,
+            )
+            primary_ok = True
+        except Exception:
+            pass
+
+    # Step 2: Fallback via metaproductivity.sessions (worker.sh:325-373).
+    if not primary_ok and hooks.make_record is not None:
+        try:
+            write_fallback_session_record(
+                record_file,
+                harness=plan.backend,
+                model=plan.model,
+                outcome=fallback_outcome(outcome.exit_code),
+                session_id=plan.session_id,
+                exit_code=outcome.exit_code,
+                duration_seconds=outcome.duration_seconds,
+                item_timeout=plan.timeout_seconds,
+                trajectory_path=trajectory_path_str,
+                make_record=hooks.make_record,
+            )
+        except Exception:
+            pass
+
+    # Step 3: PR-state before/after diff (worker.sh:377-502).
+    # Raises for non-numeric PR numbers (same as heredoc dying) → swallowed.
+    try:
+        update_record_pr_state(
+            record_file,
+            repo=item.repo,
+            number=item.number,
+            before_json=pr_state_before_json,
+            cwd=workspace,
+            upgrade_outcome=hooks.upgrade_outcome,
+        )
+    except Exception:
+        pass
+
+    # Step 4: Worker-result manifest (worker.sh:505-627).
+    if (
+        hooks.build_worker_result is not None
+        and hooks.write_worker_result is not None
+        and hooks.load_worker_result is not None
+    ):
+        try:
+            write_worker_result_manifest(
+                record_file,
+                repo=item.repo,
+                number=item.number,
+                session_id=plan.session_id,
+                exit_code=outcome.exit_code,
+                duration_seconds=outcome.duration_seconds,
+                model=plan.model,
+                item_types=item.types,
+                build_worker_result=hooks.build_worker_result,
+                write_worker_result=hooks.write_worker_result,
+                load_worker_result=hooks.load_worker_result,
+            )
+        except Exception:
+            pass
 
 
 def load_items(work_file: Path) -> list[RunItem]:

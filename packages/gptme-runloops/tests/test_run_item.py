@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from click.testing import CliRunner
 from gptme_runloops.cli import main
@@ -15,14 +16,17 @@ from gptme_runloops.run_item import (
     RunItem,
     RunItemConfig,
     RunItemHooks,
+    RunItemOutcome,
+    RunPostSessionHooks,
     execute_plan,
     load_items,
     plan_run_item,
     prepare_monitoring_trajectory_snapshot,
     resolve_monitoring_trajectory,
+    run_post_session,
     write_claude_rate_limit_block,
 )
-from gptme_runloops.worker_records import RateLimitRejection
+from gptme_runloops.worker_records import RateLimitRejection, update_record_pr_state
 
 
 def item(**overrides: object) -> RunItem:
@@ -253,3 +257,242 @@ def test_write_claude_rate_limit_block_unknown_reset_defaults_to_6h(
     )
     assert path.name == "claude-code-rate-limited-until.txt"
     assert path.read_text(encoding="utf-8") == "2026-01-01T06:00:00+00:00"
+
+
+# --- run_post_session tests ---
+
+# Stub collaborators (mirrors test_worker_records.py stubs so the two test
+# suites exercise the same injection interface).
+
+
+class _StubStore:
+    def __init__(self, sessions_dir: Path) -> None:
+        self.sessions_dir = sessions_dir
+
+
+class _StubRecord:
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def to_dict(self) -> dict:
+        return dict(self._data)
+
+
+class _StubResult:
+    def __init__(self, record: _StubRecord, grade: str) -> None:
+        self.record = record
+        self.grade = grade
+
+
+def _stub_post_session(
+    *,
+    store: _StubStore,
+    harness: str,
+    model: object,
+    run_type: str,
+    trigger: str,
+    category: str,
+    exit_code: int,
+    duration_seconds: int,
+    trajectory_path: object,
+    session_id: str,
+) -> _StubResult:
+    data = {
+        "harness": harness,
+        "model": model,
+        "run_type": run_type,
+        "trigger": trigger,
+        "category": category,
+        "exit_code": exit_code,
+        "duration_seconds": duration_seconds,
+        "trajectory_path": str(trajectory_path) if trajectory_path else None,
+        "session_id": session_id,
+        "outcome": "stub-outcome",
+    }
+    return _StubResult(_StubRecord(data), "stub-grade")
+
+
+def _stub_make_record(
+    *,
+    harness: str,
+    model: str,
+    run_type: str,
+    category: str,
+    outcome: str,
+    duration_seconds: int,
+) -> dict:
+    return {
+        "harness": harness,
+        "model": model,
+        "run_type": run_type,
+        "category": category,
+        "outcome": outcome,
+        "duration_seconds": duration_seconds,
+    }
+
+
+def _make_outcome(
+    tmp_path: Path,
+    *,
+    exit_code: int = 0,
+    skipped_claimed: bool = False,
+    types: list | None = None,
+    number: int | str = 42,
+    trajectory_path: Path | None = None,
+) -> RunItemOutcome:
+    it = item(number=number, types=types or ["pr_update"])
+    cfg = config(tmp_path)
+    plan = plan_run_item(it, cfg)
+    return RunItemOutcome(
+        item=it,
+        plan=plan,
+        exit_code=exit_code,
+        duration_seconds=5,
+        skipped_claimed=skipped_claimed,
+        trajectory_path=trajectory_path,
+    )
+
+
+def test_run_post_session_skips_when_claim_was_denied(tmp_path: Path) -> None:
+    """No record written for skipped-claim outcomes."""
+    outcome = _make_outcome(tmp_path, skipped_claimed=True)
+    calls: list[str] = []
+    hooks = RunPostSessionHooks(
+        post_session=lambda **_kw: calls.append("ps"),
+        make_store=lambda _p: _StubStore(_p),
+    )
+    run_post_session(outcome, hooks, workspace=tmp_path)
+    assert calls == []
+    assert not Path(outcome.plan.record_file).exists()
+
+
+def test_run_post_session_all_none_hooks_is_noop(tmp_path: Path) -> None:
+    """All-None hooks must not raise and must write no record."""
+    outcome = _make_outcome(tmp_path)
+    run_post_session(outcome, RunPostSessionHooks(), workspace=tmp_path)
+    assert not Path(outcome.plan.record_file).exists()
+
+
+def test_run_post_session_writes_primary_record(tmp_path: Path) -> None:
+    outcome = _make_outcome(tmp_path)
+    hooks = RunPostSessionHooks(
+        post_session=_stub_post_session,
+        make_store=lambda p: _StubStore(p),
+    )
+    run_post_session(outcome, hooks, workspace=tmp_path)
+    record_path = Path(outcome.plan.record_file)
+    assert record_path.is_file()
+    rec = json.loads(record_path.read_text(encoding="utf-8"))
+    assert rec["harness"] == "codex"
+    assert rec["grade"] == "stub-grade"
+    assert rec["timeout_seconds"] == outcome.plan.timeout_seconds
+
+
+def test_run_post_session_falls_back_when_primary_raises(tmp_path: Path) -> None:
+    outcome = _make_outcome(tmp_path, exit_code=1)
+
+    def _failing_post_session(**_kw):
+        raise RuntimeError("gptme_sessions unavailable")
+
+    hooks = RunPostSessionHooks(
+        post_session=_failing_post_session,
+        make_store=lambda p: _StubStore(p),
+        make_record=_stub_make_record,
+    )
+    run_post_session(outcome, hooks, workspace=tmp_path)
+    record_path = Path(outcome.plan.record_file)
+    assert record_path.is_file()
+    rec = json.loads(record_path.read_text(encoding="utf-8"))
+    # Fallback writer sets outcome="failed" for non-zero non-124 exits.
+    assert rec["outcome"] == "failed"
+    assert rec["exit_code"] == 1
+
+
+def test_run_post_session_uses_fallback_when_no_primary_hooks(tmp_path: Path) -> None:
+    outcome = _make_outcome(tmp_path)
+    hooks = RunPostSessionHooks(make_record=_stub_make_record)
+    run_post_session(outcome, hooks, workspace=tmp_path)
+    record_path = Path(outcome.plan.record_file)
+    assert record_path.is_file()
+    rec = json.loads(record_path.read_text(encoding="utf-8"))
+    assert rec["harness"] == "codex"
+    assert "grade" not in rec  # fallback writer doesn't grade
+
+
+def test_run_post_session_pr_state_diff_updates_record(tmp_path: Path) -> None:
+    """PR-state diff runs and folds before/after into the record."""
+    outcome = _make_outcome(tmp_path)
+    hooks = RunPostSessionHooks(make_record=_stub_make_record)
+    before_json = json.dumps(
+        {"state": "OPEN", "headRefOid": "aaa", "mergeCommit": None}
+    )
+
+    def _fetch(repo: str, number: int) -> dict:
+        return {"state": "MERGED", "headRefOid": "bbb", "mergeCommit": "ccc"}
+
+    def _patched_update(*args, **kw):
+        kw.pop("upgrade_outcome", None)
+        return update_record_pr_state(*args, fetch=_fetch, **kw)
+
+    with patch("gptme_runloops.run_item.update_record_pr_state", _patched_update):
+        run_post_session(
+            outcome, hooks, workspace=tmp_path, pr_state_before_json=before_json
+        )
+
+    record_path = Path(outcome.plan.record_file)
+    assert record_path.is_file()
+    rec = json.loads(record_path.read_text(encoding="utf-8"))
+    assert rec.get("pr_state_before") == "OPEN"
+
+
+def test_run_post_session_swallows_pr_state_error_for_non_numeric_number(
+    tmp_path: Path,
+) -> None:
+    """Non-numeric PR numbers raise inside update_record_pr_state; must not crash."""
+    outcome = _make_outcome(tmp_path, types=["master_ci_failure"], number="master-ci")
+    hooks = RunPostSessionHooks(make_record=_stub_make_record)
+    run_post_session(outcome, hooks, workspace=tmp_path)
+    # Record was still written (the pr-state step failure is swallowed).
+    assert Path(outcome.plan.record_file).is_file()
+
+
+def test_run_post_session_writes_worker_result_manifest(tmp_path: Path) -> None:
+    outcome = _make_outcome(tmp_path)
+    hooks = RunPostSessionHooks(make_record=_stub_make_record)
+
+    manifests: list[dict] = []
+
+    def _build(**kw: object) -> dict:
+        return {
+            "status": "handled",
+            "schema_version": 1,
+            "git_refs": {"commit_oids": [], "start_commit": None, "end_commit": None},
+            "task": {"intended_category": "pm-react"},
+            "artifact_paths": {"record_path": str(tmp_path)},
+        }
+
+    def _write(path: Path, manifest: object) -> None:
+        import json as _j
+
+        path.write_text(_j.dumps(manifest), encoding="utf-8")
+        manifests.append(dict(manifest))  # type: ignore[arg-type]
+
+    def _load(path: Path) -> dict | None:
+        import json as _j
+
+        try:
+            return _j.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    hooks = RunPostSessionHooks(
+        make_record=_stub_make_record,
+        build_worker_result=_build,
+        write_worker_result=_write,
+        load_worker_result=_load,
+    )
+    run_post_session(outcome, hooks, workspace=tmp_path)
+    assert len(manifests) == 1
+    record_path = Path(outcome.plan.record_file)
+    rec = json.loads(record_path.read_text(encoding="utf-8"))
+    assert rec.get("worker_status") == "handled"
