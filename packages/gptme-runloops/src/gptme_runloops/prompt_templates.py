@@ -391,8 +391,8 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
 #   ``project-monitoring-lib.sh:96-112``) → :func:`render_main_prompt`,
 #   :func:`render_mention_constraint`, :func:`render_arc_context`.
 #
-# Goldens: ``tests/goldens/run_item/*.bob.txt`` are the captured output of
-# the real bash builders (sourced/sed-extracted from ErikBjare/bob @
+# Goldens: ``tests/goldens/run_item/prompts.json`` holds the captured output
+# of the real bash builders (sourced/sed-extracted from ErikBjare/bob @
 # f95ccae920af0058c68c86083e9007be86710dc5) — see
 # ``tests/test_run_item_prompts.py`` for the capture procedure.
 #

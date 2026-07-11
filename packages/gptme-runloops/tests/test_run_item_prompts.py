@@ -1,21 +1,26 @@
 """Golden tests for the run-item prompt templates (step 4, rows 6-7).
 
-The goldens under ``tests/goldens/run_item/`` are the *captured output of
-the real bash builders* in ErikBjare/bob @
-f95ccae920af0058c68c86083e9007be86710dc5:
+The goldens in ``tests/goldens/run_item/prompts.json`` (one JSON object,
+name → exact string) are the *captured output of the real bash builders*
+in ErikBjare/bob @ f95ccae920af0058c68c86083e9007be86710dc5:
 
-- ``investigate.<type>.bob.txt`` — ``build_item_investigate`` arms
+- ``investigate.<type>.bob`` — ``build_item_investigate`` arms
   (``scripts/github/project-monitoring-lib.sh:670-935``), captured by
   sourcing the lib with the CONTEXT globals below and dumping
   ``$INVESTIGATE`` per type.
-- ``arc_context.bob.txt`` / ``mention_constraint.bob.txt`` — the
-  ``ARC_CONTEXT`` (lib.sh:96-112) and ``_DIRECT_MENTION_CONSTRAINT``
+- ``arc_context.bob`` / ``mention_constraint.bob`` — the ``ARC_CONTEXT``
+  (lib.sh:96-112) and ``_DIRECT_MENTION_CONSTRAINT``
   (project-monitoring.sh:535-542) assignments, sed-extracted from the real
   source and eval'd with the CONTEXT globals.
-- ``main_prompt.*.bob.txt`` — the inline ``PROMPT=`` assignment
+- ``main_prompt.*.bob`` — the inline ``PROMPT=`` assignment
   (project-monitoring.sh:545-578), sed-extracted and eval'd for three cases
   (plain pr_update; greptile-fix + arc + direct-mention; merge_ready with no
   investigate arm).
+
+The captures are stored JSON-encoded (same convention as
+``goldens/worker_records/*.json``) because several legitimately end
+WITHOUT a trailing newline — plain .txt storage would be corrupted by the
+end-of-file-fixer pre-commit hook.
 
 Regenerate from a brain-repo checkout with the capture script recorded in
 the step-4 PR description (source lib.sh; set item_repo/item_number/
@@ -30,6 +35,7 @@ parameters.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -46,7 +52,14 @@ from gptme_runloops.prompt_templates import (
     render_preheld_claim_block,
 )
 
-GOLDEN_DIR = Path(__file__).parent / "goldens" / "run_item"
+GOLDEN_FILE = Path(__file__).parent / "goldens" / "run_item" / "prompts.json"
+_GOLDENS: dict[str, str] = json.loads(GOLDEN_FILE.read_text())
+
+
+def golden(name: str) -> str:
+    """The exact bash-rendered bytes captured for *name*."""
+    return _GOLDENS[name]
+
 
 # Bob's identity values — what the brain config (step-5 follow-up) carries.
 BOB_IDENTITY = dict(
@@ -103,8 +116,9 @@ SIMPLE_ARMS = [
 
 @pytest.mark.parametrize("type_name", SIMPLE_ARMS)
 def test_investigate_arm_matches_bash_golden(type_name: str) -> None:
-    golden = (GOLDEN_DIR / f"investigate.{type_name}.bob.txt").read_text()
-    assert render_item_investigate(ItemPromptKind(type_name), BOB_PARAMS) == golden
+    assert render_item_investigate(ItemPromptKind(type_name), BOB_PARAMS) == golden(
+        f"investigate.{type_name}.bob"
+    )
 
 
 def test_master_ci_failure_grouped_runs_match_bash_golden() -> None:
@@ -115,15 +129,15 @@ def test_master_ci_failure_grouped_runs_match_bash_golden() -> None:
         all_numbers=("16999888001", "16999888002"),
         **BOB_IDENTITY,
     )
-    golden = (GOLDEN_DIR / "investigate.master_ci_failure.bob.txt").read_text()
-    assert render_item_investigate(ItemPromptKind.MASTER_CI_FAILURE, params) == golden
+    assert render_item_investigate(ItemPromptKind.MASTER_CI_FAILURE, params) == golden(
+        "investigate.master_ci_failure.bob"
+    )
 
 
 def test_combined_types_concatenate_in_order() -> None:
-    golden = (
-        GOLDEN_DIR / "investigate.combined.ci_failure+pr_update.bob.txt"
-    ).read_text()
-    assert build_investigate(["ci_failure", "pr_update"], BOB_PARAMS) == golden
+    assert build_investigate(["ci_failure", "pr_update"], BOB_PARAMS) == golden(
+        "investigate.combined.ci_failure+pr_update.bob"
+    )
 
 
 def test_greptile_types_delegate_to_step2_templates() -> None:
@@ -138,23 +152,20 @@ def test_unknown_types_contribute_nothing() -> None:
 
 
 def test_arc_context_matches_bash_golden() -> None:
-    golden = (GOLDEN_DIR / "arc_context.bob.txt").read_text()
     rendered = render_arc_context(
         BOB_PARAMS,
         arc_id="arc-2026-07-01-gptme-contrib-1234",
         arc_hint="Wait for Greptile re-review, then merge",
         arc_sessions=3,
     )
-    assert rendered == golden
+    assert rendered == golden("arc_context.bob")
 
 
 def test_mention_constraint_matches_bash_golden() -> None:
-    golden = (GOLDEN_DIR / "mention_constraint.bob.txt").read_text()
-    assert render_mention_constraint(BOB_PARAMS) == golden
+    assert render_mention_constraint(BOB_PARAMS) == golden("mention_constraint.bob")
 
 
 def test_main_prompt_plain_matches_bash_golden() -> None:
-    golden = (GOLDEN_DIR / "main_prompt.plain.bob.txt").read_text()
     rendered = render_main_prompt(
         BOB_PARAMS,
         item_type="pr_update",
@@ -163,12 +174,11 @@ def test_main_prompt_plain_matches_bash_golden() -> None:
         monitoring_rules=MONITORING_RULES,
         time_desc="~10 minutes",
     )
-    assert rendered == golden
+    assert rendered == golden("main_prompt.plain.bob")
 
 
 def test_main_prompt_full_matches_bash_golden() -> None:
     """Greptile fix instructions + arc context + direct-mention constraint."""
-    golden = (GOLDEN_DIR / "main_prompt.full.bob.txt").read_text()
     fix = render_instruction(
         InstructionKind.LOCAL_GREPTILE_FIX, BOB_PARAMS.to_prompt_context()
     ).rstrip("\n")
@@ -189,11 +199,10 @@ def test_main_prompt_full_matches_bash_golden() -> None:
         arc_context=arc,
         mention_constraint=render_mention_constraint(BOB_PARAMS),
     )
-    assert rendered == golden
+    assert rendered == golden("main_prompt.full.bob")
 
 
 def test_main_prompt_merge_ready_empty_investigate_matches_bash_golden() -> None:
-    golden = (GOLDEN_DIR / "main_prompt.merge_ready_empty.bob.txt").read_text()
     rendered = render_main_prompt(
         BOB_PARAMS,
         item_type="merge_ready",
@@ -202,7 +211,7 @@ def test_main_prompt_merge_ready_empty_investigate_matches_bash_golden() -> None
         monitoring_rules=MONITORING_RULES,
         time_desc="~10 minutes",
     )
-    assert rendered == golden
+    assert rendered == golden("main_prompt.merge_ready_empty.bob")
 
 
 # --- Agent-agnosticism (Alice values leave no Bob behind) ---
@@ -293,15 +302,15 @@ def test_preheld_block_appends_after_optional_blocks() -> None:
 
 
 def test_every_expected_golden_exists() -> None:
-    expected = {f"investigate.{t}.bob.txt" for t in SIMPLE_ARMS}
+    expected = {f"investigate.{t}.bob" for t in SIMPLE_ARMS}
     expected |= {
-        "investigate.master_ci_failure.bob.txt",
-        "investigate.combined.ci_failure+pr_update.bob.txt",
-        "arc_context.bob.txt",
-        "mention_constraint.bob.txt",
-        "main_prompt.plain.bob.txt",
-        "main_prompt.full.bob.txt",
-        "main_prompt.merge_ready_empty.bob.txt",
+        "investigate.master_ci_failure.bob",
+        "investigate.combined.ci_failure+pr_update.bob",
+        "arc_context.bob",
+        "mention_constraint.bob",
+        "main_prompt.plain.bob",
+        "main_prompt.full.bob",
+        "main_prompt.merge_ready_empty.bob",
     }
-    present = {p.name for p in GOLDEN_DIR.glob("*.txt")}
+    present = set(_GOLDENS)
     assert expected <= present, f"missing goldens: {expected - present}"

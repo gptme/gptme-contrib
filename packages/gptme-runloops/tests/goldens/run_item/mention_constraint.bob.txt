@@ -1,8 +1,0 @@
-
-## Required: Produce a Deliverable (Direct @Mention)
-
-This item is a **direct @mention from Erik**. Before completing or exiting, you MUST do one of:
-1. **Produce the explicitly requested deliverable** (open a tracking issue, post a reply, submit a PR, etc.), OR
-2. **Reply to the thread** explaining what you did or why you cannot fulfil the request right now.
-
-A silent NOOP is not acceptable for a direct Erik mention. If you can only do part of the ask, do the simple parts (e.g. open an issue) and note the rest in your reply.

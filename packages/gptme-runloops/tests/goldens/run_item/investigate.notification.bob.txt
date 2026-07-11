@@ -1,6 +1,0 @@
-
-### Notifications
-```bash
-gh api notifications \
-  --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign") | {subject: .subject.title, type: .subject.type, reason: .reason, url: .subject.url, repo: .repository.full_name}'
-```
