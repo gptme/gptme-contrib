@@ -203,6 +203,40 @@ def test_execute_kills_runner_process_group_on_sigterm(tmp_path: Path) -> None:
     assert sig == signal.SIGTERM
 
 
+def test_cli_run_item_calls_post_session_on_sigterm(tmp_path: Path) -> None:
+    """Interrupted run must still write bookkeeping via run_post_session."""
+    work_file = tmp_path / "work.jsonl"
+    work_file.write_text(json.dumps(item().raw) + "\n", encoding="utf-8")
+    post_session_calls: list[RunItemOutcome] = []
+
+    with (
+        patch("gptme_runloops.cli.execute_plan", side_effect=KeyboardInterrupt),
+        patch(
+            "gptme_runloops.cli.run_post_session",
+            side_effect=lambda outcome, *_a, **_kw: post_session_calls.append(outcome),
+        ),
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "run-item",
+                "--workspace",
+                str(tmp_path),
+                "--work-file",
+                str(work_file),
+                "--backend",
+                "codex",
+            ],
+        )
+
+    assert (
+        len(post_session_calls) == 1
+    ), "run_post_session must be called even on SIGTERM"
+    assert post_session_calls[0].exit_code == 143
+    # CliRunner converts re-raised KeyboardInterrupt to SystemExit(1)
+    assert result.exit_code == 1
+
+
 def test_load_items_skips_malformed_lines(tmp_path: Path) -> None:
     work_file = tmp_path / "work.jsonl"
     work_file.write_text("not json\n" + json.dumps(item().raw) + "\n", encoding="utf-8")

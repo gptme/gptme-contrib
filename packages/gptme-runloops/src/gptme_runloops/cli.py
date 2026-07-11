@@ -15,6 +15,7 @@ from gptme_runloops.project_monitoring import ProjectMonitoringRun
 from gptme_runloops.run_item import (
     RunItemConfig,
     RunItemHooks,
+    RunItemOutcome,
     RunPostSessionHooks,
     execute_plan,
     load_items,
@@ -373,7 +374,13 @@ def run_item(
                 )
 
             item_hooks = replace(hooks, claim=claim, abandon=abandon)
-        outcome = execute_plan(plan, item, item_hooks)
+        try:
+            outcome = execute_plan(plan, item, item_hooks)
+        except KeyboardInterrupt:
+            # SIGTERM: run.sh group already killed; still write the record.
+            outcome = RunItemOutcome(item, plan, 143, 0)
+            run_post_session(outcome, RunPostSessionHooks(), workspace=workspace)
+            raise
         # Post-session bookkeeping (step 5 brain shim wires real callables).
         run_post_session(outcome, RunPostSessionHooks(), workspace=workspace)
         exit_code = outcome.exit_code or exit_code
