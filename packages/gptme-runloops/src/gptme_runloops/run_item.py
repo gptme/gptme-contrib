@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,8 @@ class RunItemHooks:
     abandon: Callable[[str], None] | None = None
     trajectory_lines: Callable[[Path], Iterable[str]] | None = None
     rate_limit_block: Callable[[RateLimitRejection], None] | None = None
+    prepare_trajectory_snapshot: Callable[[str, str, Path, Path], None] | None = None
+    resolve_trajectory: Callable[[str, str, int, Path, Path], Path | None] | None = None
 
     @classmethod
     def from_workspace(cls, workspace: Path) -> RunItemHooks:
@@ -140,6 +143,7 @@ class RunItemOutcome:
     duration_seconds: int
     skipped_claimed: bool = False
     rate_limited: bool = False
+    trajectory_path: Path | None = None
 
 
 def _timeout_for(item: RunItem) -> tuple[int, str]:
@@ -279,6 +283,167 @@ def _runner_command(plan: ExecutionPlan, hooks: RunItemHooks) -> list[str]:
     return [*command, plan.prompt]
 
 
+def _read_ref_path(ref_path: Path) -> Path | None:
+    try:
+        value = ref_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return Path(value) if value else None
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size if path.is_file() else 0
+    except OSError:
+        return 0
+
+
+def _newest_file(paths: Iterable[Path], *, min_mtime: int | None = None) -> Path | None:
+    newest: Path | None = None
+    newest_mtime = -1
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if not path.is_file():
+            continue
+        mtime = int(stat.st_mtime)
+        if min_mtime is not None and mtime < min_mtime:
+            continue
+        if newest is None or mtime > newest_mtime:
+            newest = path
+            newest_mtime = mtime
+    return newest
+
+
+def prepare_monitoring_trajectory_snapshot(
+    backend: str,
+    session_id: str,
+    home: Path,
+    tmp_dir: Path = Path("/tmp"),
+) -> None:
+    """Capture pre-run trajectory listings for backends without session refs."""
+    if backend == "copilot-cli":
+        state_dir = home / ".copilot" / "session-state"
+        if state_dir.is_dir():
+            snapshot = tmp_dir / f"copilot-pre-snapshot-{session_id}.txt"
+            snapshot.write_text(
+                "\n".join(sorted(child.name for child in state_dir.iterdir())) + "\n",
+                encoding="utf-8",
+            )
+    elif backend == "codex":
+        sessions_dir = home / ".codex" / "sessions"
+        if sessions_dir.is_dir():
+            snapshot = tmp_dir / f"codex-pre-snapshot-{session_id}.txt"
+            snapshot.write_text(
+                "\n".join(
+                    sorted(str(path) for path in sessions_dir.rglob("rollout-*.jsonl"))
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+
+def resolve_monitoring_trajectory(
+    backend: str,
+    session_id: str,
+    started_epoch: int,
+    home: Path,
+    tmp_dir: Path = Path("/tmp"),
+) -> Path | None:
+    """Resolve the trajectory file produced by ``run.sh`` for one PM item.
+
+    This ports worker.sh's backend-specific post-run discovery.  It deliberately
+    uses session-specific ref files for stream-json backends and pre/post
+    snapshot files for copilot/codex so concurrent workers do not race on mtimes.
+    """
+    if backend == "claude-code" and session_id:
+        ref = tmp_dir / f"cc-session-log-ref-{session_id}.txt"
+        candidate = _read_ref_path(ref)
+        if candidate is not None and _file_size(candidate) > 5000:
+            return candidate
+
+    if backend == "grok-build" and session_id:
+        ref = tmp_dir / f"grok-build-session-log-ref-{session_id}.txt"
+        candidate = _read_ref_path(ref)
+        try:
+            ref.unlink()
+        except OSError:
+            pass
+        if candidate is not None and _file_size(candidate) > 1000:
+            return candidate
+
+    if backend == "copilot-cli":
+        pre_snapshot = tmp_dir / f"copilot-pre-snapshot-{session_id}.txt"
+        if pre_snapshot.is_file():
+            state_dir = home / ".copilot" / "session-state"
+            before = set(pre_snapshot.read_text(encoding="utf-8").splitlines())
+            candidates = []
+            if state_dir.is_dir():
+                for child in state_dir.iterdir():
+                    if child.name not in before:
+                        candidates.append(child / "events.jsonl")
+            try:
+                pre_snapshot.unlink()
+            except OSError:
+                pass
+            return _newest_file(candidates, min_mtime=started_epoch)
+
+    if backend == "codex":
+        pre_snapshot = tmp_dir / f"codex-pre-snapshot-{session_id}.txt"
+        if pre_snapshot.is_file():
+            sessions_dir = home / ".codex" / "sessions"
+            before = set(pre_snapshot.read_text(encoding="utf-8").splitlines())
+            candidates = []
+            if sessions_dir.is_dir():
+                for candidate in sessions_dir.rglob("rollout-*.jsonl"):
+                    if str(candidate) not in before:
+                        candidates.append(candidate)
+            try:
+                pre_snapshot.unlink()
+            except OSError:
+                pass
+            return _newest_file(candidates)
+
+    return None
+
+
+def write_claude_rate_limit_block(
+    rejection: RateLimitRejection,
+    quota_dir: Path,
+    *,
+    credential_target: str | None = None,
+    now: datetime | None = None,
+) -> Path:
+    """Write the per-sub Claude Code quota block file for a confirmed rejection.
+
+    Mirrors worker.sh:159-185: only call this after
+    :func:`parse_rate_limit_rejection` confirms ``status == rejected``.  The
+    ``seven_day_sonnet`` cap gets a sonnet-specific block file; other caps use
+    the generic per-sub block.  Missing/zero reset timestamps block for 6h.
+    """
+    quota_dir.mkdir(parents=True, exist_ok=True)
+    suffix = ""
+    if credential_target:
+        marker = ".credentials.json."
+        if marker in credential_target:
+            suffix = credential_target.rsplit(marker, 1)[1] + "-"
+    rate_type = str(rejection.rate_limit_type or "")
+    if rate_type == "seven_day_sonnet":
+        block_path = quota_dir / f"claude-code-{suffix}sonnet-rate-limited-until.txt"
+    else:
+        block_path = quota_dir / f"claude-code-{suffix}rate-limited-until.txt"
+
+    reset = str(rejection.resets_at or "")
+    if reset and reset != "0":
+        until = datetime.fromtimestamp(int(reset), tz=UTC)
+    else:
+        until = (now or datetime.now(UTC)) + timedelta(hours=6)
+    block_path.write_text(until.isoformat(), encoding="utf-8")
+    return block_path
+
+
 def execute_plan(
     plan: ExecutionPlan, item: RunItem, hooks: RunItemHooks
 ) -> RunItemOutcome:
@@ -286,6 +451,7 @@ def execute_plan(
     if hooks.claim is not None and not hooks.claim(plan.claim_key):
         return RunItemOutcome(item, plan, 0, 0, skipped_claimed=True)
     started = time.monotonic()
+    started_epoch = int(time.time())
     old_handler = signal.getsignal(signal.SIGTERM)
 
     def _terminate(_signum: int, _frame: Any) -> None:
@@ -298,11 +464,33 @@ def execute_plan(
             env["CC_SESSION_ID"] = plan.session_id
         elif plan.backend == "grok-build":
             env["GROK_BUILD_SESSION_ID"] = plan.session_id
+        if hooks.prepare_trajectory_snapshot is not None:
+            hooks.prepare_trajectory_snapshot(
+                plan.backend,
+                plan.session_id,
+                Path.home(),
+                Path("/tmp"),
+            )
         completed = subprocess.run(_runner_command(plan, hooks), env=env, check=False)
+        trajectory_path = None
+        if hooks.resolve_trajectory is not None:
+            trajectory_path = hooks.resolve_trajectory(
+                plan.backend,
+                plan.session_id,
+                started_epoch,
+                Path.home(),
+                Path("/tmp"),
+            )
         rate_limited = False
-        if completed.returncode and hooks.trajectory_lines and hooks.rate_limit_block:
+        if (
+            completed.returncode
+            and plan.backend == "claude-code"
+            and trajectory_path is not None
+            and hooks.trajectory_lines
+            and hooks.rate_limit_block
+        ):
             rejection = parse_rate_limit_rejection(
-                hooks.trajectory_lines(Path(plan.record_file))
+                hooks.trajectory_lines(trajectory_path or Path(plan.record_file))
             )
             if rejection is not None:
                 hooks.rate_limit_block(rejection)
@@ -313,6 +501,7 @@ def execute_plan(
             completed.returncode,
             int(time.monotonic() - started),
             rate_limited=rate_limited,
+            trajectory_path=trajectory_path,
         )
     finally:
         signal.signal(signal.SIGTERM, old_handler)

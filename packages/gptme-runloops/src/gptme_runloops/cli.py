@@ -18,6 +18,9 @@ from gptme_runloops.run_item import (
     execute_plan,
     load_items,
     plan_run_item,
+    prepare_monitoring_trajectory_snapshot,
+    resolve_monitoring_trajectory,
+    write_claude_rate_limit_block,
 )
 from gptme_runloops.team import TeamRun
 from gptme_runloops.utils.executor import get_executor, list_backends
@@ -289,6 +292,30 @@ def run_item(
         claim_mode=claim_mode,
     )
     hooks = RunItemHooks.from_workspace(workspace)
+    quota_dir = workspace / "state" / "backend-quota"
+
+    def trajectory_lines(path: Path):
+        with path.open(encoding="utf-8") as handle:
+            yield from handle
+
+    def rate_limit_block(rejection) -> None:
+        credential_target = None
+        credential = Path.home() / ".claude" / ".credentials.json"
+        if credential.is_symlink():
+            credential_target = os.readlink(credential)
+        write_claude_rate_limit_block(
+            rejection,
+            quota_dir,
+            credential_target=credential_target,
+        )
+
+    hooks = replace(
+        hooks,
+        trajectory_lines=trajectory_lines,
+        rate_limit_block=rate_limit_block,
+        prepare_trajectory_snapshot=prepare_monitoring_trajectory_snapshot,
+        resolve_trajectory=resolve_monitoring_trajectory,
+    )
     rules = ""
     if hooks.monitoring_rules_file and hooks.monitoring_rules_file.is_file():
         rules = hooks.monitoring_rules_file.read_text(encoding="utf-8")
