@@ -57,12 +57,17 @@ class Attribution:
     category: str | None = None
     productivity: float | None = None
     journal_path: str | None = None
-    confidence: str = "unmatched"  # exact | near | unmatched
+    confidence: str = "unmatched"  # exact | near | ambiguous | unmatched
     # Explicit resolution method, never silently downgraded:
-    #   commit-window | nearest | trajectory-exact | unattributable
+    #   trailer | commit-window | nearest | trajectory-exact | unattributable
     method: str = "unattributable"
     model: str | None = None
     harness: str | None = None
+    # Raw Git-Session-Id trailer value parsed from the commit (may name a session
+    # not present in the loaded windows — still authoritative).
+    trailer_session_id: str | None = None
+    # When confidence=="ambiguous": all session_ids whose windows contain this commit.
+    candidates: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -126,7 +131,7 @@ def commits_for_path(path: str, limit: int = 10) -> list[Attribution]:
             "log",
             "--follow",
             f"--max-count={limit}",
-            "--format=%H%x1f%aI%x1f%an%x1f%s",
+            "--format=%H%x1f%aI%x1f%an%x1f%s%x1f%(trailers:key=Git-Session-Id,valueonly)",
             "--",
             path,
         ]
@@ -135,8 +140,18 @@ def commits_for_path(path: str, limit: int = 10) -> list[Attribution]:
     for line in out.splitlines():
         if not line:
             continue
-        sha, when, author, subject = line.split("\x1f", 3)
-        result.append(Attribution(sha=sha, when=_parse_iso(when), author=author, subject=subject))
+        parts = line.split("\x1f", 4)
+        sha, when, author, subject = parts[:4]
+        trailer_sid = parts[4].strip() if len(parts) > 4 else ""
+        result.append(
+            Attribution(
+                sha=sha,
+                when=_parse_iso(when),
+                author=author,
+                subject=subject,
+                trailer_session_id=trailer_sid or None,
+            )
+        )
     return result
 
 
@@ -144,9 +159,27 @@ def commit_for_line(path: str, line: int) -> list[Attribution]:
     """Return the single commit that last touched ``path`` line ``line``."""
     out = _run(["git", "blame", "-L", f"{line},{line}", "--porcelain", "--", path])
     sha = out.splitlines()[0].split(" ", 1)[0]
-    meta = _run(["git", "show", "-s", "--format=%aI%x1f%an%x1f%s", sha])
-    when, author, subject = meta.split("\x1f", 2)
-    return [Attribution(sha=sha, when=_parse_iso(when), author=author, subject=subject)]
+    meta = _run(
+        [
+            "git",
+            "show",
+            "-s",
+            "--format=%aI%x1f%an%x1f%s%x1f%(trailers:key=Git-Session-Id,valueonly)",
+            sha,
+        ]
+    )
+    parts = meta.split("\x1f", 3)
+    when, author, subject = parts[:3]
+    trailer_sid = parts[3].strip() if len(parts) > 3 else ""
+    return [
+        Attribution(
+            sha=sha,
+            when=_parse_iso(when),
+            author=author,
+            subject=subject,
+            trailer_session_id=trailer_sid or None,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -337,30 +370,80 @@ def load_windows(records_path: Path) -> list[SessionWindow]:
 # ---------------------------------------------------------------------------
 
 
+def _fill_from_window(att: Attribution, w: SessionWindow) -> None:
+    """Copy session metadata from ``w`` into ``att`` in-place."""
+    att.session_id = w.session_id
+    att.category = w.category
+    att.productivity = w.productivity
+    att.journal_path = w.journal_path
+    att.model = w.model
+    att.harness = w.harness
+
+
 def attribute(att: Attribution, windows: list[SessionWindow]) -> Attribution:
-    """Attribute ``att`` to the best-matching session window in-place."""
-    best: SessionWindow | None = None
+    """Attribute ``att`` to the best-matching session window in-place.
+
+    Priority:
+    1. ``Git-Session-Id`` trailer (``att.trailer_session_id``): strongest evidence;
+       beats any window match.  When the trailer names a session not present in
+       ``windows`` the metadata fields are left None but ``session_id`` is still set.
+    2. Exact window match (distance == 0):
+       - Exactly one window → ``exact`` / ``commit-window`` (unchanged behaviour).
+       - Two or more windows → ``ambiguous`` / ``commit-window``; ``session_id``
+         is set to the closest-midpoint window; all candidates recorded in
+         ``att.candidates``.
+    3. Nearest window within ``NEAREST_TOLERANCE`` → ``near`` / ``nearest``.
+    4. No match → left as ``unmatched`` / ``unattributable``.
+    """
+    # --- Step 1: trailer-first (strongest evidence) ---------------------------
+    if att.trailer_session_id:
+        matching = next((w for w in windows if w.session_id == att.trailer_session_id), None)
+        att.method = "trailer"
+        att.confidence = "exact"
+        att.session_id = att.trailer_session_id
+        if matching:
+            _fill_from_window(att, matching)
+        return att
+
+    # --- Step 2: collect all windows that contain the commit ------------------
+    exact_windows = [w for w in windows if w.distance(att.when) == timedelta(0)]
+
+    if len(exact_windows) == 1:
+        att.confidence = "exact"
+        att.method = "commit-window"
+        _fill_from_window(att, exact_windows[0])
+        return att
+
+    if len(exact_windows) > 1:
+        # Ambiguous: pick the window whose midpoint is closest (deterministic).
+        def _midpoint_dist(w: SessionWindow) -> timedelta:
+            mid = w.start + (w.end - w.start) / 2
+            delta = att.when - mid
+            return delta if delta.total_seconds() >= 0 else -delta
+
+        best = min(exact_windows, key=_midpoint_dist)
+        att.confidence = "ambiguous"
+        att.method = "commit-window"
+        att.candidates = [w.session_id for w in exact_windows]
+        _fill_from_window(att, best)
+        return att
+
+    # --- Step 3: nearest window within tolerance ------------------------------
+    best_w: SessionWindow | None = None
     best_dist: timedelta | None = None
     for w in windows:
         d = w.distance(att.when)
         if best_dist is None or d < best_dist:
-            best, best_dist = w, d
-    if best is None or best_dist is None:
+            best_w, best_dist = w, d
+
+    if best_w is None or best_dist is None:
         return att
-    if best_dist == timedelta(0):
-        att.confidence = "exact"
-        att.method = "commit-window"
-    elif best_dist <= NEAREST_TOLERANCE:
+
+    if best_dist <= NEAREST_TOLERANCE:
         att.confidence = "near"
         att.method = "nearest"
-    else:
-        return att  # too far — leave unmatched
-    att.session_id = best.session_id
-    att.category = best.category
-    att.productivity = best.productivity
-    att.journal_path = best.journal_path
-    att.model = best.model
-    att.harness = best.harness
+        _fill_from_window(att, best_w)
+
     return att
 
 
@@ -394,14 +477,23 @@ def render_text(result: BlameResult) -> str:
         cat = a.category or "—"
         prod = f"{a.productivity:.2f}" if a.productivity is not None else "—"
         model = a.model or "—"
-        mark = {"exact": "●", "near": "○", "unmatched": "·"}[a.confidence]
+        mark = {"exact": "●", "near": "○", "ambiguous": "◐", "unmatched": "·"}.get(
+            a.confidence, "·"
+        )
         lines.append(f"  {mark} {date_str}  {a.sha[:9]}  session={sess}")
         lines.append(f"      category={cat}  model={model}  productivity={prod}  method={a.method}")
         lines.append(f"      {a.subject}")
         if a.journal_path:
             lines.append(f"      journal: {a.journal_path}")
+        if a.candidates:
+            lines.append(f"      candidates: {', '.join(a.candidates)}")
     lines.append("")
-    lines.append("  ● exact (commit-window/trajectory)  ○ nearest (≤30m)  · unattributable")
+    lines.append(
+        "  ● exact (commit-window/trajectory/trailer)"
+        "  ◐ ambiguous (multiple windows)"
+        "  ○ nearest (≤30m)"
+        "  · unattributable"
+    )
     return "\n".join(lines)
 
 
@@ -424,6 +516,7 @@ def render_json(result: BlameResult) -> str:
                     "method": a.method,
                     "model": a.model,
                     "harness": a.harness,
+                    "candidates": a.candidates,
                 }
                 for a in result.attributions
             ],

@@ -375,3 +375,182 @@ def test_render_json_round_trip():
     assert att["sha"] == "abc123"
     assert att["session_id"] == "sess-1"
     assert att["confidence"] == "exact"
+
+
+# ---------------------------------------------------------------------------
+# Trailer-first attribution
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_trailer_wins_over_window():
+    """Git-Session-Id trailer beats any window match."""
+    w = _window(session_id="window-sess")
+    a = _att("2026-06-01T10:15:00+00:00")  # inside window-sess window
+    a.trailer_session_id = "trailer-sess"
+    attribute(a, [w])
+    assert a.session_id == "trailer-sess"
+    assert a.method == "trailer"
+    assert a.confidence == "exact"
+    # Window metadata should not bleed through when trailer names unknown session
+    assert a.category is None
+    assert a.model is None
+
+
+def test_attribute_trailer_fills_metadata_when_window_known():
+    """Trailer naming a loaded window still fills category/model etc."""
+    w = _window(session_id="known-sess")
+    a = _att("2026-06-01T08:00:00+00:00")  # far outside window
+    a.trailer_session_id = "known-sess"
+    attribute(a, [w])
+    assert a.session_id == "known-sess"
+    assert a.method == "trailer"
+    assert a.confidence == "exact"
+    assert a.category == "code"
+    assert a.model == "claude-sonnet-4-6"
+
+
+def test_attribute_trailer_no_window():
+    """Trailer naming an unknown session still wins; metadata fields are None."""
+    a = _att("2026-06-01T08:00:00+00:00")
+    a.trailer_session_id = "orphan-sess"
+    attribute(a, [])
+    assert a.session_id == "orphan-sess"
+    assert a.method == "trailer"
+    assert a.confidence == "exact"
+    assert a.category is None
+
+
+# ---------------------------------------------------------------------------
+# Ambiguity detection
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_single_window_exact_unchanged():
+    """Single window containing the commit: unchanged exact/commit-window behaviour."""
+    windows = [_window()]
+    a = _att("2026-06-01T10:15:00+00:00")
+    attribute(a, windows)
+    assert a.confidence == "exact"
+    assert a.method == "commit-window"
+    assert a.session_id == "sess-abc"
+    assert a.candidates == []
+
+
+def test_attribute_overlapping_windows_ambiguous():
+    """Two windows both containing the commit → ambiguous."""
+    w1 = _window(
+        session_id="sess-1",
+        start="2026-06-01T10:00:00+00:00",
+        end="2026-06-01T11:00:00+00:00",
+    )
+    w2 = _window(
+        session_id="sess-2",
+        start="2026-06-01T10:30:00+00:00",
+        end="2026-06-01T11:30:00+00:00",
+    )
+    a = _att("2026-06-01T10:45:00+00:00")  # inside both windows
+    attribute(a, [w1, w2])
+    assert a.confidence == "ambiguous"
+    assert a.method == "commit-window"
+    assert a.session_id in ("sess-1", "sess-2")
+    assert set(a.candidates) == {"sess-1", "sess-2"}
+
+
+def test_attribute_overlapping_deterministic_by_midpoint():
+    """Among overlapping windows, closest midpoint wins deterministically."""
+    # sess-1: 10:00-11:00 → midpoint 10:30
+    # sess-2: 10:30-11:30 → midpoint 11:00
+    # commit at 10:40 → distance to sess-1 midpoint = 10m, to sess-2 midpoint = 20m
+    w1 = _window(
+        session_id="sess-1",
+        start="2026-06-01T10:00:00+00:00",
+        end="2026-06-01T11:00:00+00:00",
+    )
+    w2 = _window(
+        session_id="sess-2",
+        start="2026-06-01T10:30:00+00:00",
+        end="2026-06-01T11:30:00+00:00",
+    )
+    a = _att("2026-06-01T10:40:00+00:00")  # inside both windows
+    attribute(a, [w1, w2])
+    assert a.confidence == "ambiguous"
+    assert a.session_id == "sess-1"  # midpoint at 10:30, 10m closer than sess-2's 11:00
+
+
+def test_attribute_ambiguous_candidates_all_sessions():
+    """All overlapping session_ids appear in candidates."""
+    w1 = _window(
+        session_id="s1", start="2026-06-01T10:00:00+00:00", end="2026-06-01T12:00:00+00:00"
+    )
+    w2 = _window(
+        session_id="s2", start="2026-06-01T10:30:00+00:00", end="2026-06-01T11:30:00+00:00"
+    )
+    w3 = _window(
+        session_id="s3", start="2026-06-01T11:00:00+00:00", end="2026-06-01T13:00:00+00:00"
+    )
+    a = _att("2026-06-01T11:15:00+00:00")  # inside all three
+    attribute(a, [w1, w2, w3])
+    assert a.confidence == "ambiguous"
+    assert set(a.candidates) == {"s1", "s2", "s3"}
+
+
+# ---------------------------------------------------------------------------
+# render_text: ambiguous mark
+# ---------------------------------------------------------------------------
+
+
+def test_render_text_ambiguous_mark():
+    a = Attribution(
+        sha="abc123def456789",
+        when=_dt("2026-06-01T10:00:00+00:00"),
+        author="Bob",
+        subject="fix: ambiguous",
+        session_id="sess-1",
+        confidence="ambiguous",
+        method="commit-window",
+        candidates=["sess-1", "sess-2"],
+    )
+    result = BlameResult(path="scripts/foo.py", line=None, attributions=[a])
+    out = render_text(result)
+    assert "◐" in out
+    assert "sess-1" in out
+    assert "candidates" in out
+
+
+# ---------------------------------------------------------------------------
+# render_json: candidates field
+# ---------------------------------------------------------------------------
+
+
+def test_render_json_candidates_field():
+    a = Attribution(
+        sha="abc123",
+        when=_dt("2026-06-01T10:00:00+00:00"),
+        author="Bob",
+        subject="fix: x",
+        session_id="sess-1",
+        confidence="ambiguous",
+        method="commit-window",
+        candidates=["sess-1", "sess-2"],
+    )
+    result = BlameResult(path="foo.py", line=None, attributions=[a])
+    data = json.loads(render_json(result))
+    att = data["attributions"][0]
+    assert att["confidence"] == "ambiguous"
+    assert set(att["candidates"]) == {"sess-1", "sess-2"}
+
+
+def test_render_json_candidates_empty_for_exact():
+    a = Attribution(
+        sha="abc123",
+        when=_dt("2026-06-01T10:00:00+00:00"),
+        author="Bob",
+        subject="fix: x",
+        session_id="sess-1",
+        confidence="exact",
+        method="commit-window",
+    )
+    result = BlameResult(path="foo.py", line=None, attributions=[a])
+    data = json.loads(render_json(result))
+    att = data["attributions"][0]
+    assert att["candidates"] == []
