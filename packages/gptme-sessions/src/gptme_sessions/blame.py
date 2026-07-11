@@ -457,6 +457,210 @@ def attribute_all(
 
 
 # ---------------------------------------------------------------------------
+# Trajectory scanning
+# ---------------------------------------------------------------------------
+
+#: Write-ish tool names in CC trajectories that author or mutate a file.
+_WRITE_TOOLS = frozenset(
+    {"Write", "Edit", "MultiEdit", "str_replace_editor", "NotebookEdit", "create"}
+)
+
+#: Max seconds for the grep prefilter per source directory.
+_GREP_TIMEOUT = 60
+
+
+@dataclass
+class TrajectoryHit:
+    """A single Write/Edit tool-call touching the target path."""
+
+    session_uuid: str
+    when: datetime | None
+    tool: str
+    file_path: str  # path as recorded in the trajectory
+    cwd: str | None
+    source: str  # path of the trajectory JSONL file
+
+
+def _parse_traj_ts(value: str | None) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _traj_tool_uses(record: dict) -> list[tuple[str, dict]]:
+    """Return (tool_name, input_dict) for tool_use blocks in a CC record."""
+    msg = record.get("message")
+    if not isinstance(msg, dict):
+        return []
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return []
+    out: list[tuple[str, dict]] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        name = block.get("name")
+        inp = block.get("input")
+        if isinstance(name, str) and isinstance(inp, dict):
+            out.append((name, inp))
+    return out
+
+
+def _traj_file_paths(inp: dict) -> list[str]:
+    """Extract candidate file paths from a write-ish tool input."""
+    paths: list[str] = []
+    for key in ("file_path", "path", "notebook_path"):
+        val = inp.get(key)
+        if isinstance(val, str) and val:
+            paths.append(val)
+    return paths
+
+
+def _traj_path_matches(traj_path: str, target_rel: str, target_abs: str | None) -> bool:
+    """Return True if ``traj_path`` refers to the target file.
+
+    Matches on exact absolute path or on a ``/``-boundary suffix of the
+    repo-relative target, so worktree checkouts at different roots still match.
+    """
+    if not traj_path:
+        return False
+    norm = traj_path.rstrip("/")
+    if target_abs and norm == target_abs.rstrip("/"):
+        return True
+    rel = target_rel.strip("/")
+    return norm == rel or norm.endswith("/" + rel)
+
+
+def _traj_candidate_files(basename: str, sources: list[Path]) -> list[Path]:
+    """Return trajectory JSONL files whose content mentions ``basename``."""
+    files: list[Path] = []
+    seen: set[str] = set()
+    for src in sources:
+        if not src.exists():
+            continue
+        try:
+            proc = subprocess.run(
+                ["grep", "-rlF", "--include=*.jsonl", basename, str(src)],
+                capture_output=True,
+                text=True,
+                timeout=_GREP_TIMEOUT,
+            )
+        except (subprocess.SubprocessError, OSError):
+            continue
+        for p in proc.stdout.splitlines():
+            if p and p not in seen:
+                seen.add(p)
+                files.append(Path(p))
+    return files
+
+
+def scan_trajectories(
+    target_rel: str,
+    target_abs: str | None = None,
+    sources: list[Path] | None = None,
+    limit: int | None = None,
+) -> list[TrajectoryHit]:
+    """Find Write/Edit tool-calls that authored ``target_rel``, newest first.
+
+    ``sources`` must be supplied explicitly; ``None`` or an empty list returns
+    ``[]`` immediately — non-Bob deployments have no trajectory store, and the
+    caller chooses whether to provide one.
+    """
+    if not sources:
+        return []
+    basename = Path(target_rel).name
+    hits: list[TrajectoryHit] = []
+    for traj in _traj_candidate_files(basename, sources):
+        try:
+            with traj.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    for tool, inp in _traj_tool_uses(rec):
+                        if tool not in _WRITE_TOOLS:
+                            continue
+                        matched = [
+                            fp
+                            for fp in _traj_file_paths(inp)
+                            if _traj_path_matches(fp, target_rel, target_abs)
+                        ]
+                        if matched:
+                            hits.append(
+                                TrajectoryHit(
+                                    session_uuid=rec.get("sessionId") or traj.stem,
+                                    when=_parse_traj_ts(rec.get("timestamp")),
+                                    tool=tool,
+                                    file_path=matched[0],
+                                    cwd=rec.get("cwd"),
+                                    source=str(traj),
+                                )
+                            )
+        except OSError:
+            continue
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+    hits.sort(key=lambda h: h.when or _epoch, reverse=True)
+    return hits[:limit] if limit else hits
+
+
+def model_for_trajectory(source: str) -> str | None:
+    """Resolve the model used by the trajectory file at ``source``."""
+    try:
+        from gptme_sessions.discovery import extract_cc_model
+    except ImportError:
+        return None
+    try:
+        model = extract_cc_model(Path(source))
+    except (OSError, ValueError):
+        return None
+    return str(model) if model else None
+
+
+def enrich_with_trajectory(
+    att: Attribution,
+    target_rel: str,
+    target_abs: str | None,
+    windows: list[SessionWindow],
+    trajectories_dirs: list[Path],
+) -> None:
+    """Back-fill ``att`` from a trajectory scan when commit-window failed.
+
+    Modifies ``att`` in-place.  On a hit sets ``method='trajectory-exact'`` and
+    ``confidence='exact'``.  On a miss leaves ``method='unattributable'``.
+    """
+    hits = scan_trajectories(target_rel, target_abs, sources=trajectories_dirs, limit=1)
+    if not hits:
+        att.method = "unattributable"
+        return
+    hit = hits[0]
+    att.method = "trajectory-exact"
+    att.confidence = "exact"
+    att.session_id = hit.session_uuid
+    att.harness = "claude-code"
+    att.model = model_for_trajectory(hit.source)
+    if hit.when is not None:
+        for w in windows:
+            if w.distance(hit.when) == timedelta(0):
+                att.category = att.category or w.category
+                att.productivity = (
+                    att.productivity if att.productivity is not None else w.productivity
+                )
+                att.journal_path = att.journal_path or w.journal_path
+                att.model = att.model or w.model
+                break
+
+
+# ---------------------------------------------------------------------------
 # Output rendering
 # ---------------------------------------------------------------------------
 
@@ -539,6 +743,7 @@ def blame(
     line: int | None = None,
     limit: int = 10,
     records: Path | None = None,
+    trajectories_dirs: list[Path] | None = None,
 ) -> BlameResult:
     """Attribute a file path or GitHub ref to its authoring session(s).
 
@@ -548,6 +753,11 @@ def blame(
         limit: Max commits for whole-file mode.
         records: Path to session-records JSONL; defaults to ``DEFAULT_RECORDS``
             resolved against the current git root when inside a repo.
+        trajectories_dirs: Directories containing CC trajectory JSONL files.
+            When provided, trajectory-exact attribution is attempted for commits
+            that remain ``unattributable`` or ``ambiguous`` after commit-window
+            matching.  ``None`` (default) skips trajectory scan — backward
+            compatible with deployments that have no trajectory store.
 
     Returns:
         A :class:`BlameResult` with attributions populated.
@@ -588,4 +798,13 @@ def blame(
         attributions = commits_for_path(rel_path, limit)
 
     attribute_all(attributions, windows)
+
+    if trajectories_dirs is not None:
+        abs_path_str = str(abs_path)
+        for a in attributions:
+            if a.method == "unattributable" or (
+                a.method == "commit-window" and a.confidence == "ambiguous"
+            ):
+                enrich_with_trajectory(a, rel_path, abs_path_str, windows, trajectories_dirs)
+
     return BlameResult(path=rel_path, line=line, attributions=attributions)

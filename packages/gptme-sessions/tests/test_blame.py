@@ -15,13 +15,16 @@ from gptme_sessions.blame import (
     Attribution,
     BlameResult,
     SessionWindow,
+    _traj_path_matches,
     attribute,
     attribute_all,
     commits_for_github_ref,
     consolidated_records_sources,
+    enrich_with_trajectory,
     load_windows,
     render_json,
     render_text,
+    scan_trajectories,
 )
 
 
@@ -554,3 +557,157 @@ def test_render_json_candidates_empty_for_exact():
     data = json.loads(render_json(result))
     att = data["attributions"][0]
     assert att["candidates"] == []
+
+
+# ---------------------------------------------------------------------------
+# Trajectory scanning
+# ---------------------------------------------------------------------------
+
+
+def _make_traj_record(
+    session_id: str,
+    tool: str,
+    file_path: str,
+    timestamp: str = "2026-06-01T10:05:00Z",
+    cwd: str | None = "/home/bob/bob",
+) -> str:
+    """Emit a single JSONL line mimicking a CC trajectory Write/Edit record."""
+    return json.dumps(
+        {
+            "sessionId": session_id,
+            "timestamp": timestamp,
+            "cwd": cwd,
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": tool,
+                        "input": {"file_path": file_path},
+                    }
+                ]
+            },
+        }
+    )
+
+
+def _traj_dir(tmp_path: Path, records: list[str], filename: str = "traj.jsonl") -> Path:
+    """Write trajectory records into a temporary directory."""
+    d = tmp_path / "trajectories"
+    d.mkdir(exist_ok=True)
+    (d / filename).write_text("\n".join(records) + "\n")
+    return d
+
+
+def test_traj_path_matches_absolute():
+    assert _traj_path_matches("/home/bob/bob/foo.py", "foo.py", "/home/bob/bob/foo.py")
+
+
+def test_traj_path_matches_suffix():
+    assert _traj_path_matches("/tmp/worktree/foo.py", "foo.py", None)
+
+
+def test_traj_path_matches_relative():
+    assert _traj_path_matches("foo.py", "foo.py", None)
+
+
+def test_traj_path_matches_no_partial():
+    assert not _traj_path_matches("/home/bob/bob/notfoo.py", "foo.py", None)
+
+
+def test_scan_trajectories_empty_sources():
+    hits = scan_trajectories("foo.py", sources=[])
+    assert hits == []
+
+
+def test_scan_trajectories_none_sources():
+    hits = scan_trajectories("foo.py", sources=None)
+    assert hits == []
+
+
+def test_scan_trajectories_finds_write(tmp_path: Path):
+    src_dir = _traj_dir(
+        tmp_path,
+        [_make_traj_record("sess-traj-1", "Write", "/home/bob/bob/foo.py")],
+    )
+    hits = scan_trajectories("foo.py", target_abs="/home/bob/bob/foo.py", sources=[src_dir])
+    assert len(hits) == 1
+    assert hits[0].session_uuid == "sess-traj-1"
+    assert hits[0].tool == "Write"
+
+
+def test_scan_trajectories_finds_edit(tmp_path: Path):
+    src_dir = _traj_dir(
+        tmp_path,
+        [_make_traj_record("sess-edit", "Edit", "/home/bob/bob/bar.py")],
+    )
+    hits = scan_trajectories("bar.py", sources=[src_dir])
+    assert len(hits) == 1
+    assert hits[0].tool == "Edit"
+
+
+def test_scan_trajectories_ignores_read_tools(tmp_path: Path):
+    record = json.dumps(
+        {
+            "sessionId": "sess-read",
+            "timestamp": "2026-06-01T10:00:00Z",
+            "message": {
+                "content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "foo.py"}}]
+            },
+        }
+    )
+    src_dir = _traj_dir(tmp_path, [record])
+    hits = scan_trajectories("foo.py", sources=[src_dir])
+    assert hits == []
+
+
+def test_scan_trajectories_limit(tmp_path: Path):
+    records = [
+        _make_traj_record("sess-a", "Write", "/home/bob/bob/foo.py", "2026-06-01T10:00:00Z"),
+        _make_traj_record("sess-b", "Edit", "/home/bob/bob/foo.py", "2026-06-01T11:00:00Z"),
+    ]
+    src_dir = _traj_dir(tmp_path, records)
+    hits = scan_trajectories("foo.py", sources=[src_dir], limit=1)
+    assert len(hits) == 1
+    # newest first
+    assert hits[0].session_uuid == "sess-b"
+
+
+def test_enrich_with_trajectory_sets_exact(tmp_path: Path):
+    src_dir = _traj_dir(
+        tmp_path,
+        [_make_traj_record("sess-traj", "Write", "/home/bob/bob/foo.py", "2026-06-01T10:05:00Z")],
+    )
+    att = Attribution(sha="abc", when=_dt("2026-06-01T08:00:00+00:00"), author="Bob", subject="x")
+    assert att.method == "unattributable"
+    enrich_with_trajectory(att, "foo.py", "/home/bob/bob/foo.py", [], [src_dir])
+    assert att.confidence == "exact"
+    assert att.method == "trajectory-exact"
+    assert att.session_id == "sess-traj"
+    assert att.harness == "claude-code"
+
+
+def test_enrich_with_trajectory_miss_leaves_unattributable(tmp_path: Path):
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    att = Attribution(sha="abc", when=_dt("2026-06-01T08:00:00+00:00"), author="Bob", subject="x")
+    enrich_with_trajectory(att, "foo.py", None, [], [empty_dir])
+    assert att.method == "unattributable"
+    assert att.confidence == "unmatched"
+
+
+def test_enrich_with_trajectory_backfills_window_metadata(tmp_path: Path):
+    src_dir = _traj_dir(
+        tmp_path,
+        [_make_traj_record("sess-traj", "Write", "/home/bob/bob/foo.py", "2026-06-01T10:05:00Z")],
+    )
+    window = _window(
+        session_id="sess-traj",
+        start="2026-06-01T10:00:00+00:00",
+        end="2026-06-01T10:30:00+00:00",
+        category="code",
+        productivity=0.9,
+    )
+    att = Attribution(sha="abc", when=_dt("2026-06-01T08:00:00+00:00"), author="Bob", subject="x")
+    enrich_with_trajectory(att, "foo.py", "/home/bob/bob/foo.py", [window], [src_dir])
+    assert att.category == "code"
+    assert att.productivity == 0.9
