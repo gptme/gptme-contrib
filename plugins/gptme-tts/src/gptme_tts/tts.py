@@ -380,8 +380,14 @@ def clean_for_speech(content: str) -> str:
 
 def _synthesize_server(chunk: str):
     """Synthesize a chunk via the local tts_server.py. Returns (sample_rate, data)."""
-    import requests
-    import scipy.io.wavfile as wavfile
+    try:
+        import requests
+        import scipy.io.wavfile as wavfile
+    except (ImportError, OSError):
+        log.warning(
+            "TTS deps unavailable (scipy/requests failed to import); skipping chunk"
+        )
+        return None
 
     url = f"http://{host}:{port}/tts"
     params: dict[str, str | float] = {"text": chunk, "speed": current_speed}
@@ -418,8 +424,14 @@ def _synthesize_openrouter(chunk: str):
     Uses the ``pcm`` response format (uncompressed 16-bit mono @ 24kHz) so no
     audio decoder is needed and latency stays low.
     """
-    import numpy as np
-    import requests
+    try:
+        import numpy as np
+        import requests
+    except (ImportError, OSError):
+        log.warning(
+            "TTS deps unavailable (numpy/requests failed to import); skipping chunk"
+        )
+        return None
 
     api_key = _get_openrouter_api_key()
     if not api_key:
