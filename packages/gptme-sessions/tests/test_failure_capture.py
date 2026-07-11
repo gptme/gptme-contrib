@@ -7,9 +7,11 @@ from pathlib import Path
 
 
 from gptme_sessions.failure_capture import (
+    FAILURE_REASON_NONZERO,
     FAILURE_REASON_PRE_RESPONSE,
     FAILURE_REASON_RATE_LIMIT,
     FAILURE_REASON_TIMEOUT,
+    _trajectory_has_assistant,
     capture_session_failure,
     classify_failure_reason,
 )
@@ -101,3 +103,50 @@ def test_post_session_no_failure_fields_on_success(tmp_path: Path):
     )
     assert result.record.failure_reason is None
     assert result.record.error is None
+
+
+def test_classify_not_pre_response_when_has_assistant_turn():
+    """Zero input_tokens must not override a confirmed assistant turn (Greptile P1)."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=60,
+        input_tokens=0,
+        has_assistant_turn=True,
+        error_text=None,
+    )
+    assert result == FAILURE_REASON_NONZERO
+
+
+def test_trajectory_has_assistant_cc_nested_format(tmp_path: Path):
+    """CC nested assistant records must be detected (Greptile P1)."""
+    traj = tmp_path / "conversation.jsonl"
+    cc_record = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello, how can I help?"}],
+        },
+    }
+    traj.write_text(json.dumps(cc_record) + "\n", encoding="utf-8")
+    assert _trajectory_has_assistant(traj) is True
+
+
+def test_capture_cc_session_with_assistant_not_pre_response(tmp_path: Path):
+    """A CC-format trajectory with assistant response must not get pre_response class."""
+    traj = tmp_path / "conversation.jsonl"
+    cc_record = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Sure, I can do that."}],
+        },
+    }
+    traj.write_text(json.dumps(cc_record) + "\n", encoding="utf-8")
+    reason, _ = capture_session_failure(
+        exit_code=1,
+        duration_seconds=45,
+        input_tokens=0,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+    assert reason == FAILURE_REASON_NONZERO

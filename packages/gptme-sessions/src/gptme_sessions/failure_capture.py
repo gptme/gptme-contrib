@@ -36,6 +36,34 @@ def _read_tail(path: Path, *, max_bytes: int = 16_000, max_lines: int = 40) -> s
     return tail[:4000] if len(tail) > 4000 else tail
 
 
+def _record_is_assistant(rec: dict) -> bool:
+    """Return True for flat (gptme) and nested (Claude Code) assistant records."""
+    # Flat format: {"role": "assistant", "content": "..."}
+    if rec.get("role") in _ASSISTANT_ROLES:
+        return True
+    # CC nested format: {"type": "assistant", "message": {"role": "assistant", ...}}
+    if rec.get("type") == "assistant":
+        msg = rec.get("message") or {}
+        if msg.get("role") in _ASSISTANT_ROLES or rec.get("type") == "assistant":
+            return True
+    return False
+
+
+def _record_content_text(rec: dict) -> str:
+    """Extract flattened content string from flat or CC nested record."""
+    # Flat format
+    content = rec.get("content") or rec.get("text") or ""
+    if content:
+        return str(content)
+    # CC nested: message.content is a list of typed blocks
+    msg = rec.get("message") or {}
+    msg_content = msg.get("content") or ""
+    if isinstance(msg_content, list):
+        parts = [block.get("text") or "" for block in msg_content if isinstance(block, dict)]
+        return " ".join(p for p in parts if p)
+    return str(msg_content)
+
+
 def _trajectory_has_assistant(trajectory_path: Path | None) -> bool:
     if trajectory_path is None or not trajectory_path.is_file():
         return False
@@ -49,10 +77,8 @@ def _trajectory_has_assistant(trajectory_path: Path | None) -> bool:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("role") in _ASSISTANT_ROLES:
-                    content = rec.get("content") or rec.get("text") or ""
-                    if str(content).strip():
-                        return True
+                if _record_is_assistant(rec) and _record_content_text(rec).strip():
+                    return True
     except OSError:
         return False
     return False
@@ -72,7 +98,7 @@ def _extract_trajectory_error_line(trajectory_path: Path | None) -> str | None:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                content = str(rec.get("content") or rec.get("text") or "")
+                content = _record_content_text(rec)
                 if not content:
                     continue
                 for part in content.splitlines():
@@ -105,7 +131,9 @@ def classify_failure_reason(
             or "403" in error_text
         ):
             return FAILURE_REASON_AUTH
-    no_model_tokens = input_tokens == 0 or (input_tokens is None and not has_assistant_turn)
+    # has_assistant_turn is definitive: if the trajectory has a response, model ran.
+    # input_tokens==0 alone can't override it — token accounting can be missing on CC.
+    no_model_tokens = not has_assistant_turn and (input_tokens == 0 or input_tokens is None)
     if exit_code != 0 and no_model_tokens and duration_seconds < 120:
         return FAILURE_REASON_PRE_RESPONSE
     return FAILURE_REASON_NONZERO
