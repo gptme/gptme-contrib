@@ -1,0 +1,12 @@
+
+### Master Branch CI Failure
+```bash
+# Check all failing run logs (grouped from 16999888001, 16999888002 runs)
+gh run view 16999888001 --repo gptme/gptme-contrib --log-failed | tail -60
+gh run view 16999888002 --repo gptme/gptme-contrib --log-failed | tail -60
+
+# Check recent runs on master to see if this is a flaky test or real regression
+gh run list --repo gptme/gptme-contrib --branch master --limit 5 \
+  --json name,conclusion,createdAt,headSha \
+  --jq '.[] | {name, conclusion, createdAt, sha: .headSha[:8]}'
+```

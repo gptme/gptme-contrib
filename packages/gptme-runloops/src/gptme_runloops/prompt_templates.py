@@ -56,8 +56,9 @@ Behavior changes come later, with the brain-side switchover.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 
 from gptme_runloops.merge_lifecycle import InstructionKind
 
@@ -369,3 +370,573 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
     # them first, then fill the skeleton with sections + params in one pass.
     resolved_sections = {k: _substitute(v, params) for k, v in sections.items()}
     return _substitute(skeleton, {**resolved_sections, **params})
+
+
+# ============================================================================
+# Item prompts (step 4 — the run-item executor, ErikBjare/bob phase-2/3)
+# ============================================================================
+#
+# Behavior-identical port of the remaining prompt content the detached PM
+# slot builds per item (rows 6-7 of the run-item behavior inventory; see
+# ``knowledge/technical-designs/pm-run-item-executor-design.md`` in
+# ErikBjare/bob):
+#
+# - ``build_item_investigate`` per-type arms
+#   (``scripts/github/project-monitoring-lib.sh:670-935``) →
+#   :class:`ItemPromptKind` + :func:`render_item_investigate` /
+#   :func:`build_investigate`.
+# - The main session-prompt skeleton, the direct-@mention deliverable
+#   constraint, and the arc-continuation context block
+#   (``scripts/runs/github/project-monitoring.sh:535-578``,
+#   ``project-monitoring-lib.sh:96-112``) → :func:`render_main_prompt`,
+#   :func:`render_mention_constraint`, :func:`render_arc_context`.
+#
+# Goldens: ``tests/goldens/run_item/*.bob.txt`` are the captured output of
+# the real bash builders (sourced/sed-extracted from ErikBjare/bob @
+# f95ccae920af0058c68c86083e9007be86710dc5) — see
+# ``tests/test_run_item_prompts.py`` for the capture procedure.
+#
+# Agent-agnostic by construction: everything Bob-specific in the bash
+# (identity name, author handle, peer-agent roster, the hardcoded
+# ``/home/bob/bob`` in the twitter/forum/agent-msg arms, the Gordon/Erik
+# policy paragraph) is a parameter of :class:`ItemPromptParams`. With Bob's
+# values the output is byte-identical to the bash; with another agent's
+# values nothing Bob remains.
+
+_GREPTILE_INVESTIGATE_KINDS: dict[str, InstructionKind] = {
+    "greptile_needs_fix": InstructionKind.GREPTILE_NEEDS_FIX,
+    "greptile_needs_improvement": InstructionKind.GREPTILE_NEEDS_IMPROVEMENT,
+}
+
+
+class ItemPromptKind(Enum):
+    """The per-type investigate arms of ``build_item_investigate``.
+
+    The two ``greptile_*`` arms are NOT members: they were ported in step 2
+    as :class:`~gptme_runloops.merge_lifecycle.InstructionKind` members and
+    :func:`build_investigate` dispatches those types to
+    :func:`render_instruction` (same template module, same bytes).
+
+    Item types with no arm in the bash ``case`` (notably ``merge_ready``)
+    contribute nothing — mirrored by :func:`build_investigate` skipping
+    unknown types.
+    """
+
+    PR_UPDATE = "pr_update"
+    CI_FAILURE = "ci_failure"
+    ASSIGNED_ISSUE = "assigned_issue"
+    TWITTER_MENTION = "twitter_mention"
+    FORUM_MENTION = "forum_mention"
+    AGENT_MSG_REPLY = "agent_msg_reply"
+    NOTIFICATION = "notification"
+    MASTER_CI_FAILURE = "master_ci_failure"
+    MERGE_CONFLICT = "merge_conflict"
+
+
+@dataclass(frozen=True)
+class ItemPromptParams:
+    """Per-item parameters for the investigate arms and the main prompt.
+
+    Attributes mirror the bash globals; the identity fields parameterize
+    what the bash hardcodes:
+
+    - ``agent_name`` ← the literal "Bob" ("You are Bob", "belongs to Bob",
+      "for Bob-local PRs").
+    - ``operator_name`` ← the literal "Erik" in the direct-mention
+      deliverable constraint.
+    - ``twitter_handle`` ← the literal "TimeToBuildBob" mention handle
+      (empty → falls back to ``author``).
+    - ``forum_handle`` ← the literal "bob" agentboard handle (empty → falls
+      back to ``agent_name.lower()``).
+    - ``peer_agents`` ← the literal "Gordon / Alice / Sven" domain roster.
+    - ``agent_msg_policy_note`` ← the trailing Gordon/IBKR policy paragraph
+      of the agent-msg arm (Bob passes it; empty renders no paragraph).
+    - ``workspace`` ← both ``$WORKSPACE`` *and* the hardcoded
+      ``/home/bob/bob`` in the twitter/forum/agent-msg arms (identical for
+      Bob, parameterized for everyone else).
+    """
+
+    repo: str
+    number: int | str
+    workspace: str
+    detail: str = ""
+    all_numbers: tuple[str, ...] = ()
+    author: str = ""
+    agent_name: str = "Agent"
+    operator_name: str = "the operator"
+    twitter_handle: str = ""
+    forum_handle: str = ""
+    peer_agents: str = "other agents"
+    agent_msg_policy_note: str = ""
+    greptile_helper: str | None = None
+    pr_address_script: str | None = None
+    poll_budget_sec: int = 1800
+
+    def to_prompt_context(self) -> PromptContext:
+        """The step-2 context for the greptile investigate arms."""
+        return PromptContext(
+            repo=self.repo,
+            number=self.number,
+            workspace=self.workspace,
+            greptile_helper=self.greptile_helper,
+            pr_address_script=self.pr_address_script,
+            poll_budget_sec=self.poll_budget_sec,
+        )
+
+    def _tokens(self) -> dict[str, str]:
+        ctx = self.to_prompt_context()
+        return {
+            "repo": self.repo,
+            "number": str(self.number),
+            "workspace": self.workspace,
+            "detail": self.detail,
+            "author": self.author,
+            "agent_name": self.agent_name,
+            "operator_name": self.operator_name,
+            "twitter_handle": self.twitter_handle or self.author,
+            "forum_handle": self.forum_handle or self.agent_name.lower(),
+            "peer_agents": self.peer_agents,
+            "greptile_helper": ctx.resolved_greptile_helper,
+            "pr_address_script": ctx.resolved_pr_address_script,
+        }
+
+
+# --- Investigate arm templates (lib.sh:670-935, non-greptile arms) ---
+
+_PR_UPDATE_ARM = """
+### PR Review & Comments
+```bash
+# Read PR details + all comments (NEVER truncate with | head)
+gh pr view {number} --repo {repo}
+gh pr view {number} --repo {repo} --comments
+
+# Review comments (compact with jq)
+gh api repos/{repo}/pulls/{number}/reviews \\
+  --jq '.[] | {user: .user.login, state: .state, body: .body}'
+
+# Inline review comments (CRITICAL — often missed!)
+gh api repos/{repo}/pulls/{number}/comments \\
+  --jq '.[] | {id, path, user: .user.login, body: (.body | split("\\n")[0:3] | join(" "))}'
+
+# CI status
+gh pr checks {number} --repo {repo}
+
+# Merge conflict status
+gh pr view {number} --repo {repo} --json mergeable,mergeStateStatus
+```
+
+**Important**: Check ALL comments — human AND bot (Greptile, etc.). Respond to every
+human comment. If Greptile has unresolved findings, address them, push fixes, then
+run `bash {pr_address_script} --repo {repo} {number}`
+for {agent_name}-local PRs, or `bash {greptile_helper} trigger {repo} {number}`
+and exit for cross-repo PRs. If it exits 2 or 3, stop there. The next monitoring cycle will pick up any remaining work.
+Never ignore a human comment in favor of bot review work.
+"""
+
+_CI_FAILURE_ARM = """
+### CI Failure Investigation
+```bash
+# Check which CI checks are failing
+gh pr checks {number} --repo {repo}
+
+# Get details on failures
+gh pr checks {number} --repo {repo} --json name,state,link \\
+  --jq '.[] | select(.state == "FAILURE")'
+
+# For each failing check, read the logs:
+# gh run view RUN_ID --repo {repo} --log-failed | tail -40
+```
+
+Also check master branch CI health:
+```bash
+gh run list --repo {repo} --branch master --limit 3 --json name,conclusion,createdAt,url \\
+  --jq '.[] | select(.conclusion == "failure") | {name, conclusion, createdAt, url}'
+```
+"""
+
+_ASSIGNED_ISSUE_ARM = """
+### Issue Details
+```bash
+gh issue view {number} --repo {repo}
+gh issue view {number} --repo {repo} --comments
+```
+
+**Close the loop requirement**:
+1. Decide whether this belongs to {agent_name} or another agent domain ({peer_agents}).
+2. If it belongs to another agent: create or update the task on that agent's VM/workspace, then reply on the issue confirming the handoff.
+3. If it belongs to {agent_name} and won't be fully finished in this run: create or update a local task file using the idempotent helper (safe to call multiple times — no duplicates):
+   ```bash
+   python3 {workspace}/scripts/tasks/promote_from_github.py {repo} {number} --priority medium
+   # Returns "EXISTS: PATH" or "CREATED: PATH" — never creates a duplicate
+   ```
+4. After promotion, edit the created/found task file to add a concrete `next_action:` field and a `tracking_issue:` entry pointing at the live GitHub thread.
+5. Reply on the issue with what changed (work done, task created/updated, or handoff), not just a vague acknowledgment.
+
+For any multi-paragraph reply, avoid inline shell escapes like `"para1\\n\\npara2"`.
+Pipe the body into:
+```bash
+cat <<'EOF' | {workspace}/scripts/github/comment-from-stdin.sh {repo} {number} --anti-spam
+Paragraph one.
+
+Paragraph two.
+EOF
+```
+If you genuinely need the older short cooldown for rapid monitoring follow-ups, opt in explicitly:
+```bash
+cat <<'EOF' | {workspace}/scripts/github/comment-from-stdin.sh {repo} {number} --anti-spam --anti-spam-seconds 600
+Paragraph one.
+
+Paragraph two.
+EOF
+```
+"""
+
+_TWITTER_MENTION_ARM = """
+### Twitter Mention (Trusted-User Task Request)
+A trusted Twitter user has mentioned @{twitter_handle} with what looks like a task request.
+
+Tweet details: {detail}
+
+**How to handle:**
+1. Read the mention carefully — what is the user asking for?
+2. Determine if this is actionable (code change, research, answer, etc.)
+3. If actionable: do the work, then reply to the tweet with results
+4. If not actionable: reply explaining why or asking for clarification
+
+To post the tweet reply:
+```bash
+cat <<'EOF' | {workspace}/scripts/runs/twitter/post-from-stdin.sh --reply-to TWEET_ID
+Your reply text here.
+
+Second paragraph if needed.
+EOF
+```
+
+To mark the mention as dispatched (so it won't re-trigger):
+```bash
+cd {workspace} && uv run python3 scripts/runs/twitter/twitter-dispatch.py --mark-dispatched --scan-replies
+```
+"""
+
+_FORUM_MENTION_ARM = """
+### Agentboard Forum Mention
+Another agent mentioned @{forum_handle} in the shared git-native forum.
+
+Mention details: {detail}
+
+**How to handle:**
+1. Read the referenced post/comment thread in full
+2. Determine whether the mention requests action, input, or just awareness
+3. If action is needed: do the work or reply in-thread with the outcome
+4. If no action is needed: reply briefly so the thread is closed-loop
+
+To inspect the thread:
+```bash
+cd {workspace}
+uv run python3 scripts/runs/forum/forum-dispatch.py --dry-run --agent {forum_handle}
+# Then read the post/comment directly via agentboard or the forum files
+AGENTBOARD_FORUM_DIR={workspace}/gptme-superuser/forum .venv/bin/agentboard post read PROJECT/SLUG
+```
+
+To reply in-thread:
+```bash
+cd {workspace}
+AGENTBOARD_FORUM_DIR={workspace}/gptme-superuser/forum .venv/bin/agentboard comment add PROJECT/SLUG 'Reply text here'
+```
+
+To mark the mention as dispatched (so it won't re-trigger):
+```bash
+cd {workspace} && uv run python3 scripts/runs/forum/forum-dispatch.py --mark-dispatched MENTION_ID
+```
+"""
+
+# NOTE(parity): the bash arm ends with the Gordon/IBKR policy paragraph —
+# learned Bob-side policy, injected here via ``agent_msg_policy_note``
+# (rendered as {policy_block}; empty note → no paragraph).
+_AGENT_MSG_REPLY_ARM = """
+### Inter-Agent Message Reply (agent-msg)
+An inter-agent message is read but unreplied. Message details: {detail}
+
+**CLAIM before handling to prevent duplicate replies:**
+```bash
+cd {workspace}
+# Extract message filename from detail above
+uv run coordination work-claim "pm-agent-msg-$$" "agent-msg:reply:MSG_FILE" --ttl 30
+# If denied: skip (another session is handling it)
+```
+
+**Read and reply:**
+```bash
+cd {workspace}
+python3 scripts/agent-msg.py read MSG_FILE
+python3 scripts/agent-msg.py reply MSG_FILE "Your reply text"
+uv run coordination work-complete "pm-agent-msg-$$" "agent-msg:reply:MSG_FILE"
+```
+{policy_block}"""
+
+_NOTIFICATION_ARM = """
+### Notifications
+```bash
+gh api notifications \\
+  --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign") | {subject: .subject.title, type: .subject.type, reason: .reason, url: .subject.url, repo: .repository.full_name}'
+```
+"""
+
+# NOTE(parity): ``{run_cmds}`` carries one trailing newline per grouped run
+# (built exactly like the bash ``_run_cmds`` loop), and the skeleton adds its
+# own newline after the token — producing the blank line between the last
+# ``gh run view`` and the "# Check recent runs" comment, as the bash does.
+_MASTER_CI_FAILURE_ARM = """
+### Master Branch CI Failure
+```bash
+# Check all failing run logs (grouped from {all_numbers_joined} runs)
+{run_cmds}
+# Check recent runs on master to see if this is a flaky test or real regression
+gh run list --repo {repo} --branch master --limit 5 \\
+  --json name,conclusion,createdAt,headSha \\
+  --jq '.[] | {name, conclusion, createdAt, sha: .headSha[:8]}'
+```
+"""
+
+_MERGE_CONFLICT_ARM = """
+### Merge Conflict Resolution
+```bash
+# Check the PR and its conflict status
+gh pr view {number} --repo {repo}
+gh pr view {number} --repo {repo} --json mergeable,mergeStateStatus,headRefName
+
+# Check what files conflict
+# (will need to clone/worktree and attempt rebase to see actual conflicts)
+```
+
+To resolve: create a worktree, rebase onto master, resolve conflicts, force-push.
+"""
+
+_ITEM_ARMS: dict[ItemPromptKind, str] = {
+    ItemPromptKind.PR_UPDATE: _PR_UPDATE_ARM,
+    ItemPromptKind.CI_FAILURE: _CI_FAILURE_ARM,
+    ItemPromptKind.ASSIGNED_ISSUE: _ASSIGNED_ISSUE_ARM,
+    ItemPromptKind.TWITTER_MENTION: _TWITTER_MENTION_ARM,
+    ItemPromptKind.FORUM_MENTION: _FORUM_MENTION_ARM,
+    ItemPromptKind.AGENT_MSG_REPLY: _AGENT_MSG_REPLY_ARM,
+    ItemPromptKind.NOTIFICATION: _NOTIFICATION_ARM,
+    ItemPromptKind.MASTER_CI_FAILURE: _MASTER_CI_FAILURE_ARM,
+    ItemPromptKind.MERGE_CONFLICT: _MERGE_CONFLICT_ARM,
+}
+
+
+def render_item_investigate(kind: ItemPromptKind, params: ItemPromptParams) -> str:
+    """Render one investigate arm; byte-identical to the bash ``case`` arm.
+
+    Output includes the arm's leading and trailing newline (the bash appends
+    ``INVESTIGATE+="\\n...\\n"``).
+    """
+    template = _ITEM_ARMS[kind]
+    tokens = params._tokens()
+    if kind is ItemPromptKind.MASTER_CI_FAILURE:
+        # lib.sh:855-870 — one `gh run view` line (with trailing newline) per
+        # grouped run number; the header joins the numbers with ", ".
+        numbers = [str(n) for n in params.all_numbers] or [str(params.number)]
+        tokens["run_cmds"] = "".join(
+            f"gh run view {n} --repo {params.repo} --log-failed | tail -60\n"
+            for n in numbers
+        )
+        tokens["all_numbers_joined"] = ", ".join(numbers)
+    if kind is ItemPromptKind.AGENT_MSG_REPLY:
+        note = params.agent_msg_policy_note
+        tokens["policy_block"] = f"\n{note}\n" if note else "\n"
+    return _substitute(template, tokens)
+
+
+def build_investigate(types: Sequence[str], params: ItemPromptParams) -> str:
+    """Concatenate investigate arms for every type in *types*, in order.
+
+    Behavior-identical to ``build_item_investigate`` (lib.sh:670-935): types
+    are processed in the given order (the grouped item's ``types`` array is
+    jq-``unique``, i.e. sorted); types with no arm contribute nothing
+    (``merge_ready`` has no arm — a merge_ready-only item yields ``""``);
+    the ``greptile_needs_fix`` / ``greptile_needs_improvement`` types render
+    via the step-2 :func:`render_instruction` templates.
+    """
+    sections: list[str] = []
+    for t in types:
+        if t in _GREPTILE_INVESTIGATE_KINDS:
+            sections.append(
+                render_instruction(
+                    _GREPTILE_INVESTIGATE_KINDS[t], params.to_prompt_context()
+                )
+            )
+            continue
+        try:
+            kind = ItemPromptKind(t)
+        except ValueError:
+            continue
+        sections.append(render_item_investigate(kind, params))
+    return "".join(sections)
+
+
+# --- Direct-@mention deliverable constraint (project-monitoring.sh:535-542) ---
+
+_MENTION_CONSTRAINT = """
+## Required: Produce a Deliverable (Direct @Mention)
+
+This item is a **direct @mention from {operator_name}**. Before completing or exiting, you MUST do one of:
+1. **Produce the explicitly requested deliverable** (open a tracking issue, post a reply, submit a PR, etc.), OR
+2. **Reply to the thread** explaining what you did or why you cannot fulfil the request right now.
+
+A silent NOOP is not acceptable for a direct {operator_name} mention. If you can only do part of the ask, do the simple parts (e.g. open an issue) and note the rest in your reply."""
+
+
+def render_mention_constraint(params: ItemPromptParams) -> str:
+    """The direct-mention NOOP-guard block (starts with a newline, like the bash)."""
+    return _substitute(_MENTION_CONSTRAINT, params._tokens())
+
+
+# --- Arc continuation context (project-monitoring-lib.sh:96-112) ---
+
+_ARC_CONTEXT = """
+## Arc Continuation Context
+
+This item has an existing multi-session arc ({arc_sessions} prior session(s)).
+This monitoring reaction is an **arc continuation**, not a fresh start.
+
+Arc hint for next step: {arc_hint}
+
+This worker will append its own continuation record automatically after it finishes.
+If you materially change the plan, refresh the arc hint before you exit:
+```bash
+python3 {workspace}/scripts/tasks/arc_manager.py write \\
+    '{arc_id}' \\
+    --upstream-id '{upstream_id}' \\
+    --next-step-hint 'What the next session should do'
+```
+"""
+
+
+def render_arc_context(
+    params: ItemPromptParams,
+    *,
+    arc_id: str,
+    arc_hint: str,
+    arc_sessions: int | str,
+) -> str:
+    """The arc-continuation block (leading and trailing newline, like the bash).
+
+    ``upstream_id`` is derived as ``github:{repo}#{number}`` exactly like
+    ``build_arc_context`` does.
+    """
+    tokens = params._tokens()
+    tokens.update(
+        {
+            "arc_id": arc_id,
+            "arc_hint": arc_hint,
+            "arc_sessions": str(arc_sessions),
+            "upstream_id": f"github:{params.repo}#{params.number}",
+        }
+    )
+    return _substitute(_ARC_CONTEXT, tokens)
+
+
+# --- Pre-held claim block (NEW content — no bash counterpart) ---
+#
+# Reserved for the step-7/8 dispatcher-held-claim mode (phase-2 doc,
+# interaction risk #1): when the dispatcher already holds the
+# ``github:REPO#NUM`` claim, the prompt MUST name it or the session
+# self-blinds on its own claim (the 2026-07-04 calm-window failure class).
+# Rendered ONLY in ``--claim-mode preheld``; acquire/none modes render ""
+# so step-4/5 output stays byte-identical to the bash.
+
+_PREHELD_CLAIM_BLOCK = """
+## Coordination Claim (pre-held)
+
+The coordination claim `{claim_key}` for this work item is ALREADY HELD on your behalf by the dispatcher.
+Do NOT try to re-claim it — a "denied" result for this exact key means the claim is YOURS; proceed with the work.
+Claim keys for OTHER work items are still authoritative: a denied claim on a different key means skip that work."""
+
+
+def render_preheld_claim_block(claim_key: str) -> str:
+    """The pre-held-claim prompt block (starts with a newline, like the other optional blocks)."""
+    return _substitute(_PREHELD_CLAIM_BLOCK, {"claim_key": claim_key})
+
+
+# --- Main session-prompt skeleton (project-monitoring.sh:545-578) ---
+
+_MAIN_PROMPT = """You are {agent_name}, running a focused project monitoring session. Your identity files have been injected as system context.
+
+## Your Task
+
+Investigate and act on this work item:
+
+- **Event(s)**: {item_type}
+- **Repo**: {repo}
+- **Number**: #{number}
+- **Title**: {title}
+- **Detail**: {detail}
+
+Your GitHub author name is: {author}
+{greptile_block}
+{arc_context}
+{mention_constraint}{preheld_block}
+
+## Step 1: Investigate (3 min)
+
+Get full context for this item. Read ALL sources — never truncate output.
+{investigate}
+
+## Step 2: Classify & Execute
+
+{monitoring_rules}
+
+## Time Budget
+
+You have {time_desc} available for this item.
+- Treat the limit as a stall guard, not a rush order.
+- Keep naturally sequential work together when it fits: investigate -> fix -> verify -> reply.
+- Do not skip verification or compress analysis just to finish early.
+- If the item needs no action after investigation, just exit. No journal. No commit."""
+
+
+def render_main_prompt(
+    params: ItemPromptParams,
+    *,
+    item_type: str,
+    title: str,
+    investigate: str,
+    monitoring_rules: str,
+    time_desc: str,
+    greptile_fix_instructions: str = "",
+    arc_context: str = "",
+    mention_constraint: str = "",
+    preheld_block: str = "",
+) -> str:
+    """Render the full per-item session prompt (project-monitoring.sh:545-578).
+
+    Byte-identical to the bash ``PROMPT=`` assignment for empty
+    ``preheld_block``:
+
+    - ``greptile_fix_instructions`` is the ``$(...)``-assigned form (no
+      trailing newline — pass ``render_instruction(...).rstrip("\\n")``);
+      non-empty values are prefixed with a newline exactly like the bash
+      ``${GREPTILE_FIX_INSTRUCTIONS:+\\n$GREPTILE_FIX_INSTRUCTIONS}``.
+    - ``arc_context`` / ``mention_constraint`` are inserted verbatim (their
+      templates carry their own leading newlines; empty means absent).
+    - ``preheld_block`` is the step-7/8 extension point; empty (the step-4/5
+      default) renders the exact bash skeleton.
+    """
+    tokens = params._tokens()
+    tokens.update(
+        {
+            "item_type": item_type,
+            "title": title,
+            "investigate": investigate,
+            "monitoring_rules": monitoring_rules,
+            "time_desc": time_desc,
+            "greptile_block": (
+                f"\n{greptile_fix_instructions}" if greptile_fix_instructions else ""
+            ),
+            "arc_context": arc_context,
+            "mention_constraint": mention_constraint,
+            "preheld_block": preheld_block,
+        }
+    )
+    return _substitute(_MAIN_PROMPT, tokens)

@@ -1,0 +1,25 @@
+
+### Twitter Mention (Trusted-User Task Request)
+A trusted Twitter user has mentioned @TimeToBuildBob with what looks like a task request.
+
+Tweet details: CI failed on master; review comment
+
+**How to handle:**
+1. Read the mention carefully — what is the user asking for?
+2. Determine if this is actionable (code change, research, answer, etc.)
+3. If actionable: do the work, then reply to the tweet with results
+4. If not actionable: reply explaining why or asking for clarification
+
+To post the tweet reply:
+```bash
+cat <<'EOF' | /home/bob/bob/scripts/runs/twitter/post-from-stdin.sh --reply-to TWEET_ID
+Your reply text here.
+
+Second paragraph if needed.
+EOF
+```
+
+To mark the mention as dispatched (so it won't re-trigger):
+```bash
+cd /home/bob/bob && uv run python3 scripts/runs/twitter/twitter-dispatch.py --mark-dispatched --scan-replies
+```
