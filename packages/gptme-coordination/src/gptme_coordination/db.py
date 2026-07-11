@@ -140,7 +140,9 @@ class CoordinationDB:
     to prevent conflicts between parallel agents.
     """
 
-    def __init__(self, db_path: str | Path = DEFAULT_DB_PATH):
+    def __init__(self, db_path: str | Path | None = None):
+        if db_path is None:
+            db_path = resolve_coordination_db_path()
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None

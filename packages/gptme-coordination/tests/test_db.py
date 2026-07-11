@@ -144,6 +144,24 @@ class TestResolveCoordinationDbPath:
 class TestCoordinationDB:
     """Tests for CoordinationDB."""
 
+    def test_default_init_uses_resolved_workspace_path(self, monkeypatch):
+        """Default init uses the authoritative workspace path, not cwd."""
+        with tempfile.TemporaryDirectory() as tmp:
+            brain_dir = Path(tmp) / "brain"
+            brain_dir.mkdir()
+            submodule = Path(tmp) / "gptme-contrib"
+            submodule.mkdir()
+            subprocess.run(
+                ["git", "init"], cwd=submodule, capture_output=True, check=True
+            )
+            monkeypatch.chdir(submodule)
+            monkeypatch.setenv("BOB_WORKSPACE", str(brain_dir))
+
+            db = CoordinationDB()
+
+            assert db.db_path == brain_dir / "state/coordination/coord.db"
+            db.close()
+
     def test_init_creates_parent_dir(self):
         """DB init creates parent directories and the DB file."""
         with tempfile.TemporaryDirectory() as tmp:
