@@ -448,6 +448,43 @@ has_actionable_update() {
     return 0
 }
 
+# --- Human-review dispatch priority tokens (§7b human > bot) ---
+# Detect human (non-bot, non-AUTHOR) review activity on a PR so the dispatcher
+# can prioritize it over bot-triggered backlog. Emits ;-joined detail tokens
+# consumed by gptme_runloops.pm_dispatch (lane ordering) and the dispatcher's
+# bounded cap-overflow rule:
+#   human_changes_requested — a human's latest review state is CHANGES_REQUESTED
+#                             (blocking merge; highest priority)
+#   human_activity          — the most recent comment/review actor is human
+# Bot detection is heuristic on login shape because gh's comments/latestReviews
+# author objects carry only .login (no is_bot / __typename): GitHub Apps appear
+# WITHOUT the "[bot]" suffix here (e.g. "greptile-apps"), so we also match
+# -bot/-apps suffixes and well-known CI/review bots. Failure directions are
+# safe: an unknown bot misread as human costs at most one bounded overflow
+# slot on valid work; a human whose login matches a bot pattern just keeps
+# today's (non-prioritized) behavior.
+# Args: <pr_data_json>. Echoes "tok" / "tok; tok" or nothing.
+pr_human_priority_tokens() {
+    local pr_data=$1
+    echo "$pr_data" | jq -r --arg author "$AUTHOR" '
+        def is_bot_login:
+            test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)"; "i");
+        def is_human_login:
+            . != null and . != "" and (ascii_downcase != ($author | ascii_downcase)) and (is_bot_login | not);
+        ([
+            (.comments[-1] | select(. != null) | {login: .author.login, time: .createdAt}),
+            ((.latestReviews // []) | sort_by(.submittedAt) | last | select(. != null) | {login: .author.login, time: .submittedAt})
+         ] | sort_by(.time) | last | .login // "") as $last_actor
+        | ([ (.latestReviews // [])[]
+             | select(.state == "CHANGES_REQUESTED")
+             | select(.author.login | is_human_login)
+           ] | length > 0) as $human_changes_requested
+        | [ (if $human_changes_requested then "human_changes_requested" else empty end),
+            (if ($last_actor | is_human_login) then "human_activity" else empty end) ]
+        | join("; ")
+    ' 2>/dev/null || true
+}
+
 # Check for PR updates since last check (state-tracked via updatedAt timestamps)
 # Filters out self-triggered updates and comments directed at others.
 # Accepts pre-fetched PR data from fetch_pr_data() to avoid redundant API calls.
@@ -468,9 +505,17 @@ check_pr_updates() {
             if [[ "$updated_at" > "$last_check" ]]; then
                 # Check if the update was from someone we should respond to
                 if has_actionable_update "$pr_data"; then
-                    local pr_title
+                    local pr_title priority_tokens item_detail
                     pr_title=$(echo "$pr_data" | jq -r '.title')
-                    emit_item "pr_update" "$repo" "$pr_number" "$pr_title" "updated: $updated_at"
+                    # Human-priority tokens (§7b human > bot): let the
+                    # dispatcher sort human review activity ahead of the
+                    # bot backlog and grant bounded cap overflow.
+                    priority_tokens=$(pr_human_priority_tokens "$pr_data")
+                    item_detail="updated: $updated_at"
+                    if [ -n "$priority_tokens" ]; then
+                        item_detail="$item_detail; $priority_tokens"
+                    fi
+                    emit_item "pr_update" "$repo" "$pr_number" "$pr_title" "$item_detail"
                 fi
                 # Always advance state to avoid rechecking this timestamp
                 echo "$updated_at" > "$state_file"

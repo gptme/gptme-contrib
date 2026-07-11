@@ -10,8 +10,11 @@ from typing import Any
 import pytest
 from gptme_runloops.pm_dispatch import (
     DEFAULT_FAST_BURST_ALLOWANCE,
+    DEFAULT_PRIORITY_RANK,
     DEFAULT_SLOT_CAP,
     DISPATCH_COOLDOWN_DIR_ENV,
+    HUMAN_PRIORITY_ACTIVITY,
+    HUMAN_PRIORITY_CHANGES_REQUESTED,
     MIN_BANDIT_OBSERVATIONS,
     SLOW_LANE_TYPES,
     DispatchLedger,
@@ -27,8 +30,11 @@ from gptme_runloops.pm_dispatch import (
     classify_item_work_type,
     classify_lane,
     derive_slot_key,
+    detail_is_human_priority,
     dispatch_grouped_items,
+    human_priority_allows_overflow,
     is_direct_mention,
+    item_priority_rank,
     order_lane_lru,
     partition_items,
     resolve_lane_model,
@@ -1714,3 +1720,148 @@ class TestOrderLaneLru:
         slow = [json.loads(line) for line in slow_path.read_text().splitlines() if line]
         assert [i["number"] for i in slow] == [3, 2, 1]
         assert fast_path.read_text() == ""
+
+
+class TestItemPriorityRank:
+    """Human-review priority classification from detail tokens (§7b human > bot)."""
+
+    def test_changes_requested_is_highest(self):
+        assert item_priority_rank("updated: X; human_changes_requested") == 0
+
+    def test_human_activity_is_middle(self):
+        assert item_priority_rank("updated: X; human_activity") == 1
+
+    def test_no_tokens_is_default(self):
+        assert item_priority_rank("updated: X") == DEFAULT_PRIORITY_RANK
+
+    def test_both_tokens_take_best_rank(self):
+        detail = "updated: X; human_changes_requested; human_activity"
+        assert item_priority_rank(detail) == 0
+
+    def test_none_and_empty_are_default(self):
+        assert item_priority_rank(None) == DEFAULT_PRIORITY_RANK
+        assert item_priority_rank("") == DEFAULT_PRIORITY_RANK
+
+    def test_exact_token_match_only(self):
+        # Free text containing the token as a substring must not match.
+        assert (
+            item_priority_rank("title mentions human_activity levels")
+            == DEFAULT_PRIORITY_RANK
+        )
+
+    def test_detail_is_human_priority(self):
+        assert detail_is_human_priority(f"x; {HUMAN_PRIORITY_ACTIVITY}")
+        assert detail_is_human_priority(f"{HUMAN_PRIORITY_CHANGES_REQUESTED}")
+        assert not detail_is_human_priority("updated: 2026-07-11T13:26:04Z")
+        assert not detail_is_human_priority(None)
+
+
+class TestOrderLaneLruHumanPriority:
+    """Human-priority items sort ahead of the LRU backlog (§7b human > bot)."""
+
+    @staticmethod
+    def _item(number: int, detail: str = "") -> dict:
+        return {
+            "repo": "foo/bar",
+            "number": number,
+            "types": ["pr_update"],
+            "detail": detail,
+        }
+
+    @staticmethod
+    def _mark(cooldown_dir, number: int, epoch: int) -> None:
+        (cooldown_dir / f"foo-bar-{number}.ts").write_text(f"{epoch}\n")
+
+    def test_human_item_jumps_lru_queue(self, tmp_path):
+        """A human-priority item beats never-dispatched bot backlog items."""
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        # Item 1: human review, dispatched before (worst LRU position).
+        self._mark(cooldown, 1, 1_700_000_000)
+        items = [
+            self._item(2, "updated: X"),  # never dispatched (epoch 0)
+            self._item(3, "updated: X"),  # never dispatched (epoch 0)
+            self._item(1, "updated: X; human_changes_requested"),
+        ]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        assert [i["number"] for i in ordered] == [1, 2, 3]
+
+    def test_changes_requested_beats_plain_human_activity(self, tmp_path):
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        items = [
+            self._item(1, "updated: X; human_activity"),
+            self._item(2, "updated: X; human_changes_requested"),
+        ]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        assert [i["number"] for i in ordered] == [2, 1]
+
+    def test_no_human_items_is_pure_lru(self, tmp_path):
+        """Without priority tokens the ordering is exactly the LRU order."""
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        self._mark(cooldown, 1, 3000)
+        self._mark(cooldown, 2, 1000)
+        self._mark(cooldown, 3, 2000)
+        items = [self._item(1), self._item(2), self._item(3)]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        assert [i["number"] for i in ordered] == [2, 3, 1]
+
+    def test_lru_breaks_ties_within_priority_class(self, tmp_path):
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        self._mark(cooldown, 1, 2000)
+        self._mark(cooldown, 2, 1000)
+        items = [
+            self._item(1, "updated: X; human_activity"),
+            self._item(2, "updated: X; human_activity"),
+        ]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        assert [i["number"] for i in ordered] == [2, 1]
+
+    def test_missing_cooldown_dir_still_sorts_by_priority(self, tmp_path):
+        items = [
+            self._item(2, "updated: X"),
+            self._item(1, "updated: X; human_changes_requested"),
+        ]
+
+        ordered = order_lane_lru(items, cooldown_dir=tmp_path / "absent")
+
+        assert [i["number"] for i in ordered] == [1, 2]
+
+
+class TestHumanPriorityOverflow:
+    """Bounded cap-overflow rule for human-priority items."""
+
+    HUMAN = "updated: X; human_changes_requested"
+    BOT = "updated: X"
+
+    def test_human_item_allowed_at_cap(self):
+        assert human_priority_allows_overflow(self.HUMAN, running_slots=5, slot_cap=5)
+
+    def test_overflow_is_bounded_to_allowance(self):
+        # A previously granted overflow slot counts in running_slots, so the
+        # next human item at cap+1 is denied — max 1 slot above cap.
+        assert not human_priority_allows_overflow(
+            self.HUMAN, running_slots=6, slot_cap=5
+        )
+
+    def test_non_human_item_never_overflows(self):
+        assert not human_priority_allows_overflow(self.BOT, running_slots=5, slot_cap=5)
+        assert not human_priority_allows_overflow(None, running_slots=5, slot_cap=5)
+
+    def test_zero_allowance_disables_overflow(self):
+        assert not human_priority_allows_overflow(
+            self.HUMAN, running_slots=5, slot_cap=5, overflow_allowance=0
+        )
+
+    def test_below_cap_is_trivially_allowed_for_human(self):
+        assert human_priority_allows_overflow(self.HUMAN, running_slots=2, slot_cap=5)
