@@ -25,6 +25,7 @@ jobs:
             - 'packages/**'
             - 'plugins/**'
             - 'scripts/**'
+            - 'tests/**'
             - 'pyproject.toml'
             - 'uv.lock'
             - 'Makefile'
@@ -61,3 +62,7 @@ jobs:
       - name: Run integration tests
         run: |
           make test-integration
+
+      - name: Run unit tests
+        run: |
+          make test-unit
