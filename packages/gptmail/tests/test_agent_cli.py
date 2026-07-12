@@ -405,6 +405,53 @@ def test_pending_respects_reply_window(workspace: Path, monkeypatch: pytest.Monk
     assert "No messages awaiting reply" in result.output
 
 
+def _seed_stale(workspace: Path) -> str:
+    """An unreplied message well past the reply window."""
+    name = "old.md"
+    (workspace / "messages" / "inbox" / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2020-01-01T00:00:00Z\n"
+        "subject: ancient\nread: false\n---\n\nold question\n"
+    )
+    return name
+
+
+def test_pending_warns_about_aged_out_backlog(workspace: Path) -> None:
+    """An aged-out message is not listed, but its existence is never hidden.
+
+    Regression guard: before this, an unreplied message that outlived the SLA
+    window vanished from `pending` permanently, so a backlog could accumulate
+    silently for months with the queue reporting "No messages awaiting reply".
+    """
+    _seed_stale(workspace)
+    result = CliRunner().invoke(agent, ["pending"])
+    assert "No messages awaiting reply" in result.output
+    assert "1 unreplied message(s) older than the reply window" in result.output
+    assert "--include-stale" in result.output
+
+
+def test_pending_include_stale_lists_aged_out_messages(workspace: Path) -> None:
+    name = _seed_stale(workspace)
+    result = CliRunner().invoke(agent, ["pending", "--include-stale"])
+    assert "1 message(s) awaiting reply" in result.output
+    assert name in result.output
+    # No dangling warning when the stale set is already being shown.
+    assert "older than the reply window" not in result.output
+
+
+def test_pending_warning_absent_when_no_stale_backlog(workspace: Path) -> None:
+    _seed_inbox(workspace)
+    result = CliRunner().invoke(agent, ["pending"])
+    assert "1 message(s) awaiting reply" in result.output
+    assert "older than the reply window" not in result.output
+
+
+def test_status_reports_stale_backlog(workspace: Path) -> None:
+    _seed_stale(workspace)
+    result = CliRunner().invoke(agent, ["status"])
+    assert "Pending:  0" in result.output
+    assert "Stale:    1" in result.output
+
+
 def test_pending_excludes_replies_to_my_messages(workspace: Path) -> None:
     """Replies to my own sent messages must not appear in pending.
 

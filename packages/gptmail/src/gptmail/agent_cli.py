@@ -507,6 +507,46 @@ def _pending_for_mailboxes(
     return pending
 
 
+def _stale_pending(
+    mailboxes: list[str],
+    *,
+    self_name: str,
+    window: int,
+    agents: dict[str, dict[str, str]],
+) -> list[dict]:
+    """Unreplied messages that aged out of the reply window (window=0 -> none).
+
+    These are invisible to the actionable queue by design, but must never be
+    silently dropped: an unanswered message that outlives the SLA window would
+    otherwise disappear from ``pending`` forever, which is how a backlog builds
+    up unnoticed over months.
+    """
+    if window <= 0:
+        return []
+    fresh = {
+        (str(m.get("mailbox", "")), str(m.get("file", "")))
+        for m in _pending_for_mailboxes(
+            mailboxes, self_name=self_name, window=window, agents=agents
+        )
+    }
+    return [
+        m
+        for m in _pending_for_mailboxes(mailboxes, self_name=self_name, window=0, agents=agents)
+        if (str(m.get("mailbox", "")), str(m.get("file", ""))) not in fresh
+    ]
+
+
+def _stale_summary(stale: list[dict]) -> str:
+    """One-line backlog notice: count, oldest age, and how to see them."""
+    now = datetime.now(timezone.utc)
+    ages = [age for age in (_age_days(m, now) for m in stale) if age is not None]
+    oldest = f", oldest {max(ages):.0f}d" if ages else ""
+    return (
+        f"⚠️  {len(stale)} unreplied message(s) older than the reply window{oldest} "
+        "— not shown above. See: agent-msg pending --include-stale"
+    )
+
+
 def _outbox_rows_for_recipient(
     mailboxes: list[str],
     *,
@@ -810,6 +850,11 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
 @click.option("--for", "for_recipient", default=None, help="Show messages pending for a recipient.")
 @click.option("--fleet", is_flag=True, help="Fan out across all registered agents.")
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
+@click.option(
+    "--include-stale",
+    is_flag=True,
+    help="Also list unreplied messages that aged out of the reply window.",
+)
 @click.option("--local-only", is_flag=True, hidden=True, help="Skip fleet fan-out.")
 def pending(
     mailbox: str,
@@ -817,6 +862,7 @@ def pending(
     for_recipient: str | None,
     fleet: bool,
     json_output: bool,
+    include_stale: bool,
     local_only: bool,
 ) -> None:
     """Show inbox messages awaiting a reply (timely-reply SLA)."""
@@ -860,20 +906,24 @@ def pending(
         raise click.BadParameter("--json requires --for", param_hint="--json")
     if local_only:
         raise click.BadParameter("--local-only requires --for", param_hint="--local-only")
+    window = 0 if include_stale else _reply_window_days()
     msgs = _pending_for_mailboxes(
         mailboxes,
         self_name=self_name,
-        window=_reply_window_days(),
+        window=window,
         agents=agents,
     )
-    if not msgs:
-        click.echo("No messages awaiting reply.")
-        return
-    click.echo(f"{len(msgs)} message(s) awaiting reply:")
+    stale = _stale_pending(mailboxes, self_name=self_name, window=window, agents=agents)
     show_prefix = all_mailboxes or any(name != "default" for name in mailboxes)
-    for m in msgs:
-        prefix = _format_mailbox_prefix(str(m.get("mailbox", "default")), show=show_prefix)
-        click.echo(f"  {prefix}{m['file']}  from {m.get('from')}: {m.get('subject', '')}")
+    if msgs:
+        click.echo(f"{len(msgs)} message(s) awaiting reply:")
+        for m in msgs:
+            prefix = _format_mailbox_prefix(str(m.get("mailbox", "default")), show=show_prefix)
+            click.echo(f"  {prefix}{m['file']}  from {m.get('from')}: {m.get('subject', '')}")
+    else:
+        click.echo("No messages awaiting reply.")
+    if stale:
+        click.echo(_stale_summary(stale))
 
 
 @agent.command()
@@ -889,18 +939,22 @@ def status(mailbox: str, all_mailboxes: bool) -> None:
         transport = _transport(mailbox=mailbox_name)
         inbox_count += len(transport.list_inbox("inbox"))
         outbox_count += len(transport.list_inbox("outbox"))
+    window = _reply_window_days()
     pend = _pending_for_mailboxes(
         mailboxes,
         self_name=_self_name(),
-        window=_reply_window_days(),
+        window=window,
         agents=agents,
     )
+    stale = _stale_pending(mailboxes, self_name=_self_name(), window=window, agents=agents)
     click.echo(f"Agent:    {_self_name()}")
     click.echo(f"Registry: {', '.join(agents) or '(none)'}")
     click.echo(f"Mailbox:  {mailboxes[0] if len(mailboxes) == 1 else ', '.join(mailboxes)}")
     click.echo(f"Inbox:    {inbox_count}")
     click.echo(f"Outbox:   {outbox_count}")
     click.echo(f"Pending:  {len(pend)}")
+    if stale:
+        click.echo(f"Stale:    {len(stale)} (unreplied, aged out of reply window)")
 
 
 if __name__ == "__main__":
