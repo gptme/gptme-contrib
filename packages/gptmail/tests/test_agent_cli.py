@@ -161,6 +161,36 @@ def test_reply_reports_delivery_failure_and_keeps_pending(
     ), "tracker must not mark original as COMPLETED when delivery failed"
 
 
+def test_reply_to_unknown_sender_does_not_remain_pending(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown sender is permanently undeliverable, not a retryable failure.
+
+    The reply command still fails loudly and preserves the failed outbox record,
+    but ``pending`` must treat that record as terminal. Otherwise every agent
+    message sweep retries an address that cannot be resolved from agents.yaml.
+    """
+    name = _seed_inbox(workspace, sender="erb")
+
+    def _unknown_recipient_deliver(_agents, *, mailbox="default"):
+        def _deliver(_local_path: Path, _recipient: str) -> bool:
+            return False
+
+        return _deliver
+
+    monkeypatch.setattr(agent_cli, "_ssh_deliver", _unknown_recipient_deliver)
+
+    result = CliRunner().invoke(agent, ["reply", name, "Thanks"])
+
+    assert result.exit_code == 1, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["delivered"] is False
+
+    pending = CliRunner().invoke(agent, ["pending"])
+    assert pending.exit_code == 0, pending.output
+    assert "No messages awaiting reply." in pending.output
+    assert name not in pending.output
+
+
 @pytest.mark.parametrize(
     "entry",
     [
