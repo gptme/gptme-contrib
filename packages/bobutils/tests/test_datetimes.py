@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timezone
+from datetime import datetime, timezone
 
 from bobutils.datetimes import parse_datetime
+
+UTC = timezone.utc  # datetime.UTC added in Python 3.11; alias for >=3.10 compat
 
 # --- None / invalid input ---
 
