@@ -32,8 +32,12 @@ def run_cmd(
     """
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, check=True
         )
         return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+    ):
         return ""

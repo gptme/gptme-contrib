@@ -10,6 +10,7 @@ function — see validate_no_duplicate_utils.py ALLOWLIST.
 
 from __future__ import annotations
 
+import math
 from typing import overload
 
 __all__ = ["coerce_int", "coerce_int_nullable"]
@@ -43,6 +44,8 @@ def coerce_int(value: object, default: int | None = 0) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return default
         return int(round(value))
     if isinstance(value, str) and value.strip():
         try:

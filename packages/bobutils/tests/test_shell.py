@@ -24,3 +24,7 @@ def test_run_cmd_missing_command_returns_empty() -> None:
 def test_run_cmd_cwd(tmp_path) -> None:  # type: ignore[no-untyped-def]
     result = run_cmd(["pwd"], cwd=tmp_path)
     assert result == str(tmp_path)
+
+
+def test_run_cmd_nonzero_exit_returns_empty() -> None:
+    assert run_cmd(["sh", "-c", "printf stale; exit 1"]) == ""

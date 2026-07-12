@@ -75,3 +75,15 @@ def test_coerce_int_nullable_unparseable() -> None:
 def test_coerce_int_nullable_valid_int() -> None:
     result = coerce_int(5, default=None)
     assert result == 5
+
+
+def test_coerce_int_nan_returns_default() -> None:
+    assert coerce_int(float("nan")) == 0
+
+
+def test_coerce_int_inf_returns_default() -> None:
+    assert coerce_int(float("inf")) == 0
+
+
+def test_coerce_int_neg_inf_returns_default() -> None:
+    assert coerce_int(float("-inf")) == 0
