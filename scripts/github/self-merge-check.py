@@ -921,16 +921,19 @@ def is_allowed_file(
     repo_path_allowlist: dict[str, list[str]] | None = None,
 ) -> bool:
     """Check if a file falls into any allowed self-merge category."""
-    # Explicit repo allowlist takes precedence over the sensitive-path heuristic.
-    # If an operator has deliberately allowlisted a path, that decision stands even
-    # when the keyword scanner would flag it (e.g. LLM tokenizer files named tokens.py).
-    if is_repo_allowlisted_path(path, repo, repo_path_allowlist):
-        return True
-    if is_sensitive_path(path):
-        return False
+    # Hard-reject bot config and spec-like docs regardless of allowlist — these
+    # categories require human review regardless of what the operator has allowlisted.
     if is_bot_config(path):
         return False
     if is_doc_file(path) and is_spec_like_doc(path):
+        return False
+    # Explicit repo allowlist overrides only the sensitive-path keyword heuristic.
+    # If an operator has deliberately allowlisted a path, that decision stands even
+    # when the keyword scanner would flag it (e.g. LLM tokenizer files named tokens.py),
+    # but bot-config and spec-like-doc guards above are not bypassable.
+    if is_repo_allowlisted_path(path, repo, repo_path_allowlist):
+        return True
+    if is_sensitive_path(path):
         return False
     return (
         is_test_file(path)

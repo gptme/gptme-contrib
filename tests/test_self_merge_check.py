@@ -1269,9 +1269,18 @@ def test_is_allowed_file_allowlist_overrides_sensitive_path() -> None:
     allowlist = {"gptme/gptme": ["gptme/util/**"]}
     # Without allowlist: blocked by the sensitive-path heuristic ("token" → "tokens")
     assert not self_merge_check.is_allowed_file("gptme/util/tokens.py")
-    # With explicit allowlist: allowed (operator override takes precedence)
+    # With explicit allowlist: allowed (operator override takes precedence over heuristic)
     assert self_merge_check.is_allowed_file(
         "gptme/util/tokens.py", repo="gptme/gptme", repo_path_allowlist=allowlist
+    )
+
+
+def test_is_allowed_file_allowlist_does_not_bypass_bot_config() -> None:
+    """Allowlist overrides only the sensitive-path heuristic; bot config is never bypassable."""
+    # Even if an operator accidentally allowlists a CI workflow, it stays blocked.
+    allowlist = {"gptme/gptme": [".github/**"]}
+    assert not self_merge_check.is_allowed_file(
+        ".github/workflows/ci.yml", repo="gptme/gptme", repo_path_allowlist=allowlist
     )
 
 
