@@ -8,7 +8,6 @@ match:
   - "use python3 instead of python"
   - "python vs python3"
   - "which python to use"
-  - "use python3"
 status: active
 description: "Always use `python3` explicitly instead of `python` in shell commands and scripts."
 ---
