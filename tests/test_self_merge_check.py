@@ -1238,6 +1238,43 @@ def test_classify_repo_allowlisted_path_is_repo_scoped() -> None:
         assert any("allowed self-merge category" in reason for reason in reasons)
 
 
+def test_classify_sensitive_path_overridden_by_allowlist() -> None:
+    """Explicitly allowlisted paths pass even when the keyword scanner flags them.
+
+    Real case: LLM tokenizer utility files like gptme/util/tokens.py are flagged by
+    the 'token' keyword heuristic, but they are not auth/security sensitive.
+    An operator can add them to SELF_MERGE_ALLOWED_PATHS to unblock auto-merge.
+    Both the source file and its test file must be allowlisted.
+    """
+    with patch.dict(
+        "os.environ",
+        {
+            "SELF_MERGE_ALLOWED_PATHS": (
+                "gptme/gptme:gptme/util/**,gptme/gptme:tests/test_util_tokens.py"
+            )
+        },
+    ):
+        # Without the fix, both paths would be blocked by "Touches sensitive/security/infra paths"
+        # because "tokens" stem matches the "token" keyword with the plural-s rule.
+        category, reasons = self_merge_check.classify_category(
+            ["gptme/util/tokens.py", "tests/test_util_tokens.py"],
+            repo="gptme/gptme",
+        )
+        assert category is not None, f"Expected allowed, got reasons: {reasons}"
+        assert not any("sensitive" in r.lower() for r in reasons)
+
+
+def test_is_allowed_file_allowlist_overrides_sensitive_path() -> None:
+    """is_allowed_file returns True for an allowlisted path even when it is sensitive."""
+    allowlist = {"gptme/gptme": ["gptme/util/**"]}
+    # Without allowlist: blocked by the sensitive-path heuristic ("token" → "tokens")
+    assert not self_merge_check.is_allowed_file("gptme/util/tokens.py")
+    # With explicit allowlist: allowed (operator override takes precedence)
+    assert self_merge_check.is_allowed_file(
+        "gptme/util/tokens.py", repo="gptme/gptme", repo_path_allowlist=allowlist
+    )
+
+
 def test_evaluate_pr_captures_head_sha() -> None:
     """CheckResult.head_sha reflects the headRefOid from fetch_pr."""
     pr_data = {
