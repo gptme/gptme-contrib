@@ -921,11 +921,19 @@ def is_allowed_file(
     repo_path_allowlist: dict[str, list[str]] | None = None,
 ) -> bool:
     """Check if a file falls into any allowed self-merge category."""
-    if is_sensitive_path(path):
-        return False
+    # Hard-reject bot config and spec-like docs regardless of allowlist — these
+    # categories require human review regardless of what the operator has allowlisted.
     if is_bot_config(path):
         return False
     if is_doc_file(path) and is_spec_like_doc(path):
+        return False
+    # Explicit repo allowlist overrides only the sensitive-path keyword heuristic.
+    # If an operator has deliberately allowlisted a path, that decision stands even
+    # when the keyword scanner would flag it (e.g. LLM tokenizer files named tokens.py),
+    # but bot-config and spec-like-doc guards above are not bypassable.
+    if is_repo_allowlisted_path(path, repo, repo_path_allowlist):
+        return True
+    if is_sensitive_path(path):
         return False
     return (
         is_test_file(path)
@@ -933,7 +941,6 @@ def is_allowed_file(
         or is_task_metadata(path)
         or is_internal_tooling(path)
         or is_doc_file(path)
-        or is_repo_allowlisted_path(path, repo, repo_path_allowlist)
     )
 
 
@@ -950,7 +957,16 @@ def classify_category(
     if not paths:
         return None, ["PR has no changed files"]
 
-    if any(is_sensitive_path(path) for path in paths):
+    # Build the allowlist before the sensitive-path check so that explicitly
+    # allowlisted paths can override the keyword heuristic (e.g. an LLM tokenizer
+    # file named tokens.py passes when the operator adds it to SELF_MERGE_ALLOWED_PATHS).
+    repo_path_allowlist = _get_repo_path_allowlist()
+
+    if any(
+        is_sensitive_path(path)
+        and not is_repo_allowlisted_path(path, repo, repo_path_allowlist)
+        for path in paths
+    ):
         reasons.append("Touches sensitive/security/infra paths")
         return None, reasons
 
@@ -963,8 +979,6 @@ def classify_category(
     if any(is_doc_file(path) and is_spec_like_doc(path) for path in paths):
         reasons.append("Touches spec-like documentation requiring human review")
         return None, reasons
-
-    repo_path_allowlist = _get_repo_path_allowlist()
 
     # Single-category fast paths
     if all(is_test_file(path) for path in paths):
