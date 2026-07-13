@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch community gptme extensions and update state/community_plugins.json.
+"""Fetch community gptme extensions and update community_plugins.json.
 
 Merges two sources:
 1. registry.gptme.org/registry.json — curated official list (seed/baseline)
@@ -46,7 +46,7 @@ _TYPE_TO_TOPICS: dict[str, list[str]] = {
     "skill / mcp-server": ["gptme-skill", "gptme-mcp-server"],
 }
 
-DEFAULT_OUTPUT = Path(__file__).parent.parent / "state" / "community_plugins.json"
+DEFAULT_OUTPUT = Path(__file__).parent.parent / "community_plugins.json"
 
 
 def fetch_registry() -> tuple[list[dict], bool]:
@@ -183,7 +183,7 @@ def main() -> int:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help="Output JSON file (default: state/community_plugins.json)",
+        help="Output JSON file (default: community_plugins.json)",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print result without writing"
