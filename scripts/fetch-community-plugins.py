@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Fetch community gptme extensions from GitHub topics and update state/community_plugins.json.
+"""Fetch community gptme extensions and update state/community_plugins.json.
 
-Searches GitHub for repos tagged with gptme-plugin, gptme-skill, or gptme-mcp-server
-topics and writes the results to state/community_plugins.json for use by gptme-dashboard.
+Merges two sources:
+1. registry.gptme.org/registry.json — curated official list (seed/baseline)
+2. GitHub topic search for gptme-plugin, gptme-skill, gptme-mcp-server
+
+The registry provides stable coverage of official gptme/* repos regardless of
+whether they have the correct GitHub topics applied. Topic search discovers
+third-party community extensions organically. Together they give complete coverage.
 
 Usage:
     python3 scripts/fetch-community-plugins.py
@@ -27,7 +32,58 @@ TOPICS = ["gptme-plugin", "gptme-skill", "gptme-mcp-server"]
 # Repos to exclude (the contrib repo itself, which is the host)
 EXCLUDE_NAMES = {"gptme/gptme-contrib"}
 
+# Registry repo that maintains the curated official list
+REGISTRY_REPO = "gptme/registry.gptme.org"
+REGISTRY_FILE = "registry.json"
+
+# Map registry type strings to gptme topic names
+_TYPE_TO_TOPICS: dict[str, list[str]] = {
+    "plugin": ["gptme-plugin"],
+    "skill": ["gptme-skill"],
+    "mcp-server": ["gptme-mcp-server"],
+    "plugin / skill": ["gptme-plugin", "gptme-skill"],
+    "plugin / mcp-server": ["gptme-plugin", "gptme-mcp-server"],
+    "skill / mcp-server": ["gptme-skill", "gptme-mcp-server"],
+}
+
 DEFAULT_OUTPUT = Path(__file__).parent.parent / "state" / "community_plugins.json"
+
+
+def fetch_registry() -> list[dict]:
+    """Fetch the curated registry from registry.gptme.org and convert to entry format."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{REGISTRY_REPO}/contents/{REGISTRY_FILE}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"Warning: failed to fetch registry: {exc}", file=sys.stderr)
+        return []
+
+    import base64
+
+    raw = json.loads(result.stdout)
+    registry = json.loads(base64.b64decode(raw["content"]).decode())
+
+    entries = []
+    for item in registry:
+        name = item.get("name", "")
+        if name in EXCLUDE_NAMES:
+            continue
+        type_str = item.get("type", "")
+        topics = _TYPE_TO_TOPICS.get(type_str, [])
+        entry = {
+            "name": name,
+            "description": (item.get("description") or "").strip(),
+            "url": item.get("url", f"https://github.com/{name}"),
+            "stars": item.get("stars", 0),
+            "language": item.get("language") or "",
+            "topics": topics,
+        }
+        entries.append(entry)
+    return entries
 
 
 def search_topic(topic: str) -> list[dict]:
@@ -49,7 +105,7 @@ def search_topic(topic: str) -> list[dict]:
     return items
 
 
-def fetch_all() -> tuple[list[dict], list[str]]:
+def fetch_topics() -> tuple[list[dict], list[str]]:
     """Fetch all repos across all gptme topics, deduplicated by full_name.
 
     Returns (entries, failed_topics) — failed_topics is non-empty when any
@@ -89,6 +145,30 @@ def fetch_all() -> tuple[list[dict], list[str]]:
     return entries, failed_topics
 
 
+def merge_entries(registry: list[dict], topic_hits: list[dict]) -> list[dict]:
+    """Merge curated registry entries with topic-search discoveries.
+
+    Registry entries are the baseline. Topic hits supplement with community repos
+    not in the curated list, and update live star counts for repos in both.
+    Result is sorted descending by stars.
+    """
+    merged: dict[str, dict] = {e["name"]: e for e in registry}
+
+    for entry in topic_hits:
+        name = entry["name"]
+        if name in merged:
+            # Update live stats from GitHub API while preserving registry metadata
+            merged[name]["stars"] = entry["stars"]
+            merged[name]["language"] = entry["language"] or merged[name]["language"]
+            # Add any topic tags not already present
+            existing = set(merged[name]["topics"])
+            merged[name]["topics"] = sorted(existing | set(entry["topics"]))
+        else:
+            merged[name] = entry
+
+    return sorted(merged.values(), key=lambda e: -(e.get("stars") or 0))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Fetch community gptme extensions from GitHub"
@@ -104,9 +184,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    print(f"Fetching curated registry from {REGISTRY_REPO}...", file=sys.stderr)
+    registry_entries = fetch_registry()
+    print(f"Registry: {len(registry_entries)} entries", file=sys.stderr)
+
     print(f"Searching GitHub for topics: {', '.join(TOPICS)}", file=sys.stderr)
-    entries, failed_topics = fetch_all()
-    print(f"Found {len(entries)} community repos", file=sys.stderr)
+    topic_entries, failed_topics = fetch_topics()
+    print(f"Topics: {len(topic_entries)} repos found", file=sys.stderr)
+
+    entries = merge_entries(registry_entries, topic_entries)
+    print(f"Merged: {len(entries)} total entries", file=sys.stderr)
 
     # Refuse to overwrite when any topic search failed (partial or total) and the
     # previous file has entries — a partial failure silently drops repos that are
@@ -126,7 +213,7 @@ def main() -> int:
 
     output = {
         "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "source": "github-topics: " + ", ".join(TOPICS),
+        "source": f"registry.gptme.org + github-topics: {', '.join(TOPICS)}",
         "entries": entries,
     }
 
