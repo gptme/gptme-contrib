@@ -1029,7 +1029,7 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 
 
 def scan_community_plugins(workspace: Path) -> list[dict]:
-    """Load community/external gptme extensions from state/community_plugins.json.
+    """Load community/external gptme extensions from community_plugins.json.
 
     Returns an empty list when the file is missing (graceful degradation for
     workspaces that don't run the fetch script).
@@ -1052,7 +1052,7 @@ def scan_community_plugins(workspace: Path) -> list[dict]:
             ]
         }
     """
-    json_path = workspace / "state" / "community_plugins.json"
+    json_path = workspace / "community_plugins.json"
     if not json_path.exists():
         return []
     try:
