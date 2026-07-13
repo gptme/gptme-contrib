@@ -44,6 +44,14 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+
+def _is_coroutine_callable(fn: Any) -> bool:
+    """Return True if *fn* is async — either an async def or a callable object with async __call__."""
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+        getattr(fn, "__call__", None)
+    )
+
+
 __all__ = [
     "RetryStrategy",
     "StrategyConfig",
@@ -284,7 +292,7 @@ def retry_classified(
     active_configs = {**DEFAULT_STRATEGY_CONFIGS, **(configs or {})}
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        if inspect.iscoroutinefunction(func):
+        if _is_coroutine_callable(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> T:
@@ -292,14 +300,14 @@ def retry_classified(
                 while True:
                     attempt += 1
                     try:
-                        return await func(*args, **kwargs)  # type: ignore[no-any-return]
+                        return await func(*args, **kwargs)  # type: ignore[no-any-return, misc]
                     except Exception as exc:
                         strategy = active_classifier.classify(exc)
                         config = active_configs[strategy]
                         if attempt >= config.max_attempts:
                             logger.debug(
                                 "retry_classified: giving up on %s after %d attempt(s) [%s]",
-                                func.__name__,
+                                getattr(func, "__name__", type(func).__qualname__),
                                 attempt,
                                 strategy.value,
                             )
@@ -307,7 +315,7 @@ def retry_classified(
                         wait = config.compute_wait(attempt)
                         logger.debug(
                             "retry_classified: %s failed (attempt %d/%d, %s) -> sleeping %.2fs",
-                            func.__name__,
+                            getattr(func, "__name__", type(func).__qualname__),
                             attempt,
                             config.max_attempts,
                             strategy.value,
@@ -332,7 +340,7 @@ def retry_classified(
                     if attempt >= config.max_attempts:
                         logger.debug(
                             "retry_classified: giving up on %s after %d attempt(s) [%s]",
-                            func.__name__,
+                            getattr(func, "__name__", type(func).__qualname__),
                             attempt,
                             strategy.value,
                         )
@@ -340,7 +348,7 @@ def retry_classified(
                     wait = config.compute_wait(attempt)
                     logger.debug(
                         "retry_classified: %s failed (attempt %d/%d, %s) -> sleeping %.2fs",
-                        func.__name__,
+                        getattr(func, "__name__", type(func).__qualname__),
                         attempt,
                         config.max_attempts,
                         strategy.value,

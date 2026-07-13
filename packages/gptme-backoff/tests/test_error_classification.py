@@ -332,3 +332,26 @@ async def test_retry_classified_async_auth_fails_fast() -> None:
     with pytest.raises(HTTPError):
         await denied()
     assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_classified_async_callable_objects() -> None:
+    """retry_classified must detect callable objects with async __call__ as async.
+
+    Without _is_coroutine_callable, the sync wrapper is used, which returns the
+    coroutine object as a successful result — exceptions inside the coroutine
+    body are never caught or retried.
+    """
+    calls = {"n": 0}
+
+    class AsyncService:
+        async def __call__(self) -> str:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ConnectionError("transient")
+            return "ok"
+
+    svc = retry_classified()(AsyncService())
+    result = await svc()
+    assert result == "ok"
+    assert calls["n"] == 3
