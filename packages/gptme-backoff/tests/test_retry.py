@@ -219,6 +219,23 @@ def test_retry_file_op_does_not_retry_on_valueerror():
     assert call_count[0] == 1
 
 
+@pytest.mark.asyncio
+async def test_retry_file_op_retries_async_on_oserror():
+    """Async file ops are retried on OSError (not swallowed as a coroutine object)."""
+    call_count = [0]
+
+    @retry_file_op(max_attempts=3, min_wait=0.01, max_wait=0.01)
+    async def unstable() -> str:
+        call_count[0] += 1
+        if call_count[0] < 3:
+            raise OSError("file locked")
+        return "ok"
+
+    result = await unstable()
+    assert result == "ok"
+    assert call_count[0] == 3
+
+
 # ---- Edge cases ----
 
 

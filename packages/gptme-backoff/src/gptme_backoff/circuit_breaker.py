@@ -31,6 +31,7 @@ __all__ = [
     "State",
 ]
 
+import inspect
 import logging
 import threading
 import time
@@ -146,6 +147,51 @@ class CircuitBreaker:
         except Exception as exc:
             self._on_failure(exc)
             raise
+        except BaseException:
+            # CancelledError, KeyboardInterrupt, etc. — clear probe so the
+            # breaker doesn't stay permanently stuck in HALF_OPEN.
+            with self._lock:
+                if self._state == State.HALF_OPEN:
+                    self._probe_in_flight = False
+            raise
+        else:
+            self._on_success()
+            return result
+
+    async def async_call(
+        self, fn: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        """Async version of *call* for coroutine functions.
+
+        Awaits the coroutine so that exceptions raised inside it are captured
+        by the circuit-breaker logic, not by the caller's event loop.
+        """
+        with self._lock:
+            state = self._evaluate_state()
+
+            if state == State.OPEN:
+                retry_after = None
+                if self._opened_at is not None:
+                    retry_after = max(
+                        0.0, self.cooldown - (time.monotonic() - self._opened_at)
+                    )
+                raise CircuitBreakerOpen(self.name, retry_after=retry_after)
+
+            if state == State.HALF_OPEN:
+                if self._probe_in_flight:
+                    raise CircuitBreakerOpen(self.name)
+                self._probe_in_flight = True
+
+        try:
+            result = await fn(*args, **kwargs)
+        except Exception as exc:
+            self._on_failure(exc)
+            raise
+        except BaseException:
+            with self._lock:
+                if self._state == State.HALF_OPEN:
+                    self._probe_in_flight = False
+            raise
         else:
             self._on_success()
             return result
@@ -194,8 +240,20 @@ class CircuitBreaker:
         log.info("Circuit breaker '%s' manually reset to CLOSED", self.name)
 
     def wrap(self, fn: F) -> F:
-        """Decorator: wrap a callable with this circuit breaker."""
+        """Decorator: wrap a callable with this circuit breaker.
+
+        Async functions are wrapped with *async_call* so that exceptions raised
+        inside the coroutine body are captured, not just coroutine creation.
+        """
         from functools import wraps
+
+        if inspect.iscoroutinefunction(fn):
+
+            @wraps(fn)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                return await self.async_call(fn, *args, **kwargs)
+
+            return async_wrapper  # type: ignore[return-value]
 
         @wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:

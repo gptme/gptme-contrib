@@ -277,3 +277,58 @@ def test_retry_classified_custom_configs_override() -> None:
     with pytest.raises(ValueError):
         boom()
     assert calls["n"] == 5
+
+
+# --- async retry_classified --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retry_classified_async_success_no_retry() -> None:
+    """async functions work and are actually awaited."""
+    calls = {"n": 0}
+
+    @retry_classified(sleep=lambda _: None)
+    async def ok() -> str:
+        calls["n"] += 1
+        return "done"
+
+    result = await ok()
+    assert result == "done"
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_classified_async_rate_limit_retries() -> None:
+    """Errors raised inside the coroutine body are retried with asyncio.sleep."""
+    calls = {"n": 0}
+    configs = {
+        RetryStrategy.RATE_LIMIT: StrategyConfig(
+            max_attempts=3, base_wait=0.0, multiplier=1.0, max_wait=0.0, jitter=False
+        )
+    }
+
+    @retry_classified(configs=configs)
+    async def flaky() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise HTTPError(429)
+        return "ok"
+
+    result = await flaky()
+    assert result == "ok"
+    assert calls["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_classified_async_auth_fails_fast() -> None:
+    """AUTH errors are not retried in async mode."""
+    calls = {"n": 0}
+
+    @retry_classified()
+    async def denied() -> None:
+        calls["n"] += 1
+        raise HTTPError(401)
+
+    with pytest.raises(HTTPError):
+        await denied()
+    assert calls["n"] == 1

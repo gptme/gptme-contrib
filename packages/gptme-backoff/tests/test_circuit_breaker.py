@@ -12,6 +12,16 @@ from gptme_backoff.circuit_breaker import (
     State,
 )
 
+# ── Async helpers ─────────────────────────────────────────────────────────────
+
+
+async def _async_passing(value: int = 42) -> int:
+    return value
+
+
+async def _async_failing(exc: Exception = RuntimeError("boom")) -> None:
+    raise exc
+
 
 def _failing(exc: Exception = RuntimeError("boom")) -> None:
     raise exc
@@ -300,3 +310,67 @@ def test_circuit_breaker_open_str():
 
     exc2 = CircuitBreakerOpen("my-tool")
     assert "retry after" not in str(exc2)
+
+
+# ── Async wrap ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_async_wrap_passes_through():
+    """@cb.wrap on an async function returns an async callable that works."""
+    cb = CircuitBreaker("test", failure_threshold=5, cooldown=30.0)
+
+    @cb.wrap
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    result = await add(3, 4)
+    assert result == 7
+    assert cb.state == State.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_async_wrap_counts_failures():
+    """Failures inside an async probe are counted, not just coroutine creation."""
+    cb = CircuitBreaker("test", failure_threshold=2, cooldown=30.0)
+
+    @cb.wrap
+    async def boom() -> None:
+        raise ValueError("async fail")
+
+    with pytest.raises(ValueError):
+        await boom()
+    with pytest.raises(ValueError):
+        await boom()
+
+    assert cb.state == State.OPEN
+    with pytest.raises(CircuitBreakerOpen):
+        await boom()
+
+
+@pytest.mark.asyncio
+async def test_async_wrap_probe_flag_cleared_on_base_exception(monkeypatch):
+    """_probe_in_flight is cleared even when BaseException (e.g. CancelledError) escapes."""
+    import asyncio
+
+    cb = CircuitBreaker("test", failure_threshold=1, cooldown=5.0)
+    start = time.monotonic()
+    monkeypatch.setattr("time.monotonic", lambda: start)
+
+    # Open the breaker
+    with pytest.raises(RuntimeError):
+        cb.call(_failing)
+
+    # Advance past cooldown → HALF_OPEN
+    monkeypatch.setattr("time.monotonic", lambda: start + 6.0)
+    assert cb.state == State.HALF_OPEN
+
+    @cb.wrap
+    async def cancellable() -> None:
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cancellable()
+
+    # _probe_in_flight must be cleared so a subsequent probe is allowed
+    assert not cb._probe_in_flight

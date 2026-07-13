@@ -29,7 +29,9 @@ Example::
 
 from __future__ import annotations
 
+import asyncio
 import functools
+import inspect
 import logging
 import random
 import time
@@ -282,6 +284,41 @@ def retry_classified(
     active_configs = {**DEFAULT_STRATEGY_CONFIGS, **(configs or {})}
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        if inspect.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> T:
+                attempt = 0
+                while True:
+                    attempt += 1
+                    try:
+                        return await func(*args, **kwargs)  # type: ignore[no-any-return]
+                    except Exception as exc:
+                        strategy = active_classifier.classify(exc)
+                        config = active_configs[strategy]
+                        if attempt >= config.max_attempts:
+                            logger.debug(
+                                "retry_classified: giving up on %s after %d attempt(s) [%s]",
+                                func.__name__,
+                                attempt,
+                                strategy.value,
+                            )
+                            raise
+                        wait = config.compute_wait(attempt)
+                        logger.debug(
+                            "retry_classified: %s failed (attempt %d/%d, %s) -> sleeping %.2fs",
+                            func.__name__,
+                            attempt,
+                            config.max_attempts,
+                            strategy.value,
+                            wait,
+                        )
+                        if on_retry is not None:
+                            on_retry(exc, strategy, attempt + 1, wait)
+                        await asyncio.sleep(wait)
+
+            return async_wrapper  # type: ignore[return-value]
+
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> T:
             attempt = 0

@@ -271,10 +271,15 @@ def retry_file_op(
         def read_config() -> str:
             ...
     """
-    return retry_sync(
-        stop=tenacity.stop_after_attempt(max_attempts),
-        wait=tenacity.wait_exponential(
-            min=min_wait, max=max_wait, multiplier=multiplier
-        ),
-        retry=tenacity.retry_if_exception_type(retry_on),
-    )
+
+    def decorator(fn: F) -> F:
+        retry_decorator = retry_async if inspect.iscoroutinefunction(fn) else retry_sync
+        return retry_decorator(
+            stop=tenacity.stop_after_attempt(max_attempts),
+            wait=tenacity.wait_exponential(
+                min=min_wait, max=max_wait, multiplier=multiplier
+            ),
+            retry=tenacity.retry_if_exception_type(retry_on),
+        )(fn)
+
+    return decorator
