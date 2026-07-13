@@ -1,0 +1,24 @@
+[project]
+name = "gptme-backoff"
+version = "0.1.0"
+description = "Thin retry utilities built on tenacity — exponential backoff, jitter, and convenient async/sync decorators for agent tool calls"
+requires-python = ">=3.10"
+dependencies = [
+    "tenacity>=9.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.25",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_backoff"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
