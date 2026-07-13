@@ -272,3 +272,45 @@ def test_kwargs_preserved():
     with pytest.raises(_PermanentError):
         func()
     assert call_count[0] == 1  # no retry for non-temporary errors
+
+
+@pytest.mark.asyncio
+async def test_retry_api_call_retries_async_callable_objects():
+    """retry_api_call must detect callable objects with async __call__ as async.
+
+    inspect.iscoroutinefunction(obj) returns False for such objects; the fix uses
+    _is_coroutine_callable which also checks obj.__call__.  Without the fix, the
+    sync tenacity wrapper returns the coroutine object as a "success" result and
+    never retries.
+    """
+    call_count = [0]
+
+    class AsyncFetcher:
+        async def __call__(self) -> str:
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise OSError("transient")
+            return "ok"
+
+    fetcher = retry_api_call(max_attempts=5, min_wait=0, max_wait=0)(AsyncFetcher())
+    result = await fetcher()
+    assert result == "ok"
+    assert call_count[0] == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_file_op_retries_async_callable_objects():
+    """retry_file_op must route callable objects with async __call__ through retry_async."""
+    call_count = [0]
+
+    class AsyncReader:
+        async def __call__(self) -> str:
+            call_count[0] += 1
+            if call_count[0] < 2:
+                raise OSError("busy")
+            return "data"
+
+    reader = retry_file_op(max_attempts=3, min_wait=0, max_wait=0)(AsyncReader())
+    result = await reader()
+    assert result == "data"
+    assert call_count[0] == 2

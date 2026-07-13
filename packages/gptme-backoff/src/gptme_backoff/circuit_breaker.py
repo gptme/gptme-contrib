@@ -38,6 +38,14 @@ import time
 from enum import Enum
 from typing import Any, Callable, TypeVar
 
+
+def _is_coroutine_callable(fn: Any) -> bool:
+    """Return True if *fn* is async — either an async def or a callable object with async __call__."""
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+        getattr(fn, "__call__", None)
+    )
+
+
 log = logging.getLogger("gptme_backoff.circuit_breaker")
 
 T = TypeVar("T")
@@ -247,7 +255,7 @@ class CircuitBreaker:
         """
         from functools import wraps
 
-        if inspect.iscoroutinefunction(fn):
+        if _is_coroutine_callable(fn):
 
             @wraps(fn)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:

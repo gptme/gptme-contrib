@@ -374,3 +374,33 @@ async def test_async_wrap_probe_flag_cleared_on_base_exception(monkeypatch):
 
     # _probe_in_flight must be cleared so a subsequent probe is allowed
     assert not cb._probe_in_flight
+
+
+@pytest.mark.asyncio
+async def test_async_callable_object_wrap_counts_failures():
+    """cb.wrap on a callable object with async __call__ must use the async path.
+
+    inspect.iscoroutinefunction(obj) returns False for callable objects; only
+    inspect.iscoroutinefunction(obj.__call__) returns True.  Without the
+    _is_coroutine_callable fix, wrap() would route through cb.call() which
+    records success when the coroutine object is created (before it is awaited),
+    so failures inside the coroutine body are never counted.
+    """
+    cb = CircuitBreaker("test", failure_threshold=2, cooldown=30.0)
+
+    class AsyncService:
+        async def __call__(self) -> None:
+            raise RuntimeError("service down")
+
+    svc = AsyncService()
+    wrapped = cb.wrap(svc)
+
+    with pytest.raises(RuntimeError):
+        await wrapped()
+    with pytest.raises(RuntimeError):
+        await wrapped()
+
+    # Breaker must have opened — failures were counted, not swallowed
+    assert cb.state == State.OPEN
+    with pytest.raises(CircuitBreakerOpen):
+        await wrapped()

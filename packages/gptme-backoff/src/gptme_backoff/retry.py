@@ -22,6 +22,15 @@ from tenacity.stop import stop_base
 from tenacity.wait import wait_base
 
 T = TypeVar("T")
+
+
+def _is_coroutine_callable(fn: Any) -> bool:
+    """Return True if *fn* is async — either an async def or a callable object with async __call__."""
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+        getattr(fn, "__call__", None)
+    )
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 
@@ -228,7 +237,7 @@ def retry_api_call(
     wait_strategy = _make_wait_strategy(min_wait, max_wait, multiplier, jitter)
 
     def decorator(fn: F) -> F:
-        retry_decorator = retry_async if inspect.iscoroutinefunction(fn) else retry_sync
+        retry_decorator = retry_async if _is_coroutine_callable(fn) else retry_sync
         return retry_decorator(
             stop=tenacity.stop_any(*stop_conditions),
             wait=wait_strategy,
@@ -273,7 +282,7 @@ def retry_file_op(
     """
 
     def decorator(fn: F) -> F:
-        retry_decorator = retry_async if inspect.iscoroutinefunction(fn) else retry_sync
+        retry_decorator = retry_async if _is_coroutine_callable(fn) else retry_sync
         return retry_decorator(
             stop=tenacity.stop_after_attempt(max_attempts),
             wait=tenacity.wait_exponential(
