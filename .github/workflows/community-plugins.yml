@@ -26,7 +26,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state/community_plugins.json
+          git add community_plugins.json
           if git diff --cached --quiet; then
             echo "No changes to community_plugins.json"
           else
@@ -51,6 +51,6 @@ jobs:
                 --base ${{ github.event.repository.default_branch }} \
                 --head "$branch" \
                 --title "chore(community-plugins): weekly refresh" \
-                --body "Automated weekly refresh of state/community_plugins.json."
+                --body "Automated weekly refresh of community_plugins.json."
             fi
           fi
