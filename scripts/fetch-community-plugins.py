@@ -49,8 +49,11 @@ _TYPE_TO_TOPICS: dict[str, list[str]] = {
 DEFAULT_OUTPUT = Path(__file__).parent.parent / "state" / "community_plugins.json"
 
 
-def fetch_registry() -> list[dict]:
-    """Fetch the curated registry from registry.gptme.org and convert to entry format."""
+def fetch_registry() -> tuple[list[dict], bool]:
+    """Fetch the curated registry from registry.gptme.org and convert to entry format.
+
+    Returns (entries, failed) — failed is True when the registry fetch raised an error.
+    """
     try:
         result = subprocess.run(
             ["gh", "api", f"repos/{REGISTRY_REPO}/contents/{REGISTRY_FILE}"],
@@ -60,7 +63,7 @@ def fetch_registry() -> list[dict]:
         )
     except subprocess.CalledProcessError as exc:
         print(f"Warning: failed to fetch registry: {exc}", file=sys.stderr)
-        return []
+        return [], True
 
     import base64
 
@@ -83,7 +86,7 @@ def fetch_registry() -> list[dict]:
             "topics": topics,
         }
         entries.append(entry)
-    return entries
+    return entries, False
 
 
 def search_topic(topic: str) -> list[dict]:
@@ -157,9 +160,12 @@ def merge_entries(registry: list[dict], topic_hits: list[dict]) -> list[dict]:
     for entry in topic_hits:
         name = entry["name"]
         if name in merged:
-            # Update live stats from GitHub API while preserving registry metadata
+            # Update live data from GitHub API while preserving registry metadata
             merged[name]["stars"] = entry["stars"]
             merged[name]["language"] = entry["language"] or merged[name]["language"]
+            # Prefer the live GitHub html_url over the registry URL (registry may be stale)
+            if entry.get("url"):
+                merged[name]["url"] = entry["url"]
             # Add any topic tags not already present
             existing = set(merged[name]["topics"])
             merged[name]["topics"] = sorted(existing | set(entry["topics"]))
@@ -185,7 +191,7 @@ def main() -> int:
     args = parser.parse_args()
 
     print(f"Fetching curated registry from {REGISTRY_REPO}...", file=sys.stderr)
-    registry_entries = fetch_registry()
+    registry_entries, registry_failed = fetch_registry()
     print(f"Registry: {len(registry_entries)} entries", file=sys.stderr)
 
     print(f"Searching GitHub for topics: {', '.join(TOPICS)}", file=sys.stderr)
@@ -195,15 +201,19 @@ def main() -> int:
     entries = merge_entries(registry_entries, topic_entries)
     print(f"Merged: {len(entries)} total entries", file=sys.stderr)
 
-    # Refuse to overwrite when any topic search failed (partial or total) and the
-    # previous file has entries — a partial failure silently drops repos that are
-    # exclusively tagged with the failing topic, which is just as bad as a total wipe.
-    if failed_topics and not args.dry_run and args.output.exists():
+    # Refuse to overwrite when any source failed and the previous file has entries —
+    # a registry failure silently drops curated repos; a topic failure drops community
+    # repos tagged with the failing topic. Either way it's as bad as a total wipe.
+    any_source_failed = registry_failed or bool(failed_topics)
+    if any_source_failed and not args.dry_run and args.output.exists():
         try:
             prev = json.loads(args.output.read_text())
             if prev.get("entries"):
+                failed_labels = (
+                    ["registry"] if registry_failed else []
+                ) + failed_topics
                 print(
-                    f"Error: topic search(es) failed: {', '.join(failed_topics)}."
+                    f"Error: fetch failed for: {', '.join(failed_labels)}."
                     " Refusing to overwrite previous data — check GitHub API access.",
                     file=sys.stderr,
                 )
