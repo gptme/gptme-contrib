@@ -2147,12 +2147,12 @@ def auto(
         except Exception as e:
             console.print(f"[red]Error processing mentions: {e}")
 
-    # Process timeline (if not skipped and still under limits)
-    if (
-        not skip_timeline
-        and total_tweets_processed < max_tweets
-        and total_drafts_generated < max_drafts
-    ):
+    # Process timeline (if not skipped and still under draft limits).
+    # Timeline gets its own max_tweets budget independent of mentions so that
+    # stale repeated mentions don't starve timeline processing -- which is the
+    # path that writes fresh tweets to the evaluation/cache pipeline and feeds
+    # surface-interesting.py.  Reference: investigate-twitter-cache-freeze-green-loop.
+    if not skip_timeline and total_drafts_generated < max_drafts:
         console.print("\n[bold]Processing timeline[/bold]")
         try:
             # Get timeline tweets
@@ -2187,10 +2187,9 @@ def auto(
                 source = "home timeline"
 
             if tweets.data:
-                remaining_tweets = max_tweets - total_tweets_processed
-                console.print(
-                    f"Processing {min(len(tweets.data), remaining_tweets)} tweets from {source}"
-                )
+                # Timeline gets its own budget, not what mentions left behind
+                timeline_budget = min(max_tweets, len(tweets.data))
+                console.print(f"Processing {timeline_budget} tweets from {source}")
 
                 if dry_run:
                     console.print(
@@ -2198,7 +2197,7 @@ def auto(
                     )
 
                 drafts_from_timeline = process_timeline_tweets(
-                    tweets.data[:remaining_tweets],
+                    tweets.data[:timeline_budget],
                     tweets.includes["users"] if tweets.includes else None,
                     source,
                     client,
@@ -2208,7 +2207,7 @@ def auto(
                 )
 
                 # Update counters
-                total_tweets_processed += min(len(tweets.data), remaining_tweets)
+                total_tweets_processed += timeline_budget
                 total_drafts_generated += drafts_from_timeline
             else:
                 console.print("[yellow]No new tweets found in timeline")
