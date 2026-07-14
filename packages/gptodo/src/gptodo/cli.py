@@ -872,40 +872,45 @@ def check_directory(
     console.print(f"\n[bold {style}]{config.emoji} {config.type_name.title()} Status[/]")
 
     if not summary_only:
-        # Print sections in order
-        if results["issues"]:
-            print_status_section(
-                console,
-                "Issues Found",
-                results["issues"],
-                show_state=True,
-            )
-
-        if results["untracked"]:
-            print_status_section(
-                console,
-                "Untracked Files",
-                results["untracked"],
-            )
-
-        # Determine which states to show based on compact mode.
-        # Compact = the active work funnel: untriaged, triaged, in-flight,
-        # and awaiting verification. Exclude blocked, deferred, and terminal
-        # states so the short view stays focused on real work.
-        states_to_show = (
-            [s for s in ("backlog", "todo", "active", "ready_for_review") if s in config.states]
-            if compact
-            else config.states
-        )
-
-        # Print active states in order
-        for state in states_to_show:
-            if state in config.states and results.get(state):
+        # Check if filtering resulted in no matching tasks
+        all_tasks_flat = [t for lst in results.values() for t in lst]
+        if (pool_filter is not None or exclude_pool is not None) and not all_tasks_flat:
+            console.print("  [dim]No tasks match the pool filter.[/]")
+        else:
+            # Print sections in order
+            if results["issues"]:
                 print_status_section(
                     console,
-                    state,
-                    results[state],
+                    "Issues Found",
+                    results["issues"],
+                    show_state=True,
                 )
+
+            if results["untracked"]:
+                print_status_section(
+                    console,
+                    "Untracked Files",
+                    results["untracked"],
+                )
+
+            # Determine which states to show based on compact mode.
+            # Compact = the active work funnel: untriaged, triaged, in-flight,
+            # and awaiting verification. Exclude blocked, deferred, and terminal
+            # states so the short view stays focused on real work.
+            states_to_show = (
+                [s for s in ("backlog", "todo", "active", "ready_for_review") if s in config.states]
+                if compact
+                else config.states
+            )
+
+            # Print active states in order
+            for state in states_to_show:
+                if state in config.states and results.get(state):
+                    print_status_section(
+                        console,
+                        state,
+                        results[state],
+                    )
 
     # Print summary
     print_summary(console, results, config)
