@@ -354,15 +354,109 @@ class TestTaskToDictPool:
         assert tasks_by_id["frontier-task"]["pool"] == "frontier"
         assert tasks_by_id["general-task"]["pool"] == "general"
 
-    def test_status_pool_filter_requires_json(self, tmp_path: Path, monkeypatch) -> None:
+    def test_status_pool_filter_human_output_filters_tasks(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()
-        write_task(tasks_dir, "frontier-task", state="backlog", created="2026-01-01T00:00:00")
+        write_task(tasks_dir, "general-task", state="backlog", created="2026-01-01T00:00:00")
+        write_task(
+            tasks_dir,
+            "frontier-task",
+            state="active",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
         monkeypatch.chdir(tmp_path)
-        runner = cli_runner_separate_stderr()
+        runner = CliRunner()
         result = runner.invoke(cli, ["status", "--pool", "frontier"])
-        assert result.exit_code == 2
-        assert "--pool/--exclude-pool are only supported with --json" in result.stderr
+        assert result.exit_code == 0
+        assert "frontier-task" in result.output
+        assert "general-task" not in result.output
+        assert "Other pools:" not in result.output
+
+    def test_status_compact_pool_filter_human_output_filters_tasks(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(tasks_dir, "general-backlog", state="backlog", created="2026-01-01T00:00:00")
+        write_task(
+            tasks_dir,
+            "frontier-active",
+            state="active",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", "--compact", "--pool", "frontier"])
+        assert result.exit_code == 0
+        assert "frontier-active" in result.output
+        assert "general-backlog" not in result.output
+
+    def test_status_exclude_pool_filter_human_output_filters_tasks(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(tasks_dir, "general-task", state="backlog", created="2026-01-01T00:00:00")
+        write_task(
+            tasks_dir,
+            "frontier-task",
+            state="active",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", "--exclude-pool", "frontier"])
+        assert result.exit_code == 0
+        assert "general-task" in result.output
+        assert "frontier-task" not in result.output
+        assert "Other pools:" not in result.output
+
+    def test_status_pool_filter_empty_result_shows_message(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """When filtering matches no tasks, show explicit 'No tasks match' message."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(tasks_dir, "general-task", state="backlog", created="2026-01-01T00:00:00")
+        write_task(
+            tasks_dir,
+            "frontier-task",
+            state="active",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        # Filter for a non-existent pool
+        result = runner.invoke(cli, ["status", "--pool", "nonexistent"])
+        assert result.exit_code == 0
+        assert "No tasks match the pool filter" in result.output
+
+    def test_status_summary_pool_filter_empty_result_shows_message(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """When --summary filtering matches no tasks, show explicit 'No tasks match' message."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(tasks_dir, "general-task", state="backlog", created="2026-01-01T00:00:00")
+        write_task(
+            tasks_dir,
+            "frontier-task",
+            state="active",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        # Filter for a non-existent pool with --summary
+        result = runner.invoke(cli, ["status", "--summary", "--pool", "nonexistent"])
+        assert result.exit_code == 0
+        assert "No tasks match the pool filter" in result.output
 
     def test_status_shows_hidden_pools_discoverability(self, tmp_path: Path, monkeypatch) -> None:
         """Human-readable status shows 'Other pools: frontier: N' so non-default pools
