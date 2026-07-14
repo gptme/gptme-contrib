@@ -14,14 +14,6 @@ from typing import Any, cast
 
 import click
 
-# fcntl is POSIX-only; on Windows we skip locking.
-try:
-    import fcntl as _fcntl
-
-    _has_fcntl = True
-except ImportError:
-    _has_fcntl = False
-
 from .discovery import (
     discover_cc_sessions,
     discover_codex_sessions,
@@ -1081,81 +1073,67 @@ def annotate(
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     store.sessions_dir.mkdir(parents=True, exist_ok=True)
 
-    # Hold an exclusive lock to serialise concurrent annotate calls during the
-    # load → mutate → rewrite cycle (prevents annotate-vs-annotate clobber).
-    # Note: sync/post-session use store.append(), which does not acquire this
-    # lock. Fully protecting against annotate+sync races would require locking
-    # inside SessionStore itself — that is a future improvement.
+    # Hold the store's exclusive lock across the whole load → mutate → rewrite
+    # cycle so a concurrent writer cannot land between the load and the
+    # rewrite and have its update clobbered by our stale in-memory copy.
+    # SessionStore.lock() is reentrant, so the rewrite() below nests safely.
+    with store.lock():
+        records = store.load_all()
 
-    # The lock file is a permanent sentinel — never deleted. This ensures all
-    # concurrent annotate calls operate on the same inode, so the flock queue
-    # works correctly. Deleting the file would allow a newly arriving process
-    # to acquire LOCK_EX on a fresh inode while a blocked waiter holds
-    # LOCK_EX on the old inode, breaking mutual exclusion.
-    lock_path = store.path.with_name(store.path.name + ".lock")
-    with open(lock_path, "a", encoding="utf-8") as lock_file:
-        if _has_fcntl:
-            _fcntl.flock(lock_file, _fcntl.LOCK_EX)
-        try:
-            records = store.load_all()
+        if not records:
+            raise click.ClickException("No session records found in store.")
 
-            if not records:
-                raise click.ClickException("No session records found in store.")
+        # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
+        matches = [r for r in records if r.session_id.startswith(session_id)]
+        if not matches:
+            raise click.ClickException(
+                f"No session found with ID prefix {session_id!r}. "
+                "Run 'gptme-sessions query' to list available session IDs."
+            )
+        if len(matches) > 1:
+            ids = ", ".join(r.session_id for r in matches)
+            raise click.ClickException(
+                f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
+            )
 
-            # Resolve by prefix — short IDs like "a1b2" are common; IDs are lowercase hex
-            matches = [r for r in records if r.session_id.startswith(session_id)]
-            if not matches:
-                raise click.ClickException(
-                    f"No session found with ID prefix {session_id!r}. "
-                    "Run 'gptme-sessions query' to list available session IDs."
-                )
-            if len(matches) > 1:
-                ids = ", ".join(r.session_id for r in matches)
-                raise click.ClickException(
-                    f"Ambiguous prefix {session_id!r} matches {len(matches)} sessions: {ids}"
-                )
+        record = matches[0]
 
-            record = matches[0]
+        # Apply only the fields that were explicitly provided
+        if model is not None:
+            record.model = model
+        if harness is not None:
+            record.harness = harness
+        if run_type is not None:
+            record.run_type = normalize_run_type(run_type)
+        if category is not None:
+            record.category = category
+        if outcome is not None:
+            record.outcome = outcome
+        if duration is not None:
+            record.duration_seconds = duration
+        if journal_path is not None:
+            record.journal_path = journal_path
+        if selector_mode is not None:
+            record.selector_mode = selector_mode
+        if trigger is not None:
+            record.trigger = trigger
+        if token_count is not None:
+            record.token_count = token_count
+        if recommended_category is not None:
+            record.recommended_category = recommended_category
+        if add_deliverable:
+            existing = list(record.deliverables or [])
+            for d in add_deliverable:
+                if d not in existing:
+                    existing.append(d)
+            record.deliverables = existing
 
-            # Apply only the fields that were explicitly provided
-            if model is not None:
-                record.model = model
-            if harness is not None:
-                record.harness = harness
-            if run_type is not None:
-                record.run_type = normalize_run_type(run_type)
-            if category is not None:
-                record.category = category
-            if outcome is not None:
-                record.outcome = outcome
-            if duration is not None:
-                record.duration_seconds = duration
-            if journal_path is not None:
-                record.journal_path = journal_path
-            if selector_mode is not None:
-                record.selector_mode = selector_mode
-            if trigger is not None:
-                record.trigger = trigger
-            if token_count is not None:
-                record.token_count = token_count
-            if recommended_category is not None:
-                record.recommended_category = recommended_category
-            if add_deliverable:
-                existing = list(record.deliverables or [])
-                for d in add_deliverable:
-                    if d not in existing:
-                        existing.append(d)
-                record.deliverables = existing
+        store.rewrite(records)
 
-            store.rewrite(records)
-
-            if as_json:
-                click.echo(json.dumps(record.to_dict(), indent=2, default=str))
-            else:
-                click.echo(f"Updated session {record.session_id}.")
-        finally:
-            if _has_fcntl:
-                _fcntl.flock(lock_file, _fcntl.LOCK_UN)
+    if as_json:
+        click.echo(json.dumps(record.to_dict(), indent=2, default=str))
+    else:
+        click.echo(f"Updated session {record.session_id}.")
 
 
 # -- auto-tag ----------------------------------------------------------------

@@ -6,11 +6,21 @@ import json
 import logging
 import os
 import sys
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
 from .record import SessionRecord
+
+try:
+    import fcntl as _fcntl
+
+    _has_fcntl = True
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    _has_fcntl = False
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +56,49 @@ class SessionStore:
         self.sessions_dir = sessions_dir
         self.sessions_file = sessions_file
         self.path = sessions_dir / sessions_file
+        self._lock_depth = 0
+
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """Cross-process exclusive lock over store mutations.
+
+        ``append()`` and ``rewrite()`` acquire this internally, so any two
+        processes mutating the store are serialised.  Callers doing a
+        read-modify-write cycle (``load_all()`` → mutate → ``rewrite()``)
+        should additionally hold this around the *whole* cycle, or a
+        concurrent writer can land between the load and the rewrite and have
+        its field updates clobbered by the stale in-memory copy.
+
+        Reentrant within a single ``SessionStore`` instance (flock treats
+        separate fds in one process as independent owners, so a naive nested
+        acquire would self-deadlock).  Not thread-safe — the store is designed
+        for single-threaded CLI processes.
+
+        The lock file is a permanent sentinel next to the store file — never
+        delete it.  Deleting it would let a newly arriving process acquire
+        LOCK_EX on a fresh inode while a blocked waiter holds LOCK_EX on the
+        old inode, breaking mutual exclusion.
+        """
+        if self._lock_depth > 0:
+            self._lock_depth += 1
+            try:
+                yield
+            finally:
+                self._lock_depth -= 1
+            return
+
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        with open(lock_path, "a", encoding="utf-8") as lock_file:
+            if _has_fcntl:
+                _fcntl.flock(lock_file, _fcntl.LOCK_EX)
+            self._lock_depth = 1
+            try:
+                yield
+            finally:
+                self._lock_depth = 0
+                if _has_fcntl:
+                    _fcntl.flock(lock_file, _fcntl.LOCK_UN)
 
     def _repair_tail(self) -> bool:
         """Remove a corrupt partial JSON line from the end of the file.
@@ -53,6 +106,9 @@ class SessionStore:
         A process killed mid-write (OOM, timeout, SIGKILL) can leave a
         partial JSON record as the last line.  This method detects and
         truncates it so the next ``append()`` starts from a clean state.
+
+        Callers must hold ``lock()`` — a concurrent writer between the read
+        and the ftruncate would make the truncation destructive.
 
         Returns True if a partial line was detected and removed.
         """
@@ -107,12 +163,12 @@ class SessionStore:
 
     def append(self, record: SessionRecord) -> Path:
         """Append a session record to the JSONL store.  Self-heals corrupt tails."""
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self._repair_tail()
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(record.to_json() + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        with self.lock():
+            self._repair_tail()
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(record.to_json() + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         return self.path
 
     def load_all(self) -> list[SessionRecord]:
@@ -139,45 +195,63 @@ class SessionStore:
         and appended to the output).  There is no way to delete a record via
         this method; to remove records, edit the JSONL file directly.
 
-        Re-reads the current file before writing to:
-        - Preserve malformed JSONL lines rather than silently dropping them.
-        - Reduce (but not eliminate) the append-vs-rewrite race: records
-          appended via ``append()`` between the caller's ``load_all()`` and
-          this re-read are picked up.  Any ``append()`` that lands *after* the
-          re-read completes but before the atomic replace will still be lost;
-          fully closing this window would require ``append()`` to participate
-          in the same flock, which is a future improvement.
+        Holds the store lock across the re-read → write → replace cycle, so
+        concurrent ``append()``/``rewrite()`` calls are serialised: an append
+        either lands before the re-read (and is preserved) or blocks until
+        the replace completes (and lands in the new file).  The re-read also:
+        - Preserves malformed JSONL lines rather than silently dropping them.
+        - Picks up records appended between the caller's ``load_all()`` and
+          this call.  Callers that *mutate* loaded records should hold
+          ``lock()`` around their whole load → mutate → rewrite cycle to
+          avoid clobbering a concurrent writer's field updates with a stale
+          in-memory copy.
+
+        The temp file name is unique per call (pid + random suffix) and
+        fsynced before the atomic replace: a fixed shared temp name would let
+        two concurrent rewriters interleave writes on the same inode and
+        install a torn file (the mechanism behind truncated mid-file records
+        observed 2026-07-14).  Per-call uniqueness also covers the
+        unsupported-but-possible case of two threads sharing one store
+        instance, where the reentrancy counter races and both could
+        otherwise write the same temp.
 
         ``records`` takes precedence for any session_id present in both.
         """
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        with self.lock():
+            known_ids = {r.session_id for r in records}
+            extra_records: list[SessionRecord] = []
+            malformed_lines: list[str] = []
 
-        known_ids = {r.session_id for r in records}
-        extra_records: list[SessionRecord] = []
-        malformed_lines: list[str] = []
+            if self.path.exists():
+                with open(self.path, encoding="utf-8") as f:
+                    for raw in f:
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            rec = SessionRecord.from_dict(json.loads(raw))
+                            if rec.session_id not in known_ids:
+                                extra_records.append(rec)
+                        except (json.JSONDecodeError, TypeError, AttributeError):
+                            malformed_lines.append(raw)
 
-        if self.path.exists():
-            with open(self.path, encoding="utf-8") as f:
-                for raw in f:
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    try:
-                        rec = SessionRecord.from_dict(json.loads(raw))
-                        if rec.session_id not in known_ids:
-                            extra_records.append(rec)
-                    except (json.JSONDecodeError, TypeError, AttributeError):
-                        malformed_lines.append(raw)
-
-        tmp_path = self.path.with_name(self.path.name + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            for record in records:
-                f.write(record.to_json() + "\n")
-            for record in extra_records:
-                f.write(record.to_json() + "\n")
-            for line in malformed_lines:
-                f.write(line + "\n")
-        tmp_path.replace(self.path)
+            tmp_path = self.path.with_name(
+                f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+            )
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    for record in records:
+                        f.write(record.to_json() + "\n")
+                    for record in extra_records:
+                        f.write(record.to_json() + "\n")
+                    for line in malformed_lines:
+                        f.write(line + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                tmp_path.replace(self.path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
         return self.path
 
     def query(
