@@ -180,7 +180,9 @@ def test_rewrite_temp_file_is_per_pid(tmp_path: Path, monkeypatch):
 
     assert len(captured) == 1
     tmp_used = captured[0]
-    assert tmp_used.name == f"{store.path.name}.tmp.{os.getpid()}"
+    # Unique per call: pid + random suffix (pid alone can collide when two
+    # threads share one instance and race the reentrancy counter).
+    assert tmp_used.name.startswith(f"{store.path.name}.tmp.{os.getpid()}.")
 
 
 class _ExplodingRecord(SessionRecord):

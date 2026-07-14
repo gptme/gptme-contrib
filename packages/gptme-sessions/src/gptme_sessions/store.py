@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -205,10 +206,14 @@ class SessionStore:
           avoid clobbering a concurrent writer's field updates with a stale
           in-memory copy.
 
-        The temp file is per-pid and fsynced before the atomic replace: a
-        fixed shared temp name would let two concurrent rewriters interleave
-        writes on the same inode and install a torn file (the mechanism
-        behind truncated mid-file records observed 2026-07-14).
+        The temp file name is unique per call (pid + random suffix) and
+        fsynced before the atomic replace: a fixed shared temp name would let
+        two concurrent rewriters interleave writes on the same inode and
+        install a torn file (the mechanism behind truncated mid-file records
+        observed 2026-07-14).  Per-call uniqueness also covers the
+        unsupported-but-possible case of two threads sharing one store
+        instance, where the reentrancy counter races and both could
+        otherwise write the same temp.
 
         ``records`` takes precedence for any session_id present in both.
         """
@@ -230,7 +235,9 @@ class SessionStore:
                         except (json.JSONDecodeError, TypeError, AttributeError):
                             malformed_lines.append(raw)
 
-            tmp_path = self.path.with_name(f"{self.path.name}.tmp.{os.getpid()}")
+            tmp_path = self.path.with_name(
+                f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+            )
             try:
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     for record in records:
