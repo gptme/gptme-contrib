@@ -816,12 +816,38 @@ def _build_status_summary_from_task_dicts(tasks: List[Dict[str, Any]]) -> Dict[s
     }
 
 
+def _filter_status_results_by_pool(
+    results: Dict[str, List[TaskInfo]],
+    *,
+    pool_filter: str | None,
+    exclude_pool: str | None,
+) -> Dict[str, List[TaskInfo]]:
+    """Filter a status result-set by task pool without changing bucket shape."""
+    if pool_filter is None and exclude_pool is None:
+        return results
+
+    filtered: Dict[str, List[TaskInfo]] = {}
+    for bucket, items in results.items():
+        filtered[bucket] = [
+            task
+            for task in items
+            if task_matches_pool_filter(
+                task,
+                pool=pool_filter,
+                exclude_pool=exclude_pool,
+            )
+        ]
+    return filtered
+
+
 def check_directory(
     console: Console,
     dir_type: str,
     repo_root: Path,
     compact: bool = False,
     summary_only: bool = False,
+    pool_filter: str | None = None,
+    exclude_pool: str | None = None,
 ) -> Dict[str, List[TaskInfo]]:
     """Check and display status for a single directory type.
 
@@ -833,6 +859,11 @@ def check_directory(
     config = CONFIGS[dir_type]
     checker = StateChecker(repo_root, config)
     results = checker.check_all()
+    results = _filter_status_results_by_pool(
+        results,
+        pool_filter=pool_filter,
+        exclude_pool=exclude_pool,
+    )
 
     # Print header with type-specific color. No trailing newline: the first
     # section (and the summary) already lead with a blank line, so a trailing
@@ -880,24 +911,25 @@ def check_directory(
     print_summary(console, results, config)
 
     # Discoverability: show hidden non-default pool counts so they are never silently orphaned.
-    all_tasks_flat = [t for lst in results.values() for t in lst]
-    non_default = [t for t in all_tasks_flat if task_pool(t) != "general"]
-    if non_default:
-        pool_totals: Dict[str, list] = {}
-        for t in non_default:
-            p = task_pool(t)
-            if p not in pool_totals:
-                pool_totals[p] = [0, 0]  # [total, actionable]
-            pool_totals[p][0] += 1
-            if t.state in ("backlog", "todo", "active"):
-                pool_totals[p][1] += 1
-        parts = ", ".join(
-            f"{p}: {counts[0]} ({counts[1]} actionable)"
-            for p, counts in sorted(pool_totals.items())
-        )
-        console.print(
-            f"  [dim]Other pools: {parts} (use --pool {next(iter(pool_totals))} to view)[/]"
-        )
+    if pool_filter is None and exclude_pool is None:
+        all_tasks_flat = [t for lst in results.values() for t in lst]
+        non_default = [t for t in all_tasks_flat if task_pool(t) != "general"]
+        if non_default:
+            pool_totals: Dict[str, list] = {}
+            for t in non_default:
+                p = task_pool(t)
+                if p not in pool_totals:
+                    pool_totals[p] = [0, 0]  # [total, actionable]
+                pool_totals[p][0] += 1
+                if t.state in ("backlog", "todo", "active"):
+                    pool_totals[p][1] += 1
+            parts = ", ".join(
+                f"{p}: {counts[0]} ({counts[1]} actionable)"
+                for p, counts in sorted(pool_totals.items())
+            )
+            console.print(
+                f"  [dim]Other pools: {parts} (use --pool {next(iter(pool_totals))} to view)[/]"
+            )
 
     return results
 
@@ -1082,9 +1114,6 @@ def status(
     type, all, compact, summary, issues, github, github_repo, output_json, pool_filter, exclude_pool
 ):
     """Show status of tasks and other tracked items."""
-    if not output_json and (pool_filter is not None or exclude_pool is not None):
-        raise click.UsageError("--pool/--exclude-pool are only supported with --json")
-
     console = Console()
     repo_root = find_repo_root(Path.cwd())
 
@@ -1131,7 +1160,15 @@ def status(
     if all:
         # Check all directory types
         for type_name in CONFIGS.keys():
-            results = check_directory(console, type_name, repo_root, compact, summary_only=summary)
+            results = check_directory(
+                console,
+                type_name,
+                repo_root,
+                compact,
+                summary_only=summary,
+                pool_filter=pool_filter,
+                exclude_pool=exclude_pool,
+            )
             if results:  # Only include directories with items
                 all_results[type_name] = results
 
@@ -1146,7 +1183,15 @@ def status(
 
     else:
         # Check single directory type
-        results = check_directory(console, type, repo_root, compact, summary_only=summary)
+        results = check_directory(
+            console,
+            type,
+            repo_root,
+            compact,
+            summary_only=summary,
+            pool_filter=pool_filter,
+            exclude_pool=exclude_pool,
+        )
         if results:
             all_results[type] = results
 
