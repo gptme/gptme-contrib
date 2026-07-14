@@ -1102,13 +1102,13 @@ def _show_github_issues(
     "--pool",
     "pool_filter",
     default=None,
-    help="Only show tasks in this pool (e.g. 'frontier', 'general'); applies to --json output",
+    help="Only show tasks in this pool (e.g. 'frontier', 'general')",
 )
 @click.option(
     "--exclude-pool",
     "exclude_pool",
     default=None,
-    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier'); applies to --json output",
+    help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
 )
 def status(
     type, all, compact, summary, issues, github, github_repo, output_json, pool_filter, exclude_pool
