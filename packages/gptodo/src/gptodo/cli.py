@@ -912,8 +912,13 @@ def check_directory(
                         results[state],
                     )
 
-    # Print summary
-    print_summary(console, results, config)
+    # Print summary; if filtering resulted in all empty buckets, show explicit message
+    all_tasks_flat = [t for lst in results.values() for t in lst]
+    if (pool_filter is not None or exclude_pool is not None) and not all_tasks_flat:
+        if summary_only:
+            console.print("  [dim]No tasks match the pool filter.[/]")
+    else:
+        print_summary(console, results, config)
 
     # Discoverability: show hidden non-default pool counts so they are never silently orphaned.
     if pool_filter is None and exclude_pool is None:

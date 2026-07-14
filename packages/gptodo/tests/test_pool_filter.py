@@ -437,6 +437,27 @@ class TestTaskToDictPool:
         assert result.exit_code == 0
         assert "No tasks match the pool filter" in result.output
 
+    def test_status_summary_pool_filter_empty_result_shows_message(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """When --summary filtering matches no tasks, show explicit 'No tasks match' message."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(tasks_dir, "general-task", state="backlog", created="2026-01-01T00:00:00")
+        write_task(
+            tasks_dir,
+            "frontier-task",
+            state="active",
+            created="2026-01-01T00:00:00",
+            pool="frontier",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        # Filter for a non-existent pool with --summary
+        result = runner.invoke(cli, ["status", "--summary", "--pool", "nonexistent"])
+        assert result.exit_code == 0
+        assert "No tasks match the pool filter" in result.output
+
     def test_status_shows_hidden_pools_discoverability(self, tmp_path: Path, monkeypatch) -> None:
         """Human-readable status shows 'Other pools: frontier: N' so non-default pools
         are never silently orphaned when unflagged selection hides them."""
