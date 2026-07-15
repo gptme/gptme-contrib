@@ -539,3 +539,21 @@ def test_codegraph_search_empty_query(sample_dir):
     d = _run(_check())
     assert "error" not in d, d.get("error", "")
     assert len(d["results"]) == 0
+
+
+def test_codegraph_search_cache_consistency(sample_dir):
+    """Second codegraph_search call returns identical results (cache correctness)."""
+
+    async def _check():
+        kwargs = {"query": "add compute", "directory": sample_dir, "limit": 5}
+        r1 = await _MOD.mcp.call_tool("codegraph_search", kwargs)
+        r2 = await _MOD.mcp.call_tool("codegraph_search", kwargs)
+        return json.loads(_content(r1)), json.loads(_content(r2))
+
+    d1, d2 = _run(_check())
+    assert "error" not in d1
+    assert "error" not in d2
+    # Results must be identical between the first (cache miss) and second (cache hit) call
+    ids1 = [r["qualified_id"] for r in d1["results"]]
+    ids2 = [r["qualified_id"] for r in d2["results"]]
+    assert ids1 == ids2, f"Cache inconsistency: {ids1} != {ids2}"
