@@ -1,5 +1,7 @@
 .PHONY: install test typecheck format publish
 
+MYPY_CACHE_DIR ?= $(shell git rev-parse --show-toplevel)/.mypy_cache
+
 install:  ## Install the package in development mode
 	uv pip install -e .
 

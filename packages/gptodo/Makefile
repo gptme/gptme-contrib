@@ -1,5 +1,7 @@
 .PHONY: test typecheck publish
 
+MYPY_CACHE_DIR ?= $(shell git rev-parse --show-toplevel)/.mypy_cache
+
 test:  ## Run tests for this package
 	@if [ -d tests ] && [ "$$(find tests -name '*.py' 2>/dev/null | head -1)" ]; then \
 		uv run --with pytest pytest tests/ -v; \
