@@ -119,10 +119,11 @@ def _get_or_build_index(directory: str) -> SymbolIndex:
 def _clear_search_docs_db(db_path: str, directory: str) -> None:
     """Remove cached search documents for a directory from its SQLite store."""
     try:
-        conn = sqlite3.connect(db_path)
-        conn.execute("DELETE FROM search_documents WHERE directory = ?", (directory,))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "DELETE FROM search_documents WHERE directory = ?", (directory,)
+            )
+            conn.commit()
     except Exception:
         pass
 
@@ -660,14 +661,13 @@ def codegraph_search(
     sqlite_cache = cached_entry[1] if cached_entry else None
     if sqlite_cache is not None:
         try:
-            conn = sqlite3.connect(sqlite_cache.db_path)
-            loaded = load_search_documents(conn, dir_key)
-            if loaded:
-                docs = loaded
-            else:
-                docs = extract_search_documents(index, dir_path)
-                save_search_documents(conn, dir_key, docs)
-            conn.close()
+            with sqlite3.connect(sqlite_cache.db_path) as conn:
+                loaded = load_search_documents(conn, dir_key)
+                if loaded:
+                    docs = loaded
+                else:
+                    docs = extract_search_documents(index, dir_path)
+                    save_search_documents(conn, dir_key, docs)
         except Exception:
             docs = None
 
