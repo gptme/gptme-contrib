@@ -115,6 +115,16 @@ def call_claude_code(
             env=env,
         )
         if result.returncode != 0:
+            # If --debug-file is not supported by this claude build, the flag itself
+            # can turn a recoverable transient failure into a permanent one. Detect
+            # by looking for the flag name in error output and disable for future retries.
+            if debug_file is not None:
+                combined_out = (result.stderr or "") + (result.stdout or "")
+                if "debug-file" in combined_out.lower():
+                    logger.debug(
+                        "--debug-file appears unsupported; disabling diagnostics for remaining retries"
+                    )
+                    diagnostic_dir = None
             stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
             stdout_preview = result.stdout.strip()[:500] if result.stdout else "(none)"
             logger.warning(
