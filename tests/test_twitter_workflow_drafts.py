@@ -478,6 +478,40 @@ def test_quarantine_permanent_reply_failure_moves_draft_to_rejected(
     )
 
 
+def test_quarantine_permanent_reply_failure_preserves_existing_rejection(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approved_path = workflow_module.APPROVED_DIR / "reply.yml"
+    existing_rejected_path = workflow_module.REJECTED_DIR / "reply.yml"
+    existing_rejected_path.write_text("text: Older rejected reply\n")
+    draft = workflow_module.TweetDraft(
+        text="New rejected reply",
+        type="reply",
+        in_reply_to="4242",
+    )
+    draft.save(approved_path)
+
+    moved = workflow_module._quarantine_permanent_reply_failure(
+        approved_path,
+        draft,
+        RuntimeError(
+            "403 Forbidden: Reply to this conversation is not allowed because "
+            "you have not been mentioned or otherwise engaged by the author"
+        ),
+    )
+
+    assert moved is True
+    assert existing_rejected_path.read_text() == "text: Older rejected reply\n"
+    rejected_paths = sorted(workflow_module.REJECTED_DIR.glob("reply*.yml"))
+    assert len(rejected_paths) == 2
+    assert any(
+        workflow_module.TweetDraft.load(path).text == "New rejected reply"
+        for path in rejected_paths
+        if path != existing_rejected_path
+    )
+
+
 def test_post_quarantines_permanently_undeliverable_approved_reply(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -541,6 +575,177 @@ def test_quarantine_permanent_reply_failure_keeps_transient_failure_approved(
     assert moved is False
     assert approved_path.exists()
     assert not (workflow_module.REJECTED_DIR / approved_path.name).exists()
+
+
+def test_trusted_user_autopost_quarantines_permanent_reply_failure(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="Please respond.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="ErikBjare",
+        public_metrics={"followers_count": 1},
+    )
+
+    class PostingClient:
+        def create_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(
+                "403 Forbidden: Reply to this conversation is not allowed because "
+                "you have not been mentioned or otherwise engaged by the author"
+            )
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+    monkeypatch.setattr(
+        workflow_module,
+        "process_tweet",
+        lambda *a, **k: (
+            EvalResult("respond", 100, 100),
+            Response("A useful reply", "reply", False, None),
+        ),
+    )
+    monkeypatch.setattr(workflow_module, "save_to_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        workflow_module, "is_trusted_user", lambda username: username == "ErikBjare"
+    )
+    monkeypatch.setattr(
+        workflow_module, "_check_for_duplicate_replies_internal", lambda draft: {}
+    )
+    monkeypatch.setattr(workflow_module, "_validate_draft_urls", lambda draft: [])
+    monkeypatch.setattr(
+        workflow_module, "load_twitter_client", lambda *a, **k: PostingClient()
+    )
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 0
+    assert list(workflow_module.NEW_DIR.glob("*")) == []
+    rejected_paths = list(workflow_module.REJECTED_DIR.glob("*.yml"))
+    assert len(rejected_paths) == 1
+    rejected = workflow_module.TweetDraft.load(rejected_paths[0])
+    assert rejected.text == "A useful reply"
+    assert "Permanent Twitter reply failure" in rejected.reject_reason
+
+
+def test_trusted_user_autopost_keeps_transient_failure_retryable(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="Please respond.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="ErikBjare",
+        public_metrics={"followers_count": 1},
+    )
+
+    class PostingClient:
+        def create_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("503 Service Unavailable")
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+    monkeypatch.setattr(
+        workflow_module,
+        "process_tweet",
+        lambda *a, **k: (
+            EvalResult("respond", 100, 100),
+            Response("A useful reply", "reply", False, None),
+        ),
+    )
+    monkeypatch.setattr(workflow_module, "save_to_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        workflow_module, "is_trusted_user", lambda username: username == "ErikBjare"
+    )
+    monkeypatch.setattr(
+        workflow_module, "_check_for_duplicate_replies_internal", lambda draft: {}
+    )
+    monkeypatch.setattr(workflow_module, "_validate_draft_urls", lambda draft: [])
+    monkeypatch.setattr(
+        workflow_module, "load_twitter_client", lambda *a, **k: PostingClient()
+    )
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 1
+    new_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
+    assert len(new_paths) == 1
+    assert workflow_module.TweetDraft.load(new_paths[0]).text == "A useful reply"
+    assert list(workflow_module.REJECTED_DIR.glob("*.yml")) == []
 
 
 def test_find_live_duplicate_reply_ids_matches_own_replies(

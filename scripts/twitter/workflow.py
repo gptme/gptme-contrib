@@ -657,8 +657,19 @@ def move_draft(path: Path, new_status: str) -> Path:
     if new_status not in status_dirs:
         raise ValueError(f"Invalid status: {new_status}")
 
-    # Simply move the file to the new directory, preserving the filename
+    # Preserve the filename when possible, but never overwrite an older draft.
+    # Repeated failures can legitimately produce the same generated filename.
     new_path = status_dirs[new_status] / path.name
+    if new_path.exists() and new_path != path:
+        counter = 2
+        while True:
+            candidate = new_path.with_name(
+                f"{new_path.stem}-{counter}{new_path.suffix}"
+            )
+            if not candidate.exists():
+                new_path = candidate
+                break
+            counter += 1
 
     # Load and save to ensure any updates are persisted
     draft = TweetDraft.load(path)
@@ -676,6 +687,17 @@ _PERMANENT_REPLY_FAILURE_MARKERS = (
 )
 
 
+def _permanent_reply_failure_reason(draft: TweetDraft, error: Exception) -> str | None:
+    """Return a rejection reason for a non-retryable Twitter reply error."""
+    if not draft.in_reply_to:
+        return None
+
+    message = str(error).lower()
+    if not any(marker in message for marker in _PERMANENT_REPLY_FAILURE_MARKERS):
+        return None
+    return f"Permanent Twitter reply failure: {str(error)}"
+
+
 def _quarantine_permanent_reply_failure(
     path: Path, draft: TweetDraft, error: Exception
 ) -> bool:
@@ -686,14 +708,11 @@ def _quarantine_permanent_reply_failure(
     Retrying that response every cycle only burns API calls and leaves the
     approved queue permanently wedged.
     """
-    if not draft.in_reply_to:
+    reject_reason = _permanent_reply_failure_reason(draft, error)
+    if reject_reason is None:
         return False
 
-    message = str(error).lower()
-    if not any(marker in message for marker in _PERMANENT_REPLY_FAILURE_MARKERS):
-        return False
-
-    draft.reject_reason = f"Permanent Twitter reply failure: {str(error)}"
+    draft.reject_reason = reject_reason
     draft.save(path)
     rejected_path = move_draft(path, "rejected")
     console.print(
@@ -1873,12 +1892,20 @@ def process_timeline_tweets(
                                     _replied_tweet_ids.add(str(draft.in_reply_to))
                         except Exception as e:
                             console.print(f"[red]Error auto-posting: {e}")
-                            # Fall back to saving as new
-                            path = save_draft(draft, "new")
-                            console.print(
-                                f"[yellow]Saved as draft for manual review: {path}"
-                            )
-                            drafts_generated += 1
+                            reject_reason = _permanent_reply_failure_reason(draft, e)
+                            if reject_reason is not None:
+                                draft.reject_reason = reject_reason
+                                path = save_draft(draft, "rejected")
+                                console.print(
+                                    f"[yellow]Saved permanently undeliverable reply to {path}[/yellow]"
+                                )
+                            else:
+                                # Transient errors stay retryable via manual review.
+                                path = save_draft(draft, "new")
+                                console.print(
+                                    f"[yellow]Saved as draft for manual review: {path}"
+                                )
+                                drafts_generated += 1
                             if draft.in_reply_to is not None:
                                 _replied_tweet_ids.add(str(draft.in_reply_to))
                     else:
