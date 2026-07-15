@@ -10,6 +10,7 @@ import logging
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,12 @@ _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
 
 
-def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RETRIES) -> str:
+def call_claude_code(
+    prompt: str,
+    timeout: int = 120,
+    max_retries: int = _MAX_RETRIES,
+    diagnostic_dir: Path | None = None,
+) -> str:
     """
     Call Claude Code CLI with a prompt, retrying on non-zero exit or empty responses.
 
@@ -32,6 +38,8 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
         prompt: The prompt to send to Claude Code
         timeout: Maximum time to wait for response (seconds)
         max_retries: Maximum number of retry attempts per failure type
+        diagnostic_dir: Directory for Claude debug logs. Defaults to a stable
+            temporary directory so scheduled failures retain diagnostics.
 
     Returns:
         The response text from Claude Code
@@ -66,9 +74,16 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
     if nested:
         cmd.append("--no-session-persistence")
 
+    if diagnostic_dir is None:
+        diagnostic_dir = Path.home() / ".local" / "state" / "gptme-activity-summary"
+    diagnostic_dir.mkdir(parents=True, exist_ok=True)
+    invocation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+
     for attempt in range(1, max_retries + 1):
+        debug_file = diagnostic_dir / f"claude-{invocation_id}-attempt-{attempt}.log"
+        attempt_cmd = [*cmd, "--debug-file", str(debug_file)]
         result = subprocess.run(
-            cmd,
+            attempt_cmd,
             input=prompt,
             capture_output=True,
             text=True,
@@ -77,12 +92,15 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
         )
         if result.returncode != 0:
             stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
+            stdout_preview = result.stdout.strip()[:500] if result.stdout else "(none)"
             logger.warning(
-                "claude -p exited %d (attempt %d/%d). stderr: %s",
+                "claude -p exited %d (attempt %d/%d). stderr: %s; stdout: %s; debug_file: %s",
                 result.returncode,
                 attempt,
                 max_retries,
                 stderr_preview,
+                stdout_preview,
+                debug_file,
             )
             if attempt < max_retries:
                 # Retry all non-zero codes without discrimination. This addresses transient
@@ -92,7 +110,7 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
                 time.sleep(_RETRY_DELAY_S * attempt)  # linear backoff
                 continue
             raise subprocess.CalledProcessError(
-                result.returncode, ["claude", "-p"], result.stdout, result.stderr
+                result.returncode, attempt_cmd, result.stdout, result.stderr
             )
 
         output = result.stdout.strip()

@@ -1,6 +1,7 @@
 """Tests for cc_backend module."""
 
 import subprocess
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from gptme_activity_summary.cc_backend import (
@@ -194,6 +195,40 @@ def test_call_claude_code_nonzero_logs_stderr(mock_run, mock_sleep, caplog):
         except subprocess.CalledProcessError:
             pass
     assert any("quota exhausted" in msg for msg in caplog.messages)
+
+
+@patch("gptme_activity_summary.cc_backend.datetime")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_nonzero_logs_stdout_and_debug_file(
+    mock_run, mock_sleep, mock_datetime, caplog, tmp_path
+):
+    """Test failures preserve stdout and point operators at Claude's debug log."""
+    import logging
+
+    mock_datetime.now.return_value = datetime(2026, 7, 15, 1, 2, 3, tzinfo=timezone.utc)
+    debug_file = tmp_path / "claude-20260715T010203.000000Z-attempt-1.log"
+    mock_run.return_value = _make_completed_process(
+        returncode=1,
+        stdout="Your session quota is exhausted",
+    )
+    with caplog.at_level(logging.WARNING):
+        try:
+            call_claude_code(
+                "test prompt",
+                max_retries=1,
+                diagnostic_dir=tmp_path,
+            )
+        except subprocess.CalledProcessError as error:
+            assert error.output == "Your session quota is exhausted"
+        else:
+            assert False, "Should have raised CalledProcessError"
+
+    log_text = "\n".join(caplog.messages)
+    assert "stdout: Your session quota is exhausted" in log_text
+    assert f"debug_file: {debug_file}" in log_text
+    cmd = mock_run.call_args.args[0]
+    assert cmd[-2:] == ["--debug-file", str(debug_file)]
 
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
