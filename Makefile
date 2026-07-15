@@ -11,6 +11,14 @@ EXCLUDE_PLUGINS :=
 PACKAGE_DIRS := $(shell find packages -maxdepth 1 -mindepth 1 -type d ! -type l ! -name '__pycache__' 2>/dev/null)
 PLUGIN_DIRS := $(shell find plugins -maxdepth 1 -mindepth 1 -type d ! -type l 2>/dev/null)
 
+# Centralize mypy's cache at the repo root so per-package typecheck runs (which
+# cd into each package via `make -C`) don't scatter `.mypy_cache/` into every
+# packages/* dir. A leftover cache dir keeps a removed package's directory alive
+# as an untracked orphan, which uv's `members = ["packages/*"]` glob then rejects
+# (missing pyproject.toml) — breaking ALL uv workspace resolution and every
+# service that shells out to uv. Absolute path so it stays central under `-C`.
+export MYPY_CACHE_DIR := $(CURDIR)/.mypy_cache
+
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
