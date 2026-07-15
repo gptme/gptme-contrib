@@ -447,6 +447,102 @@ def test_trusted_user_autopost_with_bad_url_saves_draft_instead_of_posting(
     ]
 
 
+def test_quarantine_permanent_reply_failure_moves_draft_to_rejected(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approved_path = workflow_module.APPROVED_DIR / "reply.yml"
+    draft = workflow_module.TweetDraft(
+        text="A useful reply",
+        type="reply",
+        in_reply_to="4242",
+    )
+    draft.save(approved_path)
+
+    moved = workflow_module._quarantine_permanent_reply_failure(
+        approved_path,
+        draft,
+        RuntimeError(
+            "403 Forbidden: Reply to this conversation is not allowed because "
+            "you have not been mentioned or otherwise engaged by the author of the post"
+        ),
+    )
+
+    rejected_path = workflow_module.REJECTED_DIR / approved_path.name
+    assert moved is True
+    assert not approved_path.exists()
+    assert rejected_path.exists()
+    assert (
+        "Permanent Twitter reply failure"
+        in workflow_module.TweetDraft.load(rejected_path).reject_reason
+    )
+
+
+def test_post_quarantines_permanently_undeliverable_approved_reply(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approved_path = workflow_module.APPROVED_DIR / "reply.yml"
+    workflow_module.TweetDraft(
+        text="A useful reply",
+        type="reply",
+        in_reply_to="4242",
+    ).save(approved_path)
+
+    class PostingClient:
+        def create_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(
+                "403 Forbidden: Reply to this conversation is not allowed because "
+                "you have not been mentioned or otherwise engaged by the author"
+            )
+
+    monkeypatch.setattr(
+        workflow_module, "load_twitter_client", lambda *a, **k: PostingClient()
+    )
+    monkeypatch.setattr(
+        workflow_module, "_check_for_duplicate_replies_internal", lambda draft: {}
+    )
+    monkeypatch.setattr(
+        workflow_module, "_find_live_duplicate_reply_ids", lambda *a, **k: []
+    )
+    monkeypatch.setattr(workflow_module, "_validate_draft_urls", lambda draft: [])
+    monkeypatch.setattr(workflow_module, "_validate_draft_length", lambda draft: [])
+
+    workflow_module.post(
+        dry_run=False,
+        yes=True,
+        draft_id=None,
+        max_posts=1,
+        skip_url_check=False,
+    )
+
+    assert not approved_path.exists()
+    assert (workflow_module.REJECTED_DIR / approved_path.name).exists()
+
+
+def test_quarantine_permanent_reply_failure_keeps_transient_failure_approved(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approved_path = workflow_module.APPROVED_DIR / "reply.yml"
+    draft = workflow_module.TweetDraft(
+        text="A useful reply",
+        type="reply",
+        in_reply_to="4242",
+    )
+    draft.save(approved_path)
+
+    moved = workflow_module._quarantine_permanent_reply_failure(
+        approved_path,
+        draft,
+        RuntimeError("503 Service Unavailable"),
+    )
+
+    assert moved is False
+    assert approved_path.exists()
+    assert not (workflow_module.REJECTED_DIR / approved_path.name).exists()
+
+
 def test_find_live_duplicate_reply_ids_matches_own_replies(
     workflow_module: Any,
 ) -> None:

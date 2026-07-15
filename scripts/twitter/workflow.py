@@ -670,6 +670,38 @@ def move_draft(path: Path, new_status: str) -> Path:
     return new_path
 
 
+_PERMANENT_REPLY_FAILURE_MARKERS = (
+    "reply to this conversation is not allowed because you have not been mentioned",
+    "you have not been mentioned or otherwise engaged by the author",
+)
+
+
+def _quarantine_permanent_reply_failure(
+    path: Path, draft: TweetDraft, error: Exception
+) -> bool:
+    """Reject an approved reply that Twitter says can never be delivered.
+
+    Twitter can report ``reply_settings=everyone`` while still rejecting an
+    unsolicited reply because the author has not engaged with this account.
+    Retrying that response every cycle only burns API calls and leaves the
+    approved queue permanently wedged.
+    """
+    if not draft.in_reply_to:
+        return False
+
+    message = str(error).lower()
+    if not any(marker in message for marker in _PERMANENT_REPLY_FAILURE_MARKERS):
+        return False
+
+    draft.reject_reason = f"Permanent Twitter reply failure: {str(error)}"
+    draft.save(path)
+    rejected_path = move_draft(path, "rejected")
+    console.print(
+        f"[yellow]Moved permanently undeliverable reply to {rejected_path}[/yellow]"
+    )
+    return True
+
+
 def find_draft(
     draft_id: str, status: str | None = None, show_error: bool = True
 ) -> Path | None:
@@ -1455,6 +1487,7 @@ def post(
                     console.print("[red]Error: No response data from tweet creation")
             except Exception as e:
                 console.print(f"[red]Error posting tweet: {e}")
+                _quarantine_permanent_reply_failure(path, draft, e)
         else:
             console.print("[yellow]Skipped posting tweet")
 
@@ -2371,6 +2404,7 @@ def auto(
                         )
                 except Exception as e:
                     console.print(f"[red]Error posting tweet: {e}")
+                    _quarantine_permanent_reply_failure(path, draft, e)
 
     # Summary
     console.print("\n[bold]Automation Cycle Summary:[/bold]")
