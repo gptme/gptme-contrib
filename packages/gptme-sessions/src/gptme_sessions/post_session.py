@@ -140,6 +140,36 @@ def _trajectory_duration_reliable(
     return traj_span >= min_coverage * duration_seconds
 
 
+#: Minimum trajectory-derived duration (seconds) for a trajectory that parsed
+#: zero tool calls to be treated as "the extractor doesn't recognize this tool
+#: shape" rather than a genuinely trivial/instant session.
+_FORMAT_BLIND_MIN_DURATION_S = 30
+
+
+def _trajectory_format_blind(signals: dict[str, Any] | None) -> bool:
+    """Whether a trajectory ran for real but the extractor doesn't recognize
+    its tool-call shape, as opposed to a genuine no-op.
+
+    Codex has changed its tool-call encoding several times (function_call /
+    exec_command -> write_stdin piping -> custom_tool_call / exec, observed
+    2026-07). Duration-coverage alone (:func:`_trajectory_duration_reliable`)
+    does not catch this: an unrecognized shape still yields message
+    timestamps spanning the full session, just with an empty ``tool_calls``
+    dict. Left unguarded, a trajectory in this state is trusted as an
+    authoritative noop, silently dropping real caller-supplied git-range
+    deliverables and contaminating the model-selection bandit (2026-07-10..15
+    gpt-5.6-sol / gpt-5.6-terra false-noop cluster).
+
+    Only fires when the signals dict explicitly contains a ``tool_calls`` key
+    that is empty — a *missing* key (e.g. in hand-built test fixtures that
+    don't model this field) is not treated as evidence of format blindness.
+    """
+    if not signals or "tool_calls" not in signals or signals.get("tool_calls"):
+        return False
+    traj_span = signals.get("session_duration_s")
+    return isinstance(traj_span, (int, float)) and traj_span >= _FORMAT_BLIND_MIN_DURATION_S
+
+
 #: Default path for grading weights config (Phase 3 multivariate grading).
 _GRADING_WEIGHTS_PATH = (
     Path(__file__).resolve().parent.parent.parent.parent.parent.parent
@@ -454,6 +484,21 @@ def post_session(
     # resolving to the same gptme log dir), so it must not be allowed to drop
     # real git-range deliverables and record a false noop.
     trajectory_reliable = _trajectory_duration_reliable(signals, duration_seconds)
+
+    # Second-layer guard: a trajectory can look duration-reliable (it spans
+    # the right wall-clock) yet still be unusable if the extractor doesn't
+    # recognize the tool-call shape it used (see _trajectory_format_blind).
+    # Only downgrade when the caller has evidence to fall back on — otherwise
+    # this is indistinguishable from a genuine noop and the existing
+    # unreliable-trajectory-with-no-deliverables path already records
+    # "unknown" rather than penalizing the backend.
+    if trajectory_reliable and deliverables and _trajectory_format_blind(signals):
+        trajectory_reliable = False
+        logger.warning(
+            "Trajectory reports zero tool calls over %ss — extractor may not "
+            "support this trajectory format; trusting caller deliverables",
+            signals.get("session_duration_s") if signals else None,
+        )
 
     # --- Resolve deliverables ---
     # Trajectory is the authoritative source when available.  Git-range commits

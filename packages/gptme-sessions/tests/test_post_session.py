@@ -794,6 +794,72 @@ def test_post_session_reliable_trajectory_still_drops_concurrent_commits(tmp_pat
     assert result.record.deliverables == []
 
 
+def test_post_session_format_blind_trajectory_keeps_caller_deliverables(tmp_path: Path):
+    """A trajectory with zero parsed tool calls over a substantial duration is
+    treated as extractor format-blindness, not a genuine noop, when the
+    caller has real git-range commits to fall back on.
+
+    Reproduces the 2026-07-15 gpt-5.6-sol/gpt-5.6-terra false-noop cluster:
+    Codex's newer custom_tool_call "exec" shape (JS-wrapped exec_command)
+    wasn't recognized by the extractor, which reported tool_calls={} for a
+    trajectory that fully covered the session's wall-clock and said noop,
+    silently dropping real commits.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 600,
+        "tool_calls": {},
+        "productive": False,
+        "deliverables": [],
+    }
+    real_sha = "abc1234567890abcdef1234567890abcdef1234"
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="codex",
+            model="gpt-5.6-sol",
+            duration_seconds=620,  # trajectory covers ~97% — duration-reliable
+            trajectory_path=fake_traj,
+            deliverables=[real_sha],
+        )
+
+    assert result.record.outcome == "productive"
+    assert result.record.deliverables == [real_sha]
+
+
+def test_post_session_nonzero_tool_calls_still_drops_caller_deliverables(tmp_path: Path):
+    """Inverse of the format-blind guard: when the trajectory DID parse tool
+    calls (non-empty tool_calls) and says noop, it remains an authoritative
+    noop — caller git-range commits (likely from a concurrent session) are
+    still dropped."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+
+    fake_signals = {
+        "session_duration_s": 600,
+        "tool_calls": {"exec_command": 3},
+        "productive": False,
+        "deliverables": [],
+    }
+    concurrent_sha = "deadbeef" + "01234567" * 4
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="codex",
+            model="gpt-5.6-sol",
+            duration_seconds=620,
+            trajectory_path=fake_traj,
+            deliverables=[concurrent_sha],
+        )
+
+    assert result.record.outcome == "noop"
+    assert result.record.deliverables == []
+
+
 def test_post_session_trajectory_empty_deliverables_keeps_caller_when_productive(
     tmp_path: Path, caplog
 ):
