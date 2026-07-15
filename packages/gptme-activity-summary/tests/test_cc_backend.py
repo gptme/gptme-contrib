@@ -1,6 +1,7 @@
 """Tests for cc_backend module."""
 
 import subprocess
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from gptme_activity_summary.cc_backend import (
@@ -194,6 +195,95 @@ def test_call_claude_code_nonzero_logs_stderr(mock_run, mock_sleep, caplog):
         except subprocess.CalledProcessError:
             pass
     assert any("quota exhausted" in msg for msg in caplog.messages)
+
+
+@patch("gptme_activity_summary.cc_backend.datetime")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_nonzero_logs_stdout_and_debug_file(
+    mock_run, mock_sleep, mock_datetime, caplog, tmp_path
+):
+    """Test failures preserve stdout and trace the retry in a debug log."""
+    import logging
+
+    mock_datetime.now.return_value = datetime(2026, 7, 15, 1, 2, 3, tzinfo=timezone.utc)
+    debug_file = tmp_path / "claude-20260715T010203.000000Z-attempt-2.log"
+    mock_run.side_effect = [
+        _make_completed_process(returncode=1, stdout="Your session quota is exhausted"),
+        _make_completed_process(returncode=1, stdout="Your session quota is exhausted"),
+    ]
+    with caplog.at_level(logging.WARNING):
+        try:
+            call_claude_code(
+                "test prompt",
+                max_retries=2,
+                diagnostic_dir=tmp_path,
+            )
+        except subprocess.CalledProcessError as error:
+            assert error.output == "Your session quota is exhausted"
+        else:
+            assert False, "Should have raised CalledProcessError"
+
+    log_text = "\n".join(caplog.messages)
+    assert "stdout: Your session quota is exhausted" in log_text
+    assert f"debug_file: {debug_file}" in log_text
+    first_cmd = mock_run.call_args_list[0].args[0]
+    retry_cmd = mock_run.call_args_list[1].args[0]
+    assert "--debug-file" not in first_cmd
+    assert retry_cmd[-2:] == ["--debug-file", str(debug_file)]
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_unsupported_debug_file_retries_plain(mock_run, mock_sleep, tmp_path):
+    """An unsupported diagnostic flag must not consume the last plain retry."""
+    mock_run.side_effect = [
+        _make_completed_process(returncode=1, stderr="transient API failure"),
+        _make_completed_process(returncode=1, stderr="unknown option --debug-file"),
+        _make_completed_process(stdout='{"ok": true}'),
+    ]
+
+    result = call_claude_code("test prompt", max_retries=2, diagnostic_dir=tmp_path)
+
+    assert result == '{"ok": true}'
+    assert mock_run.call_count == 3
+    assert "--debug-file" in mock_run.call_args_list[1].args[0]
+    assert "--debug-file" not in mock_run.call_args_list[2].args[0]
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_home_resolution_failure_still_calls_claude(mock_run, mock_sleep):
+    """Missing home-directory metadata must not block Claude invocation."""
+    from unittest.mock import patch
+
+    mock_run.return_value = _make_completed_process(stdout='{"ok": true}')
+
+    with patch("gptme_activity_summary.cc_backend.Path.home", side_effect=RuntimeError("no home")):
+        result = call_claude_code("test prompt")
+
+    assert result == '{"ok": true}'
+    assert "--debug-file" not in mock_run.call_args.args[0]
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_diagnostic_dir_mkdir_failure_still_retries(mock_run, mock_sleep):
+    """Diagnostic dir mkdir failure must not block a Claude retry."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    mock_run.side_effect = [
+        _make_completed_process(returncode=1),
+        _make_completed_process(stdout='{"ok": true}'),
+    ]
+
+    with patch.object(Path, "mkdir", side_effect=OSError("read-only filesystem")):
+        result = call_claude_code("test prompt", max_retries=2)
+
+    assert result == '{"ok": true}'
+    assert mock_run.call_count == 2
+    assert "--debug-file" not in mock_run.call_args_list[1].args[0]
 
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")

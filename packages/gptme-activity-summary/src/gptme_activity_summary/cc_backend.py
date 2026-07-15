@@ -10,6 +10,7 @@ import logging
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,12 @@ _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
 
 
-def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RETRIES) -> str:
+def call_claude_code(
+    prompt: str,
+    timeout: int = 120,
+    max_retries: int = _MAX_RETRIES,
+    diagnostic_dir: Path | None = None,
+) -> str:
     """
     Call Claude Code CLI with a prompt, retrying on non-zero exit or empty responses.
 
@@ -32,6 +38,8 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
         prompt: The prompt to send to Claude Code
         timeout: Maximum time to wait for response (seconds)
         max_retries: Maximum number of retry attempts per failure type
+        diagnostic_dir: Directory for Claude debug logs. Defaults to a stable
+            temporary directory so scheduled failures retain diagnostics.
 
     Returns:
         The response text from Claude Code
@@ -66,9 +74,45 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
     if nested:
         cmd.append("--no-session-persistence")
 
-    for attempt in range(1, max_retries + 1):
+    if diagnostic_dir is None:
+        try:
+            diagnostic_dir = Path.home() / ".local" / "state" / "gptme-activity-summary"
+        except RuntimeError as exc:
+            logger.debug("Cannot resolve home directory (%s); debug file disabled", exc)
+    invocation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    attempt = 1
+    plain_retry_pending = False
+
+    while attempt <= max_retries or plain_retry_pending:
+        debug_file: Path | None = None
+        attempt_cmd = list(cmd)
+        # Keep the healthy path compatible with Claude versions that predate
+        # --debug-file. Enable tracing only after an actual failure triggered a
+        # retry, and make diagnostics best-effort so they cannot block Claude.
+        if attempt > 1 and diagnostic_dir is not None:
+            try:
+                diagnostic_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.debug(
+                    "Cannot create diagnostic dir %s (%s); debug file disabled",
+                    diagnostic_dir,
+                    exc,
+                )
+                diagnostic_dir = None
+            else:
+                # Prune files older than 7 days on first retry to cap disk growth
+                if attempt == 2:
+                    cutoff = time.time() - 7 * 86400
+                    for old_log in diagnostic_dir.glob("claude-*.log"):
+                        try:
+                            if old_log.stat().st_mtime < cutoff:
+                                old_log.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                debug_file = diagnostic_dir / f"claude-{invocation_id}-attempt-{attempt}.log"
+                attempt_cmd.extend(["--debug-file", str(debug_file)])
         result = subprocess.run(
-            cmd,
+            attempt_cmd,
             input=prompt,
             capture_output=True,
             text=True,
@@ -76,23 +120,39 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
             env=env,
         )
         if result.returncode != 0:
+            # If --debug-file is not supported by this claude build, the flag itself
+            # can turn a recoverable transient failure into a permanent one. Detect
+            # by looking for the flag name in error output and disable for future retries.
+            if debug_file is not None:
+                combined_out = (result.stderr or "") + (result.stdout or "")
+                if "debug-file" in combined_out.lower():
+                    logger.debug("--debug-file appears unsupported; retrying without diagnostics")
+                    diagnostic_dir = None
+                    plain_retry_pending = True
             stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
+            stdout_preview = result.stdout.strip()[:500] if result.stdout else "(none)"
             logger.warning(
-                "claude -p exited %d (attempt %d/%d). stderr: %s",
+                "claude -p exited %d (attempt %d/%d). stderr: %s; stdout: %s; debug_file: %s",
                 result.returncode,
                 attempt,
                 max_retries,
                 stderr_preview,
+                stdout_preview,
+                debug_file,
             )
-            if attempt < max_retries:
+            if attempt < max_retries or plain_retry_pending:
                 # Retry all non-zero codes without discrimination. This addresses transient
                 # CC service failures (rate limits, temporary unavailability). Permanent errors
                 # (e.g., command-not-found, auth failure) will exhaust the retry window and
                 # then raise, which is acceptable since they're rare in normal operation.
                 time.sleep(_RETRY_DELAY_S * attempt)  # linear backoff
+                if plain_retry_pending:
+                    plain_retry_pending = False
+                else:
+                    attempt += 1
                 continue
             raise subprocess.CalledProcessError(
-                result.returncode, ["claude", "-p"], result.stdout, result.stderr
+                result.returncode, attempt_cmd, result.stdout, result.stderr
             )
 
         output = result.stdout.strip()
@@ -109,6 +169,9 @@ def call_claude_code(prompt: str, timeout: int = 120, max_retries: int = _MAX_RE
 
         if attempt < max_retries:
             time.sleep(_RETRY_DELAY_S * attempt)  # linear backoff
+            attempt += 1
+        else:
+            break
 
     # All retries exhausted — return empty string (callers handle gracefully)
     logger.error(
