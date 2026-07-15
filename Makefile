@@ -19,7 +19,6 @@ PLUGIN_DIRS := $(shell find plugins -maxdepth 1 -mindepth 1 -type d ! -type l 2>
 # shells out to uv. Absolute paths so they stay central under `-C`.
 export MYPY_CACHE_DIR := $(CURDIR)/.mypy_cache
 export RUFF_CACHE_DIR := $(CURDIR)/.ruff_cache
-export PYTEST_ADDOPTS := --cache-dir=$(CURDIR)/.pytest_cache
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
