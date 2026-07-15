@@ -75,7 +75,10 @@ def call_claude_code(
         cmd.append("--no-session-persistence")
 
     if diagnostic_dir is None:
-        diagnostic_dir = Path.home() / ".local" / "state" / "gptme-activity-summary"
+        try:
+            diagnostic_dir = Path.home() / ".local" / "state" / "gptme-activity-summary"
+        except RuntimeError as exc:
+            logger.debug("Cannot resolve home directory (%s); debug file disabled", exc)
     invocation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     attempt = 1
     plain_retry_pending = False

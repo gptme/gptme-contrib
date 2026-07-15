@@ -253,6 +253,21 @@ def test_call_claude_code_unsupported_debug_file_retries_plain(mock_run, mock_sl
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
+def test_call_claude_code_home_resolution_failure_still_calls_claude(mock_run, mock_sleep):
+    """Missing home-directory metadata must not block Claude invocation."""
+    from unittest.mock import patch
+
+    mock_run.return_value = _make_completed_process(stdout='{"ok": true}')
+
+    with patch("gptme_activity_summary.cc_backend.Path.home", side_effect=RuntimeError("no home")):
+        result = call_claude_code("test prompt")
+
+    assert result == '{"ok": true}'
+    assert "--debug-file" not in mock_run.call_args.args[0]
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
 def test_call_claude_code_diagnostic_dir_mkdir_failure_still_retries(mock_run, mock_sleep):
     """Diagnostic dir mkdir failure must not block a Claude retry."""
     from pathlib import Path
