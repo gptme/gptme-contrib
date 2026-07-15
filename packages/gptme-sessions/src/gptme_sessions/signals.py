@@ -97,6 +97,52 @@ def _record_deliverable_detail(
     )
 
 
+def _detect_codex_shell_file_writes(
+    cmd: str,
+    *,
+    tool_name: str,
+    journal_paths: list[str],
+    file_writes: list[str],
+    detail_by_value: dict[str, dict[str, object]],
+    recent_sigs: list[str],
+    retry_candidates: list[str],
+) -> None:
+    """Detect redirect/file-write patterns in a Codex shell command string.
+
+    Shared by the "exec_command" (function_call) and "exec" (custom_tool_call)
+    Codex tool shapes, which both ultimately wrap a shell `cmd` string.
+    """
+    # Detect redirects and file-writing commands.
+    # >(?!=) excludes >= comparison operators in heredoc content.
+    for write_match in re.finditer(
+        r"(?:cat\s*>\s*|tee\s+(?:-\S+\s+)*|>(?!=)\s*)([^\s<>|&;]+)",
+        cmd,
+    ):
+        path = write_match.group(1).strip("'\"")
+        if path.startswith("/dev/"):
+            continue
+        elif "/journal/" in path:
+            journal_paths.append(path)
+        else:
+            file_writes.append(path)
+            _record_deliverable_detail(
+                detail_by_value,
+                value=path,
+                kind="file",
+                provenance_class="tool_authored",
+                evidence={
+                    "source": "trajectory",
+                    "tool_name": tool_name,
+                },
+            )
+            sig = f"{tool_name}:{path}"
+            if sig in recent_sigs:
+                retry_candidates.append(tool_name)
+            recent_sigs.append(sig)
+            if len(recent_sigs) > 20:
+                recent_sigs.pop(0)
+
+
 def _ordered_deliverable_details(
     deliverables: list[str],
     detail_by_value: dict[str, dict[str, object]],
@@ -1305,13 +1351,24 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     - session_meta: session start metadata
     - turn_context: per-turn context (model, cwd)
     - response_item: messages and tool calls (function_call / function_call_output /
-      custom_tool_call for apply_patch)
+      custom_tool_call for apply_patch, or newer "exec" / custom_tool_call_output
+      shell-execution shapes)
     - event_msg: events (token_count, task lifecycle)
 
-    File writes are detected from two sources:
+    Shell execution appears in two different tool shapes across Codex CLI
+    versions:
+    - exec_command (function_call) + function_call_output: the older shape,
+      command args as a JSON string, plain-string output.
+    - exec (custom_tool_call) + custom_tool_call_output: newer shape, where
+      `input` is JS source wrapping one or more `tools.exec_command({...})`
+      calls, and `output` is either a plain string or a list of content
+      blocks (`[{"type": "input_text", "text": "..."}]`).
+
+    File writes are detected from three sources:
     - apply_patch (custom_tool_call): "Add File" / "Update File" directives in patch input
     - exec_command (function_call): shell redirect patterns in the command string
-    Git commits are detected from exec_command and write_stdin outputs.
+    - exec (custom_tool_call): shell redirect patterns in embedded cmd strings
+    Git commits are detected from exec_command, write_stdin, and exec outputs.
     """
     tool_calls: dict[str, int] = {}
     error_count = 0
@@ -1399,35 +1456,49 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                                 pass
                         if isinstance(args, dict):
                             cmd = args.get("cmd") or ""
-                            # Detect redirects and file-writing commands.
-                            # >(?!=) excludes >= comparison operators in heredoc content.
-                            for write_match in re.finditer(
-                                r"(?:cat\s*>\s*|tee\s+(?:-\S+\s+)*|>(?!=)\s*)([^\s<>|&;]+)",
+                            _detect_codex_shell_file_writes(
                                 cmd,
-                            ):
-                                path = write_match.group(1).strip("'\"")
-                                if path.startswith("/dev/"):
-                                    continue
-                                elif "/journal/" in path:
-                                    journal_paths.append(path)
-                                else:
-                                    file_writes.append(path)
-                                    _record_deliverable_detail(
-                                        detail_by_value,
-                                        value=path,
-                                        kind="file",
-                                        provenance_class="tool_authored",
-                                        evidence={
-                                            "source": "trajectory",
-                                            "tool_name": "exec_command",
-                                        },
-                                    )
-                                    sig = f"exec_command:{path}"
-                                    if sig in recent_sigs:
-                                        retry_candidates.append("exec_command")
-                                    recent_sigs.append(sig)
-                                    if len(recent_sigs) > 20:
-                                        recent_sigs.pop(0)
+                                tool_name="exec_command",
+                                journal_paths=journal_paths,
+                                file_writes=file_writes,
+                                detail_by_value=detail_by_value,
+                                recent_sigs=recent_sigs,
+                                retry_candidates=retry_candidates,
+                            )
+
+            # Newer Codex CLI sessions wrap shell execution in a JS-source
+            # "exec" custom_tool_call instead of the plain "exec_command"
+            # function_call. The `input` field is JS source like:
+            #   const r = await tools.exec_command({"cmd":"...","workdir":"..."})
+            # and may contain multiple exec_command invocations. Without this
+            # branch these sessions report zero tool calls / commits and grade
+            # as noop despite doing real work.
+            elif payload_type == "custom_tool_call" and payload.get("name") == "exec":
+                tool_calls["exec"] = tool_calls.get("exec", 0) + 1
+                current_turn_has_tool = True
+                call_id = payload.get("call_id", "")
+                if call_id:
+                    call_id_to_name[call_id] = "exec"
+
+                exec_input = payload.get("input", "") or ""
+                if isinstance(exec_input, str):
+                    for cmd_match in re.finditer(
+                        r'tools\.exec_command\s*\(\s*[^)]*?"cmd"\s*:\s*("(?:[^"\\]|\\.)*")',
+                        exec_input,
+                    ):
+                        try:
+                            cmd = json.loads(cmd_match.group(1))
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        _detect_codex_shell_file_writes(
+                            cmd,
+                            tool_name="exec",
+                            journal_paths=journal_paths,
+                            file_writes=file_writes,
+                            detail_by_value=detail_by_value,
+                            recent_sigs=recent_sigs,
+                            retry_candidates=retry_candidates,
+                        )
 
             elif payload_type == "function_call_output":
                 output = payload.get("output") or ""
@@ -1459,6 +1530,43 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                             kind="commit",
                             provenance_class="session_committed",
                             evidence={"source": "trajectory", "tool_name": tool_name},
+                        )
+
+            # Parallel to function_call_output, but for the "exec" custom_tool_call
+            # shape. `output` is either a plain string or a list of content
+            # blocks (e.g. [{"type": "input_text", "text": "..."}]).
+            elif payload_type == "custom_tool_call_output":
+                call_id = payload.get("call_id", "")
+                tool_name = call_id_to_name.get(call_id, "")
+
+                if tool_name == "exec":
+                    raw_output = payload.get("output")
+                    if isinstance(raw_output, str):
+                        output = raw_output
+                    elif isinstance(raw_output, list):
+                        output = "\n".join(
+                            block.get("text", "") for block in raw_output if isinstance(block, dict)
+                        )
+                    else:
+                        output = ""
+
+                    # Error detection from shell output
+                    if "Process exited with code " in output:
+                        code_match = re.search(r"Process exited with code (\d+)", output)
+                        if code_match and code_match.group(1) != "0":
+                            error_count += 1
+
+                    for commit_match in _COMMIT_RE.finditer(output):
+                        commit_hash = commit_match.group(1)
+                        commit_msg = commit_match.group(2).strip()
+                        commit_value = f"{commit_msg} ({commit_hash})"
+                        git_commits.append(commit_value)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=commit_value,
+                            kind="commit",
+                            provenance_class="session_committed",
+                            evidence={"source": "trajectory", "tool_name": "exec"},
                         )
 
     # Finalize the last turn (not followed by another turn_context)
