@@ -49,7 +49,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
-import linear_oauth_state  # type: ignore[import-not-found]
+import linear_oauth_state
 from dotenv import load_dotenv
 
 # ============================================================================

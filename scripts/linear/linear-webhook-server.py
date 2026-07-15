@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-import linear_oauth_state  # type: ignore[import-not-found]
+import linear_oauth_state
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
