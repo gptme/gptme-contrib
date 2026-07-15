@@ -1,5 +1,8 @@
 .PHONY: install test typecheck format publish
 
+export MYPY_CACHE_DIR ?= $(shell git rev-parse --show-toplevel)/.mypy_cache
+export RUFF_CACHE_DIR ?= $(shell git rev-parse --show-toplevel)/.ruff_cache
+
 install:  ## Install the package in development mode
 	uv pip install -e .
 
