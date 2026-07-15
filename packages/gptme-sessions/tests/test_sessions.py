@@ -3852,6 +3852,157 @@ def test_extract_signals_codex_commit_in_long_output():
     assert "abc1234" in signals["git_commits"][0]
 
 
+def test_extract_signals_codex_exec_custom_tool_call_list_output_commit():
+    """Newer Codex CLI sessions wrap exec_command in a JS-source "exec"
+    custom_tool_call instead of a plain function_call, with output as a list
+    of content blocks. Regression test for gpt-5.6-sol sessions that graded
+    0.25/noop despite containing real commits (2026-07-15 false-noop cluster).
+    """
+    msgs = [
+        {
+            "timestamp": "2026-07-15T11:18:06Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-07-15T11:18:10Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec1",
+                "name": "exec",
+                "input": (
+                    'const r = await tools.exec_command({"cmd":"set -e\\n'
+                    'git add foo.md\\ngit commit -m \\"fix: something\\"",'
+                    '"workdir":"/home/bob/bob"});\ntext(r.output);\n'
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-07-15T11:18:15Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec1",
+                "output": [
+                    {"type": "input_text", "text": "Script completed\nOutput:\n"},
+                    {
+                        "type": "input_text",
+                        "text": "[master abc1234] fix: something\n 1 file changed\n",
+                    },
+                ],
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["tool_calls"] == {"exec": 1}
+    assert signals["steps"] == 1
+    assert len(signals["git_commits"]) == 1
+    assert "fix: something (abc1234)" in signals["git_commits"]
+
+
+def test_extract_signals_codex_exec_custom_tool_call_string_output_commit():
+    """Same "exec" custom_tool_call shape, but output is a plain string
+    rather than a list of content blocks."""
+    msgs = [
+        {
+            "timestamp": "2026-07-15T11:18:06Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-07-15T11:18:10Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec2",
+                "name": "exec",
+                "input": (
+                    'const r = await tools.exec_command({"cmd":"git commit -m '
+                    '\\"docs: update\\""});\ntext(r.output);\n'
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-07-15T11:18:15Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec2",
+                "output": "Process exited with code 0\n[master def5678] docs: update\n 1 file changed\n",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert len(signals["git_commits"]) == 1
+    assert "docs: update (def5678)" in signals["git_commits"]
+    assert signals["error_count"] == 0
+
+
+def test_extract_signals_codex_exec_multi_invocation_file_write():
+    """A single "exec" custom_tool_call input can contain multiple embedded
+    tools.exec_command(...) calls; each embedded cmd should be scanned for
+    file-write patterns independently."""
+    msgs = [
+        {
+            "timestamp": "2026-07-15T11:18:06Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-07-15T11:18:10Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec3",
+                "name": "exec",
+                "input": (
+                    'const a = await tools.exec_command({"cmd":"pwd"});\n'
+                    'const b = await tools.exec_command({"cmd":"cat > /tmp/x.py '
+                    "<<'EOF'\\nprint(1)\\nEOF\"});\n"
+                    "text(a.output + b.output);\n"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-07-15T11:18:15Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec3",
+                "output": "Process exited with code 0",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["tool_calls"] == {"exec": 1}
+    assert "/tmp/x.py" in signals["file_writes"]
+
+
+def test_extract_signals_codex_custom_tool_call_output_unknown_call_id():
+    """A custom_tool_call_output whose call_id has no matching custom_tool_call
+    (e.g. "exec" record was truncated/dropped) should be ignored, not crash."""
+    msgs = [
+        {
+            "timestamp": "2026-07-15T11:18:06Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-07-15T11:18:15Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_unknown",
+                "output": "[master abc1234] feat: orphaned output\n",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert signals["git_commits"] == []
+    assert signals["tool_calls"] == {}
+
+
 def test_extract_usage_codex():
     """Extract model, token, and rate-limit info from Codex trajectory."""
     msgs = [
