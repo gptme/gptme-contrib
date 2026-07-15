@@ -77,8 +77,10 @@ def call_claude_code(
     if diagnostic_dir is None:
         diagnostic_dir = Path.home() / ".local" / "state" / "gptme-activity-summary"
     invocation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    attempt = 1
+    plain_retry_pending = False
 
-    for attempt in range(1, max_retries + 1):
+    while attempt <= max_retries or plain_retry_pending:
         debug_file: Path | None = None
         attempt_cmd = list(cmd)
         # Keep the healthy path compatible with Claude versions that predate
@@ -121,10 +123,9 @@ def call_claude_code(
             if debug_file is not None:
                 combined_out = (result.stderr or "") + (result.stdout or "")
                 if "debug-file" in combined_out.lower():
-                    logger.debug(
-                        "--debug-file appears unsupported; disabling diagnostics for remaining retries"
-                    )
+                    logger.debug("--debug-file appears unsupported; retrying without diagnostics")
                     diagnostic_dir = None
+                    plain_retry_pending = True
             stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
             stdout_preview = result.stdout.strip()[:500] if result.stdout else "(none)"
             logger.warning(
@@ -136,12 +137,16 @@ def call_claude_code(
                 stdout_preview,
                 debug_file,
             )
-            if attempt < max_retries:
+            if attempt < max_retries or plain_retry_pending:
                 # Retry all non-zero codes without discrimination. This addresses transient
                 # CC service failures (rate limits, temporary unavailability). Permanent errors
                 # (e.g., command-not-found, auth failure) will exhaust the retry window and
                 # then raise, which is acceptable since they're rare in normal operation.
                 time.sleep(_RETRY_DELAY_S * attempt)  # linear backoff
+                if plain_retry_pending:
+                    plain_retry_pending = False
+                else:
+                    attempt += 1
                 continue
             raise subprocess.CalledProcessError(
                 result.returncode, attempt_cmd, result.stdout, result.stderr
@@ -161,6 +166,9 @@ def call_claude_code(
 
         if attempt < max_retries:
             time.sleep(_RETRY_DELAY_S * attempt)  # linear backoff
+            attempt += 1
+        else:
+            break
 
     # All retries exhausted — return empty string (callers handle gracefully)
     logger.error(

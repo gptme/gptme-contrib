@@ -235,6 +235,24 @@ def test_call_claude_code_nonzero_logs_stdout_and_debug_file(
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
+def test_call_claude_code_unsupported_debug_file_retries_plain(mock_run, mock_sleep, tmp_path):
+    """An unsupported diagnostic flag must not consume the last plain retry."""
+    mock_run.side_effect = [
+        _make_completed_process(returncode=1, stderr="transient API failure"),
+        _make_completed_process(returncode=1, stderr="unknown option --debug-file"),
+        _make_completed_process(stdout='{"ok": true}'),
+    ]
+
+    result = call_claude_code("test prompt", max_retries=2, diagnostic_dir=tmp_path)
+
+    assert result == '{"ok": true}'
+    assert mock_run.call_count == 3
+    assert "--debug-file" in mock_run.call_args_list[1].args[0]
+    assert "--debug-file" not in mock_run.call_args_list[2].args[0]
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
 def test_call_claude_code_diagnostic_dir_mkdir_failure_still_retries(mock_run, mock_sleep):
     """Diagnostic dir mkdir failure must not block a Claude retry."""
     from pathlib import Path
