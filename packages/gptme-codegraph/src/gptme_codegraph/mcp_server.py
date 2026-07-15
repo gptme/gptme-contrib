@@ -27,11 +27,13 @@ Tools exposed:
     codegraph_callees              — Find callees of a symbol
     codegraph_refs                 — Find references to a symbol
     codegraph_blast                — Compute dependency closure (walks callees)
+    codegraph_search               — Find symbols by concept (BM25 lexical search)
     codegraph_impact               — Compute impact radius (walks callers — what breaks if you change this)
 
 """
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +56,10 @@ from gptme_codegraph.core import (
 )
 from gptme_codegraph.search import (
     LexicalScorer,
+    SearchDocument,
     extract_search_documents,
+    load_search_documents,
+    save_search_documents,
 )
 
 mcp = FastMCP("codegraph", log_level="WARNING")
@@ -103,10 +108,23 @@ def _get_or_build_index(directory: str) -> SymbolIndex:
     if sqlite_cache is not None:
         try:
             sqlite_cache.save(index)
+            # Clear stale search-document cache so next search re-extracts from the new index
+            _clear_search_docs_db(sqlite_cache.db_path, dir_path)
         except Exception:
             pass
     _index_cache[dir_path] = (index, sqlite_cache)
     return index
+
+
+def _clear_search_docs_db(db_path: str, directory: str) -> None:
+    """Remove cached search documents for a directory from its SQLite store."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("DELETE FROM search_documents WHERE directory = ?", (directory,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 def _invalidate_cache(directory: str) -> None:
@@ -634,7 +652,28 @@ def codegraph_search(
     if not index or not index.all_names():
         return json.dumps({"error": "No symbols found in directory"})
 
-    docs = extract_search_documents(index, dir_path)
+    dir_key = str(dir_path.resolve())
+
+    # Load search documents from SQLite cache if available; extract and save on miss.
+    docs: list[SearchDocument] | None = None
+    cached_entry = _index_cache.get(dir_key)
+    sqlite_cache = cached_entry[1] if cached_entry else None
+    if sqlite_cache is not None:
+        try:
+            conn = sqlite3.connect(sqlite_cache.db_path)
+            loaded = load_search_documents(conn, dir_key)
+            if loaded:
+                docs = loaded
+            else:
+                docs = extract_search_documents(index, dir_path)
+                save_search_documents(conn, dir_key, docs)
+            conn.close()
+        except Exception:
+            docs = None
+
+    if docs is None:
+        docs = extract_search_documents(index, dir_path)
+
     scorer = LexicalScorer()
     scorer.index(docs)
     results = scorer.search(query, limit=limit)

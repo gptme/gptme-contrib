@@ -4,7 +4,7 @@ Structural code retrieval for gptme via [tree-sitter](https://tree-sitter.github
 
 ## Features
 
-- **9 MCP tools**: `codegraph_parse`, `codegraph_index`, `codegraph_map`, `codegraph_def`, `codegraph_callers`, `codegraph_callees`, `codegraph_refs`, `codegraph_blast`, `codegraph_impact`
+- **10 MCP tools**: `codegraph_parse`, `codegraph_index`, `codegraph_map`, `codegraph_def`, `codegraph_callers`, `codegraph_callees`, `codegraph_refs`, `codegraph_blast`, `codegraph_search`, `codegraph_impact`
 - **Multi-language symbol extraction** for Python, JavaScript/TypeScript, Rust, Go, Java, C#, Ruby, C, C++, PHP, Kotlin, and Swift
 - **Cross-file import capture** across supported languages, with strongest semantic resolution on Python
 - **Qualified symbol IDs** (`module::Class.method`) for unambiguous cross-file references
