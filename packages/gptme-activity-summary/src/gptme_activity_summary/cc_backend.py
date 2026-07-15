@@ -76,12 +76,27 @@ def call_claude_code(
 
     if diagnostic_dir is None:
         diagnostic_dir = Path.home() / ".local" / "state" / "gptme-activity-summary"
-    diagnostic_dir.mkdir(parents=True, exist_ok=True)
     invocation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
 
     for attempt in range(1, max_retries + 1):
-        debug_file = diagnostic_dir / f"claude-{invocation_id}-attempt-{attempt}.log"
-        attempt_cmd = [*cmd, "--debug-file", str(debug_file)]
+        debug_file: Path | None = None
+        attempt_cmd = list(cmd)
+        # Keep the healthy path compatible with Claude versions that predate
+        # --debug-file. Enable tracing only after an actual failure triggered a
+        # retry, and make diagnostics best-effort so they cannot block Claude.
+        if attempt > 1 and diagnostic_dir is not None:
+            try:
+                diagnostic_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.debug(
+                    "Cannot create diagnostic dir %s (%s); debug file disabled",
+                    diagnostic_dir,
+                    exc,
+                )
+                diagnostic_dir = None
+            else:
+                debug_file = diagnostic_dir / f"claude-{invocation_id}-attempt-{attempt}.log"
+                attempt_cmd.extend(["--debug-file", str(debug_file)])
         result = subprocess.run(
             attempt_cmd,
             input=prompt,

@@ -203,20 +203,20 @@ def test_call_claude_code_nonzero_logs_stderr(mock_run, mock_sleep, caplog):
 def test_call_claude_code_nonzero_logs_stdout_and_debug_file(
     mock_run, mock_sleep, mock_datetime, caplog, tmp_path
 ):
-    """Test failures preserve stdout and point operators at Claude's debug log."""
+    """Test failures preserve stdout and trace the retry in a debug log."""
     import logging
 
     mock_datetime.now.return_value = datetime(2026, 7, 15, 1, 2, 3, tzinfo=timezone.utc)
-    debug_file = tmp_path / "claude-20260715T010203.000000Z-attempt-1.log"
-    mock_run.return_value = _make_completed_process(
-        returncode=1,
-        stdout="Your session quota is exhausted",
-    )
+    debug_file = tmp_path / "claude-20260715T010203.000000Z-attempt-2.log"
+    mock_run.side_effect = [
+        _make_completed_process(returncode=1, stdout="Your session quota is exhausted"),
+        _make_completed_process(returncode=1, stdout="Your session quota is exhausted"),
+    ]
     with caplog.at_level(logging.WARNING):
         try:
             call_claude_code(
                 "test prompt",
-                max_retries=1,
+                max_retries=2,
                 diagnostic_dir=tmp_path,
             )
         except subprocess.CalledProcessError as error:
@@ -227,8 +227,30 @@ def test_call_claude_code_nonzero_logs_stdout_and_debug_file(
     log_text = "\n".join(caplog.messages)
     assert "stdout: Your session quota is exhausted" in log_text
     assert f"debug_file: {debug_file}" in log_text
-    cmd = mock_run.call_args.args[0]
-    assert cmd[-2:] == ["--debug-file", str(debug_file)]
+    first_cmd = mock_run.call_args_list[0].args[0]
+    retry_cmd = mock_run.call_args_list[1].args[0]
+    assert "--debug-file" not in first_cmd
+    assert retry_cmd[-2:] == ["--debug-file", str(debug_file)]
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_diagnostic_dir_mkdir_failure_still_retries(mock_run, mock_sleep):
+    """Diagnostic dir mkdir failure must not block a Claude retry."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    mock_run.side_effect = [
+        _make_completed_process(returncode=1),
+        _make_completed_process(stdout='{"ok": true}'),
+    ]
+
+    with patch.object(Path, "mkdir", side_effect=OSError("read-only filesystem")):
+        result = call_claude_code("test prompt", max_retries=2)
+
+    assert result == '{"ok": true}'
+    assert mock_run.call_count == 2
+    assert "--debug-file" not in mock_run.call_args_list[1].args[0]
 
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
