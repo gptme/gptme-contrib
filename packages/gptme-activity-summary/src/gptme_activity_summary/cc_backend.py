@@ -95,6 +95,15 @@ def call_claude_code(
                 )
                 diagnostic_dir = None
             else:
+                # Prune files older than 7 days on first retry to cap disk growth
+                if attempt == 2:
+                    cutoff = time.time() - 7 * 86400
+                    for old_log in diagnostic_dir.glob("claude-*.log"):
+                        try:
+                            if old_log.stat().st_mtime < cutoff:
+                                old_log.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                 debug_file = diagnostic_dir / f"claude-{invocation_id}-attempt-{attempt}.log"
                 attempt_cmd.extend(["--debug-file", str(debug_file)])
         result = subprocess.run(
