@@ -1482,7 +1482,10 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
 
                 exec_input = payload.get("input", "") or ""
                 if isinstance(exec_input, str):
-                    for cmd_match in re.finditer(r'"cmd"\s*:\s*("(?:[^"\\]|\\.)*")', exec_input):
+                    for cmd_match in re.finditer(
+                        r'tools\.exec_command\s*\(\s*[^)]*?"cmd"\s*:\s*("(?:[^"\\]|\\.)*")',
+                        exec_input,
+                    ):
                         try:
                             cmd = json.loads(cmd_match.group(1))
                         except (json.JSONDecodeError, ValueError):
@@ -1553,7 +1556,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                         if code_match and code_match.group(1) != "0":
                             error_count += 1
 
-                    for commit_match in _COMMIT_RE.finditer(output[:8000]):
+                    for commit_match in _COMMIT_RE.finditer(output):
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
                         commit_value = f"{commit_msg} ({commit_hash})"

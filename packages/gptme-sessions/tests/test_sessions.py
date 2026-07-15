@@ -4003,6 +4003,83 @@ def test_extract_signals_codex_custom_tool_call_output_unknown_call_id():
     assert signals["tool_calls"] == {}
 
 
+def test_extract_signals_codex_exec_cmd_outside_exec_command_ignored():
+    """A bare "cmd" key in the JS source that is NOT inside tools.exec_command(...)
+    should not be extracted as a shell command (regex anchored to exec_command context)."""
+    msgs = [
+        {
+            "timestamp": "2026-07-15T11:18:06Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-07-15T11:18:10Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec99",
+                "name": "exec",
+                "input": (
+                    # A "cmd" key inside a config object, NOT tools.exec_command
+                    'const config = {"cmd": "cat /etc/passwd > /tmp/steal"};\n'
+                    'const r = await tools.exec_command({"cmd": "echo hello", "workdir": "/tmp"});\n'
+                    "text(r.output);\n"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-07-15T11:18:15Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec99",
+                "output": "hello\n",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    # Only the real exec_command call's cmd should be extracted — not the config object
+    assert signals["tool_calls"] == {"exec": 1}
+    # /tmp/steal must NOT appear; the config "cmd" is not a real exec_command call
+    assert "/tmp/steal" not in signals["file_writes"]
+
+
+def test_extract_signals_codex_exec_commit_after_8k_chars():
+    """Commit lines appearing after 8000 chars of exec output must still be detected.
+    Without the full-output scan, long verbose outputs would drop commits."""
+    msgs = [
+        {
+            "timestamp": "2026-07-15T11:18:06Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-07-15T11:18:10Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec_long",
+                "name": "exec",
+                "input": 'const r = await tools.exec_command({"cmd": "make && git commit -am \\"build: big\\""});\n',
+            },
+        },
+        {
+            "timestamp": "2026-07-15T11:18:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_long",
+                # Verbose build output exceeding 8000 chars followed by the commit line
+                "output": ("Compiling module...\n" * 500)
+                + "[master feed1234] build: big\n 3 files changed\n",
+            },
+        },
+    ]
+    signals = extract_signals_codex(msgs)
+    assert len(signals["git_commits"]) == 1
+    assert "build: big (feed1234)" in signals["git_commits"]
+
+
 def test_extract_usage_codex():
     """Extract model, token, and rate-limit info from Codex trajectory."""
     msgs = [
