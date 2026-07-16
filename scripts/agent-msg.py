@@ -91,7 +91,7 @@ def _translate(argv: list[str]) -> list[str]:
     click validates them and errors on anything ``pending`` doesn't accept.
     """
     if argv and argv[0] == "list" and "--needs-reply" in argv[1:]:
-        rest = [a for a in argv[1:] if a != "--needs-reply"]
+        rest = [a for a in argv[1:] if a not in {"--needs-reply", "--unread"}]
         return ["pending", *rest]
     if argv and argv[0] == "list" and "--unread" in argv[1:]:
         return ["list", *(a for a in argv[1:] if a != "--unread")]

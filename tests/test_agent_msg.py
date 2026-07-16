@@ -76,10 +76,8 @@ class TestTranslate:
         ]
 
     def test_needs_reply_wins_over_unread_alias(self):
-        assert _shim._translate(["list", "--unread", "--needs-reply"]) == [
-            "pending",
-            "--unread",
-        ]
+        # --unread must be stripped when routing to `pending` (pending doesn't accept it)
+        assert _shim._translate(["list", "--unread", "--needs-reply"]) == ["pending"]
 
 
 # ---------------------------------------------------------------------------
