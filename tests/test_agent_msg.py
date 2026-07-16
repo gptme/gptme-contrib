@@ -65,6 +65,20 @@ class TestTranslate:
     def test_other_list_flags_preserved(self):
         assert _shim._translate(["list", "--all"]) == ["list", "--all"]
 
+    def test_list_unread_is_noop_alias(self):
+        assert _shim._translate(["list", "--unread"]) == ["list"]
+
+    def test_list_unread_preserves_other_args(self):
+        assert _shim._translate(["list", "--unread", "--mailbox", "ops"]) == [
+            "list",
+            "--mailbox",
+            "ops",
+        ]
+
+    def test_needs_reply_wins_over_unread_alias(self):
+        # --unread must be stripped when routing to `pending` (pending doesn't accept it)
+        assert _shim._translate(["list", "--unread", "--needs-reply"]) == ["pending"]
+
 
 # ---------------------------------------------------------------------------
 # meta_of(): YAML frontmatter parser (from transport.agent)
