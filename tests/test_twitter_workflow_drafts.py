@@ -478,6 +478,32 @@ def test_quarantine_permanent_reply_failure_moves_draft_to_rejected(
     )
 
 
+def test_quarantine_permanent_reply_failure_recognizes_current_twitter_message(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approved_path = workflow_module.APPROVED_DIR / "reply.yml"
+    draft = workflow_module.TweetDraft(
+        text="A useful reply",
+        type="reply",
+        in_reply_to="4242",
+    )
+    draft.save(approved_path)
+
+    moved = workflow_module._quarantine_permanent_reply_failure(
+        approved_path,
+        draft,
+        RuntimeError(
+            "403 Forbidden: You can only reply to or quote posts where "
+            "you are mentioned or are the author."
+        ),
+    )
+
+    assert moved is True
+    assert not approved_path.exists()
+    assert (workflow_module.REJECTED_DIR / approved_path.name).exists()
+
+
 def test_quarantine_permanent_reply_failure_preserves_existing_rejection(
     workflow_module: Any, tmp_path: Path
 ) -> None:
