@@ -684,6 +684,7 @@ def move_draft(path: Path, new_status: str) -> Path:
 _PERMANENT_REPLY_FAILURE_MARKERS = (
     "reply to this conversation is not allowed because you have not been mentioned",
     "you have not been mentioned or otherwise engaged by the author",
+    "you can only reply to or quote posts where you are mentioned or are the author",
 )
 
 
