@@ -2,8 +2,8 @@
 
 The agent workspace may provide the ``redact`` package. When it does, critical
 findings block delivery and are recorded in the workspace state ledger. A
-standalone gptme-contrib install does not require that package, so its absence is
-reported and the gate is skipped.
+standalone gptme-contrib install does not require that package, so its absence
+is reported and the gate is skipped.
 """
 
 from __future__ import annotations
