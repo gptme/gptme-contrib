@@ -1721,6 +1721,59 @@ def test_extract_usage_cc_no_usage_field():
     assert usage["context_peak_tokens"] == 5
 
 
+def test_extract_usage_cc_stream_json_result_message():
+    """Stream-json result record overrides per-event assistant sums.
+
+    In --stream-json format each assistant event is a streaming update with
+    partial/snapshot usage (output_tokens: 1-2 per event).  The final result
+    record carries the true cumulative totals and must win over the sum of
+    assistant events.  Mirrors the shape seen in real durable CC trajectories
+    (e.g. state/sessions/cc-trajectories/*.jsonl).
+    """
+    # Two streaming-chunk assistant events — each shows the same cache context
+    # and tiny partial output (typical of stream-json intermediate events).
+    msgs = [
+        _make_cc_assistant_usage(1, 1, cache_create=1400, cache_read=72825),
+        _make_cc_assistant_usage(1, 24, cache_create=1400, cache_read=72825),
+        # Result record with the correct cumulative totals.
+        {
+            "type": "result",
+            "subtype": "success",
+            "num_turns": 4,
+            "total_cost_usd": 0.44,
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 1870,
+                "cache_creation_input_tokens": 57476,
+                "cache_read_input_tokens": 223757,
+            },
+        },
+    ]
+    usage = extract_usage_cc(msgs)
+
+    # Bulk counts come from result, not from summing the two streaming events.
+    assert usage["input_tokens"] == 10
+    assert usage["output_tokens"] == 1870
+    assert usage["cache_creation_tokens"] == 57476
+    assert usage["cache_read_tokens"] == 223757
+    assert usage["total_tokens"] == 10 + 1870 + 57476 + 223757
+    # Per-turn metrics still derived from assistant records.
+    assert usage["sys_prompt_tokens"] is not None  # first turn context
+    assert usage["model"] == "claude-sonnet-4-6"
+
+
+def test_extract_usage_cc_result_without_usage_falls_back():
+    """Result record with no usage dict falls back to summing assistant events."""
+    msgs = [
+        _make_cc_assistant_usage(100, 50, cache_create=200, cache_read=0),
+        {"type": "result", "subtype": "success", "num_turns": 1},  # no usage key
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
+    assert usage["cache_creation_tokens"] == 200
+
+
 def test_detect_format_cc_with_preamble():
     """CC trajectories starting with non-standard record types are still detected correctly.
 
