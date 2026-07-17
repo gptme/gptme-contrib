@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 from gptme_wisdom import BookDocument, BookIndex, parse_book_text
 from gptme_wisdom.cli import main
+from gptme_wisdom.indexer import _normalize_fts_query
 
 
 SAMPLE_TEXT = """
@@ -375,3 +376,16 @@ def test_cli_remove(tmp_path: Path) -> None:
     result = runner.invoke(main, ["--db", str(db), "remove", "--yes", "sicp"])
     assert result.exit_code == 0
     assert "removed" in result.output
+
+
+def test_normalize_fts_query_strips_keyword_operators() -> None:
+    # FTS5 keyword operators in prompt text must not be interpreted as syntax
+    assert "AND" not in _normalize_fts_query("Compare paging AND segmentation")
+    assert "OR" not in _normalize_fts_query("caching OR buffering strategies")
+    assert "NOT" not in _normalize_fts_query("networking NOT TCP")
+    assert "NEAR" not in _normalize_fts_query("terms NEAR other")
+    # Partial matches inside words must NOT be stripped (e.g. "android" contains "and")
+    result = _normalize_fts_query("android memory management")
+    assert "android" in result
+    # Special chars still stripped
+    assert "(" not in _normalize_fts_query("search (term)")
