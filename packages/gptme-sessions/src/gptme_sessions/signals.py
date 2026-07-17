@@ -1339,16 +1339,35 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
 
         elif rec_type == "result":
             # Stream-json format: result record has correct cumulative totals.
+            # Accumulate across multiple result records — resumed/appended
+            # stream-json output can contain more than one result record, each
+            # representing one sub-session's cumulative totals.
             r_usage = record.get("usage") or {}
             if r_usage:
-                result_usage = r_usage
+                if result_usage is None:
+                    result_usage = {}
+                for key in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ):
+                    v = _as_int(r_usage.get(key))
+                    if v is not None:
+                        result_usage[key] = (result_usage.get(key) or 0) + v
 
     # Prefer result-message totals (stream-json) over summed assistant events.
+    # Fall back per-field to assistant-derived sums for absent/invalid counters
+    # so a partial result record doesn't zero out valid counts.
     if result_usage:
-        input_tokens = _as_int(result_usage.get("input_tokens")) or 0
-        output_tokens = _as_int(result_usage.get("output_tokens")) or 0
-        cache_creation_tokens = _as_int(result_usage.get("cache_creation_input_tokens")) or 0
-        cache_read_tokens = _as_int(result_usage.get("cache_read_input_tokens")) or 0
+        input_tokens = _as_int(result_usage.get("input_tokens")) or per_turn_input
+        output_tokens = _as_int(result_usage.get("output_tokens")) or per_turn_output
+        cache_creation_tokens = (
+            _as_int(result_usage.get("cache_creation_input_tokens")) or per_turn_cache_creation
+        )
+        cache_read_tokens = (
+            _as_int(result_usage.get("cache_read_input_tokens")) or per_turn_cache_read
+        )
     else:
         input_tokens = per_turn_input
         output_tokens = per_turn_output

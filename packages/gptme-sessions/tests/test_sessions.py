@@ -1774,6 +1774,57 @@ def test_extract_usage_cc_result_without_usage_falls_back():
     assert usage["cache_creation_tokens"] == 200
 
 
+def test_extract_usage_cc_multiple_result_records_accumulated():
+    """Multiple result records (resumed session) are accumulated, not overwritten.
+
+    A resumed or appended stream-json trajectory can contain more than one
+    result record, each with the cumulative totals for that sub-session.
+    All result records must be summed to produce the correct session total.
+    """
+    msgs = [
+        _make_cc_assistant_usage(5, 10),
+        {
+            "type": "result",
+            "subtype": "success",
+            "usage": {"input_tokens": 100, "output_tokens": 500},
+        },
+        _make_cc_assistant_usage(3, 7),
+        {
+            "type": "result",
+            "subtype": "success",
+            "usage": {"input_tokens": 200, "output_tokens": 800},
+        },
+    ]
+    usage = extract_usage_cc(msgs)
+    # Both result records contribute; summing gives 300 in + 1300 out.
+    assert usage["input_tokens"] == 300
+    assert usage["output_tokens"] == 1300
+
+
+def test_extract_usage_cc_partial_result_falls_back_per_field():
+    """A partial result.usage object falls back per-field to assistant-derived sums.
+
+    When a result record is present but only contains some fields (e.g. only
+    input_tokens), absent fields must not zero out valid assistant-derived counts.
+    """
+    msgs = [
+        _make_cc_assistant_usage(100, 50, cache_create=200, cache_read=300),
+        {
+            "type": "result",
+            "subtype": "success",
+            # Only input_tokens is present — output and cache fields are absent.
+            "usage": {"input_tokens": 999},
+        },
+    ]
+    usage = extract_usage_cc(msgs)
+    # result-provided field wins
+    assert usage["input_tokens"] == 999
+    # absent fields fall back to per-turn assistant sums
+    assert usage["output_tokens"] == 50
+    assert usage["cache_creation_tokens"] == 200
+    assert usage["cache_read_tokens"] == 300
+
+
 def test_detect_format_cc_with_preamble():
     """CC trajectories starting with non-standard record types are still detected correctly.
 
