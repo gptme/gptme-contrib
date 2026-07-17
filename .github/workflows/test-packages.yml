@@ -131,11 +131,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y portaudio19-dev libportaudio2 || echo "::warning::portaudio not available, voice tests may skip"
-
       - name: Install dependencies
         run: |
           uv sync --all-packages --all-extras
