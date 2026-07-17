@@ -387,5 +387,6 @@ def test_normalize_fts_query_strips_keyword_operators() -> None:
     # Partial matches inside words must NOT be stripped (e.g. "android" contains "and")
     result = _normalize_fts_query("android memory management")
     assert "android" in result
-    # Special chars still stripped
+    # Special chars still stripped (including FTS5 column-filter colon)
     assert "(" not in _normalize_fts_query("search (term)")
+    assert ":" not in _normalize_fts_query("Explain: virtual memory")

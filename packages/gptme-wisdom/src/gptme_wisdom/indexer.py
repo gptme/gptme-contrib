@@ -24,7 +24,7 @@ def _normalize_fts_query(query: str) -> str:
     literal phrase match if the unquoted version still fails.
     """
     result = query.replace('"', '""')
-    for ch in ("(", ")", "*", "^", "+", "-", "~"):
+    for ch in ("(", ")", "*", "^", "+", "-", "~", ":"):
         result = result.replace(ch, "")
     # Strip FTS5 keyword operators so prompt text like "X AND Y" is not
     # misread as a boolean expression — they stay uppercase in SQLite FTS5.
