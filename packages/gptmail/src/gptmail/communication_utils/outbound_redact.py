@@ -26,7 +26,9 @@ def guard_outbound(text: str, channel: str, workspace: Path) -> bool:
     try:
         from redact import collect_secret_literals
         from redact import redact as scan
-    except ImportError:
+    except ModuleNotFoundError as exc:
+        if exc.name != "redact":
+            raise
         logger.warning("redact package not available — skipping outbound secret scan")
         return True
 
@@ -35,15 +37,18 @@ def guard_outbound(text: str, channel: str, workspace: Path) -> bool:
         return True
 
     ledger = workspace / "state" / "outbound-redact-blocks.jsonl"
-    ledger.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "channel": channel,
         "blocked": True,
         "reasons": result.block_reasons,
     }
-    with ledger.open("a") as f:
-        f.write(json.dumps(record) + "\n")
+    try:
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError as exc:
+        logger.error("Could not record outbound security block: %s", exc)
 
     reasons = "; ".join(result.block_reasons)
     logger.error("Outbound content blocked on channel=%s: %s", channel, reasons)
