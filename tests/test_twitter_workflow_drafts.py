@@ -38,6 +38,8 @@ def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
     monitoring_stub.get_logger = lambda *args, **kwargs: logging.getLogger(
         "twitter-test"
     )
+    redact_stub: Any = types.ModuleType("gptmail.communication_utils.outbound_redact")
+    redact_stub.guard_outbound = lambda *args, **kwargs: True
 
     gptmail_stub = _make_pkg("gptmail")
     gptmail_comm_stub = _make_pkg("gptmail.communication_utils")
@@ -103,6 +105,7 @@ def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
         "gptmail": gptmail_stub,
         "gptmail.communication_utils": gptmail_comm_stub,
         "gptmail.communication_utils.monitoring": monitoring_stub,
+        "gptmail.communication_utils.outbound_redact": redact_stub,
         "gptme": gptme_stub,
         "gptme.init": gptme_init_stub,
         "dotenv": dotenv_stub,
@@ -578,6 +581,116 @@ def test_post_quarantines_permanently_undeliverable_approved_reply(
 
     assert not approved_path.exists()
     assert (workflow_module.REJECTED_DIR / approved_path.name).exists()
+
+
+def test_post_blocks_secret_before_twitter_api_call(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approved_path = workflow_module.APPROVED_DIR / "secret.yml"
+    workflow_module.TweetDraft(text="secret payload").save(approved_path)
+    posted: list[str] = []
+
+    class PostingClient:
+        def create_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            posted.append(kwargs["text"])
+            return SimpleNamespace(data={"id": "1"})
+
+    monkeypatch.setattr(
+        workflow_module, "load_twitter_client", lambda *a, **k: PostingClient()
+    )
+    monkeypatch.setattr(workflow_module, "_validate_draft_urls", lambda draft: [])
+    monkeypatch.setattr(workflow_module, "_validate_draft_length", lambda draft: [])
+    scanned: list[tuple[str, str, Path]] = []
+
+    def block(text: str, channel: str, workspace: Path) -> bool:
+        scanned.append((text, channel, workspace))
+        return False
+
+    monkeypatch.setattr(workflow_module, "guard_outbound", block)
+
+    workflow_module.post(
+        dry_run=False,
+        yes=True,
+        draft_id=None,
+        max_posts=1,
+        skip_url_check=False,
+    )
+
+    assert posted == []
+    assert scanned == [("secret payload", "twitter", workflow_module.AGENT_DIR)]
+    assert not approved_path.exists()
+    assert (workflow_module.REJECTED_DIR / approved_path.name).exists()
+
+
+def test_auto_blocks_same_cycle_secret_before_twitter_api_call(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    approved_path = workflow_module.APPROVED_DIR / "same-cycle-secret.yml"
+    workflow_module.TweetDraft(text="secret payload").save(approved_path)
+    posted: list[str] = []
+
+    class PostingClient:
+        def get_home_timeline(self, *args: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(data=None)
+
+        def create_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            posted.append(kwargs["text"])
+            return SimpleNamespace(data={"id": "1"})
+
+    client = PostingClient()
+    monkeypatch.setattr(workflow_module, "load_twitter_client", lambda *a, **k: client)
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="me", username="bob")),
+    )
+    monkeypatch.setattr(workflow_module, "_validate_draft_urls", lambda draft: [])
+    scanned: list[tuple[str, str, Path]] = []
+
+    def block(text: str, channel: str, workspace: Path) -> bool:
+        scanned.append((text, channel, workspace))
+        return False
+
+    monkeypatch.setattr(workflow_module, "guard_outbound", block)
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=False,
+        post_approved=True,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert posted == []
+    assert scanned == [("secret payload", "twitter", workflow_module.AGENT_DIR)]
+    assert not approved_path.exists()
+    assert (workflow_module.REJECTED_DIR / approved_path.name).exists()
+
+
+def test_outbound_gate_scans_thread_segments(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanned: list[tuple[str, str, Path]] = []
+
+    def allow(text: str, channel: str, workspace: Path) -> bool:
+        scanned.append((text, channel, workspace))
+        return True
+
+    monkeypatch.setattr(workflow_module, "guard_outbound", allow)
+
+    allowed = workflow_module._outbound_allowed(
+        workflow_module.TweetDraft(text="main", thread=["follow one", "follow two"])
+    )
+
+    assert allowed is True
+    assert scanned == [
+        ("main\nfollow one\nfollow two", "twitter", workflow_module.AGENT_DIR)
+    ]
 
 
 def test_quarantine_permanent_reply_failure_keeps_transient_failure_approved(

@@ -60,6 +60,7 @@ from gptmail.communication_utils.monitoring import (
     MetricsCollector,
     get_logger,
 )
+from gptmail.communication_utils.outbound_redact import guard_outbound
 from gptme.init import init as init_gptme
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
@@ -1289,6 +1290,16 @@ def edit(draft_id: str, new_text: str) -> None:
     console.print(f"[cyan]New text: {draft.text}")
 
 
+def _outbound_text(draft: TweetDraft) -> str:
+    """Return every segment that publishing ``draft`` would disclose."""
+    return "\n".join([draft.text, *draft.thread])
+
+
+def _outbound_allowed(draft: TweetDraft) -> bool:
+    """Run the optional workspace secret gate immediately before posting."""
+    return bool(guard_outbound(_outbound_text(draft), "twitter", AGENT_DIR))
+
+
 def _post_tweet_with_thread(client, draft: TweetDraft, tweet_id: str) -> None:
     """Post thread follow-ups after main tweet is posted."""
     if draft.thread:
@@ -1486,6 +1497,13 @@ def post(
             continue
 
         if yes or Confirm.ask("Post this tweet?", default=True):
+            if not _outbound_allowed(draft):
+                console.print(
+                    "[red]Skipping draft — outbound redact gate blocked a secret.[/red]"
+                )
+                move_draft(path, "rejected")
+                continue
+
             try:
                 # Post the main tweet
                 response = client.create_tweet(
@@ -1852,6 +1870,16 @@ def process_timeline_tweets(
                                 drafts_generated += 1
                                 if draft.in_reply_to is not None:
                                     _replied_tweet_ids.add(str(draft.in_reply_to))
+                                continue
+
+                            if not _outbound_allowed(draft):
+                                draft.reject_reason = (
+                                    "Auto-post blocked by outbound redact gate"
+                                )
+                                path = save_draft(draft, "rejected")
+                                console.print(
+                                    f"[yellow]Saved blocked draft to {path}[/yellow]"
+                                )
                                 continue
 
                             client_for_post = load_twitter_client(
@@ -2406,6 +2434,13 @@ def auto(
                         console.print(f"[red]✗ URL returns {http_status}: {url}[/red]")
                     console.print(
                         "[red]Skipping draft — fix dead URLs in the tweet or thread.[/red]"
+                    )
+                    move_draft(path, "rejected")
+                    continue
+
+                if not _outbound_allowed(draft):
+                    console.print(
+                        "[red]Skipping draft — outbound redact gate blocked a secret.[/red]"
                     )
                     move_draft(path, "rejected")
                     continue

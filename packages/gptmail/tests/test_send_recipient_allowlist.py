@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import gptmail.lib as gptmail_lib
 from gptmail.lib import AgentEmail
 
 
@@ -86,10 +87,38 @@ def test_send_blocks_non_allowlisted(
     draft_dir.mkdir(parents=True, exist_ok=True)
     draft_id = "test-send-block"
     draft_path = draft_dir / f"{draft_id}.md"
-    draft_path.write_text("To: attacker@evil.com\n" "Subject: Test\n" "\n" "Hello\n")
+    draft_path.write_text("To: attacker@evil.com\nSubject: Test\n\nHello\n")
 
     with pytest.raises(ValueError, match="not in the send allowlist"):
         agent.send(draft_id)
+
+
+def test_send_blocks_redact_failure_before_delivery(
+    agent: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    draft_id = "test-send-secret"
+    draft_path = tmp_path / "email" / "drafts" / f"{draft_id}.md"
+    content = "To: erik@example.com\nSubject: Secret\n\nsecret payload\n"
+    draft_path.write_text(content)
+    scanned: list[tuple[str, str, Path]] = []
+
+    def block(text: str, channel: str, workspace: Path) -> bool:
+        scanned.append((text, channel, workspace))
+        return False
+
+    monkeypatch.setattr(gptmail_lib, "guard_outbound", block)
+    monkeypatch.setattr(
+        agent,
+        "_validate_msmtp_config",
+        lambda: pytest.fail("delivery setup must not run after a redact block"),
+    )
+
+    with pytest.raises(ValueError, match="Outbound redact gate blocked"):
+        agent.send(draft_id)
+
+    assert scanned == [(content, "email", tmp_path)]
+    assert draft_path.exists()
+    assert not (tmp_path / "email" / "sent" / f"{draft_id}.md").exists()
 
 
 def test_send_allows_allowlisted_recipient(
@@ -108,7 +137,7 @@ def test_send_allows_allowlisted_recipient(
     draft_dir.mkdir(parents=True, exist_ok=True)
     draft_id = "test-send-ok"
     draft_path = draft_dir / f"{draft_id}.md"
-    draft_path.write_text("To: erik@example.com\n" "Subject: Hello\n" "\n" "Hi Erik!\n")
+    draft_path.write_text("To: erik@example.com\nSubject: Hello\n\nHi Erik!\n")
 
     # Stub out the actual SMTP delivery so no real email is sent.
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())

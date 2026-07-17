@@ -58,6 +58,7 @@ from typing import Any, Dict, NamedTuple, Tuple
 
 import markdown
 
+from gptmail.communication_utils.outbound_redact import guard_outbound
 from gptmail.communication_utils.rate_limiting.limiters import RateLimiter
 from gptmail.communication_utils.state.locks import FileLock, LockError
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
@@ -814,6 +815,8 @@ class AgentEmail:
 
         # Read content before moving
         content = draft_path.read_text()
+        if not guard_outbound(content, "email", self.workspace):
+            raise ValueError("Outbound redact gate blocked a secret")
 
         # Actually send via msmtp first
         try:
