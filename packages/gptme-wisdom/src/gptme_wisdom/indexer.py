@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from pathlib import Path
 from typing import Iterator
@@ -17,15 +18,18 @@ DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "gptme" / "wisdom.db"
 def _normalize_fts_query(query: str) -> str:
     """Escape FTS5 special characters for safe querying.
 
-    Removes FTS5 operator tokens that would cause syntax errors in a
-    bare MATCH query. The search fallback wraps the stripped query in
-    double quotes for a literal phrase match if the unquoted version
-    still fails.
+    Removes FTS5 operator tokens (both keyword operators and punctuation)
+    so that untrusted prompt text is never misinterpreted as FTS5 syntax.
+    The search fallback wraps the stripped query in double quotes for a
+    literal phrase match if the unquoted version still fails.
     """
     result = query.replace('"', '""')
-    for ch in ("(", ")", "*", "^", "+", "-", "~"):
+    for ch in ("(", ")", "*", "^", "+", "-", "~", ":"):
         result = result.replace(ch, "")
-    return result
+    # Strip FTS5 keyword operators so prompt text like "X AND Y" is not
+    # misread as a boolean expression — they stay uppercase in SQLite FTS5.
+    result = re.sub(r"\b(AND|OR|NOT|NEAR)\b", " ", result)
+    return result.strip()
 
 
 class BookIndex:

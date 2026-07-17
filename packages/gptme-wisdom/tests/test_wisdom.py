@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 from gptme_wisdom import BookDocument, BookIndex, parse_book_text
 from gptme_wisdom.cli import main
+from gptme_wisdom.indexer import _normalize_fts_query
 
 
 SAMPLE_TEXT = """
@@ -246,6 +247,57 @@ def test_cli_search_context(tmp_path: Path) -> None:
     assert "## Wisdom:" in result.output
 
 
+def test_cli_search_prompt_env(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["--db", str(db), "search", "--context", "--prompt-env"],
+        env={"GPTME_PROMPT_INITIAL": "definitions"},
+    )
+    assert result.exit_code == 0
+    assert "## Wisdom: definitions" in result.output
+
+
+def test_cli_search_prompt_env_empty_is_noop(tmp_path: Path) -> None:
+    db = _make_db(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["--db", str(db), "search", "--prompt-env"],
+        env={"GPTME_PROMPT_INITIAL": ""},
+    )
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_cli_context_cmd_toml(tmp_path: Path) -> None:
+    db = tmp_path / "a path" / "wisdom.db"
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "--db",
+            str(db),
+            "context-cmd",
+            "--limit",
+            "2",
+            "--source",
+            "sicp",
+            "--toml",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0] == "[prompt]"
+    command = json.loads(lines[1].removeprefix("context_cmd = "))
+    assert "gptme wisdom" in command
+    assert "--prompt-env" in command
+    assert "--limit 2" in command
+    assert "--source sicp" in command
+    assert f"'{db}'" in command
+
+
 def test_cli_search_no_index(tmp_path: Path) -> None:
     runner = CliRunner()
     db = tmp_path / "missing.db"
@@ -324,3 +376,17 @@ def test_cli_remove(tmp_path: Path) -> None:
     result = runner.invoke(main, ["--db", str(db), "remove", "--yes", "sicp"])
     assert result.exit_code == 0
     assert "removed" in result.output
+
+
+def test_normalize_fts_query_strips_keyword_operators() -> None:
+    # FTS5 keyword operators in prompt text must not be interpreted as syntax
+    assert "AND" not in _normalize_fts_query("Compare paging AND segmentation")
+    assert "OR" not in _normalize_fts_query("caching OR buffering strategies")
+    assert "NOT" not in _normalize_fts_query("networking NOT TCP")
+    assert "NEAR" not in _normalize_fts_query("terms NEAR other")
+    # Partial matches inside words must NOT be stripped (e.g. "android" contains "and")
+    result = _normalize_fts_query("android memory management")
+    assert "android" in result
+    # Special chars still stripped (including FTS5 column-filter colon)
+    assert "(" not in _normalize_fts_query("search (term)")
+    assert ":" not in _normalize_fts_query("Explain: virtual memory")

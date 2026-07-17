@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -139,7 +141,7 @@ def ingest(
     if not effective_title:
         known = ", ".join(sorted(SOURCES))
         click.echo(
-            f"error: no title for source '{source}' — pass --title " f"(curated slugs: {known})",
+            f"error: no title for source '{source}' — pass --title (curated slugs: {known})",
             err=True,
         )
         sys.exit(1)
@@ -169,22 +171,68 @@ def ingest(
     )
 
 
+def _context_command(db: Path, *, limit: int, source: str | None) -> str:
+    """Build a context_cmd that queries wisdom using gptme's first prompt."""
+    args = [
+        "gptme",
+        "wisdom",
+        "--db",
+        str(db),
+        "search",
+        "--context",
+        "--limit",
+        str(limit),
+        "--prompt-env",
+    ]
+    if source:
+        args.extend(["--source", source])
+    return " ".join(shlex.quote(arg) for arg in args)
+
+
+@main.command("context-cmd")
+@click.option("--limit", default=3, show_default=True, help="Max results per session.")
+@click.option("--source", help="Restrict context retrieval to a source slug.")
+@click.option("--toml", is_flag=True, help="Emit a ready-to-paste [prompt] TOML snippet.")
+@click.pass_context
+def context_cmd(ctx: click.Context, limit: int, source: str | None, toml: bool) -> None:
+    """Print a context_cmd for query-dependent wisdom retrieval.
+
+    Requires gptme >=0.33, which exposes the first prompt in
+    GPTME_PROMPT_INITIAL while context_cmd runs.
+    """
+    if limit < 1:
+        raise click.BadParameter("must be at least 1", param_hint="--limit")
+
+    command = _context_command(ctx.obj["db"], limit=limit, source=source)
+    if toml:
+        click.echo("[prompt]")
+        click.echo(f"context_cmd = {json.dumps(command)}")
+    else:
+        click.echo(command)
+
+
 @main.command()
-@click.argument("query")
+@click.argument("query", required=False)
 @click.option("--source", default=None, help="Restrict to a source slug.")
 @click.option("--limit", default=5, show_default=True, help="Max results.")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON.")
 @click.option("--snippet-chars", default=280, show_default=True, help="Snippet length (text mode).")
 @click.option("--context/--no-context", default=False, help="Output as gptme context block.")
+@click.option(
+    "--prompt-env",
+    is_flag=True,
+    help="Read the query from GPTME_PROMPT_INITIAL (for context_cmd).",
+)
 @click.pass_context
 def search(
     ctx: click.Context,
-    query: str,
+    query: str | None,
     source: str | None,
     limit: int,
     as_json: bool,
     snippet_chars: int,
     context: bool,
+    prompt_env: bool,
 ) -> None:
     """Search the wisdom index with a BM25 keyword query.
 
@@ -194,6 +242,15 @@ def search(
         gptme-wisdom search "amortized complexity" --source sicp --json
         gptme-wisdom search "reinforcement learning policy" --context
     """
+    if prompt_env:
+        if query is not None:
+            raise click.UsageError("QUERY and --prompt-env are mutually exclusive")
+        query = os.environ.get("GPTME_PROMPT_INITIAL", "").strip()
+        if not query:
+            return
+    elif query is None:
+        raise click.UsageError("Missing argument 'QUERY'.")
+
     db: Path = ctx.obj["db"]
     if not db.exists():
         click.echo(

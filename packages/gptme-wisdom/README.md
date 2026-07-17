@@ -28,9 +28,9 @@ curl -L https://greenteapress.com/thinkpython2/thinkpython2.pdf | \
 # 2. Ingest — curated slugs autofill title/url/license
 gptme-wisdom ingest --source thinkpython --file /tmp/thinkpython.txt
 
-# 3. Search
-gptme-wisdom search "recursion base case"
-gptme-wisdom search "virtual memory" --source ostep --limit 3
+# 3. Search (`gptme wisdom` delegates to `gptme-wisdom` on gptme >=0.32)
+gptme wisdom search "recursion base case"
+gptme wisdom search "virtual memory" --source ostep --limit 3
 
 # 4. List indexed books
 gptme-wisdom list
@@ -57,15 +57,24 @@ For other books, pass `--title` (and optionally `--url`, `--license`).
 
 ## gptme context integration
 
-Use `--context` to emit results in gptme's context-block format — suitable for
-piping into `context_cmd`:
+On gptme >=0.32, the installed `gptme-wisdom` executable is automatically
+available as the `gptme wisdom` external subcommand:
 
 ```bash
-# In gptme.toml:
-# [context]
-# context_cmd = "gptme-wisdom search --context '${QUERY}'"
-gptme-wisdom search --context "amortized complexity"
+gptme wisdom search --context "amortized complexity"
 ```
+
+To retrieve wisdom relevant to the first prompt of every new session, generate
+a ready-to-paste `gptme.toml` snippet:
+
+```bash
+gptme wisdom context-cmd --toml
+```
+
+The generated `[prompt].context_cmd` uses `GPTME_PROMPT_INITIAL`, available in
+gptme >=0.33, to pass the prompt through the process environment rather than
+interpolating untrusted text into a shell command. `--limit` defaults to 3, and
+`--source` can restrict retrieval to one book. Search stays entirely local.
 
 ## Storage
 
