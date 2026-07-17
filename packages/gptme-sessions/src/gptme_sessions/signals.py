@@ -1844,14 +1844,15 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
     if final_total is not None:
         input_tokens = _as_int(final_total.get("input_tokens"))
         output_tokens = _as_int(final_total.get("output_tokens"))
-        cached_input_tokens = _as_int(final_total.get("cached_input_tokens"))
+        cache_read_tokens = _as_int(final_total.get("cached_input_tokens"))
         total_tokens = _as_int(final_total.get("total_tokens"))
         if input_tokens is not None:
             result["input_tokens"] = input_tokens
         if output_tokens is not None:
             result["output_tokens"] = output_tokens
-        if cached_input_tokens is not None:
-            result["cached_input_tokens"] = cached_input_tokens
+        if cache_read_tokens is not None:
+            # Normalize Codex's provider field to the SessionRecord schema.
+            result["cache_read_tokens"] = cache_read_tokens
         if total_tokens is not None:
             result["total_tokens"] = total_tokens
     if sys_prompt_tokens is not None:
