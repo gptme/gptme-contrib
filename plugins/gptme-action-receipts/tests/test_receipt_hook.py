@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from gptme_action_receipts.hooks import register
 from gptme_action_receipts.hooks.receipt_hook import (
     _make_receipt,
     _receipt_pre,
@@ -65,6 +66,10 @@ class TestMakeReceipt:
         r = _make_receipt("shell", "ls", None, "s1")
 
         assert r["model"] == "gptme-model"
+
+
+def test_hooks_package_exports_register():
+    assert callable(register)
 
 
 class TestReceiptPreHook:
