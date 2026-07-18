@@ -40,6 +40,10 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp_path = Path(temp_name)
     try:
+        try:
+            os.fchmod(fd, path.stat().st_mode & 0o777)
+        except FileNotFoundError:
+            pass
         with os.fdopen(fd, "w", encoding=encoding) as temp_file:
             temp_file.write(text)
             temp_file.flush()

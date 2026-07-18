@@ -242,7 +242,8 @@ def write_post_session_record(
     record = finalize_post_session_record(
         result.record.to_dict(), result.grade, item_timeout
     )
-    _write_record(record_path, record)
+    with locked_state_file(record_path):
+        _write_record(record_path, record)
 
 
 # --- Legacy fallback record write (worker.sh:325-373) ---
@@ -326,7 +327,8 @@ def write_fallback_session_record(
         item_timeout=item_timeout,
         trajectory=trajectory,
     )
-    _write_record(record_path, payload)
+    with locked_state_file(record_path):
+        _write_record(record_path, payload)
 
 
 # --- PR-state before/after diff (worker.sh:377-502) ---
@@ -691,6 +693,9 @@ def write_worker_result_manifest(
     # preserved while this comparatively long manifest build runs.
     with locked_state_file(record_path):
         if not record_path.is_file():
+            # Cleanup removed the record while we were building the manifest;
+            # remove the orphaned manifest so bookkeeping stays consistent.
+            manifest_path.unlink(missing_ok=True)
             return
         latest_payload = json.loads(record_path.read_text(encoding="utf-8"))
         if not isinstance(latest_payload, dict):
