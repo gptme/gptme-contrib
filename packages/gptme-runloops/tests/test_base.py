@@ -1,5 +1,6 @@
 """Tests for BaseRunLoop."""
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -278,6 +279,25 @@ def test_backoff_schedule_skips_at_threshold(threshold, skip_n, out_of, _desc):
         # Allow ±20% variance from expected fraction
         assert skip_count >= (expected_fraction - 0.20) * 100
         assert skip_count <= (expected_fraction + 0.20) * 100
+
+
+def test_save_backoff_state_uses_atomic_replace():
+    """A failed write cannot truncate the last valid backoff state."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+        run = TestRunLoop(workspace, "test")
+        original = {"consecutive_failures": 2, "last_hash": "hash1"}
+        run._save_backoff_state(original)
+
+        with patch("gptme_runloops.utils.state.os.replace", side_effect=OSError):
+            with pytest.raises(OSError):
+                run._save_backoff_state(
+                    {"consecutive_failures": 3, "last_hash": "hash1"}
+                )
+
+        assert json.loads(run._backoff_state_file.read_text()) == original
+        assert not list(run._backoff_state_file.parent.glob(".*.tmp"))
 
 
 def test_backoff_corrupted_state_file():

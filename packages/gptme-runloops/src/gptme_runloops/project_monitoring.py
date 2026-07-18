@@ -16,6 +16,7 @@ from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.utils.execution import ExecutionResult
 from gptme_runloops.utils.executor import Executor
 from gptme_runloops.utils.github import CommentLoopDetector, has_unresolved_bot_reviews
+from gptme_runloops.utils.state import atomic_write_text, locked_state_file
 
 
 @dataclass
@@ -261,26 +262,22 @@ class ProjectMonitoringRun(BaseRunLoop):
                     self.state_dir / f"{repo.replace('/', '-')}-pr-{pr_number}.state"
                 )
 
-                # Check if PR updated since last check
-                is_new = False
-                if state_file.exists():
-                    last_check = state_file.read_text().strip()
-                    if updated_at > last_check:
-                        is_new = True
-                else:
-                    is_new = True
-
-                if is_new:
-                    # Check if last comment is just mentioning someone else (e.g., "@greptileai review")
-                    if self._is_mention_of_someone_else(repo, pr_number):
-                        # Update state file to avoid re-checking, but don't create work item
-                        state_file.write_text(updated_at)
+                with locked_state_file(state_file):
+                    last_check = (
+                        state_file.read_text().strip() if state_file.exists() else ""
+                    )
+                    if updated_at <= last_check:
                         continue
 
-                    # Check spam prevention before adding work item
+                    # Check if last comment is just mentioning someone else (e.g., "@greptileai review")
+                    if self._is_mention_of_someone_else(repo, pr_number):
+                        atomic_write_text(state_file, updated_at)
+                        continue
+
+                    # Check spam prevention before adding work item. Its own
+                    # per-comment lock protects the separate comment state.
                     if self.should_post_comment(repo, pr_number, "update"):
-                        # Update state file
-                        state_file.write_text(updated_at)
+                        atomic_write_text(state_file, updated_at)
 
                         branch_name = pr.get("headRefName", "unknown")
                         draft_note = (
@@ -358,23 +355,21 @@ class ProjectMonitoringRun(BaseRunLoop):
                 if has_failure:
                     current_failures.append(pr_number)
 
-            # Read previous failures
-            prev_failures = []
-            if state_file.exists():
-                prev_failures = [
-                    int(line.strip())
-                    for line in state_file.read_text().strip().split("\n")
-                    if line.strip()
-                ]
+            with locked_state_file(state_file):
+                prev_failures = []
+                if state_file.exists():
+                    prev_failures = [
+                        int(line.strip())
+                        for line in state_file.read_text().strip().split("\n")
+                        if line.strip()
+                    ]
 
-            # Find new failures
-            new_failures = set(current_failures) - set(prev_failures)
-
-            for pr_number in new_failures:
-                pr_data = next((p for p in prs if p["number"] == pr_number), None)
-                if pr_data:
-                    # Check spam prevention before adding work item
-                    if self.should_post_comment(repo, pr_number, "ci_failure"):
+                new_failures = set(current_failures) - set(prev_failures)
+                for pr_number in new_failures:
+                    pr_data = next((p for p in prs if p["number"] == pr_number), None)
+                    if pr_data and self.should_post_comment(
+                        repo, pr_number, "ci_failure"
+                    ):
                         work_items.append(
                             WorkItem(
                                 repo=repo,
@@ -386,8 +381,9 @@ class ProjectMonitoringRun(BaseRunLoop):
                             )
                         )
 
-            # Update state file
-            state_file.write_text("\n".join(str(n) for n in current_failures))
+                atomic_write_text(
+                    state_file, "\n".join(str(n) for n in current_failures)
+                )
 
         except Exception as e:
             self.logger.error(f"Error checking CI in {repo}: {e}")
@@ -716,36 +712,33 @@ class ProjectMonitoringRun(BaseRunLoop):
             issues = json.loads(result.stdout)
             current_issues = [issue["number"] for issue in issues]
 
-            # Read previous issues
-            prev_issues = []
-            if state_file.exists():
-                prev_issues = [
-                    int(line.strip())
-                    for line in state_file.read_text().strip().split("\n")
-                    if line.strip()
-                ]
+            with locked_state_file(state_file):
+                prev_issues = []
+                if state_file.exists():
+                    prev_issues = [
+                        int(line.strip())
+                        for line in state_file.read_text().strip().split("\n")
+                        if line.strip()
+                    ]
 
-            # Find new issues
-            new_issues = set(current_issues) - set(prev_issues)
-
-            for issue_number in new_issues:
-                issue_data = next(
-                    (i for i in issues if i["number"] == issue_number), None
-                )
-                if issue_data:
-                    work_items.append(
-                        WorkItem(
-                            repo=repo,
-                            item_type="assigned_issue",
-                            number=issue_number,
-                            title=issue_data["title"],
-                            url=issue_data["url"],
-                            details=f"Issue #{issue_number} assigned (NEW)",
-                        )
+                new_issues = set(current_issues) - set(prev_issues)
+                for issue_number in new_issues:
+                    issue_data = next(
+                        (i for i in issues if i["number"] == issue_number), None
                     )
+                    if issue_data:
+                        work_items.append(
+                            WorkItem(
+                                repo=repo,
+                                item_type="assigned_issue",
+                                number=issue_number,
+                                title=issue_data["title"],
+                                url=issue_data["url"],
+                                details=f"Issue #{issue_number} assigned (NEW)",
+                            )
+                        )
 
-            # Update state file
-            state_file.write_text("\n".join(str(n) for n in current_issues))
+                atomic_write_text(state_file, "\n".join(str(n) for n in current_issues))
 
         except Exception as e:
             self.logger.error(f"Error checking issues in {repo}: {e}")
@@ -791,76 +784,64 @@ class ProjectMonitoringRun(BaseRunLoop):
                 if n.get("reason") in relevant_reasons and n.get("unread", False)
             ]
 
-            # Read previous notifications
-            prev_notifications = set()
-            if state_file.exists():
-                prev_notifications = set(state_file.read_text().strip().split("\n"))
+            with locked_state_file(state_file):
+                prev_notifications = set()
+                if state_file.exists():
+                    prev_notifications = set(state_file.read_text().strip().split("\n"))
 
-            current_notifications = set()
+                current_notifications = set()
+                for notif in relevant_notifications:
+                    notif_id = notif["id"]
 
-            for notif in relevant_notifications:
-                notif_id = notif["id"]
+                    if notif_id in prev_notifications:
+                        current_notifications.add(notif_id)
+                        continue
 
-                # Skip if already processed
-                if notif_id in prev_notifications:
+                    repo = notif["repository"]["full_name"]
+                    subject = notif["subject"]
+                    title = subject.get("title", "")
+                    subject_type = subject.get("type", "")
+                    subject_url = subject.get("url", "")
+                    reason = notif.get("reason", "")
+
+                    number = None
+                    html_url = None
+                    if subject_url and subject_type in ["PullRequest", "Issue"]:
+                        match = re.search(r"/(pulls|issues)/(\d+)$", subject_url)
+                        if match:
+                            number = int(match.group(2))
+                            html_url = f"https://github.com/{repo}/{'pull' if subject_type == 'PullRequest' else 'issues'}/{number}"
+                    elif subject_type == "Commit":
+                        comment_url = subject.get("latest_comment_url", "")
+                        match = re.search(r"/comments/(\d+)$", comment_url)
+                        if match:
+                            number = int(match.group(1))
+                            commit_match = re.search(
+                                r"/commits/([0-9a-f]+)$", subject_url
+                            )
+                            commit_sha = commit_match.group(1) if commit_match else ""
+                            html_url = f"https://github.com/{repo}/commit/{commit_sha}#commitcomment-{number}"
+
+                    if not number:
+                        self.logger.debug(
+                            f"Skipping notification {notif_id} ({subject_type}): no number extracted"
+                        )
+                        continue
+
                     current_notifications.add(notif_id)
-                    continue
-
-                repo = notif["repository"]["full_name"]
-                subject = notif["subject"]
-                title = subject.get("title", "")
-                subject_type = subject.get("type", "")
-                subject_url = subject.get("url", "")
-                reason = notif.get("reason", "")
-
-                # Extract number and HTML URL based on subject type
-                number = None
-                html_url = None
-                if subject_url and subject_type in ["PullRequest", "Issue"]:
-                    # URL format: https://api.github.com/repos/owner/repo/pulls/123
-                    # or https://api.github.com/repos/owner/repo/issues/123
-                    match = re.search(r"/(pulls|issues)/(\d+)$", subject_url)
-                    if match:
-                        number = int(match.group(2))
-                        html_url = f"https://github.com/{repo}/{'pull' if subject_type == 'PullRequest' else 'issues'}/{number}"
-                elif subject_type == "Commit":
-                    # Commit comment: extract comment ID from latest_comment_url
-                    # URL format: https://api.github.com/repos/owner/repo/comments/456
-                    comment_url = subject.get("latest_comment_url", "")
-                    match = re.search(r"/comments/(\d+)$", comment_url)
-                    if match:
-                        number = int(match.group(1))
-                        # Extract commit SHA for the HTML URL
-                        # subject.url format: https://api.github.com/repos/owner/repo/commits/sha
-                        commit_match = re.search(r"/commits/([0-9a-f]+)$", subject_url)
-                        commit_sha = commit_match.group(1) if commit_match else ""
-                        html_url = f"https://github.com/{repo}/commit/{commit_sha}#commitcomment-{number}"
-
-                if not number:
-                    # Don't mark as processed — may become parseable after code updates
-                    self.logger.debug(
-                        f"Skipping notification {notif_id} ({subject_type}): no number extracted"
+                    details = f"Notification reason: {reason}\nType: {subject_type}"
+                    work_items.append(
+                        WorkItem(
+                            repo=repo,
+                            item_type="notification",
+                            number=number,
+                            title=title,
+                            url=html_url or "",
+                            details=details,
+                        )
                     )
-                    continue
 
-                # Only mark as processed after successfully creating a work item
-                current_notifications.add(notif_id)
-
-                details = f"Notification reason: {reason}\nType: {subject_type}"
-
-                work_items.append(
-                    WorkItem(
-                        repo=repo,
-                        item_type="notification",
-                        number=number,
-                        title=title,
-                        url=html_url or "",
-                        details=details,
-                    )
-                )
-
-            # Save current notifications
-            state_file.write_text("\n".join(current_notifications))
+                atomic_write_text(state_file, "\n".join(sorted(current_notifications)))
 
         except Exception as e:
             self.logger.error(f"Error checking notifications: {e}")

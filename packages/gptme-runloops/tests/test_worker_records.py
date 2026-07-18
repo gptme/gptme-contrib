@@ -616,6 +616,88 @@ def test_write_worker_result_manifest_raises_on_non_numeric_number(
         )
 
 
+def test_update_record_pr_state_preserves_concurrent_manifest_fields(ws: Path) -> None:
+    record = ws / "records" / "r.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"outcome": "handled"}))
+
+    def fetch(repo: str, number: int) -> dict[str, str]:
+        # Simulate the manifest writer landing while the network fetch runs.
+        payload = json.loads(record.read_text())
+        payload["worker_status"] = "succeeded"
+        record.write_text(json.dumps(payload))
+        return {"state": "OPEN", "headRefOid": "after123"}
+
+    update_record_pr_state(
+        record,
+        repo="gptme/gptme",
+        number=1,
+        before_json=json.dumps({"state": "OPEN", "headRefOid": "before12"}),
+        cwd=ws,
+        fetch=fetch,
+    )
+
+    payload = json.loads(record.read_text())
+    assert payload["worker_status"] == "succeeded"
+    assert payload["pr_head_oid_after"] == "after123"
+
+
+def test_write_worker_result_manifest_preserves_concurrent_record_fields(
+    ws: Path,
+) -> None:
+    record = ws / "records" / "r.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"outcome": "handled", "deliverables": []}))
+
+    def write_manifest(path: Path, manifest: Any) -> None:
+        # Simulate the PR-state writer landing during manifest construction.
+        payload = json.loads(record.read_text())
+        payload["pr_state_after"] = "OPEN"
+        record.write_text(json.dumps(payload))
+        stub_write_worker_result(path, manifest)
+
+    write_worker_result_manifest(
+        record,
+        repo="gptme/gptme",
+        number=1,
+        session_id="s",
+        exit_code=0,
+        duration_seconds=1,
+        model=None,
+        item_types=[],
+        build_worker_result=stub_build_worker_result,
+        write_worker_result=write_manifest,
+        load_worker_result=stub_load_worker_result,
+    )
+
+    payload = json.loads(record.read_text())
+    assert payload["pr_state_after"] == "OPEN"
+    assert payload["worker_status"] == "completed"
+
+
+def test_write_record_failure_preserves_last_valid_json(
+    ws: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = ws / "records" / "r.json"
+    record.write_text(json.dumps({"outcome": "handled"}))
+
+    def fail_replace(source: Path, target: Path) -> None:
+        raise OSError("simulated crash before replace")
+
+    monkeypatch.setattr("gptme_runloops.utils.state.os.replace", fail_replace)
+    with pytest.raises(OSError):
+        update_record_pr_state(
+            record,
+            repo="gptme/gptme",
+            number=1,
+            before_json="{}",
+            cwd=ws,
+            fetch=lambda repo, number: {"state": "OPEN"},
+        )
+
+    assert json.loads(record.read_text()) == {"outcome": "handled"}
+
+
 def test_update_record_pr_state_missing_record_is_noop(ws: Path) -> None:
     update_record_pr_state(
         ws / "records" / "missing.json",

@@ -80,6 +80,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from gptme_runloops.utils.state import atomic_write_text, locked_state_file
+
 # Commit-oid extraction from deliverable strings (worker.sh:519).
 # NOTE(parity): re.IGNORECASE is redundant in the bash heredoc too — findall
 # runs on ``deliverable.lower()`` — but it is part of the source pattern, so
@@ -171,8 +173,8 @@ def split_item_types(text: str) -> list[str]:
 
 
 def _write_record(record_path: Path, payload: Mapping[str, Any]) -> None:
-    """Serialize a record the way every heredoc does (``ensure_ascii=False``)."""
-    record_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    """Atomically serialize a record (``ensure_ascii=False``)."""
+    atomic_write_text(record_path, json.dumps(payload, ensure_ascii=False))
 
 
 # --- Primary session-record write (worker.sh:283-323) ---
@@ -487,13 +489,6 @@ def update_record_pr_state(
     Missing or non-dict record → silently returns (worker.sh:451-457).
     """
     record_path = Path(record_file)
-    if not record_path.is_file():
-        return
-
-    payload = json.loads(record_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        return
-
     before = parse_pr_snapshot(before_json)
     pr_number = int(number)
     if fetch is not None:
@@ -501,12 +496,17 @@ def update_record_pr_state(
     else:
         after = fetch_pr_snapshot(repo, pr_number, cwd=cwd)
 
-    apply_pr_state_diff(payload, before, after)
+    with locked_state_file(record_path):
+        if not record_path.is_file():
+            return
+        payload = json.loads(record_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return
 
-    if upgrade_outcome is not None:
-        upgrade_outcome(payload)
-
-    _write_record(record_path, payload)
+        apply_pr_state_diff(payload, before, after)
+        if upgrade_outcome is not None:
+            upgrade_outcome(payload)
+        _write_record(record_path, payload)
 
 
 # --- Worker-result manifest (worker.sh:505-627) ---
@@ -687,8 +687,16 @@ def write_worker_result_manifest(
     write_worker_result(manifest_path, manifest)
     normalized = load_worker_result(manifest_path) or manifest
 
-    apply_worker_result_to_payload(payload, normalized, manifest_path)
-    _write_record(record_path, payload)
+    # Re-read under the shared record lock so a concurrent PR-state update is
+    # preserved while this comparatively long manifest build runs.
+    with locked_state_file(record_path):
+        if not record_path.is_file():
+            return
+        latest_payload = json.loads(record_path.read_text(encoding="utf-8"))
+        if not isinstance(latest_payload, dict):
+            return
+        apply_worker_result_to_payload(latest_payload, normalized, manifest_path)
+        _write_record(record_path, latest_payload)
 
 
 # --- Delivery check (worker.sh:651-666 extractor; :668-690 decisions) ---
