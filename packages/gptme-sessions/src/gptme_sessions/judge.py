@@ -935,7 +935,12 @@ def write_alignment_grade(
                 session_id,
                 exc,
             )
-        store.rewrite(records)
+        # Pass only the modified record: store.rewrite() re-reads all other
+        # records from disk inside the lock, so concurrent compute-harm updates
+        # to OTHER sessions are preserved.  Passing ALL records (the old
+        # behaviour) used a stale T0 snapshot and silently clobbered
+        # compute-harm's trajectory_grade updates for unrelated sessions.
+        store.rewrite([record])
         return True
     return False
 
