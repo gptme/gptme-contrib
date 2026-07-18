@@ -16,6 +16,7 @@ from gptme_runloops.utils.logging import (
     log_execution_end,
     log_execution_start,
 )
+from gptme_runloops.utils.state import atomic_write_text
 
 # Backoff schedule for consecutive-failure detection.
 # Each entry: (failure_threshold, skip_n, out_of, description)
@@ -109,9 +110,13 @@ class BaseRunLoop(ABC):
         return {}
 
     def _save_backoff_state(self, state: dict[str, Any]) -> None:
-        """Save backoff state to disk."""
-        self._backoff_state_file.parent.mkdir(parents=True, exist_ok=True)
-        self._backoff_state_file.write_text(json.dumps(state))
+        """Save backoff state atomically.
+
+        A run-type's :class:`RunLoopLock` serializes read-modify-write access;
+        atomic replacement additionally prevents a killed writer from leaving
+        truncated JSON for the next run.
+        """
+        atomic_write_text(self._backoff_state_file, json.dumps(state))
 
     def _check_backoff(self, work_hash: str) -> bool:
         """Check if this run should be skipped due to consecutive failures.

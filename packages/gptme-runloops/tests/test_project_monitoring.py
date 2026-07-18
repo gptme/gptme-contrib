@@ -747,6 +747,60 @@ def test_check_notifications_unparseable_not_marked_processed(workspace):
     assert "3" not in state_file.read_text().split("\n")
 
 
+def test_check_assigned_issues_concurrent_claim_is_emitted_once(workspace):
+    """The state-file lock makes assigned-issue discovery a claim gate."""
+    import threading
+
+    issue_data = json.dumps(
+        [{"number": 456, "title": "Fix bug", "url": "https://x/456"}]
+    )
+    barrier = threading.Barrier(2)
+    results: list[list[WorkItem]] = []
+
+    def check() -> None:
+        run = ProjectMonitoringRun(workspace)
+        barrier.wait()
+        with patch(
+            "gptme_runloops.project_monitoring.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=issue_data),
+        ):
+            results.append(run.check_assigned_issues("gptme/gptme"))
+
+    threads = [threading.Thread(target=check) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(len(items) for items in results) == [0, 1]
+
+
+def test_check_notifications_concurrent_claim_is_emitted_once(workspace):
+    """Two monitoring instances cannot both surface one notification."""
+    import threading
+
+    notification = _notification(
+        "42",
+        "Issue",
+        "https://api.github.com/repos/owner/repo/issues/123",
+    )
+    barrier = threading.Barrier(2)
+    results: list[list[WorkItem]] = []
+
+    def check() -> None:
+        run = ProjectMonitoringRun(workspace)
+        barrier.wait()
+        results.append(_run_check_notifications(run, [notification]))
+
+    threads = [threading.Thread(target=check) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(len(items) for items in results) == [0, 1]
+
+
 def test_check_notifications_previously_processed_skipped(workspace):
     """Already-processed notifications are skipped but kept in state."""
     run = ProjectMonitoringRun(workspace)
