@@ -527,7 +527,7 @@ trigger)
             fi
             # Use REST API instead of `gh pr comment` (GraphQL) — REST has a
             # separate 5000/hour quota that's rarely exhausted.
-            if gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
+            if BOB_GREPTILE_HELPER=1 gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
                 # Record trigger timestamp locally — fast-path guard against GitHub API
                 # propagation delay that causes sequential callers to see "no trigger"
                 # and re-trigger. See: 2026-03-19 INCIDENT #5.
