@@ -1,6 +1,6 @@
 {
-  "fetched_at": "2026-06-29T00:00:00Z",
-  "source": "seeded from gptme/registry.gptme.org registry.json (2026-06-29); future updates via scripts/fetch-community-plugins.py",
+  "fetched_at": "2026-07-20T06:37:41Z",
+  "source": "registry.gptme.org + github-topics: gptme-plugin, gptme-skill, gptme-mcp-server",
   "entries": [
     {
       "name": "gptme/gptme-rag",
@@ -8,15 +8,19 @@
       "url": "https://github.com/gptme/gptme-rag",
       "stars": 17,
       "language": "Python",
-      "topics": ["gptme-plugin"]
+      "topics": [
+        "gptme-plugin"
+      ]
     },
     {
-      "name": "gptme/gptme.vim",
+      "name": "gptme/gptme-vim",
       "description": "Vim plugin for gptme — use gptme from within vim/neovim.",
       "url": "https://github.com/gptme/gptme.vim",
       "stars": 7,
       "language": "Vim Script",
-      "topics": ["gptme-plugin"]
+      "topics": [
+        "gptme-plugin"
+      ]
     },
     {
       "name": "gptme/gptme-tauri",
@@ -24,7 +28,10 @@
       "url": "https://github.com/gptme/gptme-tauri",
       "stars": 6,
       "language": "Rust",
-      "topics": ["gptme-plugin", "gptme-skill"]
+      "topics": [
+        "gptme-plugin",
+        "gptme-skill"
+      ]
     },
     {
       "name": "gptme/gptme-webui",
@@ -32,7 +39,10 @@
       "url": "https://github.com/gptme/gptme-webui",
       "stars": 5,
       "language": "TypeScript",
-      "topics": ["gptme-plugin", "gptme-skill"]
+      "topics": [
+        "gptme-plugin",
+        "gptme-skill"
+      ]
     },
     {
       "name": "gptme/gptme-voice",
@@ -40,15 +50,9 @@
       "url": "https://github.com/gptme/gptme-voice",
       "stars": 4,
       "language": "Python",
-      "topics": ["gptme-skill"]
-    },
-    {
-      "name": "gptme/gptme-codegraph",
-      "description": "Code knowledge graph MCP server for gptme — repository structure awareness.",
-      "url": "https://github.com/gptme/gptme-codegraph",
-      "stars": 3,
-      "language": "Python",
-      "topics": ["gptme-plugin", "gptme-mcp-server"]
+      "topics": [
+        "gptme-skill"
+      ]
     },
     {
       "name": "gptme/gptme-forum",
@@ -56,7 +60,9 @@
       "url": "https://github.com/gptme/gptme-forum",
       "stars": 3,
       "language": "Python",
-      "topics": ["gptme-skill"]
+      "topics": [
+        "gptme-skill"
+      ]
     },
     {
       "name": "gptme/gptme-daily-briefing",
@@ -64,7 +70,19 @@
       "url": "https://github.com/gptme/gptme-daily-briefing",
       "stars": 3,
       "language": "Python",
-      "topics": ["gptme-skill"]
+      "topics": [
+        "gptme-skill"
+      ]
+    },
+    {
+      "name": "gptme/gptme-codegraph",
+      "description": "Code knowledge graph MCP server for gptme — repository structure awareness.",
+      "url": "https://github.com/gptme/gptme-codegraph",
+      "stars": 3,
+      "language": "Python",
+      "topics": [
+        "gptme-plugin"
+      ]
     },
     {
       "name": "gptme/gptme-subscription",
@@ -72,7 +90,19 @@
       "url": "https://github.com/gptme/gptme-subscription",
       "stars": 2,
       "language": "Python",
-      "topics": ["gptme-skill"]
+      "topics": [
+        "gptme-skill"
+      ]
+    },
+    {
+      "name": "0xbrayo/aw-skill",
+      "description": "",
+      "url": "https://github.com/0xbrayo/aw-skill",
+      "stars": 0,
+      "language": "",
+      "topics": [
+        "gptme-skill"
+      ]
     }
   ]
 }
