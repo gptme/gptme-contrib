@@ -42,7 +42,8 @@ MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-3}"  # Max re-review triggers per review cyc
 # once exceeded. Incident: 2026-06-16, cloud#401 hit 25 triggers, #2906 25, #408 19.
 # Incident 2026-07-09: lowered from 8 → 5; multiple PRs hit 4+ triggers before the
 # cap fired, which Erik flagged as spam. Lower cap + stale-bypass fix below.
-MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-5}"
+# Restored to 8 on 2026-07-20 per Erik's request (gptme/gptme#3206 comment).
+MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-8}"
 GITHUB_AUTHOR="${GITHUB_AUTHOR:-$(gh api user --jq .login 2>/dev/null || echo "")}"
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
@@ -527,7 +528,7 @@ trigger)
             fi
             # Use REST API instead of `gh pr comment` (GraphQL) — REST has a
             # separate 5000/hour quota that's rarely exhausted.
-            if gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
+            if BOB_GREPTILE_HELPER=1 gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
                 # Record trigger timestamp locally — fast-path guard against GitHub API
                 # propagation delay that causes sequential callers to see "no trigger"
                 # and re-trigger. See: 2026-03-19 INCIDENT #5.
