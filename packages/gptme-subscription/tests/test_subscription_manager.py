@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -476,6 +477,23 @@ def test_manual_switch_hold_does_not_block_wrong_slot_fallback(
     # The hold is for bob, but alice is the active fallback.
     assert decision.action == "switch"
     assert decision.mode != "manual-switch-hold"
+
+
+def test_concurrent_reset_time_updates_are_preserved(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    subscriptions = [f"slot-{index}" for index in range(20)]
+    processes = [
+        multiprocessing.Process(target=sm.record_sub_reset_time, args=(sub, 3600))
+        for sub in subscriptions
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join()
+        assert process.exitcode == 0
+
+    payload = json.loads(sm.config.reset_times_file.read_text())
+    assert set(payload) == set(subscriptions)
 
 
 def test_record_manual_switch_hold_persists_state(tmp_path: Path) -> None:

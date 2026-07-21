@@ -27,6 +27,7 @@ from gptme_subscription.observation import (
     remaining_until_observed_reset,
     subscription_pressure_from_usage,
 )
+from gptme_subscription.state import atomic_write_text, locked_state_file
 
 
 @dataclass
@@ -261,8 +262,8 @@ def save_rebalance_state(
         state_path: Path to write the state JSON file.
         decision: Mapping with rebalance decision fields.
     """
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(decision, indent=2) + "\n")
+    with locked_state_file(state_path):
+        atomic_write_text(state_path, json.dumps(decision, indent=2) + "\n")
 
 
 def clear_rebalance_state(state_path: Path) -> None:
@@ -271,8 +272,8 @@ def clear_rebalance_state(state_path: Path) -> None:
     Args:
         state_path: Path to the state JSON file to remove.
     """
-    if state_path.exists():
-        state_path.unlink()
+    with locked_state_file(state_path):
+        state_path.unlink(missing_ok=True)
 
 
 # --- Fallback routing ---

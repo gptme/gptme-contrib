@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import multiprocessing
 from pathlib import Path
 
 from gptme_subscription.observation import (
@@ -195,6 +197,23 @@ class TestRecordSubResetTime:
         record_sub_reset_time(tmp_path, "bob", "seven_day", "2026-01-01T00:00:00+00:00")
         data = (tmp_path / "bob.json").read_text()
         assert "seven_day" in data
+
+    def test_concurrent_metric_updates_are_preserved(self, tmp_path: Path) -> None:
+        metrics = [f"metric-{index}" for index in range(20)]
+        processes = [
+            multiprocessing.Process(
+                target=record_sub_reset_time, args=(tmp_path, "bob", metric)
+            )
+            for metric in metrics
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join()
+            assert process.exitcode == 0
+
+        data = json.loads((tmp_path / "bob.json").read_text())
+        assert set(data["track_resets"]) == set(metrics)
 
     def test_corrupt_file_does_not_raise(self, tmp_path: Path) -> None:
         obs_file = tmp_path / "bob.json"

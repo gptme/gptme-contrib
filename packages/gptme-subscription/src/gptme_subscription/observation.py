@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from gptme_subscription.state import atomic_write_text, locked_state_file
+
 
 @dataclass
 class SubscriptionObservation:
@@ -88,22 +90,22 @@ def record_sub_reset_time(
         metric_key: Which metric reset was observed (e.g. ``seven_day``).
         timestamp: ISO-8601 timestamp. Defaults to current UTC time.
     """
-    obs_dir.mkdir(parents=True, exist_ok=True)
     obs_file = obs_dir / f"{sub}.json"
-    entry: dict[str, dict[str, str]] = {}
-    if obs_file.exists():
-        try:
-            raw = obs_file.read_text()
-            if raw.strip():
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    entry = parsed
-        except (json.JSONDecodeError, OSError):
-            pass  # corrupt file — start fresh
-    entry.setdefault("track_resets", {})[metric_key] = (
-        timestamp or datetime.now(timezone.utc).isoformat()
-    )
-    obs_file.write_text(json.dumps(entry, indent=2) + "\n")
+    with locked_state_file(obs_file):
+        entry: dict[str, dict[str, str]] = {}
+        if obs_file.exists():
+            try:
+                raw = obs_file.read_text()
+                if raw.strip():
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        entry = parsed
+            except (json.JSONDecodeError, OSError):
+                pass  # corrupt file — start fresh
+        entry.setdefault("track_resets", {})[metric_key] = (
+            timestamp or datetime.now(timezone.utc).isoformat()
+        )
+        atomic_write_text(obs_file, json.dumps(entry, indent=2) + "\n")
 
 
 def load_sub_observations(

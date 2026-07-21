@@ -31,6 +31,7 @@ from gptme_subscription.observation import (
 from gptme_subscription.routing import (
     compute_window_pacing,
 )
+from gptme_subscription.state import atomic_write_text, locked_state_file
 
 logger = logging.getLogger(__name__)
 
@@ -375,23 +376,24 @@ class SubscriptionManager:
         self, now: datetime | None = None
     ) -> dict[str, Any] | None:
         path = self.config.rebalance_state_file
-        if not path.exists():
-            return None
         current_time = now or datetime.now(timezone.utc)
-        try:
-            payload = json.loads(path.read_text())
-            if not isinstance(payload, dict):
+        with locked_state_file(path):
+            if not path.exists():
+                return None
+            try:
+                payload = json.loads(path.read_text())
+                if not isinstance(payload, dict):
+                    path.unlink(missing_ok=True)
+                    return None
+                hold_until = datetime.fromisoformat(payload["hold_until"])
+                if hold_until <= current_time:
+                    path.unlink(missing_ok=True)
+                    return None
+                payload["hold_until"] = hold_until
+                return payload
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
                 path.unlink(missing_ok=True)
                 return None
-            hold_until = datetime.fromisoformat(payload["hold_until"])
-            if hold_until <= current_time:
-                path.unlink(missing_ok=True)
-                return None
-            payload["hold_until"] = hold_until
-            return payload
-        except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            path.unlink(missing_ok=True)
-            return None
 
     def save_rebalance_state(self, decision: dict[str, Any]) -> None:
         if decision.get("mode") not in (
@@ -407,11 +409,13 @@ class SubscriptionManager:
         if isinstance(hold_until, datetime):
             decision["hold_until"] = hold_until.isoformat()
         path = self.config.rebalance_state_file
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(decision, indent=2) + "\n")
+        with locked_state_file(path):
+            atomic_write_text(path, json.dumps(decision, indent=2) + "\n")
 
     def clear_rebalance_state(self) -> None:
-        self.config.rebalance_state_file.unlink(missing_ok=True)
+        path = self.config.rebalance_state_file
+        with locked_state_file(path):
+            path.unlink(missing_ok=True)
 
     def record_manual_switch_hold(
         self, target: str, now: datetime | None = None
@@ -458,33 +462,33 @@ class SubscriptionManager:
     ) -> None:
         path = self.config.reset_times_file
         try:
-            data: dict[str, Any] = {}
-            if path.exists():
-                data = json.loads(path.read_text())
-            entry: dict[str, Any] = {
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "resets_in_seconds": int(resets_in_seconds),
-            }
-            if usage is not None:
-                weekly = usage.get("seven_day", {})
-                five_hour = usage.get("five_hour", {})
-                sonnet = usage.get("seven_day_sonnet", {})
-                for key, source_key, source in (
-                    ("weekly_utilization", "utilization", weekly),
-                    ("five_hour_utilization", "utilization", five_hour),
-                    ("sonnet_weekly_utilization", "utilization", sonnet),
-                    ("five_hour_resets_in_seconds", "resets_in_seconds", five_hour),
-                    ("sonnet_resets_in_seconds", "resets_in_seconds", sonnet),
-                ):
-                    value = source.get(source_key)
-                    if isinstance(value, int | float):
-                        entry[key] = float(value)
-                pressure = subscription_pressure_from_usage(usage)
-                if pressure is not None:
-                    entry["pressure"] = round(pressure, 3)
-            data[sub] = entry
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n")
+            with locked_state_file(path):
+                data: dict[str, Any] = {}
+                if path.exists():
+                    data = json.loads(path.read_text())
+                entry: dict[str, Any] = {
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "resets_in_seconds": int(resets_in_seconds),
+                }
+                if usage is not None:
+                    weekly = usage.get("seven_day", {})
+                    five_hour = usage.get("five_hour", {})
+                    sonnet = usage.get("seven_day_sonnet", {})
+                    for key, source_key, source in (
+                        ("weekly_utilization", "utilization", weekly),
+                        ("five_hour_utilization", "utilization", five_hour),
+                        ("sonnet_weekly_utilization", "utilization", sonnet),
+                        ("five_hour_resets_in_seconds", "resets_in_seconds", five_hour),
+                        ("sonnet_resets_in_seconds", "resets_in_seconds", sonnet),
+                    ):
+                        value = source.get(source_key)
+                        if isinstance(value, int | float):
+                            entry[key] = float(value)
+                    pressure = subscription_pressure_from_usage(usage)
+                    if pressure is not None:
+                        entry["pressure"] = round(pressure, 3)
+                data[sub] = entry
+                atomic_write_text(path, json.dumps(data, indent=2) + "\n")
         except (OSError, json.JSONDecodeError):
             pass
 
