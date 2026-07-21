@@ -34,6 +34,8 @@ from typing import (
 if TYPE_CHECKING:
     from gptodo.frontmatter_compat import Post as fmPost
 
+logger = logging.getLogger(__name__)
+
 # Lazy import compatibility wrapper to avoid broken frontmatter package conflicts
 _frontmatter = None
 
@@ -1752,9 +1754,7 @@ def update_cache(
             return merged
     except OSError as e:
         # Log but don't crash - cache is non-critical
-        import sys
-
-        print(f"Warning: Could not update cache: {e}", file=sys.stderr)
+        logger.warning("Could not update cache: %s", e)
         return load_cache(cache_path)
 
 
@@ -1771,9 +1771,7 @@ def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             _write_cache_atomic(cache_path, cache)
     except OSError as e:
-        import sys
-
-        print(f"Warning: Could not save cache: {e}", file=sys.stderr)
+        logger.warning("Could not save cache: %s", e)
 
 
 def extract_external_urls(task: TaskInfo) -> List[str]:
