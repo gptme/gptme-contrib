@@ -1651,17 +1651,26 @@ class AgentEmail:
         return processed_files
 
     def _save_sync_state(self, folder: str, processed_files: set[str]) -> None:
-        """Save set of processed maildir filenames."""
+        """Atomically save the processed maildir filenames."""
         import json
 
         state_path = self._get_sync_state_path(folder)
+        temp_path = state_path.with_name(f".{state_path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            with open(state_path, "w") as f:
+            with open(temp_path, "w") as f:
                 json.dump({"processed_files": sorted(processed_files)}, f)
+            os.replace(temp_path, state_path)
         except OSError as e:
+            temp_path.unlink(missing_ok=True)
             print(f"Warning: Could not save sync state: {e}")
 
     def sync_from_maildir(self, folder: str) -> None:
+        """Sync messages while serializing each folder's state transaction."""
+        lock_path = self.locks_dir / f"sync_state_{folder}.lock"
+        with FileLock(lock_path):
+            self._sync_from_maildir_locked(folder)
+
+    def _sync_from_maildir_locked(self, folder: str) -> None:
         """Sync messages from external maildir to markdown format.
 
         This imports emails from the external maildir (e.g., Gmail via mbsync)

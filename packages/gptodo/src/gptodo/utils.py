@@ -10,10 +10,13 @@ This module contains:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import re
 import subprocess
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -1714,16 +1717,60 @@ def load_cache(cache_path: Path) -> Dict[str, Any]:
     return {}
 
 
-def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
-    """Save cache to file with atomic write for crash safety."""
+def _write_cache_atomic(cache_path: Path, cache: Dict[str, Any]) -> None:
+    """Replace a cache file without exposing partial JSON to readers."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{cache_path.name}.", suffix=".tmp", dir=cache_path.parent
+    )
+    temp_path = Path(temp_name)
     try:
-        # Write to temp file first, then rename for atomicity
-        temp_path = cache_path.with_suffix(".tmp")
-        with open(temp_path, "w") as f:
+        with os.fdopen(fd, "w") as f:
             json.dump(cache, f, indent=2)
-        temp_path.rename(cache_path)
+        os.replace(temp_path, cache_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def update_cache(
+    cache_path: Path,
+    updates: Dict[str, Any] | None = None,
+    remove: set[str] | None = None,
+) -> Dict[str, Any]:
+    """Apply a cache delta under a sidecar lock and return the merged state."""
+    lock_path = cache_path.with_name(f".{cache_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(lock_path, "a+") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            merged = load_cache(cache_path)
+            for key in remove or set():
+                merged.pop(key, None)
+            merged.update(updates or {})
+            _write_cache_atomic(cache_path, merged)
+            return merged
     except OSError as e:
         # Log but don't crash - cache is non-critical
+        import sys
+
+        print(f"Warning: Could not update cache: {e}", file=sys.stderr)
+        return load_cache(cache_path)
+
+
+def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
+    """Replace the cache under a sidecar lock.
+
+    Read-modify-write callers should use :func:`update_cache` so unrelated
+    entries written by concurrent processes are preserved.
+    """
+    lock_path = cache_path.with_name(f".{cache_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(lock_path, "a+") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            _write_cache_atomic(cache_path, cache)
+    except OSError as e:
         import sys
 
         print(f"Warning: Could not save cache: {e}", file=sys.stderr)

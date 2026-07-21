@@ -134,8 +134,8 @@ from gptodo.utils import (
     # Phase 4: Effective state computation (bob#240)
     parse_tracking_ref,
     resolve_tasks,
-    save_cache,
     task_to_dict,
+    update_cache,
     update_task_state,
 )
 
@@ -3307,21 +3307,22 @@ def sync(update, output_json, use_cache, light, full, changes_only):
 
             if invalidated > 0:
                 console.print(f"[yellow]Invalidated {invalidated} cache entries[/]")
-                save_cache(cache_path, cache)
+                cache = update_cache(cache_path, remove=urls_to_refresh)
 
             # Fetch fresh states for invalidated URLs
             if urls_to_refresh:
                 console.print(f"[cyan]Refreshing {len(urls_to_refresh)} URLs...[/]")
+                updates: dict[str, Any] = {}
                 for url in urls_to_refresh:
                     state_info = fetch_url_state(url)
                     if state_info:
-                        cache[url] = {
+                        updates[url] = {
                             "state": state_info["state"],
                             "source": state_info.get("source", "unknown"),
                             "last_fetched": datetime.now(timezone.utc).isoformat(),
                             "updatedAt": state_info.get("updatedAt"),
                         }
-                save_cache(cache_path, cache)
+                cache = update_cache(cache_path, updates)
         else:
             console.print("[dim]No new notifications found[/]")
 
@@ -3343,10 +3344,11 @@ def sync(update, output_json, use_cache, light, full, changes_only):
             cache = load_cache(cache_path)
 
             fetched = 0
+            updates = {}
             for url in sorted(all_urls):
                 state_info = fetch_url_state(url)
                 if state_info:
-                    cache[url] = {
+                    updates[url] = {
                         "state": state_info["state"],
                         "source": state_info.get("source", "unknown"),
                         "last_fetched": datetime.now(timezone.utc).isoformat(),
@@ -3354,7 +3356,7 @@ def sync(update, output_json, use_cache, light, full, changes_only):
                     }
                     fetched += 1
 
-            save_cache(cache_path, cache)
+            cache = update_cache(cache_path, updates)
             console.print(f"[green]Refreshed {fetched} URLs[/]")
 
         # Continue with sync using refreshed cache
@@ -3908,13 +3910,14 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
     results = []
     fetched_count = 0
     error_count = 0
+    updates: dict[str, Any] = {}
 
     for url in sorted(stale_urls):
         result = {"url": url}
         state_info = fetch_url_state(url)
 
         if state_info:
-            cache[url] = {
+            updates[url] = {
                 "state": state_info["state"],
                 "source": state_info.get("source", "unknown"),
                 "last_fetched": now.isoformat(),
@@ -3946,8 +3949,8 @@ def fetch(fetch_all: bool, max_age: int, output_json: bool, urls: tuple[str, ...
             }
         )
 
-    # Save cache (even if only errors, to track last attempt)
-    save_cache(cache_path, cache)
+    if updates:
+        cache = update_cache(cache_path, updates)
 
     # Output
     if output_json:
