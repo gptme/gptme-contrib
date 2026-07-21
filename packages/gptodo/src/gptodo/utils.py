@@ -10,7 +10,6 @@ This module contains:
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -18,6 +17,14 @@ import re
 import subprocess
 import tempfile
 import warnings
+
+try:
+    import fcntl as _fcntl
+
+    _HAVE_FLOCK = True
+except ImportError:
+    _HAVE_FLOCK = False
+
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -1745,7 +1752,8 @@ def update_cache(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(lock_path, "a+") as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            if _HAVE_FLOCK:
+                _fcntl.flock(lock_file, _fcntl.LOCK_EX)
             merged = load_cache(cache_path)
             for key in remove or set():
                 merged.pop(key, None)
@@ -1768,7 +1776,8 @@ def save_cache(cache_path: Path, cache: Dict[str, Any]) -> None:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(lock_path, "a+") as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            if _HAVE_FLOCK:
+                _fcntl.flock(lock_file, _fcntl.LOCK_EX)
             _write_cache_atomic(cache_path, cache)
     except OSError as e:
         logger.warning("Could not save cache: %s", e)
