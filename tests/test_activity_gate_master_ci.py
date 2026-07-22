@@ -14,12 +14,18 @@ SCRIPT = REPO_ROOT / "scripts" / "github" / "activity-gate.sh"
 FAKE_GH = r"""#!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import sys
 
 argv = sys.argv[1:]
 if argv[:2] == ["run", "list"]:
-    print(os.environ.get("TEST_MASTER_RUNS", "[]"))
+    runs = json.loads(os.environ.get("TEST_MASTER_RUNS", "[]"))
+    if "--event" in argv:
+        event = argv[argv.index("--event") + 1]
+        runs = [run for run in runs if run.get("event") == event]
+    limit = int(argv[argv.index("--limit") + 1])
+    print(json.dumps(runs[:limit]))
     raise SystemExit(0)
 if argv[:2] in (["pr", "list"], ["issue", "list"]):
     print("[]")
@@ -68,12 +74,14 @@ def _failed_run(run_id: int, event: str) -> dict:
     }
 
 
-def test_nonblocking_events_are_not_reported_as_master_ci(tmp_path: Path) -> None:
-    """Detached/manual jobs associated with master are not push regressions."""
+def test_nonpush_events_are_not_reported_as_master_ci(tmp_path: Path) -> None:
+    """Known non-push events associated with master are not regressions."""
     runs = [
         _failed_run(101, "dynamic"),
         _failed_run(102, "workflow_dispatch"),
         _failed_run(103, "repository_dispatch"),
+        _failed_run(104, "schedule"),
+        _failed_run(105, "workflow_call"),
     ]
     result = _run_gate(tmp_path, runs)
 
@@ -82,22 +90,27 @@ def test_nonblocking_events_are_not_reported_as_master_ci(tmp_path: Path) -> Non
 
 
 def test_push_failure_is_reported_as_master_ci(tmp_path: Path) -> None:
-    result = _run_gate(tmp_path, [_failed_run(104, "push")])
+    result = _run_gate(tmp_path, [_failed_run(106, "push")])
 
     assert result.returncode == 0, result.stderr
     items = [json.loads(line) for line in result.stdout.splitlines()]
     assert [(item["type"], item["number"]) for item in items] == [
-        ("master_ci_failure", 104)
+        ("master_ci_failure", 106)
     ]
 
 
-def test_unknown_event_still_fails_toward_detection(tmp_path: Path) -> None:
-    run = _failed_run(105, "unknown")
-    run["event"] = None
+def test_nonpush_window_does_not_hide_older_push_failure(tmp_path: Path) -> None:
+    """The API event filter runs before the three-run result limit."""
+    runs = [
+        _failed_run(107, "schedule"),
+        _failed_run(108, "workflow_dispatch"),
+        _failed_run(109, "dynamic"),
+        _failed_run(110, "push"),
+    ]
 
-    result = _run_gate(tmp_path, [run])
+    result = _run_gate(tmp_path, runs)
 
     assert result.returncode == 0, result.stderr
     item = json.loads(result.stdout)
     assert item["type"] == "master_ci_failure"
-    assert item["number"] == 105
+    assert item["number"] == 110
