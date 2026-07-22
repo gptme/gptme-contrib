@@ -16,7 +16,7 @@ test = [
 ]
 
 [project.entry-points."gptme.plugins"]
-action_receipts = "gptme_action_receipts:register"
+action_receipts = "gptme_action_receipts:plugin"
 
 [build-system]
 requires = ["hatchling"]

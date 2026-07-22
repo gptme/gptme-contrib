@@ -6,6 +6,9 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from gptme.hooks import HookType, clear_hooks, get_hooks
+from gptme.plugins.plugin import GptmePlugin
+from gptme_action_receipts import plugin
 from gptme_action_receipts.hooks import register
 from gptme_action_receipts.hooks.receipt_hook import (
     _make_receipt,
@@ -68,8 +71,19 @@ class TestMakeReceipt:
         assert r["model"] == "gptme-model"
 
 
-def test_hooks_package_exports_register():
-    assert callable(register)
+def test_plugin_manifest_defers_hook_registration():
+    clear_hooks()
+
+    assert isinstance(plugin, GptmePlugin)
+    assert plugin.name == "action_receipts"
+    assert plugin.register_hooks is register
+    assert get_hooks(HookType.TOOL_EXECUTE_PRE) == []
+
+    plugin.register_hooks()
+
+    hooks = get_hooks(HookType.TOOL_EXECUTE_PRE)
+    assert len(hooks) == 1
+    assert hooks[0].name == "action_receipts.pre"
 
 
 class TestReceiptPreHook:

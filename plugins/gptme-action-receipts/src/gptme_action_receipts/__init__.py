@@ -1,14 +1,12 @@
 """gptme-action-receipts: append-only audit ledger for gptme tool actions."""
 
+from gptme.plugins.plugin import GptmePlugin
+
 from .hooks.receipt_hook import register
 
-# Register the hook at module import time so gptme can discover it.
-# This makes the plugin available to gptme's plugin system.
-try:
-    register()
-except Exception:
-    # If registration fails, log but don't crash the entire gptme session.
-    # Allows graceful degradation if dependencies are missing.
-    pass
+plugin = GptmePlugin(
+    name="action_receipts",
+    register_hooks=register,
+)
 
-__all__ = []
+__all__ = ["plugin", "register"]
