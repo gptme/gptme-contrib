@@ -141,14 +141,14 @@ def _emitted_notifications(stdout: str) -> list[dict]:
 
 
 def test_first_sight_seeds_state_without_emitting() -> None:
-    """First sight of a notification seeds state but does NOT emit.
+    """First sight with a FRESH state dir seeds state but does NOT emit.
 
     This matches the documented contract ("On first run, all items are seeded
     but NOT reported") — without it, a wiped state dir makes the whole unread
     backlog look "new" and fires a noop session on already-resolved threads.
-    (This test previously asserted the pre-seeding behaviour — first sight
-    emitting — and went stale when check_notifications adopted
-    seed-on-first-sight; the suite does not run in CI, so it rotted silently.)
+    Scope: seed-on-first-sight applies only when NO notif-*.state exists (fresh
+    state dir / reset recovery); see
+    test_first_seen_thread_emits_when_state_established for the established case.
     """
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
@@ -166,6 +166,38 @@ def test_first_sight_seeds_state_without_emitting() -> None:
         state_file = state_dir / f"notif-{NOTIF_ID}.state"
         assert state_file.exists()
         # State records the timestamp, not just presence.
+        assert state_file.read_text().strip() == "2026-04-29T20:40:00Z"
+
+
+def test_first_seen_thread_emits_when_state_established() -> None:
+    """A first-seen thread EMITS when the notification state dir is established.
+
+    Regression for ActivityWatch/aw-watcher-afk#82 (2026-07-22): Erik
+    @-mentioned the bot on a third-party PR the bot had never been notified
+    about. Seed-on-first-sight recorded the mention's updated_at without
+    emitting, so the item never became emit-eligible and the request was
+    silently swallowed. With any other notif-*.state present, a state-file-less
+    thread is genuinely new activity, not reset-recovery backlog.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # An unrelated, previously-seen notification thread establishes state.
+        (state_dir / "notif-99999999999.state").write_text("2026-04-01T00:00:00Z")
+
+        result = _run_gate(tmp, state_dir, "2026-04-29T20:40:00Z")
+        assert result.returncode in (0, 1), result.stderr
+
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, (
+            "first-seen thread with established state must emit; got: " f"{emitted}"
+        )
+        assert emitted[0]["number"] == NOTIF_NUMBER
+
+        # Emit-before-persist: state rolled forward to the seen timestamp.
+        state_file = state_dir / f"notif-{NOTIF_ID}.state"
         assert state_file.read_text().strip() == "2026-04-29T20:40:00Z"
 
 
