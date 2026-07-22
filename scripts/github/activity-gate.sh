@@ -694,26 +694,43 @@ check_assigned_issues() {
 # These indicate regressions that slipped through — not tied to any specific PR.
 check_master_ci() {
     local repo=$1
-    local runs
-    # Filter at the API boundary instead of fetching a small mixed-event window.
-    # Otherwise non-push runs can consume the limit and hide an older push run.
-    # An allowlist also avoids treating new non-push event types as regressions.
-    runs=$(gh_cache_get_or_fetch "run-master-push-${repo}" "$GH_CACHE_TTL_RUN" \
-        "gh run list --repo '$repo' --branch master --event push --limit 3 \
-            --json databaseId,name,conclusion,createdAt 2>/dev/null" \
+    local runs push_runs
+    runs=$(gh_cache_get_or_fetch "run-master-all-events-${repo}" "$GH_CACHE_TTL_RUN" \
+        "gh run list --repo '$repo' --branch master --limit 3 \
+            --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
         "[]")
-    # Also try 'main' if master returned no push runs.
+    # Fetch push runs separately so detached/manual runs cannot consume the
+    # mixed-event result window and hide a real branch regression.
+    push_runs=$(gh_cache_get_or_fetch "run-master-push-${repo}" "$GH_CACHE_TTL_RUN" \
+        "gh run list --repo '$repo' --branch master --event push --limit 3 \
+            --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
+        "[]")
+    runs=$(jq -cn --argjson recent "$runs" --argjson pushes "$push_runs" \
+        '$recent + $pushes | unique_by(.databaseId)')
+
+    # Also try 'main' if master returned nothing.
     if [ "$runs" = "[]" ]; then
-        runs=$(gh_cache_get_or_fetch "run-main-push-${repo}" "$GH_CACHE_TTL_RUN" \
-            "gh run list --repo '$repo' --branch main --event push --limit 3 \
-                --json databaseId,name,conclusion,createdAt 2>/dev/null" \
+        runs=$(gh_cache_get_or_fetch "run-main-all-events-${repo}" "$GH_CACHE_TTL_RUN" \
+            "gh run list --repo '$repo' --branch main --limit 3 \
+                --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
             "[]")
+        push_runs=$(gh_cache_get_or_fetch "run-main-push-${repo}" "$GH_CACHE_TTL_RUN" \
+            "gh run list --repo '$repo' --branch main --event push --limit 3 \
+                --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
+            "[]")
+        runs=$(jq -cn --argjson recent "$runs" --argjson pushes "$push_runs" \
+            '$recent + $pushes | unique_by(.databaseId)')
     fi
     [ "$runs" = "[]" ] || [ -z "$runs" ] && return 0
 
-    # Every returned run is push-triggered by construction.
+    # Only detached/manual failures are unrelated to default-branch health.
+    # Scheduled and reusable-workflow failures remain actionable: if those jobs
+    # start failing on the default branch, the workflows should be fixed.
     local failures
-    failures=$(echo "$runs" | jq -c '[.[] | select(.conclusion == "failure")]')
+    failures=$(echo "$runs" | jq -c '[.[] | select(
+        .conclusion == "failure"
+        and (.event as $event | ["workflow_dispatch", "repository_dispatch", "dynamic"] | index($event) | not)
+    )]')
     local fail_count
     fail_count=$(echo "$failures" | jq 'length')
     [ "$fail_count" -eq 0 ] && return 0

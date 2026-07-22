@@ -74,14 +74,12 @@ def _failed_run(run_id: int, event: str) -> dict:
     }
 
 
-def test_nonpush_events_are_not_reported_as_master_ci(tmp_path: Path) -> None:
-    """Known non-push events associated with master are not regressions."""
+def test_detached_events_are_not_reported_as_master_ci(tmp_path: Path) -> None:
+    """Detached/manual events associated with master are not regressions."""
     runs = [
         _failed_run(101, "dynamic"),
         _failed_run(102, "workflow_dispatch"),
         _failed_run(103, "repository_dispatch"),
-        _failed_run(104, "schedule"),
-        _failed_run(105, "workflow_call"),
     ]
     result = _run_gate(tmp_path, runs)
 
@@ -89,13 +87,20 @@ def test_nonpush_events_are_not_reported_as_master_ci(tmp_path: Path) -> None:
     assert result.stdout == ""
 
 
-def test_push_failure_is_reported_as_master_ci(tmp_path: Path) -> None:
-    result = _run_gate(tmp_path, [_failed_run(106, "push")])
+def test_branch_health_events_are_reported_as_master_ci(tmp_path: Path) -> None:
+    runs = [
+        _failed_run(104, "push"),
+        _failed_run(105, "schedule"),
+        _failed_run(106, "workflow_call"),
+    ]
+    result = _run_gate(tmp_path, runs)
 
     assert result.returncode == 0, result.stderr
     items = [json.loads(line) for line in result.stdout.splitlines()]
     assert [(item["type"], item["number"]) for item in items] == [
-        ("master_ci_failure", 106)
+        ("master_ci_failure", 104),
+        ("master_ci_failure", 105),
+        ("master_ci_failure", 106),
     ]
 
 
@@ -111,6 +116,7 @@ def test_nonpush_window_does_not_hide_older_push_failure(tmp_path: Path) -> None
     result = _run_gate(tmp_path, runs)
 
     assert result.returncode == 0, result.stderr
-    item = json.loads(result.stdout)
-    assert item["type"] == "master_ci_failure"
-    assert item["number"] == 110
+    items = [json.loads(line) for line in result.stdout.splitlines()]
+    assert ("master_ci_failure", 110) in [
+        (item["type"], item["number"]) for item in items
+    ]
