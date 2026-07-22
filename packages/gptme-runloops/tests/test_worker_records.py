@@ -42,10 +42,12 @@ from gptme_runloops.worker_records import (
     append_worker_latency_records,
     apply_pr_state_diff,
     apply_worker_result_to_payload,
+    augment_with_outcome_subtype,
     build_wait_merge_gate_entry,
     collect_commit_oids,
     compute_latency_outcome,
     dedupe_deliverables,
+    detect_worker_outcome_subtype,
     extract_delivery_field,
     fallback_outcome,
     fetch_pr_snapshot,
@@ -777,3 +779,187 @@ def test_parse_latency_inputs_defaults() -> None:
     assert ack is None
     with pytest.raises(json.JSONDecodeError):
         parse_latency_inputs("", "", "")
+
+
+# ---------------------------------------------------------------------------
+# detect_worker_outcome_subtype / augment_with_outcome_subtype
+# ---------------------------------------------------------------------------
+
+
+def _traj(tmp_path: Path, name: str, lines: list[str]) -> Path:
+    """Write a trajectory JSONL fixture and return its path."""
+    p = tmp_path / name
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def _cc_bash(cmd: str) -> str:
+    """One CC-format assistant entry whose Bash tool_use runs ``cmd``."""
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": cmd},
+                    }
+                ]
+            },
+        }
+    )
+
+
+def _gptme_bash_at(cmd: str) -> str:
+    """One gptme-format assistant entry with AT-style tool call."""
+    return json.dumps(
+        {
+            "role": "assistant",
+            "content": f'@shell(abc123): {{"command": {json.dumps(cmd)}}}',
+        }
+    )
+
+
+def _gptme_bash_fence(cmd: str) -> str:
+    """One gptme-format assistant entry with fence-style bash block."""
+    return json.dumps(
+        {
+            "role": "assistant",
+            "content": f"```bash\n{cmd}\n```",
+        }
+    )
+
+
+def test_detect_subtype_no_trajectory() -> None:
+    assert detect_worker_outcome_subtype(None) == "observe"
+
+
+def test_detect_subtype_missing_file(tmp_path: Path) -> None:
+    assert detect_worker_outcome_subtype(tmp_path / "ghost.jsonl") == "observe"
+
+
+def test_detect_subtype_empty_trajectory(tmp_path: Path) -> None:
+    traj = _traj(tmp_path, "empty.jsonl", [])
+    assert detect_worker_outcome_subtype(traj) == "observe"
+
+
+def test_detect_subtype_cc_ship_pr_create(tmp_path: Path) -> None:
+    traj = _traj(
+        tmp_path, "ship.jsonl", [_cc_bash("gh pr create --title 'foo' --body 'bar'")]
+    )
+    assert detect_worker_outcome_subtype(traj) == "ship"
+
+
+def test_detect_subtype_cc_ship_pr_merge(tmp_path: Path) -> None:
+    traj = _traj(tmp_path, "merge.jsonl", [_cc_bash("gh pr merge 42 --squash")])
+    assert detect_worker_outcome_subtype(traj) == "ship"
+
+
+def test_detect_subtype_cc_engage_git_push(tmp_path: Path) -> None:
+    traj = _traj(tmp_path, "push.jsonl", [_cc_bash("git push origin HEAD")])
+    assert detect_worker_outcome_subtype(traj) == "engage"
+
+
+def test_detect_subtype_cc_engage_pr_comment(tmp_path: Path) -> None:
+    traj = _traj(
+        tmp_path, "comment.jsonl", [_cc_bash("gh pr comment 99 --body 'LGTM'")]
+    )
+    assert detect_worker_outcome_subtype(traj) == "engage"
+
+
+def test_detect_subtype_cc_engage_pr_review(tmp_path: Path) -> None:
+    traj = _traj(tmp_path, "review.jsonl", [_cc_bash("gh pr review 7 --approve")])
+    assert detect_worker_outcome_subtype(traj) == "engage"
+
+
+def test_detect_subtype_cc_engage_gh_api_comment(tmp_path: Path) -> None:
+    traj = _traj(
+        tmp_path,
+        "api_comment.jsonl",
+        [_cc_bash("gh api repos/owner/repo/pulls/5/comments -f body='fixed'")],
+    )
+    assert detect_worker_outcome_subtype(traj) == "engage"
+
+
+def test_detect_subtype_cc_observe_only(tmp_path: Path) -> None:
+    """Read-only commands (gh pr view, gh pr checks, git log) → observe."""
+    traj = _traj(
+        tmp_path,
+        "observe.jsonl",
+        [
+            _cc_bash("gh pr view 42 --json state"),
+            _cc_bash("gh pr checks 42"),
+            _cc_bash("git log --oneline -5"),
+        ],
+    )
+    assert detect_worker_outcome_subtype(traj) == "observe"
+
+
+def test_detect_subtype_ship_wins_over_engage(tmp_path: Path) -> None:
+    """When both engage and ship commands appear, ship wins (early return)."""
+    traj = _traj(
+        tmp_path,
+        "ship_over_engage.jsonl",
+        [
+            _cc_bash("git push origin HEAD"),  # engage
+            _cc_bash("gh pr create --title 'X'"),  # ship
+        ],
+    )
+    assert detect_worker_outcome_subtype(traj) == "ship"
+
+
+def test_detect_subtype_gptme_at_format(tmp_path: Path) -> None:
+    traj = _traj(tmp_path, "at.jsonl", [_gptme_bash_at("gh pr create --title 'y'")])
+    assert detect_worker_outcome_subtype(traj) == "ship"
+
+
+def test_detect_subtype_gptme_fence_format_engage(tmp_path: Path) -> None:
+    traj = _traj(tmp_path, "fence.jsonl", [_gptme_bash_fence("git push origin HEAD")])
+    assert detect_worker_outcome_subtype(traj) == "engage"
+
+
+def test_detect_subtype_skips_system_entries(tmp_path: Path) -> None:
+    """System-prompt / user entries that contain ship commands must not fire."""
+    system_entry = json.dumps(
+        {
+            "type": "system",
+            "message": {"content": "gh pr create --title 'ARCHITECTURE.md text'"},
+        }
+    )
+    user_entry = json.dumps(
+        {
+            "role": "user",
+            "content": "gh pr merge 1 --squash",
+        }
+    )
+    traj = _traj(
+        tmp_path,
+        "injected.jsonl",
+        [system_entry, user_entry, _cc_bash("git log --oneline -3")],
+    )
+    assert detect_worker_outcome_subtype(traj) == "observe"
+
+
+def test_augment_adds_subtype_for_productive(tmp_path: Path) -> None:
+    traj = _traj(tmp_path, "a.jsonl", [_cc_bash("gh pr merge 1 --squash")])
+    payload: dict[str, Any] = {"outcome": "productive", "session_id": "s1"}
+    result = augment_with_outcome_subtype(payload, traj)
+    assert result is payload  # mutates in place
+    assert result["outcome_subtype"] == "ship"
+
+
+def test_augment_skips_non_productive(tmp_path: Path) -> None:
+    traj = _traj(tmp_path, "b.jsonl", [_cc_bash("gh pr merge 1 --squash")])
+    for outcome in ("failed", "unknown", "noop", ""):
+        payload: dict[str, Any] = {"outcome": outcome}
+        augment_with_outcome_subtype(payload, traj)
+        assert (
+            "outcome_subtype" not in payload
+        ), f"should not annotate outcome={outcome!r}"
+
+
+def test_augment_observe_when_no_trajectory() -> None:
+    payload: dict[str, Any] = {"outcome": "productive"}
+    augment_with_outcome_subtype(payload, None)
+    assert payload["outcome_subtype"] == "observe"

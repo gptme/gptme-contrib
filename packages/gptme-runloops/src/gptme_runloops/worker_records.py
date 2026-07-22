@@ -75,7 +75,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -92,6 +92,127 @@ COMMIT_OID_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 KNOWN_DELIVERY_OUTCOMES: frozenset[str] = frozenset(
     {"handled", "orphan_no_delivery", "no_action_needed", "failed"}
 )
+
+# --- PM worker outcome subtype detection ---
+#
+# Subtypes classify the mutating level of a PM worker pass:
+#   ship    — created or merged a PR (highest mutating signal)
+#   engage  — pushed code, posted a comment/review (lower mutating signal)
+#   observe — read-only pass; no mutating commands detected
+#
+# Rules:
+#   - Only inspect agent-authored entries (CC type='assistant' or gptme
+#     role='assistant'). Never scan whole-file text or injected prompt text
+#     (see lessons/infrastructure/trajectory-predicate-prompt-text-leak.md).
+#   - Command-gate ship/engage: match the CLI command input, not output text.
+#   - ship takes priority over engage; both take priority over observe.
+
+# Ship: create or merge a PR (permanently changes repo state).
+_WORKER_SHIP_CMD_RE = re.compile(r"\bgh\s+pr\s+(?:create|merge)\b")
+
+# Engage: push code or post a comment/review (mutating but lower-value than ship).
+_WORKER_ENGAGE_CMD_RE = re.compile(
+    r"\bgit\s+push\b"
+    r"|\bgh\s+(?:pr|issue)\s+(?:comment|review)\b"
+    r"|\bgh\s+api\s+repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)\b"
+)
+
+
+def _iter_bash_commands(lines: Iterable[str]) -> Iterator[str]:
+    """Yield Bash command strings from agent-authored trajectory entries only.
+
+    Handles two trajectory formats:
+    - CC (Claude Code): ``type='assistant'`` records whose ``message.content``
+      contains ``type='tool_use'`` blocks with ``name='Bash'``.
+    - gptme: ``role='assistant'`` records whose ``content`` string embeds tool
+      calls as ``@shell(id): {"command": "..."}`` or `` ```bash\\n...\\n``` ``.
+
+    Skips system, user, and result records to avoid false positives from
+    injected prompt text (CLAUDE.md, lessons, system prompts).
+    """
+    _at_tool_re = re.compile(r"@(?:shell|bash)\([^)]+\):\s*(\{[^}]*\})", re.DOTALL)
+    _fence_re = re.compile(r"```(?:bash|sh)\n(.*?)\n```", re.DOTALL)
+
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        # CC format: type='assistant', message.content is a list of content blocks.
+        if entry.get("type") == "assistant":
+            content = entry.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "tool_use" and item.get("name") == "Bash":
+                    cmd = item.get("input", {}).get("command", "")
+                    if cmd:
+                        yield cmd
+
+        # gptme format: role='assistant', content is a string with embedded tool calls.
+        elif entry.get("role") == "assistant":
+            content = entry.get("content", "")
+            if not isinstance(content, str):
+                continue
+            # AT-format: @shell(call_id): {"command": "..."}
+            for m in _at_tool_re.finditer(content):
+                try:
+                    args = json.loads(m.group(1))
+                    cmd = args.get("command") or args.get("code") or args.get("cmd", "")
+                    if cmd:
+                        yield str(cmd)
+                except json.JSONDecodeError:
+                    pass
+            # Fence-format: ```bash\n...\n```
+            for m in _fence_re.finditer(content):
+                yield m.group(1)
+
+
+def detect_worker_outcome_subtype(trajectory: Path | None) -> str:
+    """Derive a PM worker outcome subtype from executed Bash commands.
+
+    Returns one of:
+    - ``"ship"``    — executed ``gh pr create`` or ``gh pr merge``
+    - ``"engage"``  — pushed code or posted a PR/issue comment/review
+    - ``"observe"`` — no mutating commands detected (read-only pass)
+
+    Only inspects agent-authored trajectory entries to avoid false positives
+    from injected prompt text. Returns ``"observe"`` when no trajectory is
+    provided or it cannot be read.
+    """
+    if trajectory is None or not trajectory.is_file():
+        return "observe"
+    has_engage = False
+    try:
+        with trajectory.open(encoding="utf-8", errors="replace") as fh:
+            for cmd in _iter_bash_commands(fh):
+                if _WORKER_SHIP_CMD_RE.search(cmd):
+                    return "ship"
+                if _WORKER_ENGAGE_CMD_RE.search(cmd):
+                    has_engage = True
+    except OSError:
+        return "observe"
+    return "engage" if has_engage else "observe"
+
+
+def augment_with_outcome_subtype(
+    payload: dict[str, Any],
+    trajectory: Path | None,
+) -> dict[str, Any]:
+    """Add ``outcome_subtype`` to a PM session record when outcome is productive.
+
+    Only annotates ``outcome='productive'`` records — failed, noop, and unknown
+    outcomes get no subtype. Mutates and returns ``payload``.
+    """
+    if str(payload.get("outcome") or "").strip().lower() == "productive":
+        payload["outcome_subtype"] = detect_worker_outcome_subtype(trajectory)
+    return payload
 
 
 # --- CC rate-limit log parsing (worker.sh:110-127) ---
@@ -242,6 +363,7 @@ def write_post_session_record(
     record = finalize_post_session_record(
         result.record.to_dict(), result.grade, item_timeout
     )
+    augment_with_outcome_subtype(record, trajectory)
     with locked_state_file(record_path):
         _write_record(record_path, record)
 
@@ -327,6 +449,7 @@ def write_fallback_session_record(
         item_timeout=item_timeout,
         trajectory=trajectory,
     )
+    augment_with_outcome_subtype(payload, trajectory)
     with locked_state_file(record_path):
         _write_record(record_path, payload)
 
