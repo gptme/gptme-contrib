@@ -1218,10 +1218,25 @@ check_notifications() {
 
     # Cap emitted notifications per run to avoid flooding the dispatcher when
     # a filter change (e.g. adding new reasons) unlocks a large backlog.
-    # First-seen notifications are always seeded (state written, not emitted).
-    # The cap only gates emit-eligible items (strictly-newer updated_at): those
-    # skipped by the cap get neither emitted nor persisted, so they retry next run.
+    # The cap only gates emit-eligible items: those skipped by the cap get
+    # neither emitted nor persisted, so they retry next run.
     local max_notif_per_run=5
+
+    # Established-state detection: seed-on-first-sight (record without emitting)
+    # is only correct when the notification state itself is fresh — first run,
+    # or recovery after the state dir was reset/wiped. Once ANY notif-*.state
+    # exists, the state is established, and a thread with no prior state file is
+    # a genuinely NEW notification thread (e.g. a maintainer @-mentioning AUTHOR
+    # on a third-party PR for the first time). Silently seeding those swallows
+    # the mention forever: the seed records the current updated_at, so the item
+    # never becomes emit-eligible unless the thread is updated AGAIN. Incident:
+    # ActivityWatch/aw-watcher-afk#82 (2026-07-22) — Erik's follow-up-PR request
+    # was seeded, promoted, and never dispatched. With established state,
+    # first-seen threads are emit-eligible (still subject to the cap above).
+    local _notif_state_established=0
+    if compgen -G "$STATE_DIR/notif-*.state" > /dev/null; then
+        _notif_state_established=1
+    fi
 
     # Notification state files store the most recently seen `updated_at`. GitHub
     # re-uses the same notification ID across follow-up comments on the same
@@ -1245,17 +1260,18 @@ check_notifications() {
             state_file="$STATE_DIR/notif-${notif_id}.state"
             prior=""
             [ -f "$state_file" ] && prior=$(cat "$state_file" 2>/dev/null || true)
-            # Seed-on-first-sight: when there's no prior state (first run, or after the
-            # state dir is reset/cleaned), record the timestamp but do NOT emit. This
-            # matches the documented contract ("On first run, all items are seeded but
-            # NOT reported") and every other check here (check_pr_updates,
-            # check_greptile_scores). Without it, a wiped state dir makes the whole
-            # unread backlog look "new" and fires a noop session investigating already-
-            # resolved threads. Only a strictly-newer updated_at (genuine follow-up
-            # activity) emits. String comparison works on ISO-8601 timestamps.
-            if [ -z "$prior" ]; then
+            # Seed-on-first-sight applies ONLY to a fresh state dir (first run, or
+            # after the state dir is reset/cleaned): record the timestamp but do NOT
+            # emit, matching the documented contract ("On first run, all items are
+            # seeded but NOT reported") — without it, a wiped state dir makes the
+            # whole unread backlog look "new" and fires a noop session investigating
+            # already-resolved threads. With established state (see
+            # _notif_state_established above), a first-seen thread is genuinely new
+            # activity and emits like a strictly-newer updated_at. String comparison
+            # works on ISO-8601 timestamps.
+            if [ -z "$prior" ] && [ "$_notif_state_established" -eq 0 ]; then
                 printf '%s' "$notif_updated" > "$state_file"
-            elif [ "$prior" \< "$notif_updated" ]; then
+            elif [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
                     # Emit first so a jq failure leaves the state file untouched and the
@@ -1275,12 +1291,14 @@ check_notifications() {
             state_file="$STATE_DIR/notif-${notif_id}.state"
             prior=""
             [ -f "$state_file" ] && prior=$(cat "$state_file" 2>/dev/null || true)
-            # Seed-on-first-sight (see jsonl branch above for rationale): a first-seen
-            # notification is recorded but not counted, so a reset state dir doesn't
-            # report the whole unread backlog as "new" and trigger a noop session.
-            if [ -z "$prior" ]; then
+            # Seed-on-first-sight applies only to a fresh state dir (see jsonl
+            # branch above for rationale): recorded but not counted, so a reset
+            # state dir doesn't report the whole unread backlog as "new" and
+            # trigger a noop session. With established state, first-seen threads
+            # count as new activity.
+            if [ -z "$prior" ] && [ "$_notif_state_established" -eq 0 ]; then
                 printf '%s' "$notif_updated" > "$state_file"
-            elif [ "$prior" \< "$notif_updated" ]; then
+            elif [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
                 printf '%s' "$notif_updated" > "$state_file"
                 new_count=$((new_count + 1))
             fi
