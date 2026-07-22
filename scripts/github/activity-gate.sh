@@ -697,20 +697,27 @@ check_master_ci() {
     local runs
     runs=$(gh_cache_get_or_fetch "run-master-${repo}" "$GH_CACHE_TTL_RUN" \
         "gh run list --repo '$repo' --branch master --limit 3 \
-            --json databaseId,name,conclusion,createdAt 2>/dev/null" \
+            --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
         "[]")
     # Also try 'main' if master returned nothing
     if [ "$runs" = "[]" ]; then
         runs=$(gh_cache_get_or_fetch "run-main-${repo}" "$GH_CACHE_TTL_RUN" \
             "gh run list --repo '$repo' --branch main --limit 3 \
-                --json databaseId,name,conclusion,createdAt 2>/dev/null" \
+                --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
             "[]")
     fi
     [ "$runs" = "[]" ] || [ -z "$runs" ] && return 0
 
     # Check for any recent failures
     local failures
-    failures=$(echo "$runs" | jq -c '[.[] | select(.conclusion == "failure")]')
+    # Only branch-triggered failures represent a broken default branch. GitHub
+    # also associates manual, repository-dispatched, and Dependabot `dynamic`
+    # runs with master; those are independent jobs, not regressions from a push.
+    # Missing/unknown event values still fail open toward detection.
+    failures=$(echo "$runs" | jq -c '[.[] | select(
+        .conclusion == "failure"
+        and (.event as $event | ["workflow_dispatch", "repository_dispatch", "dynamic"] | index($event) | not)
+    )]')
     local fail_count
     fail_count=$(echo "$failures" | jq 'length')
     [ "$fail_count" -eq 0 ] && return 0
