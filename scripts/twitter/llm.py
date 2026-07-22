@@ -546,7 +546,8 @@ def _reply_with_cc_subprocess(messages: list[Message], model_name: str) -> Messa
         cc_model = cc_model[len("anthropic/") :]
     try:
         result = subprocess.run(
-            ["claude", "-p", "--no-session-persistence", "--model", cc_model, prompt],
+            ["claude", "-p", "--no-session-persistence", "--model", cc_model],
+            input=prompt,
             capture_output=True,
             text=True,
             env=env,

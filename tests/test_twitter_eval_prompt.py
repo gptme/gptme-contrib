@@ -466,10 +466,19 @@ def test_reply_with_cc_subprocess_success(
     # llm.py strips "anthropic/" prefix before passing to the claude CLI
     assert "claude-sonnet-4-5" in cmd
     assert "anthropic/claude-sonnet-4-5" not in cmd
-    # Combined prompt must contain both system and user parts
-    prompt_arg = cmd[-1]
-    assert "You are a helpful agent." in prompt_arg
-    assert "Review this tweet." in prompt_arg
+    # The prompt must travel over stdin rather than argv: real timeline context can
+    # exceed Linux's per-argument limit and fail before Claude starts. With no
+    # positional prompt, `claude -p` reads stdin; a positional "-" is ambiguous.
+    assert cmd == [
+        "claude",
+        "-p",
+        "--no-session-persistence",
+        "--model",
+        "claude-sonnet-4-5",
+    ]
+    prompt_input = run_calls[0]["kwargs"]["input"]
+    assert "You are a helpful agent." in prompt_input
+    assert "Review this tweet." in prompt_input
 
 
 def test_our_handle_in_thread_context_triggers_identity_note(
