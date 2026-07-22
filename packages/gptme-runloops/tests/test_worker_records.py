@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 from gptme_runloops.worker_records import (
+    _iter_bash_commands,
     append_wait_merge_gate_log,
     append_worker_latency_records,
     apply_pr_state_diff,
@@ -338,7 +339,10 @@ def test_pr_state_diff_golden(case: dict[str, Any], ws: Path) -> None:
         fetch=lambda repo, num: fetch_pr_snapshot(repo, num, cwd=ws, runner=runner),
         upgrade_outcome=stub_upgrade_outcome if case["upgrade_hook"] else None,
     )
-    assert json.loads(record_file.read_text()) == subst(case["expected_record"], ws)
+    expected = subst(case["expected_record"], ws)
+    if case["name"] == "upgrade_hook_present":
+        expected["outcome_subtype"] = "observe"
+    assert json.loads(record_file.read_text()) == expected
 
 
 # --- Golden: worker-result manifest (worker.sh:505-627) ---
@@ -793,7 +797,7 @@ def _traj(tmp_path: Path, name: str, lines: list[str]) -> Path:
     return p
 
 
-def _cc_bash(cmd: str) -> str:
+def _cc_bash(cmd: str, *, input_key: str = "command") -> str:
     """One CC-format assistant entry whose Bash tool_use runs ``cmd``."""
     return json.dumps(
         {
@@ -803,7 +807,7 @@ def _cc_bash(cmd: str) -> str:
                     {
                         "type": "tool_use",
                         "name": "Bash",
-                        "input": {"command": cmd},
+                        "input": {input_key: cmd},
                     }
                 ]
             },
@@ -914,6 +918,53 @@ def test_detect_subtype_gptme_at_format(tmp_path: Path) -> None:
     assert detect_worker_outcome_subtype(traj) == "ship"
 
 
+def test_detect_subtype_gptme_at_format_preserves_nested_json(tmp_path: Path) -> None:
+    cmd = 'gh api repos/o/r/issues/1/comments -f \'body={"body":"LGTM"}\''
+    traj = _traj(tmp_path, "nested.jsonl", [_gptme_bash_at(cmd)])
+    assert detect_worker_outcome_subtype(traj) == "engage"
+
+
+def test_iter_bash_commands_reads_adjacent_gptme_calls() -> None:
+    first = _gptme_bash_at("git push origin HEAD")
+    second = _gptme_bash_at("gh pr create --title x")
+    content = json.loads(first)["content"] + "\n" + json.loads(second)["content"]
+    entry = json.dumps({"role": "assistant", "content": content})
+    assert list(_iter_bash_commands([entry])) == [
+        "git push origin HEAD",
+        "gh pr create --title x",
+    ]
+
+
+def test_detect_subtype_cc_alternate_input_keys(tmp_path: Path) -> None:
+    for key in ("code", "cmd"):
+        traj = _traj(
+            tmp_path, f"{key}.jsonl", [_cc_bash("git push origin HEAD", input_key=key)]
+        )
+        assert detect_worker_outcome_subtype(traj) == "engage"
+
+
+def test_detect_subtype_ignores_mutation_text_used_as_data(tmp_path: Path) -> None:
+    traj = _traj(
+        tmp_path,
+        "mentions.jsonl",
+        [
+            _cc_bash("rg 'git push' README.md"),
+            _cc_bash("printf '%s' 'gh pr create'"),
+            _cc_bash("# gh pr merge 12 --squash\ngit log -1"),
+        ],
+    )
+    assert detect_worker_outcome_subtype(traj) == "observe"
+
+
+def test_detect_subtype_matches_mutation_after_shell_prefixes(tmp_path: Path) -> None:
+    traj = _traj(
+        tmp_path,
+        "prefixes.jsonl",
+        [_cc_bash("cd /tmp/repo && env GH_DEBUG=0 gh pr create --title x")],
+    )
+    assert detect_worker_outcome_subtype(traj) == "ship"
+
+
 def test_detect_subtype_gptme_fence_format_engage(tmp_path: Path) -> None:
     traj = _traj(tmp_path, "fence.jsonl", [_gptme_bash_fence("git push origin HEAD")])
     assert detect_worker_outcome_subtype(traj) == "engage"
@@ -963,3 +1014,28 @@ def test_augment_observe_when_no_trajectory() -> None:
     payload: dict[str, Any] = {"outcome": "productive"}
     augment_with_outcome_subtype(payload, None)
     assert payload["outcome_subtype"] == "observe"
+
+
+def test_update_record_pr_state_adds_subtype_after_productive_upgrade(
+    ws: Path,
+) -> None:
+    trajectory = _traj(ws, "upgrade.jsonl", [_cc_bash("git push origin HEAD")])
+    record = ws / "records" / "upgrade.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        json.dumps({"outcome": "unknown", "trajectory_path": str(trajectory)})
+    )
+
+    update_record_pr_state(
+        record,
+        repo="gptme/gptme",
+        number=1,
+        before_json=json.dumps({"state": "OPEN"}),
+        cwd=ws,
+        fetch=lambda repo, number: {"state": "MERGED"},
+        upgrade_outcome=stub_upgrade_outcome,
+    )
+
+    payload = json.loads(record.read_text())
+    assert payload["outcome"] == "productive"
+    assert payload["outcome_subtype"] == "engage"

@@ -107,15 +107,47 @@ KNOWN_DELIVERY_OUTCOMES: frozenset[str] = frozenset(
 #   - Command-gate ship/engage: match the CLI command input, not output text.
 #   - ship takes priority over engage; both take priority over observe.
 
+# Match only a command position: start of a shell segment, optionally following
+# common wrappers (``env X=...`` / assignments). This deliberately does not
+# match command names inside quoted arguments, comments, or search patterns.
+_WORKER_CMD_PREFIX = r"(?:^|[;&|]\s*)(?:env\s+)?(?:[A-Za-z_]\w*=\S+\s+)*"
+
 # Ship: create or merge a PR (permanently changes repo state).
-_WORKER_SHIP_CMD_RE = re.compile(r"\bgh\s+pr\s+(?:create|merge)\b")
+_WORKER_SHIP_CMD_RE = re.compile(
+    _WORKER_CMD_PREFIX + r"gh\s+pr\s+(?:create|merge)\b", re.MULTILINE
+)
 
 # Engage: push code or post a comment/review (mutating but lower-value than ship).
 _WORKER_ENGAGE_CMD_RE = re.compile(
-    r"\bgit\s+push\b"
-    r"|\bgh\s+(?:pr|issue)\s+(?:comment|review)\b"
-    r"|\bgh\s+api\s+repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)\b"
+    _WORKER_CMD_PREFIX + r"(?:git\s+push\b"
+    r"|gh\s+(?:pr|issue)\s+(?:comment|review)\b"
+    r"|gh\s+api\s+repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)\b)",
+    re.MULTILINE,
 )
+
+
+def _iter_json_objects(text: str, start: int) -> Iterator[dict[str, Any]]:
+    """Yield adjacent JSON objects from ``text`` beginning at ``start``.
+
+    ``JSONDecoder.raw_decode`` understands braces nested inside objects and
+    quoted strings, unlike a regular expression ending at the first ``}``.
+    The caller invokes this at each AT-tool marker, so adjacent calls are
+    decoded independently.
+    """
+    decoder = json.JSONDecoder()
+    cursor = start
+    while cursor < len(text):
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != "{":
+            return
+        try:
+            value, end = decoder.raw_decode(text, cursor)
+        except json.JSONDecodeError:
+            return
+        if isinstance(value, dict):
+            yield value
+        cursor = end
 
 
 def _iter_bash_commands(lines: Iterable[str]) -> Iterator[str]:
@@ -130,7 +162,7 @@ def _iter_bash_commands(lines: Iterable[str]) -> Iterator[str]:
     Skips system, user, and result records to avoid false positives from
     injected prompt text (CLAUDE.md, lessons, system prompts).
     """
-    _at_tool_re = re.compile(r"@(?:shell|bash)\([^)]+\):\s*(\{[^}]*\})", re.DOTALL)
+    _at_tool_re = re.compile(r"@(?:shell|bash)\([^)]+\):\s*", re.DOTALL)
     _fence_re = re.compile(r"```(?:bash|sh)\n(.*?)\n```", re.DOTALL)
 
     for raw in lines:
@@ -151,9 +183,12 @@ def _iter_bash_commands(lines: Iterable[str]) -> Iterator[str]:
                 if not isinstance(item, dict):
                     continue
                 if item.get("type") == "tool_use" and item.get("name") == "Bash":
-                    cmd = item.get("input", {}).get("command", "")
+                    args = item.get("input", {})
+                    if not isinstance(args, dict):
+                        continue
+                    cmd = args.get("command") or args.get("code") or args.get("cmd", "")
                     if cmd:
-                        yield cmd
+                        yield str(cmd)
 
         # gptme format: role='assistant', content is a string with embedded tool calls.
         elif entry.get("role") == "assistant":
@@ -162,13 +197,12 @@ def _iter_bash_commands(lines: Iterable[str]) -> Iterator[str]:
                 continue
             # AT-format: @shell(call_id): {"command": "..."}
             for m in _at_tool_re.finditer(content):
-                try:
-                    args = json.loads(m.group(1))
-                    cmd = args.get("command") or args.get("code") or args.get("cmd", "")
-                    if cmd:
-                        yield str(cmd)
-                except json.JSONDecodeError:
-                    pass
+                args = next(_iter_json_objects(content, m.end()), None)
+                if args is None:
+                    continue
+                cmd = args.get("command") or args.get("code") or args.get("cmd", "")
+                if cmd:
+                    yield str(cmd)
             # Fence-format: ```bash\n...\n```
             for m in _fence_re.finditer(content):
                 yield m.group(1)
@@ -629,8 +663,12 @@ def update_record_pr_state(
             return
 
         apply_pr_state_diff(payload, before, after)
+        outcome_before_upgrade = payload.get("outcome")
         if upgrade_outcome is not None:
             upgrade_outcome(payload)
+        if outcome_before_upgrade != payload.get("outcome"):
+            trajectory = resolve_trajectory(str(payload.get("trajectory_path") or ""))
+            augment_with_outcome_subtype(payload, trajectory)
         _write_record(record_path, payload)
 
 
