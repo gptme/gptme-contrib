@@ -188,6 +188,11 @@ def test_clean_for_speech():
     assert "Hello." in result_at and "Done." in result_at
     assert "@shell" not in result_at
 
+    # Single-line @tool calls must not consume ordinary speech that follows.
+    single_line_at = '@shell: {"command":"ls"}'
+    assert re_tool_use_at.search(single_line_at)
+    assert clean_for_speech(f"{single_line_at}\nDone.").strip() == "Done."
+
     # partial (incomplete, still streaming) — closing delimiter not yet received
     partial_xml = "<tool-use>\n<shell>\nls -la"  # no </tool-use>
     assert re_tool_use_xml.search(partial_xml)
