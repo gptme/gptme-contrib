@@ -188,10 +188,16 @@ def test_clean_for_speech():
     assert "Hello." in result_at and "Done." in result_at
     assert "@shell" not in result_at
 
-    # Single-line @tool calls must not consume ordinary speech that follows.
+    # Single-line @tool calls must not consume ordinary speech that follows,
+    # whether the subsequent text starts on the next line or immediately after.
     single_line_at = '@shell: {"command":"ls"}'
     assert re_tool_use_at.search(single_line_at)
     assert clean_for_speech(f"{single_line_at}\nDone.").strip() == "Done."
+    # No newline between tool call and speech — was previously consumed by \Z fallback.
+    assert (
+        clean_for_speech(f"{single_line_at} Some spoken result.").strip()
+        == "Some spoken result."
+    )
 
     # partial (incomplete, still streaming) — closing delimiter not yet received
     partial_xml = "<tool-use>\n<shell>\nls -la"  # no </tool-use>

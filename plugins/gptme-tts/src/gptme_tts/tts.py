@@ -185,7 +185,7 @@ re_thinking = re.compile(r"<think(ing)?>.*?(\n</think(ing)?>|$)", flags=re.DOTAL
 re_tool_use = re.compile(r"```[\w\. ~/\-]+\n(.*?)(\n```|$)", flags=re.DOTALL)
 re_tool_use_xml = re.compile(r"<tool-use>.*?(?:</tool-use>|$)", flags=re.DOTALL)
 re_tool_use_at = re.compile(
-    r"^@[\w.]+(?:\([\w\-:.]+\))?: " r"(?:\{\}|\{[^\n]*\}(?=\n|$)|\{.*?(?:\n\}|\Z))",
+    r"^@[\w.]+(?:\([\w\-:.]+\))?: " r"(?:\{\}|\{[^\n]*\}|\{.*?(?:\n\}|\Z))",
     flags=re.DOTALL | re.MULTILINE,
 )
 re_markdown_header = re.compile(r"^(#+)\s+(.*?)$", flags=re.MULTILINE)
