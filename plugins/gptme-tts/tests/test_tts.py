@@ -133,7 +133,7 @@ def test_split_text_lists():
 
 
 def test_clean_for_speech():
-    from gptme_tts.tts import re_thinking, re_tool_use
+    from gptme_tts.tts import re_thinking, re_tool_use, re_tool_use_at, re_tool_use_xml
 
     # complete
     assert re_thinking.search("<thinking>thinking</thinking>")
@@ -155,6 +155,38 @@ def test_clean_for_speech():
         == "Using tool"
     )
     assert re_tool_use.sub("", "```tool\ncontents\n```\nRan tool").strip() == "Ran tool"
+
+    # xml-format tool calls
+    xml_block = "<tool-use>\n<shell>\nls -la\n</shell>\n</tool-use>"
+    assert re_tool_use_xml.search(xml_block)
+    assert (
+        re_tool_use_xml.sub("", f"Before.\n{xml_block}\nAfter.").strip()
+        == "Before.\n\nAfter."
+    )
+
+    # @tool-format calls
+    at_block = '@shell: {\n  "command": "ls"\n}'
+    assert re_tool_use_at.search(at_block)
+    assert (
+        re_tool_use_at.sub("", f"Before.\n{at_block}\nAfter.").strip()
+        == "Before.\n\nAfter."
+    )
+
+    # @tool-format with call id
+    at_id_block = '@shell(abc123): {\n  "command": "ls"\n}'
+    assert re_tool_use_at.search(at_id_block)
+
+    # clean_for_speech strips all three formats
+    # (internal whitespace is not collapsed here; split_text/join handles that downstream)
+    from gptme_tts.tts import clean_for_speech
+
+    result_xml = clean_for_speech(f"Hello.\n{xml_block}\nDone.")
+    assert "Hello." in result_xml and "Done." in result_xml
+    assert "<tool-use>" not in result_xml
+
+    result_at = clean_for_speech(f"Hello.\n{at_block}\nDone.")
+    assert "Hello." in result_at and "Done." in result_at
+    assert "@shell" not in result_at
 
 
 def test_request_timeout_configurable(monkeypatch):
