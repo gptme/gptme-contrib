@@ -28,6 +28,7 @@ Uses Kokoro for local TTS generation.
 """
 
 import io
+import json
 import logging
 import os
 import queue
@@ -175,10 +176,38 @@ _stream_spoken_chars = 0
 _stream_first_segment = True
 
 
-# Regular expressions for cleaning text
+# Regular expressions for cleaning text.
+# gptme supports three tool-call formats (see gptme/tools/base.py ToolFormat):
+#   - markdown: ```lang content ``` (ToolUse._to_markdown)
+#   - xml:      <tool-use><name>content</name></tool-use> (ToolUse._to_xml)
+#   - tool:     @name: {json} or @name(id): {json} (ToolUse._to_toolcall)
+# All three are non-spoken implementation details.
 re_thinking = re.compile(r"<think(ing)?>.*?(\n</think(ing)?>|$)", flags=re.DOTALL)
 re_tool_use = re.compile(r"```[\w\. ~/\-]+\n(.*?)(\n```|$)", flags=re.DOTALL)
+re_tool_use_xml = re.compile(r"<tool-use>.*?(?:</tool-use>|$)", flags=re.DOTALL)
+re_tool_use_at_start = re.compile(r"^@[\w.]+(?:\([\w\-:.]+\))?: ", flags=re.MULTILINE)
 re_markdown_header = re.compile(r"^(#+)\s+(.*?)$", flags=re.MULTILINE)
+
+
+def _strip_at_tool_calls(content: str) -> str:
+    """Strip @tool JSON calls, including incomplete streamed calls."""
+    decoder = json.JSONDecoder()
+    parts: list[str] = []
+    cursor = 0
+
+    while match := re_tool_use_at_start.search(content, cursor):
+        parts.append(content[cursor : match.start()])
+        payload_start = match.end()
+        try:
+            _, payload_end = decoder.raw_decode(content, payload_start)
+        except json.JSONDecodeError:
+            # The call is still streaming. Drop it through the current end.
+            cursor = len(content)
+            break
+        cursor = payload_end
+
+    parts.append(content[cursor:])
+    return "".join(parts)
 
 
 def set_speed(speed):
@@ -353,7 +382,7 @@ def clean_for_speech(content: str) -> str:
     Removes:
 
     - <thinking> tags and their content
-    - Tool use blocks (```tool ...```)
+    - Tool use blocks in all three gptme formats (markdown/xml/@tool)
     - **Bold** (``**text**``) and italic (``*text*``) markup
     - Additional (details) that may not need to be spoken
     - Emojis and other non-speech content
@@ -364,8 +393,14 @@ def clean_for_speech(content: str) -> str:
     # Remove <thinking> tags and their content
     content = re_thinking.sub("", content)
 
-    # Remove tool use blocks
+    # Remove markdown-format tool calls (```lang content ```)
     content = re_tool_use.sub("", content)
+
+    # Remove xml-format tool calls (<tool-use>...</tool-use>)
+    content = re_tool_use_xml.sub("", content)
+
+    # Remove @tool-format calls (@name: {json} or @name(id): {json})
+    content = _strip_at_tool_calls(content)
 
     # Replace Markdown headers with just the header text (removing hash symbols)
     content = re_markdown_header.sub(r"\2", content)

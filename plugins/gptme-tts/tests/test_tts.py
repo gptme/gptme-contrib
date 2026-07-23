@@ -133,7 +133,13 @@ def test_split_text_lists():
 
 
 def test_clean_for_speech():
-    from gptme_tts.tts import re_thinking, re_tool_use
+    from gptme_tts.tts import (
+        _strip_at_tool_calls,
+        re_thinking,
+        re_tool_use,
+        re_tool_use_at_start,
+        re_tool_use_xml,
+    )
 
     # complete
     assert re_thinking.search("<thinking>thinking</thinking>")
@@ -155,6 +161,73 @@ def test_clean_for_speech():
         == "Using tool"
     )
     assert re_tool_use.sub("", "```tool\ncontents\n```\nRan tool").strip() == "Ran tool"
+
+    # xml-format tool calls
+    xml_block = "<tool-use>\n<shell>\nls -la\n</shell>\n</tool-use>"
+    assert re_tool_use_xml.search(xml_block)
+    assert (
+        re_tool_use_xml.sub("", f"Before.\n{xml_block}\nAfter.").strip()
+        == "Before.\n\nAfter."
+    )
+
+    # @tool-format calls
+    at_block = '@shell: {\n  "command": "ls"\n}'
+    assert re_tool_use_at_start.search(at_block)
+    assert (
+        _strip_at_tool_calls(f"Before.\n{at_block}\nAfter.").strip()
+        == "Before.\n\nAfter."
+    )
+
+    # @tool-format with call id
+    at_id_block = '@shell(abc123): {\n  "command": "ls"\n}'
+    assert re_tool_use_at_start.search(at_id_block)
+
+    # clean_for_speech strips all three formats
+    # (internal whitespace is not collapsed here; split_text/join handles that downstream)
+    from gptme_tts.tts import clean_for_speech
+
+    result_xml = clean_for_speech(f"Hello.\n{xml_block}\nDone.")
+    assert "Hello." in result_xml and "Done." in result_xml
+    assert "<tool-use>" not in result_xml
+
+    result_at = clean_for_speech(f"Hello.\n{at_block}\nDone.")
+    assert "Hello." in result_at and "Done." in result_at
+    assert "@shell" not in result_at
+
+    # Single-line @tool calls must not consume ordinary speech that follows,
+    # whether the subsequent text starts on the next line or immediately after.
+    single_line_at = '@shell: {"command":"ls"}'
+    assert re_tool_use_at_start.search(single_line_at)
+    assert clean_for_speech(f"{single_line_at}\nDone.").strip() == "Done."
+    # No newline between tool call and speech — was previously consumed by \Z fallback.
+    assert (
+        clean_for_speech(f"{single_line_at} Some spoken result.").strip()
+        == "Some spoken result."
+    )
+    # A later brace in ordinary speech must not extend the tool-call match.
+    assert (
+        clean_for_speech(f"{single_line_at} Keep this }} brace.").strip()
+        == "Keep this } brace."
+    )
+
+    # partial (incomplete, still streaming) — closing delimiter not yet received
+    partial_xml = "<tool-use>\n<shell>\nls -la"  # no </tool-use>
+    assert re_tool_use_xml.search(partial_xml)
+    assert "<tool-use>" not in re_tool_use_xml.sub("", partial_xml)
+
+    partial_at = '@shell: {\n  "command": "echo Hello."'  # no closing \n}
+    assert re_tool_use_at_start.search(partial_at)
+    assert "@shell" not in _strip_at_tool_calls(partial_at)
+
+    # partial xml: punctuation inside an incomplete block must not leak to speech
+    result_partial_xml = clean_for_speech(f"Safe sentence.\n{partial_xml}")
+    assert "Safe sentence." in result_partial_xml
+    assert "<tool-use>" not in result_partial_xml
+
+    # partial @tool: punctuation in json args must not leak to speech
+    result_partial_at = clean_for_speech(f"Safe sentence.\n{partial_at}")
+    assert "Safe sentence." in result_partial_at
+    assert "@shell" not in result_partial_at
 
 
 def test_request_timeout_configurable(monkeypatch):
