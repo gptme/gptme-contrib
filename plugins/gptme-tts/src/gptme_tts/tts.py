@@ -28,6 +28,7 @@ Uses Kokoro for local TTS generation.
 """
 
 import io
+import json
 import logging
 import os
 import queue
@@ -184,11 +185,29 @@ _stream_first_segment = True
 re_thinking = re.compile(r"<think(ing)?>.*?(\n</think(ing)?>|$)", flags=re.DOTALL)
 re_tool_use = re.compile(r"```[\w\. ~/\-]+\n(.*?)(\n```|$)", flags=re.DOTALL)
 re_tool_use_xml = re.compile(r"<tool-use>.*?(?:</tool-use>|$)", flags=re.DOTALL)
-re_tool_use_at = re.compile(
-    r"^@[\w.]+(?:\([\w\-:.]+\))?: " r"(?:\{\}|\{[^\n]*\}|\{.*?(?:\n\}|\Z))",
-    flags=re.DOTALL | re.MULTILINE,
-)
+re_tool_use_at_start = re.compile(r"^@[\w.]+(?:\([\w\-:.]+\))?: ", flags=re.MULTILINE)
 re_markdown_header = re.compile(r"^(#+)\s+(.*?)$", flags=re.MULTILINE)
+
+
+def _strip_at_tool_calls(content: str) -> str:
+    """Strip @tool JSON calls, including incomplete streamed calls."""
+    decoder = json.JSONDecoder()
+    parts: list[str] = []
+    cursor = 0
+
+    while match := re_tool_use_at_start.search(content, cursor):
+        parts.append(content[cursor : match.start()])
+        payload_start = match.end()
+        try:
+            _, payload_end = decoder.raw_decode(content, payload_start)
+        except json.JSONDecodeError:
+            # The call is still streaming. Drop it through the current end.
+            cursor = len(content)
+            break
+        cursor = payload_end
+
+    parts.append(content[cursor:])
+    return "".join(parts)
 
 
 def set_speed(speed):
@@ -381,7 +400,7 @@ def clean_for_speech(content: str) -> str:
     content = re_tool_use_xml.sub("", content)
 
     # Remove @tool-format calls (@name: {json} or @name(id): {json})
-    content = re_tool_use_at.sub("", content)
+    content = _strip_at_tool_calls(content)
 
     # Replace Markdown headers with just the header text (removing hash symbols)
     content = re_markdown_header.sub(r"\2", content)
