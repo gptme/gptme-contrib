@@ -344,8 +344,13 @@ emoji_pattern = re.compile(
 
 
 def clean_for_speech(content: str) -> str:
-    """
-    Clean content for speech by removing:
+    """Clean assistant content for speech.
+
+    Keep this aligned with the WebUI's TypeScript ``toSpokenText()`` in
+    ``webui/src/utils/tts.ts`` (gptme core): both reasoning and tool-use are
+    implementation details and must never be spoken.
+
+    Removes:
 
     - <thinking> tags and their content
     - Tool use blocks (```tool ...```)
