@@ -188,6 +188,25 @@ def test_clean_for_speech():
     assert "Hello." in result_at and "Done." in result_at
     assert "@shell" not in result_at
 
+    # partial (incomplete, still streaming) — closing delimiter not yet received
+    partial_xml = "<tool-use>\n<shell>\nls -la"  # no </tool-use>
+    assert re_tool_use_xml.search(partial_xml)
+    assert "<tool-use>" not in re_tool_use_xml.sub("", partial_xml)
+
+    partial_at = '@shell: {\n  "command": "echo Hello."'  # no closing \n}
+    assert re_tool_use_at.search(partial_at)
+    assert "@shell" not in re_tool_use_at.sub("", partial_at)
+
+    # partial xml: punctuation inside an incomplete block must not leak to speech
+    result_partial_xml = clean_for_speech(f"Safe sentence.\n{partial_xml}")
+    assert "Safe sentence." in result_partial_xml
+    assert "<tool-use>" not in result_partial_xml
+
+    # partial @tool: punctuation in json args must not leak to speech
+    result_partial_at = clean_for_speech(f"Safe sentence.\n{partial_at}")
+    assert "Safe sentence." in result_partial_at
+    assert "@shell" not in result_partial_at
+
 
 def test_request_timeout_configurable(monkeypatch):
     """Per-request timeout defaults to 30s and is overridable via env."""

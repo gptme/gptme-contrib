@@ -183,9 +183,10 @@ _stream_first_segment = True
 # All three are non-spoken implementation details.
 re_thinking = re.compile(r"<think(ing)?>.*?(\n</think(ing)?>|$)", flags=re.DOTALL)
 re_tool_use = re.compile(r"```[\w\. ~/\-]+\n(.*?)(\n```|$)", flags=re.DOTALL)
-re_tool_use_xml = re.compile(r"<tool-use>.*?</tool-use>", flags=re.DOTALL)
+re_tool_use_xml = re.compile(r"<tool-use>.*?(?:</tool-use>|$)", flags=re.DOTALL)
 re_tool_use_at = re.compile(
-    r"^@[\w.]+(?:\([\w\-:.]+\))?: (?:\{\}|\{.*?\n\})", flags=re.DOTALL | re.MULTILINE
+    r"^@[\w.]+(?:\([\w\-:.]+\))?: (?:\{\}|\{.*?(?:\n\}|\Z))",
+    flags=re.DOTALL | re.MULTILINE,
 )
 re_markdown_header = re.compile(r"^(#+)\s+(.*?)$", flags=re.MULTILINE)
 
