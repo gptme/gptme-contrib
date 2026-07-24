@@ -156,6 +156,36 @@ from gptodo.worktree import (
 # Keep console instance for CLI output
 console = Console()
 
+BROWSE_DEFAULT_STATES = [
+    "backlog",
+    "todo",
+    "active",
+    "waiting",
+    "ready_for_review",
+]
+BROWSE_FILTER_STATES = [
+    "backlog",
+    "someday",
+    "todo",
+    "active",
+    "waiting",
+    "ready_for_review",
+    "done",
+    "cancelled",
+]
+
+
+def _normalize_browse_state(filter_state: str | None) -> str | None:
+    """Normalize and validate browse state filters."""
+    if filter_state is None:
+        return None
+
+    normalized = normalize_state(filter_state.replace("-", "_"), warn=False)
+    if normalized not in BROWSE_FILTER_STATES:
+        valid_states = ", ".join(BROWSE_FILTER_STATES)
+        raise click.BadParameter(f"invalid state '{filter_state}'. Choose from: {valid_states}")
+    return normalized
+
 
 @click.group()
 @click.option("-v", "--verbose", is_flag=True)
@@ -213,17 +243,39 @@ def cli(verbose, tasks_dir):
 
 @cli.command("show")
 @click.argument("task_id", required=False)
-def show_(task_id):
+@click.option("--render/--raw", default=False, help="Render markdown content")
+def show_(task_id, render):
     """Show detailed information about a task.
 
     If task_id is not provided, it will show the first task found.
     """
-    show(task_id)
+    show(task_id, render=render)
 
 
-def show(task_id):
+def show(task_id, render=False):
     """Show detailed information about a task."""
-    console = Console()
+    if render:
+        from rich.theme import Theme
+
+        # Use FZF_PREVIEW_COLUMNS if available (set by fzf for preview commands)
+        # so Rich wraps at the correct width — prevents fzf wrap arrows and
+        # ensures code block backgrounds extend to full width
+        preview_width = int(os.environ.get("FZF_PREVIEW_COLUMNS") or 0) or None
+        console = Console(
+            force_terminal=True,
+            width=preview_width,
+            theme=Theme(
+                {
+                    "markdown.h1": "bold bright_cyan",
+                    "markdown.h2": "bold bright_green",
+                    "markdown.h3": "bold bright_yellow",
+                    "markdown.h4": "bold bright_magenta",
+                    "markdown.code": "on grey23",
+                }
+            ),
+        )
+    else:
+        console = Console()
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
@@ -231,28 +283,34 @@ def show(task_id):
         console.print("[red]Error: Task ID or filename required[/]")
         return
 
-    # Load all tasks
-    tasks = load_tasks(tasks_dir)
-    if not tasks:
-        console.print("[red]No tasks found[/]")
-        return
-
-    # Sort tasks by creation date for consistent ID mapping
-    tasks.sort(key=lambda t: t.created)
-
-    # Find requested task
     task = None
-    if task_id.isdigit():
-        # Get task by numeric ID
-        idx = int(task_id) - 1
-        if 0 <= idx < len(tasks):
-            task = tasks[idx]
-    else:
-        # Get task by name
+    if not task_id.isdigit():
         task_name = task_id[:-3] if task_id.endswith(".md") else task_id
-        matching = [t for t in tasks if t.name == task_name]
-        if matching:
-            task = matching[0]
+        direct_path = tasks_dir / f"{task_name}.md"
+        if direct_path.is_file():
+            direct_tasks = load_tasks(tasks_dir, single_file=direct_path)
+            if direct_tasks:
+                task = direct_tasks[0]
+
+    if task is None:
+        # Fall back to full task load for numeric IDs or unknown names.
+        tasks = load_tasks(tasks_dir)
+        if not tasks:
+            console.print("[red]No tasks found[/]")
+            return
+
+        # Sort tasks by creation date for consistent ID mapping
+        tasks.sort(key=lambda t: t.created)
+
+        if task_id.isdigit():
+            idx = int(task_id) - 1
+            if 0 <= idx < len(tasks):
+                task = tasks[idx]
+        else:
+            task_name = task_id[:-3] if task_id.endswith(".md") else task_id
+            matching = [t for t in tasks if t.name == task_name]
+            if matching:
+                task = matching[0]
 
     if not task:
         console.print(f"[red]Error: Task {task_id} not found[/]")
@@ -288,7 +346,12 @@ def show(task_id):
     # Print content
     console.print("\n[bold]Content:[/]")
     post = frontmatter.load(task.path)  # Reload to get content
-    console.out(post.content, highlight=True)
+    if render:
+        from rich.markdown import Markdown
+
+        console.print(Markdown(post.content))
+    else:
+        console.out(post.content, highlight=True)
 
 
 @cli.command("effective")
@@ -649,6 +712,444 @@ def list_(sort, active_only, context, output_json, output_jsonl, pool_filter, ex
 
     summary = [f"{count} {state}" for state, count in state_counts.items()]
     console.print(f"\nTotal: {len(tasks)} tasks ({', '.join(summary)})")
+
+
+def _get_browse_lines(tasks_dir, sort_key="date", filter_state=None, project=None, show_all=False):
+    """Get formatted task lines for fzf consumption.
+
+    Returns space-padded aligned lines with a header row first:
+    NAME  STATE  PRI  PROJECT  CREATED
+    """
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        return []
+
+    # Filter
+    if filter_state:
+        normalized_state = _normalize_browse_state(filter_state)
+        tasks = [t for t in tasks if t.state == normalized_state]
+    elif not show_all:
+        tasks = [t for t in tasks if t.state in BROWSE_DEFAULT_STATES]
+    if project:
+        tasks = [t for t in tasks if t.metadata.get("project") == project]
+
+    # Sort
+    if sort_key == "priority":
+        tasks.sort(key=lambda t: (-t.priority_rank, t.name))
+    elif sort_key == "modified":
+        tasks.sort(key=lambda t: t.modified, reverse=True)
+    elif sort_key == "name":
+        tasks.sort(key=lambda t: t.name)
+    else:  # date
+        tasks.sort(key=lambda t: t.created)
+
+    if not tasks:
+        return []
+
+    # Compute column widths from data
+    col_name = max(max(len(t.name) for t in tasks), len("NAME"))
+    col_state = max(
+        max(len(t.state or "untracked") + 2 for t in tasks), len("STATE")
+    )  # +2 for emoji+space
+    col_proj = max(max(len(t.metadata.get("project") or "") for t in tasks), len("PROJECT"))
+
+    # Header row
+    header = f"{'NAME':<{col_name}}  {'STATE':<{col_state}}  {'PRI':<2}  {'PROJECT':<{col_proj}}  CREATED"
+    lines = [header]
+
+    # Format data lines
+    for task in tasks:
+        state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        state_text = f"{state_emoji} {task.state or 'untracked'}"
+        priority_emoji = STATE_EMOJIS.get(task.priority or "", "")
+        project_str = task.metadata.get("project") or ""
+        age = task.created_ago
+        lines.append(
+            f"{task.name:<{col_name}}  {state_text:<{col_state}}  {priority_emoji:<2}  {project_str:<{col_proj}}  {age}"
+        )
+
+    return lines
+
+
+def _write_browse_scripts(state_dir, repo_root):
+    """Write helper shell scripts for the fzf browse TUI."""
+    sd = state_dir  # shorter alias for templates
+    rr = repo_root
+
+    Path(sd, "edit-task.sh").write_text(
+        """#!/bin/sh
+exec "${EDITOR:-nano}" "$1" </dev/tty >/dev/tty 2>/dev/tty
+"""
+    )
+
+    # Reload: reads state files and calls browse-list with appropriate args
+    Path(sd, "reload.sh").write_text(
+        f"""#!/bin/sh
+sort=$(cat "{sd}/sort" 2>/dev/null || echo date)
+state=$(cat "{sd}/state" 2>/dev/null || echo "")
+project=$(cat "{sd}/project" 2>/dev/null || echo "")
+args="--sort $sort"
+if [ "$state" = "all" ]; then
+    args="$args --all"
+elif [ -n "$state" ]; then
+    args="$args --state $state"
+fi
+if [ -n "$project" ]; then
+    args="$args --project $project"
+fi
+gptodo browse-list $args
+"""
+    )
+
+    # Sort picker: sub-fzf to choose sort mode
+    Path(sd, "sort-picker.sh").write_text(
+        f"""#!/bin/sh
+choice=$(printf 'date\\npriority\\nmodified\\nname' | fzf --no-sort --header 'Sort by:')
+[ -n "$choice" ] && printf '%s' "$choice" > "{sd}/sort"
+"""
+    )
+
+    # Filter picker: sub-fzf to choose state filter
+    Path(sd, "filter-picker.sh").write_text(
+        f"""#!/bin/sh
+choice=$(printf 'open tasks (default)\\nall states\\nbacklog only\\nsomeday only\\ntodo only\\nactive only\\nwaiting only\\nready for review only' \\
+  | fzf --no-sort --header 'Filter by state:')
+case "$choice" in
+  "open tasks"*) printf '' > "{sd}/state";;
+  "all"*) printf 'all' > "{sd}/state";;
+  "backlog"*) printf 'backlog' > "{sd}/state";;
+  "someday"*) printf 'someday' > "{sd}/state";;
+  "todo"*) printf 'todo' > "{sd}/state";;
+  "active"*) printf 'active' > "{sd}/state";;
+  "waiting"*) printf 'waiting' > "{sd}/state";;
+  "ready for review"*) printf 'ready_for_review' > "{sd}/state";;
+esac
+"""
+    )
+
+    # State change: sub-fzf to pick new state, then call gptodo edit
+    Path(sd, "state-change.sh").write_text(
+        """#!/bin/sh
+choice=$(printf 'backlog\\nsomeday\\ntodo\\nactive\\nwaiting\\nready_for_review\\ndone\\ncancelled' \\
+  | fzf --no-sort --header 'Set state to:')
+[ -n "$choice" ] && gptodo edit "$1" --set state "$choice"
+"""
+    )
+
+    # Command palette: discoverable menu of all actions
+    Path(sd, "palette.sh").write_text(
+        f"""#!/bin/sh
+action=$(printf '%s\\n' \\
+  'Sort by date' \\
+  'Sort by priority' \\
+  'Sort by modified' \\
+  'Sort by name' \\
+  '───────────────────' \\
+  'Filter: open tasks (default)' \\
+  'Filter: all states' \\
+  'Filter: backlog only' \\
+  'Filter: someday only' \\
+  'Filter: todo only' \\
+  'Filter: active only' \\
+  'Filter: waiting only' \\
+  'Filter: ready for review only' \\
+  '───────────────────' \\
+  'Change state -> backlog' \\
+  'Change state -> someday' \\
+  'Change state -> todo' \\
+  'Change state -> active' \\
+  'Change state -> waiting' \\
+  'Change state -> ready_for_review' \\
+  'Change state -> done' \\
+  'Change state -> cancelled' \\
+  '───────────────────' \\
+  'Edit in $EDITOR' \\
+  'Git blame' \\
+  'Git log (file history)' \\
+  'Preview: raw markdown (^R)' \\
+  'Preview: rendered (^P)' \\
+  | fzf --no-sort --header 'Command Palette')
+
+task="$1"
+
+case "$action" in
+  "Sort by date") printf 'date' > "{sd}/sort";;
+  "Sort by priority") printf 'priority' > "{sd}/sort";;
+  "Sort by modified") printf 'modified' > "{sd}/sort";;
+  "Sort by name") printf 'name' > "{sd}/sort";;
+  "Filter: open tasks"*) printf '' > "{sd}/state";;
+  "Filter: all"*) printf 'all' > "{sd}/state";;
+  "Filter: backlog"*) printf 'backlog' > "{sd}/state";;
+  "Filter: someday"*) printf 'someday' > "{sd}/state";;
+  "Filter: todo"*) printf 'todo' > "{sd}/state";;
+  "Filter: active"*) printf 'active' > "{sd}/state";;
+  "Filter: waiting"*) printf 'waiting' > "{sd}/state";;
+  "Filter: ready for review"*) printf 'ready_for_review' > "{sd}/state";;
+  "Change state"*"backlog") gptodo edit "$task" --set state backlog;;
+  "Change state"*"someday") gptodo edit "$task" --set state someday;;
+  "Change state"*"todo") gptodo edit "$task" --set state todo;;
+  "Change state"*"active") gptodo edit "$task" --set state active;;
+  "Change state"*"waiting") gptodo edit "$task" --set state waiting;;
+  "Change state"*"ready_for_review") gptodo edit "$task" --set state ready_for_review;;
+  "Change state"*"done") gptodo edit "$task" --set state done;;
+  "Change state"*"cancelled") gptodo edit "$task" --set state cancelled;;
+  "Edit in"*) sh "{sd}/edit-task.sh" "{rr}/tasks/$task.md";;
+  "Git blame") git -C "{rr}" blame --date=short -- tasks/"$task".md | ${{PAGER:-less}};;
+  "Git log"*) git -C "{rr}" log --follow --oneline --color -- tasks/"$task".md | ${{PAGER:-less -R}};;
+esac
+"""
+    )
+
+
+@cli.command("browse-list", hidden=True)
+@click.option(
+    "--sort",
+    "sort_key",
+    type=click.Choice(["date", "priority", "modified", "name"]),
+    default="date",
+    help="Sort order for tasks",
+)
+@click.option("--state", "filter_state", type=str, default=None, help="Filter by state")
+@click.option("--project", type=str, default=None, help="Filter by project")
+@click.option("--all", "show_all", is_flag=True, help="Include done/cancelled tasks")
+def browse_list_cmd(sort_key, filter_state, project, show_all):
+    """Output formatted task lines for fzf consumption (internal use)."""
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+    lines = _get_browse_lines(
+        tasks_dir,
+        sort_key,
+        _normalize_browse_state(filter_state),
+        project,
+        show_all,
+    )
+    for line in lines:
+        click.echo(line)
+
+
+@cli.command("browse")
+@click.option(
+    "--all",
+    "show_all",
+    is_flag=True,
+    help="Include all task states (default: open tasks only)",
+)
+@click.option(
+    "--project",
+    type=str,
+    default=None,
+    help="Filter by project name",
+)
+@click.option(
+    "--state",
+    "filter_state",
+    type=str,
+    default=None,
+    help="Filter by specific task state",
+)
+@click.option(
+    "--no-fzf",
+    "no_fzf",
+    is_flag=True,
+    help="Force pager output (skip fzf even if available)",
+)
+def browse(show_all, project, filter_state, no_fzf):
+    """Interactively browse task contents.
+
+    Uses fzf for interactive selection with a live preview pane.
+    Falls back to a paged view if fzf is not installed or --no-fzf is used.
+
+    By default, shows open tasks: backlog, todo, active, waiting, and
+    ready_for_review. Use --all to include every task state.
+
+    In fzf mode, press ? to open the command palette with all available actions.
+    """
+    import shutil
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Decide mode: fzf or pager
+    use_fzf = not no_fzf and shutil.which("fzf")
+    normalized_state = _normalize_browse_state(filter_state)
+
+    if use_fzf:
+        _browse_fzf(
+            repo_root,
+            show_all=show_all,
+            project=project,
+            filter_state=normalized_state,
+        )
+    else:
+        all_tasks = load_tasks(tasks_dir)
+        if not all_tasks:
+            console.print("[yellow]No tasks found[/]")
+            return
+        # Filter for pager mode
+        tasks = all_tasks
+        if normalized_state:
+            tasks = [t for t in tasks if t.state == normalized_state]
+        elif not show_all:
+            tasks = [t for t in tasks if t.state in BROWSE_DEFAULT_STATES]
+        if project:
+            tasks = [t for t in tasks if t.metadata.get("project") == project]
+        if not tasks:
+            console.print("[yellow]No tasks found matching filters[/]")
+            return
+        tasks.sort(key=lambda t: t.created)
+        _browse_pager(tasks, repo_root)
+
+
+def _fzf_version() -> tuple[int, ...]:
+    """Return fzf version as a tuple, e.g. (0, 38, 0)."""
+    import subprocess
+
+    try:
+        out = subprocess.check_output(["fzf", "--version"], text=True, stderr=subprocess.DEVNULL)
+        # "0.38.0 (debian)" -> "0.38.0"
+        ver_str = out.strip().split()[0]
+        return tuple(int(x) for x in ver_str.split("."))
+    except Exception:
+        return (0, 0, 0)
+
+
+def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
+    """Browse tasks interactively using fzf with full TUI.
+
+    Features: command palette (?), sort/filter pickers, state changes,
+    git blame/log in preview, editor integration.
+    """
+    import subprocess
+    import tempfile
+
+    tasks_dir = repo_root / "tasks"
+
+    # Get initial lines
+    lines = _get_browse_lines(tasks_dir, "date", filter_state, project, show_all)
+    if not lines:
+        Console().print("[yellow]No tasks found matching filters[/]")
+        return
+
+    input_text = "\n".join(lines)
+
+    with tempfile.TemporaryDirectory(prefix="gptodo-browse-") as state_dir:
+        # Write initial state to temp files
+        Path(state_dir, "sort").write_text("date")
+        if show_all:
+            Path(state_dir, "state").write_text("all")
+        elif filter_state:
+            Path(state_dir, "state").write_text(filter_state)
+        if project:
+            Path(state_dir, "project").write_text(project)
+
+        # Write helper scripts
+        _write_browse_scripts(state_dir, repo_root)
+
+        # Keyboard hints in border label (spans full window width)
+        border_label = " ? Actions │ ^S Sort │ ^F Filter │ ^T State │ ^E Edit │ ^B Blame │ ^L Log │ ^P Preview │ ^R Raw │ ^W Layout "
+
+        # Shell-quoted path aliases for embedding in fzf bind commands
+        sd_q = f'"{state_dir}"'
+        rr_q = f'"{repo_root}"'
+
+        # Reload command (reads state files, calls browse-list)
+        reload_cmd = f"sh {sd_q}/reload.sh"
+
+        # Build keybindings
+        bind_list = [
+            f"?:execute(sh {sd_q}/palette.sh {{1}})+reload({reload_cmd})",
+            f"ctrl-s:execute(sh {sd_q}/sort-picker.sh)+reload({reload_cmd})",
+            f"ctrl-f:execute(sh {sd_q}/filter-picker.sh)+reload({reload_cmd})",
+            f"ctrl-t:execute(sh {sd_q}/state-change.sh {{1}})+reload({reload_cmd})",
+            f"ctrl-e:execute(sh {sd_q}/edit-task.sh {rr_q}/tasks/{{1}}.md)+reload({reload_cmd})",
+            f"ctrl-b:change-preview(git -C {rr_q} blame --date=short -- tasks/{{1}}.md)+change-preview-label( Git Blame )",
+            f"ctrl-l:change-preview(git -C {rr_q} log --follow --oneline --color -- tasks/{{1}}.md)+change-preview-label( Git Log )",
+            "ctrl-p:change-preview(gptodo show --render {1})+change-preview-label( Task Preview )",
+            "ctrl-r:change-preview(gptodo show {1})+change-preview-label( Raw Markdown )",
+            "ctrl-w:change-preview-window(right:60%:wrap|down:75%:wrap)+refresh-preview",
+            "ctrl-/:toggle-preview",
+        ]
+        # resize event requires fzf >= 0.42.0
+        if _fzf_version() >= (0, 42, 0):
+            bind_list.append("resize:refresh-preview")
+        bindings = ",".join(bind_list)
+
+        # Run fzf with full TUI.
+        # Only capture stdout (for the selection); let stderr go to the
+        # terminal so fzf can render its TUI via /dev/tty or stderr fallback.
+        result = subprocess.run(
+            [
+                "fzf",
+                "--preview",
+                "gptodo show --render {1}",
+                "--preview-window",
+                "down:75%:wrap",
+                "--preview-label",
+                " Task Preview ",
+                "--layout",
+                "reverse",
+                "--border",
+                "rounded",
+                "--ansi",
+                "--no-sort",
+                "--header-lines",
+                "1",
+                "--border-label",
+                border_label,
+                "--border-label-pos",
+                "0:bottom",
+                "--bind",
+                bindings,
+            ],
+            input=input_text,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+
+        if result.returncode == 2:
+            # fzf error (bad flags, etc.) — report to stderr (which is the terminal)
+            Console(stderr=True).print("[red]fzf error (exit 2) — try: gptodo browse --no-fzf[/]")
+            return
+        if result.returncode == 0 and result.stdout.strip():
+            # Extract task name (first whitespace-separated field)
+            selected = result.stdout.strip().split()[0]
+            click.echo(selected)
+
+
+def _browse_pager(tasks, repo_root):
+    """Browse tasks using a pager (fallback when fzf unavailable)."""
+    parts = []
+    for i, task in enumerate(tasks):
+        if i > 0:
+            parts.append("")
+
+        # Separator header
+        state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        header = f"═══ {task.name} [{state_emoji} {task.state}] ═══"
+        parts.append(header)
+
+        # Metadata
+        if task.priority:
+            parts.append(f"  Priority: {task.priority}")
+        if task.metadata.get("project"):
+            parts.append(f"  Project:  {task.metadata['project']}")
+        if task.tags:
+            parts.append(f"  Tags:     {', '.join(task.tags)}")
+        if task.requires:
+            parts.append(f"  Requires: {', '.join(task.requires)}")
+        parts.append(f"  Created:  {task.created_ago}")
+        parts.append(f"  Modified: {task.modified_ago}")
+        if task.subtasks.total > 0:
+            parts.append(f"  Subtasks: {task.subtasks.completed}/{task.subtasks.total}")
+
+        # Content
+        parts.append("")
+        post = frontmatter.load(task.path)
+        parts.append(post.content)
+
+    output = "\n".join(parts) + "\n"
+    click.echo_via_pager(output)
 
 
 def print_status_section(
