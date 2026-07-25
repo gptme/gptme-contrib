@@ -102,8 +102,9 @@ gptme "Do a release for v1.4.2"
 
 ## Notes
 
-- Composition works through keyword overlap: broad workflow keywords cover all
-  sub-skill keywords so the full set is injected together.
+- Composition works through keyword overlap: when a message contains keywords
+  matched by multiple skills, gptme's `LessonMatcher` injects them all
+  simultaneously. This is deliberate — it is how the matching loop works.
 - Each skill is a separate directory containing a single `SKILL.md` file.
 - Keep sub-skills under ~50 lines each. Long skills dilute focus; split them.
 - Skills are versioned in git — use `git log skills/` to audit how your

@@ -20,8 +20,9 @@ output into the prompt by hand, which is slow and error-prone.
 
 gptme has a plugin API. A plugin is a Python package that exposes a `GptmePlugin`
 instance via the `gptme.plugins` entry-point group. Each tool in the plugin is a
-`ToolSpec` with a name, description (shown to the LLM), and an `execute` function
-that runs when the LLM calls the tool.
+`ToolSpec` with a name, description (shown to the LLM), and a `functions` list of
+Python callables the LLM can invoke directly. Write typed functions with docstrings
+and gptme surfaces them as structured tool calls.
 
 Install the plugin and the LLM can call your custom tool just like any built-in.
 
@@ -32,32 +33,30 @@ A plugin that lets gptme query a local SQLite database:
 ```python
 # my_gptme_plugin/__init__.py
 import sqlite3
-from collections.abc import Generator
 from gptme.tools.base import ToolSpec
-from gptme.message import Message
 from gptme.plugins.plugin import GptmePlugin
 
 
-def _execute_query(
-    code: str | None,
-    args: list[str] | None,
-    kwargs: dict[str, str] | None,
-) -> Generator[Message, None, None]:
-    """Execute a read-only SQL query and yield results as a markdown table."""
-    kw = kwargs or {}
-    db_path = kw.get("db_path", "")
-    sql = kw.get("sql", code or "")
+def query_db(db_path: str, sql: str) -> str:
+    """Execute a read-only SQL query against a local SQLite database.
+
+    Args:
+        db_path: Path to the SQLite database file.
+        sql: SELECT statement to run (read-only; writes are rejected by the URI mode).
+
+    Returns:
+        Query results as a Markdown table, or "(no results)" when no rows match.
+    """
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     cur = con.execute(sql)
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description] if cur.description else []
     if not cols:
-        yield Message("system", "(no results)")
-        return
+        return "(no results)"
     header = " | ".join(cols)
     sep = " | ".join("---" for _ in cols)
     body = "\n".join(" | ".join(str(c) for c in row) for row in rows)
-    yield Message("system", f"{header}\n{sep}\n{body}")
+    return f"{header}\n{sep}\n{body}"
 
 
 plugin = GptmePlugin(
@@ -65,8 +64,8 @@ plugin = GptmePlugin(
     tools=[
         ToolSpec(
             name="query_db",
-            desc="Run a read-only SQL query against a local SQLite database and return results as a markdown table.",
-            execute=_execute_query,
+            desc="Run a read-only SQL query against a local SQLite database and return results as a Markdown table.",
+            functions=[query_db],
         )
     ],
 )
@@ -103,9 +102,9 @@ inline, without you needing to copy-paste any SQL output.
   a buggy SQL statement the LLM generates.
 - Keep tool descriptions concise but precise — the LLM reads the `desc` field to
   decide when and how to call the tool. Poor descriptions lead to wrong calls.
-- The `execute` function receives `(code, args, kwargs)` and yields `Message`
-  objects. Use `kwargs` for named parameters passed from the LLM's tool call.
+- gptme derives the tool's parameter schema from the function's type annotations
+  and docstring `Args:` section; keep both accurate.
 - For tools that perform writes or have side effects, add a confirmation prompt
-  in the executor function and document it clearly in the `desc`.
+  in the function body and document it clearly in the `desc`.
 - See [gptme plugin docs](https://gptme.org/docs/plugins.html) for the full
   `GptmePlugin` and `ToolSpec` API reference.

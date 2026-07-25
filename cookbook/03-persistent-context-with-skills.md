@@ -83,6 +83,9 @@ gptme "I need to add a nullable email field to the User model and run a migratio
 
 - Skills are injected by keyword match — keep keyword lists specific enough to
   avoid false triggers on unrelated topics.
+- Skill discovery is built into gptme's lesson index (`LessonIndex`), which
+  recursively scans `./skills/` (and `~/.config/gptme/skills/` for global skills)
+  for `*.md` files at startup. No extra configuration is needed.
 - Skills work across runtimes (gptme terminal, gptme-contrib agents, Claude
   Code with the hook adapter). Write them once, use them everywhere.
 - Commit skills to your project repo so all contributors benefit from them.
