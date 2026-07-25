@@ -60,6 +60,13 @@ from .spans import (
     extract_spans_from_cc_jsonl,
     extract_spans_from_gptme_jsonl,
 )
+from .harm_detect import (
+    NoSearchReposError,
+    batch_detect_harm_revert,
+    check_precision_on_ground_truth,
+    detect_harm_revert,
+    extract_commit_shas,
+)
 from .store import SessionStore
 from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
 from .transcript import (
@@ -117,4 +124,9 @@ __all__ = [
     "ToolSpan",
     "extract_spans_from_cc_jsonl",
     "extract_spans_from_gptme_jsonl",
+    "NoSearchReposError",
+    "batch_detect_harm_revert",
+    "check_precision_on_ground_truth",
+    "detect_harm_revert",
+    "extract_commit_shas",
 ]
