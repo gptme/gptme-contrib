@@ -99,6 +99,16 @@ class TestList:
         idea_facts = bus.list_facts(prefix="idea:")
         assert len(idea_facts) == 1
 
+    def test_list_prefix_with_like_wildcards(self, bus: FactBus) -> None:
+        # Keys whose prefixes contain SQL LIKE special chars (% and _) must
+        # match literally, not as wildcards.
+        bus.publish("50%_done:task-a", "yes")
+        bus.publish("50%_done:task-b", "yes")
+        bus.publish("unrelated:key", "no")
+        facts = bus.list_facts(prefix="50%_done:")
+        assert len(facts) == 2
+        assert all(f.fact_key.startswith("50%_done:") for f in facts)
+
 
 class TestPurge:
     def test_purge_removes_expired(self, bus: FactBus) -> None:

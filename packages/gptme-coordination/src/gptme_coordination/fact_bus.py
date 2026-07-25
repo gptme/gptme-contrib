@@ -86,10 +86,14 @@ class FactBus:
         """Return all non-expired facts, optionally filtered by key prefix."""
         now = time.time()
         if prefix:
+            # Escape LIKE wildcards so a literal prefix containing % or _ works correctly
+            escaped = (
+                prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
             rows = self.db.conn.execute(
-                "SELECT * FROM fact_bus WHERE expires_at > ? AND fact_key LIKE ?"
+                "SELECT * FROM fact_bus WHERE expires_at > ? AND fact_key LIKE ? ESCAPE '\\'"
                 " ORDER BY fact_key",
-                (now, f"{prefix}%"),
+                (now, f"{escaped}%"),
             ).fetchall()
         else:
             rows = self.db.conn.execute(
