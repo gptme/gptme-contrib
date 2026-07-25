@@ -25,6 +25,7 @@ from gptme_coordination.db import (
     resolve_coordination_db_path,
 )
 from gptme_coordination.events import EventQueue
+from gptme_coordination.fact_bus import DEFAULT_TTL_MINUTES, FactBus
 from gptme_coordination.messages import MessageBus
 from gptme_coordination.work import WorkClaim, WorkClaimManager
 
@@ -261,6 +262,50 @@ def cmd_queue_discard(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_fact_publish(args: argparse.Namespace) -> int:
+    db_path = args.db or get_db_path()
+    with CoordinationDB(db_path) as db:
+        bus = FactBus(db)
+        fact = bus.publish(
+            args.fact_key,
+            args.value,
+            session_id=args.session,
+            ttl_minutes=args.ttl,
+        )
+        expires_in = int((fact.expires_at - fact.created_at) / 60)
+        print(f"published {fact.fact_key!r} = {fact.value!r} (ttl {expires_in}m)")
+        return 0
+
+
+def cmd_fact_query(args: argparse.Namespace) -> int:
+    db_path = args.db or get_db_path()
+    with CoordinationDB(db_path) as db:
+        bus = FactBus(db)
+        fact = bus.query(args.fact_key)
+        if fact is None:
+            print("(no fact)")
+            return 1
+        age_min = int(fact.age_seconds / 60)
+        src = f" [from {fact.session_id}]" if fact.session_id else ""
+        print(f"{fact.value}{src} (age {age_min}m)")
+        return 0
+
+
+def cmd_fact_list(args: argparse.Namespace) -> int:
+    db_path = args.db or get_db_path()
+    with CoordinationDB(db_path) as db:
+        bus = FactBus(db)
+        facts = bus.list_facts(prefix=args.prefix)
+        if not facts:
+            print("(no facts)")
+            return 0
+        for fact in facts:
+            age_min = int(fact.age_seconds / 60)
+            src = f" [{fact.session_id}]" if fact.session_id else ""
+            print(f"  {fact.fact_key} = {fact.value!r}{src} (age {age_min}m)")
+        return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     db_path = args.db or get_db_path()
     with CoordinationDB(db_path) as db:
@@ -331,6 +376,26 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("announce", help="Announce presence")
     p.add_argument("agent_id")
 
+    # fact-publish
+    p = sub.add_parser("fact-publish", help="Publish a fact to the shared fact bus")
+    p.add_argument("fact_key", help="Fact key (e.g. cascade:supply-verdict:2026-07-25)")
+    p.add_argument("value", help="Fact value (plain text)")
+    p.add_argument("--session", help="Publishing session ID (for attribution)")
+    p.add_argument(
+        "--ttl",
+        type=int,
+        default=DEFAULT_TTL_MINUTES,
+        help=f"TTL in minutes (default: {DEFAULT_TTL_MINUTES})",
+    )
+
+    # fact-query
+    p = sub.add_parser("fact-query", help="Query a fact from the shared fact bus")
+    p.add_argument("fact_key", help="Fact key to look up")
+
+    # fact-list
+    p = sub.add_parser("fact-list", help="List non-expired facts")
+    p.add_argument("--prefix", help="Filter by key prefix")
+
     # status
     sub.add_parser("status", help="Show coordination DB status")
 
@@ -391,6 +456,9 @@ COMMANDS = {
     "inbox": cmd_inbox,
     "send": cmd_send,
     "announce": cmd_announce,
+    "fact-publish": cmd_fact_publish,
+    "fact-query": cmd_fact_query,
+    "fact-list": cmd_fact_list,
     "status": cmd_status,
     "queue-list": cmd_queue_list,
     "queue-stats": cmd_queue_stats,

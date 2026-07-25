@@ -74,6 +74,15 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_state ON events(state);
 CREATE INDEX IF NOT EXISTS idx_events_thread ON events(thread_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_priority ON events(state, priority DESC);
+
+CREATE TABLE IF NOT EXISTS fact_bus (
+    fact_key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    session_id TEXT,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fact_bus_expires ON fact_bus(expires_at);
 """
 
 
