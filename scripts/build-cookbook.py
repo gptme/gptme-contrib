@@ -8,6 +8,7 @@ Output: cookbook/index.html (default)
 """
 
 import argparse
+import html
 import re
 import sys
 from pathlib import Path
@@ -17,7 +18,11 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Parse YAML frontmatter and return (meta, body)."""
     if not text.startswith("---"):
         return {}, text
-    end = text.index("---", 3)
+    # Only match --- at the start of a line to avoid splitting on --- inside YAML values
+    m = re.search(r"^---\s*$", text[3:], re.MULTILINE)
+    if not m:
+        return {}, text
+    end = m.start() + 3  # position relative to original text
     fm_text = text[3:end].strip()
     body = text[end + 3 :].strip()
 
@@ -248,19 +253,27 @@ def build_card(meta: dict, sections: dict, source_file: str) -> str:
     # Collapse newlines for inline display
     problem_snippet = " ".join(problem_snippet.split())
 
-    tags_html = "".join(f'<span class="tag">{t}</span>' for t in tags)
+    tags_html = "".join(f'<span class="tag">{html.escape(t)}</span>' for t in tags)
+
+    # Sanitize deep_link: only allow http/https URLs
+    raw_link = meta.get("deep_link", "https://gptme.ai/")
+    deep_link = (
+        raw_link
+        if raw_link.startswith(("https://", "http://"))
+        else "https://gptme.ai/"
+    )
 
     return CARD_TEMPLATE.format(
-        category=category,
-        category_label=CATEGORY_LABELS.get(category, category),
-        title=meta.get("title", "Untitled"),
-        description=meta.get("description", ""),
-        difficulty=difficulty,
+        category=html.escape(category),
+        category_label=html.escape(CATEGORY_LABELS.get(category, category)),
+        title=html.escape(meta.get("title", "Untitled")),
+        description=html.escape(meta.get("description", "")),
+        difficulty=html.escape(difficulty),
         diff_color=DIFFICULTY_COLORS.get(difficulty, "#8b949e"),
-        problem_snippet=problem_snippet,
+        problem_snippet=html.escape(problem_snippet),
         tags_html=tags_html,
-        deep_link=meta.get("deep_link", "https://gptme.ai/"),
-        source_file=source_file,
+        deep_link=html.escape(deep_link, quote=True),
+        source_file=html.escape(source_file),
     )
 
 

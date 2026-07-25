@@ -18,9 +18,10 @@ can't reuse the individual steps elsewhere.
 
 ## Solution
 
-gptme skills compose. A workflow skill can reference other skills by name, and
-gptme will load all of them when the workflow is triggered. Each sub-skill stays
-small and focused; the workflow skill is just a sequenced list of steps.
+gptme skills compose. Keyword coverage across multiple skills means that when a
+high-level workflow keyword fires, each relevant sub-skill is injected into
+context simultaneously. Each sub-skill stays small and focused; the workflow
+skill is just a sequenced list of steps that references those sub-skills.
 
 This gives you a library of reusable primitives that snap together into larger
 automated workflows.
@@ -29,28 +30,28 @@ automated workflows.
 
 Three focused sub-skills:
 
+Three focused sub-skills, each in its own `SKILL.md`:
+
 ```bash
-# skills/release/check-tests.md
+# skills/release-check-tests/SKILL.md
 ---
-name: check-tests
+match:
+  keywords: [release, publish, ship, deploy]
 description: Verify the test suite passes before any release action
-keywords: [release, publish, ship, deploy]
 ---
 # Check Tests Before Release
 
 Always run the full test suite before any release action:
-```bash
-make test
-```
+run: make test
 If any test fails, STOP and fix it before proceeding with the release.
 ```
 
 ```bash
-# skills/release/update-changelog.md
+# skills/release-update-changelog/SKILL.md
 ---
-name: update-changelog
+match:
+  keywords: [changelog, CHANGELOG, release notes]
 description: Changelog update convention for releases
-keywords: [changelog, CHANGELOG, release notes]
 ---
 # Changelog Update Convention
 
@@ -60,53 +61,50 @@ Never delete old entries.
 ```
 
 ```bash
-# skills/release/tag-and-push.md
+# skills/release-tag-and-push/SKILL.md
 ---
-name: tag-and-push
+match:
+  keywords: [git tag, release tag, push tag]
 description: Git tagging and push convention for releases
-keywords: [tag, git tag, release tag, push tag]
 ---
 # Tag and Push Convention
 
 Create an annotated tag:
-```bash
-git tag -a v$VERSION -m "Release v$VERSION"
-git push origin master --tags
-```
+run: git tag -a v$VERSION -m "Release v$VERSION" && git push origin master --tags
 Do not push without a passing CI run on master.
 ```
 
-A workflow skill that composes all three:
+A workflow skill that brings all three into scope by sharing keywords:
 
 ```bash
-# skills/release/workflow.md
+# skills/release-workflow/SKILL.md
 ---
-name: release-workflow
+match:
+  keywords: [do a release, release v, release workflow, release, publish, ship, changelog, CHANGELOG, git tag, release tag]
 description: Full release pipeline — test, changelog, tag, push
-keywords: [do a release, release v, release workflow]
-requires: [check-tests, update-changelog, tag-and-push]
 ---
 # Release Workflow
 
 Steps in order:
-1. Run check-tests (stop on failure)
+1. Run `make test` (stop on failure)
 2. Update CHANGELOG.md with the new version
 3. Commit the changelog: `git commit CHANGELOG.md -m "chore: update changelog for vX.Y.Z"`
-4. Create the annotated tag and push per tag-and-push convention
+4. Create the annotated tag and push: `git tag -a v$VERSION -m "Release v$VERSION" && git push origin master --tags`
 ```
 
 Trigger the full workflow with one prompt:
 
 ```bash
 gptme "Do a release for v1.4.2"
-# gptme loads release-workflow, which loads the three sub-skills
+# gptme matches keywords across all four skills and injects them all
 # Agent follows the composed four-step pipeline
 ```
 
 ## Notes
 
-- `requires:` lists sub-skills by name (matching their `name:` frontmatter). All
-  required skills are injected into context before the workflow runs.
+- Composition works through keyword overlap: broad workflow keywords cover all
+  sub-skill keywords so the full set is injected together.
+- Each skill is a separate directory containing a single `SKILL.md` file.
 - Keep sub-skills under ~50 lines each. Long skills dilute focus; split them.
 - Skills are versioned in git — use `git log skills/` to audit how your
   workflows have evolved over time.

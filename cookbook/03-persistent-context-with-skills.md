@@ -18,9 +18,10 @@ getting wrong first drafts because the agent lacked context.
 
 ## Solution
 
-A `SKILL.md` file is a plain markdown document that gptme injects into the
+A skill is a plain markdown document (`SKILL.md`) that gptme injects into the
 session context automatically when certain keywords appear in the conversation.
-Skills are placed in a `skills/` directory and matched by keyword headers.
+Skills are placed in named subdirectories under `skills/` (or `~/.config/gptme/skills/`
+for user-global skills) and matched by the `match.keywords` frontmatter field.
 
 This means you write the explanation **once**, commit it, and gptme uses it
 whenever relevant — no copy-pasting, no per-session setup.
@@ -31,11 +32,11 @@ Create a skill for your project's database migration convention:
 
 ```bash
 mkdir -p skills/db
-cat > skills/db/migration-workflow.md << 'EOF'
+cat > skills/db/SKILL.md << 'EOF'
 ---
-name: migration-workflow
+match:
+  keywords: [migration, alembic, makemigrations, schema, django]
 description: Django migration conventions and pre-migration checklist
-keywords: [migration, alembic, makemigrations, schema, django]
 ---
 
 # Migration Workflow
@@ -66,12 +67,9 @@ python manage.py migrate myapp 0042  # the migration before yours
 EOF
 ```
 
-Now configure gptme to load skills from this directory (`gptme.toml`):
-
-```toml
-[tools]
-skills_dir = "skills/"
-```
+gptme automatically discovers skills in the `skills/` directory at your project
+root (no configuration needed). Alternatively, place skills in
+`~/.config/gptme/skills/` for user-global availability across all projects.
 
 Start a session and gptme will automatically inject the migration skill when
 you mention "migration", "schema", or "makemigrations":

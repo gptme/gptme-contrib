@@ -23,8 +23,8 @@ gptme ships with built-in tools that are always available:
 |------|-------------|
 | `shell` | Run any shell command and capture stdout/stderr |
 | `save` / `patch` | Write or edit files |
-| `python` | Execute Python code in a persistent interpreter |
-| `read_file` | Read file contents into context |
+| `ipython` | Execute Python code in a persistent interpreter |
+| `read` | Read file contents into context |
 | `browser` | Fetch a URL (if enabled) |
 
 The agent orchestrates these tools automatically based on your request. You
@@ -39,8 +39,8 @@ gptme "Read README.md, list the project's dependencies from pyproject.toml, and 
 ```
 
 gptme will:
-1. Read `README.md` via `read_file`
-2. Read `pyproject.toml` via `read_file`
+1. Read `README.md` via `read`
+2. Read `pyproject.toml` via `read`
 3. Reason about version ranges
 4. Reply with findings
 
