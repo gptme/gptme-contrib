@@ -13,28 +13,26 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Parse YAML frontmatter and return (meta, body)."""
     if not text.startswith("---"):
         return {}, text
-    # Only match --- at the start of a line to avoid splitting on --- inside YAML values
-    m = re.search(r"^---\s*$", text[3:], re.MULTILINE)
+    # Find closing --- at the start of a line; use a fixed-offset split so that
+    # --- appearing inside YAML block scalars doesn't terminate early.
+    m = re.search(r"\n---[ \t]*\n", text)
     if not m:
         return {}, text
-    end = m.start() + 3  # position relative to original text
-    fm_text = text[3:end].strip()
-    body = text[end + 3 :].strip()
-
-    meta: dict = {}
-    for line in fm_text.splitlines():
-        if ":" in line:
-            key, _, val = line.partition(":")
-            raw = val.strip().strip('"')
-            if raw.startswith("[") and raw.endswith("]"):
-                meta[key.strip()] = [t.strip() for t in raw[1:-1].split(",")]
-            else:
-                meta[key.strip()] = raw
+    fm_text = text[3 : m.start()].strip()
+    body = text[m.end() :].strip()
+    try:
+        meta = yaml.safe_load(fm_text) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+    except yaml.YAMLError:
+        meta = {}
     return meta, body
 
 
@@ -269,7 +267,7 @@ def build_card(meta: dict, sections: dict, source_file: str) -> str:
         title=html.escape(meta.get("title", "Untitled")),
         description=html.escape(meta.get("description", "")),
         difficulty=html.escape(difficulty),
-        diff_color=DIFFICULTY_COLORS.get(difficulty, "#8b949e"),
+        diff_color=html.escape(DIFFICULTY_COLORS.get(difficulty, "#8b949e")),
         problem_snippet=html.escape(problem_snippet),
         tags_html=tags_html,
         deep_link=html.escape(deep_link, quote=True),
@@ -312,18 +310,18 @@ def main() -> int:
             categories.append(cat)
 
     filter_buttons = "".join(
-        f'<button class="filter-btn" data-filter="{c}">'
-        f"{CATEGORY_LABELS.get(c, c)}</button>"
+        f'<button class="filter-btn" data-filter="{html.escape(c, quote=True)}">'
+        f"{html.escape(CATEGORY_LABELS.get(c, c))}</button>"
         for c in categories
     )
 
-    html = HTML_TEMPLATE.format(
+    page_html = HTML_TEMPLATE.format(
         filter_buttons=filter_buttons,
         cards="\n".join(cards_html),
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html)
+    output_path.write_text(page_html)
     print(f"Built {len(pattern_files)} patterns → {output_path}")
     return 0
 
