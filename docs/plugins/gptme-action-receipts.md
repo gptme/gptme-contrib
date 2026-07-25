@@ -87,7 +87,8 @@ scopes:
 ```
 
 Patterns follow Python `fnmatch` rules: `*` matches any sequence of characters
-except `/`, so `ErikBjare/*` matches `ErikBjare/bob` but not `org/sub/repo`.
+**including** `/`, so `ErikBjare/*` matches `ErikBjare/bob` but not `other/repo`.
+A bare `*` authorizes **every** repository — use it only if that is intentional.
 
 #### Worked example — single-agent allowlist
 
