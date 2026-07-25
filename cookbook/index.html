@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gptme Interactive Cookbook</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #388bfd;
+      --accent-hover: #58a6ff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    header {
+      padding: 2rem 1.5rem 1rem;
+      border-bottom: 1px solid var(--border);
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    header h1 { font-size: 1.75rem; margin-bottom: 0.5rem; }
+    header p { color: var(--muted); }
+    .filters {
+      max-width: 900px;
+      margin: 1.5rem auto 0;
+      padding: 0 1.5rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .filter-btn {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 0.3rem 0.75rem;
+      border-radius: 1rem;
+      cursor: pointer;
+      font-size: 0.875rem;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .filter-btn:hover, .filter-btn.active {
+      border-color: var(--accent);
+      color: var(--accent-hover);
+    }
+    main {
+      max-width: 900px;
+      margin: 1.5rem auto 3rem;
+      padding: 0 1.5rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      transition: border-color 0.15s;
+    }
+    .card:hover { border-color: var(--accent); }
+    .card-header { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+    .card h2 { font-size: 1rem; font-weight: 600; }
+    .badge {
+      font-size: 0.75rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 0.25rem;
+      border: 1px solid;
+      white-space: nowrap;
+    }
+    .badge-category { border-color: var(--accent); color: var(--accent); background: #1c2d42; }
+    .badge-diff { border-color: transparent; }
+    .card p.desc { font-size: 0.9rem; color: var(--muted); }
+    .card .problem { font-size: 0.875rem; border-left: 3px solid var(--border); padding-left: 0.75rem; color: var(--muted); }
+    .card-footer { margin-top: auto; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .btn {
+      display: inline-block;
+      padding: 0.4rem 0.9rem;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      text-decoration: none;
+      font-weight: 500;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    .tags { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+    .tag {
+      font-size: 0.75rem;
+      background: #21262d;
+      border: 1px solid var(--border);
+      padding: 0.1rem 0.45rem;
+      border-radius: 0.25rem;
+      color: var(--muted);
+    }
+    footer {
+      text-align: center;
+      padding: 1rem;
+      color: var(--muted);
+      font-size: 0.8rem;
+      border-top: 1px solid var(--border);
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>gptme Interactive Cookbook</h1>
+    <p>Canonical patterns for building with gptme — browse, copy, and launch directly in your browser.</p>
+  </header>
+  <div class="filters" id="filters">
+    <button class="filter-btn active" data-filter="all">All</button>
+    <button class="filter-btn" data-filter="tool-use">Tool Use</button><button class="filter-btn" data-filter="multi-agent">Multi-Agent</button><button class="filter-btn" data-filter="context-management">Context Management</button><button class="filter-btn" data-filter="skill-composition">Skill Composition</button><button class="filter-btn" data-filter="custom-tools">Custom Tools</button>
+  </div>
+  <main id="cards">
+        <article class="card" data-category="tool-use">
+      <div class="card-header">
+        <h2>Tool Use Basics</h2>
+        <span class="badge badge-category">Tool Use</span>
+        <span class="badge badge-diff" style="color:#3fb950; border-color:#3fb950">beginner</span>
+      </div>
+      <p class="desc">Use gptme's built-in tools to read files, run shell commands, and write code in a single session</p>
+      <div class="problem">New gptme users often treat it as a chatbot. The real power is that gptme can **act** — read and write files, run commands, and inspect output — all in one conversational session without leaving the t…</div>
+      <div class="tags"><span class="tag">tools</span><span class="tag">shell</span><span class="tag">files</span><span class="tag">beginner</span></div>
+      <div class="card-footer">
+        <a href="https://gptme.ai/?prompt=Read+the+file+README.md+and+summarize+it+in+3+bullet+points%2C+then+check+if+there+are+any+TODO+comments+in+the+codebase." class="btn btn-primary" target="_blank" rel="noopener">Try in gptme.ai ↗</a>
+        <a href="01-tool-use-basics.md" class="btn btn-secondary">View pattern</a>
+      </div>
+    </article>
+    <article class="card" data-category="multi-agent">
+      <div class="card-header">
+        <h2>Parallel Research Pipeline</h2>
+        <span class="badge badge-category">Multi-Agent</span>
+        <span class="badge badge-diff" style="color:#d29922; border-color:#d29922">intermediate</span>
+      </div>
+      <p class="desc">Spawn subagents to research multiple topics simultaneously, then synthesize results</p>
+      <div class="problem">Deep research takes time when done sequentially. If you need to compare five frameworks or investigate three bug hypotheses, doing them one-by-one wastes wall-clock time and burns context on already-a…</div>
+      <div class="tags"><span class="tag">multi-agent</span><span class="tag">subagents</span><span class="tag">research</span><span class="tag">parallelism</span></div>
+      <div class="card-footer">
+        <a href="https://gptme.ai/?prompt=Research+the+top+3+Python+async+libraries+%28asyncio%2C+anyio%2C+trio%29+in+parallel%2C+compare+their+APIs+for+HTTP+clients%2C+and+write+a+recommendation." class="btn btn-primary" target="_blank" rel="noopener">Try in gptme.ai ↗</a>
+        <a href="02-parallel-research-pipeline.md" class="btn btn-secondary">View pattern</a>
+      </div>
+    </article>
+    <article class="card" data-category="context-management">
+      <div class="card-header">
+        <h2>Persistent Context with Skills</h2>
+        <span class="badge badge-category">Context Management</span>
+        <span class="badge badge-diff" style="color:#d29922; border-color:#d29922">intermediate</span>
+      </div>
+      <p class="desc">Use SKILL.md files to inject project-specific context automatically without re-explaining it every session</p>
+      <div class="problem">Every new gptme session starts blank. If your project has conventions (a specific naming scheme, a non-obvious architecture decision, a required workflow before running tests), you end up pasting the …</div>
+      <div class="tags"><span class="tag">skills</span><span class="tag">context</span><span class="tag">project-setup</span><span class="tag">efficiency</span></div>
+      <div class="card-footer">
+        <a href="https://gptme.ai/?prompt=Create+a+SKILL.md+for+my+Django+project+that+explains+our+model+naming+convention+and+migration+workflow." class="btn btn-primary" target="_blank" rel="noopener">Try in gptme.ai ↗</a>
+        <a href="03-persistent-context-with-skills.md" class="btn btn-secondary">View pattern</a>
+      </div>
+    </article>
+    <article class="card" data-category="skill-composition">
+      <div class="card-header">
+        <h2>Compose Skills into Workflows</h2>
+        <span class="badge badge-category">Skill Composition</span>
+        <span class="badge badge-diff" style="color:#f85149; border-color:#f85149">advanced</span>
+      </div>
+      <p class="desc">Chain multiple skills together to build repeatable, multi-step workflows from composable pieces</p>
+      <div class="problem">Real-world workflows are multi-step: you run tests, update a changelog, bump a version, create a tag, post a release. Writing a single monolithic prompt for this is brittle — it's hard to update one s…</div>
+      <div class="tags"><span class="tag">skills</span><span class="tag">composition</span><span class="tag">workflows</span><span class="tag">automation</span></div>
+      <div class="card-footer">
+        <a href="https://gptme.ai/?prompt=I+want+to+build+a+release-workflow+skill+that+chains+test%2C+changelog-update%2C+and+tag+skills+together." class="btn btn-primary" target="_blank" rel="noopener">Try in gptme.ai ↗</a>
+        <a href="04-skill-composition-pipeline.md" class="btn btn-secondary">View pattern</a>
+      </div>
+    </article>
+    <article class="card" data-category="custom-tools">
+      <div class="card-header">
+        <h2>Write a Custom Tool Plugin</h2>
+        <span class="badge badge-category">Custom Tools</span>
+        <span class="badge badge-diff" style="color:#f85149; border-color:#f85149">advanced</span>
+      </div>
+      <p class="desc">Extend gptme with a domain-specific tool using the Python plugin API</p>
+      <div class="problem">gptme's built-in tools cover general-purpose tasks, but domain-specific operations — querying a proprietary API, reading a custom binary format, calling an internal service — require a custom tool. Wi…</div>
+      <div class="tags"><span class="tag">plugin</span><span class="tag">custom-tool</span><span class="tag">python-api</span><span class="tag">extension</span></div>
+      <div class="card-footer">
+        <a href="https://gptme.ai/?prompt=Help+me+write+a+gptme+plugin+that+exposes+a+%60query_db%60+tool+for+reading+from+my+local+SQLite+database." class="btn btn-primary" target="_blank" rel="noopener">Try in gptme.ai ↗</a>
+        <a href="05-custom-tool-plugin.md" class="btn btn-secondary">View pattern</a>
+      </div>
+    </article>
+  </main>
+  <footer>
+    Built from <a href="https://github.com/gptme/gptme-contrib/tree/master/cookbook">gptme-contrib/cookbook</a> &mdash;
+    <a href="https://gptme.org">gptme.org</a>
+  </footer>
+  <script>
+    const btns = document.querySelectorAll('.filter-btn');
+    const cards = document.querySelectorAll('.card');
+    btns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        btns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const filter = btn.dataset.filter;
+        cards.forEach(card => {
+          card.style.display =
+            filter === 'all' || card.dataset.category === filter ? '' : 'none';
+        });
+      });
+    });
+  </script>
+</body>
+</html>
