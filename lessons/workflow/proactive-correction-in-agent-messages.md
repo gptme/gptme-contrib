@@ -1,8 +1,8 @@
 ---
 description: "When a message contains a factual error or misunderstanding, correct it immediately rather than letting it propagate"
-status: active
+status: archived
 tags: [inter-agent, correction, orchestration, epistemic-integrity, communication]
-confound_note: "Keywords are error-signal ('earlier message was wrong', 'retract incorrect recommendation') — fires in already-difficult multi-agent correction scenarios. Observational delta was +0.19 but causal dropout showed -0.08 (p=0.037, n=37/8). Small n and error-signal trigger profile suggest selection confound; archive or rewrite if causal harm confirmed with larger n."
+confound_note: "Keywords are error-signal ('earlier message was wrong', 'retract incorrect recommendation') — fires in already-difficult multi-agent correction scenarios. Observational delta was +0.19 but causal dropout showed -0.0955 (p=0.005, n=41/11 kept/withheld). Causal harm confirmed at larger n (original p=0.037 n=37/8 flagged for recheck). Archived 2026-07-25 per own prescription."
 match:
   keywords:
     - "retract incorrect recommendation"
