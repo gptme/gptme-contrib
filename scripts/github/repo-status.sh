@@ -38,7 +38,7 @@ check_repo() {
     # default-branch HEAD — a common case when path filters skip CI on
     # journal-only / docs-only commits.
     local run_json
-    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
+    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha,databaseId 2>/dev/null || echo "error")
 
     if [ "$run_json" = "error" ]; then
         echo -e "${YELLOW}-${NC} $label: No Actions"
@@ -97,7 +97,13 @@ check_repo() {
             local current_head_sha
             current_head_sha=$(gh api "repos/$repo/commits" --jq '.[0].sha' 2>/dev/null || echo "")
             if [ -n "$current_head_sha" ] && [ "$run_head_sha" != "$current_head_sha" ]; then
-                stale_suffix=" (stale; HEAD=${current_head_sha:0:7}, run=${run_head_sha:0:7})"
+                local run_id
+                run_id=$(echo "$run_json" | jq -r ".[$idx].databaseId // \"\"")
+                if [ -n "$run_id" ]; then
+                    stale_suffix=" (stale; HEAD=${current_head_sha:0:7}, run=${run_id})"
+                else
+                    stale_suffix=" (stale; HEAD=${current_head_sha:0:7}, run=${run_head_sha:0:7})"
+                fi
             fi
         fi
     fi
