@@ -78,6 +78,57 @@ Standalone scripts for automation. See each directory's README for details.
 | [status/](./scripts/status/) | Agent infrastructure status monitoring |
 | [workspace_validator/](./scripts/workspace_validator/) | Agent workspace structure validation |
 
+### agent-write-loss-scan
+
+Detects the **write-loss (git-clobber) hazard** in gptme agent sessions: a session
+writes to a file inside a git-tracked workspace, but the change is silently reverted
+before it is ever committed — the write is lost without any error.
+
+**Why this matters**: Autonomous agents write, but multi-session hot-windows can
+revert those writes via `git stash`/`restore`/`checkout --` operations. Measured
+write-loss rates in production: 0.051% overall, up to 0.68% for memory files.
+
+**Usage**:
+
+```bash
+# Basic scan (human-readable)
+python3 scripts/agent-write-loss-scan.py --repo /path/to/workspace
+
+# JSON output for programmatic use
+python3 scripts/agent-write-loss-scan.py --repo /path/to/workspace --json
+
+# Filter by date, limit session count
+python3 scripts/agent-write-loss-scan.py --repo /path/to/workspace \
+  --since 2025-01-01 --limit 50
+```
+
+**Output fields** (JSON):
+
+```json
+{
+  "total_writes": 142,
+  "persisted": 138,
+  "superseded": 2,
+  "lost": 2,
+  "unknown": 0,
+  "loss_rate": 0.0141,
+  "loss_pct": "1.4%",
+  "events": [...]
+}
+```
+
+**Classification**:
+
+| Outcome | Meaning |
+|---------|---------|
+| `PERSISTED` | Written content was committed to git |
+| `SUPERSEDED` | A later commit changed the file to different content (not a loss) |
+| `LOST` | File reverted to pre-write state; content was never committed |
+| `UNKNOWN` | Untracked path or ambiguous git history |
+
+The scanner is strictly read-only: it never runs `git stash`, `checkout`,
+`reset`, or `restore` — only `git log`, `cat-file`, and `ls-files`.
+
 ## Lessons
 
 Shared lessons provide reusable prompts and workflow patterns. See [lessons/README.md](./lessons/README.md).
