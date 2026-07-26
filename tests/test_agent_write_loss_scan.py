@@ -1,10 +1,11 @@
 """Tests for agent-write-loss-scan.py."""
+
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -48,29 +49,52 @@ def _init_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
-        cwd=repo, check=True, capture_output=True,
+        cwd=repo,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=repo, check=True, capture_output=True,
+        cwd=repo,
+        check=True,
+        capture_output=True,
     )
     # Disable global commit hooks so test repos can commit freely
     subprocess.run(
         ["git", "config", "core.hooksPath", "/dev/null"],
-        cwd=repo, check=True, capture_output=True,
+        cwd=repo,
+        check=True,
+        capture_output=True,
     )
     return repo
 
 
-def _commit_file(repo: Path, rel: str, content: str) -> None:
-    """Write a file and commit it."""
+def _commit_file(
+    repo: Path, rel: str, content: str, *, timestamp: int | None = None
+) -> None:
+    """Write a file and commit it, optionally at a fixed Unix timestamp."""
     fp = repo / rel
     fp.parent.mkdir(parents=True, exist_ok=True)
     fp.write_text(content, encoding="utf-8")
-    subprocess.run(["git", *_NO_HOOKS, "add", rel], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", *_NO_HOOKS, "add", rel],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    env = None
+    if timestamp is not None:
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_DATE": f"@{timestamp} +0000",
+            "GIT_COMMITTER_DATE": f"@{timestamp} +0000",
+        }
     subprocess.run(
         ["git", *_NO_HOOKS, "commit", "-m", f"add {rel}"],
-        cwd=repo, check=True, capture_output=True,
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env=env,
     )
 
 
@@ -158,24 +182,79 @@ def test_classify_write_persisted(tmp_path: Path) -> None:
     assert result.outcome == "PERSISTED"
 
 
-def test_classify_write_lost(tmp_path: Path) -> None:
-    """A save whose blob never appeared in git should be LOST (or SUPERSEDED)."""
+def test_classify_write_lost_when_only_commit_predates_write(tmp_path: Path) -> None:
+    """A pre-write commit must not make a later lost save look superseded."""
     repo = _init_repo(tmp_path)
-    # Commit a different version of the file
-    _commit_file(repo, "bar.txt", "committed different content\n")
+    _commit_file(repo, "bar.txt", "original content\n", timestamp=1_700_000_000)
 
     ev = WriteEvent(
         session_id="sess2",
         tool="save",
         rel_path="bar.txt",
-        write_ts=0.0,
+        write_ts=1_700_000_060,
         written_blob=_git_blob_sha(b"the write that was lost\n"),
     )
     result = classify_write(ev, repo)
-    # The blob was never committed: SUPERSEDED (a later commit changed it)
-    # or LOST (depends on ordering). Either way it should NOT be PERSISTED.
-    assert result.outcome in ("LOST", "SUPERSEDED", "UNKNOWN")
-    assert result.outcome != "PERSISTED"
+    assert result.outcome == "LOST"
+
+
+def test_classify_write_superseded_by_post_write_commit(tmp_path: Path) -> None:
+    """Different content committed after a write makes it superseded."""
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "bar.txt", "replacement content\n", timestamp=1_700_000_120)
+
+    ev = WriteEvent(
+        session_id="sess2",
+        tool="save",
+        rel_path="bar.txt",
+        write_ts=1_700_000_060,
+        written_blob=_git_blob_sha(b"earlier agent write\n"),
+    )
+    result = classify_write(ev, repo)
+    assert result.outcome == "SUPERSEDED"
+
+
+def test_classify_write_staged_only_is_not_persisted(tmp_path: Path) -> None:
+    """Content present only in the index has not persisted by contract."""
+    repo = _init_repo(tmp_path)
+    path = repo / "staged.txt"
+    path.write_text("staged only\n", encoding="utf-8")
+    subprocess.run(
+        ["git", *_NO_HOOKS, "add", "staged.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    ev = WriteEvent(
+        session_id="sess-staged",
+        tool="save",
+        rel_path="staged.txt",
+        write_ts=0.0,
+        written_blob=_git_blob_sha(b"staged only\n"),
+    )
+    result = classify_write(ev, repo)
+    assert result.outcome == "LOST"
+
+
+def test_classify_write_finds_exact_blob_in_older_post_write_commit(
+    tmp_path: Path,
+) -> None:
+    """Full object IDs let an older committed save survive later replacement."""
+    repo = _init_repo(tmp_path)
+    saved = "committed agent write\n"
+    _commit_file(repo, "history.txt", saved, timestamp=1_700_000_060)
+    _commit_file(repo, "history.txt", "later replacement\n", timestamp=1_700_000_120)
+
+    ev = WriteEvent(
+        session_id="sess-history",
+        tool="save",
+        rel_path="history.txt",
+        write_ts=1_700_000_000,
+        written_blob=_git_blob_sha(saved.encode()),
+    )
+    result = classify_write(ev, repo)
+    assert result.outcome == "PERSISTED"
 
 
 def test_classify_write_unknown_path(tmp_path: Path) -> None:
@@ -201,14 +280,59 @@ def test_classify_write_unknown_path(tmp_path: Path) -> None:
 def test_git_blob_sha_matches_git(tmp_path: Path) -> None:
     """_git_blob_sha should produce the same SHA as `git hash-object`."""
     content = b"hello from the test\n"
-    expected = subprocess.run(
-        ["git", "hash-object", "--stdin"],
-        input=content,
-        capture_output=True,
-        check=True,
-    ).stdout.strip().decode()
+    expected = (
+        subprocess.run(
+            ["git", "hash-object", "--stdin"],
+            input=content,
+            capture_output=True,
+            check=True,
+        )
+        .stdout.strip()
+        .decode()
+    )
 
     assert _git_blob_sha(content) == expected
+
+
+def test_parse_save_uses_sha256_repo_object_format(tmp_path: Path) -> None:
+    """Writes use the repository's object format rather than assuming SHA-1."""
+    repo = tmp_path / "sha256-repo"
+    repo.mkdir()
+    init = subprocess.run(
+        ["git", "init", "--object-format=sha256"],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+    )
+    if init.returncode != 0:
+        pytest.skip("installed Git does not support SHA-256 repositories")
+
+    content = "hello from sha256"
+    conv = _make_conv(
+        tmp_path / "logs-sha256",
+        [
+            {
+                "role": "assistant",
+                "content": f"```save hello.txt\n{content}\n```",
+                "timestamp": "2025-01-01T00:00:00Z",
+            }
+        ],
+    )
+    _, events = parse_conversation_jsonl(conv, repo)
+    expected = (
+        subprocess.run(
+            ["git", "hash-object", "--stdin"],
+            cwd=repo,
+            input=(content + "\n").encode(),
+            capture_output=True,
+            check=True,
+        )
+        .stdout.strip()
+        .decode()
+    )
+
+    assert events[0].written_blob == expected
+    assert len(expected) == 64
 
 
 # ---------------------------------------------------------------------------

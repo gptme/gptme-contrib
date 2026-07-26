@@ -45,9 +45,6 @@ DEFAULT_LOGS_DIR = Path.home() / ".local" / "share" / "gptme" / "logs"
 # Matches gptme's fence-tool syntax:  ```save path/to/file\ncontent\n```
 _FENCE_SAVE_RE = re.compile(r"```(save|append)\s+(\S+)\n(.*?)\n```", re.DOTALL)
 
-# Slack between write wall-clock time and git committer time (seconds)
-_COMMIT_SLACK = 120
-
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -57,13 +54,12 @@ _COMMIT_SLACK = 120
 @dataclass
 class WriteEvent:
     session_id: str
-    tool: str       # "save" | "append"
-    rel_path: str   # path relative to repo root
+    tool: str  # "save" | "append"
+    rel_path: str  # path relative to repo root
     write_ts: float
-    written_blob: str | None = None     # git blob SHA for full saves
+    written_blob: str | None = None  # git blob SHA for full saves
     new_strings: list[str] = field(default_factory=list)  # substrings for appends
-    outcome: str = "UNKNOWN"            # PERSISTED | SUPERSEDED | LOST | UNKNOWN
-    note: str = ""
+    outcome: str = "UNKNOWN"  # PERSISTED | SUPERSEDED | LOST | UNKNOWN
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +68,25 @@ class WriteEvent:
 
 
 def _git_blob_sha(data: bytes) -> str:
-    """Compute git's blob SHA-1 for content bytes (matches `git hash-object`)."""
+    """Compute a SHA-1 Git blob ID (kept as a public testable helper)."""
     header = b"blob %d\0" % len(data)
     return hashlib.sha1(header + data).hexdigest()
+
+
+def _hash_blob(repo_root: Path, data: bytes) -> str | None:
+    """Ask Git to hash content using this repository's object format."""
+    try:
+        result = subprocess.run(
+            ["git", "hash-object", "--stdin"],
+            cwd=repo_root,
+            input=data,
+            capture_output=True,
+            timeout=20.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip().decode() if result.returncode == 0 else None
 
 
 def _parse_iso_ts(raw: str | None) -> float | None:
@@ -90,8 +102,20 @@ def _parse_iso_ts(raw: str | None) -> float | None:
 def _run_git(repo_root: Path, args: list[str], timeout: float = 20.0) -> str | None:
     """Run a read-only git command; return stdout or None on error."""
     # Safety: refuse any command that could mutate the working tree.
-    _MUTATING = {"checkout", "reset", "clean", "stash", "restore", "revert",
-                 "merge", "rebase", "cherry-pick", "apply", "am", "update-ref"}
+    _MUTATING = {
+        "checkout",
+        "reset",
+        "clean",
+        "stash",
+        "restore",
+        "revert",
+        "merge",
+        "rebase",
+        "cherry-pick",
+        "apply",
+        "am",
+        "update-ref",
+    }
     subcmd = next((a for a in args if not a.startswith("-")), "")
     if subcmd in _MUTATING:
         raise RuntimeError(f"refusing mutating git op: git {subcmd}")
@@ -123,7 +147,9 @@ def _repo_root_for(abs_path: str, repo_root: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def parse_conversation_jsonl(conv_path: Path, repo_root: Path) -> tuple[float, list[WriteEvent]]:
+def parse_conversation_jsonl(
+    conv_path: Path, repo_root: Path
+) -> tuple[float, list[WriteEvent]]:
     """Parse a gptme conversation.jsonl and return (session_start_ts, write_events)."""
     start_ts: float | None = None
     events: list[WriteEvent] = []
@@ -171,7 +197,7 @@ def parse_conversation_jsonl(conv_path: Path, repo_root: Path) -> tuple[float, l
             )
             if tool == "save":
                 content_bytes = (body + "\n").encode("utf-8", "replace")
-                ev.written_blob = _git_blob_sha(content_bytes)
+                ev.written_blob = _hash_blob(repo_root, content_bytes)
                 ev.new_strings.append(body)
             else:
                 ev.new_strings.append(body)
@@ -185,26 +211,36 @@ def parse_conversation_jsonl(conv_path: Path, repo_root: Path) -> tuple[float, l
 # ---------------------------------------------------------------------------
 
 
-def _post_write_blobs(repo_root: Path, rel_path: str, write_ts: float) -> list[tuple[str, int]]:
-    """Return [(blob_sha, commit_time), ...] for commits after write_ts."""
-    out = _run_git(repo_root, ["log", "--format=C|%H|%ct", "--raw", "--", rel_path])
+def _post_write_blobs(
+    repo_root: Path, rel_path: str, write_ts: float
+) -> list[tuple[str, int]]:
+    """Return full blob IDs from commits whose committer time follows the write."""
+    out = _run_git(
+        repo_root,
+        [
+            "log",
+            "--format=C|%ct",
+            "--raw",
+            "--no-abbrev",
+            f"--since=@{int(write_ts)}",
+            "--",
+            rel_path,
+        ],
+    )
     if not out:
         return []
     blobs: list[tuple[str, int]] = []
     cur_time = 0
     for line in out.splitlines():
         if line.startswith("C|"):
-            parts = line.split("|")
             try:
-                cur_time = int(parts[2]) if len(parts) >= 3 else 0
+                cur_time = int(line.removeprefix("C|"))
             except ValueError:
                 cur_time = 0
-        elif line.startswith(":"):
+        elif line.startswith(":") and cur_time >= write_ts:
             fields = line.split("\t", 1)[0].split()
             if len(fields) >= 4:
-                post_blob = fields[3]
-                if cur_time >= write_ts - _COMMIT_SLACK:
-                    blobs.append((post_blob, cur_time))
+                blobs.append((fields[3], cur_time))
     return blobs
 
 
@@ -213,20 +249,10 @@ def classify_write(ev: WriteEvent, repo_root: Path) -> WriteEvent:
     blobs = _post_write_blobs(repo_root, ev.rel_path, ev.write_ts)
 
     if ev.written_blob:
-        # Full-content save: look for exact blob match
+        # Full-content save: only an exact blob in a post-write commit persists it.
         for blob, _t in blobs:
-            if blob == ev.written_blob or blob.startswith(ev.written_blob[:8]):
+            if blob == ev.written_blob:
                 ev.outcome = "PERSISTED"
-                return ev
-        # Check if path is currently tracked with our blob
-        current = _run_git(repo_root, ["ls-files", "-s", "--", ev.rel_path])
-        if current:
-            parts = current.split()
-            if len(parts) >= 2 and (
-                parts[1] == ev.written_blob or parts[1].startswith(ev.written_blob[:8])
-            ):
-                ev.outcome = "PERSISTED"
-                ev.note = "content live on disk (uncommitted)"
                 return ev
         if blobs:
             ev.outcome = "SUPERSEDED"
@@ -296,6 +322,7 @@ def scan_logs(
 
 def _summarise(events: list[WriteEvent]) -> dict:
     from collections import Counter
+
     counts: Counter[str] = Counter(ev.outcome for ev in events)
     total = len(events)
     lost = counts["LOST"]
@@ -388,11 +415,16 @@ def main(argv: list[str] | None = None) -> int:
     since: float | None = None
     if args.since:
         try:
-            since = datetime.strptime(args.since, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
-            ).timestamp()
+            since = (
+                datetime.strptime(args.since, "%Y-%m-%d")
+                .replace(tzinfo=timezone.utc)
+                .timestamp()
+            )
         except ValueError:
-            print(f"error: --since must be YYYY-MM-DD, got {args.since!r}", file=sys.stderr)
+            print(
+                f"error: --since must be YYYY-MM-DD, got {args.since!r}",
+                file=sys.stderr,
+            )
             return 1
 
     events = scan_logs(logs_dir, repo_root, since=since, limit=args.limit)
