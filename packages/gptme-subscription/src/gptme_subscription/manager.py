@@ -314,7 +314,15 @@ class SubscriptionManager:
 
     def is_rate_limited(self) -> bool:
         rl = self.config.rate_limit_file
-        return bool(rl and rl.exists())
+        if rl is None:
+            return False
+        try:
+            blocked_until = datetime.fromisoformat(rl.read_text().strip())
+        except (FileNotFoundError, OSError, ValueError):
+            return False
+        if blocked_until.tzinfo is None:
+            blocked_until = blocked_until.replace(tzinfo=timezone.utc)
+        return blocked_until > datetime.now(timezone.utc)
 
     def clear_rate_limit(self) -> None:
         rl = self.config.rate_limit_file

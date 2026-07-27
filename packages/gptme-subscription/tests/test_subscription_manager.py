@@ -148,6 +148,33 @@ def test_detect_external_switch_ignores_unreadable_log(tmp_path: Path) -> None:
     sm.detect_external_switch()
 
 
+def test_rate_limit_file_with_future_expiry_is_active(tmp_path: Path) -> None:
+    sm = _make_manager(tmp_path)
+    rate_limit_file = tmp_path / "rate-limited-until.txt"
+    rate_limit_file.write_text(
+        (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    )
+    sm.config.rate_limit_file = rate_limit_file
+
+    assert sm.is_rate_limited() is True
+
+
+def test_rate_limit_file_with_expired_or_invalid_value_is_inactive(
+    tmp_path: Path,
+) -> None:
+    sm = _make_manager(tmp_path)
+    rate_limit_file = tmp_path / "rate-limited-until.txt"
+    sm.config.rate_limit_file = rate_limit_file
+
+    rate_limit_file.write_text(
+        (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    )
+    assert sm.is_rate_limited() is False
+
+    rate_limit_file.write_text("not-a-timestamp")
+    assert sm.is_rate_limited() is False
+
+
 # ---- slot_credential_is_stale ----
 
 
