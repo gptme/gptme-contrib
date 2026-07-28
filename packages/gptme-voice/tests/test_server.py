@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+from gptme_voice.realtime import server as _server_module
 from gptme_voice.realtime.audio import AudioConverter
 from gptme_voice.realtime.server import (
     RecentCallRecord,
@@ -21,6 +22,7 @@ from gptme_voice.realtime.server import (
     _build_fresh_call_greeting_instructions,
     _build_resume_instructions,
     _build_runtime_identity_instructions,
+    _fetch_recent_activity_log,
     _get_twilio_field,
     _lookup_caller_identity,
     _should_trigger_hangup_transcript_fallback,
@@ -1672,3 +1674,93 @@ def test_server_voice_agent_name_overrides_general_name(
 
     assert server._agent_name == "Sven"
     assert server._instructions.startswith("IDENTITY: You are Sven.")
+
+
+# ---------------------------------------------------------------------------
+# Recent activity log: _fetch_recent_activity_log + standup bootstrap
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_recent_activity_log_returns_empty_for_none_workspace() -> None:
+    """No workspace → empty string, no subprocess spawned."""
+    result = asyncio.run(_fetch_recent_activity_log(None))
+    assert result == ""
+
+
+def test_fetch_recent_activity_log_strips_hash_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hash prefix is stripped; output is a bullet list of summaries."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    fake_proc = MagicMock()
+    fake_proc.communicate = AsyncMock(
+        return_value=(
+            b"abc1234 fix: greeting hallucination\ndef5678 chore: update tasks\n",
+            b"",
+        )
+    )
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=fake_proc),
+    )
+
+    result = asyncio.run(_fetch_recent_activity_log("/some/workspace"))
+    assert "fix: greeting hallucination" in result
+    assert "chore: update tasks" in result
+    # Short hashes must not appear in the output
+    assert "abc1234" not in result
+    assert "def5678" not in result
+    assert result.startswith("- ")
+
+
+def test_build_session_bootstrap_standup_injects_activity_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standup bootstrap injects the recent activity log into instructions."""
+
+    async def _fake_fetch(workspace: str | None, **_: object) -> str:
+        return "- fix: greeting hallucination\n- chore: update tasks"
+
+    monkeypatch.setattr(_server_module, "_fetch_recent_activity_log", _fake_fetch)
+
+    voice_server = VoiceServer(workspace="/fake/workspace")
+    voice_server._instructions = "You are Bob."
+
+    bootstrap = asyncio.run(
+        voice_server._build_session_bootstrap(
+            caller_id=None,
+            standup_brief="STANDUP BRIEF: Working on voice features.",
+        )
+    )
+
+    assert "RECENT ACTIVITY LOG" in bootstrap.instructions
+    assert "fix: greeting hallucination" in bootstrap.instructions
+    assert "chore: update tasks" in bootstrap.instructions
+    assert "STANDUP BRIEF: Working on voice features." in bootstrap.instructions
+    assert bootstrap.should_greet_first is True
+
+
+def test_build_session_bootstrap_standup_no_activity_section_when_log_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standup bootstrap omits the RECENT ACTIVITY LOG section when git is unavailable."""
+
+    async def _fake_fetch(workspace: str | None, **_: object) -> str:
+        return ""  # simulate git failure / empty repo
+
+    monkeypatch.setattr(_server_module, "_fetch_recent_activity_log", _fake_fetch)
+
+    voice_server = VoiceServer(workspace="/fake/workspace")
+    voice_server._instructions = "You are Bob."
+
+    bootstrap = asyncio.run(
+        voice_server._build_session_bootstrap(
+            caller_id=None,
+            standup_brief="STANDUP BRIEF: Working on voice features.",
+        )
+    )
+
+    assert "RECENT ACTIVITY LOG" not in bootstrap.instructions
+    assert "STANDUP BRIEF: Working on voice features." in bootstrap.instructions
+    assert bootstrap.should_greet_first is True

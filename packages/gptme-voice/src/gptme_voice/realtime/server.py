@@ -283,7 +283,7 @@ def _build_fresh_call_greeting_instructions(
     )
 
 
-def _build_standup_instructions_guidance() -> str:
+def _build_standup_instructions_guidance(*, has_activity_log: bool = False) -> str:
     """Return a guidance block prepended to the main instructions for standup calls.
 
     Unlike ``_build_standup_call_instructions`` (which only controls the model's
@@ -299,13 +299,25 @@ def _build_standup_instructions_guidance() -> str:
     2. **Stale queue references**: The model's session knowledge may include tweet
        drafts or deferred tasks that have already been resolved between brief
        generation and the call.
+
+    ``has_activity_log`` controls whether the guidance mentions the RECENT ACTIVITY
+    LOG section — only set to True when the log is actually populated.
     """
+    activity_log_hint = (
+        "- A RECENT ACTIVITY LOG (last 24h of git commits) is also loaded below the "
+        "brief. Use it to answer follow-up recap questions like 'what did you work on "
+        "today?' or 'what happened in the last 12 hours?' without dispatching a "
+        "subagent — the log gives you enough context for standard recap queries.\n"
+        if has_activity_log
+        else ""
+    )
     return (
         "STANDUP CALL GUIDANCE:\n"
         "- A pre-generated standup brief is loaded in your instructions below. "
         "The brief contains the latest blockers, active work, and recent highlights "
         "as of ~30 minutes before the call.\n"
-        "- When Erik asks follow-up questions about items in the brief (including "
+        + activity_log_hint
+        + "- When Erik asks follow-up questions about items in the brief (including "
         "'what else happened?', 'tell me more about X', or 'what's blocking Y'), "
         "answer from the brief content first. Do NOT use the subagent tool for "
         "routine recap or elaboration on items already covered by the brief.\n"
@@ -317,6 +329,47 @@ def _build_standup_instructions_guidance() -> str:
         "rather than definitely pending. Do NOT volunteer stale queue state that "
         "is not mentioned in the brief.\n"
     )
+
+
+async def _fetch_recent_activity_log(
+    workspace: str | None,
+    *,
+    hours: int = 24,
+    max_commits: int = 20,
+) -> str:
+    """Fetch a compact recent activity log from git for standup follow-up questions.
+
+    Returns a bullet-list of commit summaries (hashes stripped) from the last
+    ``hours`` hours, suitable for injection into session instructions so the voice
+    model can answer "what did you work on today?" without spawning a subagent.
+
+    Returns an empty string on failure or when workspace is not a git repo.
+    """
+    if not workspace:
+        return ""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            workspace,
+            "log",
+            "--oneline",
+            "--no-merges",
+            f"--since={hours} hours ago",
+            f"--max-count={max_commits}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        lines = stdout.decode().strip().splitlines()
+        if not lines:
+            return ""
+        # Strip 7-char hash prefix before returning readable summaries
+        summaries = [line.split(" ", 1)[1] if " " in line else line for line in lines]
+        return "\n".join(f"- {s}" for s in summaries)
+    except Exception:
+        logger.debug("Failed to fetch recent activity log", exc_info=True)
+        return ""
 
 
 def _build_standup_call_instructions(brief_text: str) -> str:
@@ -938,11 +991,21 @@ class VoiceServer:
         # standup_brief takes priority over recent-call resume: an explicit outbound
         # standup should always deliver the brief, not silently resume a prior session.
         if standup_brief:
+            activity_log = await _fetch_recent_activity_log(self.workspace)
+            activity_section = (
+                "\n\nRECENT ACTIVITY LOG (last 24h — answer recap follow-ups from this, no subagent needed):\n"
+                + activity_log
+                if activity_log
+                else ""
+            )
             return SessionBootstrap(
                 instructions=(
-                    _build_standup_instructions_guidance()
+                    _build_standup_instructions_guidance(
+                        has_activity_log=bool(activity_log)
+                    )
                     + "\n\n"
                     + standup_brief
+                    + activity_section
                     + "\n\n"
                     + instructions
                 ),
