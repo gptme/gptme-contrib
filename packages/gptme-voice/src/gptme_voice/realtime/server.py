@@ -40,6 +40,7 @@ from .openai_client import (
     _get_openai_api_key,
     _load_project_instructions,
 )
+from .sounds import DISPATCH_CUE_MULAW, TIMEOUT_CUE_MULAW
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
     _get_config_env,
@@ -1621,14 +1622,20 @@ class VoiceServer:
 
                     # Wire tool bridge BEFORE connect/activate so on_function_call
                     # is set when the initial greeting response fires.
+                    def _make_twilio_cue_callback(_ws, _sid: str, _mulaw: bytes):
+                        async def _cb() -> None:
+                            await self._send_to_twilio(_ws, _sid, _mulaw)
+
+                        return _cb
+
                     tool_bridge = GptmeToolBridge(
                         workspace=self.workspace,
                         on_result=realtime_client.inject_message,
-                        on_dispatch=lambda: realtime_client.inject_status_cue(
-                            "One moment…"
+                        on_dispatch=_make_twilio_cue_callback(
+                            websocket, stream_sid, DISPATCH_CUE_MULAW
                         ),
-                        on_timeout=lambda: realtime_client.inject_status_cue(
-                            "That lookup timed out."
+                        on_timeout=_make_twilio_cue_callback(
+                            websocket, stream_sid, TIMEOUT_CUE_MULAW
                         ),
                         on_hangup=_twilio_hangup,
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
@@ -1836,13 +1843,17 @@ class VoiceServer:
                 on_user_transcript=on_user_transcript,
             )
 
+            def _make_ws_cue_callback(_ws, _cue: str):
+                async def _cb() -> None:
+                    await _ws.send_text(json.dumps({"type": "sound_cue", "cue": _cue}))
+
+                return _cb
+
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
                 on_result=realtime_client.inject_message,
-                on_dispatch=lambda: realtime_client.inject_status_cue("One moment…"),
-                on_timeout=lambda: realtime_client.inject_status_cue(
-                    "That lookup timed out."
-                ),
+                on_dispatch=_make_ws_cue_callback(websocket, "dispatch"),
+                on_timeout=_make_ws_cue_callback(websocket, "timeout"),
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
@@ -1928,13 +1939,17 @@ class VoiceServer:
                 on_user_transcript=on_user_transcript,
             )
 
+            def _make_browser_cue_callback(_ws, _cue: str):
+                async def _cb() -> None:
+                    await _ws.send_text(json.dumps({"type": "sound_cue", "cue": _cue}))
+
+                return _cb
+
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
                 on_result=realtime_client.inject_message,
-                on_dispatch=lambda: realtime_client.inject_status_cue("One moment…"),
-                on_timeout=lambda: realtime_client.inject_status_cue(
-                    "That lookup timed out."
-                ),
+                on_dispatch=_make_browser_cue_callback(websocket, "dispatch"),
+                on_timeout=_make_browser_cue_callback(websocket, "timeout"),
                 on_hangup=_browser_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,

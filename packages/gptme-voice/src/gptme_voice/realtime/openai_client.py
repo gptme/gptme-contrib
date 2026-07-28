@@ -571,25 +571,6 @@ class OpenAIRealtimeClient:
         )
         await self._send_event("response.create", {})
 
-    async def inject_status_cue(self, cue_text: str) -> None:
-        """Speak a brief status cue without adding to conversation history.
-
-        Uses ``conversation: "none"`` so the generated turn does not appear in
-        the session history and does not affect subsequent responses.  Intended
-        for short in-band signals like "one moment…" or "that lookup timed out."
-        """
-        logger.info(f"Injecting status cue: {cue_text!r}")
-        await self._send_event(
-            "response.create",
-            {
-                "response": {
-                    "conversation": "none",
-                    "modalities": ["text", "audio"],
-                    "instructions": f'Say only: "{cue_text}"',
-                }
-            },
-        )
-
     @staticmethod
     def _should_auto_respond_after_function_output(name: str, result: Any) -> bool:
         """Decide whether a function-call result should trigger immediate speech.
