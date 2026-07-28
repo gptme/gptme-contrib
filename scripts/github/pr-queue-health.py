@@ -23,6 +23,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from bobutils.datetimes import parse_datetime
+
 # Default repos to scan — override via GPTME_TRACKED_REPOS env var
 DEFAULT_TRACKED_REPOS = [
     "gptme/gptme",
@@ -143,21 +145,6 @@ def fetch_prs_for_repo(repo: str, author: str) -> list[dict[str, Any]] | None:
         warn(f"unexpected gh pr list payload for {repo}: expected list")
         return None
     return result
-
-
-def parse_datetime(dt_str: str) -> datetime | None:
-    """Parse GitHub datetime string."""
-    if not dt_str:
-        return None
-    for fmt in ["%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z"]:
-        try:
-            dt = datetime.strptime(dt_str, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except ValueError:
-            continue
-    return None
 
 
 def get_ci_status(pr: dict[str, Any]) -> str:
