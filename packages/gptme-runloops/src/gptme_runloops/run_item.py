@@ -713,6 +713,18 @@ def resolve_backend_trajectory(
                     f"Found monitoring trajectory (stream-json, {stream_path.stat().st_size}B): {trajectory}"
                 )
 
+    if backend == "gptme" and not trajectory and session_id:
+        ref = tmp_dir / f"gptme-traj-{session_id}.path"
+        if ref.is_file():
+            trajectory_text = ref.read_text(encoding="utf-8", errors="replace").strip()
+            trajectory_path = Path(trajectory_text) if trajectory_text else None
+            if trajectory_path and trajectory_path.is_file():
+                trajectory = str(trajectory_path)
+                _log(
+                    "Found monitoring trajectory "
+                    f"(gptme, {trajectory_path.stat().st_size}B): {trajectory}"
+                )
+
     if backend == "grok-build" and not trajectory and session_id:
         ref = tmp_dir / f"grok-build-session-log-ref-{session_id}.txt"
         if ref.is_file():
@@ -971,6 +983,11 @@ def plan_item(
     runner_env: dict[str, str] = {}
     if backend == "claude-code":
         runner_env["CC_SESSION_ID"] = session_id
+    elif backend == "gptme":
+        # run.sh uses this id for its trajectory sentinel. Without it the
+        # sentinel is keyed by the runner PID and run-item cannot recover the
+        # trajectory for post_session grading/token extraction.
+        runner_env["BOB_SESSION_ID"] = session_id
     elif backend == "grok-build":
         runner_env["GROK_BUILD_SESSION_ID"] = session_id
 

@@ -475,6 +475,12 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
     assert plan.trajectory_path.endswith(f"/{plan.session_id}.jsonl")
 
 
+def test_plan_gptme_env(tmp_path) -> None:
+    plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend="gptme")
+    assert plan.runner_env == {"BOB_SESSION_ID": plan.session_id}
+    assert plan.trajectory_path == ""
+
+
 def test_plan_grok_build_env(tmp_path) -> None:
     plan, _, _ = _plan_for(
         tmp_path, make_item(), FakeLifecycleIO(), backend="grok-build"
@@ -907,6 +913,46 @@ def test_trajectory_copilot_mtime_filter(tmp_path) -> None:
         copilot_pre=pre,
         codex_pre=None,
     )
+    assert got == ""
+
+
+def test_trajectory_gptme_uses_run_sh_sentinel(tmp_path) -> None:
+    trajectory = tmp_path / "gptme-conversation.jsonl"
+    trajectory.write_text('{"role": "assistant"}\n')
+    (tmp_path / "gptme-traj-session-123.path").write_text(str(trajectory) + "\n")
+
+    got = resolve_backend_trajectory(
+        "gptme",
+        "session-123",
+        predicted="",
+        started_epoch=0,
+        copilot_state_dir=tmp_path,
+        codex_sessions_dir=tmp_path,
+        copilot_pre=None,
+        codex_pre=None,
+        tmp_dir=tmp_path,
+    )
+
+    assert got == str(trajectory)
+
+
+def test_trajectory_gptme_ignores_missing_sentinel_target(tmp_path) -> None:
+    (tmp_path / "gptme-traj-session-123.path").write_text(
+        str(tmp_path / "missing.jsonl") + "\n"
+    )
+
+    got = resolve_backend_trajectory(
+        "gptme",
+        "session-123",
+        predicted="",
+        started_epoch=0,
+        copilot_state_dir=tmp_path,
+        codex_sessions_dir=tmp_path,
+        copilot_pre=None,
+        codex_pre=None,
+        tmp_dir=tmp_path,
+    )
+
     assert got == ""
 
 
