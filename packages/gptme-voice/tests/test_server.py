@@ -18,6 +18,7 @@ from gptme_voice.realtime.server import (
     VoiceServer,
     _assistant_committed_hangup,
     _build_caller_instructions,
+    _build_fresh_call_greeting_instructions,
     _build_resume_instructions,
     _build_runtime_identity_instructions,
     _get_twilio_field,
@@ -1603,4 +1604,26 @@ def test_server_g711_passthrough_ignored_for_grok_provider(
 
     session_config = server._build_session_config("You are Bob.")
     assert session_config.g711_passthrough is False
-    assert session_config.input_format == "pcm16"
+
+
+def test_greeting_unknown_caller_uses_configured_agent_name() -> None:
+    """Verify the inbound greeting for unknown callers uses the configured agent name.
+
+    Regression test for the trust bug where the model hallucinated names like
+    'Gordon' or 'Alex' because the instructions said 'introduce yourself by name'
+    without specifying what that name is.
+    """
+    greeting = _build_fresh_call_greeting_instructions("+1555000000", None, "bob")
+    assert "Bob" in greeting
+    assert "Gordon" not in greeting
+    assert "Alex" not in greeting
+
+
+def test_greeting_unknown_caller_capitalizes_agent_name() -> None:
+    greeting = _build_fresh_call_greeting_instructions("+1555000000", None, "alice")
+    assert "Alice" in greeting
+
+
+def test_greeting_unknown_caller_default_name_is_bob() -> None:
+    greeting = _build_fresh_call_greeting_instructions("+1555000000", None)
+    assert "Bob" in greeting

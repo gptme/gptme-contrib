@@ -247,7 +247,7 @@ def _build_caller_instructions(
 
 
 def _build_fresh_call_greeting_instructions(
-    from_number: str, workspace: str | None
+    from_number: str, workspace: str | None, agent_name: str = "bob"
 ) -> str:
     caller_identity = (
         _lookup_caller_identity(from_number, workspace) if from_number else None
@@ -274,7 +274,7 @@ def _build_fresh_call_greeting_instructions(
 
     return (
         "A fresh inbound phone call has just connected and the caller is unknown. "
-        "Introduce yourself by name, then ask exactly: 'Who am I speaking to?' "
+        f"Your name is {agent_name.capitalize()}. Say 'Hello, this is {agent_name.capitalize()}. Who am I speaking to?' "
         "Do NOT say 'thanks for calling' or use other stock phone greetings. "
         "Then stop and wait for them to answer."
     )
@@ -584,6 +584,7 @@ class VoiceServer:
         # Cross-agent handoff writer (optional — only active when GPTME_VOICE_HANDOFF_DIR set)
         handoff_dir_env = _get_config_env("GPTME_VOICE_HANDOFF_DIR")
         agent_name = _get_config_env("GPTME_VOICE_AGENT_NAME") or "bob"
+        self._agent_name = agent_name
         handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
         handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
         # Comma-separated list of agents the running server can hand off to.
@@ -958,6 +959,7 @@ class VoiceServer:
             initial_response_instructions=_build_fresh_call_greeting_instructions(
                 from_number,
                 self.workspace,
+                self._agent_name,
             ),
         )
 
