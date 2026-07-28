@@ -187,8 +187,9 @@ def test_build_runtime_identity_instructions_unknown_provider() -> None:
 
 def test_voice_server_prepends_runtime_identity_to_instructions() -> None:
     server = VoiceServer(provider="grok")
-    # The runtime-identity block leads the base instructions for every call path.
-    assert server._instructions.startswith("RUNTIME IDENTITY:")
+    # Stable persona identity leads the prompt, followed by runtime provider identity.
+    assert server._instructions.startswith("IDENTITY: You are Bob.")
+    assert "RUNTIME IDENTITY:" in server._instructions
     assert "Grok" in server._instructions
 
 
@@ -575,6 +576,7 @@ def test_build_session_bootstrap_personalizes_known_caller_greeting() -> None:
         )
 
     assert bootstrap.should_greet_first is True
+    assert "You are Bob" in bootstrap.initial_response_instructions
     assert "Erik Bjäreholt" in bootstrap.initial_response_instructions
     assert (
         "using 'Erik', not their full name" in bootstrap.initial_response_instructions
@@ -619,8 +621,9 @@ def test_build_session_bootstrap_asks_unknown_caller_to_identify() -> None:
     )
 
     assert bootstrap.should_greet_first is True
+    assert "You are Bob" in bootstrap.initial_response_instructions
     assert "caller is unknown" in bootstrap.initial_response_instructions
-    assert "Introduce yourself by name" in bootstrap.initial_response_instructions
+    assert "Hello, this is Bob" in bootstrap.initial_response_instructions
     assert "Who am I speaking to?" in bootstrap.initial_response_instructions
 
 
@@ -1626,4 +1629,29 @@ def test_greeting_unknown_caller_capitalizes_agent_name() -> None:
 
 def test_greeting_unknown_caller_default_name_is_bob() -> None:
     greeting = _build_fresh_call_greeting_instructions("+1555000000", None)
-    assert "Bob" in greeting
+    assert "You are Bob" in greeting
+    assert "Hello, this is Bob" in greeting
+
+
+def test_server_uses_general_agent_name_for_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GPTME_VOICE_AGENT_NAME", raising=False)
+    monkeypatch.setenv("GPTME_AGENT_NAME", "Alice")
+
+    server = VoiceServer()
+
+    assert server._agent_name == "Alice"
+    assert server._instructions.startswith("IDENTITY: You are Alice.")
+
+
+def test_server_voice_agent_name_overrides_general_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_NAME", "Bob")
+    monkeypatch.setenv("GPTME_VOICE_AGENT_NAME", "Sven")
+
+    server = VoiceServer()
+
+    assert server._agent_name == "Sven"
+    assert server._instructions.startswith("IDENTITY: You are Sven.")

@@ -252,6 +252,7 @@ def _build_fresh_call_greeting_instructions(
     caller_identity = (
         _lookup_caller_identity(from_number, workspace) if from_number else None
     )
+    self_identity = f"You are {agent_name.capitalize()}. "
     if caller_identity:
         spoken_name = caller_identity.preferred_spoken_name
         canonical_name = caller_identity.canonical_name
@@ -267,14 +268,16 @@ def _build_fresh_call_greeting_instructions(
                 f"or 'Hey {spoken_name}, what's up?'. "
             )
         return (
-            greeting_target
+            self_identity
+            + greeting_target
             + "Do NOT say 'thanks for calling' or use other stock phone greetings. "
             "Then stop and wait for them to speak."
         )
 
     return (
-        "A fresh inbound phone call has just connected and the caller is unknown. "
-        f"Your name is {agent_name.capitalize()}. Say 'Hello, this is {agent_name.capitalize()}. Who am I speaking to?' "
+        self_identity
+        + "A fresh inbound phone call has just connected and the caller is unknown. "
+        f"Say 'Hello, this is {agent_name.capitalize()}. Who am I speaking to?' "
         "Do NOT say 'thanks for calling' or use other stock phone greetings. "
         "Then stop and wait for them to answer."
     )
@@ -555,13 +558,17 @@ class VoiceServer:
         else:
             self._api_key = openai_api_key or _get_openai_api_key()
         self.workspace = workspace or _detect_agent_repo()
-        # Prepend a truthful runtime-identity block so the voice model can answer
-        # "what model is powering this call?" honestly instead of confabulating.
-        # Built from self.provider/self.model, so it applies to every downstream
-        # call path (caller, resume, standup, handoff) that derives from
-        # self._instructions.
+        self._agent_name = (
+            _get_config_env("GPTME_VOICE_AGENT_NAME")
+            or _get_config_env("AGENT_NAME")
+            or "bob"
+        )
+        # Prepend the stable persona name and truthful runtime identity so neither
+        # gets lost when the compact voice prompt truncates personality files.
         self._instructions = (
-            _build_runtime_identity_instructions(self.provider, self.model)
+            f"IDENTITY: You are {self._agent_name.capitalize()}. "
+            "Never claim to be another agent.\n\n"
+            + _build_runtime_identity_instructions(self.provider, self.model)
             + "\n\n"
             + _load_project_instructions(self.workspace)
         )
@@ -583,14 +590,14 @@ class VoiceServer:
 
         # Cross-agent handoff writer (optional — only active when GPTME_VOICE_HANDOFF_DIR set)
         handoff_dir_env = _get_config_env("GPTME_VOICE_HANDOFF_DIR")
-        agent_name = _get_config_env("GPTME_VOICE_AGENT_NAME") or "bob"
-        self._agent_name = agent_name
         handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
         handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
         # Comma-separated list of agents the running server can hand off to.
         # Defaults to the known agents minus the current one.
         _default_agents = [
-            a for a in ["alice", "gordon", "sven", "bob"] if a != agent_name
+            a
+            for a in ["alice", "gordon", "sven", "bob"]
+            if a != self._agent_name.lower()
         ]
         self._available_agents: list[str] = (
             [a.strip() for a in handoff_agents_env.split(",") if a.strip()]
@@ -607,11 +614,13 @@ class VoiceServer:
             handoff_secret = (handoff_secret_env or "dev-only-secret").encode("utf-8")
             self._handoff_writer: HandoffWriter | None = HandoffWriter(
                 Path(handoff_dir_env),
-                from_agent=agent_name,
+                from_agent=self._agent_name.lower(),
                 secret=handoff_secret,
             )
             logger.info(
-                "Handoff enabled: from_agent=%s, dir=%s", agent_name, handoff_dir_env
+                "Handoff enabled: from_agent=%s, dir=%s",
+                self._agent_name,
+                handoff_dir_env,
             )
         else:
             self._handoff_writer = None
