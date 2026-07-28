@@ -117,6 +117,8 @@ class GptmeToolBridge:
         timeout: int = 300,
         workspace: str | None = None,
         on_result: Callable[[str], Awaitable[None]] | None = None,
+        on_dispatch: Callable[[], Awaitable[None]] | None = None,
+        on_timeout: Callable[[], Awaitable[None]] | None = None,
         on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
         on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
         transcript_provider: Callable[[], Sequence[object]] | None = None,
@@ -125,6 +127,8 @@ class GptmeToolBridge:
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result
+        self.on_dispatch = on_dispatch
+        self.on_timeout = on_timeout
         self.on_hangup = on_hangup
         self.on_handoff = on_handoff
         self.transcript_provider = transcript_provider
@@ -485,6 +489,11 @@ class GptmeToolBridge:
             }
         )
 
+        # Fire timeout cue before injecting the error so the caller hears a
+        # distinct signal rather than just dead air followed by an error message.
+        if completion_status == "timed_out" and self.on_timeout:
+            await self.on_timeout()
+
         # Inject result into conversation
         if self.on_result:
             await self.on_result(response_text)
@@ -774,6 +783,9 @@ class GptmeToolBridge:
                 started_at=time.monotonic(),
                 model=model,
             )
+
+            if self.on_dispatch:
+                await self.on_dispatch()
 
             return {
                 "status": "dispatched",

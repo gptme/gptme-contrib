@@ -1624,6 +1624,12 @@ class VoiceServer:
                     tool_bridge = GptmeToolBridge(
                         workspace=self.workspace,
                         on_result=realtime_client.inject_message,
+                        on_dispatch=lambda: realtime_client.inject_status_cue(
+                            "One moment…"
+                        ),
+                        on_timeout=lambda: realtime_client.inject_status_cue(
+                            "That lookup timed out."
+                        ),
                         on_hangup=_twilio_hangup,
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
                         transcript_provider=lambda: transcript,
@@ -1833,6 +1839,10 @@ class VoiceServer:
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
                 on_result=realtime_client.inject_message,
+                on_dispatch=lambda: realtime_client.inject_status_cue("One moment…"),
+                on_timeout=lambda: realtime_client.inject_status_cue(
+                    "That lookup timed out."
+                ),
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
@@ -1921,6 +1931,10 @@ class VoiceServer:
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
                 on_result=realtime_client.inject_message,
+                on_dispatch=lambda: realtime_client.inject_status_cue("One moment…"),
+                on_timeout=lambda: realtime_client.inject_status_cue(
+                    "That lookup timed out."
+                ),
                 on_hangup=_browser_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
