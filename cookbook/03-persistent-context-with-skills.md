@@ -19,9 +19,10 @@ getting wrong first drafts because the agent lacked context.
 ## Solution
 
 A skill is a plain markdown document (`SKILL.md`) that gptme injects into the
-session context automatically when certain keywords appear in the conversation.
+session context automatically when it is relevant to the current conversation.
 Skills are placed in named subdirectories under `skills/` (or `~/.config/gptme/skills/`
-for user-global skills) and matched by the `match.keywords` frontmatter field.
+for user-global skills). The canonical format uses `name` and `description`
+frontmatter; gptme matches skills via semantic similarity against the description.
 
 This means you write the explanation **once**, commit it, and gptme uses it
 whenever relevant — no copy-pasting, no per-session setup.
@@ -34,9 +35,8 @@ Create a skill for your project's database migration convention:
 mkdir -p skills/db
 cat > skills/db/SKILL.md << 'EOF'
 ---
-match:
-  keywords: [migration, alembic, makemigrations, schema, django]
-description: Django migration conventions and pre-migration checklist
+name: db-migrations
+description: Django migration conventions and pre-migration checklist. Applies when working with makemigrations, alembic, schema changes, or Django ORM models.
 ---
 
 # Migration Workflow
@@ -72,20 +72,23 @@ root (no configuration needed). Alternatively, place skills in
 `~/.config/gptme/skills/` for user-global availability across all projects.
 
 Start a session and gptme will automatically inject the migration skill when
-you mention "migration", "schema", or "makemigrations":
+the conversation is about migrations, schema changes, or Django ORM work:
 
 ```bash
 gptme "I need to add a nullable email field to the User model and run a migration"
-# gptme injects migration-workflow.md automatically
+# gptme injects the db-migrations skill automatically based on semantic similarity
 ```
 
 ## Notes
 
-- Skills are injected by keyword match — keep keyword lists specific enough to
-  avoid false triggers on unrelated topics.
-- Skill discovery is built into gptme's lesson index (`LessonIndex`), which
-  recursively scans `./skills/` (and `~/.config/gptme/skills/` for global skills)
-  for `*.md` files at startup. No extra configuration is needed.
+- Skills use `name` + `description` frontmatter (the canonical SKILL.md format).
+  The `description` is what gptme matches against — write it to describe the
+  scenarios where the skill should be injected.
+- Skill discovery is built into gptme's `LessonIndex`, which scans `./skills/`
+  (and `~/.config/gptme/skills/` for global skills) at startup. No extra
+  configuration is needed.
+- If you need literal keyword matching rather than semantic matching, place lesson
+  files under `lessons/` with a `match.keywords` list instead.
 - Skills work across runtimes (gptme terminal, gptme-contrib agents, Claude
   Code with the hook adapter). Write them once, use them everywhere.
 - Commit skills to your project repo so all contributors benefit from them.

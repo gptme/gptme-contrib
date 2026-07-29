@@ -106,5 +106,10 @@ inline, without you needing to copy-paste any SQL output.
   and docstring `Args:` section; keep both accurate.
 - For tools that perform writes or have side effects, add a confirmation prompt
   in the function body and document it clearly in the `desc`.
+- **Two ways to register tools**: this example uses `tools=[ToolSpec(...)]` —
+  the direct approach for simple single-file plugins (no separate Python module
+  needed). For larger plugins with multiple tool modules, use
+  `tool_modules=["my_plugin.tools"]` to register module paths instead; gptme
+  will import the module and discover all `ToolSpec` instances it defines.
 - See [gptme plugin docs](https://gptme.org/docs/plugins.html) for the full
   `GptmePlugin` and `ToolSpec` API reference.
