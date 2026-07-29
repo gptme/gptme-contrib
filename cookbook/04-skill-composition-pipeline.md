@@ -18,25 +18,23 @@ can't reuse the individual steps elsewhere.
 
 ## Solution
 
-gptme skills compose. Keyword coverage across multiple skills means that when a
-high-level workflow keyword fires, each relevant sub-skill is injected into
-context simultaneously. Each sub-skill stays small and focused; the workflow
-skill is just a sequenced list of steps that references those sub-skills.
+gptme skills can compose by reference. Keep each reusable step in a focused
+skill, then create a workflow skill that names those component skills and tells
+the agent to load them before executing the sequence. The available-skills
+summary lets the agent find every named component without stuffing all of their
+contents into every session.
 
-This gives you a library of reusable primitives that snap together into larger
-automated workflows.
+This gives you reusable primitives that snap together into larger workflows
+while keeping loading explicit and predictable.
 
 ## Example
-
-Three focused sub-skills:
 
 Three focused sub-skills, each in its own `SKILL.md`:
 
 ```bash
 # skills/release-check-tests/SKILL.md
 ---
-match:
-  keywords: [release, publish, ship, deploy]
+name: release-check-tests
 description: Verify the test suite passes before any release action
 ---
 # Check Tests Before Release
@@ -49,8 +47,7 @@ If any test fails, STOP and fix it before proceeding with the release.
 ```bash
 # skills/release-update-changelog/SKILL.md
 ---
-match:
-  keywords: [changelog, CHANGELOG, release notes]
+name: release-update-changelog
 description: Changelog update convention for releases
 ---
 # Changelog Update Convention
@@ -63,8 +60,7 @@ Never delete old entries.
 ```bash
 # skills/release-tag-and-push/SKILL.md
 ---
-match:
-  keywords: [git tag, release tag, push tag]
+name: release-tag-and-push
 description: Git tagging and push convention for releases
 ---
 # Tag and Push Convention
@@ -74,37 +70,37 @@ run: git tag -a v$VERSION -m "Release v$VERSION" && git push origin master --tag
 Do not push without a passing CI run on master.
 ```
 
-A workflow skill that brings all three into scope by sharing keywords:
+A workflow skill that explicitly composes all three:
 
 ```bash
 # skills/release-workflow/SKILL.md
 ---
-match:
-  keywords: [do a release, release v, release workflow, release, publish, ship, changelog, CHANGELOG, git tag, release tag]
-description: Full release pipeline — test, changelog, tag, push
+name: release-workflow
+description: Full release pipeline that composes release-check-tests, release-update-changelog, and release-tag-and-push
 ---
 # Release Workflow
 
-Steps in order:
-1. Run `make test` (stop on failure)
-2. Update CHANGELOG.md with the new version
-3. Commit the changelog: `git commit CHANGELOG.md -m "chore: update changelog for vX.Y.Z"`
-4. Create the annotated tag and push: `git tag -a v$VERSION -m "Release v$VERSION" && git push origin master --tags`
+Before starting, load these skills from the available-skills summary:
+
+- `release-check-tests`
+- `release-update-changelog`
+- `release-tag-and-push`
+
+Then follow their instructions in that order. Stop if the test step fails.
 ```
 
 Trigger the full workflow with one prompt:
 
 ```bash
-gptme "Do a release for v1.4.2"
-# gptme matches keywords across all four skills and injects them all
-# Agent follows the composed four-step pipeline
+gptme "Use release-workflow to release v1.4.2"
+# gptme loads release-workflow by name; its instructions direct the agent to
+# read the three named component skills before executing the sequence
 ```
 
 ## Notes
 
-- Composition works through keyword overlap: when a message contains keywords
-  matched by multiple skills, gptme's `LessonMatcher` injects them all
-  simultaneously. This is deliberate — it is how the matching loop works.
+- Composition is instruction-driven: gptme does not automatically resolve or
+  inject skill dependencies. Name every component in the workflow skill.
 - Each skill is a separate directory containing a single `SKILL.md` file.
 - Keep sub-skills under ~50 lines each. Long skills dilute focus; split them.
 - Skills are versioned in git — use `git log skills/` to audit how your

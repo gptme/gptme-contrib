@@ -1,6 +1,6 @@
 ---
 title: Persistent Context with Skills
-description: Use SKILL.md files to inject project-specific context automatically without re-explaining it every session
+description: Use a project-local SKILL.md to make reusable context discoverable by name without re-explaining it every session
 category: context-management
 difficulty: intermediate
 tags: [skills, context, project-setup, efficiency]
@@ -18,14 +18,15 @@ getting wrong first drafts because the agent lacked context.
 
 ## Solution
 
-A skill is a plain markdown document (`SKILL.md`) that gptme injects into the
-session context automatically when it is relevant to the current conversation.
-Skills are placed in named subdirectories under `skills/` (or `~/.config/gptme/skills/`
-for user-global skills). The canonical format uses `name` and `description`
-frontmatter; gptme matches skills via semantic similarity against the description.
+A skill is a plain markdown document (`SKILL.md`) that gptme discovers and lists
+in the session's available-skills summary. Skills are placed in named
+subdirectories under `skills/` (or `~/.config/gptme/skills/` for user-global
+skills). The canonical format uses `name` and `description` frontmatter. gptme
+auto-loads the full skill when its name appears in a message; the agent can also
+read it on demand from the summary.
 
-This means you write the explanation **once**, commit it, and gptme uses it
-whenever relevant — no copy-pasting, no per-session setup.
+This means you write the explanation **once** and commit it. Future sessions can
+load the same instructions instead of relying on repeated prompt setup.
 
 ## Example
 
@@ -71,24 +72,26 @@ gptme automatically discovers skills in the `skills/` directory at your project
 root (no configuration needed). Alternatively, place skills in
 `~/.config/gptme/skills/` for user-global availability across all projects.
 
-Start a session and gptme will automatically inject the migration skill when
-the conversation is about migrations, schema changes, or Django ORM work:
+Start a session and mention the skill by name when you want its full instructions:
 
 ```bash
-gptme "I need to add a nullable email field to the User model and run a migration"
-# gptme injects the db-migrations skill automatically based on semantic similarity
+gptme "Use db-migrations while adding a nullable email field to the User model"
+# gptme auto-loads the db-migrations skill by name
 ```
+
+You can also ask gptme to inspect the available-skills summary and load the most
+relevant skill on demand.
 
 ## Notes
 
 - Skills use `name` + `description` frontmatter (the canonical SKILL.md format).
-  The `description` is what gptme matches against — write it to describe the
-  scenarios where the skill should be injected.
+  Give each skill a specific name; the description helps the agent choose among
+  the skills listed in its prompt.
 - Skill discovery is built into gptme's `LessonIndex`, which scans `./skills/`
   (and `~/.config/gptme/skills/` for global skills) at startup. No extra
   configuration is needed.
-- If you need literal keyword matching rather than semantic matching, place lesson
-  files under `lessons/` with a `match.keywords` list instead.
-- Skills work across runtimes (gptme terminal, gptme-contrib agents, Claude
-  Code with the hook adapter). Write them once, use them everywhere.
+- If you need automatic topic-based matching, place a lesson under `lessons/`
+  with `match.keywords` instead.
+- The `SKILL.md` format is portable across Agent Skills-compatible runtimes,
+  though loading behavior differs by runtime.
 - Commit skills to your project repo so all contributors benefit from them.
