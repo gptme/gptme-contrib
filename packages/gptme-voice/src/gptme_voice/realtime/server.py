@@ -40,7 +40,7 @@ from .openai_client import (
     _get_openai_api_key,
     _load_project_instructions,
 )
-from .sounds import DISPATCH_CUE_MULAW, TIMEOUT_CUE_MULAW
+from .sounds import DISPATCH_CUE_MULAW, PCM_CUES, SAMPLE_RATE, TIMEOUT_CUE_MULAW
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
     _get_config_env,
@@ -1806,6 +1806,22 @@ class VoiceServer:
 
         return _on_ai_transcript, _on_user_transcript, _on_hangup
 
+    @staticmethod
+    def _make_sound_cue_callback(websocket, cue: str):
+        async def _send_cue() -> None:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "sound_cue",
+                        "cue": cue,
+                        "sample_rate": SAMPLE_RATE,
+                        "audio": base64.b64encode(PCM_CUES[cue]).decode("ascii"),
+                    }
+                )
+            )
+
+        return _send_cue
+
     async def handle_local_websocket(self, websocket):
         """
         Handle WebSocket connection for local testing.
@@ -1843,17 +1859,11 @@ class VoiceServer:
                 on_user_transcript=on_user_transcript,
             )
 
-            def _make_ws_cue_callback(_ws, _cue: str):
-                async def _cb() -> None:
-                    await _ws.send_text(json.dumps({"type": "sound_cue", "cue": _cue}))
-
-                return _cb
-
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
                 on_result=realtime_client.inject_message,
-                on_dispatch=_make_ws_cue_callback(websocket, "dispatch"),
-                on_timeout=_make_ws_cue_callback(websocket, "timeout"),
+                on_dispatch=self._make_sound_cue_callback(websocket, "dispatch"),
+                on_timeout=self._make_sound_cue_callback(websocket, "timeout"),
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
@@ -1939,17 +1949,11 @@ class VoiceServer:
                 on_user_transcript=on_user_transcript,
             )
 
-            def _make_browser_cue_callback(_ws, _cue: str):
-                async def _cb() -> None:
-                    await _ws.send_text(json.dumps({"type": "sound_cue", "cue": _cue}))
-
-                return _cb
-
             tool_bridge = GptmeToolBridge(
                 workspace=self.workspace,
                 on_result=realtime_client.inject_message,
-                on_dispatch=_make_browser_cue_callback(websocket, "dispatch"),
-                on_timeout=_make_browser_cue_callback(websocket, "timeout"),
+                on_dispatch=self._make_sound_cue_callback(websocket, "dispatch"),
+                on_timeout=self._make_sound_cue_callback(websocket, "timeout"),
                 on_hangup=_browser_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,

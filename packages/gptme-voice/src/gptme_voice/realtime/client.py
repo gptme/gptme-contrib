@@ -153,6 +153,13 @@ class LocalVoiceTest:
                         self._playing = True
                         audio_data = base64.b64decode(audio_b64)
                         stream.write(audio_data)
+                elif data.get("type") == "sound_cue":
+                    audio_b64 = data.get("audio", "")
+                    if audio_b64:
+                        self._playing = True
+                        stream.write(base64.b64decode(audio_b64))
+                        self._playing = False
+                        self._play_ended_at = time.monotonic()
                 elif data.get("type") == "audio_end":
                     self._playing = False
                     self._play_ended_at = time.monotonic()

@@ -209,13 +209,13 @@ registerProcessor('pcm16-capture', PCM16CaptureProcessor);
       }
     }
 
-    function enqueueAudio(arrayBuffer) {
+    function enqueueAudio(arrayBuffer, sampleRate = OUT_RATE) {
       ensurePlayCtx();
       const int16 = new Int16Array(arrayBuffer);
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
 
-      const buf = playCtx.createBuffer(1, float32.length, OUT_RATE);
+      const buf = playCtx.createBuffer(1, float32.length, sampleRate);
       buf.getChannelData(0).set(float32);
       const src = playCtx.createBufferSource();
       src.buffer = buf;
@@ -273,6 +273,11 @@ registerProcessor('pcm16-capture', PCM16CaptureProcessor);
               setStatus(`Mic error: ${err.message}`, 'error');
             }
           } else if (msg.type === 'audio_end') {
+            onAudioEnd();
+          } else if (msg.type === 'sound_cue' && msg.audio) {
+            const raw = atob(msg.audio);
+            const bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+            enqueueAudio(bytes.buffer, msg.sample_rate ?? OUT_RATE);
             onAudioEnd();
           } else if (msg.type === 'transcript') {
             addTranscript(msg.text, msg.role ?? 'assistant');
