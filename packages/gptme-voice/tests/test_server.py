@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from gptme_voice.realtime.audio import AudioConverter
 from gptme_voice.realtime.server import (
+    _VOICE_DIGEST_MAX_AGE_SECONDS,
     RecentCallRecord,
     SessionBootstrap,
     TranscriptTurn,
@@ -22,7 +23,9 @@ from gptme_voice.realtime.server import (
     _build_resume_instructions,
     _build_runtime_identity_instructions,
     _get_twilio_field,
+    _load_voice_digest,
     _lookup_caller_identity,
+    _prepend_activity_digest,
     _should_trigger_hangup_transcript_fallback,
     _truncate_resume_transcript,
 )
@@ -1689,3 +1692,74 @@ def test_server_voice_agent_name_overrides_general_name(
 
     assert server._agent_name == "Sven"
     assert server._instructions.startswith("IDENTITY: You are Sven.")
+
+
+# ---------------------------------------------------------------------------
+# Voice activity digest tests
+# ---------------------------------------------------------------------------
+
+
+def test_load_voice_digest_returns_none_without_workspace() -> None:
+    assert _load_voice_digest(None) is None
+
+
+def test_load_voice_digest_returns_none_when_file_missing(tmp_path: Path) -> None:
+    assert _load_voice_digest(str(tmp_path)) is None
+
+
+def test_load_voice_digest_returns_content_when_fresh(tmp_path: Path) -> None:
+    digest_path = tmp_path / "state" / "voice-digest.md"
+    digest_path.parent.mkdir(parents=True)
+    digest_path.write_text("## Recent sessions\n- [10:00 UTC] shipped something\n")
+
+    result = _load_voice_digest(str(tmp_path))
+
+    assert result is not None
+    assert "shipped something" in result
+
+
+def test_load_voice_digest_returns_none_when_stale(tmp_path: Path) -> None:
+    digest_path = tmp_path / "state" / "voice-digest.md"
+    digest_path.parent.mkdir(parents=True)
+    digest_path.write_text("## Recent sessions\n- [10:00 UTC] old work\n")
+    # Make file appear old
+    stale_mtime = time.time() - (_VOICE_DIGEST_MAX_AGE_SECONDS + 60)
+    os.utime(digest_path, (stale_mtime, stale_mtime))
+
+    assert _load_voice_digest(str(tmp_path)) is None
+
+
+def test_load_voice_digest_returns_none_when_metadata_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest_path = tmp_path / "state" / "voice-digest.md"
+    digest_path.parent.mkdir(parents=True)
+    digest_path.write_text("## Recent sessions\n")
+    original_stat = Path.stat
+
+    def fail_digest_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if path == digest_path:
+            raise OSError("digest disappeared")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_digest_stat)
+
+    assert _load_voice_digest(str(tmp_path)) is None
+
+
+def test_prepend_activity_digest_includes_guidance_and_content() -> None:
+    digest = "## Recent sessions\n- [10:00 UTC] shipped heartbeat widget\n"
+    instructions = "You are Bob."
+
+    result = _prepend_activity_digest(digest, instructions)
+
+    assert "ACTIVITY DIGEST" in result
+    assert "shipped heartbeat widget" in result
+    assert "You are Bob." in result
+    # Guidance comes before instructions
+    assert result.index("ACTIVITY DIGEST") < result.index("You are Bob.")
+
+
+def test_prepend_activity_digest_tells_model_to_skip_subagent() -> None:
+    result = _prepend_activity_digest("## Recent sessions\n", "instructions")
+    assert "subagent" in result.lower()
