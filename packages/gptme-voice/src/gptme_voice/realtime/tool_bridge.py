@@ -62,6 +62,8 @@ _TIMEOUT_BINARY_AVAILABLE = shutil.which("timeout") is not None
 # How many recently-completed task records to keep for subagent_status queries.
 # The model can see these to understand whether a task succeeded, timed out, or errored.
 _MAX_RECENT_COMPLETIONS = 5
+# Audio cues are optional UX. Never let a blocked transport delay the tool lifecycle.
+_CUE_CALLBACK_TIMEOUT_SECONDS = 1.0
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
@@ -117,6 +119,8 @@ class GptmeToolBridge:
         timeout: int = 300,
         workspace: str | None = None,
         on_result: Callable[[str], Awaitable[None]] | None = None,
+        on_dispatch: Callable[[], Awaitable[None]] | None = None,
+        on_timeout: Callable[[], Awaitable[None]] | None = None,
         on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
         on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
         transcript_provider: Callable[[], Sequence[object]] | None = None,
@@ -125,6 +129,8 @@ class GptmeToolBridge:
         self.timeout = timeout
         self.workspace = workspace
         self.on_result = on_result
+        self.on_dispatch = on_dispatch
+        self.on_timeout = on_timeout
         self.on_hangup = on_hangup
         self.on_handoff = on_handoff
         self.transcript_provider = transcript_provider
@@ -146,6 +152,7 @@ class GptmeToolBridge:
         self._pending_tasks: dict[str, PendingTask] = {}
         self._task_counter = 0
         self._completed_timings: list[dict[str, object]] = []
+        self._cue_tasks: set[asyncio.Task[None]] = set()
         # Short-lived buffer of recently-completed tasks so subagent_status can
         # distinguish "timed out" from "succeeded" from "never started".
         self._recent_completions: deque[dict] = deque(maxlen=_MAX_RECENT_COMPLETIONS)
@@ -405,6 +412,24 @@ class GptmeToolBridge:
             copies.append(copy)
         return copies
 
+    def _dispatch_cue(
+        self, callback: Callable[[], Awaitable[None]], *, cue_name: str
+    ) -> None:
+        """Send an optional cue without blocking the subagent lifecycle."""
+
+        async def _send() -> None:
+            try:
+                async with asyncio.timeout(_CUE_CALLBACK_TIMEOUT_SECONDS):
+                    await callback()
+            except TimeoutError:
+                logger.warning("Timed out sending subagent %s cue", cue_name)
+            except Exception:
+                logger.exception("Failed to send subagent %s cue", cue_name)
+
+        task = asyncio.create_task(_send())
+        self._cue_tasks.add(task)
+        task.add_done_callback(self._cue_tasks.discard)
+
     async def _run_subagent(self, task_id: str, task: str, mode: str = "fast") -> None:
         """Run a subagent in the background and inject result when done."""
         pending = self._pending_tasks.get(task_id)
@@ -484,6 +509,13 @@ class GptmeToolBridge:
                 else None,
             }
         )
+
+        # Fire timeout cue before injecting the error so the caller hears a
+        # distinct signal rather than just dead air followed by an error message.
+        # The cue is best-effort: transport failure must not suppress the result
+        # or leave a completed task in the pending map.
+        if completion_status == "timed_out" and self.on_timeout:
+            self._dispatch_cue(self.on_timeout, cue_name="timeout")
 
         # Inject result into conversation
         if self.on_result:
@@ -774,6 +806,11 @@ class GptmeToolBridge:
                 started_at=time.monotonic(),
                 model=model,
             )
+
+            # The cue is best-effort: the subagent is already running, so a
+            # transport failure must not hide its dispatch receipt.
+            if self.on_dispatch:
+                self._dispatch_cue(self.on_dispatch, cue_name="dispatch")
 
             return {
                 "status": "dispatched",

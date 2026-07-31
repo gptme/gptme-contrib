@@ -26,6 +26,7 @@ from gptme_voice.realtime.server import (
     _should_trigger_hangup_transcript_fallback,
     _truncate_resume_transcript,
 )
+from gptme_voice.realtime.sounds import PCM_CUES, SAMPLE_RATE
 
 
 class _DummyWebSocket:
@@ -318,6 +319,22 @@ def test_send_to_twilio_uses_stream_sid_field_name() -> None:
         "streamSid": "MZ123",
         "media": {"payload": base64.b64encode(b"\x00\x01").decode("utf-8")},
     }
+
+
+def test_sound_cue_callback_sends_playable_pcm_payload() -> None:
+    async def _exercise() -> None:
+        websocket = _DummyWebSocket()
+        callback = VoiceServer._make_sound_cue_callback(websocket, "dispatch")
+
+        await callback()
+
+        message = json.loads(websocket.messages[0])
+        assert message["type"] == "sound_cue"
+        assert message["cue"] == "dispatch"
+        assert message["sample_rate"] == SAMPLE_RATE
+        assert base64.b64decode(message["audio"]) == PCM_CUES["dispatch"]
+
+    asyncio.run(_exercise())
 
 
 def test_build_session_config_passes_reasoning_effort_override() -> None:
