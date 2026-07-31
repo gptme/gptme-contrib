@@ -133,6 +133,30 @@ def parse_cascade_selector_output(data: dict) -> str:
     return f"{scope} {selected_id} {category} {execution_category_out} {all_blocked} {selector_mode_out} {intent_json}"
 
 
+def parse_cascade_intent(data: dict) -> dict[str, str]:
+    """Extract routing fields from a CASCADE intent JSON object.
+
+    Replaces 4 separate inline ``python3 -c`` blocks in autonomous-run.sh that
+    each extract a single field from ``$CASCADE_INTENT``.  Centralising them
+    makes the extraction testable and keeps the bash script below its ratchet cap.
+
+    Returned keys:
+
+    - ``task_id`` — task slug for ``CASCADE_SELECTED_ID`` back-fill (fanout path)
+    - ``execution_category`` — category override carried by fanout workers
+    - ``upstream_coordination_id`` — cross-repo claim key embedded in the intent
+    - ``task_state`` — current task state for context / claim-gate injection
+
+    Every value is a plain string; missing or falsy values are normalised to ``""``.
+    """
+    return {
+        "task_id": str(data.get("task_id", "") or ""),
+        "execution_category": str(data.get("execution_category", "") or ""),
+        "upstream_coordination_id": str(data.get("upstream_coordination_id", "") or ""),
+        "task_state": str(data.get("task_state", "") or ""),
+    }
+
+
 class AutonomousRun(BaseRunLoop):
     """Autonomous operation run loop.
 
@@ -229,12 +253,29 @@ if __name__ == "__main__":
         # Logic: parse_cascade_selector_output (tested)
         data = json.load(sys.stdin)
         print(parse_cascade_selector_output(data))
+    elif cmd == "parse-cascade-intent":
+        # Read CASCADE_INTENT JSON from stdin, emit 4 space-separated shell fields.
+        # Usage: echo "$CASCADE_INTENT" | python3 -m gptme_runloops.autonomous parse-cascade-intent
+        # Output: task_id execution_category upstream_coordination_id task_state
+        # Logic: parse_cascade_intent (tested)
+        try:
+            data = json.load(sys.stdin)
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        result = parse_cascade_intent(data)
+        print(
+            f"{result['task_id']} {result['execution_category']}"
+            f" {result['upstream_coordination_id']} {result['task_state']}"
+        )
     else:
         cmds = [
             "is-capable-backend BACKEND [MODEL]",
             "self-review-cooldown STATE_PATH [COOLDOWN_HOURS]",
             "self-review-hours STATE_PATH",
             "parse-cascade-json  (reads JSON from stdin)",
+            "parse-cascade-intent  (reads JSON from stdin)",
         ]
         print(
             f"Usage: python3 -m gptme_runloops.autonomous [{' | '.join(c.split()[0] for c in cmds)}]",
