@@ -1325,6 +1325,38 @@ def test_on_dispatch_called_when_subagent_dispatched() -> None:
     asyncio.run(_exercise())
 
 
+def test_on_dispatch_failure_does_not_hide_dispatch_receipt(caplog) -> None:
+    """A failed cue send must not orphan an already-running subagent."""
+
+    async def _exercise() -> None:
+        async def _failing_on_dispatch() -> None:
+            raise ConnectionError("voice transport closed")
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(
+                workspace="/fake/workspace",
+                on_dispatch=_failing_on_dispatch,
+            )
+
+            with caplog.at_level(logging.ERROR):
+                result = await bridge.handle_function_call(
+                    "subagent", {"task": "list recent commits", "mode": "fast"}
+                )
+
+            assert result["status"] == "dispatched"
+            assert result["task_id"] in bridge._pending_tasks
+            assert "Failed to send subagent dispatch cue" in caplog.text
+
+            for _ in range(20):
+                await asyncio.sleep(0)
+
+    asyncio.run(_exercise())
+
+
 def test_on_dispatch_not_called_for_non_subagent_calls() -> None:
     """on_dispatch must not fire for subagent_status or other tool calls."""
 
@@ -1379,6 +1411,44 @@ def test_on_timeout_called_when_subagent_times_out() -> None:
 
         assert len(timeout_calls) == 1, "on_timeout should fire exactly once"
         assert len(result_calls) == 1, "on_result still fires after timeout"
+
+    asyncio.run(_exercise())
+
+
+def test_on_timeout_failure_does_not_suppress_result_or_cleanup(caplog) -> None:
+    """A failed timeout cue must not interrupt task completion."""
+
+    async def _exercise() -> None:
+        result_calls: list[str] = []
+
+        async def _failing_on_timeout() -> None:
+            raise ConnectionError("voice transport closed")
+
+        async def _fake_on_result(text: str) -> None:
+            result_calls.append(text)
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _FakeProcess(returncode=124, stdout="partial output\n")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(
+                workspace="/fake/workspace",
+                timeout=10,
+                on_result=_fake_on_result,
+                on_timeout=_failing_on_timeout,
+            )
+
+            with caplog.at_level(logging.ERROR):
+                dispatch = await bridge.handle_function_call(
+                    "subagent", {"task": "slow analysis task", "mode": "fast"}
+                )
+                for _ in range(20):
+                    await asyncio.sleep(0)
+
+            assert len(result_calls) == 1
+            assert dispatch["task_id"] not in bridge._pending_tasks
+            assert "Failed to send subagent timeout cue" in caplog.text
 
     asyncio.run(_exercise())
 

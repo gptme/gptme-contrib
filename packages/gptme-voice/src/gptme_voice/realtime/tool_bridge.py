@@ -491,8 +491,13 @@ class GptmeToolBridge:
 
         # Fire timeout cue before injecting the error so the caller hears a
         # distinct signal rather than just dead air followed by an error message.
+        # The cue is best-effort: transport failure must not suppress the result
+        # or leave a completed task in the pending map.
         if completion_status == "timed_out" and self.on_timeout:
-            await self.on_timeout()
+            try:
+                await self.on_timeout()
+            except Exception:
+                logger.exception("Failed to send subagent timeout cue")
 
         # Inject result into conversation
         if self.on_result:
@@ -784,8 +789,13 @@ class GptmeToolBridge:
                 model=model,
             )
 
+            # The cue is best-effort: the subagent is already running, so a
+            # transport failure must not hide its dispatch receipt.
             if self.on_dispatch:
-                await self.on_dispatch()
+                try:
+                    await self.on_dispatch()
+                except Exception:
+                    logger.exception("Failed to send subagent dispatch cue")
 
             return {
                 "status": "dispatched",
