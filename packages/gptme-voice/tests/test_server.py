@@ -7,6 +7,7 @@ import sys
 import tempfile
 import textwrap
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ from gptme_voice.realtime.server import (
     _build_fresh_call_greeting_instructions,
     _build_resume_instructions,
     _build_runtime_identity_instructions,
-    _fetch_recent_activity_log,
+    _fetch_recent_journal_progress,
     _get_twilio_field,
     _lookup_caller_identity,
     _should_trigger_hangup_transcript_fallback,
@@ -1677,73 +1678,59 @@ def test_server_voice_agent_name_overrides_general_name(
 
 
 # ---------------------------------------------------------------------------
-# Recent activity log: _fetch_recent_activity_log + standup bootstrap
+# Recent journal progress: _fetch_recent_journal_progress + standup bootstrap
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_recent_activity_log_returns_empty_for_none_workspace() -> None:
-    """No workspace → empty string, no subprocess spawned."""
-    result = asyncio.run(_fetch_recent_activity_log(None))
+def test_fetch_recent_journal_progress_returns_empty_for_none_workspace() -> None:
+    """No workspace → empty string immediately."""
+    result = _fetch_recent_journal_progress(None)
     assert result == ""
 
 
-def test_fetch_recent_activity_log_strips_hash_prefix(
-    monkeypatch: pytest.MonkeyPatch,
+def test_fetch_recent_journal_progress_reads_outcome_lines(
+    tmp_path: Path,
 ) -> None:
-    """Hash prefix is stripped; output is a bullet list of summaries."""
-    from unittest.mock import AsyncMock, MagicMock
+    """Outcome lines from journal files are extracted and returned as bullets."""
+    journal_dir = tmp_path / "journal"
+    today = datetime.now(timezone.utc).date().isoformat()
+    day_dir = journal_dir / today
+    day_dir.mkdir(parents=True)
 
-    fake_proc = MagicMock()
-    fake_proc.communicate = AsyncMock(
-        return_value=(
-            b"abc1234 fix: greeting hallucination\ndef5678 chore: update tasks\n",
-            b"",
-        )
+    (day_dir / "autonomous-session-abc1.md").write_text(
+        "# Session\n\n**Outcome**: productive — shipped voice greeting fix\n\nMore text.\n"
     )
-    monkeypatch.setattr(
-        "gptme_voice.realtime.server.asyncio.create_subprocess_exec",
-        AsyncMock(return_value=fake_proc),
+    (day_dir / "autonomous-session-def2.md").write_text(
+        "# Session\n\n**Outcome**: productive — updated lesson keywords\n"
     )
+    # self-merges.md should be skipped
+    (day_dir / "self-merges.md").write_text("**Outcome**: productive — merged stuff\n")
 
-    result = asyncio.run(_fetch_recent_activity_log("/some/workspace"))
-    assert "fix: greeting hallucination" in result
-    assert "chore: update tasks" in result
-    # Short hashes must not appear in the output
-    assert "abc1234" not in result
-    assert "def5678" not in result
+    result = _fetch_recent_journal_progress(str(tmp_path))
+    assert "- shipped voice greeting fix" in result
+    assert "- updated lesson keywords" in result
+    # self-merges outcome must not appear
+    assert "merged stuff" not in result
     assert result.startswith("- ")
 
 
-def test_fetch_recent_activity_log_kills_process_on_timeout(
-    monkeypatch: pytest.MonkeyPatch,
+def test_fetch_recent_journal_progress_returns_empty_for_missing_journal(
+    tmp_path: Path,
 ) -> None:
-    """A timed-out git subprocess is terminated and reaped."""
-    from unittest.mock import AsyncMock, MagicMock
-
-    fake_proc = MagicMock()
-    fake_proc.communicate = AsyncMock(side_effect=TimeoutError)
-    fake_proc.wait = AsyncMock()
-    monkeypatch.setattr(
-        "gptme_voice.realtime.server.asyncio.create_subprocess_exec",
-        AsyncMock(return_value=fake_proc),
-    )
-
-    result = asyncio.run(_fetch_recent_activity_log("/some/workspace"))
-
+    """Workspace without a journal/ directory returns empty string."""
+    result = _fetch_recent_journal_progress(str(tmp_path))
     assert result == ""
-    fake_proc.kill.assert_called_once_with()
-    fake_proc.wait.assert_awaited_once_with()
 
 
-def test_build_session_bootstrap_standup_injects_activity_log(
+def test_build_session_bootstrap_standup_injects_journal_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Standup bootstrap injects the recent activity log into instructions."""
+    """Standup bootstrap injects the recent journal progress into instructions."""
 
-    async def _fake_fetch(workspace: str | None, **_: object) -> str:
-        return "- fix: greeting hallucination\n- chore: update tasks"
+    def _fake_fetch(workspace: str | None, **_: object) -> str:
+        return "- shipped voice greeting fix\n- updated lesson keywords"
 
-    monkeypatch.setattr(_server_module, "_fetch_recent_activity_log", _fake_fetch)
+    monkeypatch.setattr(_server_module, "_fetch_recent_journal_progress", _fake_fetch)
 
     voice_server = VoiceServer(workspace="/fake/workspace")
     voice_server._instructions = "You are Bob."
@@ -1755,22 +1742,22 @@ def test_build_session_bootstrap_standup_injects_activity_log(
         )
     )
 
-    assert "RECENT ACTIVITY LOG" in bootstrap.instructions
-    assert "fix: greeting hallucination" in bootstrap.instructions
-    assert "chore: update tasks" in bootstrap.instructions
+    assert "RECENT SESSION PROGRESS" in bootstrap.instructions
+    assert "shipped voice greeting fix" in bootstrap.instructions
+    assert "updated lesson keywords" in bootstrap.instructions
     assert "STANDUP BRIEF: Working on voice features." in bootstrap.instructions
     assert bootstrap.should_greet_first is True
 
 
-def test_build_session_bootstrap_standup_no_activity_section_when_log_empty(
+def test_build_session_bootstrap_standup_no_progress_section_when_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Standup bootstrap omits the RECENT ACTIVITY LOG section when git is unavailable."""
+    """Standup bootstrap omits RECENT SESSION PROGRESS when journals are absent."""
 
-    async def _fake_fetch(workspace: str | None, **_: object) -> str:
-        return ""  # simulate git failure / empty repo
+    def _fake_fetch(workspace: str | None, **_: object) -> str:
+        return ""  # simulate missing journal directory
 
-    monkeypatch.setattr(_server_module, "_fetch_recent_activity_log", _fake_fetch)
+    monkeypatch.setattr(_server_module, "_fetch_recent_journal_progress", _fake_fetch)
 
     voice_server = VoiceServer(workspace="/fake/workspace")
     voice_server._instructions = "You are Bob."
@@ -1782,6 +1769,6 @@ def test_build_session_bootstrap_standup_no_activity_section_when_log_empty(
         )
     )
 
-    assert "RECENT ACTIVITY LOG" not in bootstrap.instructions
+    assert "RECENT SESSION PROGRESS" not in bootstrap.instructions
     assert "STANDUP BRIEF: Working on voice features." in bootstrap.instructions
     assert bootstrap.should_greet_first is True

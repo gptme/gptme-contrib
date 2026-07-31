@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
@@ -304,10 +304,11 @@ def _build_standup_instructions_guidance(*, has_activity_log: bool = False) -> s
     LOG section — only set to True when the log is actually populated.
     """
     activity_log_hint = (
-        "- A RECENT ACTIVITY LOG (last 24h of git commits) is also loaded below the "
-        "brief. Use it to answer follow-up recap questions like 'what did you work on "
-        "today?' or 'what happened in the last 12 hours?' without dispatching a "
-        "subagent — the log gives you enough context for standard recap queries.\n"
+        "- A RECENT SESSION PROGRESS log (outcome summaries from session journals) is "
+        "also loaded below the brief. Use it to answer follow-up recap questions like "
+        "'what did you work on today?' or 'what happened in the last 12 hours?' "
+        "without dispatching a subagent — the log gives you enough context for "
+        "standard recap queries.\n"
         if has_activity_log
         else ""
     )
@@ -331,49 +332,62 @@ def _build_standup_instructions_guidance(*, has_activity_log: bool = False) -> s
     )
 
 
-async def _fetch_recent_activity_log(
+def _fetch_recent_journal_progress(
     workspace: str | None,
     *,
-    hours: int = 24,
-    max_commits: int = 20,
+    days: int = 2,
+    max_entries: int = 20,
 ) -> str:
-    """Fetch a compact recent activity log from git for standup follow-up questions.
+    """Return a bullet-list of recent session outcomes from journal files.
 
-    Returns a bullet-list of commit summaries (hashes stripped) from the last
-    ``hours`` hours, suitable for injection into session instructions so the voice
-    model can answer "what did you work on today?" without spawning a subagent.
+    Reads ``workspace/journal/<YYYY-MM-DD>/*.md`` for the last *days* days,
+    extracts the ``**Outcome**:`` line from each file, and returns a formatted
+    string suitable for injection into standup instructions.  This is the same
+    source used by the outbound standup brief generator and gives higher-signal
+    context than git commit subjects.
 
-    Returns an empty string on failure or when workspace is not a git repo.
+    Returns an empty string when workspace is unavailable or journals are absent.
     """
     if not workspace:
         return ""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            "-C",
-            workspace,
-            "log",
-            "--oneline",
-            "--no-merges",
-            f"--since={hours} hours ago",
-            f"--max-count={max_commits}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-        except BaseException:
-            proc.kill()
-            await proc.wait()
-            raise
-        lines = stdout.decode().strip().splitlines()
-        if not lines:
+        today = datetime.now(timezone.utc).date()
+        journal_dir = Path(workspace) / "journal"
+        if not journal_dir.exists():
             return ""
-        # Strip 7-char hash prefix before returning readable summaries
-        summaries = [line.split(" ", 1)[1] if " " in line else line for line in lines]
-        return "\n".join(f"- {s}" for s in summaries)
+
+        candidates: list[Path] = []
+        for offset in range(days):
+            day = today - timedelta(days=offset)
+            day_dir = journal_dir / day.isoformat()
+            if not day_dir.exists():
+                continue
+            for path in day_dir.glob("*.md"):
+                if path.name == "self-merges.md":
+                    continue
+                candidates.append(path)
+
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+        summaries: list[str] = []
+        for path in candidates:
+            for line in path.read_text().splitlines():
+                if not line.startswith("**Outcome**:"):
+                    continue
+                summary = line.split(":", 1)[1].strip()
+                # Strip "productive|blocked|noop — " status prefix
+                if "—" in summary:
+                    _, rest = summary.split("—", 1)
+                    summary = rest.strip()
+                if summary:
+                    summaries.append(f"- {summary}")
+                break
+            if len(summaries) >= max_entries:
+                break
+
+        return "\n".join(summaries)
     except Exception:
-        logger.debug("Failed to fetch recent activity log", exc_info=True)
+        logger.debug("Failed to fetch recent journal progress", exc_info=True)
         return ""
 
 
@@ -996,9 +1010,9 @@ class VoiceServer:
         # standup_brief takes priority over recent-call resume: an explicit outbound
         # standup should always deliver the brief, not silently resume a prior session.
         if standup_brief:
-            activity_log = await _fetch_recent_activity_log(self.workspace)
+            activity_log = _fetch_recent_journal_progress(self.workspace)
             activity_section = (
-                "\n\nRECENT ACTIVITY LOG (last 24h — answer recap follow-ups from this, no subagent needed):\n"
+                "\n\nRECENT SESSION PROGRESS (answer recap follow-ups from this, no subagent needed):\n"
                 + activity_log
                 if activity_log
                 else ""
