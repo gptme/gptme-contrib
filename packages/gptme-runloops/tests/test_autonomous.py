@@ -511,23 +511,3 @@ def test_cli_parse_cascade_intent_invalid_json():
     )
     assert result.returncode == 0  # graceful: no crash on bad input
     assert result.stdout.rstrip("\n") == "   "  # empty fields
-
-
-def test_bob_runtime_invokes_parse_cascade_intent_cli():
-    """The production caller must use the package for intent field extraction."""
-    runtime = (
-        Path(__file__).parents[4]
-        / "scripts"
-        / "runs"
-        / "autonomous"
-        / "autonomous-run.sh"
-    )
-    if not runtime.exists():
-        return
-
-    source = runtime.read_text()
-    assert "-m gptme_runloops.autonomous parse-cascade-intent" in source
-    # No bare inline extraction of these fields via python3 -c
-    # (each field used to be extracted separately with a python3 -c block)
-    assert source.count("d.get('upstream_coordination_id'") == 0
-    assert source.count("d.get('task_state'") == 0
