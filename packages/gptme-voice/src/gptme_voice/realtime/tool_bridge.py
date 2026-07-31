@@ -152,6 +152,7 @@ class GptmeToolBridge:
         self._pending_tasks: dict[str, PendingTask] = {}
         self._task_counter = 0
         self._completed_timings: list[dict[str, object]] = []
+        self._cue_tasks: set[asyncio.Task[None]] = set()
         # Short-lived buffer of recently-completed tasks so subagent_status can
         # distinguish "timed out" from "succeeded" from "never started".
         self._recent_completions: deque[dict] = deque(maxlen=_MAX_RECENT_COMPLETIONS)
@@ -411,6 +412,24 @@ class GptmeToolBridge:
             copies.append(copy)
         return copies
 
+    def _dispatch_cue(
+        self, callback: Callable[[], Awaitable[None]], *, cue_name: str
+    ) -> None:
+        """Send an optional cue without blocking the subagent lifecycle."""
+
+        async def _send() -> None:
+            try:
+                async with asyncio.timeout(_CUE_CALLBACK_TIMEOUT_SECONDS):
+                    await callback()
+            except TimeoutError:
+                logger.warning("Timed out sending subagent %s cue", cue_name)
+            except Exception:
+                logger.exception("Failed to send subagent %s cue", cue_name)
+
+        task = asyncio.create_task(_send())
+        self._cue_tasks.add(task)
+        task.add_done_callback(self._cue_tasks.discard)
+
     async def _run_subagent(self, task_id: str, task: str, mode: str = "fast") -> None:
         """Run a subagent in the background and inject result when done."""
         pending = self._pending_tasks.get(task_id)
@@ -496,14 +515,7 @@ class GptmeToolBridge:
         # The cue is best-effort: transport failure must not suppress the result
         # or leave a completed task in the pending map.
         if completion_status == "timed_out" and self.on_timeout:
-            try:
-                await asyncio.wait_for(
-                    self.on_timeout(), timeout=_CUE_CALLBACK_TIMEOUT_SECONDS
-                )
-            except TimeoutError:
-                logger.warning("Timed out sending subagent timeout cue")
-            except Exception:
-                logger.exception("Failed to send subagent timeout cue")
+            self._dispatch_cue(self.on_timeout, cue_name="timeout")
 
         # Inject result into conversation
         if self.on_result:
@@ -798,14 +810,7 @@ class GptmeToolBridge:
             # The cue is best-effort: the subagent is already running, so a
             # transport failure must not hide its dispatch receipt.
             if self.on_dispatch:
-                try:
-                    await asyncio.wait_for(
-                        self.on_dispatch(), timeout=_CUE_CALLBACK_TIMEOUT_SECONDS
-                    )
-                except TimeoutError:
-                    logger.warning("Timed out sending subagent dispatch cue")
-                except Exception:
-                    logger.exception("Failed to send subagent dispatch cue")
+                self._dispatch_cue(self.on_dispatch, cue_name="dispatch")
 
             return {
                 "status": "dispatched",

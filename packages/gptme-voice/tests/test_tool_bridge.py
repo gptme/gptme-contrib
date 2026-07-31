@@ -1320,6 +1320,10 @@ def test_on_dispatch_called_when_subagent_dispatched() -> None:
             )
 
         assert result["status"] == "dispatched"
+        for _ in range(20):
+            if dispatch_calls:
+                break
+            await asyncio.sleep(0)
         assert len(dispatch_calls) == 1
 
     asyncio.run(_exercise())
@@ -1349,10 +1353,10 @@ def test_on_dispatch_failure_does_not_hide_dispatch_receipt(caplog) -> None:
 
             assert result["status"] == "dispatched"
             assert result["task_id"] in bridge._pending_tasks
-            assert "Failed to send subagent dispatch cue" in caplog.text
 
             for _ in range(20):
                 await asyncio.sleep(0)
+            assert "Failed to send subagent dispatch cue" in caplog.text
 
     asyncio.run(_exercise())
 
@@ -1397,6 +1401,10 @@ def test_on_dispatch_timeout_does_not_hide_dispatch_receipt(
 
         assert result["status"] == "dispatched"
         assert result["task_id"] in bridge._pending_tasks
+        assert not cue_cancelled.is_set()
+
+        for _ in range(20):
+            await asyncio.sleep(0.001)
         assert cue_cancelled.is_set()
         assert "Timed out sending subagent dispatch cue" in caplog.text
 
