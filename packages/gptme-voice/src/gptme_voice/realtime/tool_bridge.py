@@ -62,6 +62,8 @@ _TIMEOUT_BINARY_AVAILABLE = shutil.which("timeout") is not None
 # How many recently-completed task records to keep for subagent_status queries.
 # The model can see these to understand whether a task succeeded, timed out, or errored.
 _MAX_RECENT_COMPLETIONS = 5
+# Audio cues are optional UX. Never let a blocked transport delay the tool lifecycle.
+_CUE_CALLBACK_TIMEOUT_SECONDS = 1.0
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
@@ -495,7 +497,11 @@ class GptmeToolBridge:
         # or leave a completed task in the pending map.
         if completion_status == "timed_out" and self.on_timeout:
             try:
-                await self.on_timeout()
+                await asyncio.wait_for(
+                    self.on_timeout(), timeout=_CUE_CALLBACK_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                logger.warning("Timed out sending subagent timeout cue")
             except Exception:
                 logger.exception("Failed to send subagent timeout cue")
 
@@ -793,7 +799,11 @@ class GptmeToolBridge:
             # transport failure must not hide its dispatch receipt.
             if self.on_dispatch:
                 try:
-                    await self.on_dispatch()
+                    await asyncio.wait_for(
+                        self.on_dispatch(), timeout=_CUE_CALLBACK_TIMEOUT_SECONDS
+                    )
+                except TimeoutError:
+                    logger.warning("Timed out sending subagent dispatch cue")
                 except Exception:
                     logger.exception("Failed to send subagent dispatch cue")
 
