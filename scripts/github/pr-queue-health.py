@@ -21,7 +21,16 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+# Keep the documented direct-Python invocation working from a source checkout.
+# An installed workspace environment already exposes bobutils; a bare clone does not.
+_BOBUTILS_SRC = Path(__file__).resolve().parents[2] / "packages" / "bobutils" / "src"
+if _BOBUTILS_SRC.is_dir():
+    sys.path.insert(0, str(_BOBUTILS_SRC))
+
+from bobutils.datetimes import parse_datetime  # noqa: E402
 
 # Default repos to scan — override via GPTME_TRACKED_REPOS env var
 DEFAULT_TRACKED_REPOS = [
@@ -143,21 +152,6 @@ def fetch_prs_for_repo(repo: str, author: str) -> list[dict[str, Any]] | None:
         warn(f"unexpected gh pr list payload for {repo}: expected list")
         return None
     return result
-
-
-def parse_datetime(dt_str: str) -> datetime | None:
-    """Parse GitHub datetime string."""
-    if not dt_str:
-        return None
-    for fmt in ["%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z"]:
-        try:
-            dt = datetime.strptime(dt_str, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except ValueError:
-            continue
-    return None
 
 
 def get_ci_status(pr: dict[str, Any]) -> str:
