@@ -171,8 +171,8 @@ def get_standup_context(
     Scans journal/YYYY-MM-DD/*.md files whose recorded session completion time
     is after `since`, filters low-signal entries unless include_low_signal=True,
     and returns up to `limit` summaries ordered newest-first. Files without a
-    session record use their journal date at midnight UTC, preserving whole-day
-    lookbacks without treating mutable filesystem metadata as occurrence time.
+    session record are included for the boundary day because their sub-day
+    occurrence time is unknown; dated directories still exclude older days.
     """
     ctx = StandupContext(since=since)
 
@@ -204,9 +204,10 @@ def get_standup_context(
         for path in date_dir.glob("*.md"):
             if path.name == "self-merges.md":
                 continue
-            completed = completion_times.get(path.resolve(), fallback_time)
-            if completed >= since:
-                candidates.append((completed, path))
+            completed = completion_times.get(path.resolve())
+            if completed is not None and completed < since:
+                continue
+            candidates.append((completed or fallback_time, path))
 
     # Newest first
     candidates.sort(key=lambda t: t[0], reverse=True)

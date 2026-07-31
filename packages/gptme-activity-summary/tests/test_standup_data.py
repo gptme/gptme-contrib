@@ -164,6 +164,21 @@ class TestGetStandupContext:
         ctx = get_standup_context(journal, since)
         assert [s.summary for s in ctx.journal_summaries] == ["new work"]
 
+    def test_includes_boundary_day_file_without_session_record(self, tmp_path: Path) -> None:
+        journal = self._make_journal(
+            tmp_path,
+            [
+                {
+                    "date": "2026-07-31",
+                    "session": "s1",
+                    "summary": "recordless recent work",
+                }
+            ],
+        )
+
+        ctx = get_standup_context(journal, datetime(2026, 7, 31, 12, tzinfo=timezone.utc))
+        assert [s.summary for s in ctx.journal_summaries] == ["recordless recent work"]
+
     def test_ignores_mutable_mtime(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         journal = self._make_journal(
             tmp_path,
