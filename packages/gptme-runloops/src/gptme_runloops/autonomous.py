@@ -49,8 +49,11 @@ def parse_cascade_selector_output(data: dict) -> str:
     Extracts 7 space-separated tokens for bash ``read -r`` consumption:
     ``scope selected_id category execution_category all_blocked selector_mode intent_json``
 
-    Mirrors the inline ``python3 -c`` block in autonomous-run.sh that was
-    previously executed inline in a bash process substitution.
+    This is the shared implementation used by Bob's production
+    ``scripts/runs/autonomous/autonomous-run.sh`` caller. That caller lives in
+    the agent workspace (not this reusable package repository) and invokes the
+    ``parse-cascade-json`` module command below. Keep the shell integration
+    contract covered by ``test_bob_runtime_invokes_parse_cascade_cli``.
     """
     tier = data.get("tier", 0)
     blocked = len(data.get("blocked_tasks", []))

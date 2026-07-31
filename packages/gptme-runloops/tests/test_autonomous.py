@@ -386,3 +386,24 @@ def test_parse_cascade_cli_round_trip():
     )
     assert result.returncode == 0
     assert result.stdout.decode().strip() == expected
+
+
+def test_bob_runtime_invokes_parse_cascade_cli():
+    """The production caller must use this package instead of inline parsing."""
+    runtime = (
+        Path(__file__).parents[4]
+        / "scripts"
+        / "runs"
+        / "autonomous"
+        / "autonomous-run.sh"
+    )
+    if not runtime.exists():
+        # gptme-contrib can be used standalone; the caller belongs to the agent
+        # workspace and is validated when this repository is checked out there.
+        return
+
+    source = runtime.read_text()
+    integration = source[source.index("_CASCADE_PRESELECT_AGENT=") :]
+    integration = integration[: integration.index("_apply_cascade_routing")]
+    assert "-m gptme_runloops.autonomous parse-cascade-json" in integration
+    assert "json.load(sys.stdin)" not in integration
