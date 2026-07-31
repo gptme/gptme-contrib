@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from gptme_runloops.autonomous import (
     AutonomousRun,
     is_capable_backend,
@@ -399,9 +400,9 @@ def test_bob_runtime_invokes_parse_cascade_cli():
         / "autonomous-run.sh"
     )
     if not runtime.exists():
-        # gptme-contrib can be used standalone; the caller belongs to the agent
-        # workspace and is validated when this repository is checked out there.
-        return
+        pytest.skip(
+            "autonomous-run.sh not present; adoption verified in agent-workspace CI"
+        )
 
     source = runtime.read_text()
     integration = source[source.index("_CASCADE_PRESELECT_AGENT=") :]
