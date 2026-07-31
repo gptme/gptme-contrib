@@ -21,9 +21,16 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from bobutils.datetimes import parse_datetime
+# Keep the documented direct-Python invocation working from a source checkout.
+# An installed workspace environment already exposes bobutils; a bare clone does not.
+_BOBUTILS_SRC = Path(__file__).resolve().parents[2] / "packages" / "bobutils" / "src"
+if _BOBUTILS_SRC.is_dir():
+    sys.path.insert(0, str(_BOBUTILS_SRC))
+
+from bobutils.datetimes import parse_datetime  # noqa: E402
 
 # Default repos to scan — override via GPTME_TRACKED_REPOS env var
 DEFAULT_TRACKED_REPOS = [

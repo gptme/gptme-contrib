@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -47,6 +48,18 @@ def test_fetch_prs_for_repo_requests_limit_100() -> None:
 def test_parse_datetime_invalid_returns_none() -> None:
     assert pr_queue_health.parse_datetime("") is None
     assert pr_queue_health.parse_datetime("not-a-timestamp") is None
+
+
+def test_direct_python_invocation_loads_bobutils_from_source_checkout() -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", str(MODULE_PATH), "--json"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert isinstance(json.loads(result.stdout), dict)
 
 
 def test_run_gh_warns_on_failure(capsys: pytest.CaptureFixture[str]) -> None:
