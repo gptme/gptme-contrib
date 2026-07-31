@@ -1607,6 +1607,7 @@ def test_server_g711_passthrough_ignored_for_grok_provider(
 
     session_config = server._build_session_config("You are Bob.")
     assert session_config.g711_passthrough is False
+    assert session_config.input_format == "pcm16"
 
 
 def test_greeting_unknown_caller_uses_configured_agent_name() -> None:
@@ -1637,12 +1638,28 @@ def test_server_uses_general_agent_name_for_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("GPTME_VOICE_AGENT_NAME", raising=False)
-    monkeypatch.setenv("GPTME_AGENT_NAME", "Alice")
+    monkeypatch.setenv("GPTME_AGENT_NAME", "Alice Smith")
 
     server = VoiceServer()
 
-    assert server._agent_name == "Alice"
-    assert server._instructions.startswith("IDENTITY: You are Alice.")
+    assert server._agent_name == "Alice Smith"
+    assert server._instructions.startswith("IDENTITY: You are Alice smith.")
+
+
+def test_server_general_display_name_does_not_change_handoff_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("GPTME_VOICE_AGENT_NAME", raising=False)
+    monkeypatch.setenv("GPTME_AGENT_NAME", "Alice Smith")
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_DIR", str(tmp_path))
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_SECRET", "test-secret")
+
+    server = VoiceServer()
+
+    assert server._agent_name == "Alice Smith"
+    assert server._handoff_writer is not None
+    assert server._handoff_writer.from_agent == "bob"
+    assert "bob" not in server._available_agents
 
 
 def test_server_voice_agent_name_overrides_general_name(

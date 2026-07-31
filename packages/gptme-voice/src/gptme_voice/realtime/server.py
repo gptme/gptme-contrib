@@ -590,14 +590,15 @@ class VoiceServer:
 
         # Cross-agent handoff writer (optional — only active when GPTME_VOICE_HANDOFF_DIR set)
         handoff_dir_env = _get_config_env("GPTME_VOICE_HANDOFF_DIR")
+        handoff_agent_name = (
+            _get_config_env("GPTME_VOICE_AGENT_NAME") or "bob"
+        ).lower()
         handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
         handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
         # Comma-separated list of agents the running server can hand off to.
-        # Defaults to the known agents minus the current one.
+        # Defaults to the known agents minus the current protocol identity.
         _default_agents = [
-            a
-            for a in ["alice", "gordon", "sven", "bob"]
-            if a != self._agent_name.lower()
+            a for a in ["alice", "gordon", "sven", "bob"] if a != handoff_agent_name
         ]
         self._available_agents: list[str] = (
             [a.strip() for a in handoff_agents_env.split(",") if a.strip()]
@@ -614,12 +615,12 @@ class VoiceServer:
             handoff_secret = (handoff_secret_env or "dev-only-secret").encode("utf-8")
             self._handoff_writer: HandoffWriter | None = HandoffWriter(
                 Path(handoff_dir_env),
-                from_agent=self._agent_name.lower(),
+                from_agent=handoff_agent_name,
                 secret=handoff_secret,
             )
             logger.info(
                 "Handoff enabled: from_agent=%s, dir=%s",
-                self._agent_name,
+                handoff_agent_name,
                 handoff_dir_env,
             )
         else:
