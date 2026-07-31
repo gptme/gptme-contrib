@@ -28,6 +28,22 @@ _LOW_SIGNAL_PATTERNS = (
     r"\bpre-commit hooks?\b",
     r"\bno new lessons?\b",
 )
+_OUTCOME_STATUS_PREFIXES = (
+    "blocked",
+    "healthy",
+    "no-action",
+    "no-op",
+    "noop",
+    "noop-soft",
+    "partial",
+    "productive",
+    "productive (minor)",
+    "productive (restraint)",
+    "productive restraint",
+    "productive-minor",
+    "restraint",
+    "restrained",
+)
 
 
 def parse_since(since: str) -> datetime:
@@ -55,7 +71,7 @@ def parse_since(since: str) -> datetime:
     dt = datetime.fromisoformat(since.rstrip("Z").replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    return dt.astimezone(timezone.utc)
 
 
 def _extract_outcome_line(path: Path) -> str | None:
@@ -65,9 +81,10 @@ def _extract_outcome_line(path: Path) -> str | None:
             if not line.startswith("**Outcome**:"):
                 continue
             summary = line.split(":", 1)[1].strip()
-            # Strip "productive — " or "blocked — " prefix
-            if "—" in summary:
-                _, rest = summary.split("—", 1)
+            # Strip conventional journal status prefixes, preserving em dashes
+            # that are part of free-form outcome prose.
+            prefix, separator, rest = summary.partition(" — ")
+            if separator and prefix.casefold() in _OUTCOME_STATUS_PREFIXES:
                 summary = rest.strip()
             return summary or None
     except OSError:
@@ -119,10 +136,9 @@ def get_standup_context(
 ) -> StandupContext:
     """Extract journal outcome summaries since `since`.
 
-    Scans journal/YYYY-MM-DD/*.md files whose mtime is after `since`,
-    extracts **Outcome** lines, filters low-signal entries unless
-    include_low_signal=True, and returns up to `limit` summaries ordered
-    newest-first.
+    Scans journal/YYYY-MM-DD/*.md files modified since `since`, extracts
+    **Outcome** lines, filters low-signal entries unless include_low_signal=True,
+    and returns up to `limit` summaries ordered newest-first.
     """
     ctx = StandupContext(since=since)
 
@@ -130,12 +146,13 @@ def get_standup_context(
         return ctx
 
     candidates: list[tuple[float, Path]] = []
+    since_timestamp = since.astimezone(timezone.utc).timestamp()
 
     # Scan only YYYY-MM-DD date directories whose date is >= since (UTC date).
     # Non-date entries (e.g. 'templates/') are skipped.
     # Filtering by directory date (not file mtime) is semantically correct:
     # the directory name IS the journal date regardless of when the file was written.
-    since_date_str = since.date().isoformat()
+    since_date_str = since.astimezone(timezone.utc).date().isoformat()
 
     date_dirs = sorted(
         (
@@ -156,8 +173,9 @@ def get_standup_context(
             try:
                 mtime = path.stat().st_mtime
             except OSError:
-                mtime = 0.0
-            candidates.append((mtime, path))
+                continue
+            if mtime >= since_timestamp:
+                candidates.append((mtime, path))
 
     # Newest first
     candidates.sort(key=lambda t: t[0], reverse=True)

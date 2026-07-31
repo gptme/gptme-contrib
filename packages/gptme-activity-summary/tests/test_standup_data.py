@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +35,10 @@ class TestParseSince:
         result = parse_since("2026-07-31T18:00:00")
         assert result == datetime(2026, 7, 31, 18, 0, 0, tzinfo=timezone.utc)
 
+    def test_iso_offset_is_normalized_to_utc(self) -> None:
+        result = parse_since("2026-08-01T01:00:00+03:00")
+        assert result == datetime(2026, 7, 31, 22, 0, 0, tzinfo=timezone.utc)
+
     def test_invalid_raises(self) -> None:
         with pytest.raises((ValueError, TypeError)):
             parse_since("not-a-date")
@@ -48,6 +53,9 @@ class TestGetStandupContext:
             day_dir.mkdir(parents=True, exist_ok=True)
             path = day_dir / f"{entry['session']}.md"
             path.write_text(f"**Outcome**: productive — {entry['summary']}\n")
+            if "timestamp" in entry:
+                timestamp = entry["timestamp"].timestamp()
+                os.utime(path, (timestamp, timestamp))
         return journal
 
     def test_finds_recent_summaries(self, tmp_path: Path) -> None:
@@ -103,12 +111,34 @@ class TestGetStandupContext:
     def test_skips_files_before_since(self, tmp_path: Path) -> None:
         journal = self._make_journal(
             tmp_path,
-            [{"date": "2026-07-28", "session": "s1", "summary": "old work"}],
+            [
+                {
+                    "date": "2026-07-31",
+                    "session": "s1",
+                    "summary": "old work",
+                    "timestamp": datetime(2026, 7, 31, 8, tzinfo=timezone.utc),
+                }
+            ],
         )
-        # Since is after the file was written (we check mtime)
-        since = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        since = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
         ctx = get_standup_context(journal, since)
         assert len(ctx.journal_summaries) == 0
+
+    def test_includes_files_after_subday_cutoff(self, tmp_path: Path) -> None:
+        journal = self._make_journal(
+            tmp_path,
+            [
+                {
+                    "date": "2026-07-31",
+                    "session": "s1",
+                    "summary": "new work",
+                    "timestamp": datetime(2026, 7, 31, 13, tzinfo=timezone.utc),
+                }
+            ],
+        )
+        since = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+        ctx = get_standup_context(journal, since)
+        assert [s.summary for s in ctx.journal_summaries] == ["new work"]
 
     def test_empty_journal_dir(self, tmp_path: Path) -> None:
         journal = tmp_path / "journal"
@@ -147,6 +177,15 @@ class TestGetStandupContext:
         since = datetime(2026, 7, 30, tzinfo=timezone.utc)
         ctx = get_standup_context(journal, since, limit=3)
         assert len(ctx.journal_summaries) <= 3
+
+    def test_preserves_em_dash_inside_free_form_outcome(self, tmp_path: Path) -> None:
+        journal = tmp_path / "journal"
+        day = journal / "2026-07-31"
+        day.mkdir(parents=True)
+        (day / "s1.md").write_text("**Outcome**: fixed the build — tests now pass\n")
+        since = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        ctx = get_standup_context(journal, since)
+        assert [s.summary for s in ctx.journal_summaries] == ["fixed the build — tests now pass"]
 
     def test_ignores_non_date_subdirs(self, tmp_path: Path) -> None:
         journal = tmp_path / "journal"

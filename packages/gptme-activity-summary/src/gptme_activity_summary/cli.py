@@ -1032,7 +1032,7 @@ def backfill(ctx: click.Context, from_date: str, to_date: str | None, force: boo
 @click.option(
     "--limit",
     default=8,
-    type=int,
+    type=click.IntRange(min=0),
     help="Maximum number of journal summaries to include (default: 8)",
 )
 @click.option(
