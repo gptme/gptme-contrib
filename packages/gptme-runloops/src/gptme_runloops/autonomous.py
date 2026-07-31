@@ -1,10 +1,46 @@
 """Autonomous run loop implementation."""
 
+import json
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.utils.executor import Executor
 from gptme_runloops.utils.prompt import generate_base_prompt, get_agent_name
+
+
+def is_capable_backend(backend: str, model: str = "") -> bool:
+    """Return True when this backend+model combo suits self-review / cleanup tasks.
+
+    Mirrors the bash ``_is_capable_backend()`` in autonomous-run.sh.
+    """
+    if backend == "claude-code":
+        return True
+    if model.startswith("glm-5"):
+        return True
+    return False
+
+
+def self_review_hours_since_last(state_path: Path) -> float:
+    """Return hours since the last self-review, or 999.0 if the state is absent/corrupt."""
+    try:
+        with open(state_path) as f:
+            ts = json.load(f).get("timestamp", "")
+        dt = datetime.fromisoformat(ts)
+        now = datetime.now(timezone.utc)
+        return (now - dt).total_seconds() / 3600
+    except Exception:
+        return 999.0
+
+
+def self_review_cooldown_active(state_path: Path, cooldown_hours: float = 6.0) -> bool:
+    """Return True when the self-review cooldown is still active (last review was too recent).
+
+    Mirrors the inline bash time-check in ``_apply_cascade_routing()``.
+    Returns False when the state file is absent (no prior review → no cooldown).
+    """
+    return self_review_hours_since_last(state_path) < cooldown_hours
 
 
 class AutonomousRun(BaseRunLoop):
@@ -81,3 +117,32 @@ class AutonomousRun(BaseRunLoop):
 Begin your autonomous work session now.
 """,
         )
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "is-capable-backend":
+        backend = sys.argv[2] if len(sys.argv) > 2 else ""
+        model = sys.argv[3] if len(sys.argv) > 3 else ""
+        sys.exit(0 if is_capable_backend(backend, model) else 1)
+    elif cmd == "self-review-cooldown":
+        state = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/dev/null")
+        hours = float(sys.argv[3]) if len(sys.argv) > 3 else 6.0
+        # exit 0 = cooldown active (dispatcher should skip self-review)
+        sys.exit(0 if self_review_cooldown_active(state, hours) else 1)
+    elif cmd == "self-review-hours":
+        state = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/dev/null")
+        print(f"{self_review_hours_since_last(state):.1f}")
+    else:
+        cmds = [
+            "is-capable-backend BACKEND [MODEL]",
+            "self-review-cooldown STATE_PATH [COOLDOWN_HOURS]",
+            "self-review-hours STATE_PATH",
+        ]
+        print(
+            f"Usage: python3 -m gptme_runloops.autonomous [{' | '.join(c.split()[0] for c in cmds)}]",
+            file=sys.stderr,
+        )
+        for c in cmds:
+            print(f"  {c}", file=sys.stderr)
+        sys.exit(2)
