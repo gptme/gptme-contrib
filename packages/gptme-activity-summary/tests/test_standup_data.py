@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,17 +45,35 @@ class TestParseSince:
 
 
 class TestGetStandupContext:
-    def _make_journal(self, tmp_path: Path, entries: list[dict]) -> Path:
-        """Create a minimal journal directory with fake session files."""
+    def _make_journal(
+        self,
+        tmp_path: Path,
+        entries: list[dict],
+        monkeypatch: pytest.MonkeyPatch | None = None,
+    ) -> Path:
+        """Create a minimal journal directory with fake session records."""
         journal = tmp_path / "journal"
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(exist_ok=True)
+        records = []
         for entry in entries:
             day_dir = journal / entry["date"]
             day_dir.mkdir(parents=True, exist_ok=True)
             path = day_dir / f"{entry['session']}.md"
             path.write_text(f"**Outcome**: productive — {entry['summary']}\n")
             if "timestamp" in entry:
-                timestamp = entry["timestamp"].timestamp()
-                os.utime(path, (timestamp, timestamp))
+                records.append(
+                    {
+                        "session_id": entry["session"],
+                        "journal_path": str(path.relative_to(tmp_path)),
+                        "end_time": entry["timestamp"].isoformat(),
+                    }
+                )
+        (sessions_dir / "session-records.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records)
+        )
+        if monkeypatch is not None:
+            monkeypatch.setenv("GPTME_SESSIONS_DIR", str(sessions_dir))
         return journal
 
     def test_finds_recent_summaries(self, tmp_path: Path) -> None:
@@ -108,7 +126,9 @@ class TestGetStandupContext:
         ctx = get_standup_context(journal, since)
         assert len(ctx.journal_summaries) == 0
 
-    def test_skips_files_before_since(self, tmp_path: Path) -> None:
+    def test_skips_files_before_since(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         journal = self._make_journal(
             tmp_path,
             [
@@ -119,12 +139,15 @@ class TestGetStandupContext:
                     "timestamp": datetime(2026, 7, 31, 8, tzinfo=timezone.utc),
                 }
             ],
+            monkeypatch,
         )
         since = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
         ctx = get_standup_context(journal, since)
         assert len(ctx.journal_summaries) == 0
 
-    def test_includes_files_after_subday_cutoff(self, tmp_path: Path) -> None:
+    def test_includes_files_after_subday_cutoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         journal = self._make_journal(
             tmp_path,
             [
@@ -135,10 +158,30 @@ class TestGetStandupContext:
                     "timestamp": datetime(2026, 7, 31, 13, tzinfo=timezone.utc),
                 }
             ],
+            monkeypatch,
         )
         since = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
         ctx = get_standup_context(journal, since)
         assert [s.summary for s in ctx.journal_summaries] == ["new work"]
+
+    def test_ignores_mutable_mtime(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        journal = self._make_journal(
+            tmp_path,
+            [
+                {
+                    "date": "2026-07-31",
+                    "session": "s1",
+                    "summary": "old work",
+                    "timestamp": datetime(2026, 7, 31, 8, tzinfo=timezone.utc),
+                }
+            ],
+            monkeypatch,
+        )
+        path = journal / "2026-07-31" / "s1.md"
+        path.touch()
+
+        ctx = get_standup_context(journal, datetime(2026, 7, 31, 12, tzinfo=timezone.utc))
+        assert ctx.journal_summaries == []
 
     def test_empty_journal_dir(self, tmp_path: Path) -> None:
         journal = tmp_path / "journal"

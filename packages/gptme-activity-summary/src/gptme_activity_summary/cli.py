@@ -1043,8 +1043,8 @@ def backfill(ctx: click.Context, from_date: str, to_date: str | None, force: boo
 def standup(since: str, output_format: str, limit: int, include_low_signal: bool) -> None:
     """Generate standup context block from journal outcome summaries.
 
-    Reads journal files modified since --since and extracts **Outcome** lines,
-    filtered to remove internal bookkeeping noise. Output is a structured JSON
+    Reads journal outcomes from sessions completed since --since, filtered to
+    remove internal bookkeeping noise. Output is a structured JSON
     block (or text) suitable for injection into voice standup sessions.
 
     Replaces raw `git log --oneline` context with high-level session outcomes.

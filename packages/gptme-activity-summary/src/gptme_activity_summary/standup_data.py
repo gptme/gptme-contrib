@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from gptme_sessions.store import SessionStore
+
 
 # Phrases whose presence marks a progress entry as internal bookkeeping
 # rather than meaningful standup content (keep narrow — overfitting hurts).
@@ -127,6 +129,36 @@ class StandupContext:
         }
 
 
+def _journal_completion_times(journal_dir: Path) -> dict[Path, datetime]:
+    """Return immutable session completion times keyed by journal path."""
+    workspace = journal_dir.parent.resolve()
+    completion_times: dict[Path, datetime] = {}
+
+    for record in SessionStore().load_all():
+        if not record.journal_path:
+            continue
+        completed_at = record.end_time or record.timestamp
+        if not completed_at:
+            continue
+        try:
+            completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if completed.tzinfo is None:
+            completed = completed.replace(tzinfo=timezone.utc)
+
+        path = Path(record.journal_path)
+        if not path.is_absolute():
+            path = workspace / path
+        path = path.resolve()
+        completed = completed.astimezone(timezone.utc)
+        previous = completion_times.get(path)
+        if previous is None or completed > previous:
+            completion_times[path] = completed
+
+    return completion_times
+
+
 def get_standup_context(
     journal_dir: Path,
     since: datetime,
@@ -136,23 +168,24 @@ def get_standup_context(
 ) -> StandupContext:
     """Extract journal outcome summaries since `since`.
 
-    Scans journal/YYYY-MM-DD/*.md files modified since `since`, extracts
-    **Outcome** lines, filters low-signal entries unless include_low_signal=True,
-    and returns up to `limit` summaries ordered newest-first.
+    Scans journal/YYYY-MM-DD/*.md files whose recorded session completion time
+    is after `since`, filters low-signal entries unless include_low_signal=True,
+    and returns up to `limit` summaries ordered newest-first. Files without a
+    session record use their journal date at midnight UTC, preserving whole-day
+    lookbacks without treating mutable filesystem metadata as occurrence time.
     """
     ctx = StandupContext(since=since)
 
     if not journal_dir.exists():
         return ctx
 
-    candidates: list[tuple[float, Path]] = []
-    since_timestamp = since.astimezone(timezone.utc).timestamp()
+    candidates: list[tuple[datetime, Path]] = []
+    since = since.astimezone(timezone.utc)
+    completion_times = _journal_completion_times(journal_dir)
 
     # Scan only YYYY-MM-DD date directories whose date is >= since (UTC date).
     # Non-date entries (e.g. 'templates/') are skipped.
-    # Filtering by directory date (not file mtime) is semantically correct:
-    # the directory name IS the journal date regardless of when the file was written.
-    since_date_str = since.astimezone(timezone.utc).date().isoformat()
+    since_date_str = since.date().isoformat()
 
     date_dirs = sorted(
         (
@@ -167,15 +200,13 @@ def get_standup_context(
         if date_dir.name < since_date_str:
             break  # all remaining dirs are older; sorted so safe to stop
 
+        fallback_time = datetime.fromisoformat(date_dir.name).replace(tzinfo=timezone.utc)
         for path in date_dir.glob("*.md"):
             if path.name == "self-merges.md":
                 continue
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            if mtime >= since_timestamp:
-                candidates.append((mtime, path))
+            completed = completion_times.get(path.resolve(), fallback_time)
+            if completed >= since:
+                candidates.append((completed, path))
 
     # Newest first
     candidates.sort(key=lambda t: t[0], reverse=True)
