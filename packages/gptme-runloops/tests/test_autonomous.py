@@ -11,6 +11,7 @@ from unittest.mock import patch
 from gptme_runloops.autonomous import (
     AutonomousRun,
     is_capable_backend,
+    parse_cascade_selector_output,
     self_review_cooldown_active,
     self_review_hours_since_last,
 )
@@ -225,3 +226,163 @@ def test_autonomous_timeout():
 
         # Should have 50-minute timeout
         assert run.timeout == 3000
+
+
+# --- parse_cascade_selector_output ---
+
+
+def _parse(data: dict) -> list:  # type: ignore[type-arg]
+    """Parse output string back into a list of 7 tokens."""
+    raw = parse_cascade_selector_output(data)
+    # Split on first 6 spaces (intent_json is the 7th token and may have no spaces
+    # since it uses compact separators, but guard by splitting on max 6)
+    parts = raw.split(" ", 6)
+    assert len(parts) == 7, f"Expected 7 tokens, got {len(parts)}: {raw!r}"
+    return parts
+
+
+def test_parse_cascade_standard_task():
+    data = {
+        "tier": 1,
+        "recommended_scope": "standard",
+        "selector_mode": "",
+        "blocked_tasks": [],
+        "selected": {
+            "id": "my-task",
+            "category": "code",
+            "state": "backlog",
+            "label": "My Task",
+            "reason": "highest priority",
+        },
+    }
+    scope, sel_id, cat, exec_cat, all_blocked, sel_mode, intent_json = _parse(data)
+    assert scope == "standard"
+    assert sel_id == "my-task"
+    assert cat == "code"
+    assert exec_cat == "code"
+    assert all_blocked == "false"
+    assert sel_mode == "-"  # empty sentinel
+    intent = json.loads(intent_json)
+    assert intent["task_id"] == "my-task"
+    assert intent["task_state"] == "backlog"
+    assert "highest priority" in intent["reasons"]
+
+
+def test_parse_cascade_tier3_all_blocked():
+    data = {
+        "tier": 3,
+        "recommended_scope": "quick",
+        "selector_mode": "synthetic_calibration",
+        "blocked_tasks": ["task-a", "task-b"],
+        "selected": {
+            "id": "",
+            "category": "cleanup",
+            "selection_mode": "synthetic_calibration",
+            "execution_surface": {
+                "category": "cleanup",
+                "label": "cleanup surface",
+            },
+        },
+    }
+    scope, sel_id, cat, exec_cat, all_blocked, sel_mode, intent_json = _parse(data)
+    assert scope == "quick"
+    assert all_blocked == "true"
+    assert exec_cat == "cleanup"
+    intent = json.loads(intent_json)
+    assert intent["selection_mode"] == "synthetic_calibration"
+    assert intent["execution_category"] == "cleanup"
+    assert intent["execution_label"] == "cleanup surface"
+
+
+def test_parse_cascade_tier0_assigned_issue():
+    # Tier 0 = assigned GitHub issue: has id but no task 'state'.
+    # task_id should appear in intent; task_state must NOT.
+    data = {
+        "tier": 0,
+        "recommended_scope": "standard",
+        "selector_mode": "task_backed",
+        "blocked_tasks": [],
+        "selected": {
+            "id": "owner/repo#42",
+            "category": "code",
+            "label": "Fix something",
+        },
+    }
+    scope, sel_id, cat, exec_cat, all_blocked, sel_mode, intent_json = _parse(data)
+    assert sel_id == "owner/repo#42"
+    assert all_blocked == "false"
+    intent = json.loads(intent_json)
+    assert intent["task_id"] == "owner/repo#42"
+    assert "task_state" not in intent
+
+
+def test_parse_cascade_optional_task_fields():
+    data = {
+        "tier": 1,
+        "recommended_scope": "extended",
+        "selector_mode": "",
+        "blocked_tasks": [],
+        "selected": {
+            "id": "task-x",
+            "category": "infrastructure",
+            "state": "todo",
+            "state_flow": "activate_before_execution",
+            "next_action": "Do the thing",
+            "entry_actions": ["Open task file", "Claim it"],
+            "upstream_coordination_id": "github:org/repo#5",
+            "suggested_claim": "cascade:task:task-x",
+        },
+    }
+    scope, sel_id, cat, exec_cat, all_blocked, sel_mode, intent_json = _parse(data)
+    assert scope == "extended"
+    intent = json.loads(intent_json)
+    assert intent["task_state_flow"] == "activate_before_execution"
+    assert intent["task_next_action"] == "Do the thing"
+    assert intent["task_entry_actions"] == ["Open task file", "Claim it"]
+    assert intent["upstream_coordination_id"] == "github:org/repo#5"
+    assert intent["suggested_claim"] == "cascade:task:task-x"
+
+
+def test_parse_cascade_minimal_empty_selected():
+    # Degenerate case: empty selector output
+    data: dict = {  # type: ignore[type-arg]
+        "tier": 3,
+        "recommended_scope": "standard",
+        "selector_mode": "",
+        "blocked_tasks": [],
+        "selected": {},
+    }
+    scope, sel_id, cat, exec_cat, all_blocked, sel_mode, intent_json = _parse(data)
+    assert scope == "standard"
+    assert sel_id == ""
+    assert cat == ""
+    assert exec_cat == ""
+    assert all_blocked == "false"  # tier 3 but blocked_tasks is empty
+    assert sel_mode == "-"
+    intent = json.loads(intent_json)
+    assert intent["reasons"] == []
+    assert intent["tier"] == 3
+
+
+def test_parse_cascade_cli_round_trip():
+    """The parse-cascade-json CLI subcommand should produce identical output."""
+    data = {
+        "tier": 1,
+        "recommended_scope": "standard",
+        "selector_mode": "",
+        "blocked_tasks": [],
+        "selected": {
+            "id": "round-trip-task",
+            "category": "code",
+            "state": "backlog",
+            "reasons": ["testing"],
+        },
+    }
+    expected = parse_cascade_selector_output(data)
+    result = subprocess.run(
+        [sys.executable, "-m", "gptme_runloops.autonomous", "parse-cascade-json"],
+        input=json.dumps(data).encode(),
+        capture_output=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.decode().strip() == expected

@@ -43,6 +43,93 @@ def self_review_cooldown_active(state_path: Path, cooldown_hours: float = 6.0) -
     return self_review_hours_since_last(state_path) < cooldown_hours
 
 
+def parse_cascade_selector_output(data: dict) -> str:
+    """Parse cascade-selector JSON output into space-separated shell fields.
+
+    Extracts 7 space-separated tokens for bash ``read -r`` consumption:
+    ``scope selected_id category execution_category all_blocked selector_mode intent_json``
+
+    Mirrors the inline ``python3 -c`` block in autonomous-run.sh that was
+    previously executed inline in a bash process substitution.
+    """
+    tier = data.get("tier", 0)
+    blocked = len(data.get("blocked_tasks", []))
+    all_blocked = "true" if (tier == 3 and blocked > 0) else "false"
+
+    sel: dict = data.get("selected", {})
+    effective = sel
+    execution_surface = sel.get("execution_surface")
+    if (
+        sel.get("selection_mode") == "synthetic_calibration"
+        and isinstance(execution_surface, dict)
+        and execution_surface.get("category")
+    ):
+        effective = execution_surface
+
+    reason_str = sel.get("reason", "")
+    reasons = sel.get("reasons") or ([reason_str] if reason_str else [])
+    intent: dict = {"reasons": reasons, "tier": tier}
+
+    selection_mode = sel.get("selection_mode", "")
+    if selection_mode:
+        intent["selection_mode"] = selection_mode
+
+    execution_category = effective.get("category", "")
+    if selection_mode == "synthetic_calibration" and execution_category:
+        intent["execution_category"] = execution_category
+        execution_label = effective.get("label", "")
+        if execution_label:
+            intent["execution_label"] = execution_label
+        execution_id = effective.get("id", "")
+        if execution_id:
+            intent["execution_id"] = execution_id
+
+    task_state = sel.get("state", "")
+    # Tier 0 = assigned GitHub issue: real demand-side lane with id/label but no
+    # task-file 'state'. Record task_id so factory-ingest-health counts it as demand.
+    # Do NOT set task_state for Tier 0 — an empty task_state keeps the claim gate
+    # from inventing a bogus cascade:task:<issue-id> claim (test_only_task_backed_selections).
+    is_assigned_issue = tier == 0 and bool(sel.get("id"))
+    if task_state or is_assigned_issue:
+        task_id = sel.get("id", "")
+        if task_id:
+            intent["task_id"] = task_id
+        task_label = sel.get("label", "")
+        if task_label:
+            intent["task_label"] = task_label
+        if task_state:
+            intent["task_state"] = task_state
+
+    task_state_flow = sel.get("state_flow", "")
+    if task_state_flow:
+        intent["task_state_flow"] = task_state_flow
+
+    task_next_action = sel.get("next_action", "")
+    if task_next_action:
+        intent["task_next_action"] = task_next_action
+
+    task_entry_actions = sel.get("entry_actions") or []
+    if task_entry_actions:
+        intent["task_entry_actions"] = task_entry_actions
+
+    upstream_coordination_id = sel.get("upstream_coordination_id", "")
+    if upstream_coordination_id:
+        intent["upstream_coordination_id"] = upstream_coordination_id
+
+    suggested_claim = sel.get("suggested_claim", "")
+    if suggested_claim:
+        intent["suggested_claim"] = suggested_claim
+
+    scope = data.get("recommended_scope", "standard")
+    selected_id = sel.get("id", "")
+    category = sel.get("category", "")
+    execution_category_out = execution_category or category
+    selector_mode_out = data.get("selector_mode", "") or "-"
+    intent_json = json.dumps(intent, separators=(",", ":"))
+
+    return f"{scope} {selected_id} {category} {execution_category_out} {all_blocked} {selector_mode_out} {intent_json}"
+
+
 class AutonomousRun(BaseRunLoop):
     """Autonomous operation run loop.
 
@@ -133,11 +220,18 @@ if __name__ == "__main__":
     elif cmd == "self-review-hours":
         state = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("/dev/null")
         print(f"{self_review_hours_since_last(state):.1f}")
+    elif cmd == "parse-cascade-json":
+        # Read cascade-selector JSON from stdin, emit space-separated shell fields.
+        # Usage: echo "$CASCADE_JSON" | python3 -m gptme_runloops.autonomous parse-cascade-json
+        # Logic: parse_cascade_selector_output (tested)
+        data = json.load(sys.stdin)
+        print(parse_cascade_selector_output(data))
     else:
         cmds = [
             "is-capable-backend BACKEND [MODEL]",
             "self-review-cooldown STATE_PATH [COOLDOWN_HOURS]",
             "self-review-hours STATE_PATH",
+            "parse-cascade-json  (reads JSON from stdin)",
         ]
         print(
             f"Usage: python3 -m gptme_runloops.autonomous [{' | '.join(c.split()[0] for c in cmds)}]",
