@@ -339,17 +339,17 @@ def _load_voice_digest(workspace: str | None) -> str | None:
     if not workspace:
         return None
     digest_path = Path(workspace) / "state" / "voice-digest.md"
-    if not digest_path.exists():
-        return None
-    age = time.time() - digest_path.stat().st_mtime
-    if age > _VOICE_DIGEST_MAX_AGE_SECONDS:
-        logger.debug(
-            "voice digest stale (%.0fs > %ds) — skipping",
-            age,
-            _VOICE_DIGEST_MAX_AGE_SECONDS,
-        )
-        return None
     try:
+        if not digest_path.exists():
+            return None
+        age = time.time() - digest_path.stat().st_mtime
+        if age > _VOICE_DIGEST_MAX_AGE_SECONDS:
+            logger.debug(
+                "voice digest stale (%.0fs > %ds) — skipping",
+                age,
+                _VOICE_DIGEST_MAX_AGE_SECONDS,
+            )
+            return None
         return digest_path.read_text(encoding="utf-8")
     except OSError as exc:
         logger.warning("failed to read voice digest %s: %s", digest_path, exc)

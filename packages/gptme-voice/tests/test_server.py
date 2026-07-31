@@ -1729,6 +1729,24 @@ def test_load_voice_digest_returns_none_when_stale(tmp_path: Path) -> None:
     assert _load_voice_digest(str(tmp_path)) is None
 
 
+def test_load_voice_digest_returns_none_when_metadata_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest_path = tmp_path / "state" / "voice-digest.md"
+    digest_path.parent.mkdir(parents=True)
+    digest_path.write_text("## Recent sessions\n")
+    original_stat = Path.stat
+
+    def fail_digest_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if path == digest_path:
+            raise OSError("digest disappeared")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_digest_stat)
+
+    assert _load_voice_digest(str(tmp_path)) is None
+
+
 def test_prepend_activity_digest_includes_guidance_and_content() -> None:
     digest = "## Recent sessions\n- [10:00 UTC] shipped heartbeat widget\n"
     instructions = "You are Bob."
