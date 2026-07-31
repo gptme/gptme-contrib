@@ -360,7 +360,12 @@ async def _fetch_recent_activity_log(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except BaseException:
+            proc.kill()
+            await proc.wait()
+            raise
         lines = stdout.decode().strip().splitlines()
         if not lines:
             return ""

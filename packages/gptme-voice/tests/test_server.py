@@ -1714,6 +1714,27 @@ def test_fetch_recent_activity_log_strips_hash_prefix(
     assert result.startswith("- ")
 
 
+def test_fetch_recent_activity_log_kills_process_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out git subprocess is terminated and reaped."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    fake_proc = MagicMock()
+    fake_proc.communicate = AsyncMock(side_effect=TimeoutError)
+    fake_proc.wait = AsyncMock()
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=fake_proc),
+    )
+
+    result = asyncio.run(_fetch_recent_activity_log("/some/workspace"))
+
+    assert result == ""
+    fake_proc.kill.assert_called_once_with()
+    fake_proc.wait.assert_awaited_once_with()
+
+
 def test_build_session_bootstrap_standup_injects_activity_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
