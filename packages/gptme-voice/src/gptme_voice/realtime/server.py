@@ -320,6 +320,63 @@ def _build_standup_instructions_guidance() -> str:
     )
 
 
+# Stale threshold for the pre-computed voice digest (4 hours).  A digest older
+# than this is too stale to be useful and may mislead the model.
+_VOICE_DIGEST_MAX_AGE_SECONDS = 4 * 3600
+
+
+def _load_voice_digest(workspace: str | None) -> str | None:
+    """Load the pre-computed voice activity digest if one exists and is fresh.
+
+    The digest is written by ``scripts/voice-digest-precompute.py`` (run at
+    autonomous session start via autonomous-fanout.sh).  It contains recent
+    session outcome summaries sourced from journal ``**Outcome**`` lines — the
+    same high-level signal used by the outbound standup brief path.
+
+    Returns None when the workspace is unknown, the file is absent, or the
+    file is older than ``_VOICE_DIGEST_MAX_AGE_SECONDS``.
+    """
+    if not workspace:
+        return None
+    digest_path = Path(workspace) / "state" / "voice-digest.md"
+    if not digest_path.exists():
+        return None
+    age = time.time() - digest_path.stat().st_mtime
+    if age > _VOICE_DIGEST_MAX_AGE_SECONDS:
+        logger.debug(
+            "voice digest stale (%.0fs > %ds) — skipping",
+            age,
+            _VOICE_DIGEST_MAX_AGE_SECONDS,
+        )
+        return None
+    try:
+        return digest_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("failed to read voice digest %s: %s", digest_path, exc)
+        return None
+
+
+def _prepend_activity_digest(digest_text: str, instructions: str) -> str:
+    """Prepend the voice digest to call instructions with guidance to use it.
+
+    Mirrors ``_build_standup_instructions_guidance()`` for the inbound case:
+    the model is told to answer recap questions from the pre-loaded digest
+    instead of spawning a subagent.
+    """
+    guidance = (
+        "ACTIVITY DIGEST (pre-computed — do not read aloud):\n"
+        "- A compact summary of recent work is loaded below. "
+        "Use it to answer 'what did you do today / in the last 12 hours?' "
+        "without spawning a subagent.\n"
+        "- Treat this as of the 'Generated at' timestamp shown in the digest; "
+        "sessions that started after that point are not included.\n"
+        "- For questions about specific task status or anything genuinely absent "
+        "from the digest, you may use the subagent tool for a targeted lookup.\n\n"
+        f"{digest_text.strip()}\n"
+    )
+    return guidance + "\n\n" + instructions
+
+
 def _build_standup_call_instructions(brief_text: str) -> str:
     """Build initial response instructions for a standup call with a pre-generated brief.
 
@@ -935,6 +992,15 @@ class VoiceServer:
                 instructions=f"{handoff_resume_context}\n\n{instructions}",
                 should_greet_first=False,
             )
+
+        # Inject the pre-computed voice activity digest for inbound calls when no
+        # explicit standup_brief was provided.  This ensures Erik's "what did you
+        # do today?" question is answered from the digest rather than a live
+        # subagent lookup (which timed out on 2026-07-28).  Only loaded when the
+        # digest is fresh (< _VOICE_DIGEST_MAX_AGE_SECONDS).
+        activity_digest = _load_voice_digest(self.workspace)
+        if activity_digest and not standup_brief:
+            instructions = _prepend_activity_digest(activity_digest, instructions)
 
         # standup_brief takes priority over recent-call resume: an explicit outbound
         # standup should always deliver the brief, not silently resume a prior session.
