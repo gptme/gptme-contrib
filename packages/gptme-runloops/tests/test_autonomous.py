@@ -8,9 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from gptme_runloops.autonomous import (
     AutonomousRun,
     is_capable_backend,
+    parse_cascade_intent,
     parse_cascade_selector_output,
     self_review_cooldown_active,
     self_review_hours_since_last,
@@ -398,12 +400,115 @@ def test_bob_runtime_invokes_parse_cascade_cli():
         / "autonomous-run.sh"
     )
     if not runtime.exists():
-        # gptme-contrib can be used standalone; the caller belongs to the agent
-        # workspace and is validated when this repository is checked out there.
-        return
+        pytest.skip(
+            "autonomous-run.sh not present; adoption verified in agent-workspace CI"
+        )
 
     source = runtime.read_text()
     integration = source[source.index("_CASCADE_PRESELECT_AGENT=") :]
     integration = integration[: integration.index("_apply_cascade_routing")]
     assert "-m gptme_runloops.autonomous parse-cascade-json" in integration
     assert "json.load(sys.stdin)" not in integration
+
+
+# --- parse_cascade_intent ---
+
+
+def test_parse_cascade_intent_full():
+    data = {
+        "task_id": "my-task",
+        "execution_category": "code",
+        "upstream_coordination_id": "github:owner/repo#42",
+        "task_state": "active",
+    }
+    result = parse_cascade_intent(data)
+    assert result["task_id"] == "my-task"
+    assert result["execution_category"] == "code"
+    assert result["upstream_coordination_id"] == "github:owner/repo#42"
+    assert result["task_state"] == "active"
+
+
+def test_parse_cascade_intent_empty_dict():
+    result = parse_cascade_intent({})
+    assert result == {
+        "task_id": "",
+        "execution_category": "",
+        "upstream_coordination_id": "",
+        "task_state": "",
+    }
+
+
+def test_parse_cascade_intent_partial():
+    result = parse_cascade_intent({"task_id": "foo", "task_state": "todo"})
+    assert result["task_id"] == "foo"
+    assert result["task_state"] == "todo"
+    assert result["execution_category"] == ""
+    assert result["upstream_coordination_id"] == ""
+
+
+def test_parse_cascade_intent_none_values():
+    # Explicit None → empty string (mirrors the `or ''` in the bash inline blocks)
+    result = parse_cascade_intent(
+        {
+            "task_id": None,
+            "execution_category": None,
+            "upstream_coordination_id": None,
+            "task_state": None,
+        }
+    )
+    assert all(v == "" for v in result.values())
+
+
+def test_parse_cascade_intent_returns_strings():
+    # All values must be plain strings regardless of input type
+    result = parse_cascade_intent({"task_id": 42, "task_state": True})
+    assert isinstance(result["task_id"], str)
+    assert isinstance(result["task_state"], str)
+
+
+# --- parse-cascade-intent CLI ---
+
+
+def test_cli_parse_cascade_intent_full():
+    data = {
+        "task_id": "test-task",
+        "execution_category": "infrastructure",
+        "upstream_coordination_id": "github:gptme/gptme#123",
+        "task_state": "todo",
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "gptme_runloops.autonomous", "parse-cascade-intent"],
+        input=json.dumps(data),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    parts = result.stdout.strip().split(" ", 3)
+    assert len(parts) == 4
+    assert parts[0] == "test-task"
+    assert parts[1] == "infrastructure"
+    assert parts[2] == "github:gptme/gptme#123"
+    assert parts[3] == "todo"
+
+
+def test_cli_parse_cascade_intent_empty_json():
+    result = subprocess.run(
+        [sys.executable, "-m", "gptme_runloops.autonomous", "parse-cascade-intent"],
+        input="{}",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    # 4 empty tokens → 3 spaces; bash `read -r` will assign all as empty strings
+    assert result.stdout.rstrip("\n") == "   "
+
+
+def test_cli_parse_cascade_intent_invalid_json():
+    result = subprocess.run(
+        [sys.executable, "-m", "gptme_runloops.autonomous", "parse-cascade-intent"],
+        input="not json",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0  # graceful: no crash on bad input
+    assert result.stdout.rstrip("\n") == "   "  # empty fields
