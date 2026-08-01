@@ -760,17 +760,21 @@ def test_check_assigned_issues_concurrent_claim_is_emitted_once(workspace):
     def check() -> None:
         run = ProjectMonitoringRun(workspace)
         barrier.wait()
-        with patch(
-            "gptme_runloops.project_monitoring.subprocess.run",
-            return_value=MagicMock(returncode=0, stdout=issue_data),
-        ):
-            results.append(run.check_assigned_issues("gptme/gptme"))
+        results.append(run.check_assigned_issues("gptme/gptme"))
 
-    threads = [threading.Thread(target=check) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    # Patch in main thread before spawning to avoid concurrent-patch race:
+    # two threads patching the same attribute simultaneously can leave the mock
+    # installed after both context managers exit (Thread B saves Thread A's mock
+    # as "original" and restores it on __exit__, leaking it globally).
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout=issue_data),
+    ):
+        threads = [threading.Thread(target=check) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
 
     assert sorted(len(items) for items in results) == [0, 1]
 
@@ -786,17 +790,26 @@ def test_check_notifications_concurrent_claim_is_emitted_once(workspace):
     )
     barrier = threading.Barrier(2)
     results: list[list[WorkItem]] = []
+    mock_result = MagicMock(returncode=0, stdout=json.dumps([notification]))
 
     def check() -> None:
         run = ProjectMonitoringRun(workspace)
         barrier.wait()
-        results.append(_run_check_notifications(run, [notification]))
+        # Call check_notifications() directly rather than via _run_check_notifications
+        # so the patch lives in the main thread (see test_check_assigned_issues_concurrent
+        # for the rationale).
+        results.append(run.check_notifications())
 
-    threads = [threading.Thread(target=check) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    # Patch before spawning threads — same race-avoidance rationale as above.
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run",
+        return_value=mock_result,
+    ):
+        threads = [threading.Thread(target=check) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
 
     assert sorted(len(items) for items in results) == [0, 1]
 
