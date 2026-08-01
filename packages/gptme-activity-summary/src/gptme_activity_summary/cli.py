@@ -1017,6 +1017,66 @@ def backfill(ctx: click.Context, from_date: str, to_date: str | None, force: boo
 
 
 @cli.command()
+@click.option(
+    "--since",
+    default="24h",
+    help="Lookback window: '24h', '48h', '3d', or ISO timestamp (default: 24h)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    default="json",
+    type=click.Choice(["json", "text"]),
+    help="Output format (default: json)",
+)
+@click.option(
+    "--limit",
+    default=8,
+    type=click.IntRange(min=0),
+    help="Maximum number of journal summaries to include (default: 8)",
+)
+@click.option(
+    "--include-low-signal",
+    is_flag=True,
+    help="Include low-signal entries (typecheck, lint, etc.) as fallback",
+)
+def standup(since: str, output_format: str, limit: int, include_low_signal: bool) -> None:
+    """Generate standup context block from journal outcome summaries.
+
+    Reads journal outcomes from sessions completed since --since, filtered to
+    remove internal bookkeeping noise. Output is a structured JSON
+    block (or text) suitable for injection into voice standup sessions.
+
+    Replaces raw `git log --oneline` context with high-level session outcomes.
+    """
+    import json as _json
+
+    from .standup_data import StandupContext, get_standup_context, parse_since
+
+    try:
+        since_dt = parse_since(since)
+    except (ValueError, TypeError) as e:
+        raise click.ClickException(f"Invalid --since value '{since}': {e}") from e
+
+    ctx: StandupContext = get_standup_context(
+        JOURNAL_DIR,
+        since_dt,
+        limit=limit,
+        include_low_signal=include_low_signal,
+    )
+
+    if output_format == "json":
+        click.echo(_json.dumps(ctx.to_dict(), indent=2))
+    else:
+        if not ctx.journal_summaries:
+            click.echo(f"No journal summaries found since {since}.")
+            return
+        click.echo(f"Recent work since {since}:")
+        for s in ctx.journal_summaries:
+            click.echo(f"  [{s.date}] {s.summary}")
+
+
+@cli.command()
 def stats() -> None:
     """Show statistics about journal entries."""
     click.echo("Journal Statistics")
