@@ -912,6 +912,12 @@ class AgentEmail:
                 html_body = markdown.markdown(
                     fix_list_spacing(body),
                     extensions=["extra", "codehilite", "sane_lists"],
+                    # guess_lang triggers pygments' guess_lexer on every
+                    # untagged code block, which raises KeyError on a broken
+                    # lexer-cache entry (pygments 2.20.0: 'Debian Sources
+                    # file') and fails the whole send. Language guessing is
+                    # worthless for email anyway.
+                    extension_configs={"codehilite": {"guess_lang": False}},
                 )
                 # Use quoted-printable instead of base64 to reduce spam
                 # score. MIMEText._charset accepts Charset objects at
