@@ -348,6 +348,106 @@ def render_tree_ascii(
     return "\n".join(lines)
 
 
+def render_dag_mermaid(
+    nodes: dict[str, DependencyNode],
+    unblocking_power: dict[str, int] | None = None,
+    filter_states: set[str] | None = None,
+) -> str:
+    """Render the full workspace dependency DAG as a Mermaid graph.
+
+    Produces a ``graph TD`` diagram showing all tasks and their dependency
+    relationships.  The output can be embedded directly in Mermaid-aware
+    renderers such as gptme-webui or GitHub Markdown.
+
+    Args:
+        nodes: Dependency graph (from ``build_dependency_graph``).
+        unblocking_power: Optional mapping of task name → power score.  When
+            provided, scores are appended to node labels.
+        filter_states: When non-None, only tasks whose ``state`` is in this set
+            are included.  Edges that cross the filtered boundary are dropped.
+
+    Returns:
+        Mermaid graph definition string (empty string when nothing to render).
+    """
+    if not nodes:
+        return ""
+
+    def sanitize_id(name: str) -> str:
+        return name.replace("-", "_").replace("/", "_").replace(".", "_").replace(":", "_")[:40]
+
+    # State → CSS class mapping (matches the classDef blocks below)
+    _state_class = {
+        "done": "done",
+        "cancelled": "cancelled",
+        "active": "active",
+        "ready_for_review": "review",
+        "waiting": "waiting",
+    }
+
+    visible: set[str] = set()
+    for name, node in nodes.items():
+        if node.is_external:
+            continue
+        if filter_states is not None and node.state not in filter_states:
+            continue
+        visible.add(name)
+
+    if not visible:
+        return ""
+
+    lines: list[str] = ["graph TD"]
+    emitted_edges: set[tuple[str, str]] = set()
+
+    # Node definitions
+    for name in sorted(visible):
+        node = nodes[name]
+        node_id = sanitize_id(name)
+        label = name
+        if unblocking_power and unblocking_power.get(name, 0) > 0:
+            label = f"{name} [{unblocking_power[name]}↑]"
+        lines.append(f'    {node_id}["{label}<br/>({node.state})"]')
+
+    # Edges (only between visible nodes)
+    for name in sorted(visible):
+        node = nodes[name]
+        node_id = sanitize_id(name)
+        for req in node.requires:
+            if req.name in visible:
+                req_id = sanitize_id(req.name)
+                edge = (req_id, node_id)
+                if edge not in emitted_edges:
+                    emitted_edges.add(edge)
+                    lines.append(f"    {req_id} --> {node_id}")
+
+    # Class assignments
+    class_members: dict[str, list[str]] = {}
+    for name in sorted(visible):
+        node = nodes[name]
+        css = _state_class.get(node.state)
+        if css:
+            class_members.setdefault(css, []).append(sanitize_id(name))
+
+    if class_members:
+        lines.append("")
+        for css, members in sorted(class_members.items()):
+            lines.append(f"    class {','.join(members)} {css}")
+
+    # Class definitions
+    lines.extend(
+        [
+            "",
+            "    classDef done fill:#90EE90",
+            "    classDef cancelled fill:#FFB6C1",
+            "    classDef active fill:#87CEEB",
+            "    classDef review fill:#FFD700",
+            "    classDef waiting fill:#DDA0DD",
+            "    classDef blocked fill:#FF6347",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
 def render_tree_mermaid(
     root_name: str,
     nodes: dict[str, DependencyNode],
