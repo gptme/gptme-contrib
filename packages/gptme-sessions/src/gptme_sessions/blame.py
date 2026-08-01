@@ -20,6 +20,7 @@ Phase 2 (GitHub refs):
 from __future__ import annotations
 
 import json
+import mmap
 import re
 import subprocess
 import sys
@@ -470,9 +471,6 @@ _WRITE_TOOLS = frozenset(
     {"Write", "Edit", "MultiEdit", "str_replace_editor", "NotebookEdit", "create"}
 )
 
-#: Max seconds for the grep prefilter per source directory.
-_GREP_TIMEOUT = 60
-
 
 @dataclass
 class TrajectoryHit:
@@ -543,25 +541,34 @@ def _traj_path_matches(traj_path: str, target_rel: str, target_abs: str | None) 
 
 
 def _traj_candidate_files(basename: str, sources: list[Path]) -> list[Path]:
-    """Return trajectory JSONL files whose content mentions ``basename``."""
+    """Return trajectory JSONL files whose content mentions ``basename``.
+
+    Uses memory-mapped binary scanning so large trajectory files are not fully
+    loaded into RAM — the OS pages in only the parts it needs to find the needle.
+    Falls back to a chunked read for empty files (mmap rejects zero-length files).
+    """
     files: list[Path] = []
     seen: set[str] = set()
+    needle = basename.encode()
     for src in sources:
         if not src.exists():
             continue
-        try:
-            proc = subprocess.run(
-                ["grep", "-rlF", "--include=*.jsonl", basename, str(src)],
-                capture_output=True,
-                text=True,
-                timeout=_GREP_TIMEOUT,
-            )
-        except (subprocess.SubprocessError, OSError):
-            continue
-        for p in proc.stdout.splitlines():
-            if p and p not in seen:
-                seen.add(p)
-                files.append(Path(p))
+        for jsonl_path in src.rglob("*.jsonl"):
+            key = str(jsonl_path)
+            if key in seen:
+                continue
+            try:
+                with jsonl_path.open("rb") as fh:
+                    try:
+                        with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                            found = mm.find(needle) != -1
+                    except ValueError:
+                        found = False  # empty file — needle cannot be present
+                    if found:
+                        seen.add(key)
+                        files.append(jsonl_path)
+            except OSError:
+                continue
     return files
 
 
