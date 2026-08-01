@@ -7,6 +7,7 @@ from gptodo.deptree import (
     DependencyNode,
     build_dependency_graph,
     compute_unblocking_power,
+    render_dag_mermaid,
     render_full_dag_ascii,
 )
 from gptodo.utils import SubtaskCount, TaskInfo
@@ -262,3 +263,145 @@ class TestRenderFullDagAscii:
         assert result.startswith("── No dependencies ──")
         assert "active-child" in result
         assert "done-base" not in result
+
+
+# ---------------------------------------------------------------------------
+# render_dag_mermaid tests
+# ---------------------------------------------------------------------------
+
+
+class TestRenderDagMermaid:
+    def test_empty_graph(self):
+        """Empty graph returns empty string."""
+        nodes: dict[str, DependencyNode] = {}
+        result = render_dag_mermaid(nodes)
+        assert result == ""
+
+    def test_isolated_tasks_included(self):
+        """Isolated tasks appear in the Mermaid output."""
+        tasks = [make_task("alpha"), make_task("beta")]
+        nodes = build_dependency_graph(tasks)
+        result = render_dag_mermaid(nodes)
+        assert "graph TD" in result
+        assert "alpha" in result
+        assert "beta" in result
+
+    def test_edge_rendered(self):
+        """A dependency edge appears as an arrow in the Mermaid output."""
+        tasks = [
+            make_task("base"),
+            make_task("child", requires=["base"]),
+        ]
+        nodes = build_dependency_graph(tasks)
+        result = render_dag_mermaid(nodes)
+        assert "-->" in result
+        # base must be referenced as the arrow source, child as target
+        assert "base" in result
+        assert "child" in result
+
+    def test_filter_states(self):
+        """filter_states excludes tasks not in the set."""
+        tasks = [
+            make_task("active-task", state="active"),
+            make_task("done-task", state="done"),
+        ]
+        nodes = build_dependency_graph(tasks)
+        result = render_dag_mermaid(nodes, filter_states={"active"})
+        assert "active-task" in result
+        assert "done-task" not in result
+
+    def test_empty_filter_states_returns_empty(self):
+        """An empty filter set produces no output."""
+        tasks = [make_task("done-task", state="done")]
+        nodes = build_dependency_graph(tasks)
+        result = render_dag_mermaid(nodes, filter_states=set())
+        assert result == ""
+
+    def test_cross_boundary_edge_dropped(self):
+        """Edges crossing the filter boundary are suppressed."""
+        tasks = [
+            make_task("done-base", state="done"),
+            make_task("active-child", state="active", requires=["done-base"]),
+        ]
+        nodes = build_dependency_graph(tasks)
+        result = render_dag_mermaid(nodes, filter_states={"active"})
+        # done-base filtered out, so the edge must not appear
+        assert "-->" not in result
+        assert "done-base" not in result
+        assert "active-child" in result
+
+    def test_power_scores_shown(self):
+        """Unblocking power scores appear in node labels when provided."""
+        tasks = [
+            make_task("base"),
+            make_task("child", requires=["base"]),
+        ]
+        nodes = build_dependency_graph(tasks)
+        power = compute_unblocking_power(nodes)
+        result = render_dag_mermaid(nodes, unblocking_power=power)
+        # base has power 1, should appear in its label
+        assert "1↑" in result
+
+    def test_power_scores_absent_when_none(self):
+        """No power annotation in node labels when unblocking_power is None."""
+        tasks = [make_task("a"), make_task("b", requires=["a"])]
+        nodes = build_dependency_graph(tasks)
+        result = render_dag_mermaid(nodes, unblocking_power=None)
+        assert "↑" not in result
+
+    def test_classdefs_present(self):
+        """ClassDef styling lines appear in the output."""
+        tasks = [make_task("task", state="active")]
+        nodes = build_dependency_graph(tasks)
+        result = render_dag_mermaid(nodes)
+        assert "classDef active" in result
+        assert "classDef done" in result
+
+    def test_class_assignment_by_state(self):
+        """Tasks receive a class assignment matching their state."""
+        tasks = [make_task("atask", state="active")]
+        nodes = build_dependency_graph(tasks)
+        result = render_dag_mermaid(nodes)
+        assert "class" in result
+        assert "active" in result
+
+    def test_colliding_normalized_names_have_distinct_ids(self):
+        """Names that normalize alike must remain distinct Mermaid nodes."""
+        tasks = [
+            make_task("a-b"),
+            make_task("a_b"),
+            make_task("child", requires=["a-b", "a_b"]),
+        ]
+        nodes = build_dependency_graph(tasks)
+
+        result = render_dag_mermaid(nodes)
+        definitions = [line for line in result.splitlines() if '<br/>(active)"' in line]
+        node_ids = [line.strip().split("[", 1)[0] for line in definitions]
+
+        assert len(definitions) == 3
+        assert len(set(node_ids)) == 3
+        assert result.count(" --> ") == 2
+
+    def test_long_names_with_same_prefix_have_distinct_ids(self):
+        """Long names sharing a prefix must not collide through truncation."""
+        prefix = "a" * 80
+        tasks = [make_task(f"{prefix}-one"), make_task(f"{prefix}-two")]
+        nodes = build_dependency_graph(tasks)
+
+        result = render_dag_mermaid(nodes)
+        definitions = [line for line in result.splitlines() if '<br/>(active)"' in line]
+        node_ids = [line.strip().split("[", 1)[0] for line in definitions]
+
+        assert len(definitions) == 2
+        assert len(set(node_ids)) == 2
+
+    def test_mermaid_significant_label_characters_are_escaped(self):
+        """Arbitrary task names cannot terminate the quoted Mermaid label."""
+        name = 'task "quoted" [bracket] <tag>\nnext'
+        nodes = build_dependency_graph([make_task(name)])
+
+        result = render_dag_mermaid(nodes)
+
+        assert name not in result
+        assert "task &quot;quoted&quot; [bracket] &lt;tag&gt;&#10;next" in result
+        assert "\nnext" not in result

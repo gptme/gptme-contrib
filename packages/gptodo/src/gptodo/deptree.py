@@ -7,6 +7,8 @@ Also provides unblocking power computation for priority scoring.
 """
 
 from dataclasses import dataclass, field
+from hashlib import sha256
+from html import escape
 from pathlib import Path
 
 from .utils import TaskInfo, load_tasks
@@ -344,6 +346,111 @@ def render_tree_ascii(
         for i, dep in enumerate(root.required_by):
             is_last = i == len(root.required_by) - 1
             render_node(dep, "    ", is_last, 1, "down")
+
+    return "\n".join(lines)
+
+
+def render_dag_mermaid(
+    nodes: dict[str, DependencyNode],
+    unblocking_power: dict[str, int] | None = None,
+    filter_states: set[str] | None = None,
+) -> str:
+    """Render the full workspace dependency DAG as a Mermaid graph.
+
+    Produces a ``graph TD`` diagram showing all tasks and their dependency
+    relationships.  The output can be embedded directly in Mermaid-aware
+    renderers such as gptme-webui or GitHub Markdown.
+
+    Args:
+        nodes: Dependency graph (from ``build_dependency_graph``).
+        unblocking_power: Optional mapping of task name → power score.  When
+            provided, scores are appended to node labels.
+        filter_states: When non-None, only tasks whose ``state`` is in this set
+            are included.  Edges that cross the filtered boundary are dropped.
+
+    Returns:
+        Mermaid graph definition string (empty string when nothing to render).
+    """
+    if not nodes:
+        return ""
+
+    def mermaid_id(name: str) -> str:
+        """Return a deterministic, collision-resistant Mermaid identifier."""
+        return f"task_{sha256(name.encode()).hexdigest()}"
+
+    def mermaid_label(text: str) -> str:
+        """Escape arbitrary task text for a quoted Mermaid HTML label."""
+        return escape(text, quote=True).replace("\n", "&#10;").replace("\r", "&#13;")
+
+    # State → CSS class mapping (matches the classDef blocks below)
+    _state_class = {
+        "done": "done",
+        "cancelled": "cancelled",
+        "active": "active",
+        "ready_for_review": "review",
+        "waiting": "waiting",
+    }
+
+    visible: set[str] = set()
+    for name, node in nodes.items():
+        if node.is_external:
+            continue
+        if filter_states is not None and node.state not in filter_states:
+            continue
+        visible.add(name)
+
+    if not visible:
+        return ""
+
+    lines: list[str] = ["graph TD"]
+    emitted_edges: set[tuple[str, str]] = set()
+
+    # Node definitions
+    for name in sorted(visible):
+        node = nodes[name]
+        node_id = mermaid_id(name)
+        label = name
+        if unblocking_power and unblocking_power.get(name, 0) > 0:
+            label = f"{name} [{unblocking_power[name]}↑]"
+        lines.append(f'    {node_id}["{mermaid_label(label)}<br/>({mermaid_label(node.state)})"]')
+
+    # Edges (only between visible nodes)
+    for name in sorted(visible):
+        node = nodes[name]
+        node_id = mermaid_id(name)
+        for req in node.requires:
+            if req.name in visible:
+                req_id = mermaid_id(req.name)
+                edge = (req_id, node_id)
+                if edge not in emitted_edges:
+                    emitted_edges.add(edge)
+                    lines.append(f"    {req_id} --> {node_id}")
+
+    # Class assignments
+    class_members: dict[str, list[str]] = {}
+    for name in sorted(visible):
+        node = nodes[name]
+        css = _state_class.get(node.state)
+        if css:
+            class_members.setdefault(css, []).append(mermaid_id(name))
+
+    if class_members:
+        lines.append("")
+        for css, members in sorted(class_members.items()):
+            lines.append(f"    class {','.join(members)} {css}")
+
+    # Class definitions
+    lines.extend(
+        [
+            "",
+            "    classDef done fill:#90EE90",
+            "    classDef cancelled fill:#FFB6C1",
+            "    classDef active fill:#87CEEB",
+            "    classDef review fill:#FFD700",
+            "    classDef waiting fill:#DDA0DD",
+            "    classDef blocked fill:#FF6347",
+        ]
+    )
 
     return "\n".join(lines)
 

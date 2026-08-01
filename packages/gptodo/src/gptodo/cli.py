@@ -62,6 +62,7 @@ from gptodo.deptree import (
     compute_unblocking_power,
     detect_circular_dependencies,
     get_dependency_tree,
+    render_dag_mermaid,
     render_full_dag_ascii,
 )
 
@@ -5670,19 +5671,27 @@ def dep_check(output_json: bool):
     flag_value=False,
     help="Hide unblocking power scores",
 )
-def dep_dag(state: tuple[str, ...], show_power: bool):
+@click.option(
+    "--format",
+    "-f",
+    "fmt",
+    type=click.Choice(["ascii", "mermaid"]),
+    default="ascii",
+    help="Output format: ascii (default) or mermaid (for webui / Markdown embedding)",
+)
+def dep_dag(state: tuple[str, ...], show_power: bool, fmt: str):
     """Show the full workspace dependency graph.
 
-    Renders all tasks with their dependency relationships as an ASCII graph,
-    with optional unblocking power scores showing which tasks unlock the most
-    downstream work.
+    Renders all tasks with their dependency relationships, with optional
+    unblocking power scores showing which tasks unlock the most downstream work.
 
     Examples:
 
     \b
-        gptodo dep dag                    # Full graph, non-terminal tasks
-        gptodo dep dag --state active     # Active tasks only
-        gptodo dep dag --no-power         # Hide unblocking power scores
+        gptodo dep dag                        # Full ASCII graph, non-terminal tasks
+        gptodo dep dag --state active         # Active tasks only
+        gptodo dep dag --no-power             # Hide unblocking power scores
+        gptodo dep dag --format mermaid       # Mermaid output (webui / Markdown)
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -5706,6 +5715,18 @@ def dep_dag(state: tuple[str, ...], show_power: bool):
         }
 
     power = compute_unblocking_power(nodes) if show_power else None
+
+    if fmt == "mermaid":
+        dag = render_dag_mermaid(nodes, unblocking_power=power, filter_states=filter_states)
+        if not dag.strip():
+            console.print("[yellow]No tasks with dependencies found.[/]")
+            return
+        title = "Workspace Dependency DAG"
+        if filter_states:
+            title += f" ({', '.join(sorted(filter_states))})"
+        console.print(f"[bold]{title}[/]\n")
+        console.print(f"```mermaid\n{dag}\n```")
+        return
 
     dag = render_full_dag_ascii(nodes, unblocking_power=power, filter_states=filter_states)
 
