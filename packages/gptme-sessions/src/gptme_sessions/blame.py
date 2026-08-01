@@ -470,9 +470,6 @@ _WRITE_TOOLS = frozenset(
     {"Write", "Edit", "MultiEdit", "str_replace_editor", "NotebookEdit", "create"}
 )
 
-#: Max seconds for the grep prefilter per source directory.
-_GREP_TIMEOUT = 60
-
 
 @dataclass
 class TrajectoryHit:
@@ -543,25 +540,28 @@ def _traj_path_matches(traj_path: str, target_rel: str, target_abs: str | None) 
 
 
 def _traj_candidate_files(basename: str, sources: list[Path]) -> list[Path]:
-    """Return trajectory JSONL files whose content mentions ``basename``."""
+    """Return trajectory JSONL files whose content mentions ``basename``.
+
+    Uses Python-native binary scanning instead of a grep subprocess to avoid
+    fork failures under high load (e.g. in a full test suite run).
+    """
     files: list[Path] = []
     seen: set[str] = set()
+    needle = basename.encode()
     for src in sources:
         if not src.exists():
             continue
-        try:
-            proc = subprocess.run(
-                ["grep", "-rlF", "--include=*.jsonl", basename, str(src)],
-                capture_output=True,
-                text=True,
-                timeout=_GREP_TIMEOUT,
-            )
-        except (subprocess.SubprocessError, OSError):
-            continue
-        for p in proc.stdout.splitlines():
-            if p and p not in seen:
-                seen.add(p)
-                files.append(Path(p))
+        for jsonl_path in src.rglob("*.jsonl"):
+            key = str(jsonl_path)
+            if key in seen:
+                continue
+            try:
+                with jsonl_path.open("rb") as fh:
+                    if needle in fh.read():
+                        seen.add(key)
+                        files.append(jsonl_path)
+            except OSError:
+                continue
     return files
 
 
