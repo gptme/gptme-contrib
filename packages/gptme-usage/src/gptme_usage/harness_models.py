@@ -410,8 +410,12 @@ _CACHE_PRICING_PROVIDER: dict[tuple[str, str], str] = {
     ("claude-code", "opus"): "anthropic",
     ("claude-code", "sonnet"): "anthropic",
     ("claude-code", "fable-5"): "anthropic",
+    # copilot-cli: both full model names (for existing session records) and short
+    # aliases (for HARNESS_TIERS canonical keys after 2026-08-01 naming alignment).
     ("copilot-cli", "claude-opus-4.6"): "anthropic",
+    ("copilot-cli", "opus"): "anthropic",
     ("copilot-cli", "claude-sonnet-4.6"): "anthropic",
+    ("copilot-cli", "sonnet"): "anthropic",
     ("codex", "gpt-5.4"): "openai",
     ("codex", "gpt-5.5"): "openai",
     ("copilot-cli", "gpt-5.4"): "openai",
@@ -506,8 +510,15 @@ SUBSCRIPTION_BACKED_MODELS: set[tuple[str, str]] = {
     ("grok-build", "grok-build"),
     ("codex", "gpt-5.4"),
     ("codex", "gpt-5.5"),
+    # copilot-cli: both full model name (for pricing-table lookups from existing
+    # session records, where model="claude-sonnet-4.6") and short alias (to match
+    # HARNESS_TIERS canonical keys after the 2026-08-01 naming alignment). Once
+    # harness-quota.toml and dispatch scripts are updated to short aliases, the
+    # full-name entries below can be removed.
     ("copilot-cli", "claude-opus-4.6"),
+    ("copilot-cli", "opus"),
     ("copilot-cli", "claude-sonnet-4.6"),
+    ("copilot-cli", "sonnet"),
     ("copilot-cli", "gpt-5.4"),
     ("gptme", "gpt-5.4"),
     ("gptme", "gpt-5.5"),
