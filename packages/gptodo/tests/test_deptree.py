@@ -364,3 +364,44 @@ class TestRenderDagMermaid:
         result = render_dag_mermaid(nodes)
         assert "class" in result
         assert "active" in result
+
+    def test_colliding_normalized_names_have_distinct_ids(self):
+        """Names that normalize alike must remain distinct Mermaid nodes."""
+        tasks = [
+            make_task("a-b"),
+            make_task("a_b"),
+            make_task("child", requires=["a-b", "a_b"]),
+        ]
+        nodes = build_dependency_graph(tasks)
+
+        result = render_dag_mermaid(nodes)
+        definitions = [line for line in result.splitlines() if '<br/>(active)"' in line]
+        node_ids = [line.strip().split("[", 1)[0] for line in definitions]
+
+        assert len(definitions) == 3
+        assert len(set(node_ids)) == 3
+        assert result.count(" --> ") == 2
+
+    def test_long_names_with_same_prefix_have_distinct_ids(self):
+        """Long names sharing a prefix must not collide through truncation."""
+        prefix = "a" * 80
+        tasks = [make_task(f"{prefix}-one"), make_task(f"{prefix}-two")]
+        nodes = build_dependency_graph(tasks)
+
+        result = render_dag_mermaid(nodes)
+        definitions = [line for line in result.splitlines() if '<br/>(active)"' in line]
+        node_ids = [line.strip().split("[", 1)[0] for line in definitions]
+
+        assert len(definitions) == 2
+        assert len(set(node_ids)) == 2
+
+    def test_mermaid_significant_label_characters_are_escaped(self):
+        """Arbitrary task names cannot terminate the quoted Mermaid label."""
+        name = 'task "quoted" [bracket] <tag>\nnext'
+        nodes = build_dependency_graph([make_task(name)])
+
+        result = render_dag_mermaid(nodes)
+
+        assert name not in result
+        assert "task &quot;quoted&quot; [bracket] &lt;tag&gt;&#10;next" in result
+        assert "\nnext" not in result

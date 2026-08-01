@@ -7,6 +7,8 @@ Also provides unblocking power computation for priority scoring.
 """
 
 from dataclasses import dataclass, field
+from hashlib import sha256
+from html import escape
 from pathlib import Path
 
 from .utils import TaskInfo, load_tasks
@@ -372,8 +374,13 @@ def render_dag_mermaid(
     if not nodes:
         return ""
 
-    def sanitize_id(name: str) -> str:
-        return name.replace("-", "_").replace("/", "_").replace(".", "_").replace(":", "_")[:40]
+    def mermaid_id(name: str) -> str:
+        """Return a deterministic, collision-resistant Mermaid identifier."""
+        return f"task_{sha256(name.encode()).hexdigest()}"
+
+    def mermaid_label(text: str) -> str:
+        """Escape arbitrary task text for a quoted Mermaid HTML label."""
+        return escape(text, quote=True).replace("\n", "&#10;").replace("\r", "&#13;")
 
     # State → CSS class mapping (matches the classDef blocks below)
     _state_class = {
@@ -401,19 +408,19 @@ def render_dag_mermaid(
     # Node definitions
     for name in sorted(visible):
         node = nodes[name]
-        node_id = sanitize_id(name)
+        node_id = mermaid_id(name)
         label = name
         if unblocking_power and unblocking_power.get(name, 0) > 0:
             label = f"{name} [{unblocking_power[name]}↑]"
-        lines.append(f'    {node_id}["{label}<br/>({node.state})"]')
+        lines.append(f'    {node_id}["{mermaid_label(label)}<br/>({mermaid_label(node.state)})"]')
 
     # Edges (only between visible nodes)
     for name in sorted(visible):
         node = nodes[name]
-        node_id = sanitize_id(name)
+        node_id = mermaid_id(name)
         for req in node.requires:
             if req.name in visible:
-                req_id = sanitize_id(req.name)
+                req_id = mermaid_id(req.name)
                 edge = (req_id, node_id)
                 if edge not in emitted_edges:
                     emitted_edges.add(edge)
@@ -425,7 +432,7 @@ def render_dag_mermaid(
         node = nodes[name]
         css = _state_class.get(node.state)
         if css:
-            class_members.setdefault(css, []).append(sanitize_id(name))
+            class_members.setdefault(css, []).append(mermaid_id(name))
 
     if class_members:
         lines.append("")
