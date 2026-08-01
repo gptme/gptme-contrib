@@ -3,8 +3,11 @@
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import parseaddr
+from pathlib import Path
 
-from gptmail.lib import _format_address_header, _is_html, _utf8_qp
+import pytest
+
+from gptmail.lib import AgentEmail, _format_address_header, _is_html, _utf8_qp
 
 
 def test_is_html_detects_html():
@@ -92,6 +95,41 @@ def test_format_address_header_bare_address():
     value = _format_address_header("recipient@example.com")
     _, addr = parseaddr(value)
     assert addr == "recipient@example.com"
+
+
+@pytest.fixture
+def email_agent(tmp_path: Path) -> AgentEmail:
+    email_dir = tmp_path / "email"
+    for subdir in ["inbox", "sent", "archive", "drafts", "filters"]:
+        (email_dir / subdir).mkdir(parents=True, exist_ok=True)
+    return AgentEmail(tmp_path, own_email="sender@example.com")
+
+
+def test_send_disables_code_language_guessing(
+    email_agent: AgentEmail, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Untagged code blocks must not invoke Pygments lexer guessing."""
+    import gptmail.lib as lib
+
+    def fail_if_language_guessed(*args, **kwargs):
+        raise AssertionError("Pygments lexer guessing should be disabled")
+
+    monkeypatch.setattr(
+        "markdown.extensions.codehilite.guess_lexer",
+        fail_if_language_guessed,
+    )
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "*")
+    monkeypatch.setattr(email_agent, "_validate_msmtp_config", lambda: True)
+    monkeypatch.setattr(email_agent.rate_limiter, "can_proceed", lambda: True)
+    monkeypatch.setattr(lib.subprocess, "run", lambda *args, **kwargs: None)
+
+    message_id = email_agent.compose(
+        "recipient@example.com",
+        "Code sample",
+        "```\napt install gptme\n```\n\n```python\nprint('tagged')\n```",
+    )
+
+    email_agent.send(message_id)
 
 
 def test_send_to_header_non_ascii_name_is_deliverable(tmp_path, monkeypatch):
