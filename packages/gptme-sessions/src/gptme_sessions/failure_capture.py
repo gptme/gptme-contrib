@@ -8,6 +8,7 @@ from pathlib import Path
 
 # Coarse taxonomy for operator-pulse / bandit post-mortems.
 FAILURE_REASON_AUTH = "auth"
+FAILURE_REASON_INVALID_REQUEST = "invalid_request"
 FAILURE_REASON_NONZERO = "nonzero_exit_unclassified"
 FAILURE_REASON_PRE_RESPONSE = "pre_response_api_failure"
 FAILURE_REASON_RATE_LIMIT = "rate_limit"
@@ -139,9 +140,15 @@ def classify_failure_reason(
         lower = error_text.lower()
         if ("rate" in lower and "limit" in lower) or "429" in error_text:
             return FAILURE_REASON_RATE_LIMIT
+        # Check for invalid_request before auth: a 400 invalid_request_error (e.g.
+        # deepseek tool_calls without responses) must not be misclassified as auth.
+        if "invalid_request_error" in lower or "invalid_request" in lower:
+            return FAILURE_REASON_INVALID_REQUEST
+        # Auth check: use specific patterns only — bare "auth" matches lesson names
+        # like "Auth Blueprint" injected into the gptme startup log / stderr tail.
         if (
-            "auth" in lower
-            or "authentication" in lower
+            "authentication" in lower
+            or "unauthorized" in lower
             or "401" in error_text
             or "403" in error_text
         ):

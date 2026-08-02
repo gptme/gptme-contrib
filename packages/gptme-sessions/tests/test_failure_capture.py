@@ -7,6 +7,8 @@ from pathlib import Path
 
 
 from gptme_sessions.failure_capture import (
+    FAILURE_REASON_AUTH,
+    FAILURE_REASON_INVALID_REQUEST,
     FAILURE_REASON_NONZERO,
     FAILURE_REASON_PRE_RESPONSE,
     FAILURE_REASON_RATE_LIMIT,
@@ -179,6 +181,97 @@ def test_record_has_any_content_tool_use():
         },
     }
     assert _record_has_any_content(rec) is True
+
+
+def test_classify_no_false_auth_from_lesson_name_in_stderr():
+    """Lesson name 'Auth Blueprint' in startup log must not trigger auth classification.
+
+    Root cause (ErikBjare/bob#1116): gptme startup logs all loaded lessons to stderr,
+    including '- Auth Blueprint'. The bare 'auth' check in classify_failure_reason
+    matched that lesson name and misclassified deepseek 400 errors as auth failures.
+    """
+    # Simulate the gptme startup log that appears in stderr, listing lesson names
+    startup_log_with_auth_lesson = (
+        "· WARNING  Parallel agent detected: gptme PID 12345\n"
+        "· Auto-included 20 lessons:\n"
+        "- Lesson-Effectiveness Lane Gets Over-Grazed\n"
+        "- Autonomous Session Workflow\n"
+        "- Auth Blueprint\n"  # <-- the false-positive trigger
+        "- Lesson Quality Standards\n"
+        "litellm.APIStatusError: Error code: 400 - "
+        "{'error': {'message': 'tool_calls without responses', 'type': 'invalid_request_error'}}"
+    )
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=300,
+        input_tokens=1000,
+        has_assistant_turn=True,
+        error_text=startup_log_with_auth_lesson,
+    )
+    assert (
+        result != FAILURE_REASON_AUTH
+    ), "Lesson name 'Auth Blueprint' in stderr must not trigger auth classification"
+    assert result == FAILURE_REASON_INVALID_REQUEST
+
+
+def test_classify_invalid_request_error_deepseek_tool_format():
+    """deepseek 400 invalid_request_error for tool_calls must map to invalid_request."""
+    error = (
+        "litellm.APIStatusError: APIStatusError: Error code: 400 - "
+        "{'error': {'message': 'tool_calls without responses', 'type': 'invalid_request_error'}}"
+    )
+    assert (
+        classify_failure_reason(
+            exit_code=1,
+            duration_seconds=200,
+            input_tokens=500,
+            has_assistant_turn=True,
+            error_text=error,
+        )
+        == FAILURE_REASON_INVALID_REQUEST
+    )
+
+
+def test_classify_auth_still_works_for_real_401():
+    """Real 401 authentication failures must still classify as auth."""
+    assert (
+        classify_failure_reason(
+            exit_code=1,
+            duration_seconds=10,
+            input_tokens=0,
+            has_assistant_turn=False,
+            error_text="APIStatusError: Error code: 401 - {'error': 'Invalid API key'}",
+        )
+        == FAILURE_REASON_AUTH
+    )
+
+
+def test_classify_auth_still_works_for_authentication_keyword():
+    """'authentication' keyword in stderr must still classify as auth."""
+    assert (
+        classify_failure_reason(
+            exit_code=1,
+            duration_seconds=10,
+            input_tokens=0,
+            has_assistant_turn=False,
+            error_text="AuthenticationError: Invalid credentials for anthropic",
+        )
+        == FAILURE_REASON_AUTH
+    )
+
+
+def test_classify_auth_still_works_for_unauthorized():
+    """'unauthorized' in error text must classify as auth."""
+    assert (
+        classify_failure_reason(
+            exit_code=1,
+            duration_seconds=10,
+            input_tokens=0,
+            has_assistant_turn=False,
+            error_text="HTTP 403 Forbidden: unauthorized access",
+        )
+        == FAILURE_REASON_AUTH
+    )
 
 
 def test_capture_cc_session_with_assistant_not_pre_response(tmp_path: Path):
