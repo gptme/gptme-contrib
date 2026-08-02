@@ -7,6 +7,8 @@ from pathlib import Path
 
 
 from gptme_sessions.failure_capture import (
+    FAILURE_REASON_AUTH,
+    FAILURE_REASON_INVALID_REQUEST,
     FAILURE_REASON_NONZERO,
     FAILURE_REASON_PRE_RESPONSE,
     FAILURE_REASON_RATE_LIMIT,
@@ -167,6 +169,74 @@ def test_capture_cc_tool_use_only_not_pre_response(tmp_path: Path):
         harness_stderr_path=None,
     )
     assert reason == FAILURE_REASON_NONZERO
+
+
+def test_classify_auth_not_triggered_by_lesson_name():
+    """'Auth Blueprint' in gptme startup lesson list must NOT classify as auth.
+
+    Regression: 'auth' in lower matched lesson names like 'Auth Blueprint'
+    injected into gptme stdout, causing valid deepseek 400 errors to be
+    misclassified as failure_reason='auth'. (ErikBjare/bob#1116)
+    """
+    # Realistic gptme stderr that includes lesson list but no real auth error
+    error_text = (
+        "· Auto-included 20 lessons:\n"
+        "- Autonomous Session Workflow\n"
+        "- Ship\n"
+        "- Auth Blueprint\n"  # ← was triggering the false positive
+        "- Lesson Quality Standards\n"
+        "· ERROR    provider_error_code: invalid_request_error"
+    )
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=90,
+        input_tokens=75000,
+        has_assistant_turn=False,
+        error_text=error_text,
+    )
+    assert (
+        result != FAILURE_REASON_AUTH
+    ), "lesson name 'Auth Blueprint' must not trigger auth classification"
+
+
+def test_classify_invalid_request_deepseek_tool_calls():
+    """deepseek 400 invalid_request_error (tool_calls) → FAILURE_REASON_INVALID_REQUEST."""
+    error_text = (
+        "{'error': {'message': 'tool calls must be followed by tool responses', "
+        "'type': 'invalid_request_error', 'provider_error_code': 'invalid_request_error'}}"
+    )
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=120,
+        input_tokens=70000,
+        has_assistant_turn=False,
+        error_text=error_text,
+    )
+    assert result == FAILURE_REASON_INVALID_REQUEST
+
+
+def test_classify_auth_real_401():
+    """Real 401 Unauthorized error text → FAILURE_REASON_AUTH."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text="HTTP error: 401 Unauthorized — authentication failed",
+    )
+    assert result == FAILURE_REASON_AUTH
+
+
+def test_classify_auth_unauthorized_text():
+    """'unauthorized' in error text → FAILURE_REASON_AUTH even without '401'."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text="Error: Unauthorized access, check your API key",
+    )
+    assert result == FAILURE_REASON_AUTH
 
 
 def test_record_has_any_content_tool_use():
