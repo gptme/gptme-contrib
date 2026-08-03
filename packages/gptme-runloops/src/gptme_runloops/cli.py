@@ -1,6 +1,7 @@
 """Command-line interface for run loops."""
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -505,6 +506,126 @@ def review(
         err=True,
     )
     # Fail closed: automation must only continue after an explicit safe verdict.
+    if artifact.merge_safety != MergeSafety.safe:
+        sys.exit(1)
+
+
+@main.command("review-pr")
+@click.argument("pr_ref")
+@click.option(
+    "--shadow/--publish",
+    default=True,
+    help="Shadow mode (default): run review but do not post GitHub comments. "
+    "--publish posts findings as inline PR review comments.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write ReviewArtifact JSON to this path (default: print to stdout).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="gptme model spec (e.g. 'anthropic/claude-sonnet-4-6'). "
+    "Defaults to gptme's configured model.",
+)
+@click.option(
+    "--checkout",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Local checkout of the repository, used to read AGENTS.md/CLAUDE.md "
+    "for reviewer context. Optional.",
+)
+@click.option(
+    "--min-confidence",
+    type=float,
+    default=0.6,
+    show_default=True,
+    help="Skip findings below this confidence threshold when publishing.",
+)
+def review_pr(
+    pr_ref: str,
+    shadow: bool,
+    output_path: Path | None,
+    model: str | None,
+    checkout: Path | None,
+    min_confidence: float,
+) -> None:
+    """Review a GitHub pull request and optionally post findings as inline comments.
+
+    PR_REF must be in the form OWNER/REPO#NUM, e.g. ``gptme/gptme-contrib#42``.
+
+    Phase 2: GitHub-backed review with idempotent inline comment publication.
+
+    Examples:
+
+      # Shadow run — review without posting (safe to run on any PR):
+      gptme-runloops review-pr gptme/gptme-contrib#42
+
+      # Publish findings as inline PR comments:
+      gptme-runloops review-pr gptme/gptme-contrib#42 --publish
+
+      # Shadow run, save artifact:
+      gptme-runloops review-pr gptme/gptme-contrib#42 --output /tmp/review.json
+
+      # Use a local checkout for AGENTS.md context:
+      gptme-runloops review-pr gptme/gptme-contrib#42 --checkout /path/to/checkout
+
+      # Use a specific model:
+      gptme-runloops review-pr gptme/gptme-contrib#42 --model anthropic/claude-sonnet-4-6
+    """
+    # Parse OWNER/REPO#NUM
+    m = re.match(r"^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)$", pr_ref)
+    if not m:
+        raise click.UsageError(
+            f"Invalid PR reference '{pr_ref}'. Expected format: OWNER/REPO#NUM "
+            "(e.g. gptme/gptme-contrib#42)."
+        )
+    repo = m.group(1)
+    pr_number = int(m.group(2))
+
+    from gptme_runloops.pr_review.github_adapter import run_github_review
+
+    mode_label = "shadow" if shadow else "publish"
+    click.echo(f"Reviewing {repo}#{pr_number} ({mode_label} mode) …", err=True)
+
+    try:
+        artifact, posted, skipped = run_github_review(
+            repo,
+            pr_number,
+            model=model,
+            checkout=checkout,
+            shadow=shadow,
+            output_path=output_path,
+            min_confidence=min_confidence,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise click.ClickException(
+            f"GitHub CLI command failed: {exc.stderr.strip() if exc.stderr else exc}"
+        ) from exc
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(f"Review failed: {exc}") from exc
+
+    if output_path:
+        click.echo(f"Artifact written to {output_path}", err=True)
+    else:
+        click.echo(artifact.model_dump_json(indent=2))
+
+    n = len(artifact.findings)
+    if shadow:
+        click.echo(
+            f"Review complete (shadow) — {n} finding(s), merge_safety={artifact.merge_safety.value}",
+            err=True,
+        )
+    else:
+        click.echo(
+            f"Review complete — {n} finding(s), {posted} posted, {skipped} skipped, "
+            f"merge_safety={artifact.merge_safety.value}",
+            err=True,
+        )
+
     if artifact.merge_safety != MergeSafety.safe:
         sys.exit(1)
 

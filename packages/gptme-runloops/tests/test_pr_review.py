@@ -1,6 +1,7 @@
-"""Tests for the pr_review schema and corpus module (Phase 0 + Phase 1)."""
+"""Tests for the pr_review schema and corpus module (Phase 0 + Phase 2)."""
 
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -800,3 +801,269 @@ class TestReviewCliExitStatus:
         assert result.exit_code == 1
         assert "Error: Invalid review response:" in result.output
         assert not isinstance(result.exception, TypeError | ValueError)
+
+
+# ── Phase 2: GitHub adapter ───────────────────────────────────────────────────
+
+
+class TestGetPostedFingerprints:
+    """get_posted_fingerprints() parses hidden fp tags from existing comments."""
+
+    def test_extracts_fingerprint_from_body(self):
+        from gptme_runloops.pr_review.github_adapter import (
+            _FP_PREFIX,
+            _FP_SUFFIX,
+            get_posted_fingerprints,
+        )
+
+        comment_body = (
+            f"Some text.\n{_FP_PREFIX}abcd1234ef567890{_FP_SUFFIX}\nMore text."
+        )
+        mock_response = [{"body": comment_body}]
+
+        with patch(
+            "gptme_runloops.pr_review.github_adapter._gh_api",
+            return_value=mock_response,
+        ):
+            fps = get_posted_fingerprints("org/repo", 42)
+
+        assert "abcd1234ef567890" in fps
+
+    def test_returns_empty_on_no_comments(self):
+        from gptme_runloops.pr_review.github_adapter import get_posted_fingerprints
+
+        with patch("gptme_runloops.pr_review.github_adapter._gh_api", return_value=[]):
+            fps = get_posted_fingerprints("org/repo", 42)
+
+        assert fps == set()
+
+    def test_multiple_comments_multiple_fingerprints(self):
+        from gptme_runloops.pr_review.github_adapter import (
+            _FP_PREFIX,
+            _FP_SUFFIX,
+            get_posted_fingerprints,
+        )
+
+        mock_response = [
+            {"body": f"Finding A\n{_FP_PREFIX}aaaa111122223333{_FP_SUFFIX}"},
+            {"body": f"Finding B\n{_FP_PREFIX}bbbb444455556666{_FP_SUFFIX}"},
+            {"body": "No fingerprint here"},
+        ]
+        with patch(
+            "gptme_runloops.pr_review.github_adapter._gh_api",
+            return_value=mock_response,
+        ):
+            fps = get_posted_fingerprints("org/repo", 42)
+
+        assert fps == {"aaaa111122223333", "bbbb444455556666"}
+
+
+class TestPublishArtifactShadowMode:
+    """publish_artifact() in shadow mode must not call any GitHub API."""
+
+    def _make_artifact(self, findings=None):
+        return ReviewArtifact(
+            target=ReviewTarget(
+                repo="org/repo",
+                pr_number=42,
+                base_sha="base" * 10,
+                head_sha="head" * 10,
+            ),
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="ok",
+            merge_safety=MergeSafety.needs_review,
+            findings=findings or [],
+        )
+
+    def _make_finding(self, fp_id: str, confidence: float = 0.9) -> ReviewFinding:
+        return ReviewFinding(
+            id=fp_id,
+            category="correctness",
+            severity=Severity.high,
+            confidence=confidence,
+            file_path="src/foo.py",
+            line_range="42",
+            title=f"Bug {fp_id}",
+            description="A bug.",
+            evidence="code here",
+        )
+
+    def test_shadow_no_api_calls(self):
+        from gptme_runloops.pr_review.github_adapter import publish_artifact
+
+        artifact = self._make_artifact([self._make_finding("fp1")])
+        with patch("gptme_runloops.pr_review.github_adapter._gh_api") as mock_api:
+            posted, skipped = publish_artifact(
+                artifact, repo="org/repo", pr_number=42, shadow=True
+            )
+            mock_api.assert_not_called()
+
+        assert posted == 1
+        assert skipped == 0
+
+    def test_shadow_drops_low_confidence(self):
+        from gptme_runloops.pr_review.github_adapter import publish_artifact
+
+        f_high = self._make_finding("fp-high", confidence=0.9)
+        f_low = self._make_finding("fp-low", confidence=0.3)
+        artifact = self._make_artifact([f_high, f_low])
+
+        with patch("gptme_runloops.pr_review.github_adapter._gh_api"):
+            posted, skipped = publish_artifact(
+                artifact, repo="org/repo", pr_number=42, shadow=True, min_confidence=0.6
+            )
+
+        assert posted == 1
+        assert skipped == 1
+
+
+class TestPublishArtifactIdempotency:
+    """publish_artifact() skips findings already posted (idempotency guard)."""
+
+    def _make_artifact(self, fp_id: str) -> ReviewArtifact:
+        finding = ReviewFinding(
+            id=fp_id,
+            category="correctness",
+            severity=Severity.medium,
+            confidence=0.8,
+            file_path="src/foo.py",
+            line_range="10",
+            title="Duplicate finding",
+            description="Already posted.",
+            evidence="...",
+        )
+        return ReviewArtifact(
+            target=ReviewTarget(
+                repo="org/repo",
+                pr_number=99,
+                base_sha="b" * 40,
+                head_sha="h" * 40,
+            ),
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="ok",
+            merge_safety=MergeSafety.safe,
+            findings=[finding],
+        )
+
+    def test_already_posted_fingerprint_is_skipped(self):
+        from gptme_runloops.pr_review.github_adapter import publish_artifact
+
+        artifact = self._make_artifact("alreadypostedfp")
+
+        with (
+            patch(
+                "gptme_runloops.pr_review.github_adapter.get_posted_fingerprints",
+                return_value={"alreadypostedfp"},
+            ),
+            patch(
+                "gptme_runloops.pr_review.github_adapter.post_inline_finding"
+            ) as mock_post,
+        ):
+            posted, skipped = publish_artifact(
+                artifact, repo="org/repo", pr_number=99, shadow=False
+            )
+            mock_post.assert_not_called()
+
+        assert posted == 0
+        assert skipped == 1
+
+    def test_new_fingerprint_is_posted(self):
+        from gptme_runloops.pr_review.github_adapter import publish_artifact
+
+        artifact = self._make_artifact("newfp1234567890a")
+
+        with (
+            patch(
+                "gptme_runloops.pr_review.github_adapter.get_posted_fingerprints",
+                return_value=set(),
+            ),
+            patch(
+                "gptme_runloops.pr_review.github_adapter.post_inline_finding",
+                return_value="comment-id-1",
+            ) as mock_post,
+            patch(
+                "gptme_runloops.pr_review.github_adapter.post_summary_comment",
+                return_value="s1",
+            ),
+        ):
+            posted, skipped = publish_artifact(
+                artifact, repo="org/repo", pr_number=99, shadow=False
+            )
+            mock_post.assert_called_once()
+
+        assert posted == 1
+        assert skipped == 0
+
+
+class TestReviewPrCliCommand:
+    """CLI integration tests for the review-pr command."""
+
+    def test_invalid_pr_ref_format(self):
+        result = CliRunner().invoke(cli_main, ["review-pr", "not-a-valid-ref"])
+        assert result.exit_code != 0
+        assert "Invalid PR reference" in result.output
+
+    def test_invalid_pr_ref_missing_hash(self):
+        result = CliRunner().invoke(cli_main, ["review-pr", "org/repo"])
+        assert result.exit_code != 0
+
+    def test_shadow_mode_calls_run_github_review(self):
+        target = ReviewTarget(
+            repo="org/repo",
+            pr_number=42,
+            base_sha="b" * 40,
+            head_sha="h" * 40,
+        )
+        artifact = ReviewArtifact(
+            target=target,
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="Looks good.",
+            merge_safety=MergeSafety.safe,
+        )
+
+        with patch(
+            "gptme_runloops.pr_review.github_adapter.run_github_review",
+            return_value=(artifact, 0, 0),
+        ):
+            result = CliRunner().invoke(cli_main, ["review-pr", "org/repo#42"])
+
+        assert result.exit_code == 0
+        # Extract JSON object from output (stderr progress lines may be mixed in)
+        m = re.search(r"\{.*\}", result.output, re.DOTALL)
+        assert m is not None, f"No JSON in output: {result.output!r}"
+        data = json.loads(m.group(0))
+        assert data["summary"] == "Looks good."
+
+    def test_unsafe_verdict_exits_nonzero(self):
+        target = ReviewTarget(
+            repo="org/repo",
+            pr_number=1,
+            base_sha="b" * 40,
+            head_sha="h" * 40,
+        )
+        artifact = ReviewArtifact(
+            target=target,
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="Bugs found.",
+            merge_safety=MergeSafety.unsafe,
+        )
+
+        with patch(
+            "gptme_runloops.pr_review.github_adapter.run_github_review",
+            return_value=(artifact, 0, 0),
+        ):
+            result = CliRunner().invoke(cli_main, ["review-pr", "org/repo#1"])
+
+        assert result.exit_code == 1

@@ -19,11 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .schema import (
+    AnyReviewTarget,
     Disposition,
     LocalReviewTarget,
     MergeSafety,
     ReviewArtifact,
     ReviewFinding,
+    ReviewTarget,
     Severity,
 )
 
@@ -268,17 +270,20 @@ def _invoke_model(prompt: str, model: str | None, checkout: Path) -> str:
 
 def run_review(
     checkout: Path,
-    target: LocalReviewTarget,
+    target: AnyReviewTarget,
     diff: str,
     *,
     model: str | None = None,
     output_path: Path | None = None,
 ) -> ReviewArtifact:
-    """Run a local review and return the validated ReviewArtifact.
+    """Run a review and return the validated ReviewArtifact.
+
+    Accepts both LocalReviewTarget (working-tree / commit-range, Phase 1) and
+    ReviewTarget (hosted PR fetched via GitHub/Forgejo adapter, Phase 2).
 
     Args:
         checkout: Path to the repository root (used for repo instructions and gptme cwd).
-        target: Resolved LocalReviewTarget (from resolve_local_target).
+        target: LocalReviewTarget or ReviewTarget resolved by the caller.
         diff: Unified diff text to review.
         model: gptme model spec (e.g. "anthropic/claude-sonnet-4-6"). If None,
                gptme uses its configured default.
@@ -291,16 +296,23 @@ def run_review(
     started_at = datetime.now(timezone.utc)
 
     repo_instructions = read_repo_instructions(checkout)
-    prompt = _build_prompt(diff, repo_instructions, target.description)
+
+    # Resolve display description and identity anchor for hosted vs local targets.
+    if isinstance(target, ReviewTarget):
+        target_desc = f"{target.repo}#{target.pr_number}@{target.head_sha[:8]}"
+        head_anchor = target.head_sha
+        repo_id = target.repo
+    else:
+        target_desc = target.description
+        head_anchor = target.head_sha or target.diff_fingerprint or ""
+        repo_id = target.repo_name or target.checkout
+
+    prompt = _build_prompt(diff, repo_instructions, target_desc)
     raw_output = _invoke_model(prompt, model, checkout)
 
     completed_at = datetime.now(timezone.utc)
 
     data = _extract_json(raw_output)
-
-    # Resolve identity anchor for fingerprinting
-    head_anchor = target.head_sha or target.diff_fingerprint or ""
-    repo_id = target.repo_name or target.checkout
 
     raw_findings = data.get("findings", [])
     if not isinstance(raw_findings, list):
