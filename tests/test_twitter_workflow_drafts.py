@@ -1221,6 +1221,96 @@ def test_legacy_context_backfill_failure_does_not_abort_cycle(
     assert len(cache_updates) == 0
 
 
+def test_legacy_context_backfill_empty_result_is_not_persisted(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    _set_status_dirs(workflow_module, tmp_path)
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="A legacy cached tweet with enough text to pass filtering successfully.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id="4000",
+    )
+    user = SimpleNamespace(
+        id="7", username="someone", public_metrics={"followers_count": 1}
+    )
+    cache_updates: list[tuple[Any, ...]] = []
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: True)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_from_cache",
+        lambda *a, **k: ({"action": "respond"}, {"text": "Cached reply"}),
+    )
+    monkeypatch.setattr(
+        workflow_module, "load_cached_thread_context", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        workflow_module.EvaluationResponse,
+        "from_dict",
+        lambda *a, **k: EvalResult("respond", 90, 80),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workflow_module.TweetResponse,
+        "from_dict",
+        lambda *a, **k: Response("Cached reply", "reply", False, None),
+        raising=False,
+    )
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda *a, **k: False)
+    # get_conversation_thread swallows both "nothing found" and internal
+    # errors into an empty list — simulate that here (no exception raised).
+    monkeypatch.setattr(workflow_module, "get_conversation_thread", lambda *a, **k: [])
+    monkeypatch.setattr(
+        workflow_module,
+        "save_to_cache",
+        lambda *args, **kwargs: cache_updates.append((*args, kwargs)),
+    )
+
+    # An empty backfill result must not be persisted as a completed migration —
+    # doing so would permanently skip the retry without ever attaching context.
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 1
+    assert len(cache_updates) == 0
+    draft_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
+    assert len(draft_paths) == 1
+    draft = workflow_module.TweetDraft.load(draft_paths[0])
+    assert "thread_context" not in draft.context["original_tweet"]
+
+
 def test_process_new_tweet_fetches_thread_by_tweet_id(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

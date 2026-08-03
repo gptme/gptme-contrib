@@ -1799,18 +1799,29 @@ def process_timeline_tweets(
                     # read-free without degrading draft review context.
                     # Guard against transient API failures: a failed backfill
                     # must not terminate the processing cycle for remaining posts.
+                    # get_conversation_thread swallows its own errors and returns
+                    # [] on both "no tweets found" and internal failure, so an
+                    # empty result must NOT be persisted as a completed backfill
+                    # — that would permanently skip the retry (cached_thread_context
+                    # is no longer None) without ever attaching real context.
                     try:
-                        cached_thread_context = get_conversation_thread(
+                        backfilled_thread_context = get_conversation_thread(
                             client,
                             tweet.id,
                             fallback_conversation_id=tweet.conversation_id,
                         )
-                        save_to_cache(
-                            tweet_id_str,
-                            eval_result,
-                            response,
-                            cached_thread_context,
-                        )
+                        if backfilled_thread_context:
+                            cached_thread_context = backfilled_thread_context
+                            save_to_cache(
+                                tweet_id_str,
+                                eval_result,
+                                response,
+                                cached_thread_context,
+                            )
+                        else:
+                            console.print(
+                                f"[yellow]No thread context found for {tweet_id_str}; will retry next cycle"
+                            )
                     except Exception as e:
                         console.print(
                             f"[yellow]Could not backfill thread context for {tweet_id_str}: {e}"
