@@ -195,6 +195,20 @@ class TestCorpusEntry:
         e = self._entry()
         assert len(e.false_positives) == 1
 
+    def test_to_model_input_excludes_ground_truth(self):
+        e = self._entry()
+        model_input = e.to_model_input()
+        # Ground truth (with post-merge verification notes) must not leak to the model
+        assert "ground_truth" not in model_input
+        assert "verification" not in str(model_input)
+
+    def test_to_model_input_includes_diff_fields(self):
+        e = self._entry()
+        model_input = e.to_model_input()
+        assert model_input["entry_id"] == "test-1"
+        assert model_input["pr_title"] == "feat: Mermaid DAG"
+        assert model_input["diff_summary"] == "deptree.py: new render_dag_mermaid()"
+
 
 class TestScoreModel:
     def test_perfect_precision(self):
@@ -344,6 +358,43 @@ class TestScoreModel:
         ]
         scores = score_model(results, corpus)
         assert not scores.passes_gate()
+
+    def test_empty_predicted_file_path_raises(self):
+        """score_model() must reject matched_tp entries with empty predicted_file_path.
+
+        An empty path silently zeroes location_accuracy without warning.
+        """
+        import pytest
+
+        corpus = [
+            CorpusEntry(
+                entry_id="e1",
+                repo="r",
+                pr_number=1,
+                pr_title="t",
+                pr_description="d",
+                diff_summary="s",
+                ground_truth=[
+                    GroundTruthFinding(
+                        label="true_positive",
+                        category="correctness",
+                        severity="high",
+                        file_path="f.py",
+                        title="Bug",
+                        description="A bug",
+                    )
+                ],
+            )
+        ]
+        results = [
+            EvalResult(
+                entry_id="e1",
+                model="test-model",
+                matched_tp=[(0, "Bug", 0.9, "")],  # empty predicted_file_path
+            )
+        ]
+        with pytest.raises(ValueError, match="predicted_file_path"):
+            score_model(results, corpus)
 
 
 class TestLoadCorpus:

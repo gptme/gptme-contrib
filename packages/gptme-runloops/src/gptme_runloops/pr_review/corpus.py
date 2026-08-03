@@ -32,7 +32,10 @@ class GroundTruthFinding:
     file_path: str
     title: str
     description: str
-    # How the finding was verified
+    # Post-merge verification note: describes how the finding was confirmed AFTER
+    # the snapshot was taken (e.g. "fixed in commit abc123 by ...").
+    # This is internal corpus metadata — it must NEVER be passed to the reviewer
+    # model, as it may describe fixes not present in the reviewed snapshot.
     verification: str = ""
 
 
@@ -61,6 +64,23 @@ class CorpusEntry:
     def false_positives(self) -> list[GroundTruthFinding]:
         return [f for f in self.ground_truth if f.label == "false_positive"]
 
+    def to_model_input(self) -> dict:
+        """Return only the fields that the reviewer model should see.
+
+        The ground_truth field is internal evaluation metadata (labels, post-merge
+        verification notes) and must NEVER be included here. Passing it to the model
+        would contaminate the review: verification descriptions reference fixes that
+        are NOT present in the snapshot being reviewed.
+        """
+        return {
+            "entry_id": self.entry_id,
+            "repo": self.repo,
+            "pr_number": self.pr_number,
+            "pr_title": self.pr_title,
+            "pr_description": self.pr_description,
+            "diff_summary": self.diff_summary,
+        }
+
 
 @dataclass
 class EvalResult:
@@ -70,11 +90,30 @@ class EvalResult:
     model: str
     # Matched findings:
     # (ground_truth_idx, model_finding_title, match_score 0-1, predicted_file_path)
+    # predicted_file_path MUST be the file the model pointed to (never empty string).
+    # An empty predicted_file_path silently breaks location_accuracy in score_model().
     matched_tp: list[tuple[int, str, float, str]] = field(default_factory=list)
     false_positives_produced: int = 0
     duplicate_findings: int = 0
     latency_s: float = 0.0
     cost_usd: float = 0.0
+
+    def validate(self) -> None:
+        """Raise ValueError if any matched_tp entry has an empty predicted_file_path.
+
+        Call this before passing an EvalResult to score_model(). A missing file path
+        causes location_accuracy to always read as 0 for that finding, silently
+        understating the model's location quality.
+        """
+        for i, (gt_idx, title, score, predicted_file_path) in enumerate(
+            self.matched_tp
+        ):
+            if not predicted_file_path:
+                raise ValueError(
+                    f"matched_tp[{i}] (gt_idx={gt_idx}, title={title!r}) has an empty "
+                    "predicted_file_path. Supply the file the model pointed to so "
+                    "location_accuracy is computed correctly."
+                )
 
     @property
     def precision(self) -> float:
@@ -144,7 +183,13 @@ def score_model(
     """Aggregate per-entry EvalResults into a ModelScores summary.
 
     Call this after running the model against every corpus entry.
+    Each EvalResult's matched_tp must carry the file the model predicted
+    (predicted_file_path non-empty); call result.validate() or rely on the
+    validation here to catch missing paths before they silently zero location_accuracy.
     """
+    for result in model_results:
+        result.validate()
+
     total_tp = sum(len(e.true_positives) for e in corpus)
     corpus_by_id = {entry.entry_id: entry for entry in corpus}
     matched_tp_total = 0
