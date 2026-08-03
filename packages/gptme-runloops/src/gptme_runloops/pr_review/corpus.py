@@ -68,8 +68,9 @@ class EvalResult:
 
     entry_id: str
     model: str
-    # Matched findings: (ground_truth_idx, model_finding_title, match_score 0-1)
-    matched_tp: list[tuple[int, str, float]] = field(default_factory=list)
+    # Matched findings:
+    # (ground_truth_idx, model_finding_title, match_score 0-1, predicted_file_path)
+    matched_tp: list[tuple[int, str, float, str]] = field(default_factory=list)
     false_positives_produced: int = 0
     duplicate_findings: int = 0
     latency_s: float = 0.0
@@ -145,6 +146,7 @@ def score_model(
     Call this after running the model against every corpus entry.
     """
     total_tp = sum(len(e.true_positives) for e in corpus)
+    corpus_by_id = {entry.entry_id: entry for entry in corpus}
     matched_tp_total = 0
     fp_total = 0
     dup_total = 0
@@ -152,14 +154,23 @@ def score_model(
     location_checked = 0
 
     for result in model_results:
+        entry = corpus_by_id.get(result.entry_id)
+        if entry is None:
+            raise ValueError(f"No corpus entry for EvalResult {result.entry_id!r}")
+
         matched_tp_total += len(result.matched_tp)
         fp_total += result.false_positives_produced
         dup_total += result.duplicate_findings
 
-        for _gt_idx, _title, match_score in result.matched_tp:
-            # location_accuracy: does the finding reference the correct file?
+        for gt_idx, _title, _match_score, predicted_file_path in result.matched_tp:
+            try:
+                expected_file_path = entry.true_positives[gt_idx].file_path
+            except IndexError as exc:
+                raise ValueError(
+                    f"Invalid ground-truth index {gt_idx} for {result.entry_id!r}"
+                ) from exc
             location_checked += 1
-            if match_score >= 0.5:
+            if predicted_file_path == expected_file_path:
                 location_hits += 1
 
     n = len(model_results)

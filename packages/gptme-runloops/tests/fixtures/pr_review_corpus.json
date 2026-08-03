@@ -8,28 +8,28 @@
       "repo": "gptme/gptme-contrib",
       "pr_number": 1341,
       "pr_title": "feat(gptodo): add Mermaid output to dep dag",
-      "pr_description": "Adds --format mermaid to gptodo dep dag. Adds deterministic SHA-256 node identifiers and escaped task labels. State-based styling, dependency edges, filtering, power annotations.",
-      "diff_summary": "packages/gptodo/src/gptodo/deptree.py: new render_dag_mermaid() function using SHA-256 node IDs and Mermaid escaping. packages/gptodo/tests/test_deptree.py: new test suite.",
+      "pr_description": "Initial revision adds --format mermaid to gptodo dep dag with task-derived node identifiers and unescaped task labels. State-based styling, dependency edges, filtering, and power annotations are included.",
+      "diff_summary": "packages/gptodo/src/gptodo/deptree.py at 5a175bb3: new render_dag_mermaid() truncates sanitized task names to 40 characters for node IDs and interpolates task names directly inside quoted Mermaid labels. packages/gptodo/tests/test_deptree.py: initial renderer tests.",
       "attribution": "greptile + bob self-review (2026-08-03)",
-      "notes": "Greptile initially flagged two real bugs in earlier revisions: SHA-256 identifier collision (fixed by using full digest instead of prefix) and Mermaid label injection (fixed by escaping brackets/quotes). Final merged version is clean 5/5.",
+      "notes": "Snapshot pinned to PR head 5a175bb3, before the collision-safe ID and label-escaping fixes in 7a446d96. Greptile flagged both defects against this revision; final merged version is clean 5/5.",
       "ground_truth": [
         {
           "label": "true_positive",
           "category": "correctness",
           "severity": "high",
           "file_path": "packages/gptodo/src/gptodo/deptree.py",
-          "title": "Truncated SHA-256 node IDs can collide for large task sets",
-          "description": "Using only a short prefix of the SHA-256 hash for Mermaid node IDs can produce collisions when the task set is large enough, causing the graph to silently drop edges.",
-          "verification": "Greptile flagged this in review round 1; fixed by using longer digest in round 2 commit."
+          "title": "Lossy Mermaid node IDs merge distinct tasks",
+          "description": "Replacing punctuation and truncating task names to 40 characters gives distinct names such as a-b and a_b, or long names sharing a prefix, the same Mermaid node ID. Mermaid then merges nodes and misattaches edges or state classes.",
+          "verification": "Greptile flagged this against 5a175bb3; fixed in 7a446d96 by using deterministic SHA-256 identifiers."
         },
         {
           "label": "true_positive",
           "category": "security",
           "severity": "medium",
           "file_path": "packages/gptodo/src/gptodo/deptree.py",
-          "title": "Task labels containing brackets or quotes break Mermaid syntax",
-          "description": "Task titles with special Mermaid characters ([ ] \") are embedded raw in node labels, allowing a crafted task name to inject arbitrary Mermaid directives.",
-          "verification": "Greptile flagged this in review round 1; fixed by escaping in round 2."
+          "title": "Unescaped task names break Mermaid syntax",
+          "description": "Raw task names containing quotes, brackets, angle brackets, or newlines are interpolated into a quoted Mermaid label and can terminate or split the node declaration.",
+          "verification": "Greptile flagged this against 5a175bb3; fixed in 7a446d96 by escaping labels and encoding line breaks."
         }
       ]
     },
@@ -38,10 +38,10 @@
       "repo": "gptme/gptme-contrib",
       "pr_number": 1338,
       "pr_title": "refactor(runloops): extract CASCADE JSON parsing from inline bash to tested Python",
-      "pr_description": "Adds a tested CASCADE intent parser and CLI. Normalizes four routing fields from JSON input. Replaces the runtime-adoption test's vacuous success path with an explicit skip when the external script is unavailable.",
-      "diff_summary": "packages/gptme-runloops/src/gptme_runloops/autonomous.py: new parse_cascade_intent() and parse-cascade-intent CLI. packages/gptme-runloops/tests/test_autonomous.py: new test coverage plus fix to a vacuous test.",
+      "pr_description": "Initial revision adds a tested CASCADE intent parser and CLI and normalizes four routing fields from JSON input. The runtime-adoption test returns early when the external script is unavailable.",
+      "diff_summary": "packages/gptme-runloops/src/gptme_runloops/autonomous.py at bd3e2040: new parse_cascade_intent() and parse-cascade-intent CLI. packages/gptme-runloops/tests/test_autonomous.py: runtime-adoption test uses a bare return when autonomous-run.sh is absent.",
       "attribution": "greptile (2026-08-03)",
-      "notes": "Greptile identified the vacuous test success as a real issue: a missing runtime script produced a silent pass instead of a pytest.skip. This was a genuine correctness gap.",
+      "notes": "Snapshot pinned to PR head bd3e2040, before d86b97f2 replaced the vacuous return with pytest.skip(). Greptile identified the silent pass as a real correctness gap.",
       "ground_truth": [
         {
           "label": "true_positive",
@@ -59,10 +59,10 @@
       "repo": "gptme/gptme-contrib",
       "pr_number": 1344,
       "pr_title": "fix(sessions): replace grep subprocess with Python-native binary scan in blame",
-      "pr_description": "Replaces the external grep trajectory prefilter with Python-native recursive discovery and memory-mapped fixed-string scanning. Removes the subprocess timeout and silent fork-failure path.",
-      "diff_summary": "packages/gptme-sessions/src/gptme_sessions/blame.py: new mmap-backed scan replaces subprocess.run(['grep', ...]). Error handling for inaccessible/empty files.",
+      "pr_description": "Initial revision replaces the external grep trajectory prefilter with Python-native recursive discovery and fixed-string scanning by reading each candidate file in full.",
+      "diff_summary": "packages/gptme-sessions/src/gptme_sessions/blame.py at 865e49e2: _traj_candidate_files() opens each JSONL file and calls fh.read() before checking for the basename.",
       "attribution": "greptile (2026-08-03)",
-      "notes": "Greptile initially flagged that the original implementation could allocate each entire trajectory file in Python memory. The mmap approach fixes this. Clean 5/5 on final commit.",
+      "notes": "Snapshot pinned to PR head 865e49e2, before b1a058ce switched the scan to mmap.find(). Greptile flagged the full-file allocation against this revision; final merged version is clean 5/5.",
       "ground_truth": [
         {
           "label": "true_positive",
@@ -91,10 +91,10 @@
       "repo": "gptme/gptme",
       "pr_number": 3419,
       "pr_title": "fix(shell): fold workspace hint into tool response",
-      "pr_description": "Folds the workspace hint into the command output message directly. The generator yields a single message that receives the call_id stamp, producing a clean tool response with zero interleaving. Strict providers that require tool responses to immediately follow tool_calls are no longer broken.",
-      "diff_summary": "gptme/tools/shell.py: yield single tool response instead of hint-then-output. tests/test_shell.py: new single-message contract test.",
+      "pr_description": "Initial revision yields the command output and then emits a separate workspace hint. The last yielded message receives the call_id stamp, so the hint becomes the nominal tool response while the actual output is interleaved as bare context.",
+      "diff_summary": "gptme/tools/shell.py at f75053bf^: execute_shell_impl() yields Message(\"system\", msg) before yielding workspace_hint. The later commit 42005f42 folds the hint into the command output.",
       "attribution": "bob self-review + greptile (2026-08-03)",
-      "notes": "The core issue was that strict providers (Moonshot AI, others) require tool responses to immediately follow tool_calls, but the prior impl inserted a user-role system message between them.",
+      "notes": "Snapshot pinned to the parent of PR head f75053bf, where the strict-provider ordering bug is present. The later commits fix the ordering and add regression coverage.",
       "ground_truth": [
         {
           "label": "true_positive",
@@ -112,16 +112,16 @@
       "repo": "gptme/gptme",
       "pr_number": 3414,
       "pr_title": "fix(server): acquire step_lock in interrupt endpoint to prevent race",
-      "pr_description": "Acquires the step_lock in the interrupt endpoint to prevent a race condition between interrupt handling and step execution.",
-      "diff_summary": "gptme/server/api.py: interrupt endpoint now acquires step_lock before signal delivery.",
+      "pr_description": "Before the fix, the interrupt endpoint checks and mutates generating state and pending tools without acquiring the session step lock.",
+      "diff_summary": "gptme/server/api_v2_sessions.py at c488c07f^: api_conversation_interrupt() performs the idempotency check, generating-state updates, and pending_tools.clear() outside session.step_lock.",
       "attribution": "greptile + bob (2026-08-03)",
-      "notes": "A real concurrency bug: the interrupt endpoint could race with an ongoing step, leaving the agent in an inconsistent state.",
+      "notes": "Snapshot pinned to the parent of PR head c488c07f. The PR wraps the check-and-mutate sequence in session.step_lock to close the TOCTOU race.",
       "ground_truth": [
         {
           "label": "true_positive",
           "category": "correctness",
           "severity": "high",
-          "file_path": "gptme/server/api.py",
+          "file_path": "gptme/server/api_v2_sessions.py",
           "title": "Interrupt endpoint lacks step_lock acquisition, enabling concurrent-step race",
           "description": "The /interrupt endpoint could fire while a step was executing without holding step_lock, potentially corrupting execution state or causing double-execution of a step.",
           "verification": "Fix required acquiring step_lock before sending the interrupt signal; merged as the canonical fix."

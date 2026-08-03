@@ -222,7 +222,7 @@ class TestScoreModel:
             EvalResult(
                 entry_id="e1",
                 model="test-model",
-                matched_tp=[(0, "Bug", 1.0)],
+                matched_tp=[(0, "Bug", 1.0, "f.py")],
                 false_positives_produced=0,
             )
         ]
@@ -230,6 +230,41 @@ class TestScoreModel:
         assert scores.precision == 1.0
         assert scores.recall == 1.0
         assert scores.fp_rate == 0.0
+        assert scores.location_accuracy == 1.0
+
+    def test_location_accuracy_compares_file_paths(self):
+        corpus = [
+            CorpusEntry(
+                entry_id="e1",
+                repo="r",
+                pr_number=1,
+                pr_title="t",
+                pr_description="d",
+                diff_summary="s",
+                ground_truth=[
+                    GroundTruthFinding(
+                        label="true_positive",
+                        category="correctness",
+                        severity="high",
+                        file_path="expected.py",
+                        title="Bug",
+                        description="A bug",
+                    )
+                ],
+            )
+        ]
+        results = [
+            EvalResult(
+                entry_id="e1",
+                model="test-model",
+                matched_tp=[(0, "Bug", 1.0, "wrong.py")],
+            )
+        ]
+
+        scores = score_model(results, corpus)
+
+        assert scores.precision == 1.0
+        assert scores.location_accuracy == 0.0
 
     def test_all_false_positives(self):
         corpus = [
@@ -280,7 +315,7 @@ class TestScoreModel:
             EvalResult(
                 entry_id="e1",
                 model="test-model",
-                matched_tp=[(0, "Bug", 1.0)],
+                matched_tp=[(0, "Bug", 1.0, "f.py")],
                 false_positives_produced=0,
             )
         ]
