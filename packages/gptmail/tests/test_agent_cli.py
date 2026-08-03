@@ -430,6 +430,25 @@ def test_pending_excludes_configured_no_reply_subject(
     assert "1 message(s) awaiting reply" in result.output
 
 
+def test_no_reply_subject_patterns_support_regex_commas_and_multiple_lines(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    earnings = _seed_inbox(workspace, subject="EARNINGS - ACME beat")
+    digest = _seed_inbox(workspace, subject="Daily, digest")
+    escalation = _seed_inbox(workspace, subject="RISK ALERT - action needed")
+    monkeypatch.setenv(
+        "AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS",
+        "^EARNINGS\n^Daily.{2,4}digest$",
+    )
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0, result.output
+    assert earnings not in result.output
+    assert digest not in result.output
+    assert escalation in result.output
+    assert "1 message(s) awaiting reply" in result.output
+
+
 @pytest.mark.parametrize("command", ["pending", "status"])
 def test_no_reply_subject_filter_rejects_invalid_regex(workspace: Path, command: str) -> None:
     _seed_inbox(workspace)

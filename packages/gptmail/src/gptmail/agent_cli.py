@@ -68,7 +68,7 @@ def _no_reply_subject_patterns() -> list[re.Pattern[str]]:
     """Configured receiver-side subject patterns excluded from reply SLA."""
     raw = os.environ.get("AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS", "")
     patterns: list[re.Pattern[str]] = []
-    for item in raw.split(","):
+    for item in raw.splitlines():
         if not item.strip():
             continue
         try:
