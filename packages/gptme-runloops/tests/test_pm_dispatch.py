@@ -1305,6 +1305,45 @@ class TestClassifyItemWorkType:
     def test_strategy_highest_priority(self):
         assert classify_item_work_type(["strategy", "ci_failure"]) == "strategy-reply"
 
+    def test_automated_review_allowlisted_repo(self, monkeypatch):
+        monkeypatch.setenv(
+            "AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud,ErikBjare/bob"
+        )
+        assert (
+            classify_item_work_type(["pr_update"], repo="gptme/gptme-cloud")
+            == "automated-pr-review"
+        )
+        assert (
+            classify_item_work_type(["pr_update"], repo="ErikBjare/bob")
+            == "automated-pr-review"
+        )
+
+    def test_automated_review_non_allowlisted_falls_back(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud")
+        assert classify_item_work_type(["pr_update"], repo="gptme/gptme") == "pr-review"
+
+    def test_automated_review_no_allowlist(self, monkeypatch):
+        monkeypatch.delenv("AUTOMATED_PR_REVIEW_REPOS", raising=False)
+        # Without allowlist, pr_update is always pr-review even for private repos
+        assert (
+            classify_item_work_type(["pr_update"], repo="gptme/gptme-cloud")
+            == "pr-review"
+        )
+
+    def test_automated_review_ci_takes_precedence(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud")
+        # CI failure on allowlisted repo still routes to ci-fix
+        assert (
+            classify_item_work_type(
+                ["pr_update", "ci_failure"], repo="gptme/gptme-cloud"
+            )
+            == "ci-fix"
+        )
+
+    def test_automated_review_no_repo(self):
+        # No repo → original pr-review behavior
+        assert classify_item_work_type(["pr_update"]) == "pr-review"
+
 
 # --- _bandit_observation_count and _resolve_model_with_bandit ---
 

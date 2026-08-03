@@ -52,6 +52,7 @@ PM_WORK_TYPES: set[str] = {
     "ci-fix",
     "greptile-fix",
     "pr-review",
+    "automated-pr-review",
     "merge-conflict",
     "assigned-issue",
     "notification-triage",

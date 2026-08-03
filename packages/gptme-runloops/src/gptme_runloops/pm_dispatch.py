@@ -45,6 +45,23 @@ DEFAULT_FAST_BURST_ALLOWANCE = 1
 # Minimum bandit observations before preferring bandit routing over static fallback
 MIN_BANDIT_OBSERVATIONS = 5
 
+# Repositories that receive automated shadow PR reviews (no Greptile free tier).
+# Override at runtime via AUTOMATED_PR_REVIEW_REPOS=owner/repo1,owner/repo2.
+_AUTOMATED_PR_REVIEW_REPOS_DEFAULT: frozenset[str] = frozenset()
+
+
+def _automated_pr_review_allowlist() -> frozenset[str]:
+    """Return the set of repos that get automated shadow PR reviews.
+
+    Populated from the AUTOMATED_PR_REVIEW_REPOS env var (comma-separated
+    ``owner/repo`` values). Empty by default so the feature is opt-in.
+    """
+    raw = os.environ.get("AUTOMATED_PR_REVIEW_REPOS", "")
+    if not raw.strip():
+        return _AUTOMATED_PR_REVIEW_REPOS_DEFAULT
+    return frozenset(r.strip() for r in raw.split(",") if r.strip())
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -333,12 +350,17 @@ def classify_lane(types: list[str]) -> str:
     return "fast"
 
 
-def classify_item_work_type(types: list[str]) -> str:
+def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
     """Map SlotItem.types to a PM bandit work type string.
 
     Priority order is significant: ci-fix and greptile-fix take precedence over
     pr-review since a PR with a CI failure should route to the CI-fix arm, not
     the generic PR-review arm.
+
+    ``repo`` (optional) is the ``owner/repo`` string for the item. When provided
+    and the repo is in the automated-review allowlist, ``pr_update`` items route
+    to ``automated-pr-review`` instead of ``pr-review``. The allowlist is
+    populated from the ``AUTOMATED_PR_REVIEW_REPOS`` environment variable.
 
     Returns one of the PM_WORK_TYPES strings defined in pm_bandit.
     """
@@ -352,6 +374,8 @@ def classify_item_work_type(types: list[str]) -> str:
     if "merge_conflict" in types_set:
         return "merge-conflict"
     if "pr_update" in types_set:
+        if repo and repo in _automated_pr_review_allowlist():
+            return "automated-pr-review"
         return "pr-review"
     if "assigned" in types_set:
         return "assigned-issue"
@@ -386,6 +410,7 @@ def _resolve_model_with_bandit(
     fast_model: str | None,
     bandit: Any | None,
     detail: str = "",
+    repo: str | None = None,
 ) -> str | None:
     """Resolve the dispatch model for an item.
 
@@ -405,7 +430,7 @@ def _resolve_model_with_bandit(
 
     if bandit is None:
         return resolve_lane_model(lane, model, fast_model)
-    work_type = classify_item_work_type(item_types)
+    work_type = classify_item_work_type(item_types, repo=repo)
     available = [m for m in [model, fast_model] if m]
     if not available:
         available = ["sonnet"]
@@ -597,7 +622,13 @@ class LaneDispatcher:
                     item=item,
                     backend=backend,
                     model=_resolve_model_with_bandit(
-                        item.types, lane, model, fast_model, bandit, item.detail
+                        item.types,
+                        lane,
+                        model,
+                        fast_model,
+                        bandit,
+                        item.detail,
+                        repo=item.repo,
                     ),
                     script_path=script_path,
                 )
