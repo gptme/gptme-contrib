@@ -1,16 +1,19 @@
-"""Tests for the pr_review schema and corpus module (Phase 0)."""
+"""Tests for the pr_review schema and corpus module (Phase 0 + Phase 1)."""
 
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 from gptme_runloops.pr_review import (
     Disposition,
+    LocalReviewTarget,
     MergeSafety,
     ReviewArtifact,
     ReviewFinding,
     ReviewTarget,
     Severity,
+    resolve_local_target,
 )
 from gptme_runloops.pr_review.corpus import (
     CorpusEntry,
@@ -18,6 +21,12 @@ from gptme_runloops.pr_review.corpus import (
     GroundTruthFinding,
     load_corpus,
     score_model,
+)
+from gptme_runloops.pr_review.reviewer import (
+    _build_prompt,
+    _diff_fingerprint,
+    _extract_json,
+    read_repo_instructions,
 )
 from gptme_runloops.pr_review.schema import SCHEMA_VERSION
 
@@ -425,3 +434,286 @@ class TestLoadCorpus:
         assert "corpus_version" in raw
         assert "entries" in raw
         assert raw["corpus_version"] == "v1"
+
+
+# ── Phase 1: LocalReviewTarget, local_fingerprint, reviewer helpers ───────────
+
+
+class TestLocalReviewTarget:
+    def test_description_range(self):
+        t = LocalReviewTarget(
+            checkout="/repo",
+            repo_name="org/repo",
+            base_sha="aabbccdd",
+            head_sha="11223344",
+        )
+        assert "aabbccdd" in t.description
+        assert "11223344" in t.description
+        assert "org/repo" in t.description
+
+    def test_description_working_tree(self):
+        t = LocalReviewTarget(
+            checkout="/repo",
+            repo_name="org/repo",
+            base_sha="aabbccdd",
+            head_sha=None,
+            diff_fingerprint="fp16chars12345",
+        )
+        assert "working-tree" in t.description
+        assert "fp16chars12345" in t.description
+
+    def test_kind_default(self):
+        t = LocalReviewTarget(checkout="/repo", base_sha="abc")
+        assert t.kind == "local"
+
+    def test_roundtrip_json(self):
+        t = LocalReviewTarget(
+            checkout="/repo",
+            repo_name="org/repo",
+            base_sha="abc",
+            head_sha="def",
+        )
+        dumped = t.model_dump_json()
+        loaded = LocalReviewTarget.model_validate_json(dumped)
+        assert loaded.repo_name == "org/repo"
+        assert loaded.head_sha == "def"
+
+
+class TestLocalFingerprintVsHostedFingerprint:
+    def test_local_fingerprint_stable(self):
+        fp1 = ReviewFinding.local_fingerprint(
+            repo="org/repo",
+            head_sha="abc123",
+            file_path="src/foo.py",
+            title="Null deref",
+            prompt_version="v1",
+        )
+        fp2 = ReviewFinding.local_fingerprint(
+            repo="org/repo",
+            head_sha="abc123",
+            file_path="src/foo.py",
+            title="Null deref",
+            prompt_version="v1",
+        )
+        assert fp1 == fp2
+
+    def test_local_fingerprint_differs_from_hosted(self):
+        local_fp = ReviewFinding.local_fingerprint(
+            repo="org/repo",
+            head_sha="abc123",
+            file_path="src/foo.py",
+            title="T",
+            prompt_version="v1",
+        )
+        hosted_fp = ReviewFinding.fingerprint(
+            repo="org/repo",
+            pr_number=42,
+            head_sha="abc123",
+            file_path="src/foo.py",
+            title="T",
+            prompt_version="v1",
+        )
+        assert local_fp != hosted_fp
+
+    def test_local_fingerprint_length(self):
+        fp = ReviewFinding.local_fingerprint(
+            repo="r", head_sha="h", file_path="f", title="t", prompt_version="v1"
+        )
+        assert len(fp) == 16
+
+
+class TestReviewArtifactDiscriminatedUnion:
+    def test_hosted_target_roundtrip(self):
+        a = ReviewArtifact(
+            target=ReviewTarget(
+                repo="org/repo",
+                pr_number=7,
+                base_sha="base",
+                head_sha="head",
+            ),
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="ok",
+            merge_safety=MergeSafety.safe,
+        )
+        raw = a.model_dump_json()
+        loaded = ReviewArtifact.model_validate_json(raw)
+        assert isinstance(loaded.target, ReviewTarget)
+        assert loaded.target.pr_number == 7
+
+    def test_local_target_roundtrip(self):
+        a = ReviewArtifact(
+            target=LocalReviewTarget(
+                checkout="/repo",
+                repo_name="org/repo",
+                base_sha="abc",
+                head_sha=None,
+                diff_fingerprint="fp1234567890abcd",
+            ),
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="Local review",
+            merge_safety=MergeSafety.needs_review,
+        )
+        raw = a.model_dump_json()
+        loaded = ReviewArtifact.model_validate_json(raw)
+        assert isinstance(loaded.target, LocalReviewTarget)
+        assert loaded.target.diff_fingerprint == "fp1234567890abcd"
+
+    def test_token_id_local(self):
+        a = ReviewArtifact(
+            target=LocalReviewTarget(
+                checkout="/home/bob/bob",
+                repo_name="org/repo",
+                base_sha="aabbccdd",
+                head_sha="11223344",
+            ),
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="ok",
+            merge_safety=MergeSafety.safe,
+        )
+        assert "org/repo@11223344" == a.token_id
+
+
+class TestDiffFingerprint:
+    def test_stable(self):
+        assert _diff_fingerprint("abc\n") == _diff_fingerprint("abc\n")
+
+    def test_differs_on_content(self):
+        assert _diff_fingerprint("abc\n") != _diff_fingerprint("def\n")
+
+    def test_length(self):
+        assert len(_diff_fingerprint("x")) == 16
+
+
+class TestExtractJson:
+    def test_direct_json(self):
+        raw = '{"summary": "ok", "merge_safety": "safe", "findings": []}'
+        result = _extract_json(raw)
+        assert result["summary"] == "ok"
+
+    def test_json_in_prose(self):
+        raw = 'Here is my review:\n{"summary": "ok", "merge_safety": "safe", "findings": []}\nDone.'
+        result = _extract_json(raw)
+        assert result["merge_safety"] == "safe"
+
+    def test_json_in_code_fence(self):
+        raw = '```json\n{"summary": "ok", "merge_safety": "safe", "findings": []}\n```'
+        result = _extract_json(raw)
+        assert result["findings"] == []
+
+    def test_raises_on_no_json(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="No valid JSON"):
+            _extract_json("This is not JSON at all.")
+
+
+class TestBuildPrompt:
+    def test_contains_instructions(self):
+        prompt = _build_prompt("diff content", "", "repo@abc")
+        assert "merge_safety" in prompt
+        assert "diff content" in prompt
+
+    def test_contains_repo_instructions(self):
+        prompt = _build_prompt("diff", "# AGENTS.md\n\nBe careful.", "repo@abc")
+        assert "AGENTS.md" in prompt
+
+    def test_truncates_large_diff(self):
+        big_diff = "x" * 100_000
+        prompt = _build_prompt(big_diff, "", "repo@abc")
+        assert "TRUNCATED" in prompt
+        assert len(prompt) < 120_000  # well within reason
+
+    def test_no_truncation_small_diff(self):
+        small_diff = "- old\n+ new\n"
+        prompt = _build_prompt(small_diff, "", "repo@abc")
+        assert "TRUNCATED" not in prompt
+
+
+class TestReadRepoInstructions:
+    def test_reads_agents_md(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("# Instructions\nBe careful.")
+        result = read_repo_instructions(tmp_path)
+        assert "Be careful." in result
+        assert "AGENTS.md" in result
+
+    def test_returns_empty_when_none(self, tmp_path):
+        result = read_repo_instructions(tmp_path)
+        assert result == ""
+
+    def test_truncates_long_file(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("x" * 10_000)
+        result = read_repo_instructions(tmp_path)
+        assert "truncated" in result
+        assert len(result) < 12_000
+
+
+class TestResolveLocalTarget:
+    def _git(self, path: Path, *args: str, **extra_env: str) -> None:
+        env = {**__import__("os").environ, "ALLOW_GIT_IDENTITY": "1", **extra_env}
+        subprocess.run(
+            ["git", *args], cwd=path, check=True, capture_output=True, env=env
+        )
+
+    def _init_git_repo(self, path: Path) -> None:
+        self._git(path, "init")
+        self._git(path, "config", "user.email", "test@test.com")
+        self._git(path, "config", "user.name", "Test")
+        (path / "README.md").write_text("# Repo\n")
+        self._git(path, "add", ".")
+        self._git(path, "commit", "-m", "init", "--no-verify")
+
+    def test_working_tree(self, tmp_path):
+        self._init_git_repo(tmp_path)
+        (tmp_path / "new_file.py").write_text("x = 1\n")
+        self._git(tmp_path, "add", ".")
+
+        target, diff = resolve_local_target(tmp_path, working_tree=True)
+        assert target.kind == "local"
+        assert target.head_sha is None
+        assert target.diff_fingerprint != ""
+        assert "new_file.py" in diff
+
+    def test_range(self, tmp_path):
+        self._init_git_repo(tmp_path)
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        (tmp_path / "change.py").write_text("def foo(): pass\n")
+        self._git(tmp_path, "add", ".")
+        self._git(tmp_path, "commit", "-m", "add change", "--no-verify")
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        target, diff = resolve_local_target(
+            tmp_path, base_sha=base_sha, head_sha=head_sha
+        )
+        assert target.kind == "local"
+        assert target.head_sha == head_sha
+        assert target.base_sha == base_sha
+        assert "change.py" in diff
+
+    def test_raises_without_args(self, tmp_path):
+        self._init_git_repo(tmp_path)
+        import pytest
+
+        with pytest.raises(ValueError, match="Specify"):
+            resolve_local_target(tmp_path)
