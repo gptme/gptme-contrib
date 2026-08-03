@@ -421,9 +421,12 @@ class TestRunsCommand:
         assert isinstance(data, dict)
 
     def test_runs_empty_store(self, tmp_path: Path):
-        """runs on empty store shows discovery fallback."""
+        """runs on empty store triggers discovery fallback path; exits 0."""
         SessionStore(sessions_dir=tmp_path)
-        rc, out = _invoke(["runs"], tmp_path)
+        # Apply _NO_DISCOVER so we don't scan the real filesystem (20-30s on
+        # a loaded system causes timeouts in the full test suite).
+        with _NO_DISCOVER:
+            rc, out = _invoke(["runs"], tmp_path)
         assert rc == 0
 
     def test_runs_json_has_outcome_counts(self, tmp_path: Path):
