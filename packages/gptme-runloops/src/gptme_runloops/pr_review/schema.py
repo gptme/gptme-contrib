@@ -6,6 +6,8 @@ ReviewArtifact; the renderer decides how to publish it.
 Version history:
   v1 (2026-08-03): initial schema — target identity, run metadata, findings,
                    fingerprints, merge safety verdict.
+  v1 (2026-08-03): added LocalReviewTarget for working-tree and commit-range
+                   reviews that require no forge access (Phase 1).
 """
 
 from __future__ import annotations
@@ -14,9 +16,9 @@ import hashlib
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Discriminator, Field, Tag
 
 SCHEMA_VERSION = "v1"
 
@@ -43,16 +45,60 @@ class MergeSafety(str, Enum):
 
 
 class ReviewTarget(BaseModel):
-    """Immutable identity of the PR being reviewed.
+    """Immutable identity of a hosted PR being reviewed.
 
     Binding reviews to exact base/head SHAs prevents stale-head publication.
     """
 
+    kind: Literal["hosted"] = "hosted"
     forge: Literal["github", "forgejo"] = "github"
     repo: str  # e.g. "gptme/gptme-contrib"
     pr_number: int
     base_sha: str
     head_sha: str
+
+
+class LocalReviewTarget(BaseModel):
+    """Target for a local-only review — no forge access required.
+
+    Used for working-tree reviews (in-session, before a PR exists) and for
+    reviewing an explicit committed commit range locally.
+
+    Committed/range reviews bind to immutable base/head SHAs.
+    Working-tree reviews record the base SHA plus a deterministic diff fingerprint
+    (since pretending an uncommitted head is immutable would be wrong).
+    """
+
+    kind: Literal["local"] = "local"
+    checkout: str  # Absolute path to the repository root
+    repo_name: str = ""  # e.g. "gptme/gptme-contrib" — for display; may be empty
+    base_sha: str  # Always resolved; working-tree reviews use HEAD
+    head_sha: str | None = None  # None for working-tree reviews
+    diff_fingerprint: str = ""  # SHA256[:16] of diff bytes (working-tree only)
+
+    @property
+    def description(self) -> str:
+        name = self.repo_name or self.checkout
+        if self.head_sha:
+            return f"{name} {self.base_sha[:8]}..{self.head_sha[:8]}"
+        return f"{name} working-tree@{self.base_sha[:8]} (fingerprint:{self.diff_fingerprint})"
+
+
+def _discriminate_target(v: object) -> str:
+    """Return the discriminator tag for Union[ReviewTarget, LocalReviewTarget].
+
+    Existing artifacts without an explicit 'kind' default to 'hosted' for
+    backward compatibility with Phase 0 artifacts.
+    """
+    if isinstance(v, dict):
+        return str(v.get("kind", "hosted"))
+    return str(getattr(v, "kind", "hosted"))
+
+
+AnyReviewTarget = Annotated[
+    Annotated[ReviewTarget, Tag("hosted")] | Annotated[LocalReviewTarget, Tag("local")],
+    Discriminator(_discriminate_target),
+]
 
 
 class ReviewFinding(BaseModel):
@@ -63,7 +109,9 @@ class ReviewFinding(BaseModel):
     """
 
     # Identity
-    id: str = Field(description="Stable fingerprint (see FindingFingerprint)")
+    id: str = Field(
+        description="Stable fingerprint (see fingerprint / local_fingerprint)"
+    )
 
     # Classification
     category: str = Field(description="e.g. correctness, security, test-coverage")
@@ -99,7 +147,7 @@ class ReviewFinding(BaseModel):
         title: str,
         prompt_version: str,
     ) -> str:
-        """Stable, content-addressed fingerprint for deduplication.
+        """Stable fingerprint for a hosted-PR finding.
 
         Same finding on the same head SHA + prompt version always produces the
         same fingerprint, so re-runs cannot post duplicate comments.
@@ -108,6 +156,33 @@ class ReviewFinding(BaseModel):
             {
                 "repo": repo,
                 "pr": pr_number,
+                "head": head_sha,
+                "file": file_path,
+                "title": title,
+                "prompt": prompt_version,
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+    @classmethod
+    def local_fingerprint(
+        cls,
+        *,
+        repo: str,
+        head_sha: str,
+        file_path: str,
+        title: str,
+        prompt_version: str,
+    ) -> str:
+        """Stable fingerprint for a local-review finding (no PR number).
+
+        Uses the diff fingerprint (for working-tree) or the head SHA (for
+        range reviews) as the immutable identity anchor.
+        """
+        payload = json.dumps(
+            {
+                "repo": repo,
                 "head": head_sha,
                 "file": file_path,
                 "title": title,
@@ -135,12 +210,15 @@ class ReviewArtifact(BaseModel):
 
     The analysis core produces this; the adapter (GitHub / Forgejo publisher)
     reads it. The core must not call forge APIs directly.
+
+    Supports both hosted-PR targets (ReviewTarget) and local-only targets
+    (LocalReviewTarget) via a discriminated union.
     """
 
     schema_version: str = SCHEMA_VERSION
 
-    # Immutable identity
-    target: ReviewTarget
+    # Immutable identity — hosted PR or local working-tree/range
+    target: AnyReviewTarget
 
     # Run provenance
     model: str
@@ -167,4 +245,9 @@ class ReviewArtifact(BaseModel):
     def token_id(self) -> str:
         """Short readable identity for log messages."""
         t = self.target
-        return f"{t.repo}#{t.pr_number}@{t.head_sha[:8]}"
+        if isinstance(t, ReviewTarget):
+            return f"{t.repo}#{t.pr_number}@{t.head_sha[:8]}"
+        # LocalReviewTarget
+        name = t.repo_name or t.checkout.split("/")[-1]
+        head = (t.head_sha or t.diff_fingerprint or "")[:8]
+        return f"{name}@{head}"

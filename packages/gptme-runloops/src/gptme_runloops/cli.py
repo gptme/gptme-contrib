@@ -1,6 +1,7 @@
 """Command-line interface for run loops."""
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import click
 
 from gptme_runloops.autonomous import AutonomousRun
 from gptme_runloops.email import EmailRun
+from gptme_runloops.pr_review.schema import MergeSafety
 from gptme_runloops.project_monitoring import ProjectMonitoringRun
 from gptme_runloops.team import TeamRun
 from gptme_runloops.utils.executor import get_executor, list_backends
@@ -385,6 +387,126 @@ def run_item_cmd(
         claim_mode=claim_mode,
     )
     sys.exit(exit_code)
+
+
+@main.command()
+@click.option(
+    "--checkout",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path.cwd,
+    help="Repository root to review (default: current directory)",
+)
+@click.option(
+    "--working-tree",
+    is_flag=True,
+    default=False,
+    help="Review the current working-tree diff (git diff HEAD). "
+    "No PR or forge access needed.",
+)
+@click.option(
+    "--base",
+    "base_sha",
+    default=None,
+    help="Base commit SHA for a local range review (requires --head).",
+)
+@click.option(
+    "--head",
+    "head_sha",
+    default=None,
+    help="Head commit SHA for a local range review (requires --base).",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write ReviewArtifact JSON to this path (default: print to stdout).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="gptme model spec (e.g. 'anthropic/claude-sonnet-4-6'). "
+    "Defaults to gptme's configured model.",
+)
+def review(
+    checkout: Path,
+    working_tree: bool,
+    base_sha: str | None,
+    head_sha: str | None,
+    output_path: Path | None,
+    model: str | None,
+) -> None:
+    """Review a local diff and emit a ReviewArtifact JSON.
+
+    Phase 1: local-only, no forge API calls, artifact-only output.
+
+    Examples:
+
+      # Review uncommitted working-tree changes (in-session, before a PR):
+      gptme-runloops review --working-tree
+
+      # Review a specific commit range:
+      gptme-runloops review --base abc123 --head def456
+
+      # Write the artifact to a file:
+      gptme-runloops review --working-tree --output /tmp/review.json
+
+      # Use a specific model:
+      gptme-runloops review --working-tree --model anthropic/claude-sonnet-4-6
+    """
+
+    from gptme_runloops.pr_review.reviewer import resolve_local_target, run_review
+
+    if not working_tree and not (base_sha and head_sha):
+        raise click.UsageError(
+            "Specify --working-tree or both --base <SHA> and --head <SHA>."
+        )
+    if working_tree and (base_sha or head_sha):
+        raise click.UsageError(
+            "--working-tree is mutually exclusive with --base / --head."
+        )
+
+    try:
+        target, diff = resolve_local_target(
+            checkout,
+            working_tree=working_tree,
+            base_sha=base_sha,
+            head_sha=head_sha,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise click.ClickException(f"git command failed: {exc.stderr.strip()}") from exc
+
+    if not diff.strip():
+        click.echo("No changes to review.", err=True)
+        sys.exit(0)
+
+    click.echo(f"Reviewing {target.description} …", err=True)
+
+    try:
+        artifact = run_review(
+            checkout,
+            target,
+            diff,
+            model=model,
+            output_path=output_path,
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(f"Invalid review response: {exc}") from exc
+
+    if output_path:
+        click.echo(f"Artifact written to {output_path}", err=True)
+    else:
+        click.echo(artifact.model_dump_json(indent=2))
+
+    # Summary to stderr
+    n = len(artifact.findings)
+    click.echo(
+        f"Review complete — {n} finding(s), merge_safety={artifact.merge_safety.value}",
+        err=True,
+    )
+    # Fail closed: automation must only continue after an explicit safe verdict.
+    if artifact.merge_safety != MergeSafety.safe:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
