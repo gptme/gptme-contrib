@@ -857,6 +857,19 @@ class TestGetPostedFingerprints:
 
         assert fps == {"aaaa111122223333", "bbbb444455556666"}
 
+    def test_uses_paginate_to_scan_all_pages(self):
+        """get_posted_fingerprints must request all pages, not just the first."""
+        from gptme_runloops.pr_review.github_adapter import get_posted_fingerprints
+
+        with patch(
+            "gptme_runloops.pr_review.github_adapter._gh_api",
+            return_value=[],
+        ) as mock_api:
+            get_posted_fingerprints("org/repo", 42)
+
+        _, call_kwargs = mock_api.call_args
+        assert call_kwargs.get("paginate") is True
+
 
 class TestPublishArtifactShadowMode:
     """publish_artifact() in shadow mode must not call any GitHub API."""
@@ -999,6 +1012,73 @@ class TestPublishArtifactIdempotency:
 
         assert posted == 1
         assert skipped == 0
+
+
+class TestPostInlineFinding:
+    """post_inline_finding() falls back to LEFT side when RIGHT is rejected."""
+
+    def _make_finding(self) -> ReviewFinding:
+        return ReviewFinding(
+            id="fp1234567890abcd",
+            category="correctness",
+            severity=Severity.high,
+            confidence=0.9,
+            file_path="src/foo.py",
+            line_range="10",
+            title="Bug",
+            description="A bug.",
+            evidence="- old line",
+        )
+
+    def test_right_side_succeeds(self):
+        from gptme_runloops.pr_review.github_adapter import post_inline_finding
+
+        with patch(
+            "gptme_runloops.pr_review.github_adapter._gh_api",
+            return_value={"id": 999},
+        ) as mock_api:
+            comment_id = post_inline_finding(
+                "org/repo", 42, "h" * 40, self._make_finding()
+            )
+
+        assert comment_id == "999"
+        fields = mock_api.call_args[1]["fields"]
+        assert fields["side"] == "RIGHT"
+
+    def test_falls_back_to_left_when_right_rejected(self):
+        """When RIGHT anchor is rejected by GitHub, LEFT is tried automatically."""
+        from gptme_runloops.pr_review.github_adapter import post_inline_finding
+
+        call_count = 0
+
+        def _api_side_effect(path, *, method="GET", fields=None, **kw):
+            nonlocal call_count
+            call_count += 1
+            if fields and fields.get("side") == "RIGHT":
+                raise subprocess.CalledProcessError(1, "gh")
+            return {"id": 777}
+
+        with patch(
+            "gptme_runloops.pr_review.github_adapter._gh_api",
+            side_effect=_api_side_effect,
+        ):
+            comment_id = post_inline_finding(
+                "org/repo", 42, "h" * 40, self._make_finding()
+            )
+
+        assert comment_id == "777"
+        assert call_count == 2  # RIGHT tried first, then LEFT
+
+    def test_raises_when_both_sides_rejected(self):
+        """If both RIGHT and LEFT fail, CalledProcessError propagates."""
+        from gptme_runloops.pr_review.github_adapter import post_inline_finding
+
+        with patch(
+            "gptme_runloops.pr_review.github_adapter._gh_api",
+            side_effect=subprocess.CalledProcessError(1, "gh"),
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                post_inline_finding("org/repo", 42, "h" * 40, self._make_finding())
 
 
 class TestReviewPrCliCommand:

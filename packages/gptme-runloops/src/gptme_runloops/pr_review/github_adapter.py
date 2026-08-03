@@ -60,7 +60,11 @@ def _gh(*args: str, repo: str | None = None) -> str:
 
 
 def _gh_api(
-    path: str, *, method: str = "GET", fields: dict[str, Any] | None = None
+    path: str,
+    *,
+    method: str = "GET",
+    fields: dict[str, Any] | None = None,
+    paginate: bool = False,
 ) -> Any:
     """Call the GitHub REST API via ``gh api`` and return parsed JSON.
 
@@ -68,8 +72,13 @@ def _gh_api(
         path: API path, e.g. ``/repos/owner/repo/pulls/1/comments``.
         method: HTTP method (GET, POST, PATCH, …).
         fields: Fields to pass as ``-f key=value`` or ``-F key=value``.
+        paginate: If True, follow GitHub pagination and return all results
+                  concatenated into a single list (list endpoints only).
     """
-    cmd = ["gh", "api", "--method", method, path]
+    cmd = ["gh", "api", "--method", method]
+    if paginate:
+        cmd.append("--paginate")
+    cmd.append(path)
     if fields:
         for k, v in fields.items():
             # Use -F for values that should stay as native types (int, bool)
@@ -78,7 +87,21 @@ def _gh_api(
             else:
                 cmd.extend(["-f", f"{k}={v}"])
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return json.loads(result.stdout)
+    if not paginate:
+        return json.loads(result.stdout)
+    # gh api --paginate prints each page as a separate JSON document (one per line).
+    # For list endpoints each page is a JSON array; concatenate them all.
+    all_items: list[Any] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        page = json.loads(line)
+        if isinstance(page, list):
+            all_items.extend(page)
+        else:
+            all_items.append(page)
+    return all_items
 
 
 def fetch_pr_metadata(repo: str, pr_number: int) -> dict[str, str]:
@@ -144,7 +167,7 @@ def get_posted_fingerprints(repo: str, pr_number: int) -> set[str]:
         Set of fingerprint ID strings that are already posted.
     """
     owner, name = repo.split("/", 1)
-    raw = _gh_api(f"/repos/{owner}/{name}/pulls/{pr_number}/comments")
+    raw = _gh_api(f"/repos/{owner}/{name}/pulls/{pr_number}/comments", paginate=True)
     if not isinstance(raw, list):
         return set()
 
@@ -261,18 +284,26 @@ def post_inline_finding(
     body = _build_inline_comment_body(finding)
     line = _parse_first_line(finding.line_range)
 
-    data = _gh_api(
-        f"/repos/{owner}/{name}/pulls/{pr_number}/comments",
-        method="POST",
-        fields={
-            "body": body,
-            "commit_id": head_sha,
-            "path": finding.file_path,
-            "line": line,
-            "side": "RIGHT",
-        },
-    )
-    return str(data.get("id", ""))
+    # Try RIGHT (added/context lines) first; fall back to LEFT (deleted lines).
+    # GitHub rejects a RIGHT anchor on a deletion-only line and vice versa.
+    last_error: subprocess.CalledProcessError | None = None
+    for side in ("RIGHT", "LEFT"):
+        try:
+            data = _gh_api(
+                f"/repos/{owner}/{name}/pulls/{pr_number}/comments",
+                method="POST",
+                fields={
+                    "body": body,
+                    "commit_id": head_sha,
+                    "path": finding.file_path,
+                    "line": line,
+                    "side": side,
+                },
+            )
+            return str(data.get("id", ""))
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+    raise last_error  # type: ignore[misc]  # unreachable when loop body always sets it
 
 
 def post_summary_comment(
