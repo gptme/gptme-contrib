@@ -41,6 +41,7 @@ You are a careful code reviewer. Analyze the provided diff and produce findings.
 Rules:
 - Only report findings with concrete evidence visible in the diff.
 - Every finding MUST reference a specific file and line from the changed code.
+- Set line_side to LEFT for a deleted line and RIGHT for an added or context line.
 - Focus on correctness first, then security, then missing test coverage.
 - Skip purely stylistic findings unless they indicate a real bug risk.
 - Be conservative: a missed real bug is worse than a skipped marginal finding.
@@ -57,6 +58,7 @@ Return a single JSON object with this exact structure (no preamble, no fences):
       "confidence": <float 0.0-1.0>,
       "file_path": "<exact path from diff>",
       "line_range": "<line or range, e.g. 42 or 42-49>",
+      "line_side": "LEFT" | "RIGHT",
       "title": "<short specific title>",
       "description": "<full description of the problem>",
       "evidence": "<exact code snippet from the diff showing the issue>",
@@ -341,6 +343,7 @@ def run_review(
             confidence=float(raw_f.get("confidence", 0.5)),
             file_path=raw_f.get("file_path", ""),
             line_range=str(raw_f.get("line_range", "1")),
+            line_side=raw_f.get("line_side", "RIGHT"),
             title=raw_f.get("title", ""),
             description=raw_f.get("description", ""),
             evidence=raw_f.get("evidence", ""),

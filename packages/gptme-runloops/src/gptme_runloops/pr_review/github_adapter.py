@@ -286,28 +286,27 @@ def post_inline_finding(
     owner, name = repo.split("/", 1)
     body = _build_inline_comment_body(finding)
 
-    # Iterate every line in the reported range, trying RIGHT then LEFT at each
-    # position. The first line may fall outside the GitHub diff window when the
-    # finding spans context lines not part of any hunk; later lines in the range
-    # are more likely to be postable anchors.
+    # Iterate every line in the reported range on the model-selected diff side.
+    # Trying the opposite side is unsafe: the same numeric line can exist on both
+    # sides while referring to unrelated code. Later lines in a range remain safe
+    # fallback anchors because they preserve the finding's declared side.
     last_error: subprocess.CalledProcessError | None = None
     for line in _iter_range_lines(finding.line_range):
-        for side in ("RIGHT", "LEFT"):
-            try:
-                data = _gh_api(
-                    f"/repos/{owner}/{name}/pulls/{pr_number}/comments",
-                    method="POST",
-                    fields={
-                        "body": body,
-                        "commit_id": head_sha,
-                        "path": finding.file_path,
-                        "line": line,
-                        "side": side,
-                    },
-                )
-                return str(data.get("id", ""))
-            except subprocess.CalledProcessError as exc:
-                last_error = exc
+        try:
+            data = _gh_api(
+                f"/repos/{owner}/{name}/pulls/{pr_number}/comments",
+                method="POST",
+                fields={
+                    "body": body,
+                    "commit_id": head_sha,
+                    "path": finding.file_path,
+                    "line": line,
+                    "side": finding.line_side,
+                },
+            )
+            return str(data.get("id", ""))
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
     raise last_error  # type: ignore[misc]  # unreachable when loop body always sets it
 
 

@@ -1015,9 +1015,9 @@ class TestPublishArtifactIdempotency:
 
 
 class TestPostInlineFinding:
-    """post_inline_finding() falls back to LEFT side when RIGHT is rejected."""
+    """post_inline_finding() preserves the finding's declared diff side."""
 
-    def _make_finding(self) -> ReviewFinding:
+    def _make_finding(self, *, line_side: str = "RIGHT") -> ReviewFinding:
         return ReviewFinding(
             id="fp1234567890abcd",
             category="correctness",
@@ -1025,12 +1025,14 @@ class TestPostInlineFinding:
             confidence=0.9,
             file_path="src/foo.py",
             line_range="10",
+            line_side=line_side,
             title="Bug",
             description="A bug.",
             evidence="- old line",
         )
 
-    def test_right_side_succeeds(self):
+    @pytest.mark.parametrize("line_side", ["RIGHT", "LEFT"])
+    def test_posts_on_declared_side(self, line_side: str):
         from gptme_runloops.pr_review.github_adapter import post_inline_finding
 
         with patch(
@@ -1038,36 +1040,34 @@ class TestPostInlineFinding:
             return_value={"id": 999},
         ) as mock_api:
             comment_id = post_inline_finding(
-                "org/repo", 42, "h" * 40, self._make_finding()
+                "org/repo",
+                42,
+                "h" * 40,
+                self._make_finding(line_side=line_side),
             )
 
         assert comment_id == "999"
         fields = mock_api.call_args[1]["fields"]
-        assert fields["side"] == "RIGHT"
+        assert fields["side"] == line_side
 
-    def test_falls_back_to_left_when_right_rejected(self):
-        """When RIGHT anchor is rejected by GitHub, LEFT is tried automatically."""
+    def test_does_not_fall_back_to_opposite_side(self):
+        """A rejected anchor must not attach to the same number on another side."""
         from gptme_runloops.pr_review.github_adapter import post_inline_finding
-
-        call_count = 0
-
-        def _api_side_effect(path, *, method="GET", fields=None, **kw):
-            nonlocal call_count
-            call_count += 1
-            if fields and fields.get("side") == "RIGHT":
-                raise subprocess.CalledProcessError(1, "gh")
-            return {"id": 777}
 
         with patch(
             "gptme_runloops.pr_review.github_adapter._gh_api",
-            side_effect=_api_side_effect,
-        ):
-            comment_id = post_inline_finding(
-                "org/repo", 42, "h" * 40, self._make_finding()
-            )
+            side_effect=subprocess.CalledProcessError(1, "gh"),
+        ) as mock_api:
+            with pytest.raises(subprocess.CalledProcessError):
+                post_inline_finding(
+                    "org/repo",
+                    42,
+                    "h" * 40,
+                    self._make_finding(line_side="LEFT"),
+                )
 
-        assert comment_id == "777"
-        assert call_count == 2  # RIGHT tried first, then LEFT
+        mock_api.assert_called_once()
+        assert mock_api.call_args.kwargs["fields"]["side"] == "LEFT"
 
     def test_iterates_range_when_first_line_rejected(self):
         """Falls back to later lines in the range when the first is not a postable anchor."""
@@ -1101,11 +1101,11 @@ class TestPostInlineFinding:
             comment_id = post_inline_finding("org/repo", 42, "h" * 40, finding)
 
         assert comment_id == "888"
-        # line 10 RIGHT+LEFT failed; line 11 RIGHT succeeded
-        assert call_lines == [10, 10, 11]
+        # line 10 failed; line 11 succeeded, preserving RIGHT throughout.
+        assert call_lines == [10, 11]
 
-    def test_raises_when_both_sides_rejected(self):
-        """If both RIGHT and LEFT fail, CalledProcessError propagates."""
+    def test_raises_when_all_range_lines_are_rejected(self):
+        """If every same-side anchor fails, CalledProcessError propagates."""
         from gptme_runloops.pr_review.github_adapter import post_inline_finding
 
         with patch(

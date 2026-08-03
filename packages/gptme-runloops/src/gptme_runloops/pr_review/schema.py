@@ -121,6 +121,10 @@ class ReviewFinding(BaseModel):
     # Location — required; no evidence without a file reference
     file_path: str
     line_range: str = Field(description="e.g. '42' or '42-49'")
+    line_side: Literal["LEFT", "RIGHT"] = Field(
+        default="RIGHT",
+        description="Git diff side: LEFT for deleted lines, RIGHT for added/context lines",
+    )
 
     # Content
     title: str
