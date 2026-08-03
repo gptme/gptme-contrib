@@ -32,8 +32,11 @@ gptme-runloops autonomous --workspace /path/to/workspace
 # Run project monitoring
 gptme-runloops monitoring --workspace /path/to/workspace
 
-# Run a single run-item
-gptme-runloops run-item --workspace /path/to/workspace
+# Run a single project-monitoring work item
+gptme-runloops run-item \
+  --workspace /path/to/workspace \
+  --work-file /path/to/work-item.jsonl \
+  --backend gptme
 
 # Run email monitoring
 gptme-runloops email --workspace /path/to/workspace
@@ -45,9 +48,9 @@ gptme-runloops team --workspace /path/to/workspace
 ### Python API
 
 ```python
-from gptme_runloops.autonomous import AutonomousRunner
-from gptme_runloops.project_monitoring import ProjectMonitor
-from gptme_runloops.email import EmailRunner
+from gptme_runloops.autonomous import AutonomousRun
+from gptme_runloops.project_monitoring import ProjectMonitoringRun
+from gptme_runloops.email import EmailRun
 ```
 
 ## Components
