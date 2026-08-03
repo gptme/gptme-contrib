@@ -180,12 +180,15 @@ def get_posted_fingerprints(repo: str, pr_number: int) -> set[str]:
     return found
 
 
-def _parse_first_line(line_range: str) -> int:
-    """Extract the first line number from a range string like '42' or '42-49'."""
+def _iter_range_lines(line_range: str):
+    """Yield each line number in a range string like '42' or '42-49'."""
+    parts = line_range.split("-")
     try:
-        return int(line_range.split("-")[0])
+        start = int(parts[0])
+        end = int(parts[1]) if len(parts) > 1 else start
     except (ValueError, IndexError):
-        return 1
+        start, end = 1, 1
+    yield from range(start, end + 1)
 
 
 def _severity_label(severity: Severity) -> str:
@@ -282,27 +285,29 @@ def post_inline_finding(
     """
     owner, name = repo.split("/", 1)
     body = _build_inline_comment_body(finding)
-    line = _parse_first_line(finding.line_range)
 
-    # Try RIGHT (added/context lines) first; fall back to LEFT (deleted lines).
-    # GitHub rejects a RIGHT anchor on a deletion-only line and vice versa.
+    # Iterate every line in the reported range, trying RIGHT then LEFT at each
+    # position. The first line may fall outside the GitHub diff window when the
+    # finding spans context lines not part of any hunk; later lines in the range
+    # are more likely to be postable anchors.
     last_error: subprocess.CalledProcessError | None = None
-    for side in ("RIGHT", "LEFT"):
-        try:
-            data = _gh_api(
-                f"/repos/{owner}/{name}/pulls/{pr_number}/comments",
-                method="POST",
-                fields={
-                    "body": body,
-                    "commit_id": head_sha,
-                    "path": finding.file_path,
-                    "line": line,
-                    "side": side,
-                },
-            )
-            return str(data.get("id", ""))
-        except subprocess.CalledProcessError as exc:
-            last_error = exc
+    for line in _iter_range_lines(finding.line_range):
+        for side in ("RIGHT", "LEFT"):
+            try:
+                data = _gh_api(
+                    f"/repos/{owner}/{name}/pulls/{pr_number}/comments",
+                    method="POST",
+                    fields={
+                        "body": body,
+                        "commit_id": head_sha,
+                        "path": finding.file_path,
+                        "line": line,
+                        "side": side,
+                    },
+                )
+                return str(data.get("id", ""))
+            except subprocess.CalledProcessError as exc:
+                last_error = exc
     raise last_error  # type: ignore[misc]  # unreachable when loop body always sets it
 
 

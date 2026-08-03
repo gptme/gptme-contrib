@@ -1069,6 +1069,41 @@ class TestPostInlineFinding:
         assert comment_id == "777"
         assert call_count == 2  # RIGHT tried first, then LEFT
 
+    def test_iterates_range_when_first_line_rejected(self):
+        """Falls back to later lines in the range when the first is not a postable anchor."""
+        from gptme_runloops.pr_review.github_adapter import post_inline_finding
+
+        finding = ReviewFinding(
+            id="fp1234567890abcd",
+            category="correctness",
+            severity=Severity.high,
+            confidence=0.9,
+            file_path="src/foo.py",
+            line_range="10-12",  # multi-line range; line 10 is outside the diff window
+            title="Bug",
+            description="A bug.",
+            evidence="+ new line",
+        )
+
+        call_lines: list[int] = []
+
+        def _api_side_effect(path, *, method="GET", fields=None, **kw):
+            line = fields["line"] if fields else None
+            call_lines.append(line)
+            if line == 10:  # first line not in diff window
+                raise subprocess.CalledProcessError(1, "gh")
+            return {"id": 888}
+
+        with patch(
+            "gptme_runloops.pr_review.github_adapter._gh_api",
+            side_effect=_api_side_effect,
+        ):
+            comment_id = post_inline_finding("org/repo", 42, "h" * 40, finding)
+
+        assert comment_id == "888"
+        # line 10 RIGHT+LEFT failed; line 11 RIGHT succeeded
+        assert call_lines == [10, 10, 11]
+
     def test_raises_when_both_sides_rejected(self):
         """If both RIGHT and LEFT fail, CalledProcessError propagates."""
         from gptme_runloops.pr_review.github_adapter import post_inline_finding
