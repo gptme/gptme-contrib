@@ -508,6 +508,31 @@ def test_pending_excludes_replies_to_my_messages(workspace: Path) -> None:
     assert "No messages awaiting reply" in result.output, result.output
 
 
+def test_pending_excludes_consolidated_reply_to_my_messages(workspace: Path) -> None:
+    """A peer may close several threads in one reply with a list of parent IDs."""
+    for subject in ("Question one", "Question two"):
+        result = CliRunner().invoke(agent, ["send", "bob", subject, "thoughts?"])
+        assert result.exit_code == 0, result.output
+    my_msg_ids = sorted(path.name for path in (workspace / "messages" / "outbox").glob("*.md"))
+
+    inbox = workspace / "messages" / "inbox"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (inbox / "consolidated-reply.md").write_text(
+        "---\n"
+        "from: bob\n"
+        "to: alice\n"
+        f"timestamp: {now_iso}\n"
+        "subject: Re: both questions\n"
+        "read: false\n"
+        f"in_reply_to: {json.dumps(my_msg_ids)}\n"
+        "---\n\nBoth answers.\n"
+    )
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0, result.output
+    assert "No messages awaiting reply" in result.output
+
+
 def test_pending_reply_once_for_pull_based_recipient(workspace: Path) -> None:
     """An undelivered reply to a pull-based recipient satisfies reply-once.
 
