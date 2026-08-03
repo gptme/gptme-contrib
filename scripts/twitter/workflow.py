@@ -1797,17 +1797,24 @@ def process_timeline_tweets(
                     # Older cache entries predate persisted thread context. Fetch
                     # it once, then upgrade the entry so subsequent polls remain
                     # read-free without degrading draft review context.
-                    cached_thread_context = get_conversation_thread(
-                        client,
-                        tweet.id,
-                        fallback_conversation_id=tweet.conversation_id,
-                    )
-                    save_to_cache(
-                        tweet_id_str,
-                        eval_result,
-                        response,
-                        cached_thread_context,
-                    )
+                    # Guard against transient API failures: a failed backfill
+                    # must not terminate the processing cycle for remaining posts.
+                    try:
+                        cached_thread_context = get_conversation_thread(
+                            client,
+                            tweet.id,
+                            fallback_conversation_id=tweet.conversation_id,
+                        )
+                        save_to_cache(
+                            tweet_id_str,
+                            eval_result,
+                            response,
+                            cached_thread_context,
+                        )
+                    except Exception as e:
+                        console.print(
+                            f"[yellow]Could not backfill thread context for {tweet_id_str}: {e}"
+                        )
                 if cached_thread_context:
                     tweet_data["thread_context"] = cached_thread_context
                     tweet_data["context"]["thread_context"] = cached_thread_context
