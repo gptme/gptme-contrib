@@ -4,7 +4,11 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
+from click.testing import CliRunner
+from gptme_runloops.cli import main as cli_main
 from gptme_runloops.pr_review import (
     Disposition,
     LocalReviewTarget,
@@ -713,7 +717,84 @@ class TestResolveLocalTarget:
 
     def test_raises_without_args(self, tmp_path):
         self._init_git_repo(tmp_path)
-        import pytest
 
         with pytest.raises(ValueError, match="Specify"):
             resolve_local_target(tmp_path)
+
+
+class TestReviewCliExitStatus:
+    @pytest.mark.parametrize(
+        ("merge_safety", "expected_exit_code"),
+        [
+            (MergeSafety.safe, 0),
+            (MergeSafety.unsafe, 1),
+            (MergeSafety.needs_review, 1),
+            (MergeSafety.unknown, 1),
+        ],
+    )
+    def test_only_safe_verdict_exits_zero(
+        self, tmp_path, merge_safety, expected_exit_code
+    ):
+        target = LocalReviewTarget(
+            checkout=str(tmp_path),
+            base_sha="a" * 40,
+            diff_fingerprint="b" * 16,
+        )
+        artifact = ReviewArtifact(
+            target=target,
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="review",
+            merge_safety=merge_safety,
+        )
+
+        with (
+            patch(
+                "gptme_runloops.pr_review.reviewer.resolve_local_target",
+                return_value=(target, "+new line"),
+            ),
+            patch(
+                "gptme_runloops.pr_review.reviewer.run_review",
+                return_value=artifact,
+            ),
+        ):
+            result = CliRunner().invoke(
+                cli_main,
+                ["review", "--checkout", str(tmp_path), "--working-tree"],
+            )
+
+        assert result.exit_code == expected_exit_code
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            "not JSON",
+            '{"merge_safety":"safe","findings":[{"confidence":"high"}]}',
+        ],
+    )
+    def test_invalid_response_is_controlled_cli_error(self, tmp_path, response):
+        target = LocalReviewTarget(
+            checkout=str(tmp_path),
+            base_sha="a" * 40,
+            diff_fingerprint="b" * 16,
+        )
+        with (
+            patch(
+                "gptme_runloops.pr_review.reviewer.resolve_local_target",
+                return_value=(target, "+new line"),
+            ),
+            patch(
+                "gptme_runloops.pr_review.reviewer._invoke_model",
+                return_value=response,
+            ),
+        ):
+            result = CliRunner().invoke(
+                cli_main,
+                ["review", "--checkout", str(tmp_path), "--working-tree"],
+            )
+
+        assert result.exit_code == 1
+        assert "Error: Invalid review response:" in result.output
+        assert not isinstance(result.exception, TypeError | ValueError)

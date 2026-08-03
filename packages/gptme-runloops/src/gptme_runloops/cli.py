@@ -490,8 +490,8 @@ def review(
             model=model,
             output_path=output_path,
         )
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc)) from exc
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise click.ClickException(f"Invalid review response: {exc}") from exc
 
     if output_path:
         click.echo(f"Artifact written to {output_path}", err=True)
@@ -504,7 +504,8 @@ def review(
         f"Review complete — {n} finding(s), merge_safety={artifact.merge_safety.value}",
         err=True,
     )
-    if artifact.merge_safety == MergeSafety.unsafe:
+    # Fail closed: automation must only continue after an explicit safe verdict.
+    if artifact.merge_safety != MergeSafety.safe:
         sys.exit(1)
 
 
