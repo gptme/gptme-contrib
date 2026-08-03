@@ -165,14 +165,17 @@ def is_tweet_cached(tweet_id: str) -> bool:
     return cache_path.exists()
 
 
-def save_to_cache(tweet_id: str, eval_result, response=None) -> None:
-    """Save tweet processing results to cache"""
+def save_to_cache(
+    tweet_id: str, eval_result, response=None, thread_context: list[dict] | None = None
+) -> None:
+    """Save tweet processing results and the context used to produce them."""
     cache_path = get_cache_path(tweet_id)
     cache_data = {
         "tweet_id": tweet_id,
         "processed_at": datetime.now().isoformat(),
         "evaluation": asdict(eval_result) if eval_result else None,
         "response": asdict(response) if response else None,
+        "thread_context": thread_context,
     }
 
     with open(cache_path, "w") as f:
@@ -182,16 +185,23 @@ def save_to_cache(tweet_id: str, eval_result, response=None) -> None:
 
 
 def load_from_cache(tweet_id: str) -> Tuple[dict | None, dict | None]:
-    """Load tweet processing results from cache"""
+    """Load tweet processing results from cache."""
     cache_path = get_cache_path(tweet_id)
-
     if not cache_path.exists():
         return None, None
-
     with open(cache_path) as f:
         cache_data = json.load(f)
-
     return cache_data.get("evaluation"), cache_data.get("response")
+
+
+def load_cached_thread_context(tweet_id: str) -> list[dict] | None:
+    """Load the conversation context used to produce a cached response."""
+    cache_path = get_cache_path(tweet_id)
+    if not cache_path.exists():
+        return None
+    with open(cache_path) as f:
+        thread_context = json.load(f).get("thread_context")
+    return thread_context if isinstance(thread_context, list) else None
 
 
 def _list_draft_files(directory: Path) -> List[Path]:
@@ -427,7 +437,12 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
 
 
 def get_conversation_thread(
-    client, tweet_id_or_conversation_id, max_pages=3, max_tweets_per_page=100
+    client,
+    tweet_id_or_conversation_id,
+    max_pages=3,
+    max_tweets_per_page=100,
+    *,
+    fallback_conversation_id=None,
 ):
     """
     Retrieve the complete conversation thread for a given tweet ID or conversation ID.
@@ -483,11 +498,16 @@ def get_conversation_thread(
                             {user.id: user for user in tweet_response.includes["users"]}
                         )
                 else:
-                    # If we couldn't get the tweet, just use the ID as conversation ID
+                    conversation_id = (
+                        fallback_conversation_id or tweet_id_or_conversation_id
+                    )
                     all_tweets = {}
                     all_users = {}
             except Exception as e:
                 console.print(f"[yellow]Error fetching original tweet: {e}")
+                conversation_id = (
+                    fallback_conversation_id or tweet_id_or_conversation_id
+                )
                 all_tweets = {}
                 all_users = {}
         else:
@@ -1726,7 +1746,11 @@ def process_timeline_tweets(
                 # conversation and retains the root post in the context.
                 if hasattr(tweet, "conversation_id") and tweet.conversation_id:
                     try:
-                        thread_tweets = get_conversation_thread(client, tweet.id)
+                        thread_tweets = get_conversation_thread(
+                            client,
+                            tweet.id,
+                            fallback_conversation_id=tweet.conversation_id,
+                        )
                         if thread_tweets:
                             # Add thread context at both the root level (for eval/response) and in context (for storage)
                             tweet_data["thread_context"] = thread_tweets
@@ -1764,10 +1788,39 @@ def process_timeline_tweets(
                     if cached_response
                     else None
                 )
+                cached_thread_context = load_cached_thread_context(tweet_id_str)
+                if (
+                    response
+                    and cached_thread_context is None
+                    and getattr(tweet, "conversation_id", None)
+                ):
+                    # Older cache entries predate persisted thread context. Fetch
+                    # it once, then upgrade the entry so subsequent polls remain
+                    # read-free without degrading draft review context.
+                    cached_thread_context = get_conversation_thread(
+                        client,
+                        tweet.id,
+                        fallback_conversation_id=tweet.conversation_id,
+                    )
+                    save_to_cache(
+                        tweet_id_str,
+                        eval_result,
+                        response,
+                        cached_thread_context,
+                    )
+                if cached_thread_context:
+                    tweet_data["thread_context"] = cached_thread_context
+                    tweet_data["context"]["thread_context"] = cached_thread_context
             else:
-                # Process tweet and cache results
+                # Process tweet and cache results, including the exact context used
+                # to produce a response so later cache hits need no network read.
                 eval_result, response = process_tweet(tweet_data)
-                save_to_cache(tweet_id_str, eval_result, response)
+                save_to_cache(
+                    tweet_id_str,
+                    eval_result,
+                    response,
+                    tweet_data.get("thread_context"),
+                )
 
                 # Show evaluation result
                 console.print(f"[blue]Evaluation: {eval_result.action.upper()}")
