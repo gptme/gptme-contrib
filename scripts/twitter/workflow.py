@@ -1714,28 +1714,34 @@ def process_timeline_tweets(
                 },
             }
 
-            # Try to get conversation thread context if this is a reply
-            if hasattr(tweet, "conversation_id") and tweet.conversation_id:
-                try:
-                    thread_tweets = get_conversation_thread(
-                        client, tweet.conversation_id
-                    )
-                    if thread_tweets:
-                        # Add thread context at both the root level (for eval/response) and in context (for storage)
-                        tweet_data["thread_context"] = thread_tweets
-                        tweet_data["context"]["thread_context"] = thread_tweets
-                        console.print(
-                            f"[blue]Added thread context with {len(thread_tweets)} tweets"
-                        )
-                except Exception as e:
-                    console.print(f"[yellow]Could not retrieve thread context: {e}")
+            # Check the durable evaluation cache before fetching conversation context.
+            # Re-seen entries do not need another metered thread search just to reuse
+            # a decision we already made.
+            cached_eval = None
+            cached_response = None
+            tweet_is_cached = is_tweet_cached(tweet_id_str)
+
+            if not tweet_is_cached:
+                # Pass the tweet itself so the helper resolves the canonical
+                # conversation and retains the root post in the context.
+                if hasattr(tweet, "conversation_id") and tweet.conversation_id:
+                    try:
+                        thread_tweets = get_conversation_thread(client, tweet.id)
+                        if thread_tweets:
+                            # Add thread context at both the root level (for eval/response) and in context (for storage)
+                            tweet_data["thread_context"] = thread_tweets
+                            tweet_data["context"]["thread_context"] = thread_tweets
+                            console.print(
+                                f"[blue]Added thread context with {len(thread_tweets)} tweets"
+                            )
+                    except Exception as e:
+                        console.print(f"[yellow]Could not retrieve thread context: {e}")
 
             # Process tweet
             console.print(f"\n[cyan]Processing tweet from @{author_username}:[/cyan]")
             console.print(f"[white]{tweet.text}[/white]")
 
-            # Check if tweet is already cached
-            if is_tweet_cached(tweet_id_str):
+            if tweet_is_cached:
                 console.print(f"[blue]Using cached results for tweet {tweet_id_str}")
                 cached_eval, cached_response = load_from_cache(tweet_id_str)
 
