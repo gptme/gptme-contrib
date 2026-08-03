@@ -418,7 +418,9 @@ def _pending_messages(
             continue
         if f.name in replied_to:
             continue
-        if m.get("in_reply_to") in my_outbox_ids:
+        in_reply_to = m.get("in_reply_to")
+        thread_ids = in_reply_to if isinstance(in_reply_to, list) else [in_reply_to]
+        if any(str(thread_id) in my_outbox_ids for thread_id in thread_ids):
             continue
         if window > 0:
             age = _age_days(m, now)
