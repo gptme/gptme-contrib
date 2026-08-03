@@ -64,6 +64,30 @@ def _reply_window_days() -> int:
         return 7
 
 
+def _no_reply_subject_patterns() -> list[re.Pattern[str]]:
+    """Configured receiver-side subject patterns excluded from reply SLA."""
+    raw = os.environ.get("AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS", "")
+    patterns: list[re.Pattern[str]] = []
+    for item in raw.splitlines():
+        if not item.strip():
+            continue
+        try:
+            patterns.append(re.compile(item.strip(), re.IGNORECASE))
+        except re.error as exc:
+            raise click.ClickException(
+                f"Invalid AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS regex {item.strip()!r}: {exc}"
+            ) from exc
+    return patterns
+
+
+def _reply_expected(meta: dict, patterns: list[re.Pattern[str]]) -> bool:
+    """Whether a message belongs in the receiver's reply-obligation queue."""
+    if meta.get("reply_expected") is False:
+        return False
+    subject = str(meta.get("subject", ""))
+    return not any(pattern.search(subject) for pattern in patterns)
+
+
 @functools.lru_cache(maxsize=1)
 def _repo_root() -> Path:
     """Workspace root via ``git rev-parse --show-toplevel`` (symlink-correct).
@@ -374,10 +398,13 @@ def _pending_messages(
     self_name: str,
     window: int,
     agents: dict[str, dict[str, str]] | None = None,
+    no_reply_subject_patterns: list[re.Pattern[str]] | None = None,
 ) -> list[dict]:
     """Inbox messages addressed to us that we haven't replied to (timely SLA).
 
-    A reply requirement is satisfied by an inbox ``replied: true`` stamp or by an
+    Messages with ``reply_expected: false`` or a subject matching
+    ``AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS`` are informational and omitted. A reply
+    requirement is otherwise satisfied by an inbox ``replied: true`` stamp or by an
     outbox message whose ``in_reply_to`` points at it. Reply-once: a draft reply
     counts even when stamped ``delivered: false`` **if the recipient is
     pull-based** (no push transport), where that stamp is the permanent steady
@@ -390,6 +417,8 @@ def _pending_messages(
     now = datetime.now(timezone.utc)
     if agents is None:
         agents = _load_agents(warn_missing=False)
+    if no_reply_subject_patterns is None:
+        no_reply_subject_patterns = _no_reply_subject_patterns()
 
     replied_to: set[str] = set()
     my_outbox_ids: set[str] = set()
@@ -413,6 +442,8 @@ def _pending_messages(
         if m.get("from") in (None, self_name):
             continue
         if not _addressed_to(m, self_name):
+            continue
+        if not _reply_expected(m, no_reply_subject_patterns):
             continue
         if m.get("replied"):
             continue
@@ -684,7 +715,12 @@ def agent() -> None:
 @click.argument("subject")
 @click.argument("content", required=False)
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to send from.")
-def send(to: str, subject: str, content: str | None, mailbox: str) -> None:
+@click.option(
+    "--no-reply",
+    is_flag=True,
+    help="Mark the message as informational; the recipient owes no reply.",
+)
+def send(to: str, subject: str, content: str | None, mailbox: str, no_reply: bool) -> None:
     """Send a message to another agent."""
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
@@ -696,7 +732,7 @@ def send(to: str, subject: str, content: str | None, mailbox: str) -> None:
         sys.exit(1)
     mailbox = _normalize_mailbox(mailbox)
     transport = _transport(deliver=_ssh_deliver(agents, mailbox=mailbox), mailbox=mailbox)
-    message_id = transport.send(to, subject, body)
+    message_id = transport.send(to, subject, body, reply_expected=not no_reply)
     _track_sent(transport, message_id, reply_to=None)
     if _delivery_failed(message_id, mailbox=mailbox):
         click.echo(
@@ -712,7 +748,12 @@ def send(to: str, subject: str, content: str | None, mailbox: str) -> None:
 @click.argument("subject")
 @click.argument("content", required=False)
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to send from.")
-def broadcast(subject: str, content: str | None, mailbox: str) -> None:
+@click.option(
+    "--no-reply",
+    is_flag=True,
+    help="Mark the broadcast as informational; recipients owe no reply.",
+)
+def broadcast(subject: str, content: str | None, mailbox: str, no_reply: bool) -> None:
     """Send a message to every agent in the registry except self."""
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
@@ -724,7 +765,7 @@ def broadcast(subject: str, content: str | None, mailbox: str) -> None:
         return
     failures = []
     for name in recipients:
-        message_id = transport.send(name, subject, body)
+        message_id = transport.send(name, subject, body, reply_expected=not no_reply)
         _track_sent(transport, message_id, reply_to=None)
         if _delivery_failed(message_id, mailbox=mailbox):
             click.echo(f"Delivery to {name} FAILED (delivered: false).", err=True)

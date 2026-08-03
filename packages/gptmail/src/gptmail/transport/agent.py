@@ -145,6 +145,7 @@ class AgentTransport:
         body: str,
         mailbox: str = "default",
         in_reply_to: str | None = None,
+        reply_expected: bool = True,
     ) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         meta: dict[str, object] = {
@@ -157,6 +158,8 @@ class AgentTransport:
         }
         if in_reply_to:
             meta["in_reply_to"] = in_reply_to
+        if not reply_expected:
+            meta["reply_expected"] = False
         frontmatter = yaml.dump(
             meta, default_flow_style=False, allow_unicode=True, sort_keys=False
         ).rstrip()
@@ -191,13 +194,15 @@ class AgentTransport:
         *,
         reply_to: str | None = None,
         references: list[str] | None = None,
+        reply_expected: bool = True,
     ) -> str:
         """Write a message to the outbox and (optionally) deliver it.
 
         ``references`` is accepted for Protocol parity; agent messages carry a
         single ``in_reply_to`` link rather than a full ancestor chain, so only
-        the immediate parent (``reply_to``) is recorded. Returns the message ID
-        (outbox filename).
+        the immediate parent (``reply_to``) is recorded. ``reply_expected=False``
+        marks an informational message that receivers omit from their reply queue.
+        Returns the message ID (outbox filename).
         """
         filename = self._make_filename(self._self, subject)
         local_path = self.outbox / filename
@@ -209,6 +214,7 @@ class AgentTransport:
                 content,
                 mailbox=self.mailbox,
                 in_reply_to=reply_to,
+                reply_expected=reply_expected,
             )
         )
         if self._deliver is not None and not self._deliver(local_path, to.lower()):
