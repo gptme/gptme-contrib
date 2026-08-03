@@ -614,6 +614,7 @@ class LaneDispatcher:
                     continue
 
                 # Launch — bandit-driven model selection when observations ≥ threshold
+                work_type = classify_item_work_type(item.types, repo=item.repo)
                 success = self._launch_unit(
                     unit_name=unit_name,
                     legacy_name=legacy_name,
@@ -631,6 +632,7 @@ class LaneDispatcher:
                         repo=item.repo,
                     ),
                     script_path=script_path,
+                    work_type=work_type,
                 )
 
                 if success:
@@ -653,6 +655,7 @@ class LaneDispatcher:
         backend: str,
         model: str | None = None,
         script_path: str | None = None,
+        work_type: str | None = None,
     ) -> bool:
         """Launch a transient systemd unit for a single dispatch slot.
 
@@ -669,6 +672,7 @@ class LaneDispatcher:
                     backend=backend,
                     model=model,
                     script_path=script_path,
+                    work_type=work_type,
                 )
             )
 
@@ -716,6 +720,8 @@ class LaneDispatcher:
         ]
         if model:
             cmd.append(f"--setenv=BOB_SELECTED_MODEL={model}")
+        if work_type:
+            cmd.append(f"--setenv=PM_WORK_TYPE={work_type}")
         cmd.extend(["--", "bash", script_path])
 
         try:
