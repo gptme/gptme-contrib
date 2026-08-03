@@ -267,18 +267,23 @@ def _seed_inbox(
     subject: str = "Q",
     *,
     mailbox: str = "default",
+    reply_expected: bool | None = None,
 ) -> str:
     """Drop a message from ``sender`` into alice's inbox; return its filename."""
     inbox = workspace / "messages" / "inbox"
     if mailbox != "default":
         inbox = workspace / "messages" / "mailboxes" / mailbox / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    name = f"{ts}-000000-{sender}-{subject}.md"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    name = f"{ts}-{sender}-{subject}.md"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    reply_expected_line = (
+        f"reply_expected: {str(reply_expected).lower()}\n" if reply_expected is not None else ""
+    )
     (inbox / name).write_text(
         f"---\nfrom: {sender}\nto: alice\n"
-        f"timestamp: {timestamp}\nsubject: {subject}\nread: false\nmailbox: {mailbox}\n---\n\nplease advise\n"
+        f"timestamp: {timestamp}\nsubject: {subject}\nread: false\nmailbox: {mailbox}\n"
+        f"{reply_expected_line}---\n\nplease advise\n"
     )
     return name
 
@@ -393,6 +398,52 @@ def test_reply_marks_read_no_existing_key(workspace: Path) -> None:
     fm = _frontmatter(workspace / "messages" / "inbox" / name)
     assert fm["read"] is True
     assert fm["replied"] is True
+
+
+def test_pending_excludes_sender_declared_no_reply_but_list_keeps_it(workspace: Path) -> None:
+    name = _seed_inbox(workspace, reply_expected=False)
+
+    pending = CliRunner().invoke(agent, ["pending"])
+    assert pending.exit_code == 0, pending.output
+    assert "No messages awaiting reply" in pending.output
+    assert name not in pending.output
+
+    listed = CliRunner().invoke(agent, ["list"])
+    assert listed.exit_code == 0, listed.output
+    assert name in listed.output
+    read = CliRunner().invoke(agent, ["read", name])
+    assert read.exit_code == 0, read.output
+    assert "please advise" in read.output
+
+
+def test_pending_excludes_configured_no_reply_subject(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    earnings = _seed_inbox(workspace, subject="EARNINGS - ACME beat")
+    escalation = _seed_inbox(workspace, subject="RISK ALERT - action needed")
+    monkeypatch.setenv("AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS", r"^EARNINGS")
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0, result.output
+    assert earnings not in result.output
+    assert escalation in result.output
+    assert "1 message(s) awaiting reply" in result.output
+
+
+@pytest.mark.parametrize("command", ["pending", "status"])
+def test_no_reply_subject_filter_rejects_invalid_regex(workspace: Path, command: str) -> None:
+    _seed_inbox(workspace)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS", "[invalid")
+        result = CliRunner().invoke(agent, [command])
+    assert result.exit_code != 0
+    assert "Invalid AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS regex" in result.output
+
+
+def test_send_no_reply_stamps_frontmatter(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["send", "--no-reply", "bob", "FYI", "informational"])
+    assert result.exit_code == 0, result.output
+    assert _frontmatter(_only_outbox_msg(workspace))["reply_expected"] is False
 
 
 def test_pending_lists_unanswered_then_clears_on_reply(workspace: Path) -> None:
