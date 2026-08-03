@@ -1,0 +1,164 @@
+{
+  "corpus_version": "v1",
+  "created": "2026-08-03",
+  "description": "Hand-labeled golden corpus for PR reviewer Phase 0 evaluation. Sources: real Greptile reviews on gptme-contrib and gptme PRs, plus known post-merge incidents.",
+  "entries": [
+    {
+      "entry_id": "contrib-1341-mermaid-dag",
+      "repo": "gptme/gptme-contrib",
+      "pr_number": 1341,
+      "pr_title": "feat(gptodo): add Mermaid output to dep dag",
+      "pr_description": "Adds --format mermaid to gptodo dep dag. Adds deterministic SHA-256 node identifiers and escaped task labels. State-based styling, dependency edges, filtering, power annotations.",
+      "diff_summary": "packages/gptodo/src/gptodo/deptree.py: new render_dag_mermaid() function using SHA-256 node IDs and Mermaid escaping. packages/gptodo/tests/test_deptree.py: new test suite.",
+      "attribution": "greptile + bob self-review (2026-08-03)",
+      "notes": "Greptile initially flagged two real bugs in earlier revisions: SHA-256 identifier collision (fixed by using full digest instead of prefix) and Mermaid label injection (fixed by escaping brackets/quotes). Final merged version is clean 5/5.",
+      "ground_truth": [
+        {
+          "label": "true_positive",
+          "category": "correctness",
+          "severity": "high",
+          "file_path": "packages/gptodo/src/gptodo/deptree.py",
+          "title": "Truncated SHA-256 node IDs can collide for large task sets",
+          "description": "Using only a short prefix of the SHA-256 hash for Mermaid node IDs can produce collisions when the task set is large enough, causing the graph to silently drop edges.",
+          "verification": "Greptile flagged this in review round 1; fixed by using longer digest in round 2 commit."
+        },
+        {
+          "label": "true_positive",
+          "category": "security",
+          "severity": "medium",
+          "file_path": "packages/gptodo/src/gptodo/deptree.py",
+          "title": "Task labels containing brackets or quotes break Mermaid syntax",
+          "description": "Task titles with special Mermaid characters ([ ] \") are embedded raw in node labels, allowing a crafted task name to inject arbitrary Mermaid directives.",
+          "verification": "Greptile flagged this in review round 1; fixed by escaping in round 2."
+        }
+      ]
+    },
+    {
+      "entry_id": "contrib-1338-cascade-intent",
+      "repo": "gptme/gptme-contrib",
+      "pr_number": 1338,
+      "pr_title": "refactor(runloops): extract CASCADE JSON parsing from inline bash to tested Python",
+      "pr_description": "Adds a tested CASCADE intent parser and CLI. Normalizes four routing fields from JSON input. Replaces the runtime-adoption test's vacuous success path with an explicit skip when the external script is unavailable.",
+      "diff_summary": "packages/gptme-runloops/src/gptme_runloops/autonomous.py: new parse_cascade_intent() and parse-cascade-intent CLI. packages/gptme-runloops/tests/test_autonomous.py: new test coverage plus fix to a vacuous test.",
+      "attribution": "greptile (2026-08-03)",
+      "notes": "Greptile identified the vacuous test success as a real issue: a missing runtime script produced a silent pass instead of a pytest.skip. This was a genuine correctness gap.",
+      "ground_truth": [
+        {
+          "label": "true_positive",
+          "category": "test-coverage",
+          "severity": "medium",
+          "file_path": "packages/gptme-runloops/tests/test_autonomous.py",
+          "title": "Absent runtime script produces silent passing test instead of explicit skip",
+          "description": "The runtime-adoption test returned early with no assertion when the external script was missing, making the test always pass vacuously regardless of whether the integration was working.",
+          "verification": "Greptile flagged this; fixed by adding pytest.skip() when script is absent."
+        }
+      ]
+    },
+    {
+      "entry_id": "contrib-1344-blame-mmap",
+      "repo": "gptme/gptme-contrib",
+      "pr_number": 1344,
+      "pr_title": "fix(sessions): replace grep subprocess with Python-native binary scan in blame",
+      "pr_description": "Replaces the external grep trajectory prefilter with Python-native recursive discovery and memory-mapped fixed-string scanning. Removes the subprocess timeout and silent fork-failure path.",
+      "diff_summary": "packages/gptme-sessions/src/gptme_sessions/blame.py: new mmap-backed scan replaces subprocess.run(['grep', ...]). Error handling for inaccessible/empty files.",
+      "attribution": "greptile (2026-08-03)",
+      "notes": "Greptile initially flagged that the original implementation could allocate each entire trajectory file in Python memory. The mmap approach fixes this. Clean 5/5 on final commit.",
+      "ground_truth": [
+        {
+          "label": "true_positive",
+          "category": "correctness",
+          "severity": "high",
+          "file_path": "packages/gptme-sessions/src/gptme_sessions/blame.py",
+          "title": "Full trajectory file loaded into Python memory during grep scan",
+          "description": "The original implementation read entire append-only trajectory files into memory before searching, causing high RAM usage on systems with large trajectory archives.",
+          "verification": "Greptile flagged the full-file RAM allocation in review round 1; fixed with mmap in round 2."
+        }
+      ]
+    },
+    {
+      "entry_id": "contrib-1347-concurrent-patch",
+      "repo": "gptme/gptme-contrib",
+      "pr_number": 1347,
+      "pr_title": "fix(test): move patch() to main thread in concurrent PM tests",
+      "pr_description": "Moves subprocess.run patches out of worker threads in two concurrent project-monitoring tests so patch installation and restoration occur safely on the main thread.",
+      "diff_summary": "packages/gptme-runloops/tests/test_project_monitoring.py: wraps thread startup and joining in one patch context per test. Calls check_notifications() directly under the shared main-thread patch.",
+      "attribution": "greptile 5/5 clean (2026-08-03)",
+      "notes": "A clean PR — Greptile found no issues and gave 5/5. Ground truth contains no true positives. Useful for measuring false-positive rate.",
+      "ground_truth": []
+    },
+    {
+      "entry_id": "gptme-3419-shell-hint-interleave",
+      "repo": "gptme/gptme",
+      "pr_number": 3419,
+      "pr_title": "fix(shell): fold workspace hint into tool response",
+      "pr_description": "Folds the workspace hint into the command output message directly. The generator yields a single message that receives the call_id stamp, producing a clean tool response with zero interleaving. Strict providers that require tool responses to immediately follow tool_calls are no longer broken.",
+      "diff_summary": "gptme/tools/shell.py: yield single tool response instead of hint-then-output. tests/test_shell.py: new single-message contract test.",
+      "attribution": "bob self-review + greptile (2026-08-03)",
+      "notes": "The core issue was that strict providers (Moonshot AI, others) require tool responses to immediately follow tool_calls, but the prior impl inserted a user-role system message between them.",
+      "ground_truth": [
+        {
+          "label": "true_positive",
+          "category": "correctness",
+          "severity": "high",
+          "file_path": "gptme/tools/shell.py",
+          "title": "System-to-user conversion inserts interleaved message violating tool_calls ordering",
+          "description": "The workspace hint was yielded as a separate system message that llm_openai.py converted to a user-role message, inserted between the assistant tool_call and the tool result. Strict providers reject this ordering.",
+          "verification": "Post-merge investigation by bob confirmed the root cause; Moonshot AI and other strict providers rejected the conversation shape."
+        }
+      ]
+    },
+    {
+      "entry_id": "gptme-3414-step-lock-race",
+      "repo": "gptme/gptme",
+      "pr_number": 3414,
+      "pr_title": "fix(server): acquire step_lock in interrupt endpoint to prevent race",
+      "pr_description": "Acquires the step_lock in the interrupt endpoint to prevent a race condition between interrupt handling and step execution.",
+      "diff_summary": "gptme/server/api.py: interrupt endpoint now acquires step_lock before signal delivery.",
+      "attribution": "greptile + bob (2026-08-03)",
+      "notes": "A real concurrency bug: the interrupt endpoint could race with an ongoing step, leaving the agent in an inconsistent state.",
+      "ground_truth": [
+        {
+          "label": "true_positive",
+          "category": "correctness",
+          "severity": "high",
+          "file_path": "gptme/server/api.py",
+          "title": "Interrupt endpoint lacks step_lock acquisition, enabling concurrent-step race",
+          "description": "The /interrupt endpoint could fire while a step was executing without holding step_lock, potentially corrupting execution state or causing double-execution of a step.",
+          "verification": "Fix required acquiring step_lock before sending the interrupt signal; merged as the canonical fix."
+        }
+      ]
+    },
+    {
+      "entry_id": "contrib-1338-false-positive-example",
+      "repo": "gptme/gptme-contrib",
+      "pr_number": 1338,
+      "pr_title": "refactor(runloops): extract CASCADE JSON parsing from inline bash to tested Python",
+      "pr_description": "Same PR as contrib-1338-cascade-intent but focusing on a different candidate finding that was a false positive.",
+      "diff_summary": "packages/gptme-runloops/src/gptme_runloops/autonomous.py: new parse_cascade_intent() function handles None, empty dict, and non-object JSON gracefully.",
+      "attribution": "synthetic FP example based on common review patterns",
+      "notes": "A reviewer might flag the broad except clause around json.loads() as swallowing errors — but in this context it is intentional: malformed CASCADE output should be tolerated gracefully, not crash the autonomous runner.",
+      "ground_truth": [
+        {
+          "label": "false_positive",
+          "category": "correctness",
+          "severity": "medium",
+          "file_path": "packages/gptme-runloops/src/gptme_runloops/autonomous.py",
+          "title": "Broad except clause around json.loads() swallows unexpected errors",
+          "description": "The bare except around JSON parsing may hide programming errors. A reviewer unfamiliar with the design intent might flag this as dangerous error swallowing.",
+          "verification": "Design intent: CASCADE intent parsing must be fault-tolerant; malformed output from the autonomous runner should degrade gracefully, not crash the caller. The broad catch is intentional."
+        }
+      ]
+    },
+    {
+      "entry_id": "contrib-1349-auth-misclassify",
+      "repo": "gptme/gptme-contrib",
+      "pr_number": 1349,
+      "pr_title": "fix(failure-capture): prevent lesson names from triggering auth misclassification",
+      "pr_description": "Prevents lesson file names that contain auth-related words from triggering false auth-failure classification in the session failure capture module.",
+      "diff_summary": "packages/gptme-sessions/src/gptme_sessions/failure_capture.py: add guard against misclassifying lesson names as auth failures.",
+      "attribution": "bob self-review + greptile (2026-08-03)",
+      "notes": "Clean fix PR. Greptile gave 5/5. No true positives. Useful as a negative corpus example.",
+      "ground_truth": []
+    }
+  ]
+}
