@@ -887,6 +887,511 @@ def test_trusted_user_autopost_keeps_transient_failure_retryable(
     assert list(workflow_module.REJECTED_DIR.glob("*.yml")) == []
 
 
+def test_process_cached_tweet_skips_conversation_read(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="A previously evaluated tweet with enough text to pass filtering.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id="4000",
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: True)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_from_cache",
+        lambda *a, **k: ({"action": "ignore"}, None),
+    )
+    monkeypatch.setattr(
+        workflow_module.EvaluationResponse,
+        "from_dict",
+        lambda *a, **k: SimpleNamespace(action="ignore", relevance=1, priority=1),
+        raising=False,
+    )
+
+    def unexpected_conversation_read(*args: Any, **kwargs: Any) -> list[Any]:
+        raise AssertionError("cached tweets must not trigger conversation reads")
+
+    monkeypatch.setattr(
+        workflow_module, "get_conversation_thread", unexpected_conversation_read
+    )
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 0
+
+
+def test_process_cached_response_restores_persisted_thread_without_read(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    _set_status_dirs(workflow_module, tmp_path)
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="A previously evaluated tweet with enough text to pass filtering.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id="4000",
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+    thread_context = [
+        {
+            "id": "4000",
+            "author": "root-author",
+            "text": "Original thread post",
+        }
+    ]
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: True)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_from_cache",
+        lambda *a, **k: ({"action": "respond"}, {"text": "Cached reply"}),
+    )
+    monkeypatch.setattr(
+        workflow_module, "load_cached_thread_context", lambda *a, **k: thread_context
+    )
+    monkeypatch.setattr(
+        workflow_module.EvaluationResponse,
+        "from_dict",
+        lambda *a, **k: EvalResult("respond", 90, 80),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workflow_module.TweetResponse,
+        "from_dict",
+        lambda *a, **k: Response("Cached reply", "reply", False, None),
+        raising=False,
+    )
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda *a, **k: False)
+
+    def unexpected_conversation_read(*args: Any, **kwargs: Any) -> list[Any]:
+        raise AssertionError("persisted context must keep cache hits read-free")
+
+    monkeypatch.setattr(
+        workflow_module, "get_conversation_thread", unexpected_conversation_read
+    )
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 1
+    draft_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
+    assert len(draft_paths) == 1
+    draft = workflow_module.TweetDraft.load(draft_paths[0])
+    assert draft.context["original_tweet"]["thread_context"] == thread_context
+
+
+def test_cached_response_without_context_fetches_once_and_upgrades_cache(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    _set_status_dirs(workflow_module, tmp_path)
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="A legacy cached tweet with enough text to pass filtering successfully.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id="4000",
+    )
+    user = SimpleNamespace(
+        id="7", username="someone", public_metrics={"followers_count": 1}
+    )
+    thread_context = [{"id": "4000", "author": "root", "text": "Root post"}]
+    cache_updates: list[tuple[Any, ...]] = []
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: True)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_from_cache",
+        lambda *a, **k: ({"action": "respond"}, {"text": "Cached reply"}),
+    )
+    monkeypatch.setattr(
+        workflow_module, "load_cached_thread_context", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        workflow_module.EvaluationResponse,
+        "from_dict",
+        lambda *a, **k: EvalResult("respond", 90, 80),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workflow_module.TweetResponse,
+        "from_dict",
+        lambda *a, **k: Response("Cached reply", "reply", False, None),
+        raising=False,
+    )
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda *a, **k: False)
+    monkeypatch.setattr(
+        workflow_module,
+        "get_conversation_thread",
+        lambda client, tweet_id, *, fallback_conversation_id: thread_context,
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "save_to_cache",
+        lambda *args, **kwargs: cache_updates.append((*args, kwargs)),
+    )
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 1
+    assert len(cache_updates) == 1
+    assert cache_updates[0][0] == "4242"
+    assert cache_updates[0][3] == thread_context
+
+
+def test_legacy_context_backfill_failure_does_not_abort_cycle(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    _set_status_dirs(workflow_module, tmp_path)
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="A legacy cached tweet with enough text to pass filtering successfully.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id="4000",
+    )
+    user = SimpleNamespace(
+        id="7", username="someone", public_metrics={"followers_count": 1}
+    )
+    cache_updates: list[tuple[Any, ...]] = []
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: True)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_from_cache",
+        lambda *a, **k: ({"action": "respond"}, {"text": "Cached reply"}),
+    )
+    monkeypatch.setattr(
+        workflow_module, "load_cached_thread_context", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        workflow_module.EvaluationResponse,
+        "from_dict",
+        lambda *a, **k: EvalResult("respond", 90, 80),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workflow_module.TweetResponse,
+        "from_dict",
+        lambda *a, **k: Response("Cached reply", "reply", False, None),
+        raising=False,
+    )
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda *a, **k: False)
+
+    def fail_conversation_read(*a: Any, **k: Any) -> list[Any]:
+        raise RuntimeError("transient Twitter API error")
+
+    monkeypatch.setattr(
+        workflow_module, "get_conversation_thread", fail_conversation_read
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "save_to_cache",
+        lambda *args, **kwargs: cache_updates.append((*args, kwargs)),
+    )
+
+    # A transient backfill failure must not abort processing — the draft
+    # should still be generated (without thread context).
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 1
+    # save_to_cache must NOT be called when the backfill failed
+    assert len(cache_updates) == 0
+
+
+def test_legacy_context_backfill_empty_result_is_not_persisted(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    _set_status_dirs(workflow_module, tmp_path)
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="A legacy cached tweet with enough text to pass filtering successfully.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id="4000",
+    )
+    user = SimpleNamespace(
+        id="7", username="someone", public_metrics={"followers_count": 1}
+    )
+    cache_updates: list[tuple[Any, ...]] = []
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: True)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_from_cache",
+        lambda *a, **k: ({"action": "respond"}, {"text": "Cached reply"}),
+    )
+    monkeypatch.setattr(
+        workflow_module, "load_cached_thread_context", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        workflow_module.EvaluationResponse,
+        "from_dict",
+        lambda *a, **k: EvalResult("respond", 90, 80),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workflow_module.TweetResponse,
+        "from_dict",
+        lambda *a, **k: Response("Cached reply", "reply", False, None),
+        raising=False,
+    )
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda *a, **k: False)
+    # get_conversation_thread swallows both "nothing found" and internal
+    # errors into an empty list — simulate that here (no exception raised).
+    monkeypatch.setattr(workflow_module, "get_conversation_thread", lambda *a, **k: [])
+    monkeypatch.setattr(
+        workflow_module,
+        "save_to_cache",
+        lambda *args, **kwargs: cache_updates.append((*args, kwargs)),
+    )
+
+    # An empty backfill result must not be persisted as a completed migration —
+    # doing so would permanently skip the retry without ever attaching context.
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 1
+    assert len(cache_updates) == 0
+    draft_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
+    assert len(draft_paths) == 1
+    draft = workflow_module.TweetDraft.load(draft_paths[0])
+    assert "thread_context" not in draft.context["original_tweet"]
+
+
+def test_process_new_tweet_fetches_thread_by_tweet_id(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="A new tweet with enough text to pass the cheap prefilter successfully.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id="4000",
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+    conversation_reads: list[str] = []
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+
+    def record_conversation_read(
+        client: Any, tweet_id: str, *, fallback_conversation_id: str
+    ) -> list[Any]:
+        conversation_reads.append(f"{tweet_id}:{fallback_conversation_id}")
+        return []
+
+    monkeypatch.setattr(
+        workflow_module, "get_conversation_thread", record_conversation_read
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "process_tweet",
+        lambda data: (SimpleNamespace(action="ignore", relevance=1, priority=1), None),
+    )
+    monkeypatch.setattr(workflow_module, "save_to_cache", lambda *a, **k: None)
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="mentions",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 0
+    assert conversation_reads == ["4242:4000"]
+
+
+def test_conversation_lookup_failure_falls_back_to_canonical_conversation_id(
+    workflow_module: Any,
+) -> None:
+    search_queries: list[str] = []
+
+    class Client:
+        def get_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("transient lookup failure")
+
+        def search_recent_tweets(self, **kwargs: Any) -> Any:
+            search_queries.append(kwargs["query"])
+            return SimpleNamespace(data=None)
+
+    thread = workflow_module.get_conversation_thread(
+        Client(), "4242", fallback_conversation_id="4000"
+    )
+
+    assert thread == []
+    assert search_queries == ["conversation_id:4000"]
+
+
 def test_find_live_duplicate_reply_ids_matches_own_replies(
     workflow_module: Any,
 ) -> None:
