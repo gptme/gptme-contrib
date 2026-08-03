@@ -772,6 +772,8 @@ class TestReviewCliExitStatus:
         [
             "not JSON",
             '{"merge_safety":"safe","findings":[{"confidence":"high"}]}',
+            '{"merge_safety":"safe","findings":[42]}',
+            '{"merge_safety":"safe","findings":{}}',
         ],
     )
     def test_invalid_response_is_controlled_cli_error(self, tmp_path, response):

@@ -302,8 +302,14 @@ def run_review(
     head_anchor = target.head_sha or target.diff_fingerprint or ""
     repo_id = target.repo_name or target.checkout
 
+    raw_findings = data.get("findings", [])
+    if not isinstance(raw_findings, list):
+        raise ValueError("findings must be a list")
+
     findings: list[ReviewFinding] = []
-    for raw_f in data.get("findings", []):
+    for raw_f in raw_findings:
+        if not isinstance(raw_f, dict):
+            raise ValueError("each finding must be an object")
         fp = ReviewFinding.local_fingerprint(
             repo=repo_id,
             head_sha=head_anchor,
