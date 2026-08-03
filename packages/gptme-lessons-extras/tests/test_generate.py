@@ -5,29 +5,33 @@ import sys
 import types
 from pathlib import Path
 
-fake_gptme = types.ModuleType("gptme")
-fake_llm = types.ModuleType("gptme.llm")
-fake_message = types.ModuleType("gptme.message")
+# Only stub gptme when the real package is absent. Installing a bare
+# types.ModuleType (which has no __path__) unconditionally pollutes sys.modules
+# across multi-package test runs: the stub shadows the real package for all
+# later tests in the same process, causing "gptme is not a package" errors.
+try:
+    import gptme as _real_gptme  # noqa: F401 — side-effect: populates sys.modules
+except ImportError:
+    fake_gptme = types.ModuleType("gptme")
+    fake_llm = types.ModuleType("gptme.llm")
+    fake_message = types.ModuleType("gptme.message")
 
+    def _unused_reply(*args, **kwargs):
+        raise NotImplementedError
 
-def _unused_reply(*args, **kwargs):
-    raise NotImplementedError
+    class _FakeMessage:
+        def __init__(self, role: str, content: str):
+            self.role = role
+            self.content = content
 
+    fake_llm.reply = _unused_reply
+    fake_message.Message = _FakeMessage
+    fake_gptme.llm = fake_llm
+    fake_gptme.message = fake_message
 
-class _FakeMessage:
-    def __init__(self, role: str, content: str):
-        self.role = role
-        self.content = content
-
-
-fake_llm.reply = _unused_reply
-fake_message.Message = _FakeMessage
-fake_gptme.llm = fake_llm
-fake_gptme.message = fake_message
-
-sys.modules.setdefault("gptme", fake_gptme)
-sys.modules.setdefault("gptme.llm", fake_llm)
-sys.modules.setdefault("gptme.message", fake_message)
+    sys.modules.setdefault("gptme", fake_gptme)
+    sys.modules.setdefault("gptme.llm", fake_llm)
+    sys.modules.setdefault("gptme.message", fake_message)
 
 from gptme_lessons_extras import generate
 
