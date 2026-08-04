@@ -14,6 +14,7 @@ from gptme_sessions.transcript import (
     _normalize_codex,
     _normalize_copilot,
     _normalize_gptme,
+    _normalize_grok,
     read_transcript,
 )
 
@@ -165,6 +166,33 @@ def copilot_jsonl(tmp_path: Path) -> Path:
     return _write_jsonl(tmp_path / "events.jsonl", records)
 
 
+@pytest.fixture
+def grok_jsonl(tmp_path: Path) -> Path:
+    records = [
+        {"type": "available_commands", "commands": ["run_terminal_command", "write"]},
+        {"type": "thought", "content": "I will write a test file."},
+        {
+            "type": "tool_call",
+            "toolName": "write",
+            "toolCallId": "tc1",
+            "rawInput": {"path": "test.py", "content": "# test"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "tc1",
+            "status": "completed",
+            "rawOutput": {"exit_code": 0, "output_for_prompt": "File written."},
+        },
+        {"type": "text", "content": "Done."},
+        {
+            "type": "end",
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+            "modelUsage": {"grok-4.5-build": {"input_tokens": 100, "output_tokens": 50}},
+        },
+    ]
+    return _write_jsonl(tmp_path / "session.jsonl", records)
+
+
 # ---------------------------------------------------------------------------
 # Unit tests for normalizers
 # ---------------------------------------------------------------------------
@@ -275,6 +303,57 @@ class TestNormalizeCodex:
         assert "exited" in results[0].content.lower()
 
 
+class TestNormalizeGrok:
+    def test_thought_emitted(self, grok_jsonl: Path):
+        records = [json.loads(line) for line in grok_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_grok(records)
+        text_msgs = [m for m in norm if m.role == "assistant" and not m.tool_name and m.content]
+        assert any("write a test" in m.content.lower() for m in text_msgs)
+
+    def test_tool_call_emitted(self, grok_jsonl: Path):
+        records = [json.loads(line) for line in grok_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_grok(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "write"
+        assert tool_msgs[0].tool_input == {"path": "test.py", "content": "# test"}
+
+    def test_tool_result_emitted(self, grok_jsonl: Path):
+        records = [json.loads(line) for line in grok_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_grok(records)
+        results = [m for m in norm if m.role == "tool_result"]
+        assert len(results) == 1
+        assert "written" in results[0].content.lower()
+        assert results[0].is_error is False
+
+    def test_skips_available_commands_and_end(self, grok_jsonl: Path):
+        records = [json.loads(line) for line in grok_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_grok(records)
+        # available_commands and end records must not produce messages
+        assert all(m.role in ("assistant", "tool_result") for m in norm)
+
+    def test_error_tool_result(self):
+        records = [
+            {"type": "available_commands", "commands": ["run_terminal_command"]},
+            {
+                "type": "tool_call",
+                "toolName": "run_terminal_command",
+                "toolCallId": "tc_err",
+                "rawInput": {"command": "ls /nonexistent"},
+            },
+            {
+                "type": "tool_call_update",
+                "toolCallId": "tc_err",
+                "status": "completed",
+                "rawOutput": {"exit_code": 1, "output_for_prompt": "ls: cannot access"},
+            },
+        ]
+        norm = _normalize_grok(records)
+        results = [m for m in norm if m.role == "tool_result"]
+        assert len(results) == 1
+        assert results[0].is_error is True
+
+
 class TestNormalizeCopilot:
     def test_assistant_text(self, copilot_jsonl: Path):
         records = [json.loads(line) for line in copilot_jsonl.read_text().strip().splitlines()]
@@ -330,6 +409,15 @@ class TestReadTranscript:
         assert t.harness == "copilot"
         assert t.model == "gpt-5.4"
         assert len(t.messages) > 0
+
+    def test_grok_transcript(self, grok_jsonl: Path):
+        t = read_transcript(grok_jsonl)
+        assert t.harness == "grok"
+        assert t.model == "grok-4.5-build"
+        assert len(t.messages) > 0
+        tool_msgs = [m for m in t.messages if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "write"
 
     def test_started_at_and_last_activity(self, gptme_jsonl: Path):
         t = read_transcript(gptme_jsonl)

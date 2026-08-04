@@ -4,7 +4,7 @@ Reads raw harness-specific JSONL files and produces a stable, version-tagged
 JSON contract that external consumers (dashboards, fleet operators, analysis
 tools) can depend on without parsing harness-specific formats directly.
 
-Supported harnesses: gptme, claude-code, codex, copilot.
+Supported harnesses: gptme, claude-code, codex, copilot, grok.
 
 Schema version: 1 (increment when breaking changes are made to the output shape).
 """
@@ -379,6 +379,72 @@ def _normalize_copilot(msgs: list[dict]) -> list[NormalizedMessage]:
     return normalized
 
 
+def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
+    """Normalize Grok Build streaming-json NDJSON messages.
+
+    Grok format uses typed records (--output-format streaming-json):
+    - ``available_commands``: tool catalog at session start (skipped)
+    - ``thought``: agent reasoning delta (``content`` field) → assistant turn
+    - ``tool_call``: agent tool invocation (``toolName``, ``rawInput``, ``toolCallId``)
+    - ``tool_call_update``: execution result (``status == "completed"`` carries ``rawOutput``)
+    - ``text``: assistant response text delta (``content`` field)
+    - ``usage``/``end``: token accounting (skipped)
+    """
+    normalized: list[NormalizedMessage] = []
+    call_id_to_input: dict[str, dict] = {}
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+        ts = _ts_str(_parse_timestamp(record.get("timestamp", "")))
+
+        if rec_type in ("thought", "text"):
+            content = record.get("content", "") or ""
+            if content:
+                normalized.append(
+                    NormalizedMessage(role="assistant", content=content, timestamp=ts)
+                )
+
+        elif rec_type == "tool_call":
+            tool_name = record.get("toolName", "")
+            raw_input = record.get("rawInput") or {}
+            call_id = record.get("toolCallId", "")
+            if call_id:
+                call_id_to_input[call_id] = raw_input
+            if tool_name:
+                normalized.append(
+                    NormalizedMessage(
+                        role="assistant",
+                        content="",
+                        timestamp=ts,
+                        tool_name=tool_name,
+                        tool_input=raw_input if isinstance(raw_input, dict) else {},
+                    )
+                )
+
+        elif rec_type == "tool_call_update":
+            if record.get("status") != "completed":
+                continue
+            raw_output = record.get("rawOutput") or {}
+            if not isinstance(raw_output, dict):
+                continue
+            exit_code = raw_output.get("exit_code")
+            is_error = isinstance(exit_code, int) and exit_code != 0
+            output_text = (
+                raw_output.get("output_for_prompt", "") or raw_output.get("output", "") or ""
+            )
+            normalized.append(
+                NormalizedMessage(
+                    role="tool_result",
+                    content=str(output_text),
+                    timestamp=ts,
+                    tool_result=str(output_text),
+                    is_error=is_error,
+                )
+            )
+
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -417,13 +483,23 @@ def _extract_model(fmt: str, msgs: list[dict], path: Path) -> str | None:
                 return str(model)
         return None
 
+    if fmt == "grok":
+        for record in reversed(msgs):
+            if record.get("type") != "end":
+                continue
+            model_usage = record.get("modelUsage") or {}
+            model_name = next(iter(model_usage), None)
+            if model_name:
+                return str(model_name)
+        return None
+
     return None
 
 
 def read_transcript(path: Path) -> SessionTranscript:
     """Read a trajectory file and return a normalized SessionTranscript.
 
-    Auto-detects the harness format (gptme, claude-code, codex, copilot).
+    Auto-detects the harness format (gptme, claude-code, codex, copilot, grok).
     The ``messages`` list is in chronological order as they appear in the
     source file — no resorting is applied.
 
@@ -457,6 +533,7 @@ def read_transcript(path: Path) -> SessionTranscript:
         "claude_code": "claude-code",
         "codex": "codex",
         "copilot": "copilot",
+        "grok": "grok",
     }
     harness = harness_map.get(fmt, fmt)
 
@@ -467,6 +544,8 @@ def read_transcript(path: Path) -> SessionTranscript:
         norm_msgs = _normalize_codex(msgs)
     elif fmt == "copilot":
         norm_msgs = _normalize_copilot(msgs)
+    elif fmt == "grok":
+        norm_msgs = _normalize_grok(msgs)
     else:
         norm_msgs = _normalize_gptme(msgs)
 
