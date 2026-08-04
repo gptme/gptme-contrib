@@ -223,11 +223,12 @@ def parse_trajectory(jsonl_path: Path) -> list[dict]:
 def _detect_format(msgs: list[dict]) -> str:
     """Detect trajectory format from parsed JSONL records.
 
-    Returns one of: 'gptme', 'claude_code', 'codex', 'copilot'.
+    Returns one of: 'gptme', 'claude_code', 'codex', 'copilot', 'grok'.
 
     Detection heuristics (checked in order):
     - **Codex**: first record has type='session_meta' with originator='codex_exec'
     - **Copilot**: first record has type='session.start' with producer='copilot-agent'
+    - **Grok Build**: first record has type='available_commands' (capability broadcast)
     - **gptme**: any record has a top-level 'role' field
     - **Claude Code**: any record has type in (user, assistant, result)
 
@@ -246,6 +247,9 @@ def _detect_format(msgs: list[dict]) -> str:
             data = first.get("data") or {}
             if data.get("producer") == "copilot-agent":
                 return "copilot"
+        # Grok Build: first line is always available_commands capability broadcast
+        if first.get("type") == "available_commands":
+            return "grok"
 
     for msg in msgs:
         if "role" in msg:
@@ -2198,10 +2202,151 @@ def extract_usage_copilot(msgs: list[dict]) -> dict:
     return usage
 
 
+_GROK_WRITE_TOOLS = {"write", "search_replace"}
+
+
+def extract_signals_grok(msgs: list[dict]) -> dict:
+    """Extract productivity signals from Grok Build streaming-json trajectories.
+
+    Grok format uses typed NDJSON records (--output-format streaming-json):
+    - available_commands: tool/command catalog (session start marker)
+    - tool_call: agent tool invocation (toolName + rawInput)
+    - tool_call_update: execution update (status=completed has rawOutput)
+    - text/thought: response/reasoning text deltas
+    - usage: per-turn token usage
+    - end: session summary (cumulative usage, num_turns, cost)
+
+    Shell tool: run_terminal_command (rawInput.command, rawOutput.output_for_prompt)
+    File write tools: write, search_replace (rawInput.path)
+    Git commits detected from run_terminal_command rawOutput.output_for_prompt.
+    """
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    journal_paths: list[str] = []
+    steps = 0
+    detail_by_value: dict[str, dict[str, object]] = {}
+    call_id_to_input: dict[str, dict] = {}
+    current_batch_has_tool = False
+
+    for record in msgs:
+        rec_type = record.get("type", "")
+
+        if rec_type == "tool_call":
+            tool_name = record.get("toolName", "")
+            raw_input = record.get("rawInput") or {}
+            call_id = record.get("toolCallId", "")
+
+            if tool_name:
+                tool_calls[tool_name] = tool_calls.get(tool_name, 0) + 1
+                current_batch_has_tool = True
+            if call_id:
+                call_id_to_input[call_id] = raw_input
+
+            if tool_name in _GROK_WRITE_TOOLS:
+                path = raw_input.get("path", "")
+                if path:
+                    if "/journal/" in path:
+                        journal_paths.append(path)
+                    else:
+                        file_writes.append(path)
+                    _record_deliverable_detail(
+                        detail_by_value,
+                        value=path,
+                        kind="file",
+                        provenance_class="tool_authored",
+                        evidence={"source": "trajectory", "tool_name": tool_name},
+                    )
+
+        elif rec_type == "tool_call_update":
+            if record.get("status") != "completed":
+                continue
+            call_id = record.get("toolCallId", "")
+            raw_output = record.get("rawOutput") or {}
+            if not isinstance(raw_output, dict):
+                continue
+
+            exit_code = raw_output.get("exit_code")
+            if isinstance(exit_code, int) and exit_code != 0:
+                error_count += 1
+
+            raw_input = call_id_to_input.get(call_id, {})
+            command = raw_input.get("command", "") or raw_output.get("command", "")
+            if command and ("git commit" in command or "git-safe-commit" in command):
+                output_text = raw_output.get("output_for_prompt", "")
+                for commit_match in _COMMIT_RE.finditer(output_text):
+                    commit_value = f"{commit_match.group(1)} {commit_match.group(2).strip()}"
+                    if commit_value not in git_commits:
+                        git_commits.append(commit_value)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=commit_value,
+                            kind="git_commit",
+                            provenance_class="tool_authored",
+                            evidence={"source": "trajectory", "tool_name": "run_terminal_command"},
+                        )
+
+        elif rec_type == "text" and current_batch_has_tool:
+            steps += 1
+            current_batch_has_tool = False
+
+    if current_batch_has_tool:
+        steps += 1
+
+    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
+
+    return {
+        "tool_calls": tool_calls,
+        "steps": steps,
+        "error_count": error_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
+        "session_duration_s": None,
+        "retry_count": 0,
+        "deliverables": deliverables,
+        "deliverable_details": deliverable_details,
+        "summarizer_fired": False,
+    }
+
+
+def extract_usage_grok(msgs: list[dict]) -> dict:
+    """Extract token usage from Grok Build streaming-json trajectories.
+
+    Reads from the final 'end' record which has cumulative session totals.
+    Model name comes from the modelUsage dict (keyed by model id).
+    """
+    for record in reversed(msgs):
+        if record.get("type") != "end":
+            continue
+        usage_data = record.get("usage") or {}
+        if not usage_data:
+            continue
+        result: dict = {}
+        input_tokens = usage_data.get("input_tokens")
+        output_tokens = usage_data.get("output_tokens")
+        cache_read = usage_data.get("cache_read_input_tokens")
+        if isinstance(input_tokens, int) and input_tokens > 0:
+            result["input_tokens"] = input_tokens
+        if isinstance(output_tokens, int) and output_tokens > 0:
+            result["output_tokens"] = output_tokens
+        if isinstance(cache_read, int) and cache_read > 0:
+            result["cache_read_input_tokens"] = cache_read
+        model_usage = record.get("modelUsage") or {}
+        if model_usage:
+            model_name = next(iter(model_usage), None)
+            if model_name:
+                result["model"] = model_name
+        return result
+    return {}
+
+
 def extract_from_path(jsonl_path: Path) -> dict:
     """Parse trajectory and return signals + grade in one call.
 
-    Auto-detects format: gptme, Claude Code, Codex, or Copilot.
+    Auto-detects format: gptme, Claude Code, Codex, Copilot, or Grok Build.
     Token usage is extracted when available (CC has full counts, Codex has
     rate-limit percentages only, Copilot has model info only).
 
@@ -2228,6 +2373,9 @@ def extract_from_path(jsonl_path: Path) -> dict:
     elif fmt == "copilot":
         signals = extract_signals_copilot(msgs)
         usage = extract_usage_copilot(msgs)
+    elif fmt == "grok":
+        signals = extract_signals_grok(msgs)
+        usage = extract_usage_grok(msgs)
     else:
         signals = extract_signals(msgs)
         usage = extract_usage_gptme(msgs)
