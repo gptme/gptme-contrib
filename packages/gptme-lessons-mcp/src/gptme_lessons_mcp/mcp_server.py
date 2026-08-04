@@ -162,6 +162,9 @@ def get_lesson(path: str) -> dict:
         Full lesson dict including the complete body text, or an error key if
         no lesson matched.
     """
+    if not path:
+        return {"error": "No lesson found for an empty path"}
+
     index = _load_index()
 
     # Try exact path match (substring of full path)

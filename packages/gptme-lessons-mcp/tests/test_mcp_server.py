@@ -119,6 +119,13 @@ def test_get_lesson_not_found(mock_index):
     assert "error" in results
 
 
+def test_get_lesson_empty_path(mock_index):
+    """get_lesson returns error dict for empty path (not first lesson)."""
+    results = get_lesson("")
+    assert "error" in results
+    assert results.get("title") is None
+
+
 def test_list_categories(mock_index):
     """list_categories returns sorted unique category names."""
     cats = list_categories()
