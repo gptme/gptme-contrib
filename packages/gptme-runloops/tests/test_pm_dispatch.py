@@ -862,6 +862,67 @@ class TestLaneDispatcher:
         assert callback_calls[1]["lane"] == "slow"
         assert callback_calls[1]["slot_key"] == "a/b#2"
 
+    def test_dispatch_work_type_propagated_to_callback(self, ld_no_slots):
+        """work_type is derived and passed to dispatch_callback so the worker
+        session can route to the correct workflow (e.g. automated-pr-review)."""
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        ld = LaneDispatcher(
+            slot_manager=ld_no_slots.slot_manager,
+            dispatch_callback=cb,
+        )
+
+        items = [
+            make_item(repo="a/b", number=1, types=["assigned"]),
+            make_item(repo="a/b", number=2, types=["pr_update"]),
+            make_item(repo="a/b", number=3, types=["ci_failure"]),
+        ]
+        ld.dispatch(items, backend="claude-code")
+        assert len(callback_calls) == 3
+        # work_type key must always be present in the callback kwargs
+        assert all("work_type" in c for c in callback_calls)
+        # Spot-check derived values
+        wt_by_slot = {c["slot_key"]: c["work_type"] for c in callback_calls}
+        assert wt_by_slot["a/b#1"] == "assigned-issue"
+        assert wt_by_slot["a/b#2"] == "pr-review"
+        assert wt_by_slot["a/b#3"] == "ci-fix"
+
+    def test_dispatch_work_type_automated_pr_review_for_allowlisted_repo(
+        self, ld_no_slots, monkeypatch
+    ):
+        """Allowlisted repos route pr_update items to automated-pr-review work type."""
+        monkeypatch.setenv(
+            "AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud,ErikBjare/bob"
+        )
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs)
+            return True
+
+        ld = LaneDispatcher(
+            slot_manager=ld_no_slots.slot_manager,
+            dispatch_callback=cb,
+        )
+
+        items = [
+            make_item(repo="gptme/gptme-cloud", number=1, types=["pr_update"]),
+            make_item(repo="ErikBjare/bob", number=2, types=["pr_update"]),
+            make_item(
+                repo="gptme/gptme", number=3, types=["pr_update"]
+            ),  # not allowlisted
+        ]
+        ld.dispatch(items, backend="claude-code")
+        assert len(callback_calls) == 3
+        wt_by_repo = {c["item"].repo: c["work_type"] for c in callback_calls}
+        assert wt_by_repo["gptme/gptme-cloud"] == "automated-pr-review"
+        assert wt_by_repo["ErikBjare/bob"] == "automated-pr-review"
+        assert wt_by_repo["gptme/gptme"] == "pr-review"
+
     def test_dispatch_fast_model_routes_per_lane(self, ld_no_slots):
         callback_calls = []
 
@@ -1305,6 +1366,45 @@ class TestClassifyItemWorkType:
     def test_strategy_highest_priority(self):
         assert classify_item_work_type(["strategy", "ci_failure"]) == "strategy-reply"
 
+    def test_automated_review_allowlisted_repo(self, monkeypatch):
+        monkeypatch.setenv(
+            "AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud,ErikBjare/bob"
+        )
+        assert (
+            classify_item_work_type(["pr_update"], repo="gptme/gptme-cloud")
+            == "automated-pr-review"
+        )
+        assert (
+            classify_item_work_type(["pr_update"], repo="ErikBjare/bob")
+            == "automated-pr-review"
+        )
+
+    def test_automated_review_non_allowlisted_falls_back(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud")
+        assert classify_item_work_type(["pr_update"], repo="gptme/gptme") == "pr-review"
+
+    def test_automated_review_no_allowlist(self, monkeypatch):
+        monkeypatch.delenv("AUTOMATED_PR_REVIEW_REPOS", raising=False)
+        # Without allowlist, pr_update is always pr-review even for private repos
+        assert (
+            classify_item_work_type(["pr_update"], repo="gptme/gptme-cloud")
+            == "pr-review"
+        )
+
+    def test_automated_review_ci_takes_precedence(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud")
+        # CI failure on allowlisted repo still routes to ci-fix
+        assert (
+            classify_item_work_type(
+                ["pr_update", "ci_failure"], repo="gptme/gptme-cloud"
+            )
+            == "ci-fix"
+        )
+
+    def test_automated_review_no_repo(self):
+        # No repo → original pr-review behavior
+        assert classify_item_work_type(["pr_update"]) == "pr-review"
+
 
 # --- _bandit_observation_count and _resolve_model_with_bandit ---
 
@@ -1509,7 +1609,9 @@ class TestLaneDispatcherWithBandit:
     def _make_dispatcher(self, launched: list, deferred: list):
         """Return a LaneDispatcher whose callback captures routing decisions."""
 
-        def callback(slot_unit, slot_key, lane, item, backend, model, script_path):
+        def callback(
+            slot_unit, slot_key, lane, item, backend, model, script_path, work_type=None
+        ):
             launched.append({"slot_key": slot_key, "lane": lane, "model": model})
             return True
 
