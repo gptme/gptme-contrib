@@ -7,8 +7,9 @@ Key invariants tested
 3. Symlink chain: even multi-hop chains are preserved end-to-end.
 4. New file creation: works when destination doesn't exist yet.
 5. Mode bits: new files get the requested permission mode.
-6. Atomic partial-write safety: a write error leaves the original intact.
-7. safe_write_bytes: binary variant works correctly.
+6. Permission preservation: existing file permissions are NOT overwritten by mode.
+7. Atomic partial-write safety: a write error leaves the original intact.
+8. safe_write_bytes: binary variant works correctly.
 """
 
 from __future__ import annotations
@@ -97,18 +98,55 @@ def test_mode_bits_new_file(tmp_path: Path) -> None:
 
 
 def test_mode_bits_symlink_new_target(tmp_path: Path) -> None:
-    """Mode is applied to the real target when writing through a symlink to a new file."""
+    """Mode is applied when writing through a symlink to a *new* (not yet existing) real file."""
     real = tmp_path / "real.json"
     link = tmp_path / "link.json"
-    # Create real file first so the symlink resolves
-    real.write_text("")
+    # Symlink points at real, but real doesn't exist yet — mode should be applied
     link.symlink_to(real)
+    assert not real.exists()
 
     safe_write(link, '{"key": "val"}', mode=0o600)
 
-    # The real file should have the restrictive mode
+    # The newly created real file should have the requested mode
     assert file_mode(real) == 0o600
     assert link.is_symlink(), "symlink clobbered"
+
+
+def test_existing_permissions_preserved(tmp_path: Path) -> None:
+    """Existing file permissions are NOT overwritten by the mode parameter.
+
+    A credential file with 0o600 must stay 0o600 even if the caller passes
+    mode=0o644 (the default).  Silently widening permissions would expose
+    private content to other local users.
+    """
+    secret = tmp_path / "credentials.json"
+    secret.write_text("{}")
+    os.chmod(secret, 0o600)
+    assert file_mode(secret) == 0o600
+
+    # Write with the default mode (0o644) — existing 0o600 must be preserved
+    safe_write(secret, '{"token": "abc"}')
+
+    assert file_mode(secret) == 0o600, (
+        "safe_write widened a 0o600 credential file to "
+        f"{oct(file_mode(secret))} — permissions NOT preserved"
+    )
+    assert secret.read_text() == '{"token": "abc"}'
+
+
+def test_existing_permissions_preserved_through_symlink(tmp_path: Path) -> None:
+    """Permission preservation works when writing through a symlink."""
+    real = tmp_path / "real_creds.json"
+    real.write_text("{}")
+    os.chmod(real, 0o600)
+    link = tmp_path / "creds.json"
+    link.symlink_to(real)
+
+    safe_write(link, '{"token": "xyz"}')
+
+    assert file_mode(real) == 0o600, "permissions of real target were widened"
+    assert link.is_symlink(), "symlink clobbered"
+    assert real.read_text() == '{"token": "xyz"}'
 
 
 def test_original_intact_after_write(tmp_path: Path) -> None:

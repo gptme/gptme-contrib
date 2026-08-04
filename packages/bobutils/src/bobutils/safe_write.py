@@ -32,6 +32,7 @@ Both functions are stdlib-only and have no external dependencies.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -50,9 +51,10 @@ def safe_write(path: Path | str, data: str, *, mode: int = 0o644) -> None:
     Args:
         path:  Destination path (may be a symlink or symlink chain).
         data:  Text content to write, encoded as UTF-8.
-        mode:  Permission bits for a *newly created* file.  When the target
-               already exists, its existing permissions are kept by
-               ``os.replace``.
+        mode:  Permission bits applied when creating a *new* file.  When the
+               target already exists, its current permissions are preserved —
+               this prevents accidentally widening restrictive modes (e.g.
+               ``0o600`` credential files).
 
     Raises:
         OSError:  If the write or rename fails (e.g. wrong permissions, full
@@ -69,7 +71,8 @@ def safe_write_bytes(path: Path | str, data: bytes, *, mode: int = 0o644) -> Non
     Args:
         path:  Destination path (may be a symlink or symlink chain).
         data:  Raw bytes to write.
-        mode:  Permission bits for a *newly created* file.
+        mode:  Permission bits applied when creating a *new* file.  Existing
+               file permissions are preserved (see :func:`safe_write`).
 
     Raises:
         OSError:  If the write or rename fails.
@@ -103,11 +106,23 @@ def _atomic_write(path: Path, data: bytes, *, mode: int) -> None:
         # New file or broken symlink — resolve without requiring target to exist
         real = path.resolve(strict=False)
 
-    # Step 2: temp file in the same directory as the real target
-    real.parent.mkdir(parents=True, exist_ok=True)
+    # Step 2: temp file in the same directory as the real target.
+    # parents=False: if the direct parent doesn't exist (e.g. broken symlink
+    # pointing into a missing subtree), raise FileNotFoundError as documented.
+    real.parent.mkdir(parents=False, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=real.parent)
     try:
-        os.chmod(tmp_name, mode)
+        # Preserve existing permissions; use caller-supplied mode only for new
+        # files.  os.replace() transplants the temp inode, so whatever mode the
+        # temp file carries becomes the mode of the resulting file — we must set
+        # it explicitly or existing restrictive modes (e.g. 0o600 credential
+        # files) would be silently widened to the default 0o644.
+        effective_mode = mode
+        try:
+            effective_mode = stat.S_IMODE(os.stat(real).st_mode)
+        except OSError:
+            pass  # Target doesn't exist yet — use caller-supplied mode
+        os.chmod(tmp_name, effective_mode)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         # Step 3: atomic replace — lands on real target, not the symlink
