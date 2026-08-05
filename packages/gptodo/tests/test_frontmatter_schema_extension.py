@@ -19,12 +19,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from gptodo import cli as cli_mod
+from gptodo.cli import cli
 from gptodo.utils import (
     EXTRA_FRONTMATTER_FIELDS_ENV,
     HAVE_TOML_PARSER,
     KNOWN_FRONTMATTER_FIELDS,
-    _pyproject_extra_fields,
     lint_frontmatter_fields,
     resolve_known_frontmatter_fields,
 )
@@ -34,14 +36,6 @@ needs_toml = pytest.mark.skipif(
     not HAVE_TOML_PARSER,
     reason="pyproject config needs tomllib (3.11+) or the tomli backport",
 )
-
-
-@pytest.fixture(autouse=True)
-def _clear_pyproject_cache():
-    """_pyproject_extra_fields is lru_cached; tests reuse tmp_path names."""
-    _pyproject_extra_fields.cache_clear()
-    yield
-    _pyproject_extra_fields.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -148,3 +142,49 @@ def test_env_and_pyproject_are_additive(tmp_path: Path, monkeypatch: pytest.Monk
     )
     known = resolve_known_frontmatter_fields(tmp_path)
     assert {"from_env", "from_toml"} <= known
+
+
+# -- Schema resolution is hoisted out of the lint loop -----------------------
+
+
+CLEAN_TASK = """\
+---
+state: todo
+created: 2026-06-01T00:00:00+00:00
+---
+# Clean Task
+"""
+
+
+def test_lint_resolves_schema_once_regardless_of_task_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`gptodo lint` must resolve the schema once, not once per task.
+
+    `resolve_known_frontmatter_fields` reads the workspace pyproject from disk
+    on every call. It was originally called inside the per-task loop and made
+    cheap with an `lru_cache`; the cache was removed in favour of hoisting the
+    call, so this pins the hoist. Without it the disk read silently returns to
+    O(tasks).
+    """
+    monkeypatch.delenv(EXTRA_FRONTMATTER_FIELDS_ENV, raising=False)
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    for i in range(5):
+        (tasks_dir / f"task-{i}.md").write_text(CLEAN_TASK)
+
+    calls = 0
+    real = cli_mod.resolve_known_frontmatter_fields
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "resolve_known_frontmatter_fields", counting)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["lint"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == 1, f"schema resolved {calls}x for 5 tasks — hoist regressed"

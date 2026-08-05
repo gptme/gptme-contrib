@@ -5972,6 +5972,10 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
             console.print("[yellow]No tasks found[/]")
         return
 
+    # Resolved once, not per task: the workspace pyproject is read from disk on
+    # every call, and this loop runs over every task in the repo.
+    known_fields = resolve_known_frontmatter_fields(repo_root)
+
     # Collect findings across all tasks
     all_findings: list[dict] = []
     for task in tasks:
@@ -6000,7 +6004,7 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
             )
         # Field-level warnings (deprecated / unknown).
         for severity, field, message in lint_frontmatter_fields(
-            task.metadata, known_fields=resolve_known_frontmatter_fields(repo_root)
+            task.metadata, known_fields=known_fields
         ):
             all_findings.append(
                 {

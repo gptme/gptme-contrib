@@ -27,7 +27,6 @@ except ImportError:
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from functools import lru_cache
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -299,7 +298,6 @@ def _parse_extra_fields_env(raw: str | None) -> set[str]:
     return {part for part in re.split(r"[,\s]+", raw.strip()) if part}
 
 
-@lru_cache(maxsize=16)
 def _pyproject_extra_fields(repo_root: Path) -> frozenset[str]:
     """Read [tool.gptodo] extra_frontmatter_fields from the workspace pyproject.
 
