@@ -473,6 +473,26 @@ def explain_readiness(task_id: str) -> None:
     else:
         check("waiting_for", True, "not set")
 
+    # ready_for_review bypass: gptodo ready only checks waiting_for for this state —
+    # wait-date, pool, and dep checks are all skipped (work is done; the task is
+    # waiting for deliberate local review, not external conditions). Mirror that here
+    # so explain doesn't contradict the command it is diagnosing.
+    if state == "ready_for_review":
+        check(
+            "wait date / pool / dependencies",
+            True,
+            "skipped — ready_for_review work is done; only waiting_for matters",
+        )
+        console.print()
+        if all_pass:
+            console.print("[green]VERDICT: READY[/] (gptodo-level filters pass)")
+            console.print(
+                "[dim]Note: cascade-claim and live-dirty checks require 'ready-tasks.py --explain'[/]"
+            )
+        else:
+            console.print("[red]VERDICT: NOT READY[/]")
+        return
+
     # 3. wait: date gate
     if task_is_waiting_for_date(task):
         wait_val = task.wait
@@ -496,20 +516,6 @@ def explain_readiness(task_id: str) -> None:
         check("pool", True, f"pool={pool!r}")
 
     # 5 & 6. Dependencies (task-based and URL-based)
-    # ready_for_review: work is done; gptodo ready deliberately skips dep checks
-    # for this state (only checks waiting_for). Mirror that here so explain
-    # doesn't contradict the command it is diagnosing.
-    if state == "ready_for_review":
-        check("dependencies", True, "skipped — ready_for_review work is complete")
-        console.print()
-        if all_pass:
-            console.print("[green]VERDICT: READY[/] (gptodo-level filters pass)")
-            console.print(
-                "[dim]Note: cascade-claim and live-dirty checks require 'ready-tasks.py --explain'[/]"
-            )
-        else:
-            console.print("[red]VERDICT: NOT READY[/]")
-        return
 
     requires = task.requires or []
     if not requires:

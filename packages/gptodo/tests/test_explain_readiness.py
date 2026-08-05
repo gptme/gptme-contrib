@@ -196,6 +196,30 @@ def test_explain_ready_for_review_skips_dep_checks(tmp_path: Path, monkeypatch) 
     assert "VERDICT: READY" in out
 
 
+def test_explain_ready_for_review_with_future_wait_date(tmp_path: Path, monkeypatch) -> None:
+    """ready_for_review tasks with a future wait: date should still report READY.
+
+    gptodo ready --state ready_for_review only checks waiting_for, not the wait
+    date gate. explain must match: a future wait: date must not flip the verdict.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "rfr-future-wait",
+        state="ready_for_review",
+        created="2026-01-01T00:00:00",
+        wait="2099-12-31T00:00:00+00:00",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    out = run_explain(tmp_path, "rfr-future-wait")
+
+    # Wait date check must be skipped — a future wait should NOT block READY
+    assert "skipped" in out
+    assert "VERDICT: READY" in out
+
+
 def test_explain_substring_match_not_ambiguous(tmp_path: Path, monkeypatch) -> None:
     """Substring of another task's name must not select the wrong task."""
     tasks_dir = tmp_path / "tasks"
