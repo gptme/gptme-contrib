@@ -80,7 +80,7 @@ Add to your `.claude/settings.local.json`:
 ### 4. The pipeline runs automatically
 
 - **Stop hook**: When the session ends, the extractor reads the trajectory and writes
-  pending updates, pending items, and new feedback memories.
+  pending updates, session context, and new feedback memories.
 - **Prompt injection**: At the next session start, `prompt-inject` reads the memory
   directory, scores each file, and injects the top-N relevant memories.
 
@@ -96,7 +96,7 @@ Interactive session ends
    extractor
      • Reads CC trajectory (JSONL)
      • Detects: corrections, confirmations, new instructions
-     • Writes pending-updates.md + pending-items.md
+     • Writes pending-updates.md + pending-session-context.md
         │
         ▼ (next session starts)
         │
