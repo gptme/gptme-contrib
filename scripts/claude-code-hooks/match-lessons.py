@@ -205,6 +205,106 @@ def _trajectory_log_dir() -> Path:
     return get_workspace() / "state" / "lesson-trajectories"
 
 
+# --- Lesson policy manifest (Stage 1 shadow logging) ---
+
+_policy_manifest_cache: dict | None = None
+
+
+def _policy_manifest_path() -> Path:
+    """Return path to lesson-policy manifest."""
+    return get_workspace() / "state" / "lesson-policy" / "manifest.yaml"
+
+
+def _load_policy_manifest() -> dict:
+    """Load and cache the lesson-policy manifest (YAML).
+
+    Returns dict with keys: version, updated_at, validated_core, exempt, holdout_population.
+    On load failure or missing file, returns a safe default (all lessons in holdout).
+    """
+    global _policy_manifest_cache
+    if _policy_manifest_cache is not None:
+        return _policy_manifest_cache
+
+    manifest_path = _policy_manifest_path()
+    if not manifest_path.exists():
+        # Manifest not yet created (Stage 0 not run) — default all to holdout
+        _policy_manifest_cache = {
+            "version": 1,
+            "updated_at": "",
+            "validated_core": [],
+            "exempt": [],
+            "holdout_population": [],
+        }
+        return _policy_manifest_cache
+
+    try:
+        import yaml
+
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = yaml.safe_load(f) or {}
+    except ImportError:
+        # YAML library unavailable — log once and return safe default
+        print(
+            f"Warning: yaml not available; lesson-policy manifest at {manifest_path} ignored",
+            file=sys.stderr,
+        )
+        manifest = {
+            "version": 1,
+            "updated_at": "",
+            "validated_core": [],
+            "exempt": [],
+            "holdout_population": [],
+        }
+    except Exception as e:
+        # Parse error or file read failure — return safe default
+        print(
+            f"Warning: failed to load lesson-policy manifest: {e}",
+            file=sys.stderr,
+        )
+        manifest = {
+            "version": 1,
+            "updated_at": "",
+            "validated_core": [],
+            "exempt": [],
+            "holdout_population": [],
+        }
+
+    _policy_manifest_cache = manifest
+    return manifest
+
+
+def _classify_lesson(lesson_path: str) -> tuple[str, int]:
+    """Classify a lesson by its path against the policy manifest.
+
+    Args:
+        lesson_path: e.g. "lessons/patterns/persistent-learning.md"
+
+    Returns:
+        (policy_class, policy_version) where policy_class is one of:
+        - "validated_core": high-ROI, recommended for all sessions
+        - "exempt": safety/retention policy, exempt from dropout
+        - "holdout": under evaluation (default)
+        - "unknown": lesson not in manifest (created after manifest timestamp)
+    """
+    manifest = _load_policy_manifest()
+    policy_version = manifest.get("version", 1)
+
+    # Normalize lesson_path to the key format used in manifest (no leading/trailing slashes)
+    key = lesson_path.strip("/").replace("lessons/", "", 1).replace(".md", "")
+
+    for category in ["validated_core", "exempt", "holdout_population"]:
+        if key in manifest.get(category, []):
+            if category == "validated_core":
+                return "validated_core", policy_version
+            elif category == "exempt":
+                return "exempt", policy_version
+            else:
+                return "holdout", policy_version
+
+    # Not found in manifest — unknown (created after manifest)
+    return "unknown", policy_version
+
+
 # --- Lesson loading ---
 
 
@@ -1172,15 +1272,34 @@ def _get_dropout_log_dir(workspace: Path) -> Path:
 def _log_dropout(
     session_id: str, epsilon: float, withheld: list[dict], workspace: Path
 ) -> None:
-    """Append a dropout record for causal LOO analysis. Failures are swallowed."""
+    """Append a dropout record for causal LOO analysis. Failures are swallowed.
+
+    Stage 1 shadow logging: includes policy_class and policy_version per lesson
+    for cross-runtime parity validation.
+    """
     try:
         log_dir = _get_dropout_log_dir(workspace)
         log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Enrich withheld lessons with policy classification
+        enriched_withheld = []
+        for lesson in withheld:
+            policy_class, policy_version = _classify_lesson(lesson.get("path", ""))
+            enriched = dict(lesson)
+            enriched["policy_class"] = policy_class
+            enriched["policy_version"] = policy_version
+            enriched_withheld.append(enriched)
+
+        # Get policy manifest version from the manifest itself
+        manifest = _load_policy_manifest()
+        manifest_version = manifest.get("version", 1)
+
         record = {
             "ts": time.time(),
             "session_id": session_id,
             "epsilon": epsilon,
-            "withheld": withheld,
+            "policy_version": manifest_version,
+            "withheld": enriched_withheld,
         }
         with open(log_dir / f"{session_id}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
