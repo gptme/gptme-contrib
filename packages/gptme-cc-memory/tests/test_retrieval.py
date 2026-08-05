@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -239,3 +240,61 @@ class TestInjectionCooldown:
     def test_cooldown_expiry_re_allows(self, memory_dir: Path, state_file: Path):
         self._stamp(state_file, "never-skip-precommit", INJECTION_COOLDOWN_MINUTES + 5.0)
         assert "never-skip-precommit" in self._select(memory_dir, state_file)
+
+
+ENTRY_MD_TEMPLATE = """\
+---
+name: perf-memory-{i:04d}
+description: Performance test memory entry number {i:04d} about precommit hooks and typing
+metadata:
+  type: feedback
+---
+
+Entry {i:04d}: Never bypass pre-commit hooks with --no-verify. Always use Python type hints.
+"""
+
+
+class TestSelectRelevantMemoriesPerformance:
+    """Regression guard: repeat-decay dict lookup must not blow the <100ms hook budget."""
+
+    N_ENTRIES = 500
+    # Budget: 100ms total / 500 candidates = 0.2ms per candidate. Asserting
+    # at 1ms/candidate gives 5× headroom for slow CI runners.
+    MAX_MS_PER_CANDIDATE = 1.0
+
+    @pytest.fixture
+    def large_memory_dir(self, tmp_path: Path) -> Path:
+        mem = tmp_path / "large_memory"
+        mem.mkdir()
+        for i in range(self.N_ENTRIES):
+            (mem / f"perf-memory-{i:04d}.md").write_text(ENTRY_MD_TEMPLATE.format(i=i))
+        return mem
+
+    def test_select_budget_with_cooldown_state(
+        self, large_memory_dir: Path, tmp_path: Path
+    ) -> None:
+        """select_relevant_memories on 500 files stays under 1ms/candidate with repeat-decay active."""
+        state_file = tmp_path / "cc-memory" / "metadata.json"
+        state_file.parent.mkdir(parents=True)
+        # Mark half the entries as recently injected so the decay branch runs.
+        stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        state: dict = {
+            f"perf-memory-{i:04d}": {"last_injected": stamp, "injections": 1}
+            for i in range(0, self.N_ENTRIES, 2)
+        }
+        state_file.write_text(json.dumps(state))
+
+        t0 = time.perf_counter()
+        select_relevant_memories(
+            "Don't use --no-verify to bypass pre-commit hooks; add Python type hints",
+            memory_dir=large_memory_dir,
+            state_file=state_file,
+            limit=2,
+        )
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        per_candidate_ms = elapsed_ms / self.N_ENTRIES
+        assert per_candidate_ms < self.MAX_MS_PER_CANDIDATE, (
+            f"select_relevant_memories too slow: {per_candidate_ms:.3f}ms/candidate "
+            f"(total {elapsed_ms:.1f}ms for {self.N_ENTRIES} entries, "
+            f"budget {self.MAX_MS_PER_CANDIDATE}ms/candidate)"
+        )
