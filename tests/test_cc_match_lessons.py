@@ -626,16 +626,145 @@ def test_bm25_score_relevant_higher_than_unrelated(hook):
 
 
 def test_score_lessons_with_bm25_index(hook, tmp_path):
-    """score_lessons accepts bm25_index and does not crash."""
-    lessons_dir = tmp_path / "lessons"
-    lessons_dir.mkdir()
+    """score_lessons accepts bm25_index and tags a standout semantic match.
+
+    BM25 is gated relative to the other lessons' scores, so this needs a corpus
+    with something to stand out from — a single-lesson corpus admits nothing.
+    """
+    lessons_dir = _bm25_corpus(tmp_path)
     (lessons_dir / "lesson.md").write_text(
         "---\ndescription: handles merge conflict resolution\nmatch:\n  keywords:\n    - merge conflict\nstatus: active\n---\n# Merge Lesson\n\nContent.\n"
     )
     lessons = hook.scan_lessons([lessons_dir])
     index = hook._build_bm25_index(lessons)
     results = hook.score_lessons(lessons, "merge conflict resolution", bm25_index=index)
-    assert len(results) == 1
+    assert results
     # BM25 match tag should appear in matched_by
     has_bm25 = any("bm25" in tag for tag in results[0].get("matched_by", []))
     assert has_bm25
+
+
+def _bm25_corpus(tmp_path, n_filler: int = 30):
+    """Lesson dir with one clearly-relevant lesson plus generic filler."""
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "target.md").write_text(
+        "---\ndescription: resolving rebase merge conflict hunks in git\n"
+        "match:\n  keywords:\n    - zzztargetkw\n"
+        "status: active\n---\n# Merge Conflict Lesson\n\nContent.\n"
+    )
+    for i in range(n_filler):
+        (lessons_dir / f"filler{i}.md").write_text(
+            f"---\ndescription: generic workspace note number {i} about running "
+            f"scripts and tools\nmatch:\n  keywords:\n    - zzzfillerkw{i}\n"
+            f"status: active\n---\n# Filler {i}\n\nContent.\n"
+        )
+    return lessons_dir
+
+
+def test_bm25_min_z_scales_with_corpus_size(hook):
+    """A fixed z-floor is unreachable on small corpora, so it must scale down."""
+    # z cannot exceed (n-1)/sqrt(n); below ~17 lessons a flat 4.0 never fires.
+    # 1-2 overlapping lessons => discriminative query, admitted on the raw floor
+    assert hook._bm25_min_z(2) == float("-inf")
+    assert hook._bm25_min_z(5) < hook._BM25_MIN_Z
+    assert hook._bm25_min_z(5) <= 0.8 * (5 - 1) / (5**0.5) + 1e-9
+    assert hook._bm25_min_z(500) == hook._BM25_MIN_Z  # large corpus: flat floor
+
+
+def test_bm25_zscores_standardize_against_nonzero_scores(hook):
+    """Zero-scoring docs get z=0; a clear outlier gets a large positive z."""
+    zs = hook._bm25_zscores([0.0, 10.0, 10.0, 10.0, 100.0])
+    assert zs[0] == 0.0
+    assert zs[4] > zs[1] > 0 or zs[1] < 0
+    assert zs[4] == max(zs)
+
+
+def test_bm25_gate_is_scale_free_across_prompt_lengths(hook, tmp_path):
+    """Padding a prompt with unrelated text must not admit more BM25 matches.
+
+    Raw BM25 grows with query length, so the previous absolute floor of 0.8
+    admitted essentially every lesson on long prompts.
+    """
+    lessons = hook.scan_lessons([_bm25_corpus(tmp_path)])
+    index = hook._build_bm25_index(lessons)
+
+    short = hook.score_lessons(
+        lessons, "rebase merge conflict hunks", max_results=50, bm25_index=index
+    )
+    padded = hook.score_lessons(
+        lessons,
+        "rebase merge conflict hunks " + "generic workspace note scripts tools " * 40,
+        max_results=50,
+        bm25_index=index,
+    )
+    assert len(padded) <= len(short)
+    # And the long prompt must not admit most of the corpus.
+    assert len(padded) < len(lessons) / 2
+
+
+def test_bm25_ranking_preserved_with_two_scoring_lessons(hook, tmp_path):
+    """With exactly two BM25-scoring lessons, both must appear and the stronger must rank first.
+
+    When n_nonzero==2, bm_min_z==-inf (both admitted on raw floor alone) and
+    z-scores are exactly ±1.  Using bm_z directly floors the weaker lesson to
+    max(-1, 0)=0 and drops it from results despite admission — that was the bug.
+    The fix uses max(bm_z, 0.5) for n==2 so the weaker lesson still contributes
+    a positive 0.5 while the stronger gets 1.0, preserving ranking.
+    """
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    # strong: many target terms → will dominate BM25 for this query
+    (lessons_dir / "strong.md").write_text(
+        "---\ndescription: rebase merge conflict resolution hunks diff\n"
+        "match:\n  keywords:\n    - zzzstrongkw\nstatus: active\n---\n# Strong\n\n"
+        "Merge conflicts in rebase sessions: hunks, diff, resolution.\n"
+    )
+    # weak: only one incidental term
+    (lessons_dir / "weak.md").write_text(
+        "---\ndescription: merge overview general\n"
+        "match:\n  keywords:\n    - zzzweakkw\nstatus: active\n---\n# Weak\n\n"
+        "General merge note.\n"
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    assert len(lessons) == 2
+
+    index = hook._build_bm25_index(lessons)
+    results = hook.score_lessons(
+        lessons,
+        "rebase merge conflict resolution hunks",
+        max_results=5,
+        bm25_index=index,
+    )
+    # Both lessons must appear: the weaker admitted match may not be dropped.
+    assert len(results) == 2, (
+        f"both lessons should appear in results, got "
+        f"{[r['path'].rsplit('/', 1)[-1] for r in results]}"
+    )
+    scores = {r["path"].rsplit("/", 1)[-1]: r["score"] for r in results}
+    assert (
+        scores["strong.md"] > scores["weak.md"]
+    ), f"strong.md should outrank weak.md but scores were {scores}"
+
+
+def test_bm25_contribution_does_not_swamp_keyword_matches(hook, tmp_path):
+    """A keyword-matching lesson must outrank a purely semantic neighbour.
+
+    Raw BM25 runs into the hundreds on long prompts; adding 0.4x the raw score
+    buried keyword/pattern matches (worth 1.0-1.5 each) in the ranking.
+    """
+    lessons_dir = _bm25_corpus(tmp_path)
+    (lessons_dir / "keyworded.md").write_text(
+        "---\ndescription: unrelated topic entirely\nmatch:\n  keywords:\n"
+        '    - "merge conflict"\nstatus: active\n---\n# Keyworded\n\nContent.\n'
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    index = hook._build_bm25_index(lessons)
+
+    prompt = "help me with a merge conflict during rebase " + "git hunks " * 50
+    results = hook.score_lessons(lessons, prompt, max_results=5, bm25_index=index)
+    assert results
+    assert "keyworded" in results[0]["path"], (
+        f"keyword match should rank first, got {results[0]['path']} "
+        f"({results[0]['matched_by']})"
+    )
