@@ -102,6 +102,7 @@ from gptodo.unblock import auto_unblock_with_fan_in
 from gptodo.utils import (
     # Constants
     CONFIGS,
+    DEPRECATED_FRONTMATTER_FIELDS,
     STATE_EMOJIS,
     STATE_STYLES,
     # Data classes
@@ -1799,7 +1800,12 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
     # one level down. Deliberately scoped to the *extras*: upstream-known fields
     # that are absent above (session_id, worktree_path, …) are machine-written
     # and stay unsettable by hand.
-    for _extra in resolve_known_frontmatter_fields(repo_root) - KNOWN_FRONTMATTER_FIELDS:
+    # Deprecated fields are explicitly excluded — a workspace cannot opt back
+    # into an anti-design-goal field by registering it as an extra. Registering
+    # `modified` would otherwise make `gptodo edit --set modified ...` succeed
+    # right before `gptodo lint` rejects it, recreating the two-schema split.
+    _excluded = KNOWN_FRONTMATTER_FIELDS | set(DEPRECATED_FRONTMATTER_FIELDS)
+    for _extra in resolve_known_frontmatter_fields(repo_root) - _excluded:
         VALID_FIELDS.setdefault(_extra, {"type": "string"})
 
     # Validate set operations

@@ -317,7 +317,13 @@ def _pyproject_extra_fields(repo_root: Path) -> frozenset[str]:
             data = _toml.load(f)
     except (OSError, ValueError):
         return frozenset()
-    raw = data.get("tool", {}).get("gptodo", {}).get("extra_frontmatter_fields")
+    tool = data.get("tool", {})
+    if not isinstance(tool, dict):
+        return frozenset()
+    gptodo = tool.get("gptodo", {})
+    if not isinstance(gptodo, dict):
+        return frozenset()
+    raw = gptodo.get("extra_frontmatter_fields")
     if not isinstance(raw, list):
         return frozenset()
     return frozenset(item for item in raw if isinstance(item, str) and item)

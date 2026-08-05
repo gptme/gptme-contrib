@@ -119,6 +119,8 @@ def test_deprecated_beats_workspace_registration(
         '[tool.gptodo]\nextra_frontmatter_fields = "not-a-list"\n',
         "[tool.gptodo]\nextra_frontmatter_fields = [1, 2]\n",  # non-str entries
         "this is not = valid toml [[[",
+        'tool = "not-a-dict"\n',  # tool is a scalar, not a table — was AttributeError
+        '[tool]\ngptodo = "not-a-dict"\n',  # tool.gptodo scalar — was AttributeError
     ],
 )
 @needs_toml
