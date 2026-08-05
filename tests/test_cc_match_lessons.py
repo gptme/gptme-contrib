@@ -704,13 +704,13 @@ def test_bm25_gate_is_scale_free_across_prompt_lengths(hook, tmp_path):
 
 
 def test_bm25_ranking_preserved_with_two_scoring_lessons(hook, tmp_path):
-    """With exactly two BM25-scoring lessons, the stronger must rank above the weaker.
+    """With exactly two BM25-scoring lessons, both must appear and the stronger must rank first.
 
-    When n_nonzero==2, bm_min_z==-inf (both admitted on raw floor alone).
-    The old floor of max(bm_z, 1.0) converted z≈-1 and z≈+1 both to 1.0,
-    making them tie and letting corpus order decide — the wrong lesson could
-    come first.  The fix uses the actual z-score when n_nonzero>=2, so the
-    higher-scoring lesson gets a strictly larger contribution.
+    When n_nonzero==2, bm_min_z==-inf (both admitted on raw floor alone) and
+    z-scores are exactly ±1.  Using bm_z directly floors the weaker lesson to
+    max(-1, 0)=0 and drops it from results despite admission — that was the bug.
+    The fix uses max(bm_z, 0.5) for n==2 so the weaker lesson still contributes
+    a positive 0.5 while the stronger gets 1.0, preserving ranking.
     """
     lessons_dir = tmp_path / "lessons"
     lessons_dir.mkdir()
@@ -736,13 +736,15 @@ def test_bm25_ranking_preserved_with_two_scoring_lessons(hook, tmp_path):
         max_results=5,
         bm25_index=index,
     )
-    assert len(results) >= 1
-    # When both lessons score, the stronger semantic match must rank first.
-    if len(results) == 2:
-        scores = {r["path"].rsplit("/", 1)[-1]: r["score"] for r in results}
-        assert scores.get("strong.md", 0) > scores.get(
-            "weak.md", 0
-        ), f"strong.md should outrank weak.md but scores were {scores}"
+    # Both lessons must appear: the weaker admitted match may not be dropped.
+    assert len(results) == 2, (
+        f"both lessons should appear in results, got "
+        f"{[r['path'].rsplit('/', 1)[-1] for r in results]}"
+    )
+    scores = {r["path"].rsplit("/", 1)[-1]: r["score"] for r in results}
+    assert (
+        scores["strong.md"] > scores["weak.md"]
+    ), f"strong.md should outrank weak.md but scores were {scores}"
 
 
 def test_bm25_contribution_does_not_swamp_keyword_matches(hook, tmp_path):

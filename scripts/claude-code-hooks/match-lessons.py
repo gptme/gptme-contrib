@@ -1023,16 +1023,29 @@ def score_lessons(
         if bm_scores:
             bm_score = bm_scores[i]
             bm_z = bm_zs[i]
-            if bm_z >= bm_min_z and bm_score >= _BM25_MIN_RAW:
-                # When the corpus produces a real z distribution (≥2 nonzero
-                # scores), use the actual z so ranking is preserved.  Only
-                # floor to 1.0 for the degenerate case (bm_n_nonzero < 2)
-                # where _bm25_zscores returns 0.0 for every score by
-                # construction — without the floor, the lone semantic hit
-                # would contribute nothing despite passing the raw gate.
-                # max(..., 0.0) ensures a below-mean match in the n≥2 case
-                # does not subtract from the lesson's score.
-                bm_contribution = bm_z if bm_n_nonzero >= 2 else 1.0
+            # For n<3 the query is highly discriminative — ANY overlap with the
+            # query is informative — so bypass the raw floor (still require >0
+            # to exclude completely unrelated lessons).  For n≥3 the z-gate
+            # is the primary filter and the raw floor guards against spurious
+            # weak-overlap false positives that can slip through noisy z-scores.
+            small_corpus = bm_n_nonzero < 3
+            if bm_z >= bm_min_z and (
+                bm_score >= _BM25_MIN_RAW or (small_corpus and bm_score > 0)
+            ):
+                # Contribution is the z-score so ranking is preserved in
+                # normal corpora (n≥3).  Two edge cases need special handling:
+                # • n<2: _bm25_zscores returns 0.0 for all scores (degenerate);
+                #   floor to 1.0 so the lone hit still contributes.
+                # • n==2: bm_min_z==-inf admits both; z-scores are ±1.
+                #   Using z directly floors the weaker to max(-1,0)=0, dropping
+                #   it despite admission.  Floor to 0.5 so both contribute
+                #   positively while ranking is still preserved (1.0 > 0.5).
+                if bm_n_nonzero >= 3:
+                    bm_contribution = bm_z
+                elif bm_n_nonzero == 2:
+                    bm_contribution = max(bm_z, 0.5)
+                else:
+                    bm_contribution = 1.0
                 score += _BM25_WEIGHT * max(bm_contribution, 0.0)
                 matched_by.append(f"bm25:{bm_score:.2f}")
 
