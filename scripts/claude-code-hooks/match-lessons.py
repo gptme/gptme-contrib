@@ -840,8 +840,26 @@ def get_predicted_lessons(
 
 _BM25_K1 = 1.2
 _BM25_B = 0.75
-_BM25_WEIGHT = 0.4  # additive weight for BM25 score contribution
-_BM25_MIN_SCORE = 0.8  # minimum BM25 score to add contribution
+_BM25_WEIGHT = 0.4  # additive weight for the normalized BM25 contribution
+
+# Raw BM25 scores scale with query length: a 50-token prompt tops out around 45
+# while a 3000-token prompt tops out around 1200. An absolute floor therefore
+# cannot separate "semantically relevant" from "shares a few common words" —
+# measured on 33 real prompts, the old absolute floor of 0.8 admitted a median
+# of 475 out of 503 lessons, i.e. it never filtered anything.
+#
+# Instead, gate on how far a lesson stands out from the background distribution
+# of *this* query's scores (z = (score - mean) / stdev over nonzero scores).
+# That is scale-free, and it makes "inject nothing" the common case for long
+# generic prompts (which match everything weakly, so nothing stands out) while
+# still admitting the one or two lessons a short focused prompt is really about.
+_BM25_MIN_Z = 4.0  # minimum z-score over the per-query score distribution
+_BM25_MIN_RAW = 0.8  # absolute floor, guards degenerate tiny-corpus cases
+# A z-score over n samples cannot exceed (n-1)/sqrt(n), so a fixed z=4 is
+# unreachable below ~17 scoring lessons — which would silently disable the
+# semantic layer for small corpora (forks, per-project lesson sets). Scale the
+# requirement to what is attainable for the corpus actually being scored.
+_BM25_STANDOUT_FRACTION = 0.8
 
 
 def _build_bm25_index(lessons: list[dict]) -> dict:
@@ -898,6 +916,39 @@ def _bm25_score(query_terms: list[str], doc_terms: list[str], index: dict) -> fl
     return score
 
 
+def _bm25_min_z(n_nonzero: int) -> float:
+    """Minimum z-score a lesson must reach to count as a semantic match.
+
+    When only one or two lessons overlap the query at all, the query is highly
+    discriminative and those matches are admitted on the raw floor alone — the
+    failure mode this gate exists to stop is the opposite one, where hundreds of
+    lessons share a few common words and none of them is really about the query.
+    """
+    if n_nonzero < 3:
+        return -math.inf
+    max_attainable = (n_nonzero - 1) / math.sqrt(n_nonzero)
+    return min(_BM25_MIN_Z, _BM25_STANDOUT_FRACTION * max_attainable)
+
+
+def _bm25_zscores(scores: list[float]) -> list[float]:
+    """Standardize raw BM25 scores against the nonzero score distribution.
+
+    Returns one z-score per input score. Lessons that scored 0 (no term overlap
+    at all) get 0.0. If fewer than two lessons score nonzero, or the spread is
+    degenerate, every z is 0.0 — nothing can "stand out" from a background of
+    one, so the caller admits nothing.
+    """
+    nonzero = [s for s in scores if s > 0]
+    if len(nonzero) < 2:
+        return [0.0] * len(scores)
+    mean = sum(nonzero) / len(nonzero)
+    var = sum((s - mean) ** 2 for s in nonzero) / len(nonzero)
+    sd = math.sqrt(var)
+    if sd <= 0:
+        return [0.0] * len(scores)
+    return [(s - mean) / sd if s > 0 else 0.0 for s in scores]
+
+
 def score_lessons(
     lessons: list[dict],
     prompt: str,
@@ -914,6 +965,19 @@ def score_lessons(
     prompt_lower = prompt.lower()
     query_terms = re.findall(r"[a-z0-9]+", prompt_lower) if bm25_index else []
     results = []
+
+    # BM25 is gated relative to this query's own score distribution, so all
+    # scores have to be computed before any single lesson can be judged.
+    bm_scores: list[float] = []
+    bm_zs: list[float] = []
+    bm_min_z = math.inf
+    if bm25_index is not None and query_terms:
+        bm_scores = [
+            _bm25_score(query_terms, doc_terms, bm25_index)
+            for doc_terms in bm25_index["corpus"]
+        ]
+        bm_zs = _bm25_zscores(bm_scores)
+        bm_min_z = _bm25_min_z(sum(1 for s in bm_scores if s > 0))
 
     for i, lesson in enumerate(lessons):
         score = 0.0
@@ -950,12 +1014,18 @@ def score_lessons(
             score += descriptor_score
             matched_by.extend(descriptor_matches)
 
-        # BM25 semantic scoring (soft matching over description + title + keywords)
-        if bm25_index is not None and query_terms:
-            doc_terms = bm25_index["corpus"][i]
-            bm_score = _bm25_score(query_terms, doc_terms, bm25_index)
-            if bm_score >= _BM25_MIN_SCORE:
-                score += _BM25_WEIGHT * bm_score
+        # BM25 semantic scoring (soft matching over description + title + keywords).
+        # The contribution is the z-score, not the raw score: raw BM25 runs into
+        # the hundreds on long prompts and would otherwise drown out keyword,
+        # pattern, and descriptor matches (which are worth 1.0-1.5 each).
+        if bm_scores:
+            bm_score = bm_scores[i]
+            bm_z = bm_zs[i]
+            if bm_z >= bm_min_z and bm_score >= _BM25_MIN_RAW:
+                # Floor the contribution at 1.0 z: in the degenerate case where
+                # too few lessons score to compute a spread, every z is 0.0 and
+                # an admitted match would otherwise contribute nothing at all.
+                score += _BM25_WEIGHT * max(bm_z, 1.0)
                 matched_by.append(f"bm25:{bm_score:.2f}")
 
         if score > 0:
