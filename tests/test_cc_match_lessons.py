@@ -768,3 +768,69 @@ def test_bm25_contribution_does_not_swamp_keyword_matches(hook, tmp_path):
         f"keyword match should rank first, got {results[0]['path']} "
         f"({results[0]['matched_by']})"
     )
+
+
+def test_bm25_min_raw_floor_calibration(hook):
+    """_BM25_MIN_RAW must stay at the recalibrated production floor (>= 40.0).
+
+    Pins the threshold so future changes don't silently restore the 0.8 value
+    that never filtered anything (measured 2026-08-05: real scores 3.92–1397.22,
+    median 60.80).
+    """
+    assert hook._BM25_MIN_RAW >= 40.0, (
+        f"_BM25_MIN_RAW ({hook._BM25_MIN_RAW}) regressed below the recalibrated "
+        f"floor of 40.0 — restore or re-calibrate"
+    )
+
+
+def test_bm25_corpus_scale_bypass_admits_relevant_lesson(hook, tmp_path):
+    """Small-corpus bypass must admit a relevant lesson when no score reaches the production floor.
+
+    BM25 raw scores scale with corpus size via IDF.  A small fork or per-project
+    lesson set may have scores well below 40.0 even for genuinely relevant lessons.
+    When max(bm_scores) < _BM25_MIN_RAW the corpus is operating at a different
+    IDF scale; the raw floor is bypassed and z-score alone gates admission.
+    """
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    # Two-lesson corpus: keeps IDF low so scores stay below 40.0.
+    (lessons_dir / "target.md").write_text(
+        "---\ndescription: rebase merge conflict resolution\n"
+        "match:\n  keywords:\n    - zzzuniquekw\nstatus: active\n---\n# Target\n\n"
+        "Resolving merge conflicts during git rebase: hunks, diff, resolution.\n"
+    )
+    (lessons_dir / "unrelated.md").write_text(
+        "---\ndescription: python packaging wheel build\n"
+        "match:\n  keywords:\n    - zzzotherkw\nstatus: active\n---\n# Unrelated\n\n"
+        "Python wheel packaging and build configuration.\n"
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    index = hook._build_bm25_index(lessons)
+
+    # Verify this corpus actually produces below-floor scores (the test premise).
+    scores = [
+        hook._bm25_score(
+            ["rebase", "merge", "conflict", "resolution"],
+            doc_terms,
+            index,
+        )
+        for doc_terms in index["corpus"]
+    ]
+    assert max(scores) < hook._BM25_MIN_RAW, (
+        f"test premise failed: max BM25 score {max(scores):.2f} already exceeds "
+        f"the production floor {hook._BM25_MIN_RAW} — corpus is not small enough "
+        f"to exercise the bypass"
+    )
+
+    # The relevant lesson must still be admitted via the corpus-scale bypass.
+    results = hook.score_lessons(
+        lessons,
+        "rebase merge conflict resolution",
+        max_results=5,
+        bm25_index=index,
+    )
+    matched_names = [r["path"].rsplit("/", 1)[-1] for r in results]
+    assert "target.md" in matched_names, (
+        f"relevant lesson was silently filtered by the raw floor despite "
+        f"corpus operating at a different IDF scale; results: {matched_names}"
+    )

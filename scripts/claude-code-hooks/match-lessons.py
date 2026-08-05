@@ -1033,9 +1033,15 @@ def score_lessons(
             # to exclude completely unrelated lessons).  For n≥3 the z-gate
             # is the primary filter and the raw floor guards against spurious
             # weak-overlap false positives that can slip through noisy z-scores.
+            # Also bypass the raw floor when the corpus-peak score falls below
+            # it: that signals a different IDF scale (small fork, per-project
+            # lesson set) where the production-calibrated 40.0 is unattainable.
+            # In that case z-score alone gates admission.
             small_corpus = bm_n_nonzero < 3
+            corpus_below_floor = max(bm_scores) < _BM25_MIN_RAW
             if bm_z >= bm_min_z and (
-                bm_score >= _BM25_MIN_RAW or (small_corpus and bm_score > 0)
+                bm_score >= _BM25_MIN_RAW
+                or ((small_corpus or corpus_below_floor) and bm_score > 0)
             ):
                 # Contribution is the z-score so ranking is preserved in
                 # normal corpora (n≥3).  Two edge cases need special handling:
