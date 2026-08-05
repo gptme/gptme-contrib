@@ -971,13 +971,15 @@ def score_lessons(
     bm_scores: list[float] = []
     bm_zs: list[float] = []
     bm_min_z = math.inf
+    bm_n_nonzero = 0
     if bm25_index is not None and query_terms:
         bm_scores = [
             _bm25_score(query_terms, doc_terms, bm25_index)
             for doc_terms in bm25_index["corpus"]
         ]
         bm_zs = _bm25_zscores(bm_scores)
-        bm_min_z = _bm25_min_z(sum(1 for s in bm_scores if s > 0))
+        bm_n_nonzero = sum(1 for s in bm_scores if s > 0)
+        bm_min_z = _bm25_min_z(bm_n_nonzero)
 
     for i, lesson in enumerate(lessons):
         score = 0.0
@@ -1022,10 +1024,16 @@ def score_lessons(
             bm_score = bm_scores[i]
             bm_z = bm_zs[i]
             if bm_z >= bm_min_z and bm_score >= _BM25_MIN_RAW:
-                # Floor the contribution at 1.0 z: in the degenerate case where
-                # too few lessons score to compute a spread, every z is 0.0 and
-                # an admitted match would otherwise contribute nothing at all.
-                score += _BM25_WEIGHT * max(bm_z, 1.0)
+                # When the corpus produces a real z distribution (≥2 nonzero
+                # scores), use the actual z so ranking is preserved.  Only
+                # floor to 1.0 for the degenerate case (bm_n_nonzero < 2)
+                # where _bm25_zscores returns 0.0 for every score by
+                # construction — without the floor, the lone semantic hit
+                # would contribute nothing despite passing the raw gate.
+                # max(..., 0.0) ensures a below-mean match in the n≥2 case
+                # does not subtract from the lesson's score.
+                bm_contribution = bm_z if bm_n_nonzero >= 2 else 1.0
+                score += _BM25_WEIGHT * max(bm_contribution, 0.0)
                 matched_by.append(f"bm25:{bm_score:.2f}")
 
         if score > 0:

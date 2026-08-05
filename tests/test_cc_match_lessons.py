@@ -118,9 +118,9 @@ def test_scan_lessons_skips_node_modules(hook, tmp_path):
     )
     result = hook.scan_lessons([lessons_dir])
     paths = [r["path"] for r in result]
-    assert all("node_modules" not in p for p in paths), (
-        f"node_modules file leaked into scan: {paths}"
-    )
+    assert all(
+        "node_modules" not in p for p in paths
+    ), f"node_modules file leaked into scan: {paths}"
     assert len(result) == 1
     assert result[0]["title"] == "Real Skill"
 
@@ -533,9 +533,9 @@ def test_filter_by_session_category_case_insensitive(hook, tmp_path):
     lessons = hook.scan_lessons([lessons_dir])
     # detect_session_category always returns lowercase; YAML "Code" must still match
     kept = hook.filter_by_session_category(lessons, "code")
-    assert len(kept) == 1, (
-        "Mixed-case YAML category should match lowercase env-var category"
-    )
+    assert (
+        len(kept) == 1
+    ), "Mixed-case YAML category should match lowercase env-var category"
     dropped = hook.filter_by_session_category(lessons, "cleanup")
     assert len(dropped) == 0
 
@@ -701,6 +701,48 @@ def test_bm25_gate_is_scale_free_across_prompt_lengths(hook, tmp_path):
     assert len(padded) <= len(short)
     # And the long prompt must not admit most of the corpus.
     assert len(padded) < len(lessons) / 2
+
+
+def test_bm25_ranking_preserved_with_two_scoring_lessons(hook, tmp_path):
+    """With exactly two BM25-scoring lessons, the stronger must rank above the weaker.
+
+    When n_nonzero==2, bm_min_z==-inf (both admitted on raw floor alone).
+    The old floor of max(bm_z, 1.0) converted z≈-1 and z≈+1 both to 1.0,
+    making them tie and letting corpus order decide — the wrong lesson could
+    come first.  The fix uses the actual z-score when n_nonzero>=2, so the
+    higher-scoring lesson gets a strictly larger contribution.
+    """
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    # strong: many target terms → will dominate BM25 for this query
+    (lessons_dir / "strong.md").write_text(
+        "---\ndescription: rebase merge conflict resolution hunks diff\n"
+        "match:\n  keywords:\n    - zzzstrongkw\nstatus: active\n---\n# Strong\n\n"
+        "Merge conflicts in rebase sessions: hunks, diff, resolution.\n"
+    )
+    # weak: only one incidental term
+    (lessons_dir / "weak.md").write_text(
+        "---\ndescription: merge overview general\n"
+        "match:\n  keywords:\n    - zzzweakkw\nstatus: active\n---\n# Weak\n\n"
+        "General merge note.\n"
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+    assert len(lessons) == 2
+
+    index = hook._build_bm25_index(lessons)
+    results = hook.score_lessons(
+        lessons,
+        "rebase merge conflict resolution hunks",
+        max_results=5,
+        bm25_index=index,
+    )
+    assert len(results) >= 1
+    # When both lessons score, the stronger semantic match must rank first.
+    if len(results) == 2:
+        scores = {r["path"].rsplit("/", 1)[-1]: r["score"] for r in results}
+        assert scores.get("strong.md", 0) > scores.get(
+            "weak.md", 0
+        ), f"strong.md should outrank weak.md but scores were {scores}"
 
 
 def test_bm25_contribution_does_not_swamp_keyword_matches(hook, tmp_path):
