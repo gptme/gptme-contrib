@@ -388,6 +388,204 @@ def effective(task_id: str):
                     console.print(f"  • [red]{req}[/] (missing)")
 
 
+@cli.command("explain")
+@click.argument("task_id")
+def explain_(task_id: str):
+    """Explain why a task is or is not ready to work on.
+
+    Walks through each readiness filter in order and shows which ones pass
+    or fail, so you can diagnose why 'gptodo ready' does not surface a task.
+
+    Note: cascade-claim blocking and live-dirty-file checks require
+    'ready-tasks.py --explain TASK_ID' (Bob-local script).
+    """
+    explain_readiness(task_id)
+
+
+def explain_readiness(task_id: str) -> None:
+    """Walk through readiness filters for a task and print the verdict."""
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    tasks = load_tasks(tasks_dir)
+    if not tasks:
+        console.print("[red]No tasks found[/]")
+        sys.exit(1)
+
+    all_tasks: Dict[str, TaskInfo] = {t.name: t for t in tasks}
+
+    # Exact name match first; fall back to stem-only match when the caller
+    # passes a bare .md filename ("my-task.md" → "my-task").  Restrict to:
+    #   • .md extension only (not arbitrary suffixes like .txt)
+    #   • no path separators (a path like "dir/my-task.md" might refer to a
+    #     different task than the local "my-task", so don't strip dir components)
+    _is_bare_md = task_id.endswith(".md") and "/" not in task_id and "\\" not in task_id
+    stem = Path(task_id).stem if _is_bare_md else None
+    task = all_tasks.get(task_id) or (all_tasks.get(stem) if stem else None)
+
+    if not task:
+        console.print(f"[red]Task not found: {task_id}[/]")
+        sys.exit(1)
+
+    cache_path = get_cache_path(repo_root)
+    issue_cache = load_cache(cache_path)
+
+    console.print(f"\n[bold]Task:[/] {task.name}")
+    console.print(f"[bold]File:[/] {task.path.relative_to(repo_root)}")
+    console.print(f"[bold]State:[/] {task.state or 'unknown'}")
+    console.print()
+    console.print("[bold]Readiness filters:[/]")
+
+    WORKABLE = {"backlog", "todo", "active", "ready_for_review"}
+    all_pass = True
+
+    def check(label: str, passed: bool, detail: str = "") -> None:
+        nonlocal all_pass
+        icon = "[green]✓[/]" if passed else "[red]✗[/]"
+        suffix = f" — {detail}" if detail else ""
+        console.print(f"  {icon} {label}{suffix}")
+        if not passed:
+            all_pass = False
+
+    # 1. State filter
+    state = normalize_state(task.state or "", warn=False) if task.state else ""
+    if state in ("done", "cancelled"):
+        check("state", False, f"terminal state ({state}) — work is complete or cancelled")
+    elif state == "someday":
+        check("state", False, "someday — explicitly deferred, not in ready pool")
+    elif state == "waiting":
+        waiting_for = str(task.metadata.get("waiting_for") or "").strip()
+        detail = f"waiting_for={waiting_for!r}" if waiting_for else "state=waiting"
+        check("state / waiting_for", False, detail)
+    elif state in WORKABLE:
+        check("state", True, state)
+    else:
+        check("state", False, f"unrecognised state ({state!r})")
+
+    if not all_pass:
+        # State already failed; remaining checks irrelevant
+        console.print()
+        console.print("[red]VERDICT: NOT READY[/]")
+        return
+
+    # 2. waiting_for prose on a non-waiting task
+    if task.metadata.get("waiting_for"):
+        waiting_for = str(task.metadata["waiting_for"]).strip()
+        check(
+            "waiting_for", False, f"{waiting_for!r} (set on non-waiting task → treated as blocker)"
+        )
+    else:
+        check("waiting_for", True, "not set")
+
+    # 3. Pool filter — applies to ALL states including ready_for_review.
+    # gptodo ready applies pool filtering before the readiness check, even for
+    # ready_for_review tasks (see ready() lines 2729-2733): a frontier-pool task
+    # in ready_for_review is excluded by the default general-pool filter just like
+    # any other pool. Mirror that here so explain doesn't contradict ready.
+    pool = task_pool(task)
+    if pool == "frontier":
+        check(
+            "pool",
+            False,
+            "pool=frontier — requires a frontier-tier session (e.g. gptodo ready --pool frontier)",
+        )
+    else:
+        check("pool", True, f"pool={pool!r}")
+
+    # ready_for_review bypass: gptodo ready skips wait-date and dependency checks
+    # for this state (work is done; only waiting_for and pool matter). Mirror that
+    # here so explain doesn't contradict the command it is diagnosing.
+    if state == "ready_for_review":
+        check(
+            "wait date / dependencies",
+            True,
+            "skipped — ready_for_review work is done; pool and waiting_for are the only gates",
+        )
+        console.print()
+        if all_pass:
+            console.print("[green]VERDICT: READY[/] (gptodo-level filters pass)")
+            console.print(
+                "[dim]Note: cascade-claim and live-dirty checks require 'ready-tasks.py --explain'[/]"
+            )
+        else:
+            console.print("[red]VERDICT: NOT READY[/]")
+        return
+
+    # 4. wait: date gate
+    if task_is_waiting_for_date(task):
+        wait_val = task.wait
+        detail = f"wait gate not yet open (wait={wait_val.isoformat() if wait_val else '?'})"
+        check("wait date", False, detail)
+    else:
+        if task.wait is not None:
+            check("wait date", True, f"gate open (wait={task.wait})")
+        else:
+            check("wait date", True, "not set")
+
+    # 4 & 5. Dependencies (task-based and URL-based)
+
+    requires = task.requires or []
+    if not requires:
+        check("dependencies", True, "none")
+    else:
+        blocked: list[str] = []
+        missing: list[str] = []
+        open_urls: list[str] = []
+        resolved: list[str] = []
+        uncached_urls: list[str] = []
+
+        for req in requires:
+            if isinstance(req, str) and req.startswith(("http://", "https://")):
+                cached = issue_cache.get(req) if issue_cache else None
+                if cached:
+                    url_state = cached.get("state", "unknown")
+                    if url_state == "OPEN":
+                        open_urls.append(f"{req} ({url_state})")
+                    else:
+                        resolved.append(f"{req} ({url_state})")
+                else:
+                    uncached_urls.append(req)
+            else:
+                dep_task = all_tasks.get(req)
+                if dep_task is None:
+                    missing.append(req)
+                elif dep_task.state not in ("done", "cancelled"):
+                    blocked.append(f"{req} ({dep_task.state})")
+                else:
+                    resolved.append(f"{req} ({dep_task.state})")
+
+        if blocked or missing or open_urls:
+            parts = []
+            if blocked:
+                parts.append("blocked_by=" + ", ".join(blocked))
+            if missing:
+                parts.append("missing=" + ", ".join(missing))
+            if open_urls:
+                parts.append("open_url=" + ", ".join(open_urls))
+            check("dependencies", False, "; ".join(parts))
+        else:
+            summary_parts = []
+            if resolved:
+                summary_parts.append(f"{len(resolved)} resolved")
+            if uncached_urls:
+                summary_parts.append(f"{len(uncached_urls)} URL(s) not cached (assumed unblocked)")
+            check(
+                "dependencies",
+                True,
+                ", ".join(summary_parts) if summary_parts else f"{len(requires)} resolved",
+            )
+
+    console.print()
+    if all_pass:
+        console.print("[green]VERDICT: READY[/] (gptodo-level filters pass)")
+        console.print(
+            "[dim]Note: cascade-claim and live-dirty checks require 'ready-tasks.py --explain'[/]"
+        )
+    else:
+        console.print("[red]VERDICT: NOT READY[/]")
+
+
 @cli.command("list")
 @click.option(
     "--sort",
