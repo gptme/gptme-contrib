@@ -11,10 +11,8 @@ from gptme_cc_memory.extractor import (
     detect_corrections,
     detect_confirmations,
     detect_guidance_blocks,
-    detect_pending_items,
     extract_memories,
     extract_session_context,
-    format_pending_items,
     format_pending_updates,
     format_session_context,
 )
@@ -25,13 +23,6 @@ CORRECTION_TRAJECTORY = [
     {"role": "human", "content": "Don't use --no-verify, fix the pre-commit failure instead"},
     {"role": "assistant", "content": "You're right, I should fix the hook failure."},
     {"role": "human", "content": "Great, that works!"},
-]
-
-# Sample trajectory with a pending item
-PENDING_TRAJECTORY = [
-    {"role": "human", "content": "Let's start the database migration"},
-    {"role": "assistant", "content": "I'll begin with the schema changes."},
-    {"role": "human", "content": "The next step is to handle the rollback script"},
 ]
 
 # Sample trajectory with guidance
@@ -78,15 +69,6 @@ class TestDetectConfirmations:
         ]
         result = detect_confirmations(messages)
         assert len(result) == 0
-
-
-class TestDetectPendingItems:
-    def test_detects_pending_items(self):
-        result = detect_pending_items(PENDING_TRAJECTORY)
-        assert len(result) >= 1
-
-    def test_no_items_in_empty(self):
-        assert detect_pending_items(EMPTY_TRAJECTORY) == []
 
 
 class TestDetectGuidanceBlocks:
@@ -142,8 +124,14 @@ class TestExtractMemories:
         workspace = tmp_path / "workspace"
         memory_dir = workspace / "memory"
 
+        # Includes a phrase the retired pending-item detector matched
+        # ("The next step is ..."), so this asserts the lane is really gone
+        # rather than merely un-triggered.
+        messages = CORRECTION_TRAJECTORY + [
+            {"role": "human", "content": "The next step is to handle the rollback script"},
+        ]
         with open(traj, "w", encoding="utf-8") as f:
-            for msg in CORRECTION_TRAJECTORY:
+            for msg in messages:
                 f.write(json.dumps(msg) + "\n")
 
         monkeypatch.setenv("GPTME_CC_MEMORY_DIR", str(workspace))
@@ -153,6 +141,8 @@ class TestExtractMemories:
 
         assert (memory_dir / "pending-updates.md").exists()
         assert (memory_dir / "pending-session-context.md").exists()
+        # Retired lane: the extractor must never write pending-items.md again.
+        assert not (memory_dir / "pending-items.md").exists()
 
 
 class TestFormatOutput:
@@ -173,14 +163,6 @@ class TestFormatOutput:
         output = format_pending_updates(r)
         assert "don't use" in output
         assert "Great, that works" in output
-
-    def test_format_pending_items(self):
-        from gptme_cc_memory.extractor import ExtractionResult
-
-        r = ExtractionResult(pending_items=["Finish the migration", "Write tests"])
-        output = format_pending_items(r)
-        assert "Finish" in output
-        assert "Write tests" in output
 
     def test_format_session_context(self):
         from gptme_cc_memory.extractor import ExtractionResult

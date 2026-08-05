@@ -34,7 +34,6 @@ STATE_DIR = WORKSPACE / "state" / "cc-memory"
 METADATA_FILE = STATE_DIR / "metadata.json"
 GUIDANCE_FILE = MEMORY_DIR / "guidance.md"
 PENDING_UPDATES_FILE = MEMORY_DIR / "pending-updates.md"
-PENDING_ITEMS_FILE = MEMORY_DIR / "pending-items.md"
 PENDING_SESSION_CONTEXT_FILE = MEMORY_DIR / "pending-session-context.md"
 
 
@@ -58,7 +57,6 @@ def main() -> None:
         metadata_file=METADATA_FILE,
         guidance_file=GUIDANCE_FILE,
         pending_updates_file=PENDING_UPDATES_FILE,
-        pending_items_file=PENDING_ITEMS_FILE,
         pending_session_context_file=PENDING_SESSION_CONTEXT_FILE,
     )
 

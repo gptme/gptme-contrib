@@ -68,14 +68,6 @@ CONFIRMATION_PATTERNS: list[tuple[str, str]] = [
     (r"\b(approved?|accepted?|confirmed?)\b", "explicit_approval"),
 ]
 
-# Patterns for pending items and follow-ups
-PENDING_ITEM_PATTERNS: list[str] = [
-    r"(next|remaining|outstanding|unfinished|todo)\s+(step|task|item|work)",
-    r"(to\s+do|follow.?up|check\s+back|look\s+into|investigate)",
-    r"(i'll|we'll|let's)\s+(come\s+back|continue|finish|address)",
-    r"(pending|deferred|postponed|on\s+hold)",
-]
-
 # Patterns for structured guidance in model responses
 GUIDANCE_PATTERNS: list[str] = [
     r"(reminder|rule|guideline|principle|convention|policy|standard|practice)s?:",
@@ -89,7 +81,6 @@ class ExtractionResult:
 
     corrections: list[dict[str, Any]] = field(default_factory=list)
     confirmations: list[dict[str, Any]] = field(default_factory=list)
-    pending_items: list[str] = field(default_factory=list)
     guidance_blocks: list[str] = field(default_factory=list)
     session_context: dict[str, Any] = field(default_factory=dict)
 
@@ -181,32 +172,6 @@ def detect_confirmations(
     return confirmations
 
 
-def detect_pending_items(
-    messages: list[dict[str, Any]],
-) -> list[str]:
-    """Detect pending items and follow-ups in a trajectory."""
-    items: list[str] = []
-    seen: set[str] = set()
-
-    for msg in messages:
-        # Check both user and assistant messages
-        content = str(msg.get("content", ""))
-        if not content or len(content) > 1000:
-            continue
-
-        for pattern in PENDING_ITEM_PATTERNS:
-            matches = re.finditer(pattern, content, re.IGNORECASE)
-            for match in matches:
-                start = max(0, match.start() - 40)
-                end = min(len(content), match.end() + 80)
-                snippet = content[start:end].strip()
-                if snippet and snippet not in seen:
-                    seen.add(snippet)
-                    items.append(snippet)
-
-    return items
-
-
 def detect_guidance_blocks(
     messages: list[dict[str, Any]],
 ) -> list[str]:
@@ -275,7 +240,6 @@ def extract_memories(
     return ExtractionResult(
         corrections=detect_corrections(messages),
         confirmations=detect_confirmations(messages),
-        pending_items=detect_pending_items(messages),
         guidance_blocks=detect_guidance_blocks(messages),
         session_context=extract_session_context(messages),
     )
@@ -305,17 +269,6 @@ def format_pending_updates(result: ExtractionResult) -> str:
             lines.append(f"- {g[:200]}")
         lines.append("")
 
-    return "\n".join(lines).strip()
-
-
-def format_pending_items(result: ExtractionResult) -> str:
-    """Format extraction results as a pending-items markdown block."""
-    if not result.pending_items:
-        return ""
-
-    lines = ["## Pending Items"]
-    for item in result.pending_items[:5]:  # Limit to 5 items
-        lines.append(f"- {item[:200]}")
     return "\n".join(lines).strip()
 
 
@@ -373,10 +326,6 @@ def main() -> None:
             combined = f"{existing}\n\n{updates}" if existing else updates
             updates_file.write_text(combined.strip() + "\n", encoding="utf-8")
 
-        items = format_pending_items(result)
-        if items:
-            (memory_dir / "pending-items.md").write_text(items + "\n", encoding="utf-8")
-
         ctx = format_session_context(result)
         if ctx:
             (memory_dir / "pending-session-context.md").write_text(ctx + "\n", encoding="utf-8")
@@ -384,7 +333,7 @@ def main() -> None:
     # Also print summary to stdout
     print(
         f"Extracted {len(result.corrections)} corrections, {len(result.confirmations)} confirmations, "
-        f"{len(result.pending_items)} pending items, {len(result.guidance_blocks)} guidance blocks"
+        f"{len(result.guidance_blocks)} guidance blocks"
     )
 
 

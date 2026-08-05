@@ -28,6 +28,8 @@ SPECIAL_MEMORY_FILES = frozenset(
     {
         "MEMORY.md",
         "guidance.md",
+        # Retired lane — kept here so a leftover file from a pre-retirement
+        # install is never discovered as a memory entry.
         "pending-items.md",
         "pending-updates.md",
         "pending-session-context.md",

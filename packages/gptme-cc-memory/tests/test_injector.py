@@ -120,21 +120,29 @@ class TestInjectMemories:
         # Guidance should be cleared after injection
         assert not guidance.read_text()
 
-    def test_with_pending_items(self, tmp_path: Path):
+    def test_leftover_pending_items_file_is_never_injected(self, tmp_path: Path):
+        """The pending-items lane is retired.
+
+        A file left behind by a pre-retirement install must not re-enter the
+        prompt — neither as its own block nor as a discovered memory entry.
+        The signature assertion pins the injection point itself: the retired
+        branch cannot be re-wired without this failing.
+        """
+        import inspect
+
+        assert "pending_items_file" not in inspect.signature(inject_memories).parameters
+
         mem_dir = tmp_path / "memory"
         mem_dir.mkdir()
         meta_file = tmp_path / "metadata.json"
-        items = mem_dir / "pending-items.md"
-        items.write_text("## Pending Items\n- Finish the migration")
+        (mem_dir / "pending-items.md").write_text("## Pending Items\n- Finish the migration")
 
         result = inject_memories(
             "test prompt",
             memory_dir=mem_dir,
             metadata_file=meta_file,
-            pending_items_file=items,
         )
-        assert result is not None
-        assert "Finish the migration" in result
+        assert result is None or "Finish the migration" not in result
 
     def test_preserves_one_shot_files_when_recording_injections_fails(
         self, tmp_path: Path, monkeypatch: Any

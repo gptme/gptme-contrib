@@ -92,7 +92,6 @@ def inject_memories(
     metadata_file: Path,
     guidance_file: Path | None = None,
     pending_updates_file: Path | None = None,
-    pending_items_file: Path | None = None,
     pending_session_context_file: Path | None = None,
     max_chars: int = MAX_INJECT_CHARS,
 ) -> str | None:
@@ -120,20 +119,14 @@ def inject_memories(
                 if pruned:
                     blocks.append(f"{pruned}\n\n")
 
-        # 3. Pending items
-        if pending_items_file:
-            items = read_if_exists(pending_items_file)
-            if items:
-                blocks.append(f"## Pending Items\n\n{items}\n\n")
-
-        # 4. Pending session context (one-shot)
+        # 3. Pending session context (one-shot)
         if pending_session_context_file:
             ctx = read_if_exists(pending_session_context_file)
             if ctx:
                 blocks.append(f"## Previous Session Context\n\n{ctx}\n\n")
                 one_shot_files_to_clear.append(pending_session_context_file)
 
-        # 5. Relevant memory entries (scored against prompt)
+        # 4. Relevant memory entries (scored against prompt)
         relevant = select_relevant_memories(
             prompt,
             memory_dir=memory_dir,
