@@ -303,3 +303,22 @@ def test_explain_md_suffix_resolves_correctly(tmp_path: Path, monkeypatch) -> No
     out = run_explain(tmp_path, "my-task.md")
 
     assert "VERDICT: READY" in out
+
+
+def test_explain_path_like_md_does_not_match(tmp_path: Path, monkeypatch) -> None:
+    """A path-like .md identifier must not silently resolve via stem stripping.
+
+    'some/dir/my-task.md' has the stem 'my-task', but the caller is passing a
+    path, not a bare filename. Stripping directory components would silently
+    select a different (or wrong) task; the command should exit 1 instead.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "my-task", state="todo", created="2026-01-01T00:00:00")
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["explain", "some/dir/my-task.md"])
+
+    assert result.exit_code == 1
+    assert "not found" in result.output.lower()

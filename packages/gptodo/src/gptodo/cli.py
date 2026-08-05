@@ -416,10 +416,12 @@ def explain_readiness(task_id: str) -> None:
     all_tasks: Dict[str, TaskInfo] = {t.name: t for t in tasks}
 
     # Exact name match first; fall back to stem-only match when the caller
-    # passes a .md filename ("my-task.md" → "my-task").  Only strip the .md
-    # extension — stripping arbitrary suffixes (e.g. "my-task.txt") would
-    # silently resolve to a different task than the one requested.
-    stem = Path(task_id).stem if task_id.endswith(".md") else None
+    # passes a bare .md filename ("my-task.md" → "my-task").  Restrict to:
+    #   • .md extension only (not arbitrary suffixes like .txt)
+    #   • no path separators (a path like "dir/my-task.md" might refer to a
+    #     different task than the local "my-task", so don't strip dir components)
+    _is_bare_md = task_id.endswith(".md") and "/" not in task_id and "\\" not in task_id
+    stem = Path(task_id).stem if _is_bare_md else None
     task = all_tasks.get(task_id) or (all_tasks.get(stem) if stem else None)
 
     if not task:
