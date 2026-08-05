@@ -220,6 +220,45 @@ def test_explain_ready_for_review_with_future_wait_date(tmp_path: Path, monkeypa
     assert "VERDICT: READY" in out
 
 
+def test_explain_empty_tasks_dir_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
+    """An empty tasks directory must exit with code 1 so scripts can detect failure."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["explain", "anything"])
+
+    assert result.exit_code == 1
+    assert "no tasks found" in result.output.lower()
+
+
+def test_explain_frontier_pool_ready_for_review_not_ready(tmp_path: Path, monkeypatch) -> None:
+    """A ready_for_review task in the frontier pool should report NOT READY.
+
+    gptodo ready applies the pool filter before readiness checks, even for
+    ready_for_review tasks. A frontier-pool task is excluded by the default
+    general-pool filter, so explain must report NOT READY to match.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "frontier-rfr",
+        state="ready_for_review",
+        created="2026-01-01T00:00:00",
+        pool="frontier",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["explain", "frontier-rfr"], catch_exceptions=False)
+
+    assert "pool" in result.output
+    assert "frontier" in result.output
+    assert "VERDICT: NOT READY" in result.output
+
+
 def test_explain_substring_match_not_ambiguous(tmp_path: Path, monkeypatch) -> None:
     """Substring of another task's name must not select the wrong task."""
     tasks_dir = tmp_path / "tasks"

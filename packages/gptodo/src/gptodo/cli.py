@@ -411,7 +411,7 @@ def explain_readiness(task_id: str) -> None:
     tasks = load_tasks(tasks_dir)
     if not tasks:
         console.print("[red]No tasks found[/]")
-        return
+        sys.exit(1)
 
     all_tasks: Dict[str, TaskInfo] = {t.name: t for t in tasks}
 
@@ -473,15 +473,29 @@ def explain_readiness(task_id: str) -> None:
     else:
         check("waiting_for", True, "not set")
 
-    # ready_for_review bypass: gptodo ready only checks waiting_for for this state —
-    # wait-date, pool, and dep checks are all skipped (work is done; the task is
-    # waiting for deliberate local review, not external conditions). Mirror that here
-    # so explain doesn't contradict the command it is diagnosing.
+    # 3. Pool filter — applies to ALL states including ready_for_review.
+    # gptodo ready applies pool filtering before the readiness check, even for
+    # ready_for_review tasks (see ready() lines 2729-2733): a frontier-pool task
+    # in ready_for_review is excluded by the default general-pool filter just like
+    # any other pool. Mirror that here so explain doesn't contradict ready.
+    pool = task_pool(task)
+    if pool == "frontier":
+        check(
+            "pool",
+            False,
+            "pool=frontier — requires a frontier-tier session (e.g. gptodo ready --pool frontier)",
+        )
+    else:
+        check("pool", True, f"pool={pool!r}")
+
+    # ready_for_review bypass: gptodo ready skips wait-date and dependency checks
+    # for this state (work is done; only waiting_for and pool matter). Mirror that
+    # here so explain doesn't contradict the command it is diagnosing.
     if state == "ready_for_review":
         check(
-            "wait date / pool / dependencies",
+            "wait date / dependencies",
             True,
-            "skipped — ready_for_review work is done; only waiting_for matters",
+            "skipped — ready_for_review work is done; pool and waiting_for are the only gates",
         )
         console.print()
         if all_pass:
@@ -493,7 +507,7 @@ def explain_readiness(task_id: str) -> None:
             console.print("[red]VERDICT: NOT READY[/]")
         return
 
-    # 3. wait: date gate
+    # 4. wait: date gate
     if task_is_waiting_for_date(task):
         wait_val = task.wait
         detail = f"wait gate not yet open (wait={wait_val.isoformat() if wait_val else '?'})"
@@ -504,18 +518,7 @@ def explain_readiness(task_id: str) -> None:
         else:
             check("wait date", True, "not set")
 
-    # 4. Pool filter
-    pool = task_pool(task)
-    if pool == "frontier":
-        check(
-            "pool",
-            False,
-            "pool=frontier — requires a frontier-tier session (e.g. gptodo ready --pool frontier)",
-        )
-    else:
-        check("pool", True, f"pool={pool!r}")
-
-    # 5 & 6. Dependencies (task-based and URL-based)
+    # 4 & 5. Dependencies (task-based and URL-based)
 
     requires = task.requires or []
     if not requires:
