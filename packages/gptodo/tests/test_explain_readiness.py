@@ -136,16 +136,18 @@ def test_explain_resolved_dependency(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_explain_missing_task(tmp_path: Path, monkeypatch) -> None:
-    """A task ID not found should give a clear error, not crash."""
+    """A task ID not found should give a clear error and exit with code 1."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
+    # Add a real task so we hit the "not found" branch, not "no tasks found"
+    write_task(tasks_dir, "other-task", state="todo", created="2026-01-01T00:00:00")
     monkeypatch.chdir(tmp_path)
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["explain", "nonexistent-task"], catch_exceptions=False)
+    result = runner.invoke(cli, ["explain", "nonexistent-task"])
 
-    assert result.exit_code == 0  # Should not crash
-    assert "not found" in result.output.lower() or "no tasks" in result.output.lower()
+    assert result.exit_code == 1
+    assert "not found" in result.output.lower()
 
 
 def test_explain_waiting_for_on_non_waiting_state(tmp_path: Path, monkeypatch) -> None:
@@ -166,3 +168,44 @@ def test_explain_waiting_for_on_non_waiting_state(tmp_path: Path, monkeypatch) -
     assert "waiting_for" in out
     assert "external thing" in out
     assert "VERDICT: NOT READY" in out
+
+
+def test_explain_ready_for_review_skips_dep_checks(tmp_path: Path, monkeypatch) -> None:
+    """ready_for_review tasks should show READY even with an unresolved dependency.
+
+    gptodo ready deliberately skips dependency checks for ready_for_review tasks
+    (work is done; only waiting_for matters). explain must match that behaviour so
+    the diagnostic doesn't contradict the command it diagnoses.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "open-prereq", state="todo", created="2026-01-01T00:00:00")
+    write_task(
+        tasks_dir,
+        "rfr-task",
+        state="ready_for_review",
+        created="2026-01-01T00:00:00",
+        requires=["open-prereq"],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    out = run_explain(tmp_path, "rfr-task")
+
+    # Dep check should be skipped (not flagged as a blocker)
+    assert "skipped" in out
+    assert "VERDICT: READY" in out
+
+
+def test_explain_substring_match_not_ambiguous(tmp_path: Path, monkeypatch) -> None:
+    """Substring of another task's name must not select the wrong task."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "task-foo-bar", state="todo", created="2026-01-01T00:00:00")
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    # "task-foo" is a substring of "task-foo-bar" but is not a real task
+    result = runner.invoke(cli, ["explain", "task-foo"])
+
+    assert result.exit_code == 1
+    assert "not found" in result.output.lower()

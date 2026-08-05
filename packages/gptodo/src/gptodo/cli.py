@@ -415,15 +415,13 @@ def explain_readiness(task_id: str) -> None:
 
     all_tasks: Dict[str, TaskInfo] = {t.name: t for t in tasks}
 
-    task = None
-    for t in tasks:
-        if t.name == task_id or task_id in str(t.path):
-            task = t
-            break
+    # Exact name match first; fall back to exact path-stem match (handles
+    # callers that pass "my-task.md" instead of "my-task").
+    task = all_tasks.get(task_id) or all_tasks.get(Path(task_id).stem)
 
     if not task:
         console.print(f"[red]Task not found: {task_id}[/]")
-        return
+        sys.exit(1)
 
     cache_path = get_cache_path(repo_root)
     issue_cache = load_cache(cache_path)
@@ -498,6 +496,21 @@ def explain_readiness(task_id: str) -> None:
         check("pool", True, f"pool={pool!r}")
 
     # 5 & 6. Dependencies (task-based and URL-based)
+    # ready_for_review: work is done; gptodo ready deliberately skips dep checks
+    # for this state (only checks waiting_for). Mirror that here so explain
+    # doesn't contradict the command it is diagnosing.
+    if state == "ready_for_review":
+        check("dependencies", True, "skipped — ready_for_review work is complete")
+        console.print()
+        if all_pass:
+            console.print("[green]VERDICT: READY[/] (gptodo-level filters pass)")
+            console.print(
+                "[dim]Note: cascade-claim and live-dirty checks require 'ready-tasks.py --explain'[/]"
+            )
+        else:
+            console.print("[red]VERDICT: NOT READY[/]")
+        return
+
     requires = task.requires or []
     if not requires:
         check("dependencies", True, "none")
