@@ -144,6 +144,20 @@ TASK_METADATA_PREFIXES = (
     "journal/",
 )
 LESSON_PREFIXES = ("lessons/",)
+# Dependency lockfiles: always auto-generated; low risk, mandatory companion to new packages.
+LOCKFILES = {
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "go.sum",
+    "composer.lock",
+    "Gemfile.lock",
+    "mix.lock",
+}
 # Exact full-path match — intentionally only root-level files.
 # Nested Makefiles (e.g. scripts/Makefile, packages/Makefile) fall through to
 # is_internal_tooling() instead. If that scope should change, extend this set.
@@ -810,6 +824,17 @@ def is_lesson_file(path: str) -> bool:
     return path.startswith(LESSON_PREFIXES)
 
 
+def is_lockfile(path: str) -> bool:
+    """Return True for dependency lockfiles (auto-generated, low-risk).
+
+    These are mandatory companions to new package additions in uv/poetry/npm
+    workspaces and must not block self-merge purely because the tool regenerated
+    them.  Only the exact filename is checked; the file must sit at the root of
+    the repository or inside a workspace member directory.
+    """
+    return path in LOCKFILES or path.rsplit("/", 1)[-1] in LOCKFILES
+
+
 def is_bot_config(path: str) -> bool:
     return path in BOT_CONFIG_FILES or path.startswith(BOT_CONFIG_PREFIXES)
 
@@ -940,6 +965,7 @@ def is_allowed_file(
         or is_lesson_file(path)
         or is_task_metadata(path)
         or is_internal_tooling(path)
+        or is_lockfile(path)
         or is_doc_file(path)
     )
 
@@ -989,6 +1015,8 @@ def classify_category(
         return "task-journal-metadata", reasons
     if all(is_internal_tooling(path) for path in paths):
         return "internal-tooling", reasons
+    if all(is_lockfile(path) for path in paths):
+        return "lockfiles-only", reasons
     if all(is_doc_file(path) for path in paths):
         return "docs-only", reasons
     if repo and all(
@@ -1007,6 +1035,8 @@ def classify_category(
             categories.append("task-metadata")
         if any(is_internal_tooling(path) for path in paths):
             categories.append("internal-tooling")
+        if any(is_lockfile(path) for path in paths):
+            categories.append("lockfiles")
         if any(is_doc_file(path) for path in paths):
             categories.append("docs")
         if repo and any(
