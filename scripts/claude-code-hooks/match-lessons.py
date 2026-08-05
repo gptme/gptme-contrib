@@ -633,14 +633,14 @@ def filter_by_session_category(
 
     Lessons that explicitly restrict to specific session categories are filtered out
     when running in a different category, reducing irrelevant lesson injection.
-    If category is unknown (None), all lessons pass through.
+    If category is unknown (None), only universal lessons (no restriction) pass through.
+    This prevents social/triage/research lessons from injecting when context is unavailable.
     """
-    if not category:
-        return lessons
     filtered = []
     for lesson in lessons:
         cats = lesson.get("session_categories") or []
-        if not cats or category in {c.lower() for c in cats}:
+        # Keep lesson if: (1) no category restriction, or (2) category is known and matches
+        if not cats or (category and category in {c.lower() for c in cats}):
             filtered.append(lesson)
     return filtered
 
