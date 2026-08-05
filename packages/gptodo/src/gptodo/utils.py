@@ -35,6 +35,7 @@ from typing import (
     List,
     NamedTuple,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -176,10 +177,23 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     "completed",
     "output_types",
     "success_criterion",
+    # Structured blockers (see TASKS.md "Blocked means waiting"):
+    # `wait_kind` classifies WHY a task is waiting (machine|human|external|
+    # hypothesis) so sweepers can auto-release only the mechanically-checkable
+    # ones; `probe` carries the shell command that decides whether a
+    # machine-class blocker has cleared.
+    "wait_kind",
+    "probe",
     # External tracking
     "tracking",
     "tracking_issue",
     "upstream_coordination_id",
+    # Provenance / grouping for autonomous loops: `follow_on_from` names the
+    # task that spawned this one (narrower than `parent`, which implies a
+    # subtask tree), `coordination_family` groups tasks that must not run
+    # concurrently because they touch the same subsystem.
+    "follow_on_from",
+    "coordination_family",
     # Work-pool routing (see frontier-pool-routing design)
     "pool",
     # Multi-agent coordination
@@ -232,21 +246,119 @@ DEPRECATED_FRONTMATTER_FIELDS: dict[str, str] = {
         "Not a task schema field — use `assigned_to` instead. "
         "`owner` is a common hallucination for the real assignment field."
     ),
+    "discovered_from": (
+        "Underscore variant of the real field. Use `discovered-from` (hyphen) — "
+        "the underscore spelling is never read by any gptodo code path."
+    ),
 }
 
 
-def lint_frontmatter_fields(metadata: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+# =============================================================================
+# Workspace schema extension
+# =============================================================================
+#
+# Agent workspaces grow fields gptodo cannot reasonably own upstream (Bob's
+# `erik_gate_class` names a specific human). Without an extension point those
+# fields lint as "unknown" forever, which trains everyone to ignore the warning
+# — and a warning nobody reads catches no drift.
+#
+# Two sources, both additive on top of KNOWN_FRONTMATTER_FIELDS:
+#   1. GPTODO_EXTRA_FRONTMATTER_FIELDS — comma/whitespace separated (works in
+#      any workspace, including non-Python ones)
+#   2. <repo_root>/pyproject.toml → [tool.gptodo] extra_frontmatter_fields
+
+EXTRA_FRONTMATTER_FIELDS_ENV = "GPTODO_EXTRA_FRONTMATTER_FIELDS"
+
+# tomllib is 3.11+; gptodo supports 3.10. `tomli` is its API-identical backport
+# and is already present in most environments transitively — use it when it is,
+# rather than making 3.10 silently lose a documented config source. Neither
+# available => the env var still works.
+# Assigned rather than aliased with `as _toml`: rebinding the same name across
+# both import arms reads as a redefinition to mypy under one repo's config and
+# as a redundant ignore under the other's.
+_toml: Any = None
+try:
+    import tomllib
+
+    _toml = tomllib
+except ImportError:  # pragma: no cover - Python 3.10
+    try:
+        import tomli
+
+        _toml = tomli
+    except ImportError:
+        pass
+
+HAVE_TOML_PARSER = _toml is not None
+
+
+def _parse_extra_fields_env(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    return {part for part in re.split(r"[,\s]+", raw.strip()) if part}
+
+
+def _pyproject_extra_fields(repo_root: Path) -> frozenset[str]:
+    """Read [tool.gptodo] extra_frontmatter_fields from the workspace pyproject.
+
+    Degrades silently: a missing file, no available TOML parser, malformed
+    TOML, or a non-list value all yield an empty set. Schema linting is a soft
+    check — it must never be the reason a command fails.
+    """
+    if _toml is None:  # pragma: no cover - only without tomllib/tomli
+        return frozenset()
+    pyproject = repo_root / "pyproject.toml"
+    if not pyproject.is_file():
+        return frozenset()
+    try:
+        with open(pyproject, "rb") as f:
+            data = _toml.load(f)
+    except (OSError, ValueError):
+        return frozenset()
+    tool = data.get("tool", {})
+    if not isinstance(tool, dict):
+        return frozenset()
+    gptodo = tool.get("gptodo", {})
+    if not isinstance(gptodo, dict):
+        return frozenset()
+    raw = gptodo.get("extra_frontmatter_fields")
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(item for item in raw if isinstance(item, str) and item)
+
+
+def resolve_known_frontmatter_fields(repo_root: Path | None = None) -> set[str]:
+    """KNOWN_FRONTMATTER_FIELDS plus any workspace-registered extra fields."""
+    fields = set(KNOWN_FRONTMATTER_FIELDS)
+    fields |= _parse_extra_fields_env(os.environ.get(EXTRA_FRONTMATTER_FIELDS_ENV))
+    if repo_root is not None:
+        fields |= _pyproject_extra_fields(repo_root)
+    return fields
+
+
+def lint_frontmatter_fields(
+    metadata: Dict[str, Any],
+    known_fields: Optional[Set[str]] = None,
+) -> List[Tuple[str, str, str]]:
     """Return (severity, field, message) tuples for schema violations.
+
+    Args:
+        metadata: task frontmatter to check.
+        known_fields: accepted field names. Defaults to KNOWN_FRONTMATTER_FIELDS;
+            pass ``resolve_known_frontmatter_fields(repo_root)`` to honor
+            workspace-registered extras.
 
     Severities:
         "warn-deprecated" — field is on the DEPRECATED_FRONTMATTER_FIELDS list
-        "warn-unknown"    — field is not in KNOWN_FRONTMATTER_FIELDS
+        "warn-unknown"    — field is not in the known-field set
 
     This is a soft check: callers should surface these as warnings, not errors.
     Rejecting unknown fields at read time would break autonomous-loop task
     creation, which the schema needs to nudge toward — not wall off from —
     the correct form.
     """
+    if known_fields is None:
+        known_fields = KNOWN_FRONTMATTER_FIELDS
     findings: List[Tuple[str, str, str]] = []
     for key in metadata.keys():
         if not isinstance(key, str):
@@ -259,14 +371,16 @@ def lint_frontmatter_fields(metadata: Dict[str, Any]) -> List[Tuple[str, str, st
                     DEPRECATED_FRONTMATTER_FIELDS[key],
                 )
             )
-        elif key not in KNOWN_FRONTMATTER_FIELDS:
+        elif key not in known_fields:
             findings.append(
                 (
                     "warn-unknown",
                     key,
                     f"Field '{key}' is not in the known schema. If this is a real, "
                     "intentional field, add it to KNOWN_FRONTMATTER_FIELDS in "
-                    "gptodo/utils.py. Otherwise, remove it — the autonomous loop "
+                    "gptodo/utils.py — or, if it is workspace-specific, register it "
+                    "under [tool.gptodo] extra_frontmatter_fields in your "
+                    "pyproject.toml. Otherwise, remove it — the autonomous loop "
                     "tends to invent plausible-sounding fields under load.",
                 )
             )

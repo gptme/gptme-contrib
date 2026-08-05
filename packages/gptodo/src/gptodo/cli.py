@@ -102,6 +102,7 @@ from gptodo.unblock import auto_unblock_with_fan_in
 from gptodo.utils import (
     # Constants
     CONFIGS,
+    DEPRECATED_FRONTMATTER_FIELDS,
     STATE_EMOJIS,
     STATE_STYLES,
     # Data classes
@@ -124,7 +125,9 @@ from gptodo.utils import (
     get_cache_path,
     has_new_activity,
     is_task_ready,
+    KNOWN_FRONTMATTER_FIELDS,
     lint_frontmatter_fields,
+    resolve_known_frontmatter_fields,
     task_has_waiting_blocker,
     task_is_waiting_for_date,
     task_matches_pool_filter,
@@ -1956,6 +1959,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         "assigned_to": {"type": "string"},
         "waiting_since": {"type": "date"},
         "wait": {"type": "date"},  # Hide from queue until this date
+        # Structured blockers: why this task is waiting, and (for machine-class
+        # blockers) the shell command that decides whether it has cleared.
+        "wait_kind": {
+            "type": "enum",
+            "values": ["machine", "human", "external", "hypothesis"],
+        },
+        "probe": {"type": "string"},
         # Optional fields with arbitrary string values
         "next_action": {"type": "string"},
         "waiting_for": {"type": "string"},
@@ -1967,6 +1977,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # Auto-expire (Gordon 2026-07-01)
         "expired_from": {"type": "string"},  # State the task came from before auto-expire
         "expired_at": {"type": "date"},  # Date the task was auto-expired
+        # Provenance / concurrency grouping for autonomous loops
+        "follow_on_from": {"type": "string"},  # Task that spawned this one
+        "coordination_family": {"type": "string"},  # Tasks that must not run concurrently
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
         "depends": {"type": "list"},  # Deprecated, use requires instead
@@ -1977,6 +1990,21 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         "output_types": {"type": "list"},
         "tracking": {"type": "list"},  # External issue/PR tracking URLs
     }
+
+    # Workspace-registered fields ([tool.gptodo] extra_frontmatter_fields /
+    # GPTODO_EXTRA_FRONTMATTER_FIELDS) are settable as free-form strings.
+    # Without this, a workspace could register a field so `lint` accepts it and
+    # still be unable to write it with `gptodo edit` — the same two-schema split
+    # one level down. Deliberately scoped to the *extras*: upstream-known fields
+    # that are absent above (session_id, worktree_path, …) are machine-written
+    # and stay unsettable by hand.
+    # Deprecated fields are explicitly excluded — a workspace cannot opt back
+    # into an anti-design-goal field by registering it as an extra. Registering
+    # `modified` would otherwise make `gptodo edit --set modified ...` succeed
+    # right before `gptodo lint` rejects it, recreating the two-schema split.
+    _excluded = KNOWN_FRONTMATTER_FIELDS | set(DEPRECATED_FRONTMATTER_FIELDS)
+    for _extra in resolve_known_frontmatter_fields(repo_root) - _excluded:
+        VALID_FIELDS.setdefault(_extra, {"type": "string"})
 
     # Validate set operations
     for field, value in set_fields:
@@ -6142,6 +6170,10 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
             console.print("[yellow]No tasks found[/]")
         return
 
+    # Resolved once, not per task: the workspace pyproject is read from disk on
+    # every call, and this loop runs over every task in the repo.
+    known_fields = resolve_known_frontmatter_fields(repo_root)
+
     # Collect findings across all tasks
     all_findings: list[dict] = []
     for task in tasks:
@@ -6169,7 +6201,9 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
                 }
             )
         # Field-level warnings (deprecated / unknown).
-        for severity, field, message in lint_frontmatter_fields(task.metadata):
+        for severity, field, message in lint_frontmatter_fields(
+            task.metadata, known_fields=known_fields
+        ):
             all_findings.append(
                 {
                     "task": task.name,
