@@ -272,3 +272,34 @@ def test_explain_substring_match_not_ambiguous(tmp_path: Path, monkeypatch) -> N
 
     assert result.exit_code == 1
     assert "not found" in result.output.lower()
+
+
+def test_explain_arbitrary_suffix_does_not_match(tmp_path: Path, monkeypatch) -> None:
+    """Only .md suffix should be stripped; arbitrary suffixes must not resolve a task.
+
+    Path.stem strips any extension, so "my-task.txt" → "my-task" would silently
+    diagnose a different task. Only ".md" should trigger the stem fallback.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "my-task", state="todo", created="2026-01-01T00:00:00")
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    # "my-task.txt" has a stem matching the real task, but .txt is not .md
+    result = runner.invoke(cli, ["explain", "my-task.txt"])
+
+    assert result.exit_code == 1
+    assert "not found" in result.output.lower()
+
+
+def test_explain_md_suffix_resolves_correctly(tmp_path: Path, monkeypatch) -> None:
+    """.md suffix should be stripped so 'my-task.md' resolves to 'my-task'."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "my-task", state="todo", created="2026-01-01T00:00:00")
+    monkeypatch.chdir(tmp_path)
+
+    out = run_explain(tmp_path, "my-task.md")
+
+    assert "VERDICT: READY" in out
