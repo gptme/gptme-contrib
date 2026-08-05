@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from gptme_cc_memory.memory_retrieval import (
+    INJECTION_COOLDOWN_MINUTES,
     load_memory_state,
     record_memory_injections,
     render_relevant_memory_block,
@@ -206,3 +209,33 @@ class TestUpdateMemoryState:
             state_file=state_file,
         )
         assert matched == []
+
+
+class TestInjectionCooldown:
+    PROMPT = "Don't use --no-verify to bypass pre-commit hooks"
+
+    def _select(self, memory_dir: Path, state_file: Path) -> list[str]:
+        return [
+            r["name"]
+            for r in select_relevant_memories(
+                self.PROMPT, memory_dir=memory_dir, state_file=state_file, limit=2
+            )
+        ]
+
+    def _stamp(self, state_file: Path, name: str, minutes_ago: float) -> None:
+        stamp = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        state_file.write_text(
+            json.dumps({name: {"last_injected": stamp.isoformat(), "injections": 1}})
+        )
+
+    def test_first_injection_is_unaffected(self, memory_dir: Path, state_file: Path):
+        assert "never-skip-precommit" in self._select(memory_dir, state_file)
+
+    def test_recent_injection_is_suppressed(self, memory_dir: Path, state_file: Path):
+        assert "never-skip-precommit" in self._select(memory_dir, state_file)
+        self._stamp(state_file, "never-skip-precommit", minutes_ago=1.0)
+        assert "never-skip-precommit" not in self._select(memory_dir, state_file)
+
+    def test_cooldown_expiry_re_allows(self, memory_dir: Path, state_file: Path):
+        self._stamp(state_file, "never-skip-precommit", INJECTION_COOLDOWN_MINUTES + 5.0)
+        assert "never-skip-precommit" in self._select(memory_dir, state_file)

@@ -67,6 +67,14 @@ RECENCY_FLOOR = 0.18
 RECENCY_HALF_LIFE_DAYS = 45.0
 MIN_MATCH_OVERLAP = 2
 MIN_RELEVANCE_SCORE = 0.85
+# Repeat-injection decay: the same fact re-injected on every prompt of a session
+# carries ~0 marginal information but full token cost. `record_memory_injections()`
+# already stamps `last_injected`; scoring multiplies by a factor that ramps from
+# INJECTION_DECAY_FLOOR back to 1.0 over the cooldown window. Weak/mid matches fall
+# below MIN_RELEVANCE_SCORE and drop out; a genuinely strong match still breaks
+# through. First injection is unaffected (no `last_injected` => factor 1.0).
+INJECTION_COOLDOWN_MINUTES = 45.0
+INJECTION_DECAY_FLOOR = 0.15
 
 
 def _normalize(text: str) -> str:
@@ -109,6 +117,36 @@ def _confidence(
     except (TypeError, ValueError):
         confidence = entry.default_confidence
     return max(0.0, min(confidence, 1.0))
+
+
+def _minutes_since_injection(
+    entry: MemoryFile,
+    state: dict[str, dict[str, Any]],
+    now: datetime,
+) -> float | None:
+    """Minutes since this entry was last injected, or None if never injected."""
+    raw = state.get(entry.name, {}).get("last_injected")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    sentinel = datetime.min.replace(tzinfo=timezone.utc)
+    last = _coerce_timestamp(raw, sentinel)
+    if last is sentinel:
+        return None
+    # Clock skew / future stamps count as "just injected".
+    return max(0.0, (now - last).total_seconds() / 60.0)
+
+
+def _repeat_decay(
+    entry: MemoryFile,
+    state: dict[str, dict[str, Any]],
+    now: datetime,
+) -> float:
+    """Score multiplier suppressing memories injected within the cooldown window."""
+    age_minutes = _minutes_since_injection(entry, state, now)
+    if age_minutes is None or age_minutes >= INJECTION_COOLDOWN_MINUTES:
+        return 1.0
+    ramp = age_minutes / INJECTION_COOLDOWN_MINUTES
+    return INJECTION_DECAY_FLOOR + (1.0 - INJECTION_DECAY_FLOOR) * ramp
 
 
 def _recency_weight(last_verified: datetime, now: datetime) -> float:
@@ -172,7 +210,7 @@ def select_relevant_memories(
 
     Scoring formula::
 
-        score = lexical_match(prompt, memory_body) × confidence × recency × type_boost
+        score = lexical_match(...) × confidence × recency × type_boost × repeat_decay
 
     Args:
         prompt: The current user prompt or session context.
@@ -200,7 +238,8 @@ def select_relevant_memories(
         confidence = _confidence(entry, state)
         last_verified = _last_verified(entry, state)
         recency = _recency_weight(last_verified, now)
-        score = lexical * confidence * recency * entry.type_boost
+        decay = _repeat_decay(entry, state, now)
+        score = lexical * confidence * recency * entry.type_boost * decay
         if score < MIN_RELEVANCE_SCORE:
             continue
 
