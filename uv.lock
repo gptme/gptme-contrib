@@ -36,6 +36,7 @@ members = [
     "gptme-hooks-examples",
     "gptme-imagen",
     "gptme-lessons-extras",
+    "gptme-lessons-mcp",
     "gptme-lsp",
     "gptme-rag",
     "gptme-ralph",
@@ -2092,6 +2093,34 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0.0" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "gptme-lessons-mcp"
+version = "0.1.0"
+source = { editable = "packages/gptme-lessons-mcp" }
+dependencies = [
+    { name = "gptme" },
+    { name = "mcp" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "mcp", specifier = ">=1.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+]
+provides-extras = ["dev", "test"]
 
 [[package]]
 name = "gptme-lsp"
