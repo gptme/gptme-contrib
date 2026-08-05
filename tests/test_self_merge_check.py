@@ -1284,6 +1284,68 @@ def test_is_allowed_file_allowlist_does_not_bypass_bot_config() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "uv.lock",
+        "poetry.lock",
+        "Pipfile.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "Cargo.lock",
+        "go.sum",
+        "packages/mypkg/uv.lock",  # nested (workspace member)
+        "subdir/package-lock.json",
+    ],
+)
+def test_is_lockfile_recognized(path: str) -> None:
+    assert self_merge_check.is_lockfile(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "requirements.txt",
+        "setup.cfg",
+        "pyproject.toml",
+        "scripts/lock.py",
+        "docs/uv.lock.md",  # not a lockfile
+    ],
+)
+def test_is_lockfile_not_recognized(path: str) -> None:
+    assert not self_merge_check.is_lockfile(path)
+
+
+def test_is_allowed_file_lockfile() -> None:
+    assert self_merge_check.is_allowed_file("uv.lock")
+    assert self_merge_check.is_allowed_file("poetry.lock")
+    assert self_merge_check.is_allowed_file("packages/mypkg/uv.lock")
+
+
+def test_classify_category_lockfiles_only() -> None:
+    """A PR that only touches lockfiles gets the lockfiles-only category."""
+    category, reasons = self_merge_check.classify_category(["uv.lock"])
+    assert category == "lockfiles-only", reasons
+
+    category, reasons = self_merge_check.classify_category(["uv.lock", "Cargo.lock"])
+    assert category == "lockfiles-only", reasons
+
+
+def test_classify_category_lockfile_mixed_with_allowed() -> None:
+    """A PR mixing lockfiles with other allowed files is mixed-allowed."""
+    category, reasons = self_merge_check.classify_category(
+        ["uv.lock", "scripts/myscript.py"]
+    )
+    assert category is not None and "lockfiles" in category, reasons
+
+    category, reasons = self_merge_check.classify_category(
+        ["uv.lock", "tasks/my-task.md"]
+    )
+    assert category is not None, reasons
+    assert "lockfiles" in category
+
+
 def test_evaluate_pr_captures_head_sha() -> None:
     """CheckResult.head_sha reflects the headRefOid from fetch_pr."""
     pr_data = {
