@@ -22,10 +22,17 @@ import pytest
 
 from gptodo.utils import (
     EXTRA_FRONTMATTER_FIELDS_ENV,
+    HAVE_TOML_PARSER,
     KNOWN_FRONTMATTER_FIELDS,
     _pyproject_extra_fields,
     lint_frontmatter_fields,
     resolve_known_frontmatter_fields,
+)
+
+
+needs_toml = pytest.mark.skipif(
+    not HAVE_TOML_PARSER,
+    reason="pyproject config needs tomllib (3.11+) or the tomli backport",
 )
 
 
@@ -77,6 +84,7 @@ def test_env_var_absent_or_empty_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> 
     assert resolve_known_frontmatter_fields() == set(KNOWN_FRONTMATTER_FIELDS)
 
 
+@needs_toml
 def test_pyproject_registers_extra_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(EXTRA_FRONTMATTER_FIELDS_ENV, raising=False)
     (tmp_path / "pyproject.toml").write_text(
@@ -89,6 +97,7 @@ def test_pyproject_registers_extra_fields(tmp_path: Path, monkeypatch: pytest.Mo
     assert lint_frontmatter_fields({"erik_gate_class": "spend"}, known_fields=known) == []
 
 
+@needs_toml
 def test_deprecated_beats_workspace_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -112,6 +121,7 @@ def test_deprecated_beats_workspace_registration(
         "this is not = valid toml [[[",
     ],
 )
+@needs_toml
 def test_malformed_pyproject_degrades_to_base_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
 ) -> None:
@@ -128,6 +138,7 @@ def test_missing_pyproject_degrades_to_base_schema(
     assert resolve_known_frontmatter_fields(tmp_path) == set(KNOWN_FRONTMATTER_FIELDS)
 
 
+@needs_toml
 def test_env_and_pyproject_are_additive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(EXTRA_FRONTMATTER_FIELDS_ENV, "from_env")
     (tmp_path / "pyproject.toml").write_text(

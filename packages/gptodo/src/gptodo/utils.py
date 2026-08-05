@@ -270,6 +270,28 @@ DEPRECATED_FRONTMATTER_FIELDS: dict[str, str] = {
 
 EXTRA_FRONTMATTER_FIELDS_ENV = "GPTODO_EXTRA_FRONTMATTER_FIELDS"
 
+# tomllib is 3.11+; gptodo supports 3.10. `tomli` is its API-identical backport
+# and is already present in most environments transitively — use it when it is,
+# rather than making 3.10 silently lose a documented config source. Neither
+# available => the env var still works.
+# Assigned rather than aliased with `as _toml`: rebinding the same name across
+# both import arms reads as a redefinition to mypy under one repo's config and
+# as a redundant ignore under the other's.
+_toml: Any = None
+try:
+    import tomllib
+
+    _toml = tomllib
+except ImportError:  # pragma: no cover - Python 3.10
+    try:
+        import tomli
+
+        _toml = tomli
+    except ImportError:
+        pass
+
+HAVE_TOML_PARSER = _toml is not None
+
 
 def _parse_extra_fields_env(raw: str | None) -> set[str]:
     if not raw:
@@ -281,20 +303,18 @@ def _parse_extra_fields_env(raw: str | None) -> set[str]:
 def _pyproject_extra_fields(repo_root: Path) -> frozenset[str]:
     """Read [tool.gptodo] extra_frontmatter_fields from the workspace pyproject.
 
-    Degrades silently: a missing file, missing tomllib (Python 3.10), malformed
+    Degrades silently: a missing file, no available TOML parser, malformed
     TOML, or a non-list value all yield an empty set. Schema linting is a soft
     check — it must never be the reason a command fails.
     """
+    if _toml is None:  # pragma: no cover - only without tomllib/tomli
+        return frozenset()
     pyproject = repo_root / "pyproject.toml"
     if not pyproject.is_file():
         return frozenset()
     try:
-        import tomllib
-    except ImportError:  # pragma: no cover - Python 3.10
-        return frozenset()
-    try:
         with open(pyproject, "rb") as f:
-            data = tomllib.load(f)
+            data = _toml.load(f)
     except (OSError, ValueError):
         return frozenset()
     raw = data.get("tool", {}).get("gptodo", {}).get("extra_frontmatter_fields")
