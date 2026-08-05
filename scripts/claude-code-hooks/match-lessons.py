@@ -853,8 +853,13 @@ _BM25_WEIGHT = 0.4  # additive weight for the normalized BM25 contribution
 # That is scale-free, and it makes "inject nothing" the common case for long
 # generic prompts (which match everything weakly, so nothing stands out) while
 # still admitting the one or two lessons a short focused prompt is really about.
+#
+# 2026-08-05 recalibration: measured BM25 scores on 9,025 real injections (CC hook,
+# 2026-08-05) showed raw scores 3.92–1397.22 (median 60.80). BM25-only injections
+# accounted for 79% of output and dominated the spurious set (precision 0.28 strict).
+# New floor (40) filters bottom ~30% of scores, targeting ~50%+ precision restoration.
 _BM25_MIN_Z = 4.0  # minimum z-score over the per-query score distribution
-_BM25_MIN_RAW = 0.8  # absolute floor, guards degenerate tiny-corpus cases
+_BM25_MIN_RAW = 40.0  # absolute floor (P~30 on 2026-08-05 data), guards degenerate tiny-corpus cases
 # A z-score over n samples cannot exceed (n-1)/sqrt(n), so a fixed z=4 is
 # unreachable below ~17 scoring lessons — which would silently disable the
 # semantic layer for small corpora (forks, per-project lesson sets). Scale the
@@ -1028,9 +1033,15 @@ def score_lessons(
             # to exclude completely unrelated lessons).  For n≥3 the z-gate
             # is the primary filter and the raw floor guards against spurious
             # weak-overlap false positives that can slip through noisy z-scores.
+            # Also bypass the raw floor when the corpus-peak score falls below
+            # it: that signals a different IDF scale (small fork, per-project
+            # lesson set) where the production-calibrated 40.0 is unattainable.
+            # In that case z-score alone gates admission.
             small_corpus = bm_n_nonzero < 3
+            corpus_below_floor = max(bm_scores) < _BM25_MIN_RAW
             if bm_z >= bm_min_z and (
-                bm_score >= _BM25_MIN_RAW or (small_corpus and bm_score > 0)
+                bm_score >= _BM25_MIN_RAW
+                or ((small_corpus or corpus_below_floor) and bm_score > 0)
             ):
                 # Contribution is the z-score so ranking is preserved in
                 # normal corpora (n≥3).  Two edge cases need special handling:
