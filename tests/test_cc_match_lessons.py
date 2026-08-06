@@ -553,7 +553,7 @@ def test_filter_by_session_category_none_filters_restricted(hook, tmp_path):
     lessons = hook.scan_lessons([lessons_dir])
     result = hook.filter_by_session_category(lessons, None)
     # Restricted lesson must be filtered; universal lesson must pass through
-    titles = {l["title"] for l in result}
+    titles = {lesson["title"] for lesson in result}
     assert "Restricted" not in titles
     assert "Universal" in titles
 
