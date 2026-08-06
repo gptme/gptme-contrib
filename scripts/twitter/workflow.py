@@ -53,8 +53,21 @@ from typing import (
 
 import click
 import yaml
-from bobutils.public_safe import public_safe
 from dotenv import load_dotenv
+
+try:
+    from bobutils.public_safe import public_safe
+except ModuleNotFoundError:
+    # bobutils is a workspace-only package. A standalone gptme-contrib install
+    # (no full workspace) shouldn't crash on import — degrade to a no-op and
+    # warn instead, matching the optional-dependency pattern in
+    # gptmail.communication_utils.outbound_redact.guard_outbound.
+    def public_safe(text: str) -> str:
+        logging.getLogger(__name__).warning(
+            "bobutils not installed — skipping public_safe sanitization"
+        )
+        return text
+
 
 # Import monitoring utilities
 from gptmail.communication_utils.monitoring import (
@@ -431,6 +444,12 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
 
     if status not in status_dirs:
         raise ValueError(f"Invalid status: {status}")
+
+    # Sanitize here so every draft-creation path (draft(), monitor auto-reply,
+    # thread follow-ups) is covered, not just the explicit `draft` CLI command.
+    draft.text = public_safe(draft.text)
+    if draft.thread:
+        draft.thread = [public_safe(t) for t in draft.thread]
 
     path = status_dirs[status] / generate_draft_name(draft)
     draft.save(path)
@@ -1435,6 +1454,13 @@ def post(
             break
 
         draft = TweetDraft.load(path)
+
+        # Defense-in-depth: sanitize on load too, so drafts persisted before
+        # public_safe was wired into save_draft() (or written by any future
+        # path that bypasses it) still can't leak private refs on posting.
+        draft.text = public_safe(draft.text)
+        if draft.thread:
+            draft.thread = [public_safe(t) for t in draft.thread]
 
         # Skip if scheduled for later
         if draft.scheduled_time and draft.scheduled_time > datetime.now():
