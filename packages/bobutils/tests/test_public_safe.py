@@ -127,6 +127,14 @@ def test_endpoint_in_markdown_link_preserved() -> None:
     assert result == "[dashboard](<internal-endpoint>) is live."
 
 
+def test_endpoint_url_as_markdown_link_text() -> None:
+    """URL appearing as Markdown link text [URL](URL) is sanitized without breaking structure."""
+    text = "[http://bob.hassel.bjareho.lt/decisions/](http://bob.hassel.bjareho.lt/decisions/) is live."
+    result = public_safe(text)
+    assert "bjareho.lt" not in result
+    assert result.count("[") == result.count("]")
+
+
 def test_endpoint_url_with_balanced_parens_kept() -> None:
     """A closing ) that is balanced by an earlier ( inside the URL stays."""
     text = "Archive: http://bob.hassel.bjareho.lt/path/(archive) is available."

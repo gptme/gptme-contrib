@@ -32,7 +32,7 @@ from typing import Callable
 __all__ = ["public_safe", "validate_public_safe", "PublicSafeViolation"]
 
 # Simple punctuation that always trails a URL in prose (never part of a URL).
-_TRAILING_SIMPLE = ".,;:!?'\"> "
+_TRAILING_SIMPLE = ".,;:!?'\">"
 # Balanced pairs: a closing delimiter is prose punctuation only when the URL
 # contains fewer opening counterparts than closing ones.
 _TRAILING_BALANCED: dict[str, str] = {")": "(", "]": "[", "}": "{"}
@@ -84,7 +84,7 @@ _SUBSTITUTIONS: list[tuple[re.Pattern[str], _Replacement]] = [
     # Internal HTTP(S) endpoints (catch before bare-hostname pattern)
     (
         re.compile(
-            r"https?://[a-z0-9.-]*\.bjareho\.lt(?::\d+)?(?:/[^\s]*)?",
+            r"https?://[a-z0-9.-]*\.bjareho\.lt(?::\d+)?(?:/[^\s\[\]]*)?",
             re.IGNORECASE,
         ),
         _strip_trailing_delimiters("<internal-endpoint>"),
