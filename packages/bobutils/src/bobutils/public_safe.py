@@ -31,22 +31,42 @@ from typing import Callable
 
 __all__ = ["public_safe", "validate_public_safe", "PublicSafeViolation"]
 
-# Punctuation/markdown delimiters that commonly trail a URL in prose and must
-# not be swallowed into the match (e.g. "see <url>." or "(<url>)").
-_TRAILING_DELIMITERS = ".,;:!?)]}'\">"
+# Simple punctuation that always trails a URL in prose (never part of a URL).
+_TRAILING_SIMPLE = ".,;:!?'\"> "
+# Balanced pairs: a closing delimiter is prose punctuation only when the URL
+# contains fewer opening counterparts than closing ones.
+_TRAILING_BALANCED: dict[str, str] = {")": "(", "]": "[", "}": "{"}
 
 _Replacement = str | Callable[[re.Match[str]], str]
 
 
 def _strip_trailing_delimiters(placeholder: str) -> Callable[[re.Match[str]], str]:
-    """Build a `re.sub` replacement fn that trims trailing prose delimiters."""
+    """Build a `re.sub` replacement fn that trims trailing prose delimiters.
+
+    Simple punctuation (``.,;:!?`` etc.) is always stripped.  Balanced
+    delimiters (``)``, ``]``, ``}``) are only stripped when the URL contains
+    fewer opening counterparts than closing ones — i.e. the delimiter belongs
+    to surrounding prose, not the URL path (e.g. ``/path/(archive)`` keeps its
+    ``)``, but ``(http://…/path/)`` strips the trailing ``)``) .
+    """
 
     def _replace(m: re.Match[str]) -> str:
         text = m.group()
         trailing = ""
-        while text and text[-1] in _TRAILING_DELIMITERS:
-            trailing = text[-1] + trailing
-            text = text[:-1]
+        while text:
+            c = text[-1]
+            if c in _TRAILING_SIMPLE:
+                trailing = c + trailing
+                text = text[:-1]
+            elif c in _TRAILING_BALANCED:
+                open_char = _TRAILING_BALANCED[c]
+                if text.count(open_char) < text.count(c):
+                    trailing = c + trailing
+                    text = text[:-1]
+                else:
+                    break
+            else:
+                break
         return placeholder + trailing
 
     return _replace

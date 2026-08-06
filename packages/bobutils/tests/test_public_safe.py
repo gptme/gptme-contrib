@@ -127,6 +127,13 @@ def test_endpoint_in_markdown_link_preserved() -> None:
     assert result == "[dashboard](<internal-endpoint>) is live."
 
 
+def test_endpoint_url_with_balanced_parens_kept() -> None:
+    """A closing ) that is balanced by an earlier ( inside the URL stays."""
+    text = "Archive: http://bob.hassel.bjareho.lt/path/(archive) is available."
+    result = public_safe(text)
+    assert result == "Archive: <internal-endpoint> is available."
+
+
 def test_idempotent() -> None:
     """Applying public_safe twice must yield the same result as once."""
     text = "See /home/bob/bob/journal/ at bob.hassel.bjareho.lt:8812"
