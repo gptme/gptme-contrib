@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Dispatcher: core.hooksPath is global, so this runs for every repo. Delegate to
+# the repo's own guard when it ships one; do nothing anywhere else.
+# Real logic: <brain-repo>/scripts/precommit/prevent-master-merge-commits.sh
+set -uo pipefail
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+guard="$root/scripts/precommit/prevent-master-merge-commits.sh"
+[ -n "$root" ] && [ -x "$guard" ] || exit 0
+exec "$guard"
