@@ -53,6 +53,7 @@ from typing import (
 
 import click
 import yaml
+from bobutils.public_safe import public_safe
 from dotenv import load_dotenv
 
 # Import monitoring utilities
@@ -938,6 +939,10 @@ def draft(
 ) -> None:
     """Create a new tweet draft"""
     op = metrics.start_operation("draft_creation", "twitter")
+
+    # Strip private operational details (workspace paths, internal hostnames, LXC refs)
+    # before the draft enters the queue — catches leaks before any external API call.
+    text = public_safe(text)
 
     try:
         # Guard: reject drafts with unresolved LLM placeholders
