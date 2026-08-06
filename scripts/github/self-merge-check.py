@@ -786,6 +786,31 @@ def fetch_unresolved_human_threads(
     }
 
 
+def repo_has_ci_configured(repo: str) -> bool:
+    """Check if the repo has GitHub Actions workflows configured.
+
+    Returns True if .github/workflows/ directory exists and contains at least
+    one workflow file. Returns False if the directory doesn't exist, is empty,
+    or the API call fails.
+
+    Used to distinguish "repo has no CI at all" from "repo has CI but checks
+    produced no result" (e.g., due to an outage or paths-filter mismatch).
+    """
+    # Check if .github/workflows/ exists with any files
+    raw = run_gh(
+        ["api", f"repos/{repo}/contents/.github/workflows", "--jq", "length"],
+        timeout=10,
+    )
+    if not raw:
+        # Directory doesn't exist, API call failed, or rate-limited
+        return False
+    try:
+        count = int(raw)
+        return count > 0
+    except (ValueError, TypeError):
+        return False
+
+
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     """Return True if all reported checks are success/skipped/neutral.
 
@@ -1239,9 +1264,16 @@ def evaluate_pr(
 
     status_checks = pr.get("statusCheckRollup", [])
     if not status_checks:
-        result.warnings.append(
-            "No CI checks configured; CI requirement satisfied without a green build"
-        )
+        # Distinguish between "repo has no CI at all" and "repo has CI but no result"
+        if repo_has_ci_configured(repo):
+            result.reasons.append(
+                "CI checks not found; repo has workflows configured but produced no check results "
+                "(possible GitHub outage, paths filter mismatch, or concurrency cancellation)"
+            )
+        else:
+            result.warnings.append(
+                "No CI configured; CI requirement satisfied without running checks"
+            )
     elif not checks_green(status_checks):
         result.reasons.append("CI is not fully green")
 
