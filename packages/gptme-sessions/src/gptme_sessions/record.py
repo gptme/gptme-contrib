@@ -272,6 +272,14 @@ class SessionRecord:
     # None = trajectory unavailable or pre-dates this field.
     summarizer_fired: bool | None = None
 
+    # Per-step phase timings (gptme sessions only; populated from metadata.timings
+    # written by gptme/gptme#3436). ``None`` for sessions before that PR or for
+    # non-gptme harnesses. All values in milliseconds (wall-clock).
+    ttft_ms_avg: float | None = None  # mean time-to-first-token across timed turns
+    ttft_ms_p50: float | None = None  # median TTFT (more robust to outliers)
+    gen_ms_total: float | None = None  # total generation (streaming) time
+    tool_ms_total: float | None = None  # total tool-execution wall time
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``recommended_confidence``, ``notes``).
