@@ -212,6 +212,61 @@ class TestUpdateMemoryState:
         assert matched == []
 
 
+class TestArchiveExclusion:
+    """MEMORY-archive.md must never surface as a recall result.
+
+    The archive file is cold storage: a concatenation of archived one-liners
+    with broad vocabulary that out-scores real entries on nearly every prompt.
+    Excluding it at discover time (SPECIAL_MEMORY_FILES) is the fix; these
+    tests confirm the exclusion reaches the scoring layer.
+    """
+
+    # Large archive body — broad vocabulary would dominate scoring if not excluded
+    ARCHIVE_MD = """\
+---
+name: archived-memories
+description: Cold-storage overflow of archived one-liner memory entries
+metadata:
+  type: feedback
+---
+
+Archived: pre-commit hooks bypass --no-verify. Archived: database migration zero downtime.
+Archived: Python typing hints function signatures. Archived: git workflow conventional commits.
+Archived: pytest testing code coverage. Archived: PostgreSQL migration table schema.
+Archived: CI/CD pipeline deployment monitoring. Archived: code review authentication.
+"""
+
+    def test_archive_file_not_recalled(self, memory_dir: Path, state_file: Path):
+        """MEMORY-archive.md must not appear in recall results even with a highly matching prompt."""
+        (memory_dir / "MEMORY-archive.md").write_text(self.ARCHIVE_MD)
+        results = select_relevant_memories(
+            "Don't use --no-verify to bypass pre-commit hooks. Add Python type hints.",
+            memory_dir=memory_dir,
+            state_file=state_file,
+            limit=5,
+        )
+        names = [r["name"] for r in results]
+        assert (
+            "archived-memories" not in names
+        ), "MEMORY-archive.md must be excluded from recall but was returned as a result"
+
+    def test_real_memories_still_recalled_with_archive_present(
+        self, memory_dir: Path, state_file: Path
+    ):
+        """Presence of MEMORY-archive.md must not displace real memory entries."""
+        (memory_dir / "MEMORY-archive.md").write_text(self.ARCHIVE_MD)
+        results = select_relevant_memories(
+            "Don't use --no-verify to bypass pre-commit hooks",
+            memory_dir=memory_dir,
+            state_file=state_file,
+            limit=5,
+        )
+        names = [r["name"] for r in results]
+        assert (
+            "never-skip-precommit" in names
+        ), "Real memories should still be recalled when MEMORY-archive.md is present"
+
+
 class TestInjectionCooldown:
     PROMPT = "Don't use --no-verify to bypass pre-commit hooks"
 

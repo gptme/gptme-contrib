@@ -186,3 +186,36 @@ Some useful content.
         entries = discover_memory_files(mem_dir)
         assert len(entries) == 1
         assert entries[0].type == "memory"
+
+    def test_memory_archive_is_excluded(self, tmp_path: Path):
+        """MEMORY-archive.md must never be discovered as a recall candidate.
+
+        The archive file is a concatenation of ~180 one-liners that gives it a
+        vocabulary broad enough to out-score real entries on almost any prompt.
+        It is cold storage, excluded from automated recall by design.
+        """
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+
+        (mem_dir / "feedback-precommit.md").write_text(VALID_FEEDBACK_MD)
+        # A valid-frontmatter archive file that would parse successfully if not excluded.
+        (mem_dir / "MEMORY-archive.md").write_text(
+            """\
+---
+name: archived-memories
+description: Cold-storage overflow of archived one-liner memory entries
+metadata:
+  type: feedback
+---
+
+Archived entry: pre-commit hooks. Archived: database migration. Archived: Python typing.
+Archived: git workflow. Archived: pytest. Archived: code review. Archived: CI/CD.
+"""
+        )
+
+        entries = discover_memory_files(mem_dir)
+        names = [e.name for e in entries]
+        assert (
+            "archived-memories" not in names
+        ), "MEMORY-archive.md was discovered as a recall candidate but must be excluded"
+        assert len(entries) == 1  # only the real feedback entry
