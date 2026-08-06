@@ -217,6 +217,42 @@ Adapted from [ayghri/i-have-adhd](https://github.com/ayghri/i-have-adhd) by @ayg
 Original rules grounded in adult ADHD toolkit research (Ramsay & Rostain).
 Ported to gptme by Bob.
 
+## Example: Before and After
+
+### Before (Dense, State-Implicit)
+
+```
+You'll want to examine how tool results are handled. There's a mechanism in the
+server code that processes these. If you look at `packages/gptme/src/server.py`
+around line 240, you'll see there's a function that takes the tool result and
+does some processing. You might also want to consider whether the interrupt
+state needs special handling here. There are a few cases to think about, and
+it's a bit complex, but once you understand the pattern it becomes clear.
+```
+
+**Problems**:
+- No clear starting action
+- State (which line? which function?) scattered through prose
+- Next step is vague ("look at...")
+- Reader loses context by end
+
+### After (Action-First, State-Explicit)
+
+```
+[Step 1 of 2] Open `packages/gptme/src/server.py` and search for `on_tool_result`.
+
+This function processes the trajectory result after a tool executes. The key
+decision point is at line 245: whether to auto-continue or wait for user input.
+
+Next: Check line 245 for the interrupt guard, then verify whether it respects
+the `auto_step` flag correctly.
+```
+
+**Improvements**:
+- First action is concrete (file, search term)
+- State is explicit (Step 1 of 2, which function, which line)
+- Next step is actionable and specific
+
 ## Related
 
 - Original project: [ayghri/i-have-adhd](https://github.com/ayghri/i-have-adhd)
