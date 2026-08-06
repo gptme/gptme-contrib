@@ -8167,6 +8167,46 @@ def test_is_productive_pr_submitted():
     assert is_productive(sigs)
 
 
+def test_grade_signals_novelty_bonus():
+    """Session grading applies originality bonus for high novelty code."""
+    # Base case: normal productive session (1 commit)
+    base_sigs = {
+        "git_commits": ["abc1234"],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 2},
+        "prs_submitted": [],
+    }
+    base_grade = grade_signals(base_sigs)
+
+    # With novelty score (0.7 = fairly novel/diverse code)
+    novel_sigs = base_sigs.copy()
+    novel_sigs["novelty_score"] = 0.7
+    novel_grade = grade_signals(novel_sigs)
+
+    # Grade should improve by 0.7 * 0.05 = 0.035 (capped at 0.04)
+    expected_bonus = min(0.04, 0.7 * 0.05)  # 0.035
+    assert novel_grade == pytest.approx(base_grade + expected_bonus)
+
+    # With very high novelty (1.0 = maximum novel)
+    very_novel_sigs = base_sigs.copy()
+    very_novel_sigs["novelty_score"] = 1.0
+    very_novel_grade = grade_signals(very_novel_sigs)
+
+    # Should get max bonus of 0.04 (capped)
+    expected_max_bonus = 0.04
+    assert very_novel_grade == pytest.approx(base_grade + expected_max_bonus)
+
+    # With zero novelty score (no bonus)
+    no_novelty_sigs = base_sigs.copy()
+    no_novelty_sigs["novelty_score"] = 0.0
+    no_novelty_grade = grade_signals(no_novelty_sigs)
+
+    # Should be same as base (no bonus)
+    assert no_novelty_grade == pytest.approx(base_grade)
+
+
 def test_is_productive_issue_closed():
     """is_productive returns True when an issue was successfully closed."""
     sigs = {

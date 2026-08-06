@@ -468,7 +468,75 @@ def extract_signals(msgs: list[dict]) -> dict:
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
         "summarizer_fired": summarizer_fired,
+        "novelty_score": calculate_novelty_score_for_files(file_writes),
     }
+
+
+def calculate_novelty_score_for_files(file_paths: list[str]) -> float:
+    """Calculate mean divergence (novelty score) for edited files using novelty-divergence-benchmark.
+
+    Args:
+        file_paths: List of file paths edited in the session.
+
+    Returns:
+        Mean divergence score (0.0-1.0) for the session's files, or 0.0 if no scores available.
+        Higher divergence = more novel/unique code patterns relative to the corpus.
+    """
+    if not file_paths:
+        return 0.0
+
+    # Only score Python and TypeScript files (benchmark supports these)
+    supported_exts = {".py", ".ts", ".tsx", ".js", ".jsx"}
+    relevant_files = [f for f in file_paths if Path(f).suffix.lower() in supported_exts]
+
+    if not relevant_files:
+        return 0.0
+
+    try:
+        # Use the novelty-divergence-benchmark script to score files
+        # Call with --json to get structured output, score only the relevant files
+        repo_root = Path(__file__).resolve().parents[3]  # /home/bob/bob
+        script_path = repo_root / "scripts" / "analysis" / "novelty-divergence-benchmark.py"
+
+        if not script_path.exists():
+            return 0.0
+
+        # Run benchmark with --json output, score the relevant files
+        scores = []
+        for file_path in relevant_files:
+            try:
+                result = subprocess.run(
+                    [
+                        "uv",
+                        "run",
+                        "python3",
+                        str(script_path),
+                        "--score-file",
+                        file_path,
+                        "--json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=str(repo_root),
+                )
+
+                if result.returncode == 0 and result.stdout:
+                    data = json.loads(result.stdout)
+                    if isinstance(data, dict) and "mean_divergence" in data:
+                        scores.append(data["mean_divergence"])
+            except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
+                # Skip files that can't be scored
+                continue
+
+        if not scores:
+            return 0.0
+
+        return sum(scores) / len(scores)
+
+    except Exception:
+        # If benchmark fails entirely, return 0.0 (no penalty, just no bonus)
+        return 0.0
 
 
 def grade_signals(signals: dict, *, category: str | None = None) -> float:
@@ -584,6 +652,13 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
 
     if has_complete:
         reward += 0.03
+
+    # Originality bonus: sessions that edit novel/diverse code patterns get a small boost.
+    # novelty_score is 0.0-1.0 from the divergence benchmark; we scale it to a max of
+    # 0.04 bonus (smaller than completion bonus, since productivity is primary).
+    novelty_score = signals.get("novelty_score", 0.0)
+    if novelty_score > 0:
+        reward += min(0.04, novelty_score * 0.05)
 
     return max(0.0, min(1.0, reward))
 
