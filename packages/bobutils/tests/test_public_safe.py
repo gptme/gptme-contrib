@@ -101,6 +101,32 @@ def test_multiple_private_patterns_in_one_string() -> None:
     assert "bjareho.lt" not in result
 
 
+def test_mixed_case_hostname_replaced() -> None:
+    text = "Dashboard is at Bob.Hassel.Bjareho.lt"
+    result = public_safe(text)
+    assert "bjareho.lt" not in result.lower()
+    assert "<internal-host>" in result
+
+
+def test_mixed_case_endpoint_replaced() -> None:
+    text = "Visit HTTP://Bob.Hassel.Bjareho.lt:8812/decisions/"
+    result = public_safe(text)
+    assert "bjareho.lt" not in result.lower()
+    assert "<internal-endpoint>" in result
+
+
+def test_endpoint_trailing_punctuation_preserved() -> None:
+    text = "See (http://bob.hassel.bjareho.lt:8812/decisions/)."
+    result = public_safe(text)
+    assert result == "See (<internal-endpoint>)."
+
+
+def test_endpoint_in_markdown_link_preserved() -> None:
+    text = "[dashboard](http://bob.hassel.bjareho.lt:8812/decisions/) is live."
+    result = public_safe(text)
+    assert result == "[dashboard](<internal-endpoint>) is live."
+
+
 def test_idempotent() -> None:
     """Applying public_safe twice must yield the same result as once."""
     text = "See /home/bob/bob/journal/ at bob.hassel.bjareho.lt:8812"

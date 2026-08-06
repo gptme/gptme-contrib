@@ -27,26 +27,53 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Callable
 
 __all__ = ["public_safe", "validate_public_safe", "PublicSafeViolation"]
+
+# Punctuation/markdown delimiters that commonly trail a URL in prose and must
+# not be swallowed into the match (e.g. "see <url>." or "(<url>)").
+_TRAILING_DELIMITERS = ".,;:!?)]}'\">"
+
+_Replacement = str | Callable[[re.Match[str]], str]
+
+
+def _strip_trailing_delimiters(placeholder: str) -> Callable[[re.Match[str]], str]:
+    """Build a `re.sub` replacement fn that trims trailing prose delimiters."""
+
+    def _replace(m: re.Match[str]) -> str:
+        text = m.group()
+        trailing = ""
+        while text and text[-1] in _TRAILING_DELIMITERS:
+            trailing = text[-1] + trailing
+            text = text[:-1]
+        return placeholder + trailing
+
+    return _replace
 
 
 # ---------------------------------------------------------------------------
 # Substitution table — applied in declaration order (most-specific first).
 # ---------------------------------------------------------------------------
 
-_SUBSTITUTIONS: list[tuple[re.Pattern[str], str]] = [
+_SUBSTITUTIONS: list[tuple[re.Pattern[str], _Replacement]] = [
     # Absolute workspace root — most specific, must come before /home/bob/
     (re.compile(r"/home/bob/bob/"), "<workspace>/"),
     # Home directory
     (re.compile(r"/home/bob/"), "<home>/"),
     # Internal HTTP(S) endpoints (catch before bare-hostname pattern)
     (
-        re.compile(r"https?://[a-z0-9.-]*\.bjareho\.lt(?::\d+)?(?:/[^\s]*)?"),
-        "<internal-endpoint>",
+        re.compile(
+            r"https?://[a-z0-9.-]*\.bjareho\.lt(?::\d+)?(?:/[^\s]*)?",
+            re.IGNORECASE,
+        ),
+        _strip_trailing_delimiters("<internal-endpoint>"),
     ),
     # Internal bare hostnames
-    (re.compile(r"\b[a-z0-9-]+\.bjareho\.lt\b"), "<internal-host>"),
+    (
+        re.compile(r"\b[a-z0-9-]+\.bjareho\.lt\b", re.IGNORECASE),
+        "<internal-host>",
+    ),
     # Known private SSH remotes
     (re.compile(r"\berb-hetzner-ax41\b"), "<ssh-remote>"),
     # Cluster node references
@@ -60,8 +87,14 @@ _SUBSTITUTIONS: list[tuple[re.Pattern[str], str]] = [
 _VALIDATORS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"/home/bob/bob/"), "workspace absolute path"),
     (re.compile(r"/home/bob/"), "home directory path"),
-    (re.compile(r"https?://[a-z0-9.-]*\.bjareho\.lt"), "internal endpoint URL"),
-    (re.compile(r"\b[a-z0-9-]+\.bjareho\.lt\b"), "internal hostname"),
+    (
+        re.compile(r"https?://[a-z0-9.-]*\.bjareho\.lt", re.IGNORECASE),
+        "internal endpoint URL",
+    ),
+    (
+        re.compile(r"\b[a-z0-9-]+\.bjareho\.lt\b", re.IGNORECASE),
+        "internal hostname",
+    ),
     (re.compile(r"\berb-hetzner-ax41\b"), "private SSH remote"),
     (re.compile(r"\bcluster1(?:-node\d+)?\b"), "cluster node reference"),
     (re.compile(r"\bCT\d{3}\b"), "LXC container reference"),
