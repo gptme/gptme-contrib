@@ -540,16 +540,22 @@ def test_filter_by_session_category_case_insensitive(hook, tmp_path):
     assert len(dropped) == 0
 
 
-def test_filter_by_session_category_none_keeps_all(hook, tmp_path):
-    """Unknown category (None) keeps all lessons unchanged."""
+def test_filter_by_session_category_none_filters_restricted(hook, tmp_path):
+    """Unknown category (None) filters out lessons with session_categories restrictions."""
     lessons_dir = tmp_path / "lessons"
     lessons_dir.mkdir()
     (lessons_dir / "restricted.md").write_text(
         "---\nmatch:\n  keywords:\n    - x\n  session_categories:\n    - strategic\nstatus: active\n---\n# Restricted\n\nContent.\n"
     )
+    (lessons_dir / "universal.md").write_text(
+        "---\nmatch:\n  keywords:\n    - y\nstatus: active\n---\n# Universal\n\nContent.\n"
+    )
     lessons = hook.scan_lessons([lessons_dir])
     result = hook.filter_by_session_category(lessons, None)
-    assert len(result) == 1
+    # Restricted lesson must be filtered; universal lesson must pass through
+    titles = {lesson["title"] for lesson in result}
+    assert "Restricted" not in titles
+    assert "Universal" in titles
 
 
 def test_detect_session_category_from_env(hook, monkeypatch):
