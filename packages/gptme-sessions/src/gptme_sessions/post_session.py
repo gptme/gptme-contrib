@@ -417,6 +417,10 @@ def post_session(
     session_total_bytes: int | None = None
     traj_productive: bool | None = None
     summarizer_fired: bool | None = None
+    ttft_ms_avg: float | None = None
+    ttft_ms_p50: float | None = None
+    gen_ms_total: float | None = None
+    tool_ms_total: float | None = None
 
     # --- Extract signals from trajectory ---
     if trajectory_path is not None and trajectory_path.is_file():
@@ -426,6 +430,13 @@ def post_session(
             grade = result.get("grade")
             traj_productive = result.get("productive")
             usage = result.get("usage")
+            # Per-step phase timings (gptme sessions only, gptme/gptme#3436).
+            _traj_timings = result.get("timings")
+            if _traj_timings:
+                ttft_ms_avg = _traj_timings.get("ttft_ms_avg")
+                ttft_ms_p50 = _traj_timings.get("ttft_ms_p50")
+                gen_ms_total = _traj_timings.get("gen_ms_total")
+                tool_ms_total = _traj_timings.get("tool_ms_total")
             if usage:
                 _in = usage.get("input_tokens")
                 _out = usage.get("output_tokens")
@@ -774,6 +785,14 @@ def post_session(
         record_kwargs["session_total_bytes"] = session_total_bytes
     if summarizer_fired is not None:
         record_kwargs["summarizer_fired"] = summarizer_fired
+    if ttft_ms_avg is not None:
+        record_kwargs["ttft_ms_avg"] = ttft_ms_avg
+    if ttft_ms_p50 is not None:
+        record_kwargs["ttft_ms_p50"] = ttft_ms_p50
+    if gen_ms_total is not None:
+        record_kwargs["gen_ms_total"] = gen_ms_total
+    if tool_ms_total is not None:
+        record_kwargs["tool_ms_total"] = tool_ms_total
 
     if exit_code != 0:
         if failure_reason is None or error is None:

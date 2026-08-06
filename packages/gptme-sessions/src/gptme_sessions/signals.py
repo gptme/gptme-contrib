@@ -1281,6 +1281,64 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     }
 
 
+def extract_timings_gptme(msgs: list[dict]) -> dict:
+    """Extract per-step phase timings from a gptme conversation.jsonl trajectory.
+
+    Reads ``metadata.timings`` attached by gptme core (gptme/gptme#3436) to each
+    assistant message.  Returns session-level aggregates:
+
+    - ``ttft_ms_avg``: mean time-to-first-token across all timed turns (ms)
+    - ``ttft_ms_p50``: median TTFT (ms), more robust to outliers
+    - ``gen_ms_total``: total generation (streaming) time across the session (ms)
+    - ``tool_ms_total``: total tool-execution wall time across the session (ms)
+    - ``timed_turns``: number of assistant turns with timing data
+
+    Returns an empty dict when no timing data is present (old sessions, non-gptme
+    formats, or sessions before gptme#3436 merged).
+    """
+    ttft_samples: list[float] = []
+    gen_ms_total = 0.0
+    tool_ms_total = 0.0
+
+    for msg in msgs:
+        if msg.get("role") != "assistant":
+            continue
+        metadata = msg.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        timings = metadata.get("timings")
+        if not timings or not isinstance(timings, dict):
+            continue
+        ttft = timings.get("ttft_ms")
+        if ttft is not None:
+            ttft_samples.append(float(ttft))
+        gen = timings.get("gen_ms")
+        if gen is not None:
+            gen_ms_total += float(gen)
+        tool = timings.get("tool_ms")
+        if tool is not None:
+            tool_ms_total += float(tool)
+
+    if not ttft_samples and gen_ms_total == 0.0 and tool_ms_total == 0.0:
+        return {}
+
+    result: dict = {"timed_turns": len(ttft_samples)}
+    if ttft_samples:
+        result["ttft_ms_avg"] = round(sum(ttft_samples) / len(ttft_samples), 1)
+        sorted_samples = sorted(ttft_samples)
+        n = len(sorted_samples)
+        mid = n // 2
+        result["ttft_ms_p50"] = round(
+            sorted_samples[mid] if n % 2 else (sorted_samples[mid - 1] + sorted_samples[mid]) / 2,
+            1,
+        )
+    if gen_ms_total > 0.0:
+        result["gen_ms_total"] = round(gen_ms_total, 1)
+    if tool_ms_total > 0.0:
+        result["tool_ms_total"] = round(tool_ms_total, 1)
+    return result
+
+
 def extract_usage_cc(msgs: list[dict]) -> dict:
     """Extract cumulative token usage from a Claude Code trajectory.
 
@@ -2390,4 +2448,10 @@ def extract_from_path(jsonl_path: Path) -> dict:
     }
     if usage:
         result["usage"] = usage
+    # Attach per-step phase timings for gptme sessions (gptme/gptme#3436).
+    # Other formats don't carry per-message timing metadata so we skip them.
+    if fmt == "gptme":
+        timings = extract_timings_gptme(msgs)
+        if timings:
+            result["timings"] = timings
     return result
