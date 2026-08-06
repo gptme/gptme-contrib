@@ -8,6 +8,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$0")"
 
+# Git invokes: pre-push <remote-name> <remote-url>
+# Used to skip origin-specific work when pushing to a mirror or other remote.
+PUSH_REMOTE_NAME="${1:-}"
+
 # Read stdin before any subprocess consumes it.
 # Git provides per line: local_ref local_sha remote_ref remote_sha
 # The `|| [ -n "$local_ref" ]` handles the last line without a trailing newline
@@ -51,6 +55,35 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             range="$remote_sha..$local_sha"
         fi
 
+        # O(N) protection: skip the per-commit scan when the push range is huge.
+        #
+        # The loop below is O(commits). A first push to a NEW remote (a mirror, a
+        # backup forge, a fork) has a range of the entire history. Measured
+        # 2026-08-06 pushing a brain repo to a fresh Forgejo mirror: 24,548
+        # commits, 30+ minutes, 5GB read, and git had not even begun packing.
+        # The failure mode is a SILENT HANG with no indication the hook is
+        # running, so it reads as "the remote is broken" or "the repo is too
+        # big" — both wrong, and both send you down a dead end.
+        #
+        # That makes any new remote unusable without --no-verify, which is
+        # exactly the habit this hook exists to avoid teaching.
+        #
+        # One rev-list --count is fast even on huge ranges. The per-commit
+        # guard is a backstop anyway: pre-commit already checks each commit's
+        # staged diff as it is created, so a skip here does not leave the
+        # commits unexamined.
+        # shellcheck disable=SC2086  # $range intentionally unquoted (may contain --not --remotes=origin)
+        _range_count=$(git rev-list --count $range 2>/dev/null || echo 0)
+        if [ "$_range_count" -gt "${MASS_DELETE_COMMIT_RANGE_LIMIT:-500}" ]; then
+            # Never skip silently — a quiet downgrade of a safety check is its own trap.
+            echo "ℹ️  pre-push: skipping per-commit mass-delete scan" >&2
+            echo "   Range: $_range_count commits (limit ${MASS_DELETE_COMMIT_RANGE_LIMIT:-500})." >&2
+            echo "   Normal for a first push to a new remote. Each commit was still" >&2
+            echo "   checked by pre-commit when it was created." >&2
+            echo "   Force the full scan with: MASS_DELETE_COMMIT_RANGE_LIMIT=0 (very slow)" >&2
+            continue
+        fi
+
         # Check each commit in the range
         # shellcheck disable=SC2086  # $range intentionally unquoted (may contain --not --remotes=origin)
         for commit in $(git rev-list $range 2>/dev/null); do
@@ -73,9 +106,20 @@ if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
         [ "$local_sha" = "$ZERO" ] && continue
         [ "$remote_sha" = "$ZERO" ] && continue
 
-        # Fetch to get the latest remote state (updates reflog)
+        # Fetch to get the latest remote state (updates reflog).
+        #
+        # This guard is about origin's history being force-reset, so it is only
+        # meaningful when we are pushing to origin. Pushing to a mirror or any
+        # other remote should not trigger a network round-trip to origin that
+        # serves no protective purpose — and on a slow or unreachable origin
+        # that round-trip is pure latency on every mirror push.
+        #
+        # Git passes the remote NAME as $1. Empty means invoked outside git
+        # (tests) — keep the old behaviour there rather than silently skipping.
         _remote_branch="${remote_ref#refs/heads/}"
-        git fetch origin "$_remote_branch" --quiet 2>/dev/null || true
+        if [ "${PUSH_REMOTE_NAME:-}" = "origin" ] || [ -z "${PUSH_REMOTE_NAME:-}" ]; then
+            git fetch origin "$_remote_branch" --quiet 2>/dev/null || true
+        fi
 
         # Read the two most recent entries from the remote branch reflog.
         # If the previous entry is NOT an ancestor of the current entry, a
