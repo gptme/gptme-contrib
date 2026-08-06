@@ -601,33 +601,85 @@ check_ci_failures() {
     local prs=$2
     [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
 
-    echo "$prs" | jq -c '.[]' | while read -r pr_data; do
-        local has_failures
-        has_failures=$(echo "$pr_data" | jq -r 'select(.statusCheckRollup != null) | .statusCheckRollup | any(.conclusion == "FAILURE")')
-        if [ "$has_failures" = "true" ]; then
-            local pr_number pr_title ci_hash state_file
-            pr_number=$(echo "$pr_data" | jq -r '.number')
-            pr_title=$(echo "$pr_data" | jq -r '.title')
-            # Hash the CI conclusions to detect state changes.
-            # Note: in-progress checks have empty conclusions (mapped to "pending").
-            # When they complete, the hash changes — this can cause a re-trigger even
-            # if the final result matches the previous run. Acceptable trade-off vs
-            # missing genuine state changes.
-            ci_hash=$(echo "$pr_data" | jq -r '[.statusCheckRollup[] | .conclusion // "pending"] | sort | join(",")' | portable_hash)
-            state_file="$STATE_DIR/${repo//\//-}-pr-${pr_number}-ci.state"
+    # A PR whose checks sit in QUEUED/IN_PROGRESS with an unchanged hash for this
+    # long is stuck, not progressing, and needs a re-trigger rather than patience.
+    local stuck_secs="${CI_STUCK_SECS:-3600}"
+    local now
+    now=$(date +%s)
 
-            if [ -f "$state_file" ]; then
-                local last_hash
-                last_hash=$(cat "$state_file")
-                if [ "$ci_hash" = "$last_hash" ]; then
-                    # CI state unchanged since last check — don't re-trigger
-                    continue
-                fi
+    echo "$prs" | jq -c '.[]' | while read -r pr_data; do
+        # Three-way classification. Previously this matched only
+        # `any(.conclusion == "FAILURE")`, which stranded two shapes the
+        # 2026-08-06 GitHub Actions outage produced in bulk:
+        #
+        #   - terminal but not green (CANCELLED / TIMED_OUT / ACTION_REQUIRED and
+        #     nothing left running). The PR sits UNSTABLE, so check_merge_ready
+        #     (needs CLEAN) skips it, check_merge_conflicts (needs DIRTY) skips
+        #     it, and once updatedAt stops moving check_pr_updates skips it too.
+        #   - permanently QUEUED. Live example: gptme/gptme#3472 had 3 checks
+        #     QUEUED for ~6h behind cancelled/orphaned jobs, matching no predicate.
+        #
+        # FAILURE still fires immediately even with other checks running, which
+        # preserves the previous behaviour exactly. CANCELLED only counts once
+        # nothing is in flight — otherwise every `cancel-in-progress` supersede
+        # (which leaves CANCELLED behind while the new run starts) would fire.
+        local ci_state
+        ci_state=$(echo "$pr_data" | jq -r '
+            select(.statusCheckRollup != null) | .statusCheckRollup
+            | (any(.[]; ((.conclusion // "") | ascii_upcase) == "FAILURE")) as $hard
+            | (any(.[]; ((.status // "") | ascii_upcase) as $s
+                   | $s == "QUEUED" or $s == "IN_PROGRESS" or $s == "WAITING"
+                     or (((.conclusion // "") == "")
+                         and (((.state // "") | ascii_upcase) == "PENDING")))) as $inflight
+            | (any(.[]; ((.conclusion // .state // "") | ascii_upcase) as $c
+                   | $c != "" and $c != "SUCCESS" and $c != "SKIPPED"
+                     and $c != "NEUTRAL")) as $bad
+            | if $hard then "bad"
+              elif ($bad and ($inflight | not)) then "bad"
+              elif $inflight then "inflight"
+              else "green" end')
+
+        [ -n "$ci_state" ] || continue
+        [ "$ci_state" = "green" ] && continue
+
+        local pr_number pr_title ci_hash state_file detail
+        pr_number=$(echo "$pr_data" | jq -r '.number')
+        pr_title=$(echo "$pr_data" | jq -r '.title')
+        # Hash the CI conclusions to detect state changes.
+        # Note: in-progress checks have empty conclusions (mapped to "pending").
+        # When they complete, the hash changes — this can cause a re-trigger even
+        # if the final result matches the previous run. Acceptable trade-off vs
+        # missing genuine state changes.
+        ci_hash=$(echo "$pr_data" | jq -r '[.statusCheckRollup[] | .conclusion // "pending"] | sort | join(",")' | portable_hash)
+        state_file="$STATE_DIR/${repo//\//-}-pr-${pr_number}-ci.state"
+        detail="CI failing"
+
+        if [ "$ci_state" = "inflight" ]; then
+            # Checks still running is normal. Only actionable once the state has
+            # not moved for stuck_secs — the state file's mtime is the clock.
+            if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$ci_hash" ]; then
+                local mtime age
+                mtime=$(stat -c %Y "$state_file" 2>/dev/null || stat -f %m "$state_file" 2>/dev/null || echo "$now")
+                age=$(( now - mtime ))
+                [ "$age" -ge "$stuck_secs" ] || continue
+                detail="CI stuck: checks in flight ${age}s with no state change"
+                # Re-stamp so a still-stuck PR re-emits at most once per
+                # stuck_secs rather than on every gate run.
+                touch "$state_file"
+            else
+                # First sighting of this in-flight state: record and wait.
+                echo "$ci_hash" > "$state_file"
+                continue
             fi
-            # New failure or CI state changed
+        else
+            if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$ci_hash" ]; then
+                # CI state unchanged since last check — don't re-trigger
+                continue
+            fi
             echo "$ci_hash" > "$state_file"
-            emit_item "ci_failure" "$repo" "$pr_number" "$pr_title" "CI failing"
         fi
+
+        emit_item "ci_failure" "$repo" "$pr_number" "$pr_title" "$detail"
     done
 }
 
