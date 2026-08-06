@@ -1304,6 +1304,8 @@ def extract_timings_gptme(msgs: list[dict]) -> dict:
         if msg.get("role") != "assistant":
             continue
         metadata = msg.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
         timings = metadata.get("timings")
         if not timings or not isinstance(timings, dict):
             continue
