@@ -1274,10 +1274,13 @@ check_notifications() {
             title: .subject.title,
             detail: .reason
         }' 2>/dev/null | while IFS= read -r item; do
-            local notif_id notif_updated state_file prior
+            local notif_id notif_updated state_file map_file prior repo number
             notif_id=$(echo "$item" | jq -r '.id')
             notif_updated=$(echo "$item" | jq -r '.updated_at')
+            repo=$(echo "$item" | jq -r '.repo')
+            number=$(echo "$item" | jq -r '.number')
             state_file="$STATE_DIR/notif-${notif_id}.state"
+            map_file="$STATE_DIR/notif-${notif_id}.map"
             prior=""
             [ -f "$state_file" ] && prior=$(cat "$state_file" 2>/dev/null || true)
             # Seed-on-first-sight applies ONLY to a fresh state dir (first run, or
@@ -1291,6 +1294,7 @@ check_notifications() {
             # works on ISO-8601 timestamps.
             if [ -z "$prior" ] && [ "$_notif_state_established" -eq 0 ]; then
                 printf '%s' "$notif_updated" > "$state_file"
+                [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
             elif [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
@@ -1298,6 +1302,7 @@ check_notifications() {
                     # notification is retried on the next run (emit-before-persist semantics).
                     echo "$item" | jq -c 'del(.id, .updated_at)'
                     printf '%s' "$notif_updated" > "$state_file"
+                    [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                 fi
             fi
         done
@@ -1305,10 +1310,15 @@ check_notifications() {
         # Count new notifications and create state files (process substitution avoids subshell)
         local new_count=0
         while IFS= read -r line; do
-            local notif_id notif_updated state_file prior
+            local notif_id notif_updated state_file map_file prior repo number
             notif_id=${line%%$'\t'*}
-            notif_updated=${line#*$'\t'}
+            remaining=${line#*$'\t'}
+            notif_updated=${remaining%%$'\t'*}
+            remaining=${remaining#*$'\t'}
+            repo=${remaining%%$'\t'*}
+            number=${remaining#*$'\t'}
             state_file="$STATE_DIR/notif-${notif_id}.state"
+            map_file="$STATE_DIR/notif-${notif_id}.map"
             prior=""
             [ -f "$state_file" ] && prior=$(cat "$state_file" 2>/dev/null || true)
             # Seed-on-first-sight applies only to a fresh state dir (see jsonl
@@ -1318,11 +1328,13 @@ check_notifications() {
             # count as new activity.
             if [ -z "$prior" ] && [ "$_notif_state_established" -eq 0 ]; then
                 printf '%s' "$notif_updated" > "$state_file"
+                [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
             elif [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
                 printf '%s' "$notif_updated" > "$state_file"
+                [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                 new_count=$((new_count + 1))
             fi
-        done < <(echo "$notifs" | jq -r '"\(.id)\t\(.updated_at)"' 2>/dev/null)
+        done < <(echo "$notifs" | jq -r '"\(.id)\t\(.updated_at)\t\(.repository.full_name)\t(.subject.url // "" | split("/") | last | tonumber? // 0)"' 2>/dev/null)
         echo "$new_count"
     fi
 }
