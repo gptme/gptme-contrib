@@ -19,9 +19,8 @@ Usage::
 
     # Dry-run audit
     violations = validate_public_safe(draft)
-    if violations:
-        for v in violations:
-            print(f"  [{v.kind}] {v.match!r} at offset {v.offset}")
+    for v in violations:
+        logger.warning("[%s] %r at offset %d", v.kind, v.match, v.offset)
 """
 
 from __future__ import annotations
