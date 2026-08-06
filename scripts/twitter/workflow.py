@@ -53,6 +53,9 @@ from typing import (
 
 import click
 import yaml
+
+# Import privacy sanitization
+from bobutils.public_safe import public_safe
 from dotenv import load_dotenv
 
 # Import monitoring utilities
@@ -978,6 +981,9 @@ def draft(
 
         scheduled_time = datetime.fromisoformat(schedule) if schedule else None
 
+        # Scrub private refs (workspace paths, internal hostnames, etc.) before saving draft
+        text = public_safe(text)
+
         draft = TweetDraft(
             text=text,
             type=type,
@@ -1853,11 +1859,12 @@ def process_timeline_tweets(
                     continue
 
                 # Create draft from response
+                draft_text = public_safe(response.text)
                 draft = TweetDraft(
-                    text=response.text,
+                    text=draft_text,
                     type=response.type,
                     in_reply_to=tweet.id if response.type == "reply" else None,
-                    thread=[response.follow_up]
+                    thread=[public_safe(response.follow_up)]
                     if response.thread_needed and response.follow_up
                     else None,
                     context={
@@ -2034,7 +2041,7 @@ def process_timeline_tweets(
                         ), "eval_result should not be None in thread context"
 
                         thread_draft = TweetDraft(
-                            text=follow_up,
+                            text=public_safe(follow_up),
                             type="thread",
                             context={
                                 "thread_position": i,

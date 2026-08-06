@@ -5,6 +5,7 @@ match:
   session_categories: [cross-repo, code]
 status: active
 description: "NEVER truncate GitHub comment output."
+confound_note: "Fires during cross-repo coordination work, which naturally involves external waits and complex handoffs; these factors suppress session reward independent of lesson quality. The lesson itself is correct (don't truncate), but sessions needing it are already in coordination scenarios."
 ---
 
 # Read Full GitHub Context
