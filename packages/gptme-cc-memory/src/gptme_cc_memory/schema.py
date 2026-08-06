@@ -27,6 +27,12 @@ MEMORY_TYPES = frozenset({"user", "feedback", "project", "reference"})
 SPECIAL_MEMORY_FILES = frozenset(
     {
         "MEMORY.md",
+        # Cold-storage overflow written by memory-overflow tooling. It is a
+        # concatenation of archived one-liners, so as a single retrieval
+        # candidate its vocabulary matches almost any prompt and out-scores
+        # real entries while its excerpt renders static header boilerplate.
+        # Archived == out of automated recall by design; use grep for it.
+        "MEMORY-archive.md",
         "guidance.md",
         # Retired lane — kept here so a leftover file from a pre-retirement
         # install is never discovered as a memory entry.
