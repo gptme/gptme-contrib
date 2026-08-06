@@ -31,21 +31,13 @@ Invoke `/output-clarity` to enable clarity mode for the rest of this session. Us
 
 ## The 10 Rules
 
-These rules are grounded in **five psychological facts** about working memory and executive function:
+These rules address how working memory works: actions get lost if not positioned first, time estimates must be specific to be usable, and visible progress matters more than buried wins.
 
-1. **Working memory is small** — Anything off-screen is forgotten. Never ask "keep in mind X."
-2. **Knowing ≠ doing** — Gap between "got it" and "done it" is where work dies. Close it.
-3. **Starting is hardest** — First action must be obvious, small, doable now.
-4. **Time feels uniform** — "A bit" and "a few hours" register the same. Vague = fails.
-5. **Dopamine is scarce** — Visible progress matters. Buried wins don't register.
+**Rule precedence when rules conflict**: Rule 1 (action first) > Rule 5 (state restatement) > Rule 10 (no preamble). For multi-step continuations, merge Rule 5 and Rule 1 into one line — `✓ Step 2 done. Run: pytest -v` covers both. Rule 10 targets generic filler ("Great question!"), not Rule 5's progress lines.
 
 ### Rule 1: Lead with next action
 
 **Implementation**: First line is a command, path, code snippet, or concrete action — not context or preamble.
-
-**Why**: Working memory is small. If the action isn't in the first ~20 characters, it's already forgotten.
-
-**Example**:
 
 ```
 # ✅ Correct
@@ -58,10 +50,6 @@ First, you'll want to navigate to the repository. Then run the checkout command.
 ### Rule 2: Number multi-step tasks
 
 **Implementation**: Use numbered lists. One bounded action per step. No "and then" within a step.
-
-**Why**: Numbered steps let readers track progress ("step 3 of 5 done"). Numbered lists are cognitively easier to follow than prose.
-
-**Example**:
 
 ```
 # ✅ Correct
@@ -77,10 +65,6 @@ First, you'll want to navigate to the repository. Then run the checkout command.
 
 **Implementation**: Final line names ONE thing doable in <2 minutes. "Open the file," "run the test," "read the error" all count.
 
-**Why**: Ending with ambiguity ("let me know if that works") leaves readers hanging. A concrete next step closes the loop.
-
-**Example**:
-
 ```
 # ✅ Correct
 Your next action: Run `pytest -v tests/test_feature.py` to verify the fix.
@@ -92,10 +76,6 @@ That should fix it. Let me know if you need anything else.
 ### Rule 4: Suppress tangents
 
 **Implementation**: If a second issue exists, finish the first fully, then offer the second separately ("I also noticed...").
-
-**Why**: Multiple problems in one response create cognitive load. Sequential problems are easier to track.
-
-**Example**:
 
 ```
 # ✅ Correct
@@ -109,15 +89,11 @@ Fix the bug by X, but also watch out for Y because Z...
 
 ### Rule 5: Restate state every turn
 
-**Implementation**: At the start of each response, briefly state where we are ("Step 3 of 5 complete. Moving to step 4").
-
-**Why**: Readers can't hold "step 3 of 5" across messages. Restate it.
-
-**Example**:
+**Implementation**: At the start of each response (for multi-step tasks), briefly state where we are. Merge with Rule 1's action line when possible: `✓ Fix applied. Run: pytest -v`.
 
 ```
-# ✅ Correct
-You've fixed the parser. Next: run the full test suite.
+# ✅ Correct (merged with Rule 1)
+✓ Parser fixed. Run: pytest -v tests/
 
 # ❌ Wrong (no state context)
 Now run the full test suite.
@@ -126,10 +102,6 @@ Now run the full test suite.
 ### Rule 6: Specific time estimates
 
 **Implementation**: Ballpark in concrete units with conditions ("5 min if tests pass, 30 min if debugging needed").
-
-**Why**: "A bit" and "a few hours" feel the same. Specific + conditional estimates help readers plan.
-
-**Example**:
 
 ```
 # ✅ Correct
@@ -143,10 +115,6 @@ This should be quick.
 
 **Implementation**: After each tool execution or milestone, show what changed ("✓ Tests now pass. 2/3 issues resolved.").
 
-**Why**: Buried wins don't register. Visible progress = dopamine = motivation.
-
-**Example**:
-
 ```
 # ✅ Correct
 Pushed the fix. Tests now pass: 42/42 green. Next: code review.
@@ -159,10 +127,6 @@ I made the change. Let me know what you think.
 
 **Implementation**: No "Uh oh," "There seems to be," or hedging. State cause and fix directly.
 
-**Why**: Hedging stalls action. Direct statements get quicker resolution.
-
-**Example**:
-
 ```
 # ✅ Correct
 The test failed: import error in line 42. Fix: add `import json` at the top.
@@ -174,10 +138,6 @@ Hmm, it looks like there might be an import issue...
 ### Rule 9: Cap lists at 5
 
 **Implementation**: If >5 items, split into "do now/later" or "must/nice-to-have." Rank, don't enumerate all.
-
-**Why**: Lists >5 items create cognitive overload. Ranked tiers are easier to prioritize.
-
-**Example**:
 
 ```
 # ✅ Correct
@@ -199,11 +159,7 @@ Hmm, it looks like there might be an import issue...
 
 ### Rule 10: No preamble, recap, closers
 
-**Implementation**: Delete opening ("Great question," "Here's the solution") and closing ("Hope this helps," "Let me know if...") lines.
-
-**Why**: Preamble delays action. Recap is forgotten by the next turn. Closers invite false "done" signals.
-
-**Example**:
+**Implementation**: Delete opening ("Great question," "Here's the solution") and closing ("Hope this helps," "Let me know if...") lines. Does NOT apply to Rule 5 progress lines.
 
 ```
 # ✅ Correct
