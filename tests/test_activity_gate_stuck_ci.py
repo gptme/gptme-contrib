@@ -175,3 +175,58 @@ def _extract_function() -> str:
     rest = src[start:]
     end = rest.index("\n}\n") + len("\n}\n")
     return rest[:end]
+
+
+def _extract_hash_program() -> str:
+    """Pull the ci_hash jq program out of the gate, same anti-drift trick."""
+    src = GATE.read_text()
+    marker = 'ci_hash=$(echo "$pr_data" | jq -r \''
+    assert marker in src, "ci_hash program not found — did check_ci_failures change?"
+    return src.split(marker, 1)[1].split("'", 1)[0]
+
+
+def _ci_hash_key(rollup: list[dict]) -> str:
+    proc = subprocess.run(
+        ["jq", "-r", _extract_hash_program()],
+        input=json.dumps({"statusCheckRollup": rollup}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def test_ci_hash_tracks_legacy_status_context_transitions() -> None:
+    """A legacy StatusContext going PENDING -> FAILURE must change the hash.
+
+    Regression test for a bug our own self-hosted reviewer caught on the PR that
+    introduced the three-way classifier (gptme/gptme-contrib#1383, 2026-08-07).
+
+    The classifier learned to read ``.state`` so it could see legacy
+    StatusContext items, which carry no ``.conclusion`` at all. The dedup hash
+    did not: it hashed ``.conclusion // "pending"``, so every StatusContext
+    hashed as ``"pending"`` forever. A status flipping PENDING -> FAILURE was
+    therefore classified ``bad`` and then silently swallowed by the
+    unchanged-hash check — precisely the "CI failed but nothing fired" symptom
+    the PR set out to fix.
+
+    The classifier and the hash must agree on which fields carry CI state.
+    """
+    pending = [{"__typename": "StatusContext", "context": "ci", "state": "PENDING"}]
+    failure = [{"__typename": "StatusContext", "context": "ci", "state": "FAILURE"}]
+
+    assert _classify(pending) == "inflight"
+    assert _classify(failure) == "bad"
+    assert _ci_hash_key(pending) != _ci_hash_key(failure), (
+        "legacy StatusContext transition is invisible to the dedup hash — "
+        "the ci_failure emit will be suppressed"
+    )
+
+
+def test_ci_hash_still_tracks_checkrun_transitions() -> None:
+    """The .state fallback must not blind the hash to ordinary CheckRun items."""
+    running = [{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None}]
+    failed = [
+        {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}
+    ]
+    assert _ci_hash_key(running) != _ci_hash_key(failed)

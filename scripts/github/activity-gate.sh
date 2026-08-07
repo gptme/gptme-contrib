@@ -650,7 +650,15 @@ check_ci_failures() {
         # When they complete, the hash changes — this can cause a re-trigger even
         # if the final result matches the previous run. Acceptable trade-off vs
         # missing genuine state changes.
-        ci_hash=$(echo "$pr_data" | jq -r '[.statusCheckRollup[] | .conclusion // "pending"] | sort | join(",")' | portable_hash)
+        #
+        # `.state` is part of the hash because legacy StatusContext rollup items
+        # carry no `.conclusion` at all — only `.state`. Hashing `.conclusion`
+        # alone made every such item hash as "pending" forever, so a legacy
+        # status going PENDING -> FAILURE left the hash unchanged and the
+        # dedup below silently swallowed the `ci_failure` that the classifier
+        # above had correctly identified as `bad`. Keep this field list in sync
+        # with the `ci_state` classifier.
+        ci_hash=$(echo "$pr_data" | jq -r '[.statusCheckRollup[] | .conclusion // .state // "pending"] | sort | join(",")' | portable_hash)
         state_file="$STATE_DIR/${repo//\//-}-pr-${pr_number}-ci.state"
         detail="CI failing"
 
