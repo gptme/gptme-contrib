@@ -80,6 +80,9 @@ class PromptContext:
         pr_address_script: path to ``pr-address-wait-and-merge.sh`` (the
             address→wait→merge poller). Default:
             ``<workspace>/scripts/github/pr-address-wait-and-merge.sh``.
+        retrigger_pr_checks_script: path to ``retrigger-pr-checks.sh`` (the
+            close+reopen webhook regenerator). Default:
+            ``<workspace>/scripts/ci/retrigger-pr-checks.sh``.
         poll_budget_sec: ``POLL_BUDGET_SEC`` value baked into the
             pr-address-wait-and-merge invocation lines (bash hardcodes 1800).
     """
@@ -89,6 +92,7 @@ class PromptContext:
     workspace: str
     greptile_helper: str | None = None
     pr_address_script: str | None = None
+    retrigger_pr_checks_script: str | None = None
     poll_budget_sec: int = 1800
 
     @property
@@ -102,6 +106,12 @@ class PromptContext:
         if self.pr_address_script is not None:
             return self.pr_address_script
         return f"{self.workspace}/scripts/github/pr-address-wait-and-merge.sh"
+
+    @property
+    def resolved_retrigger_pr_checks_script(self) -> str:
+        if self.retrigger_pr_checks_script is not None:
+            return self.retrigger_pr_checks_script
+        return f"{self.workspace}/scripts/ci/retrigger-pr-checks.sh"
 
 
 # --- Token substitution ---
@@ -470,6 +480,7 @@ class ItemPromptParams:
     agent_msg_policy_note: str = ""
     greptile_helper: str | None = None
     pr_address_script: str | None = None
+    retrigger_pr_checks_script: str | None = None
     poll_budget_sec: int = 1800
 
     def to_prompt_context(self) -> PromptContext:
@@ -480,6 +491,7 @@ class ItemPromptParams:
             workspace=self.workspace,
             greptile_helper=self.greptile_helper,
             pr_address_script=self.pr_address_script,
+            retrigger_pr_checks_script=self.retrigger_pr_checks_script,
             poll_budget_sec=self.poll_budget_sec,
         )
 
@@ -498,6 +510,7 @@ class ItemPromptParams:
             "peer_agents": self.peer_agents,
             "greptile_helper": ctx.resolved_greptile_helper,
             "pr_address_script": ctx.resolved_pr_address_script,
+            "retrigger_pr_checks_script": ctx.resolved_retrigger_pr_checks_script,
         }
 
 
@@ -520,7 +533,7 @@ gh api repos/{repo}/pulls/{number}/comments \\
 
 # CI status
 gh pr checks {number} --repo {repo}
-# If no checks appear at all (GHA webhook dropped): bash {workspace}/scripts/ci/retrigger-pr-checks.sh {repo} {number}
+# If no checks appear at all (GHA webhook dropped): bash {retrigger_pr_checks_script} {repo} {number}
 
 # Merge conflict status
 gh pr view {number} --repo {repo} --json mergeable,mergeStateStatus
@@ -554,10 +567,16 @@ gh run list --repo {repo} --branch master --limit 3 --json name,conclusion,creat
   --jq '.[] | select(.conclusion == "failure") | {name, conclusion, createdAt, url}'
 ```
 
-**Zero checks (webhook dropped)?** If `gh pr checks` returns no results, no workflow run exists
-to re-run with `gh run rerun`. Regenerate the `pull_request` event instead:
+**Zero checks (webhook dropped)?** Note: an empty result from `select(.state == "FAILURE")` above
+is normal when no check is failing — it does NOT mean zero checks exist. A genuine zero-checks
+case (dropped webhook) is when the first unfiltered `gh pr checks` call returns nothing AND
+`gh run list` confirms no runs for the head SHA:
 ```bash
-bash {workspace}/scripts/ci/retrigger-pr-checks.sh {repo} {number}
+gh run list --repo {repo} --branch <head_branch> --limit 1 --json databaseId --jq '.'
+```
+If both are empty, regenerate the `pull_request` event:
+```bash
+bash {retrigger_pr_checks_script} {repo} {number}
 ```
 The script closes and reopens the PR (no local checkout needed). Safe: refuses PRs that are
 already green or have checks in flight.
