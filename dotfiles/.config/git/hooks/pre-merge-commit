@@ -2,8 +2,39 @@
 # Dispatcher: core.hooksPath is global, so this runs for every repo. Delegate to
 # the repo's own guard when it ships one; do nothing anywhere else.
 # Real logic: <brain-repo>/scripts/precommit/prevent-master-merge-commits.sh
+#
+# SECURITY: the guard path is repo-controlled content, and this hook runs in
+# EVERY repository — including untrusted clones. Executing it unconditionally is
+# a remote-code-execution vector: an adversary commits an executable script at
+# that exact path, and a routine `git merge` after cloning runs it with the
+# user's full privileges. Git's normal hook model is opt-in precisely because
+# repo-local .git/hooks are never fetched from a remote; core.hooksPath opts
+# every repo in at once, so the trust check has to be reintroduced here.
+#
+# So: only delegate in repos whose `origin` belongs to an org we control. This
+# keeps the guard working where it is meant to while making a hostile clone
+# inert. Found by our own AI reviewer on gptme/gptme-contrib#1380 (P0).
 set -uo pipefail
+
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$root" ] || exit 0
+
 guard="$root/scripts/precommit/prevent-master-merge-commits.sh"
-[ -n "$root" ] && [ -x "$guard" ] || exit 0
-exec "$guard"
+[ -x "$guard" ] || exit 0
+
+origin="$(git config --get remote.origin.url 2>/dev/null || true)"
+[ -n "$origin" ] || exit 0
+
+# Match owner across both URL shapes: git@host:OWNER/repo(.git) and
+# https://host/OWNER/repo(.git). Anchored so "evil.com/gptme-fake/x" cannot
+# match by containing the substring.
+owner=""
+case "$origin" in
+    *://*) owner="$(printf '%s' "$origin" | sed -E 's#^[a-z+]+://[^/]+/([^/]+)/.*$#\1#')" ;;
+    *:*) owner="$(printf '%s' "$origin" | sed -E 's#^[^:]+:([^/]+)/.*$#\1#')" ;;
+esac
+
+case "$owner" in
+    ErikBjare | gptme | ActivityWatch | superuserlabs) exec "$guard" ;;
+    *) exit 0 ;;
+esac
