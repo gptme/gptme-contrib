@@ -1958,6 +1958,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # Keep "none" as the explicit clear value; otherwise accept any string.
         "assigned_to": {"type": "string"},
         "waiting_since": {"type": "date"},
+        "completed": {"type": "date"},  # When the task was marked done/cancelled
         "wait": {"type": "date"},  # Hide from queue until this date
         # Structured blockers: why this task is waiting, and (for machine-class
         # blockers) the shell command that decides whether it has cleared.
@@ -2355,11 +2356,28 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # permanent traceability.
         # cancelled is terminal regardless of recur; done skips cleanup only when recurring
         # (recurrence reset below handles it).
-        if post.metadata.get("state") == "cancelled" or (
+        _is_terminal_nonrecurring = post.metadata.get("state") == "cancelled" or (
             post.metadata.get("state") == "done" and not post.metadata.get("recur")
-        ):
+        )
+        if _is_terminal_nonrecurring:
             for _stale_field in ("next_action", "waiting_for", "waiting_since", "wait"):
                 post.metadata.pop(_stale_field, None)
+
+        # Auto-set completed timestamp when transitioning to a terminal state.
+        # Mirrors the waiting_since auto-set pattern. Skipped for recurring done
+        # tasks (they reset to todo and should not carry a completed stamp).
+        _transitioning_to_terminal = any(
+            op == "set" and field == "state" and value in ("done", "cancelled")
+            for op, field, value in changes
+        )
+        if (
+            _transitioning_to_terminal
+            and _is_terminal_nonrecurring
+            and not post.metadata.get("completed")
+        ):
+            from datetime import datetime as _dt2, timezone as _tz2
+
+            post.metadata["completed"] = _dt2.now(_tz2.utc).isoformat(timespec="seconds")
 
         # Save changes
         with open(task.path, "w") as f:
