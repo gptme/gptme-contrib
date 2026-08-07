@@ -544,6 +544,7 @@ class SlotManager:
         reason: str,
         *,
         force: bool = False,
+        probe_ok: bool = False,
     ) -> SwitchResult:
         """Flip the live symlink to point at ``sub``'s slot file.
 
@@ -554,6 +555,9 @@ class SlotManager:
         - If the target slot is expired or unreadable, the switch is
           refused **regardless of** ``force`` — landing on a known-bad
           credential just moves the 401 crash loop to the next run.
+          Pass ``probe_ok=True`` to bypass this check when an online probe
+          has already confirmed the slot's refresh token is valid (e.g. an
+          expired access token that CC will auto-refresh on first use).
         - On success, replaces the existing symlink atomically via a
           temp-symlink + ``os.replace`` (single rename syscall) so no
           concurrent reader sees a missing ``live_path``, then calls
@@ -588,11 +592,12 @@ class SlotManager:
             self._log(msg)
             return SwitchResult(ok=False, reason=msg)
 
-        fresh, fresh_reason = self.slot_is_fresh(sub)
-        if not fresh:
-            msg = f"refusing to switch to {sub}: {fresh_reason}"
-            self._log(msg)
-            return SwitchResult(ok=False, reason=msg)
+        if not probe_ok:
+            fresh, fresh_reason = self.slot_is_fresh(sub)
+            if not fresh:
+                msg = f"refusing to switch to {sub}: {fresh_reason}"
+                self._log(msg)
+                return SwitchResult(ok=False, reason=msg)
 
         live = self.live_path
         tmp = self.creds_dir / (self.live_name + f".tmp{os.getpid()}")
