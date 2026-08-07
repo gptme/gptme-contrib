@@ -1,0 +1,104 @@
+"""The global pre-merge-commit dispatcher must not run untrusted repo content.
+
+``core.hooksPath`` is set globally, so this hook fires in *every* repository,
+including a fresh clone of somebody else's. The dispatcher delegates to
+``$root/scripts/precommit/prevent-master-merge-commits.sh`` — a path controlled
+by whatever repo you happen to be standing in.
+
+The original version exec'd that script whenever it existed and was executable.
+An adversary commits an executable file at exactly that path; you clone the
+repo, run an ordinary ``git merge``, and their script runs with your
+privileges. Git's usual hook model is opt-in *because* ``.git/hooks`` is never
+fetched from a remote — ``core.hooksPath`` opts every repo in at once, so the
+trust check has to be reintroduced in the dispatcher itself.
+
+Found as a P0 by our own self-hosted AI reviewer on gptme/gptme-contrib#1380
+(ErikBjare/bob#1122). These tests pin the trust boundary.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+HOOK = (
+    Path(__file__).resolve().parents[1]
+    / "dotfiles"
+    / ".config"
+    / "git"
+    / "hooks"
+    / "pre-merge-commit"
+)
+
+
+def _make_repo(tmp_path: Path, origin: str | None) -> tuple[Path, Path]:
+    """A git repo carrying a 'malicious' guard that touches a sentinel file."""
+    repo = tmp_path / "repo"
+    (repo / "scripts" / "precommit").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    if origin is not None:
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin", origin], check=True
+        )
+
+    sentinel = tmp_path / "PWNED"
+    guard = repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh"
+    guard.write_text(f"#!/usr/bin/env bash\ntouch {sentinel}\nexit 0\n")
+    guard.chmod(0o755)
+    return repo, sentinel
+
+
+def _run_hook(repo: Path) -> None:
+    subprocess.run([str(HOOK)], cwd=repo, capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "git@github.com:evil/pwn.git",
+        "https://github.com/evil/pwn.git",
+        # Must not match by mere substring — this is why the owner is anchored.
+        "https://evil.com/gptme-fake/x.git",
+        "https://github.com/gptme-evil/x.git",
+        "https://github.com/notErikBjare/x.git",
+        None,  # no origin at all
+    ],
+)
+def test_untrusted_repo_guard_is_not_executed(
+    tmp_path: Path, origin: str | None
+) -> None:
+    repo, sentinel = _make_repo(tmp_path, origin)
+    _run_hook(repo)
+    assert (
+        not sentinel.exists()
+    ), f"executed repo-controlled script for origin={origin!r}"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "git@github.com:gptme/gptme-contrib.git",
+        "https://github.com/ErikBjare/bob.git",
+        "git@github.com:ActivityWatch/activitywatch.git",
+        # Forgejo, with a port in the URL.
+        "ssh://git@forgejo.hassel.bjareho.lt:3000/ErikBjare/bob.git",
+    ],
+)
+def test_trusted_repo_guard_still_runs(tmp_path: Path, origin: str) -> None:
+    """The guard must keep working where it is actually wanted."""
+    repo, sentinel = _make_repo(tmp_path, origin)
+    _run_hook(repo)
+    assert sentinel.exists(), f"guard did not run in trusted repo origin={origin!r}"
+
+
+def test_absent_guard_is_a_noop(tmp_path: Path) -> None:
+    """Most repos ship no guard; the hook must exit cleanly and quietly."""
+    repo, _ = _make_repo(tmp_path, "git@github.com:gptme/gptme-contrib.git")
+    (repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh").unlink()
+    proc = subprocess.run(
+        [str(HOOK)], cwd=repo, capture_output=True, text=True, timeout=30
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == ""
