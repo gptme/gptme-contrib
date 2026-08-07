@@ -786,29 +786,54 @@ def fetch_unresolved_human_threads(
     }
 
 
-def repo_has_ci_configured(repo: str) -> bool:
-    """Check if the repo has GitHub Actions workflows configured.
+def repo_has_ci_configured(repo: str) -> bool | None:
+    """Whether the repo has GitHub Actions workflows configured.
 
-    Returns True if .github/workflows/ directory exists and contains at least
-    one workflow file. Returns False if the directory doesn't exist, is empty,
-    or the API call fails.
+    Tri-state, and deliberately so:
+
+    * ``True``  — ``.github/workflows/`` exists and holds at least one file.
+    * ``False`` — GitHub answered 404: the directory genuinely does not exist.
+    * ``None``  — indeterminate. The API errored, timed out, or returned
+      something unparseable, so we do not know.
+
+    ``None`` must never be treated as ``False``. An earlier version returned a
+    plain ``bool`` and collapsed every failure into ``False``, which made this
+    whole guard vacuous in the one situation it exists for: during a GitHub
+    outage the workflows lookup fails too, the helper said "no CI configured",
+    and the PR stayed self-merge eligible — the exact outage merge this check
+    is supposed to block. Fail closed on ``None`` at the call site.
 
     Used to distinguish "repo has no CI at all" from "repo has CI but checks
-    produced no result" (e.g., due to an outage or paths-filter mismatch).
+    produced no result" (e.g., an outage, paths filter mismatch, or
+    concurrency cancellation).
     """
-    # Check if .github/workflows/ exists with any files
-    raw = run_gh(
-        ["api", f"repos/{repo}/contents/.github/workflows", "--jq", "length"],
-        timeout=10,
-    )
-    if not raw:
-        # Directory doesn't exist, API call failed, or rate-limited
-        return False
     try:
-        count = int(raw)
-        return count > 0
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}/contents/.github/workflows", "--jq", "length"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        if stderr:
+            print(f"[gh error] {stderr}", file=sys.stderr)
+        # A 404 is a real answer: the directory does not exist. Anything else
+        # (rate limit, 5xx, auth, network) leaves us genuinely unsure.
+        if "404" in stderr or "Not Found" in stderr:
+            return False
+        return None
+
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw) > 0
     except (ValueError, TypeError):
-        return False
+        return None
 
 
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
@@ -1264,8 +1289,18 @@ def evaluate_pr(
 
     status_checks = pr.get("statusCheckRollup", [])
     if not status_checks:
-        # Distinguish between "repo has no CI at all" and "repo has CI but no result"
-        if repo_has_ci_configured(repo):
+        # Distinguish between "repo has no CI at all" and "repo has CI but no result".
+        # Only a definitive False ("GitHub says .github/workflows does not exist")
+        # may waive the CI requirement. None means we could not determine it —
+        # fail closed, since the likeliest cause of an indeterminate answer is
+        # the same outage that suppressed the checks in the first place.
+        has_ci = repo_has_ci_configured(repo)
+        if has_ci is None:
+            result.reasons.append(
+                "CI checks not found and could not determine whether the repo has "
+                "workflows configured (GitHub API error) — failing closed"
+            )
+        elif has_ci:
             result.reasons.append(
                 "CI checks not found; repo has workflows configured but produced no check results "
                 "(possible GitHub outage, paths filter mismatch, or concurrency cancellation)"
