@@ -25,13 +25,37 @@ guard="$root/scripts/precommit/prevent-master-merge-commits.sh"
 origin="$(git config --get remote.origin.url 2>/dev/null || true)"
 [ -n "$origin" ] || exit 0
 
-# Match owner across both URL shapes: git@host:OWNER/repo(.git) and
-# https://host/OWNER/repo(.git). Anchored so "evil.com/gptme-fake/x" cannot
-# match by containing the substring.
+# Both HOST and OWNER must be trusted, as a pair.
+#
+# Matching the owner alone is not enough, and that bug shipped here first:
+# `https://evil.com/gptme/malicious.git` parses to owner `gptme`, which was on
+# the allowlist, so an attacker only had to name their account after one of
+# ours to get the RCE back. Caught by our own AI reviewer re-reviewing this PR
+# after the first fix (P0, ErikBjare/bob#1122) — the original tests probed
+# `gptme-fake` and `gptme-evil` but never an attacker host with an *exact*
+# allowed owner, so they all passed.
+#
+# Shapes handled: git@host:OWNER/repo(.git), scheme://[user@]host[:port]/OWNER/repo(.git)
+host=""
 owner=""
 case "$origin" in
-    *://*) owner="$(printf '%s' "$origin" | sed -E 's#^[a-z+]+://[^/]+/([^/]+)/.*$#\1#')" ;;
-    *:*) owner="$(printf '%s' "$origin" | sed -E 's#^[^:]+:([^/]+)/.*$#\1#')" ;;
+    *://*)
+        host="$(printf '%s' "$origin" | sed -E 's#^[a-z+]+://([^/]+)/.*$#\1#')"
+        owner="$(printf '%s' "$origin" | sed -E 's#^[a-z+]+://[^/]+/([^/]+)/.*$#\1#')"
+        ;;
+    *:*)
+        host="$(printf '%s' "$origin" | sed -E 's#^([^:]+):.*$#\1#')"
+        owner="$(printf '%s' "$origin" | sed -E 's#^[^:]+:([^/]+)/.*$#\1#')"
+        ;;
+esac
+
+# Strip any userinfo ("git@") and port (":3000") from the host.
+host="${host##*@}"
+host="${host%%:*}"
+
+case "$host" in
+    github.com | forgejo.hassel.bjareho.lt) ;;
+    *) exit 0 ;;
 esac
 
 case "$owner" in
