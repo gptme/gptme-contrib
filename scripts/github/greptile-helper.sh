@@ -545,8 +545,65 @@ trigger)
         exit 0
     fi
 
-    # No review yet — let Greptile auto-review. Don't manually trigger initial review.
-    echo "  [greptile] No review yet on $REPO#$PR_NUMBER. Awaiting Greptile auto-review."
+    # No review yet. Normally let Greptile auto-review: manually triggering the
+    # first review races the bot and produces two reviews.
+    #
+    # But auto-review is not guaranteed to arrive, and this branch used to be an
+    # unconditional dead end. Observed 2026-08-06/07: Greptile stopped
+    # auto-reviewing gptme-contrib entirely (#1380-#1383, zero reviews across
+    # ~9h) while still reviewing gptme and aw-server-rust within ~2 minutes. With
+    # no path to a first review, every affected PR is permanently self-merge
+    # ineligible, because the self-merge gate requires a Greptile review — and
+    # the symptom reads as "PRs aren't ready" rather than "the reviewer never came".
+    #
+    # So after a grace period, trigger once. Every existing protection still
+    # applies: the flock above, the in-flight check, the lifetime cap, and the
+    # trigger-timestamp record.
+    _initial_grace="${GREPTILE_INITIAL_GRACE_MINS:-45}"
+
+    _ts_status=$(_our_trigger_status 2>/dev/null || echo "none")
+    if [ "$_ts_status" = "in-progress" ]; then
+        echo "  [greptile] Initial-review trigger already in flight on $REPO#$PR_NUMBER. Skipping."
+        exit 0
+    fi
+
+    _created=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at // ""' 2>/dev/null) || _created=""
+    _age_mins=0
+    if [ -n "$_created" ]; then
+        _created_epoch=$(date -u -d "$_created" +%s 2>/dev/null \
+            || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_created" +%s 2>/dev/null || echo "")
+        if [ -n "$_created_epoch" ]; then
+            _age_mins=$(( ( $(date -u +%s) - _created_epoch ) / 60 ))
+        fi
+    fi
+
+    if [ "$_age_mins" -lt "$_initial_grace" ]; then
+        echo "  [greptile] No review yet on $REPO#$PR_NUMBER (${_age_mins}m old, grace ${_initial_grace}m). Awaiting Greptile auto-review."
+        exit 0
+    fi
+
+    _total_triggers=$(_total_trigger_count)
+    if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+        echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS) and still no review. Escalate to a human."
+        exit 0
+    fi
+
+    echo "  [greptile] No auto-review on $REPO#$PR_NUMBER after ${_age_mins}m (grace ${_initial_grace}m) — triggering initial review..."
+    _head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || _head_sha=""
+    _trigger_body="@greptileai review"
+    if [ -n "$_head_sha" ]; then
+        _trigger_body="$_trigger_body
+
+<!-- greptile-helper head-sha: $_head_sha -->"
+    fi
+    if BOB_GREPTILE_HELPER=1 gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
+        if ! date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null; then
+            echo "  [greptile] Warning: could not write trigger-timestamp file; propagation-delay guard disabled for this trigger."
+        fi
+        echo "  [greptile] Initial review triggered."
+    else
+        echo "  [greptile] Trigger failed (non-fatal)."
+    fi
     exit 0
     ;;
 

@@ -661,8 +661,35 @@ def test_score_5_with_new_commits_needs_rereview():
     assert status.stdout.strip() == "needs-re-review"
 
 
-def test_trigger_skips_unreviewed_pr_initial_review():
-    """Trigger on old PR with no review → skips (awaiting Greptile auto-review)."""
+def test_trigger_waits_for_auto_review_within_grace():
+    """No review yet and inside the grace window → do not race Greptile's auto-review.
+
+    This is the primary behaviour: manually triggering the first review races the
+    bot and yields two reviews.
+    """
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=10)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Awaiting" in result.stdout
+    assert (
+        not gh_log
+    ), "gh pr comment should NOT have been called inside the grace window"
+
+
+def test_trigger_falls_back_to_initial_review_after_grace():
+    """Auto-review never arrived → trigger once, rather than dead-ending forever.
+
+    Regression test for 2026-08-06/07: Greptile stopped auto-reviewing
+    gptme-contrib entirely (#1380-#1383) while still reviewing other repos in
+    minutes. This branch previously returned unconditionally, so those PRs could
+    never obtain the Greptile review the self-merge gate requires.
+    """
     fixture = {
         "pr_number": 999,
         "raw_comments": [],
@@ -672,8 +699,8 @@ def test_trigger_skips_unreviewed_pr_initial_review():
     }
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert "Awaiting" in result.stdout
-    assert not gh_log, "gh pr comment should NOT have been called"
+    assert "triggering initial review" in result.stdout
+    assert gh_log, "a trigger comment should have been posted after the grace window"
 
 
 def test_trigger_skips_fresh_pr():
