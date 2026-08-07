@@ -553,6 +553,7 @@ def _fetch_greptile_review_data(
                     nodes {{
                       author {{ login }}
                       createdAt
+                      body
                     }}
                   }}
                 }}
@@ -708,6 +709,32 @@ def _is_bot_author(author: str) -> bool:
     return lower.endswith("[bot]") or lower in _BOT_EXACT_NAMES
 
 
+# Inline findings posted by Bob's self-hosted AI reviewer carry this marker.
+# They are machine-authored but posted through Bob's *user* account rather than
+# a GitHub App, so `_is_bot_author` cannot see them — the login is a perfectly
+# ordinary human-looking one.
+_AI_REVIEW_FINDING_MARKER = "<!-- bob-ai-review-finding -->"
+
+
+def _is_ai_review_thread(comments: list[dict[str, Any]]) -> bool:
+    """True when a review thread was opened by an automated reviewer.
+
+    Without this, Bob's own AI review makes its PRs *less* mergeable: each
+    inline finding opens a thread attributed to Bob's user account, which
+    ``fetch_unresolved_human_threads`` then reports as unacknowledged human
+    review feedback and the self-merge gate blocks on. Observed live on
+    gptme/gptme-contrib#1383 — "4 unresolved human review thread(s) from:
+    TimeToBuildBob", where all four were the AI reviewer's own findings.
+
+    Detection is by explicit marker rather than by author login, because the
+    login is shared with Bob's genuine human-directed comments; only the
+    reviewer stamps this marker.
+    """
+    if not comments:
+        return False
+    return _AI_REVIEW_FINDING_MARKER in (comments[0].get("body") or "")
+
+
 def fetch_unresolved_human_threads(
     repo: str,
     pr_number: int,
@@ -742,6 +769,10 @@ def fetch_unresolved_human_threads(
             continue
         author = (comments[0].get("author") or {}).get("login", "")
         if _is_bot_author(author):
+            continue
+        # Automated review findings are not human feedback, even though they
+        # are posted through a user account rather than a GitHub App.
+        if _is_ai_review_thread(comments):
             continue
         total += 1
         if not thread.get("isResolved", False):
