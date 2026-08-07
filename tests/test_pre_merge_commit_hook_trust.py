@@ -64,6 +64,16 @@ def _run_hook(repo: Path) -> None:
         "https://github.com/gptme-evil/x.git",
         "https://github.com/notErikBjare/x.git",
         None,  # no origin at all
+        # --- attacker HOST carrying an EXACT allowed owner -------------------
+        # The first fix checked the owner and ignored the host, so all of these
+        # executed the payload while the cases above correctly refused. The
+        # original matrix only ever varied the owner, so nothing caught it.
+        # An attacker just names their account after one of ours.
+        "https://evil.com/gptme/malicious.git",
+        "git@evil.com:gptme/malicious.git",
+        "https://evil.com/ErikBjare/bob.git",
+        "ssh://git@evil.com:3000/ErikBjare/bob.git",
+        "https://github.com.evil.com/gptme/x.git",
     ],
 )
 def test_untrusted_repo_guard_is_not_executed(
