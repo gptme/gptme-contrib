@@ -342,6 +342,26 @@ class TestSwitchTo:
         assert result.ok is False
         assert mgr.get_active_subscription() == "alice"
 
+    def test_probe_ok_bypasses_expiry_check(self, mgr: SlotManager) -> None:
+        """probe_ok=True allows switching to a slot with an expired access token.
+
+        An expired access token with a valid refresh token is NOT a dead credential
+        — CC auto-refreshes on first use. When the caller has already confirmed this
+        via an online probe, probe_ok=True bypasses the offline freshness check.
+        """
+        self._seed(mgr, bob_ms=_ms_from_now(-3600), alice_ms=_ms_from_now(3600))
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+        assert result.ok is True
+        assert mgr.get_active_subscription() == "bob"
+
+    def test_probe_ok_still_rejects_missing_slot(self, mgr: SlotManager) -> None:
+        """probe_ok=True bypasses freshness but not existence checks."""
+        mgr.live_path.symlink_to(".credentials.json.alice")
+        # No slot files at all
+        result = mgr.switch_to("bob", "probe", probe_ok=True)
+        assert result.ok is False
+        assert "missing" in result.reason.lower()
+
     def test_missing_slot_rejected(self, mgr: SlotManager) -> None:
         mgr.live_path.symlink_to(".credentials.json.alice")
         # No slot files at all

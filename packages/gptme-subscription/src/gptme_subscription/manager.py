@@ -344,10 +344,14 @@ class SubscriptionManager:
 
     # ---- Switch ----
 
-    def switch_to(self, sub: str, reason: str, force: bool = False) -> bool:
+    def switch_to(
+        self, sub: str, reason: str, force: bool = False, probe_ok: bool = False
+    ) -> bool:
         """Flip the live symlink to a named slot. Returns True on success."""
         self._last_switch_deferred = False
-        result = self._slot_manager.switch_to(sub, reason, force=force)
+        result = self._slot_manager.switch_to(
+            sub, reason, force=force, probe_ok=probe_ok
+        )
         if not result.ok:
             if result.deferred_locks and not force:
                 self._last_switch_deferred = True

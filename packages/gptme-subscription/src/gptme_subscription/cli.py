@@ -351,6 +351,27 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         print("  use --execute to apply")
         return 0
     ok = sm.switch_to(target, f"manual switch via --switch {target}", force=True)
+    if not ok:
+        # Retry with probe_ok=True if the slot has an expired access token but a
+        # valid refresh token — CC auto-refreshes on first use, so this is safe.
+        fresh, fresh_reason = sm._slot_manager.slot_is_fresh(target)
+        if not fresh and "expired" in fresh_reason.lower():
+            print(
+                f"  Access token expired; probing {target!r} to verify refresh token...",
+                file=sys.stderr,
+            )
+            _, probe_ok, probe_msg = probe_credential(
+                sm.config.slot_path(target), target, usage_script=sm.config.usage_script
+            )
+            if probe_ok:
+                ok = sm.switch_to(
+                    target,
+                    f"manual switch via --switch {target} (probe_ok)",
+                    force=True,
+                    probe_ok=True,
+                )
+            else:
+                print(f"  Probe failed ({probe_msg}); cannot switch.", file=sys.stderr)
     if ok:
         # Protect the operator's explicit choice: write a manual-switch hold so a
         # concurrent automated --execute doesn't immediately rebalance / forward-
