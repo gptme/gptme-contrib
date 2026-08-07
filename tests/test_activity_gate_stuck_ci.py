@@ -135,8 +135,7 @@ def test_stuck_inflight_emits_only_after_threshold(
         [
             "bash",
             "-c",
-            'jq -r \'[.statusCheckRollup[] | .conclusion // "pending"] | sort | join(",")\''
-            " | sha256sum | cut -d' ' -f1",
+            f"jq -r '{_extract_hash_program()}' | sha256sum | cut -d' ' -f1",
         ],
         input=json.dumps(pr),
         capture_output=True,

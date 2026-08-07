@@ -667,7 +667,7 @@ check_ci_failures() {
             # not moved for stuck_secs — the state file's mtime is the clock.
             if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$ci_hash" ]; then
                 local mtime age
-                mtime=$(stat -c %Y "$state_file" 2>/dev/null || stat -f %m "$state_file" 2>/dev/null || echo "$now")
+                mtime=$(stat -c %Y "$state_file" 2>/dev/null || stat -f %m "$state_file" 2>/dev/null) || continue
                 age=$(( now - mtime ))
                 [ "$age" -ge "$stuck_secs" ] || continue
                 detail="CI stuck: checks in flight ${age}s with no state change"
