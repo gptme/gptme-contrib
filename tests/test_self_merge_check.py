@@ -1550,3 +1550,36 @@ def test_fetch_pr_raises_on_missing_number() -> None:
     ):
         with pytest.raises(RuntimeError, match="PR data mismatch.*1257.*None"):
             self_merge_check.fetch_pr("gptme/gptme-contrib", 1257)
+
+
+def test_is_test_file_spec_ts() -> None:
+    """Playwright-style .spec.ts files must be recognised as test files."""
+    assert self_merge_check.is_test_file("e2e/demo-real-chat.spec.ts")
+    assert self_merge_check.is_test_file("tests/foo.spec.ts")
+    assert self_merge_check.is_test_file("src/components/Button.spec.tsx")
+
+
+def test_is_test_file_spec_js() -> None:
+    """Jest/Vitest .spec.js files must be recognised as test files."""
+    assert self_merge_check.is_test_file("e2e/login.spec.js")
+    assert self_merge_check.is_test_file("src/utils/helper.spec.js")
+
+
+def test_is_test_file_e2e_directory() -> None:
+    """Files under an e2e/ directory must be recognised as test files."""
+    assert self_merge_check.is_test_file("e2e/fixtures/data.json")
+    assert self_merge_check.is_test_file("src/e2e/helpers.ts")
+
+
+def test_is_test_file_spec_plain_name_not_matched() -> None:
+    """A file named 'spec.ts' without a leading dot must NOT be a test file."""
+    assert not self_merge_check.is_test_file("src/spec.ts")
+    assert not self_merge_check.is_test_file("docs/spec.md")
+
+
+def test_classify_category_e2e_spec_ts_is_test_only() -> None:
+    """A PR touching only e2e/*.spec.ts files must be 'test-only' (regression: gptme-cloud#847)."""
+    category, reasons = self_merge_check.classify_category(
+        ["e2e/demo-real-chat.spec.ts"]
+    )
+    assert category == "test-only", reasons

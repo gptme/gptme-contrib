@@ -85,7 +85,7 @@ SPEC_LIKE_DOCS = {
     "TASKS.md",
     "OVERVIEW.md",
 }
-TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
+TEST_MARKERS = ("tests/", "test_", "_test.", ".test.", ".spec.", "e2e/")
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
     "scripts/deploy",
