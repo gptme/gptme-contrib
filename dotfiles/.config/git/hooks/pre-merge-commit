@@ -19,8 +19,26 @@ set -uo pipefail
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$root" ] || exit 0
 
-guard="$root/scripts/precommit/prevent-master-merge-commits.sh"
+guard_rel="scripts/precommit/prevent-master-merge-commits.sh"
+guard="$root/$guard_rel"
 [ -x "$guard" ] || exit 0
+
+# The guard must be byte-identical to the version already committed at HEAD.
+#
+# A trusted origin does NOT make merged-in content trusted, and this hook runs
+# at the worst possible moment for that distinction: pre-merge-commit fires
+# *after* the merge has been applied to the worktree and before the commit
+# object exists. So a branch from an untrusted fork can introduce — or modify —
+# this exact file, and merging it into a repo whose origin is on the allowlist
+# below would execute the attacker's version with the user's privileges. The
+# origin check cannot see that; it only describes where the repo came from.
+#
+# Comparing blob hashes covers both shapes: a guard the merge *added* has no
+# HEAD blob, and a guard the merge *edited* has a different one.
+# (Found by our own AI reviewer, third P0 on this file — ErikBjare/bob#1122.)
+head_blob="$(git rev-parse "HEAD:$guard_rel" 2>/dev/null || true)"
+work_blob="$(git hash-object "$guard" 2>/dev/null || true)"
+[ -n "$head_blob" ] && [ "$head_blob" = "$work_blob" ] || exit 0
 
 origin="$(git config --get remote.origin.url 2>/dev/null || true)"
 [ -n "$origin" ] || exit 0

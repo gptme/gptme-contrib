@@ -33,20 +33,42 @@ HOOK = (
 )
 
 
-def _make_repo(tmp_path: Path, origin: str | None) -> tuple[Path, Path]:
-    """A git repo carrying a 'malicious' guard that touches a sentinel file."""
+def _git(repo: Path, *args: str) -> None:
+    # `--no-verify` on the fixture commits: Bob's global core.hooksPath points
+    # at the real hook set, which this temp repo cannot satisfy. Scoped to the
+    # fixture rather than overriding hooksPath, which has leaked before.
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def _make_repo(
+    tmp_path: Path, origin: str | None, *, commit_guard: bool = True
+) -> tuple[Path, Path]:
+    """A git repo carrying a guard that touches a sentinel file when executed.
+
+    ``commit_guard=False`` leaves the guard present in the worktree but absent
+    from HEAD — the shape a merge produces when an incoming branch *introduces*
+    the file. The hook must refuse that even in a trusted repo.
+    """
     repo = tmp_path / "repo"
     (repo / "scripts" / "precommit").mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
     if origin is not None:
-        subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin", origin], check=True
-        )
+        _git(repo, "remote", "add", "origin", origin)
+
+    # A commit must exist so HEAD resolves at all.
+    (repo / "README").write_text("x\n")
+    _git(repo, "add", "README")
+    _git(repo, "commit", "--no-verify", "-qm", "init")
 
     sentinel = tmp_path / "PWNED"
     guard = repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh"
     guard.write_text(f"#!/usr/bin/env bash\ntouch {sentinel}\nexit 0\n")
     guard.chmod(0o755)
+    if commit_guard:
+        _git(repo, "add", str(guard))
+        _git(repo, "commit", "--no-verify", "-qm", "add guard")
     return repo, sentinel
 
 
@@ -112,3 +134,44 @@ def test_absent_guard_is_a_noop(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0
     assert proc.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# A trusted ORIGIN does not make merged-in CONTENT trusted.
+#
+# pre-merge-commit fires after the merge has been applied to the worktree and
+# before the commit object exists. So a branch from an untrusted fork can carry
+# this exact file into a repo whose origin is on the allowlist, and the hook
+# would execute the attacker's version. The origin check cannot see that — it
+# only describes where the repo came from.
+#
+# Third P0 our own AI reviewer found on this file (ErikBjare/bob#1122); the
+# previous two rounds of tests only ever varied the origin URL.
+# ---------------------------------------------------------------------------
+
+TRUSTED = "git@github.com:gptme/gptme-contrib.git"
+
+
+def test_guard_introduced_by_the_merge_is_not_executed(tmp_path: Path) -> None:
+    """The file is in the worktree but not at HEAD — i.e. the merge added it."""
+    repo, sentinel = _make_repo(tmp_path, TRUSTED, commit_guard=False)
+    _run_hook(repo)
+    assert not sentinel.exists(), "executed a guard that the merge introduced"
+
+
+def test_guard_modified_by_the_merge_is_not_executed(tmp_path: Path) -> None:
+    """Committing a benign guard then having the merge edit it must not help."""
+    repo, sentinel = _make_repo(tmp_path, TRUSTED, commit_guard=True)
+    guard = repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh"
+    # The merge rewrites the committed guard with a hostile payload.
+    guard.write_text(f"#!/usr/bin/env bash\ntouch {sentinel}\nexit 0\n# owned\n")
+    guard.chmod(0o755)
+    _run_hook(repo)
+    assert not sentinel.exists(), "executed a guard the merge had modified"
+
+
+def test_committed_unmodified_guard_still_runs(tmp_path: Path) -> None:
+    """The legitimate case must keep working, or the hook is just disabled."""
+    repo, sentinel = _make_repo(tmp_path, TRUSTED, commit_guard=True)
+    _run_hook(repo)
+    assert sentinel.exists(), "the repo's own committed guard did not run"
