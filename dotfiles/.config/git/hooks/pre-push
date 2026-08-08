@@ -72,12 +72,23 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # guard is a backstop anyway: pre-commit already checks each commit's
         # staged diff as it is created, so a skip here does not leave the
         # commits unexamined.
+        #
+        # 0 means "no limit — always scan", which is what the skip message below
+        # tells you to set. It has to be special-cased: `_range_count -gt 0` is
+        # true for every non-empty range, so a plain comparison made
+        # MASS_DELETE_COMMIT_RANGE_LIMIT=0 disable the guard on every push —
+        # the exact opposite of the documented override, and silently.
+        # A non-numeric value falls back to the default rather than erroring.
+        _range_limit="${MASS_DELETE_COMMIT_RANGE_LIMIT:-500}"
+        case "$_range_limit" in
+            '' | *[!0-9]*) _range_limit=500 ;;
+        esac
         # shellcheck disable=SC2086  # $range intentionally unquoted (may contain --not --remotes=origin)
         _range_count=$(git rev-list --count $range 2>/dev/null || echo 0)
-        if [ "$_range_count" -gt "${MASS_DELETE_COMMIT_RANGE_LIMIT:-500}" ]; then
+        if [ "$_range_limit" -ne 0 ] && [ "$_range_count" -gt "$_range_limit" ]; then
             # Never skip silently — a quiet downgrade of a safety check is its own trap.
             echo "ℹ️  pre-push: skipping per-commit mass-delete scan" >&2
-            echo "   Range: $_range_count commits (limit ${MASS_DELETE_COMMIT_RANGE_LIMIT:-500})." >&2
+            echo "   Range: $_range_count commits (limit $_range_limit)." >&2
             echo "   Normal for a first push to a new remote. Each commit was still" >&2
             echo "   checked by pre-commit when it was created." >&2
             echo "   Force the full scan with: MASS_DELETE_COMMIT_RANGE_LIMIT=0 (very slow)" >&2
@@ -106,20 +117,54 @@ if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
         [ "$local_sha" = "$ZERO" ] && continue
         [ "$remote_sha" = "$ZERO" ] && continue
 
-        # Fetch to get the latest remote state (updates reflog).
+        # This guard is about ORIGIN's history being force-reset, so the whole
+        # check — not just the fetch — is meaningless when pushing elsewhere.
         #
-        # This guard is about origin's history being force-reset, so it is only
-        # meaningful when we are pushing to origin. Pushing to a mirror or any
-        # other remote should not trigger a network round-trip to origin that
-        # serves no protective purpose — and on a slow or unreachable origin
-        # that round-trip is pure latency on every mirror push.
+        # Skipping only the fetch was a half-fix: the reflog comparison below
+        # reads refs/remotes/origin/$branch unconditionally, so a stale
+        # non-fast-forward transition left by some earlier fetch still blocked
+        # mirror pushes with an error about a remote you were not pushing to.
         #
         # Git passes the remote NAME as $1. Empty means invoked outside git
         # (tests) — keep the old behaviour there rather than silently skipping.
+        #
+        # Compare canonical repository identities, not raw URL strings. Git
+        # accepts several spellings for the same remote (HTTPS with/without
+        # `.git`, scp-style SSH, case variants), and treating an alias spelling
+        # as a mirror would bypass the origin force-reset guard. Unknown URL
+        # shapes fail closed by staying distinct.
+        _canonical_remote_url() {
+            printf '%s\n' "$1" | sed -E \
+                -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^@/]+@)?##' \
+                -e 's#^[^/@:]+@##' \
+                -e 's#^([^/:]+):#\1/#' \
+                -e 's#^[^/]+@##' \
+                -e 's#/$##' \
+                -e 's#\.git$##' | tr '[:upper:]' '[:lower:]'
+        }
+
         _remote_branch="${remote_ref#refs/heads/}"
-        if [ "${PUSH_REMOTE_NAME:-}" = "origin" ] || [ -z "${PUSH_REMOTE_NAME:-}" ]; then
-            git fetch origin "$_remote_branch" --quiet 2>/dev/null || true
+        if [ -n "${PUSH_REMOTE_NAME:-}" ] && [ "${PUSH_REMOTE_NAME:-}" != "origin" ]; then
+            # `--push` on BOTH sides: the question is where a push LANDS, and
+            # `remote.<name>.pushurl` overrides `url` for exactly that. Reading
+            # the fetch URL inverted the guard in the case that matters most —
+            # a remote whose `url` differs from origin's but whose `pushurl` IS
+            # origin's compares unequal, so the guard was skipped for a push
+            # that really does rewrite origin. `--push` falls back to `url`
+            # when no pushurl is configured, so this is a strict refinement.
+            _origin_url="$(git remote get-url --push origin 2>/dev/null || true)"
+            _push_url="$(git remote get-url --push "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
+            _origin_identity="$(_canonical_remote_url "$_origin_url")"
+            _push_identity="$(_canonical_remote_url "$_push_url")"
+            # Unknown/unresolvable remote: fall through to the guard rather than
+            # skipping it — an unrecognised name is not evidence of a mirror.
+            if [ -n "$_origin_identity" ] && [ -n "$_push_identity" ] && [ "$_origin_identity" != "$_push_identity" ]; then
+                continue
+            fi
         fi
+
+        # Fetch to get the latest remote state (updates reflog).
+        git fetch origin "$_remote_branch" --quiet 2>/dev/null || true
 
         # Read the two most recent entries from the remote branch reflog.
         # If the previous entry is NOT an ancestor of the current entry, a
