@@ -1,0 +1,220 @@
+"""The pre-push hook's origin-scoping and range-limit override must mean what they say.
+
+Two defects our own AI reviewer found on gptme/gptme-contrib#1380
+(ErikBjare/bob#1122), both of the same shape: a documented behaviour that the
+code does not actually implement.
+
+* The force-reset guard was scoped to origin by wrapping *only* the ``git fetch``
+  in a remote-name check. The reflog comparison after it still read
+  ``refs/remotes/origin/$branch`` unconditionally, so pushing to a mirror was
+  still blocked by an origin force-reset.
+* The skip message tells you to set ``MASS_DELETE_COMMIT_RANGE_LIMIT=0`` to force
+  the full scan, but the comparison was ``count -gt limit`` — so 0 made *every*
+  non-empty range take the skip branch and disabled the guard entirely.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+HOOK = ROOT / "dotfiles" / ".config" / "git" / "hooks" / "pre-push"
+
+ZERO = "0" * 40
+FORCE_RESET_ERROR = "was force-reset"
+SKIP_MESSAGE = "skipping per-commit mass-delete scan"
+
+
+def _git(repo: Path, *args: str) -> str:
+    # `--no-verify` on fixture commits: Bob's global core.hooksPath points at the
+    # real hook set, which these temp repos cannot satisfy.
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    )
+    return proc.stdout.strip()
+
+
+def _init(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    # A dead origin URL: the hook's `git fetch origin` fails harmlessly (it is
+    # `|| true`), which keeps the reflog we plant below under our control.
+    _git(repo, "remote", "add", "origin", str(tmp_path / "nonexistent.git"))
+    return repo
+
+
+def _commit(repo: Path, name: str, body: str = "x\n") -> str:
+    (repo / name).write_text(body)
+    _git(repo, "add", name)
+    _git(repo, "commit", "--no-verify", "-qm", f"add {name}")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _run_hook(
+    repo: Path, stdin: str, *argv: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    full_env = {**os.environ, **(env or {})}
+    return subprocess.run(
+        [str(HOOK), *argv],
+        cwd=repo,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=full_env,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Force-reset guard: scoped to origin, in full.
+# ---------------------------------------------------------------------------
+
+
+def _repo_with_force_reset_reflog(tmp_path: Path) -> tuple[Path, str]:
+    """A repo whose origin/master reflog holds a non-fast-forward transition."""
+    repo = _init(tmp_path)
+    base = _commit(repo, "README")
+    _git(repo, "checkout", "-q", "-b", "sideline", base)
+    diverged = _commit(repo, "sideline.txt")
+    _git(repo, "checkout", "-q", "-")
+
+    # Two reflog entries where the older is NOT an ancestor of the newer —
+    # exactly what a human force-resetting origin/master leaves behind.
+    _git(repo, "update-ref", "refs/remotes/origin/master", diverged)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+
+    head = _commit(repo, "local.txt")
+    return repo, head
+
+
+def test_force_reset_guard_fires_when_pushing_to_origin(tmp_path: Path) -> None:
+    """The guard itself must still work — otherwise the fix just disables it."""
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        "origin",
+        "git@github.com:o/r.git",
+    )
+    assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
+    assert proc.returncode == 1
+
+
+@pytest.mark.parametrize("remote", ["mirror", "forgejo", "backup"])
+def test_force_reset_guard_does_not_block_a_non_origin_push(
+    tmp_path: Path, remote: str
+) -> None:
+    """The regression: a stale origin reflog must not block a mirror push.
+
+    Skipping only the fetch left the reflog comparison in place, so this still
+    exited 1 with an error about a remote the user was not pushing to.
+    """
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        remote,
+        f"git@example.com:o/{remote}.git",
+    )
+    assert FORCE_RESET_ERROR not in proc.stderr, proc.stderr
+
+
+def test_force_reset_guard_still_applies_when_invoked_outside_git(
+    tmp_path: Path,
+) -> None:
+    """No remote name (direct invocation) keeps the old, protective behaviour."""
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    proc = _run_hook(repo, f"refs/heads/master {head} refs/heads/master {head}\n")
+    assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
+    assert proc.returncode == 1
+
+
+# ---------------------------------------------------------------------------
+# MASS_DELETE_COMMIT_RANGE_LIMIT: 0 means "no limit", as documented.
+# ---------------------------------------------------------------------------
+
+
+def _repo_with_mass_deletion(tmp_path: Path) -> tuple[Path, str, str]:
+    """A repo whose tip commit deletes more files than MASS_DELETE_THRESHOLD=1."""
+    repo = _init(tmp_path)
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (repo / name).write_text("x\n")
+    _git(repo, "add", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "seed")
+    base = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "rm", "-q", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "delete everything")
+    head = _git(repo, "rev-parse", "HEAD")
+    return repo, base, head
+
+
+def test_range_limit_zero_forces_the_full_scan(tmp_path: Path) -> None:
+    """The regression: 0 is the documented "force the scan" value.
+
+    With `count -gt 0`, every non-empty range satisfied the skip condition, so
+    the override silently disabled the guard it claimed to force on.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        "git@github.com:o/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    # The scan ran, and the mass deletion it exists to catch was caught.
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_range_limit_above_the_range_still_scans(tmp_path: Path) -> None:
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        "git@github.com:o/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "500", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1
+
+
+def test_range_limit_smaller_than_range_skips(tmp_path: Path) -> None:
+    """The O(N) escape hatch must keep working for a genuinely huge range."""
+    repo = _init(tmp_path)
+    base = _commit(repo, "README")
+    for i in range(3):
+        _commit(repo, f"f{i}.txt")
+    head = _git(repo, "rev-parse", "HEAD")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        "git@github.com:o/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1"},
+    )
+    assert SKIP_MESSAGE in proc.stderr, proc.stderr
+
+
+def test_non_numeric_range_limit_falls_back_to_the_default(tmp_path: Path) -> None:
+    """A typo must not error out or disable the guard."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        "git@github.com:o/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "lots", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert "integer expression expected" not in proc.stderr, proc.stderr
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1
