@@ -13,6 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from credential_slots import reason_is_refreshable
+
 from gptme_subscription.auth import (
     check_credential_file,
     format_reauth_instructions,
@@ -354,10 +356,14 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
     if not ok:
         # Retry with probe_ok=True if the slot has an expired access token but a
         # valid refresh token — CC auto-refreshes on first use, so this is safe.
-        fresh, fresh_reason = sm._slot_manager.slot_is_fresh(target)
-        if not fresh and "expired" in fresh_reason.lower():
+        # ``reason_is_refreshable`` lives next to ``slot_is_fresh`` so the two
+        # can't drift; it covers both "expired Nm ago" and "expires within
+        # grace", and excludes missing/unreadable slots (no probe can fix those).
+        fresh, fresh_reason = sm.slot_is_fresh(target)
+        if not fresh and reason_is_refreshable(fresh_reason):
             print(
-                f"  Access token expired; probing {target!r} to verify refresh token...",
+                f"  Access token stale ({fresh_reason}); "
+                f"probing {target!r} to verify refresh token...",
                 file=sys.stderr,
             )
             _, probe_ok, probe_msg = probe_credential(

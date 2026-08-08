@@ -20,6 +20,7 @@ from credential_slots import (
     SwitchResult,
     compute_slot_fingerprint,
     read_slot_expiry,
+    reason_is_refreshable,
     slot_is_fresh,
 )
 
@@ -174,6 +175,49 @@ class TestSlotIsFresh:
         _write_slot(p, _ms_from_now(3600))
         ok, _ = slot_is_fresh(p)
         assert ok is True
+
+
+class TestReasonIsRefreshable:
+    """Classify ``slot_is_fresh`` reasons into probeable vs hopeless.
+
+    Driven through real slot states rather than hand-written strings so the
+    predicate can't drift from the reasons ``slot_is_fresh`` actually emits.
+    """
+
+    def test_expired_reason_is_refreshable(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600))
+        fresh, reason = mgr.slot_is_fresh("bob")
+        assert fresh is False
+        assert reason_is_refreshable(reason) is True
+
+    def test_within_grace_reason_is_refreshable(self, mgr: SlotManager) -> None:
+        """Regression: the grace reason says "expire**s**", not "expire**d**".
+
+        A naive ``"expired" in reason`` check misses this branch entirely, which
+        made ``--switch`` fail hard for a slot that only needed a token refresh.
+        """
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(60))
+        fresh, reason = mgr.slot_is_fresh("bob", grace_seconds=300)
+        assert fresh is False
+        assert "expired" not in reason.lower()  # the trap this predicate exists for
+        assert reason_is_refreshable(reason) is True
+
+    def test_missing_slot_reason_is_not_refreshable(self, mgr: SlotManager) -> None:
+        fresh, reason = mgr.slot_is_fresh("bob")
+        assert fresh is False
+        assert reason_is_refreshable(reason) is False
+
+    def test_unreadable_slot_reason_is_not_refreshable(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), expires_at_ms=None)
+        fresh, reason = mgr.slot_is_fresh("bob")
+        assert fresh is False
+        assert reason_is_refreshable(reason) is False
+
+    def test_valid_reason_is_not_refreshable(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600))
+        fresh, reason = mgr.slot_is_fresh("bob")
+        assert fresh is True
+        assert reason_is_refreshable(reason) is False
 
 
 class TestGetActiveSubscription:

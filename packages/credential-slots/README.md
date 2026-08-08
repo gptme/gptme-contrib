@@ -61,7 +61,7 @@ uv pip install -e packages/credential-slots
 
 ```python
 from pathlib import Path
-from credential_slots import SlotManager
+from credential_slots import SlotManager, reason_is_refreshable
 
 mgr = SlotManager(
     creds_dir=Path.home() / ".claude",
@@ -81,6 +81,13 @@ mgr.get_available_subscriptions()   # ["bob", "alice"]
 
 # Safety checks
 ok, reason = mgr.slot_is_fresh("bob")
+# A stale access token is often still recoverable: CC refreshes it from the
+# stored refresh token on first use. Classify the reason instead of matching
+# its text — "expired 7m ago" and "expires within grace" are both probeable,
+# while "slot missing"/"unreadable" are not.
+if not ok and reason_is_refreshable(reason):
+    if online_probe_succeeds("bob"):
+        mgr.switch_to("bob", "operator switch", probe_ok=True)  # skips the expiry gate
 drift = mgr.detect_live_slot_drift()
 if drift and drift["drift"]:
     warn("live creds file matches no named slot — run /login then persist")
