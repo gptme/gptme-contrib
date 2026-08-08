@@ -23,7 +23,7 @@ guard_rel="scripts/precommit/prevent-master-merge-commits.sh"
 guard="$root/$guard_rel"
 [ -x "$guard" ] || exit 0
 
-# The guard must be byte-identical to the version already committed at HEAD.
+# The guard must be byte-identical to the version on ORIGIN's default branch.
 #
 # A trusted origin does NOT make merged-in content trusted, and this hook runs
 # at the worst possible moment for that distinction: pre-merge-commit fires
@@ -33,12 +33,36 @@ guard="$root/$guard_rel"
 # below would execute the attacker's version with the user's privileges. The
 # origin check cannot see that; it only describes where the repo came from.
 #
-# Comparing blob hashes covers both shapes: a guard the merge *added* has no
-# HEAD blob, and a guard the merge *edited* has a different one.
-# (Found by our own AI reviewer, third P0 on this file — ErikBjare/bob#1122.)
-head_blob="$(git rev-parse "HEAD:$guard_rel" 2>/dev/null || true)"
+# The first attempt at this anchored to `HEAD:$guard_rel`, which is NOT a trust
+# anchor: `gh pr checkout` moves HEAD onto the contributor's branch, so a
+# hostile PR that carries this exact file makes worktree and HEAD agree, and the
+# next `git merge` in that checkout execs the payload. Anchoring to HEAD only
+# proves "the worktree matches the branch you are standing on" — it says nothing
+# about who wrote that branch. (Fourth P0 on this file, all four found by our own
+# AI reviewer — ErikBjare/bob#1122.)
+#
+# `refs/remotes/origin/*` is the anchor that actually means something: those refs
+# only move on `git fetch origin`, so a match proves the guard is the version
+# that already landed on the trusted org's default branch. A PR branch — even
+# one pushed to origin — is never origin/HEAD, origin/master, or origin/main.
+#
+# Consequences, both intentional:
+#   * A merge that ADDS or EDITS the guard has no matching origin blob, so the
+#     hook goes inert for that merge. It does not abort the merge: refusing
+#     would break every legitimate PR that updates the guard, and once the
+#     origin anchor is in place there is no escalation path to protect against
+#     (the payload becoming the local HEAD no longer grants it execution).
+#   * While you are locally editing the guard, the hook is inert. Fail closed.
+trusted_blob=""
+for _trusted_ref in \
+    refs/remotes/origin/HEAD \
+    refs/remotes/origin/master \
+    refs/remotes/origin/main; do
+    trusted_blob="$(git rev-parse --quiet --verify "$_trusted_ref:$guard_rel" 2>/dev/null || true)"
+    [ -n "$trusted_blob" ] && break
+done
 work_blob="$(git hash-object "$guard" 2>/dev/null || true)"
-[ -n "$head_blob" ] && [ "$head_blob" = "$work_blob" ] || exit 0
+[ -n "$trusted_blob" ] && [ "$trusted_blob" = "$work_blob" ] || exit 0
 
 origin="$(git config --get remote.origin.url 2>/dev/null || true)"
 [ -n "$origin" ] || exit 0
