@@ -17,10 +17,24 @@
 #   1. Reduce 30min age guard → 15min (reviews complete in 5-15min)
 #   2. Re-request after addressing feedback once new commits land after a Greptile review
 #
-# Initial review policy: Greptile automatically reviews all new PRs. We NEVER manually
-# trigger initial reviews. Only re-reviews (new commits after the latest Greptile
-# review) are triggered.
-# Status 'awaiting-initial-review' is returned for ALL unreviewed PRs regardless of age.
+# Initial review policy: Greptile automatically reviews new PRs (drafts included —
+# verified 2026-08-08 across gptme/gptme, gptme-contrib and gptme-cloud: bot reviews
+# land 1-9 min after a draft PR opens, with no trigger comment). So we do not race it;
+# re-reviews (new commits after the latest Greptile review) are the normal trigger path.
+#
+# Exception: auto-review is not guaranteed. On 2026-08-06/07 Greptile stopped reviewing
+# gptme-contrib entirely (#1380-#1383, ~9h) while still reviewing other repos in minutes,
+# leaving every affected PR permanently self-merge ineligible. So after
+# GREPTILE_INITIAL_GRACE_MINS (default 45) with no review, `trigger` posts exactly one
+# initial-review request. See the fallback block in the `trigger` command.
+#
+# NOTE: `check` and `status` still encode the older never-trigger policy — `check` exits 1
+# and `status` prints 'awaiting-initial-review' for ALL unreviewed PRs regardless of age.
+# Callers that gate on them therefore never reach the fallback: pr-greptile-trigger.py
+# (ACTIONABLE_STATES = {"stale", "needs-re-review"}) and project-monitoring-lib.sh's
+# cross-repo `none|stale` case both skip. The fallback is reached via the self-merge path,
+# which calls `trigger` directly when self-merge-check.py reports "Greptile review not
+# found", and via direct manual invocation.
 #
 # Root cause of spam incidents:
 #   Multiple concurrent sessions each check "any trigger comments?" → all see 0
@@ -316,14 +330,19 @@ _our_trigger_status() {
         if [ -n "$_local_ts" ]; then
             # Only count this entry if it's from the CURRENT review cycle
             # (i.e., the timestamp is after the last Greptile review).
-            # Note: when review_cutoff is empty (no prior Greptile review), skip the
-            # fast-path — the trigger command only writes this file during re-reviews,
-            # which always have a non-empty cutoff, so this invariant holds.
+            # When review_cutoff is EMPTY there is no prior Greptile review at all,
+            # so there is only one cycle and any timestamp in the file is in it by
+            # definition. The fast-path must apply there too: the trigger command
+            # also writes this file on the initial-review fallback path, and skipping
+            # the guard for an empty cutoff would let two sequential runs both miss
+            # the (not-yet-propagated) comment via the API and both post.
             local _ts_in_cycle=0  # 1 = TS is from current review cycle; 0 = skip fast-path
             if [ -n "$review_cutoff" ]; then
                 if _timestamp_gt "$_local_ts" "$review_cutoff" 2>/dev/null; then
                     _ts_in_cycle=1
                 fi
+            else
+                _ts_in_cycle=1
             fi
             if [ "$_ts_in_cycle" -eq 1 ]; then
                 local _local_age
@@ -545,8 +564,105 @@ trigger)
         exit 0
     fi
 
-    # No review yet — let Greptile auto-review. Don't manually trigger initial review.
-    echo "  [greptile] No review yet on $REPO#$PR_NUMBER. Awaiting Greptile auto-review."
+    # No review yet. Normally let Greptile auto-review: manually triggering the
+    # first review races the bot and produces two reviews.
+    #
+    # But auto-review is not guaranteed to arrive, and this branch used to be an
+    # unconditional dead end. Observed 2026-08-06/07: Greptile stopped
+    # auto-reviewing gptme-contrib entirely (#1380-#1383, zero reviews across
+    # ~9h) while still reviewing gptme and aw-server-rust within ~2 minutes. With
+    # no path to a first review, every affected PR is permanently self-merge
+    # ineligible, because the self-merge gate requires a Greptile review — and
+    # the symptom reads as "PRs aren't ready" rather than "the reviewer never came".
+    #
+    # So after a grace period, trigger once. Every existing protection still
+    # applies: the flock above, the in-flight check, the lifetime cap, and the
+    # trigger-timestamp record.
+    _initial_grace="${GREPTILE_INITIAL_GRACE_MINS:-45}"
+
+    # "trigger once" means exactly once. Two guards, in order:
+    #
+    #   1. "in-progress" — a trigger is in flight: either the local trigger-timestamp
+    #      file is fresh (propagation-delay guard, INCIDENT #5) or our comment is
+    #      younger than TRIGGER_GRACE_SECONDS. This is also the fail-safe value when
+    #      _our_trigger_status errors, so an API failure backs off instead of posting.
+    #   2. lifetime trigger count >= 1 — we already posted our one `@greptileai review`
+    #      on this PR (it now reads "stale" or "stale-acked"). The re-review path
+    #      deliberately treats those as re-triggerable, since a new commit or a stuck
+    #      ack justifies another nudge; this path has neither escape hatch, so treating
+    #      them as re-triggerable would re-post every grace window. If Greptile never
+    #      reviews after our one trigger, escalate to a human.
+    #
+    # Guard 2 counts `@greptileai review` comments (_total_trigger_count) rather than
+    # reusing _our_trigger_status's verdict. That function matches ANY comment of ours
+    # containing "greptileai" (case-insensitive), and on this path review_cutoff is
+    # empty — so neither the spent-trigger normalisation nor the max-retries guard can
+    # ever age the match out. A single unrelated comment, e.g. "Thanks for the catch
+    # @greptileai! Fixed in abc123" (a shape we post routinely), would otherwise report
+    # "stale" forever and permanently suppress the fallback on exactly the PRs it
+    # exists to rescue.
+    #
+    # A ceiling of 1 is stricter than MAX_TOTAL_TRIGGERS (8, which governs the
+    # re-review path), and subsumes it — there is no separate cap check below.
+    _ts_status=$(_our_trigger_status 2>/dev/null || echo "in-progress")
+    if [ "$_ts_status" = "in-progress" ]; then
+        echo "  [greptile] Initial-review trigger already in flight on $REPO#$PR_NUMBER. Not triggering again."
+        exit 0
+    fi
+    _total_triggers=$(_total_trigger_count)
+    if [ "${_total_triggers:-0}" -ge 1 ]; then
+        echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER ($_total_triggers trigger comment(s), status: $_ts_status). Not triggering again — escalate to a human if Greptile never reviews."
+        exit 0
+    fi
+
+    _created=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at // ""' 2>/dev/null) || _created=""
+    _age_mins=0
+    if [ -n "$_created" ]; then
+        _created_epoch=$(date -u -d "$_created" +%s 2>/dev/null \
+            || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_created" +%s 2>/dev/null || echo "")
+        if [ -n "$_created_epoch" ]; then
+            _age_mins=$(( ( $(date -u +%s) - _created_epoch ) / 60 ))
+        fi
+    fi
+
+    if [ "$_age_mins" -lt "$_initial_grace" ]; then
+        echo "  [greptile] No review yet on $REPO#$PR_NUMBER (${_age_mins}m old, grace ${_initial_grace}m). Awaiting Greptile auto-review."
+        exit 0
+    fi
+
+    echo "  [greptile] No auto-review on $REPO#$PR_NUMBER after ${_age_mins}m (grace ${_initial_grace}m) — triggering initial review..."
+    _head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || _head_sha=""
+    _trigger_body="@greptileai review"
+    if [ -n "$_head_sha" ]; then
+        _trigger_body="$_trigger_body
+
+<!-- greptile-helper head-sha: $_head_sha -->"
+    fi
+    # Record the intent BEFORE posting, and refuse to post if it cannot be
+    # recorded.
+    #
+    # Writing the timestamp after a successful post leaves a window with no
+    # guard at all: if the write fails (read-only TMPDIR, full disk), the next
+    # invocation inside TRIGGER_GRACE_SECONDS finds no TS file, and the GitHub
+    # comments API can take minutes to surface the comment we just made — so
+    # `_our_trigger_status` says "none" and we post a second `@greptileai
+    # review`. That is INCIDENT #5 (2026-03-19) exactly, and a warning saying
+    # "the guard is disabled" does not prevent it.
+    #
+    # So: write first, and treat a failed write as fatal for this trigger. Not
+    # triggering costs one cycle; double-triggering is the incident. If the post
+    # then fails, the stale TS only backs us off until the grace window expires,
+    # after which the API query (which will correctly report no comment) lets a
+    # retry through — self-healing, in the safe direction.
+    if ! date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null; then
+        echo "  [greptile] Could not write trigger-timestamp file ($_TRIGGER_TS_FILE); refusing to trigger without the propagation-delay guard. Retrying next cycle."
+        exit 0
+    fi
+    if BOB_GREPTILE_HELPER=1 gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
+        echo "  [greptile] Initial review triggered."
+    else
+        echo "  [greptile] Trigger failed (non-fatal)."
+    fi
     exit 0
     ;;
 
