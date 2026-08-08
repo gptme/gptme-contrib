@@ -57,8 +57,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 import json
 import os
 import re
@@ -718,57 +716,53 @@ def fetch_greptile_status(
 # Greptile, which is Erik's open decision and not this gate's to make. Nothing
 # here touches the existing `Greptile review not found` blocker.
 #
-# Matching is on the reviewer's own abstention text rather than re-deriving
-# "is this diff submodule-only?" here: the reviewer already made that call and
-# encoded it in the comment, and a second implementation would drift from the
-# first. The coupling to prose is the price; a structured field in the
-# `bob-ai-review` JSON marker would be strictly better and is worth adding
-# upstream, at which point this should read that instead.
-#
-# Selecting on the HTML marker rather than the visible heading avoids matching a
-# human comment that merely *quotes* the abstention.
+# The reviewer encodes abstention as `score: null` in its structured marker.
+# Reading that field avoids coupling this safety gate to human-facing prose.
 AI_REVIEW_COMMENT_MARKER = "<!-- bob-ai-review {"
-AI_REVIEW_ABSTENTION_PHRASES = ("submodule pointer change only", "not reviewed")
+AI_REVIEW_MARKER_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
 
 
-def ai_review_abstained(repo: str, pr_number: int) -> bool:
-    """Whether our AI reviewer's LATEST review explicitly declined to review.
+def ai_review_abstained(repo: str, pr_number: int) -> bool | None:
+    """Whether our AI reviewer's latest review explicitly declined to review.
 
-    Only the latest AI-review comment counts. An older abstention followed by a
-    real review means the diff outgrew the submodule-only shape and *was*
-    assessed; blocking on the stale one would be wrong.
-
-    Fails OPEN on an API or decode error. This is a supplementary blocker: the
-    Greptile gates are independent and already fail closed when review data
-    cannot be fetched, so a transient error here cannot open a hole on its own.
+    ``None`` means the review state could not be determined and callers must
+    fail closed. Only the latest marker comment counts: a later real review
+    supersedes an earlier abstention.
     """
     raw = run_gh(
         [
             "api",
-            f"repos/{repo}/issues/{pr_number}/comments",
-            "--paginate",
-            # base64 so a comment body's own newlines cannot be mistaken for a
-            # record separator — these bodies are multi-line markdown.
+            f"repos/{repo}/issues/{pr_number}/comments?per_page=100",
             "--jq",
-            f'.[] | select(.body | contains("{AI_REVIEW_COMMENT_MARKER}"))'
-            " | .body | @base64",
+            f'[.[] | select(.body | contains("{AI_REVIEW_COMMENT_MARKER}"))]'
+            ' | if length == 0 then "__NO_AI_REVIEW__" else last.body end',
         ],
         timeout=30,
     )
     if not raw or not raw.strip():
+        return None
+    if raw == "__NO_AI_REVIEW__":
         return False
 
-    encoded = [line for line in raw.splitlines() if line.strip()]
-    if not encoded:
-        return False
-
+    match = AI_REVIEW_MARKER_RE.search(raw)
+    if match is None:
+        return None
     try:
-        latest = base64.b64decode(encoded[-1]).decode("utf-8", errors="replace")
-    except (ValueError, binascii.Error):
-        return False
+        marker = json.loads(match.group(1))
+    except (json.JSONDecodeError, TypeError):
+        return None
 
-    lowered = latest.lower()
-    return all(phrase in lowered for phrase in AI_REVIEW_ABSTENTION_PHRASES)
+    if "score" in marker:
+        score = marker["score"]
+        if score is None:
+            return True
+        if isinstance(score, int) and not isinstance(score, bool) and 1 <= score <= 5:
+            return False
+        return None
+
+    # Markers written before score provenance was added are not abstentions:
+    # the old reviewer had no explicit structured abstention state.
+    return False
 
 
 # Known bot logins (exact match, case-insensitive) to exclude when counting
@@ -1342,13 +1336,13 @@ def evaluate_pr(
         if score is not None and score < min_score:
             result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
 
-    # An explicit "I did not review this" from our own reviewer is a blocker in
-    # its own right — see AI_REVIEW_ABSTENTION_PHRASES above. Negative signal
-    # only: this never *grants* eligibility.
-    if ai_review_abstained(repo, number):
-        result.reasons.append(
-            "AI review abstained (submodule pointer change) — not reviewed"
-        )
+    # An explicit abstention blocks in its own right. If the structured review
+    # state cannot be read, fail closed rather than silently removing the gate.
+    ai_abstention = ai_review_abstained(repo, number)
+    if ai_abstention is True:
+        result.reasons.append("AI review abstained — not reviewed")
+    elif ai_abstention is None:
+        result.reasons.append("AI review status unavailable")
 
     human_threads = fetch_unresolved_human_threads(
         repo, number, review_data=shared_review_data

@@ -19,7 +19,6 @@ ordinary AI review (and no AI review at all) leaves eligibility untouched.
 
 from __future__ import annotations
 
-import base64
 import importlib.util
 import sys
 from pathlib import Path
@@ -51,39 +50,32 @@ nothing here for me to assess. Whether the bump is safe depends on the
 submodule's commit range, which this diff does not include. Treat this as
 *not reviewed*, not as approved.
 
-<!-- bob-ai-review {"sha": "c096e25e50f8", "engine": "llm", "history": []} -->
+<!-- bob-ai-review {"sha": "c096e25e50f8", "score": null, "engine": "llm", "history": []} -->
 """
 
 ORDINARY_REVIEW_BODY = """## 🤖 AI code review
 
 **2 finding(s)** — ⚠️ **2** P2
 
-<!-- bob-ai-review {"sha": "deadbeef1234", "engine": "llm", "history": []} -->
+<!-- bob-ai-review {"sha": "deadbeef1234", "score": 3, "engine": "llm", "history": []} -->
 """
 
 CLEAN_REVIEW_BODY = """## 🤖 AI code review
 
 ✅ **No findings.** The diff looks correct to me on this pass.
 
-<!-- bob-ai-review {"sha": "deadbeef1234", "engine": "llm", "history": []} -->
+<!-- bob-ai-review {"sha": "deadbeef1234", "score": 5, "engine": "llm", "history": []} -->
 """
 
-ABSTENTION_REASON = "AI review abstained (submodule pointer change) — not reviewed"
+ABSTENTION_REASON = "AI review abstained — not reviewed"
 
 
 def _gh_returning(*bodies: str):
-    """Stand in for `gh api ... --jq '... | @base64'` over issue comments.
-
-    The real jq selects on the HTML marker and base64-encodes each body, one per
-    line — encoding matters, because these bodies are multi-line markdown and a
-    raw dump would be ambiguous to split.
-    """
+    """Stand in for the jq query returning the latest marker comment body."""
 
     def _run_gh(args: list[str], **kwargs: Any) -> str:
         selected = [b for b in bodies if self_merge_check.AI_REVIEW_COMMENT_MARKER in b]
-        return "\n".join(
-            base64.b64encode(b.encode("utf-8")).decode("ascii") for b in selected
-        )
+        return selected[-1] if selected else "__NO_AI_REVIEW__"
 
     return _run_gh
 
@@ -106,6 +98,15 @@ def test_ordinary_review_is_not_an_abstention(body: str) -> None:
 
 def test_no_ai_review_at_all_is_not_an_abstention() -> None:
     with patch.object(self_merge_check, "run_gh", _gh_returning()):
+        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+
+
+def test_legacy_marker_without_score_is_not_an_abstention() -> None:
+    legacy = (
+        "## 🤖 AI code review\n\n"
+        '<!-- bob-ai-review {"sha": "deadbeef1234", "engine": "llm"} -->'
+    )
+    with patch.object(self_merge_check, "run_gh", _gh_returning(legacy)):
         assert self_merge_check.ai_review_abstained("o/r", 1) is False
 
 
@@ -142,11 +143,30 @@ def test_a_human_comment_quoting_the_abstention_does_not_count() -> None:
         assert self_merge_check.ai_review_abstained("o/r", 1) is False
 
 
-@pytest.mark.parametrize("raw", ["", "   \n", "!!!not-base64!!!"])
-def test_api_or_decode_failure_fails_open(raw: str) -> None:
-    """Supplementary blocker: the Greptile gates already fail closed."""
+@pytest.mark.parametrize(
+    "raw", ["", "   \n", "not a marker", "<!-- bob-ai-review {bad json} -->"]
+)
+def test_api_or_decode_failure_is_unknown(raw: str) -> None:
     with patch.object(self_merge_check, "run_gh", lambda *a, **k: raw):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+        assert self_merge_check.ai_review_abstained("o/r", 1) is None
+
+
+def test_query_requests_latest_structured_marker() -> None:
+    captured: list[str] = []
+
+    def _capture(args: list[str], **kwargs: Any) -> str:
+        captured.extend(args)
+        return CLEAN_REVIEW_BODY
+
+    with patch.object(self_merge_check, "run_gh", _capture):
+        assert self_merge_check.ai_review_abstained("o/r", 42) is False
+
+    assert "repos/o/r/issues/42/comments?per_page=100" in captured
+    assert "--paginate" not in captured
+    query = captured[captured.index("--jq") + 1]
+    assert self_merge_check.AI_REVIEW_COMMENT_MARKER in query
+    assert "last" in query
+    assert "__NO_AI_REVIEW__" in query
 
 
 # ---------------------------------------------------------------------------
