@@ -396,18 +396,6 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
 # f95ccae920af0058c68c86083e9007be86710dc5) — see
 # ``tests/test_run_item_prompts.py`` for the capture procedure.
 #
-# KNOWN DIVERGENCE (zero-checks retrigger guidance): the ``**Zero checks
-# (webhook dropped)?**`` paragraph in :data:`_CI_FAILURE_ARM` and the
-# ``retrigger-pr-checks.sh`` comment in :data:`_PR_UPDATE_ARM` were added
-# here FIRST and have no counterpart in the pinned bash. The five affected
-# goldens (``investigate.ci_failure.bob``, ``investigate.pr_update.bob``,
-# ``investigate.combined.ci_failure+pr_update.bob``, ``main_prompt.plain.bob``,
-# ``main_prompt.full.bob``) therefore no longer reproduce bash bytes for that
-# region. Until ``project-monitoring-lib.sh:build_item_investigate`` grows the
-# same text, the live PM path (still bash) does NOT emit this guidance, and the
-# switchover diff must treat these five keys as expected-to-differ rather than
-# as regressions.
-#
 # Agent-agnostic by construction: everything Bob-specific in the bash
 # (identity name, author handle, peer-agent roster, the hardcoded
 # ``/home/bob/bob`` in the twitter/forum/agent-msg arms, the Gordon/Erik
@@ -571,9 +559,8 @@ to re-run with `gh run rerun`. Regenerate the `pull_request` event instead:
 ```bash
 bash {workspace}/scripts/ci/retrigger-pr-checks.sh {repo} {number}
 ```
-The script closes and reopens the PR (no local checkout needed). It refuses PRs that are not
-OPEN and skips PRs with checks in flight — but it does NOT refuse an already-green PR, so only
-run it once you have confirmed there are genuinely zero checks.
+The script closes and reopens the PR (no local checkout needed). Safe: refuses PRs that are
+already green or have checks in flight.
 """
 
 _ASSIGNED_ISSUE_ARM = """
