@@ -786,6 +786,109 @@ def fetch_unresolved_human_threads(
     }
 
 
+def _repo_is_readable(repo: str) -> bool:
+    """Whether ``repos/{repo}`` is *confirmed* readable by the current token.
+
+    Only ``True`` means confirmed. Any 404, error, timeout or empty answer
+    returns ``False`` ("not confirmed"), so callers that use this to justify a
+    fail-open decision stay fail-closed when the probe itself is unreliable.
+
+    Exists because the Contents API answers 404 for two very different things:
+    the path is absent, or the *repository* cannot be read at all (GitHub
+    returns 404 rather than 403 to avoid confirming a private repo's
+    existence). ``gh``'s stderr is byte-identical in both cases — verified:
+    ``repos/gptme/does-not-exist/contents/.github/workflows`` and
+    ``repos/gptme/gptme-contrib/contents/.github/no-such-dir`` both print
+    exactly ``gh: Not Found (HTTP 404)``. A token that can read pull requests
+    but not contents (a fine-grained PAT with Contents withheld) therefore
+    looked exactly like "this repo has no CI", waiving the CI gate.
+    """
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{repo}", "--jq", ".full_name"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if proc.returncode != 0:
+        return False
+    return bool((proc.stdout or "").strip())
+
+
+def repo_has_ci_configured(repo: str) -> bool | None:
+    """Whether the repo has GitHub Actions workflows configured.
+
+    Tri-state, and deliberately so:
+
+    * ``True``  — ``.github/workflows/`` exists and holds at least one file.
+    * ``False`` — the repo is readable and definitively has no workflows to
+      run: GitHub answered 404 for the directory, or listed it as empty.
+    * ``None``  — indeterminate. The API errored, timed out, returned
+      something unparseable, or answered 404 in a way we could not attribute
+      to the directory rather than the whole repository.
+
+    ``None`` must never be treated as ``False``. An earlier version returned a
+    plain ``bool`` and collapsed every failure into ``False``, which made this
+    whole guard vacuous in the one situation it exists for: during a GitHub
+    outage the workflows lookup fails too, the helper said "no CI configured",
+    and the PR stayed self-merge eligible — the exact outage merge this check
+    is supposed to block. Fail closed on ``None`` at the call site.
+
+    Used to distinguish "repo has no CI at all" from "repo has CI but checks
+    produced no result" (e.g., an outage, paths filter mismatch, or
+    concurrency cancellation).
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/contents/.github/workflows",
+                # Type-guard: the Contents API returns an array for a directory
+                # but an object for a regular file. A bare `length` would count
+                # that object's keys and report "CI configured" for a repo whose
+                # .github/workflows is not a directory at all. -1 is the
+                # "not a directory listing" sentinel, mapped to None below.
+                "--jq",
+                'if type == "array" then length else -1 end',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        if stderr:
+            print(f"[gh error] {stderr}", file=sys.stderr)
+        # A 404 here is ambiguous, not a real answer. It means either "the
+        # workflows directory does not exist" (safe to waive) or "this token
+        # cannot read this repository at all" (must never waive) — GitHub
+        # returns 404 for both, and gh's stderr is identical. Only conclude
+        # "no workflows" once the repository itself is confirmed readable.
+        # Anything else (rate limit, 5xx, auth, network) leaves us unsure.
+        if "404" in stderr or "Not Found" in stderr:
+            return False if _repo_is_readable(repo) else None
+        return None
+
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        count = int(raw)
+    except (ValueError, TypeError):
+        return None
+    # Negative is the jq type-guard sentinel: the path exists but is not a
+    # directory listing, so there is nothing to count. Indeterminate, not False.
+    if count < 0:
+        return None
+    return count > 0
+
+
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     """Return True if all reported checks are success/skipped/neutral.
 
@@ -1239,9 +1342,26 @@ def evaluate_pr(
 
     status_checks = pr.get("statusCheckRollup", [])
     if not status_checks:
-        result.warnings.append(
-            "No CI checks configured; CI requirement satisfied without a green build"
-        )
+        # Distinguish between "repo has no CI at all" and "repo has CI but no result".
+        # Only a definitive False ("GitHub says .github/workflows does not exist")
+        # may waive the CI requirement. None means we could not determine it —
+        # fail closed, since the likeliest cause of an indeterminate answer is
+        # the same outage that suppressed the checks in the first place.
+        has_ci = repo_has_ci_configured(repo)
+        if has_ci is None:
+            result.reasons.append(
+                "CI checks not found and could not determine whether the repo has "
+                "workflows configured (GitHub API error) — failing closed"
+            )
+        elif has_ci:
+            result.reasons.append(
+                "CI checks not found; repo has workflows configured but produced no check results "
+                "(possible GitHub outage, paths filter mismatch, or concurrency cancellation)"
+            )
+        else:
+            result.warnings.append(
+                "No CI configured; CI requirement satisfied without running checks"
+            )
     elif not checks_green(status_checks):
         result.reasons.append("CI is not fully green")
 
