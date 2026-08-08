@@ -61,7 +61,7 @@ uv pip install -e packages/credential-slots
 
 ```python
 from pathlib import Path
-from credential_slots import SlotManager
+from credential_slots import SlotManager, reason_is_refreshable
 
 mgr = SlotManager(
     creds_dir=Path.home() / ".claude",
@@ -81,6 +81,21 @@ mgr.get_available_subscriptions()   # ["bob", "alice"]
 
 # Safety checks
 ok, reason = mgr.slot_is_fresh("bob")
+# A stale access token is often still recoverable: CC refreshes it from the
+# stored refresh token on first use. Classify the reason instead of matching
+# its text — "expired 7m ago" and "expires within grace" are both probeable,
+# while "slot missing"/"unreadable" are not.
+if not ok and reason_is_refreshable(reason):
+    # probe_ok asserts "an online probe just confirmed this slot works". Only
+    # pass it with a *fresh* probe result in hand — it disables the expiry gate
+    # that force=True cannot. It is deliberately narrow: honored only when the
+    # freshness failure is expiry-class AND the slot actually holds a refresh
+    # token. A malformed/unreadable slot, or one with nothing to auto-refresh,
+    # is still refused (the gate stays in force, the ignore is logged) — so
+    # switch_to re-checks both itself rather than trusting the caller's filter.
+    # Every bypass and every ignored probe_ok is logged distinctly.
+    if online_probe_succeeds("bob"):
+        mgr.switch_to("bob", "operator switch", probe_ok=True)  # skips the expiry gate
 drift = mgr.detect_live_slot_drift()
 if drift and drift["drift"]:
     warn("live creds file matches no named slot — run /login then persist")

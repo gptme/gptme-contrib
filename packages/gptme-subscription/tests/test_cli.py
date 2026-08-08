@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import MagicMock
 
+import pytest
+from credential_slots import slot_is_fresh
 from gptme_subscription.cli import (
     _cmd_evaluate,
     _cmd_switch,
     _execute_switch_decision,
 )
+from gptme_subscription.config import Config
 from gptme_subscription.manager import Decision, SubscriptionManager
 
 
@@ -28,15 +33,19 @@ class FakeManager:
         post_switch_usage: dict[str, object] | None = None,
         decision: Decision | None = None,
         blocked_reason: str = "still blocked",
+        slot_fresh_result: tuple[bool, str] = (True, "ok"),
     ) -> None:
         self.config = SimpleNamespace(
             primary=primary,
             subscriptions=[primary, "alice", "erik"],
             probe_primary_cooldown=1800,
             rate_limit_file=Path("/tmp/nonexistent-rate-limit-flag"),
+            slot_path=lambda name: Path(f"/tmp/fake-slot-{name}.json"),
+            usage_script=None,
         )
         self._active = active
         self._switch_results = list(switch_results or [(True, False)])
+        self._slot_fresh_result = slot_fresh_result
         self._blocked = blocked
         self._initial_usage = (
             initial_usage
@@ -67,6 +76,8 @@ class FakeManager:
         self.detect_external_switch_calls = 0
         self.check_usage_calls: list[bool] = []
         self.switch_calls: list[tuple[str, str]] = []
+        self.switch_probe_ok_flags: list[bool] = []
+        self.slot_is_fresh_calls: list[str] = []
         self.saved_decision: dict[str, object] | None = None
         self.cleared_rebalance = 0
         self.manual_hold_calls: list[str] = []
@@ -96,11 +107,18 @@ class FakeManager:
     def seconds_since_last_primary_departure(self) -> None:
         return None
 
-    def switch_to(self, sub: str, reason: str, force: bool = False) -> bool:
+    def switch_to(
+        self, sub: str, reason: str, force: bool = False, probe_ok: bool = False
+    ) -> bool:
         self.switch_calls.append((sub, reason))
+        self.switch_probe_ok_flags.append(probe_ok)
         ok, deferred = self._switch_results.pop(0)
         self.last_switch_deferred = deferred
         return ok
+
+    def slot_is_fresh(self, sub: str, grace_seconds: int = 300) -> tuple[bool, str]:
+        self.slot_is_fresh_calls.append(sub)
+        return self._slot_fresh_result
 
     def save_rebalance_state(self, decision: dict[str, object]) -> None:
         self.saved_decision = decision
@@ -353,3 +371,349 @@ def test_cmd_switch_dry_run_does_not_switch_or_hold(capsys) -> None:
     assert rc == 0
     assert sm.switch_calls == []
     assert sm.manual_hold_calls == []
+
+
+def _real_fresh_reason(
+    tmp_path: Path, *, expires_in: float | None, write: bool = True
+) -> tuple[bool, str]:
+    """Produce a genuine ``slot_is_fresh`` result for a synthetic slot file.
+
+    Using the real producer (rather than a hand-typed string) keeps these CLI
+    tests honest: if ``slot_is_fresh``'s reason wording changes, the classifier
+    it feeds is exercised against the new wording here too.
+
+    ``write=False`` leaves the file absent (missing-slot reason);
+    ``expires_in=None`` writes a payload with no ``expiresAt`` (unreadable).
+    """
+    path = tmp_path / ".credentials.json.alice"
+    if write:
+        oauth: dict[str, object] = {"accessToken": "fake"}
+        if expires_in is not None:
+            oauth["expiresAt"] = int(
+                (datetime.now(timezone.utc).timestamp() + expires_in) * 1000
+            )
+        path.write_text(json.dumps({"claudeAiOauth": oauth}))
+    return slot_is_fresh(path)
+
+
+@pytest.mark.parametrize(
+    "expires_in,label",
+    [
+        (-3600, "already expired"),
+        # Regression for the grace-window branch: its reason reads
+        # "expire*s* within grace", so a naive `"expired" in reason` check
+        # skipped the probe and failed the operator's --switch outright.
+        (60, "within the 5-min grace window"),
+    ],
+)
+def test_cmd_switch_stale_token_probes_and_retries_with_probe_ok(
+    expires_in: float, label: str, tmp_path: Path, monkeypatch
+) -> None:
+    """A stale-but-refreshable slot is probed, then re-switched with probe_ok=True."""
+    fresh, reason = _real_fresh_reason(tmp_path, expires_in=expires_in)
+    assert fresh is False, f"fixture should be stale ({label})"
+
+    sm = FakeManager(
+        active="bob",
+        switch_results=[(False, False), (True, False)],
+        slot_fresh_result=(fresh, reason),
+    )
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    probe_mock = MagicMock(return_value=(None, True, "probe ok"))
+    monkeypatch.setattr("gptme_subscription.cli.probe_credential", probe_mock)
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+
+    assert rc == 0
+    assert sm.slot_is_fresh_calls == ["alice"]
+    probe_mock.assert_called_once()
+    assert probe_mock.call_args.args[0] == sm.config.slot_path("alice")
+    assert sm.switch_calls == [
+        ("alice", "manual switch via --switch alice"),
+        ("alice", "manual switch via --switch alice (probe_ok)"),
+    ]
+    assert sm.switch_probe_ok_flags == [False, True]
+    assert sm.manual_hold_calls == ["alice"]
+
+
+def test_cmd_switch_stale_token_probe_failure_does_not_retry(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A failed probe means the refresh token is dead: no retry, rc 1, no hold."""
+    fresh, reason = _real_fresh_reason(tmp_path, expires_in=-3600)
+    sm = FakeManager(
+        active="bob",
+        switch_results=[(False, False)],
+        slot_fresh_result=(fresh, reason),
+    )
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    monkeypatch.setattr(
+        "gptme_subscription.cli.probe_credential",
+        MagicMock(return_value=(None, False, "probe failed: 401")),
+    )
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+
+    assert rc == 1
+    assert len(sm.switch_calls) == 1
+    assert sm.switch_probe_ok_flags == [False]
+    assert sm.manual_hold_calls == []
+    assert "probe failed: 401" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "expires_in,write",
+    [
+        (None, True),  # present but no expiresAt → "unreadable ..."
+        (0, False),  # absent file → "slot missing: ..."
+    ],
+)
+def test_cmd_switch_unprobeable_failure_is_not_probed(
+    expires_in: float | None, write: bool, tmp_path: Path, monkeypatch
+) -> None:
+    """Missing/unreadable slots can't be fixed by a probe — fail hard, don't probe."""
+    fresh, reason = _real_fresh_reason(tmp_path, expires_in=expires_in, write=write)
+    assert fresh is False
+
+    probe_mock = MagicMock(return_value=(None, True, "ok"))
+    monkeypatch.setattr("gptme_subscription.cli.probe_credential", probe_mock)
+
+    sm = FakeManager(
+        active="bob",
+        switch_results=[(False, False)],
+        slot_fresh_result=(fresh, reason),
+    )
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+
+    assert rc == 1
+    probe_mock.assert_not_called()
+    assert len(sm.switch_calls) == 1
+    assert sm.manual_hold_calls == []
+
+
+def _real_manager(
+    tmp_path: Path, *, usage_script: Path | None = None
+) -> SubscriptionManager:
+    """A real SubscriptionManager over tmp creds/state dirs (never real slots)."""
+    creds_dir = tmp_path / "creds"
+    creds_dir.mkdir()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    return SubscriptionManager(
+        Config(
+            subscriptions=["bob", "alice"],
+            primary="bob",
+            creds_dir=creds_dir,
+            state_dir=state_dir,
+            usage_script=usage_script,
+        )
+    )
+
+
+def _write_real_slot(sm: SubscriptionManager, slot: str, *, expires_in: float) -> None:
+    sm.config.slot_path(slot).write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "fake-access-token",
+                    "refreshToken": "fake-refresh-token",
+                    "expiresAt": int(
+                        (datetime.now(timezone.utc).timestamp() + expires_in) * 1000
+                    ),
+                }
+            }
+        )
+    )
+
+
+def test_cmd_switch_probe_ok_retry_flips_symlink_end_to_end(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End-to-end over a REAL SubscriptionManager: the retry must flip the symlink.
+
+    Exercises the CLI → SubscriptionManager → SlotManager seam that the
+    FakeManager-based tests cannot: if ``probe_ok`` were dropped anywhere along
+    the chain, the retry would be refused by the freshness gate and the live
+    symlink would stay on bob.
+    """
+    sm = _real_manager(tmp_path)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=-3600)  # access token lapsed
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    probe_mock = MagicMock(return_value=(None, True, "probe ok"))
+    monkeypatch.setattr("gptme_subscription.cli.probe_credential", probe_mock)
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 0
+    probe_mock.assert_called_once()
+    assert sm.get_active_subscription() == "alice"
+    assert sm.config.creds_link.resolve() == sm.config.slot_path("alice").resolve()
+
+
+def test_cmd_switch_warns_loudly_when_post_flip_usage_check_fails(
+    tmp_path: Path, capsys
+) -> None:
+    """A failed post-flip usage check must not be silently discarded.
+
+    The switch really happened and is recorded, so the exit code stays 0 — but
+    the operator has to be told no usage data came back. Note the failure here
+    is the *script* (non-executable), not the credential, so the message must
+    not assert the credential is dead or demand a re-login.
+    """
+    # Non-executable script → check_usage() returns None (probe could not run).
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\necho '{}'\n")
+    usage_script.chmod(0o644)
+
+    sm = _real_manager(tmp_path, usage_script=usage_script)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=3600)
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 0  # the flip did happen — exit 1 would read as "it did not"
+    assert sm.get_active_subscription() == "alice"
+    err = capsys.readouterr().err
+    assert "post-switch usage check against alice returned no usage data" in err
+    # The script is what broke — don't tell the operator to re-login blindly.
+    assert str(usage_script) in err
+
+
+def test_cmd_switch_no_warning_when_post_flip_usage_check_succeeds(
+    tmp_path: Path, capsys
+) -> None:
+    """A healthy post-flip usage check must stay quiet."""
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text('#!/bin/sh\necho \'{"seven_day": {"utilization": 0.1}}\'\n')
+    usage_script.chmod(0o755)
+
+    sm = _real_manager(tmp_path, usage_script=usage_script)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=3600)
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 0
+    assert "post-switch usage check" not in capsys.readouterr().err
+
+
+def test_cmd_switch_fresh_slot_failure_is_not_probed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If the slot is fresh, the switch failed for some other reason — no probe."""
+    fresh, reason = _real_fresh_reason(tmp_path, expires_in=3600)
+    assert fresh is True
+
+    probe_mock = MagicMock(return_value=(None, True, "ok"))
+    monkeypatch.setattr("gptme_subscription.cli.probe_credential", probe_mock)
+
+    sm = FakeManager(
+        active="bob",
+        switch_results=[(False, True)],  # deferred by locks
+        slot_fresh_result=(fresh, reason),
+    )
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+
+    assert rc == 1
+    probe_mock.assert_not_called()
+    assert sm.manual_hold_calls == []
+
+
+def test_cmd_switch_unprobeable_failure_explains_itself(tmp_path: Path, capsys) -> None:
+    """A non-refreshable failure must not exit 1 in silence.
+
+    The whole point of this command's retry path is to remove the
+    diagnosis-free ``--switch X --execute`` → exit 1. A corrupt slot payload
+    is not probeable, so no probe message is printed — without an explicit
+    failure line the operator gets zero output and a bare non-zero exit.
+    """
+    sm = _real_manager(tmp_path)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    sm.config.slot_path("alice").write_text("{ truncated json")
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 1
+    assert sm.get_active_subscription() == "bob"  # symlink untouched
+    err = capsys.readouterr().err
+    assert "Failed to switch to alice" in err
+    assert "expiresAt" in err  # the actual reason, not just "it failed"
+
+
+def test_cmd_switch_probe_ok_refusal_explains_itself(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A probe that succeeds but a switch the SlotManager still refuses must talk.
+
+    Slot has no refresh token, so ``probe_ok`` is ignored inside SlotManager
+    and the switch is refused after the probe already printed "probing...".
+    Previously the command then exited 1 with no explanation at all.
+    """
+    sm = _real_manager(tmp_path)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    sm.config.slot_path("alice").write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "fake",
+                    "expiresAt": int(
+                        (datetime.now(timezone.utc).timestamp() - 3600) * 1000
+                    ),
+                }
+            }
+        )
+    )
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+    monkeypatch.setattr(
+        "gptme_subscription.cli.probe_credential",
+        MagicMock(return_value=(None, True, "probe ok")),
+    )
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 1
+    assert sm.get_active_subscription() == "bob"
+    assert "Failed to switch to alice" in capsys.readouterr().err
+
+
+def test_cmd_switch_warns_when_post_flip_usage_returns_empty_dict(
+    tmp_path: Path, capsys
+) -> None:
+    """An empty usage payload is as useless a post-flip signal as None.
+
+    ``check_usage`` returns ``{}`` (not None) for a script that exits 0 printing
+    ``{}``, so an ``is None`` test lets a genuinely empty response through
+    silently — while ``_execute_switch_decision`` treats the same value as a
+    failure via ``if not new_usage``.
+    """
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\necho '{}'\n")
+    usage_script.chmod(0o755)
+
+    sm = _real_manager(tmp_path, usage_script=usage_script)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=3600)
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 0
+    assert sm.get_active_subscription() == "alice"
+    assert "post-switch usage check against alice" in capsys.readouterr().err

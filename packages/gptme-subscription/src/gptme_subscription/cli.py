@@ -13,6 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from credential_slots import reason_is_refreshable
+
 from gptme_subscription.auth import (
     check_credential_file,
     format_reauth_instructions,
@@ -351,6 +353,34 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         print("  use --execute to apply")
         return 0
     ok = sm.switch_to(target, f"manual switch via --switch {target}", force=True)
+    failure_detail: str | None = None
+    if not ok:
+        # Retry with probe_ok=True if the slot has an expired access token but a
+        # valid refresh token — CC auto-refreshes on first use, so this is safe.
+        # ``reason_is_refreshable`` lives next to ``slot_is_fresh`` so the two
+        # can't drift; it covers both "expired Nm ago" and "expires within
+        # grace", and excludes missing/unreadable slots (no probe can fix those).
+        fresh, fresh_reason = sm.slot_is_fresh(target)
+        if not fresh:
+            failure_detail = fresh_reason
+        if not fresh and reason_is_refreshable(fresh_reason):
+            print(
+                f"  Access token stale ({fresh_reason}); "
+                f"probing {target!r} to verify refresh token...",
+                file=sys.stderr,
+            )
+            _, probe_ok, probe_msg = probe_credential(
+                sm.config.slot_path(target), target, usage_script=sm.config.usage_script
+            )
+            if probe_ok:
+                ok = sm.switch_to(
+                    target,
+                    f"manual switch via --switch {target} (probe_ok)",
+                    force=True,
+                    probe_ok=True,
+                )
+            else:
+                print(f"  Probe failed ({probe_msg}); cannot switch.", file=sys.stderr)
     if ok:
         # Protect the operator's explicit choice: write a manual-switch hold so a
         # concurrent automated --execute doesn't immediately rebalance / forward-
@@ -358,8 +388,36 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         # manual switch unprotected for the next decision.
         sm.record_manual_switch_hold(target)
         print(f"Switched to {target}")
-        sm.check_usage(no_cache=True)
+        # Post-flip validation: this runs the usage script against the *live*
+        # credential, i.e. the slot we just switched into. Don't discard the
+        # result — a failure here is the one signal we have that the credential
+        # is not usable after the flip. ``check_usage`` also returns None when
+        # no usage script is configured, which says nothing about the
+        # credential, so only warn when a script was actually available to run.
+        #
+        # Use a falsy test, matching ``_execute_switch_decision``: a script that
+        # exits 0 printing ``{}`` yields an empty dict, which is just as useless
+        # a post-flip signal as None. And keep the wording honest — check_usage
+        # also returns None when the *script* failed (not executable, timed out,
+        # non-zero exit, unparseable output), which says nothing about the
+        # credential. Don't send an operator to /login for their own script bug.
+        usage_script = sm.config.usage_script
+        if not sm.check_usage(no_cache=True) and (
+            usage_script is not None and usage_script.exists()
+        ):
+            print(
+                f"  WARNING: post-switch usage check against {target} returned "
+                "no usage data — the switch DID happen and is recorded. Either "
+                f"the credential did not answer, or {usage_script} itself failed "
+                "(not executable / timed out / bad output). Verify with "
+                f"`--status --probe` before assuming {target} needs a re-login.",
+                file=sys.stderr,
+            )
         return 0
+    # Never exit 1 in silence: a bare non-zero exit is the diagnosis-free
+    # failure this command's retry path exists to remove. Say what blocked it.
+    detail = f": {failure_detail}" if failure_detail else ""
+    print(f"Failed to switch to {target}{detail}", file=sys.stderr)
     return 1
 
 

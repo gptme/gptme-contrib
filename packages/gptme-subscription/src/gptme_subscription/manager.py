@@ -116,6 +116,12 @@ class SubscriptionManager:
             fingerprint_template=config.fingerprint_template,
             lock_guard=self._lock_guard,
             on_switch=self._log_switch,
+            # Without this the SlotManager's audit trail is a no-op: its
+            # ``probe_ok BYPASS`` / ``probe_ok IGNORED`` / refusal lines are
+            # emitted only via ``SlotManager._log``, which discards everything
+            # when ``logger is None``. This is the production wiring, so a
+            # skipped safety check has to be visible here, not just in tests.
+            logger=logger.warning,
         )
 
     # ---- Lock guard (autonomous sessions) ----
@@ -344,10 +350,14 @@ class SubscriptionManager:
 
     # ---- Switch ----
 
-    def switch_to(self, sub: str, reason: str, force: bool = False) -> bool:
+    def switch_to(
+        self, sub: str, reason: str, force: bool = False, probe_ok: bool = False
+    ) -> bool:
         """Flip the live symlink to a named slot. Returns True on success."""
         self._last_switch_deferred = False
-        result = self._slot_manager.switch_to(sub, reason, force=force)
+        result = self._slot_manager.switch_to(
+            sub, reason, force=force, probe_ok=probe_ok
+        )
         if not result.ok:
             if result.deferred_locks and not force:
                 self._last_switch_deferred = True
