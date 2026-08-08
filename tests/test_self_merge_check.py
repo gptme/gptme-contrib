@@ -1583,3 +1583,93 @@ def test_classify_category_e2e_spec_ts_is_test_only() -> None:
         ["e2e/demo-real-chat.spec.ts"]
     )
     assert category == "test-only", reasons
+
+
+# --- `.spec.` must be anchored to JS/TS test extensions, not a bare substring ---
+@pytest.mark.parametrize(
+    "path",
+    [
+        "openapi.spec.yaml",
+        "api.spec.json",
+        "infra.spec.yaml",
+        "docs/openapi.spec.yaml",
+        "schemas/service.spec.yml",
+        "proto/wire.spec.toml",
+    ],
+)
+def test_api_spec_documents_are_not_test_files(path: str) -> None:
+    """API/infra specification documents must NOT be treated as tests.
+
+    A bare ``.spec.`` substring marker matched these, letting a PR that only
+    changes an OpenAPI/infra spec self-merge as "test-only" without review.
+    """
+    assert self_merge_check.is_test_file(path) is False
+
+
+@pytest.mark.parametrize("path", ["openapi.spec.yaml", "api.spec.json"])
+def test_classify_category_api_spec_documents_are_not_test_only(path: str) -> None:
+    category, _reasons = self_merge_check.classify_category([path])
+    assert category != "test-only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "foo.spec.ts",
+        "foo.spec.js",
+        "src/components/Button.spec.tsx",
+        "e2e/login.spec.jsx",
+        "test/setup.spec.mjs",
+        "scripts/legacy.spec.cjs",
+    ],
+)
+def test_js_ts_spec_files_are_still_test_files(path: str) -> None:
+    """The feature this PR adds must keep working for real JS/TS spec files."""
+    assert self_merge_check.is_test_file(path) is True
+
+
+@pytest.mark.parametrize("path", ["foo.spec.ts", "foo.spec.js"])
+def test_classify_category_js_ts_spec_files_are_test_only(path: str) -> None:
+    category, reasons = self_merge_check.classify_category([path])
+    assert category == "test-only", reasons
+
+
+# --- `e2e` must be a path COMPONENT, not a bare substring ---
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/ee2e/bar.py",
+        "src/foo-e2e/bar.py",
+        "packages/pre2e2e/main.go",
+        "e2estuff/thing.py",
+    ],
+)
+def test_e2e_substring_lookalikes_are_not_test_files(path: str) -> None:
+    """`e2e/` as a raw substring matched directories merely *containing* "e2e"."""
+    assert self_merge_check.is_test_file(path) is False
+
+
+@pytest.mark.parametrize("path", ["src/ee2e/bar.py", "src/foo-e2e/bar.py"])
+def test_classify_category_e2e_lookalikes_are_not_test_only(path: str) -> None:
+    category, _reasons = self_merge_check.classify_category([path])
+    assert category != "test-only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "e2e/foo.ts",
+        "packages/x/e2e/foo.ts",
+        "e2e/fixtures/data.json",
+        "src/e2e/helpers.ts",
+        "./e2e/foo.ts",
+    ],
+)
+def test_real_e2e_directories_are_still_test_files(path: str) -> None:
+    assert self_merge_check.is_test_file(path) is True
+
+
+@pytest.mark.parametrize("path", ["e2e/foo.ts", "packages/x/e2e/foo.ts"])
+def test_classify_category_real_e2e_dirs_are_test_only(path: str) -> None:
+    category, reasons = self_merge_check.classify_category([path])
+    assert category == "test-only", reasons

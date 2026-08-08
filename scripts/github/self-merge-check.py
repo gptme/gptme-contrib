@@ -85,7 +85,12 @@ SPEC_LIKE_DOCS = {
     "TASKS.md",
     "OVERVIEW.md",
 }
-TEST_MARKERS = ("tests/", "test_", "_test.", ".test.", ".spec.", "e2e/")
+TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
+# Playwright/Jest/Vitest spec files. Anchored to real JS/TS test extensions:
+# a bare ``.spec.`` substring would also match API/infrastructure specification
+# documents (``openapi.spec.yaml``, ``api.spec.json``, ``infra.spec.yaml``),
+# which are NOT tests and must not be self-mergeable as "test-only".
+SPEC_TEST_FILE_RE = re.compile(r"\.spec\.(ts|tsx|js|jsx|mjs|cjs)$", re.IGNORECASE)
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
     "scripts/deploy",
@@ -809,7 +814,14 @@ def is_spec_like_doc(path: str) -> bool:
 
 
 def is_test_file(path: str) -> bool:
-    return any(marker in path for marker in TEST_MARKERS)
+    normalized = path.replace("\\", "/").removeprefix("./")
+    if any(marker in normalized for marker in TEST_MARKERS):
+        return True
+    if SPEC_TEST_FILE_RE.search(normalized):
+        return True
+    # ``e2e`` must be a real path COMPONENT. A bare "e2e/" substring also matches
+    # ``src/ee2e/bar.py`` and ``src/foo-e2e/bar.py``, neither of which is a test.
+    return normalized.startswith("e2e/") or "/e2e/" in normalized
 
 
 def is_internal_tooling(path: str) -> bool:
