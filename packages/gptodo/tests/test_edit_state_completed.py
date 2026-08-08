@@ -223,27 +223,38 @@ def test_reopening_preserves_explicitly_set_completed(tmp_path: Path, monkeypatc
 
 
 @pytest.mark.parametrize(
-    "recur_value",
+    ("recur_value", "wait_survives"),
     [
-        "sometimes",  # malformed — parser rejects
-        "0 9 * * 1",  # cron — documented-valid but parse_recur_interval() returns None
+        # Malformed — not a recurrence at all, so the task is terminal in every
+        # sense and its stale scheduling fields are cleaned.
+        ("sometimes", False),
+        # Cron — documented-valid (is_valid_recur_value accepts it) but
+        # parse_recur_interval() returns None, so gptodo cannot compute the next
+        # fire date. wait: is owned by the external scheduler and must survive.
+        ("0 9 * * 1", True),
     ],
 )
-def test_unparseable_recur_is_terminal_and_gets_completed(
-    tmp_path: Path, monkeypatch, recur_value: str
+def test_uncomputable_recur_is_terminal_and_gets_completed(
+    tmp_path: Path, monkeypatch, recur_value: str, wait_survives: bool
 ) -> None:
-    """recur: values the parser rejects are terminal, so they get stamped.
+    """recur: values the parser cannot compute are terminal, so they get stamped.
 
     The recurrence handler resets a task to todo only when
     ``parse_recur_interval()`` returns an interval; everything else (malformed
     strings *and* cron expressions, which are documented-valid but not yet
-    computed) is left sitting in done. The terminal predicate must agree, or
-    such tasks end up permanently done with no completed stamp.
+    computed) is left sitting in done. The stamp predicate must agree, or such
+    tasks end up permanently done with no completed stamp.
+
+    Stale-field cleanup, however, must *not* agree: a cron recur: is a real
+    recurrence whose next-fire date lives in wait:, maintained by whatever
+    external scheduler owns the cron. Deleting it on `--set state done` destroys
+    that scheduler's state irrecoverably.
     """
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     (tasks_dir / "my-task.md").write_text(
         RECURRING_TASK.replace("recur: 7d", f"recur: {recur_value!r}")
+        + "next_action: run the export\n"
     )
 
     monkeypatch.chdir(tmp_path)
@@ -251,9 +262,84 @@ def test_unparseable_recur_is_terminal_and_gets_completed(
 
     assert result.exit_code == 0, result.output
     task = load_tasks(tasks_dir)[0]
-    assert task.metadata["state"] == "done", "unparseable recur must not reset to todo"
+    assert task.metadata["state"] == "done", "uncomputable recur must not reset to todo"
     assert "completed" in task.metadata
-    assert "wait" not in task.metadata, "terminal tasks must not keep a stale wait:"
+    if wait_survives:
+        assert task.metadata.get("wait"), (
+            "a cron recur: is a valid recurrence whose next-fire date lives in "
+            "wait:; marking it done must not delete the external scheduler's state"
+        )
+    else:
+        assert "wait" not in task.metadata, "terminal tasks must not keep a stale wait:"
+
+
+def test_cron_recur_done_preserves_scheduling_fields(tmp_path: Path, monkeypatch) -> None:
+    """All four stale-cleanup fields survive `done` on a cron-recurring task.
+
+    Regression guard: the terminal predicate was once gated on
+    ``parse_recur_interval()``, which returns None for cron, so marking a
+    cron task done silently stripped next_action/waiting_for/waiting_since/wait.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        """\
+---
+state: active
+created: 2026-06-16T00:00:00+00:00
+recur: "0 9 * * 1"
+wait: 2026-09-01
+next_action: run the weekly export
+waiting_for: external scheduler
+waiting_since: 2026-08-01
+---
+# Cron Task
+"""
+    )
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "state", "done"])
+
+    assert result.exit_code == 0, result.output
+    task = load_tasks(tasks_dir)[0]
+    assert task.metadata["state"] == "done"
+    assert "completed" in task.metadata
+    for field in ("wait", "next_action", "waiting_for", "waiting_since"):
+        assert field in task.metadata, f"cron-recurring task lost {field} on done"
+
+
+def test_recurring_reset_preserves_explicitly_set_completed(tmp_path: Path, monkeypatch) -> None:
+    """`--set completed <value>` survives the recurrence reset.
+
+    The stamp/clear pair documents that an explicit user value wins over the
+    automation in either direction; the recurrence reset must honour the same
+    contract instead of silently dropping the field the caller just set.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(RECURRING_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "edit",
+            "my-task",
+            "--set",
+            "state",
+            "done",
+            "--set",
+            "completed",
+            "2026-05-01T00:00:00+00:00",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    task = load_tasks(tasks_dir)[0]
+    assert task.metadata["state"] == "todo", "7d recur must still reset to todo"
+    assert (
+        str(task.metadata.get("completed")) == "2026-05-01T00:00:00+00:00"
+    ), "an explicit --set completed must not be silently deleted by the recurrence reset"
 
 
 def test_explicit_completed_clear_wins_over_auto_stamp(tmp_path: Path, monkeypatch) -> None:
