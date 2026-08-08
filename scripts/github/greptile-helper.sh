@@ -610,10 +610,27 @@ trigger)
 
 <!-- greptile-helper head-sha: $_head_sha -->"
     fi
+    # Record the intent BEFORE posting, and refuse to post if it cannot be
+    # recorded.
+    #
+    # Writing the timestamp after a successful post leaves a window with no
+    # guard at all: if the write fails (read-only TMPDIR, full disk), the next
+    # invocation inside TRIGGER_GRACE_SECONDS finds no TS file, and the GitHub
+    # comments API can take minutes to surface the comment we just made — so
+    # `_our_trigger_status` says "none" and we post a second `@greptileai
+    # review`. That is INCIDENT #5 (2026-03-19) exactly, and a warning saying
+    # "the guard is disabled" does not prevent it.
+    #
+    # So: write first, and treat a failed write as fatal for this trigger. Not
+    # triggering costs one cycle; double-triggering is the incident. If the post
+    # then fails, the stale TS only backs us off until the grace window expires,
+    # after which the API query (which will correctly report no comment) lets a
+    # retry through — self-healing, in the safe direction.
+    if ! date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null; then
+        echo "  [greptile] Could not write trigger-timestamp file ($_TRIGGER_TS_FILE); refusing to trigger without the propagation-delay guard. Retrying next cycle."
+        exit 0
+    fi
     if BOB_GREPTILE_HELPER=1 gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
-        if ! date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null; then
-            echo "  [greptile] Warning: could not write trigger-timestamp file; propagation-delay guard disabled for this trigger."
-        fi
         echo "  [greptile] Initial review triggered."
     else
         echo "  [greptile] Trigger failed (non-fatal)."
