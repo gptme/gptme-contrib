@@ -595,10 +595,12 @@ class SlotManager:
           Pass ``probe_ok=True`` to bypass this check when an online probe
           has already confirmed the slot's refresh token is valid (e.g. an
           expired access token that CC will auto-refresh on first use).
-          ``probe_ok`` is honored **only** for slots that actually hold a
-          refresh token — there is nothing to auto-refresh otherwise — and
-          every bypass is logged distinctly so a skipped safety check is
-          never indistinguishable from an ordinary switch.
+          ``probe_ok`` is honored **only** when the freshness failure is
+          expiry-class (see :func:`reason_is_refreshable`) *and* the slot
+          actually holds a refresh token — an unreadable/malformed slot, or
+          one with nothing to refresh, is still refused. Every bypass and
+          every ignored ``probe_ok`` is logged distinctly so a skipped safety
+          check is never indistinguishable from an ordinary switch.
         - On success, replaces the existing symlink atomically via a
           temp-symlink + ``os.replace`` (single rename syscall) so no
           concurrent reader sees a missing ``live_path``, then calls
@@ -633,32 +635,47 @@ class SlotManager:
             self._log(msg)
             return SwitchResult(ok=False, reason=msg)
 
-        # ``probe_ok`` is a caller assertion ("an online probe says this slot
-        # works"), so it only earns the bypass when the slot could actually be
-        # revived the way the assertion implies: CC refreshes an expired access
-        # token from the stored refresh token. No refresh token, nothing to
-        # refresh — the assertion cannot be about this slot, so the offline gate
-        # stays in force.
-        bypass_expiry = probe_ok
-        if probe_ok and _read_refresh_token(slot) is None:
+        fresh, fresh_reason = self.slot_is_fresh(sub)
+        if not fresh:
+            # ``probe_ok`` is a caller assertion ("an online probe says this
+            # slot works"), so it only earns a bypass when *both* halves of the
+            # assertion can hold for this slot. It is deliberately narrow:
+            #
+            #  1. The failure must be expiry-class. A slot that is unreadable,
+            #     malformed, or missing ``expiresAt`` (truncated / rewritten
+            #     mid-OAuth-refresh) is not something a refresh can fix, and the
+            #     docstring promises those are refused regardless. Letting
+            #     ``probe_ok`` swallow the whole gate would hand any current or
+            #     future caller a malformed-slot bypass for free.
+            #  2. The slot must hold a refresh token. No refresh token, nothing
+            #     for CC to auto-refresh — the assertion cannot be about this
+            #     slot.
+            #
+            # Anything else keeps the offline gate in force, and says why.
             bypass_expiry = False
-            self._log(
-                f"probe_ok IGNORED for {sub}: slot holds no refresh token, "
-                "so an expired access token cannot be auto-refreshed; "
-                "applying the normal expiry gate"
-            )
+            if probe_ok and not reason_is_refreshable(fresh_reason):
+                self._log(
+                    f"probe_ok IGNORED for {sub}: {fresh_reason} — not an "
+                    "expiry-class failure, so no token refresh can fix it; "
+                    "applying the normal freshness gate"
+                )
+            elif probe_ok and _read_refresh_token(slot) is None:
+                self._log(
+                    f"probe_ok IGNORED for {sub}: slot holds no refresh token, "
+                    "so an expired access token cannot be auto-refreshed; "
+                    "applying the normal expiry gate"
+                )
+            elif probe_ok:
+                bypass_expiry = True
+                # Never let a skipped safety check look like an ordinary switch
+                # in the logs — this line is the audit trail for the bypass.
+                self._log(
+                    f"probe_ok BYPASS: skipping expiry gate for {sub} "
+                    f"(caller asserts an online probe confirmed the refresh token) "
+                    f"— {reason}"
+                )
 
-        if bypass_expiry:
-            # Never let a skipped safety check look like an ordinary switch in
-            # the logs — this line is the audit trail for the bypass.
-            self._log(
-                f"probe_ok BYPASS: skipping expiry gate for {sub} "
-                f"(caller asserts an online probe confirmed the refresh token) "
-                f"— {reason}"
-            )
-        else:
-            fresh, fresh_reason = self.slot_is_fresh(sub)
-            if not fresh:
+            if not bypass_expiry:
                 msg = f"refusing to switch to {sub}: {fresh_reason}"
                 self._log(msg)
                 return SwitchResult(ok=False, reason=msg)
