@@ -136,6 +136,7 @@ from gptodo.utils import (
     load_tasks,
     normalize_state,
     # Phase 4: Effective state computation (bob#240)
+    parse_recur_interval,
     parse_tracking_ref,
     resolve_tasks,
     task_to_dict,
@@ -2354,30 +2355,54 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # todo further below and must keep these fields, so skip when recur is set.
         # tracking_issue / upstream_coordination_id are intentionally preserved for
         # permanent traceability.
-        # cancelled is terminal regardless of recur; done skips cleanup only when recurring
-        # (recurrence reset below handles it).
+        # cancelled is terminal regardless of recur. A done task only escapes the
+        # terminal path when the recurrence reset below actually fires, and that
+        # reset is gated on parse_recur_interval() — so gate on the same parse
+        # here rather than on the truthiness of recur:. Values the parser rejects
+        # (malformed strings, and cron expressions, which are documented-valid but
+        # not yet computed) leave the task sitting in done, so they are terminal in
+        # practice and must be stamped and stale-field-cleaned like any other.
+        recur = post.metadata.get("recur")
+        _will_recur = (
+            post.metadata.get("state") == "done"
+            and recur is not None
+            and parse_recur_interval(str(recur)) is not None
+        )
         _is_terminal_nonrecurring = post.metadata.get("state") == "cancelled" or (
-            post.metadata.get("state") == "done" and not post.metadata.get("recur")
+            post.metadata.get("state") == "done" and not _will_recur
         )
         if _is_terminal_nonrecurring:
             for _stale_field in ("next_action", "waiting_for", "waiting_since", "wait"):
                 post.metadata.pop(_stale_field, None)
 
-        # Auto-set completed timestamp when transitioning to a terminal state.
-        # Mirrors the waiting_since auto-set pattern. Skipped for recurring done
-        # tasks (they reset to todo and should not carry a completed stamp).
-        _transitioning_to_terminal = any(
-            op == "set" and field == "state" and value in ("done", "cancelled")
+        # Auto-set completed timestamp when transitioning to a terminal state, and
+        # clear a stale stamp when this edit reopens a task. Both halves defer to an
+        # explicit `--set completed ...` in the same edit: the user's value wins over
+        # the automation in either direction.
+        _state_target = next(
+            (value for op, field, value in reversed(changes) if op == "set" and field == "state"),
+            None,
+        )
+        _completed_explicitly_cleared = any(
+            op == "set" and field == "completed" and value is None for op, field, value in changes
+        )
+        _completed_explicitly_set = any(
+            op == "set" and field == "completed" and value is not None
             for op, field, value in changes
         )
         if (
-            _transitioning_to_terminal
+            _state_target in ("done", "cancelled")
             and _is_terminal_nonrecurring
             and not post.metadata.get("completed")
+            and not _completed_explicitly_cleared
         ):
-            from datetime import datetime as _dt2, timezone as _tz2
-
-            post.metadata["completed"] = _dt2.now(_tz2.utc).isoformat(timespec="seconds")
+            post.metadata["completed"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        elif (
+            _state_target is not None
+            and _state_target not in ("done", "cancelled")
+            and not _completed_explicitly_set
+        ):
+            post.metadata.pop("completed", None)
 
         # Save changes
         with open(task.path, "w") as f:
@@ -2394,8 +2419,6 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                 # Handle recur: reset task to todo and advance wait: date
                 recur = post.metadata.get("recur")
                 if recur:
-                    from gptodo.utils import parse_recur_interval
-
                     if parse_recur_interval(str(recur)) is None:
                         completed_task_ids.append(task.id)
                         continue
@@ -2405,6 +2428,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     next_wait = advance_wait(current_wait, recur)
                     post.metadata["state"] = "todo"
                     post.metadata["wait"] = next_wait.isoformat()
+                    post.metadata.pop("completed", None)
                     with open(task.path, "w") as f:
                         f.write(frontmatter.dumps(post))
                     console.print(
