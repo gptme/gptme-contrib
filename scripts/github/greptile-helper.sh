@@ -17,10 +17,24 @@
 #   1. Reduce 30min age guard → 15min (reviews complete in 5-15min)
 #   2. Re-request after addressing feedback once new commits land after a Greptile review
 #
-# Initial review policy: Greptile automatically reviews all new PRs. We NEVER manually
-# trigger initial reviews. Only re-reviews (new commits after the latest Greptile
-# review) are triggered.
-# Status 'awaiting-initial-review' is returned for ALL unreviewed PRs regardless of age.
+# Initial review policy: Greptile automatically reviews new PRs (drafts included —
+# verified 2026-08-08 across gptme/gptme, gptme-contrib and gptme-cloud: bot reviews
+# land 1-9 min after a draft PR opens, with no trigger comment). So we do not race it;
+# re-reviews (new commits after the latest Greptile review) are the normal trigger path.
+#
+# Exception: auto-review is not guaranteed. On 2026-08-06/07 Greptile stopped reviewing
+# gptme-contrib entirely (#1380-#1383, ~9h) while still reviewing other repos in minutes,
+# leaving every affected PR permanently self-merge ineligible. So after
+# GREPTILE_INITIAL_GRACE_MINS (default 45) with no review, `trigger` posts exactly one
+# initial-review request. See the fallback block in the `trigger` command.
+#
+# NOTE: `check` and `status` still encode the older never-trigger policy — `check` exits 1
+# and `status` prints 'awaiting-initial-review' for ALL unreviewed PRs regardless of age.
+# Callers that gate on them therefore never reach the fallback: pr-greptile-trigger.py
+# (ACTIONABLE_STATES = {"stale", "needs-re-review"}) and project-monitoring-lib.sh's
+# cross-repo `none|stale` case both skip. The fallback is reached via the self-merge path,
+# which calls `trigger` directly when self-merge-check.py reports "Greptile review not
+# found", and via direct manual invocation.
 #
 # Root cause of spam incidents:
 #   Multiple concurrent sessions each check "any trigger comments?" → all see 0
@@ -566,18 +580,38 @@ trigger)
     # trigger-timestamp record.
     _initial_grace="${GREPTILE_INITIAL_GRACE_MINS:-45}"
 
-    # "trigger once" means exactly once. Any status other than "none" means a trigger
-    # comment from us already exists on this PR, so the fallback has already fired —
-    # back off regardless of whether it is "in-progress", "stale" or "stale-acked".
-    # The re-review path deliberately treats "stale"/"stale-acked" as re-triggerable
-    # (a new commit or a stuck ack justifies another nudge); this path has neither of
-    # those escape hatches, so treating them as re-triggerable would re-post every
-    # grace window until MAX_TOTAL_TRIGGERS — up to 8 `@greptileai review` comments on
-    # one PR. If Greptile never reviews after our one trigger, escalate to a human.
-    # Fail-safe: an unexpected non-zero return backs off rather than posting.
+    # "trigger once" means exactly once. Two guards, in order:
+    #
+    #   1. "in-progress" — a trigger is in flight: either the local trigger-timestamp
+    #      file is fresh (propagation-delay guard, INCIDENT #5) or our comment is
+    #      younger than TRIGGER_GRACE_SECONDS. This is also the fail-safe value when
+    #      _our_trigger_status errors, so an API failure backs off instead of posting.
+    #   2. lifetime trigger count >= 1 — we already posted our one `@greptileai review`
+    #      on this PR (it now reads "stale" or "stale-acked"). The re-review path
+    #      deliberately treats those as re-triggerable, since a new commit or a stuck
+    #      ack justifies another nudge; this path has neither escape hatch, so treating
+    #      them as re-triggerable would re-post every grace window. If Greptile never
+    #      reviews after our one trigger, escalate to a human.
+    #
+    # Guard 2 counts `@greptileai review` comments (_total_trigger_count) rather than
+    # reusing _our_trigger_status's verdict. That function matches ANY comment of ours
+    # containing "greptileai" (case-insensitive), and on this path review_cutoff is
+    # empty — so neither the spent-trigger normalisation nor the max-retries guard can
+    # ever age the match out. A single unrelated comment, e.g. "Thanks for the catch
+    # @greptileai! Fixed in abc123" (a shape we post routinely), would otherwise report
+    # "stale" forever and permanently suppress the fallback on exactly the PRs it
+    # exists to rescue.
+    #
+    # A ceiling of 1 is stricter than MAX_TOTAL_TRIGGERS (8, which governs the
+    # re-review path), and subsumes it — there is no separate cap check below.
     _ts_status=$(_our_trigger_status 2>/dev/null || echo "in-progress")
-    if [ "$_ts_status" != "none" ]; then
-        echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER (status: $_ts_status). Not triggering again — escalate to a human if Greptile never reviews."
+    if [ "$_ts_status" = "in-progress" ]; then
+        echo "  [greptile] Initial-review trigger already in flight on $REPO#$PR_NUMBER. Not triggering again."
+        exit 0
+    fi
+    _total_triggers=$(_total_trigger_count)
+    if [ "${_total_triggers:-0}" -ge 1 ]; then
+        echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER ($_total_triggers trigger comment(s), status: $_ts_status). Not triggering again — escalate to a human if Greptile never reviews."
         exit 0
     fi
 
@@ -593,12 +627,6 @@ trigger)
 
     if [ "$_age_mins" -lt "$_initial_grace" ]; then
         echo "  [greptile] No review yet on $REPO#$PR_NUMBER (${_age_mins}m old, grace ${_initial_grace}m). Awaiting Greptile auto-review."
-        exit 0
-    fi
-
-    _total_triggers=$(_total_trigger_count)
-    if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
-        echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS) and still no review. Escalate to a human."
         exit 0
     fi
 
