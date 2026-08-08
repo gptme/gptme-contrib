@@ -142,6 +142,46 @@ def _extract_classifier() -> str:
             ],
             "bad",
         ),
+        # CheckStatusState has FIVE non-terminal members, not three. A CheckRun
+        # sitting in PENDING/REQUESTED carries no `.state` and an empty
+        # `.conclusion`, so when the classifier only listed
+        # QUEUED/IN_PROGRESS/WAITING every predicate was false and the whole PR
+        # read as `green` — deleting the stuck clock for the not-yet-started
+        # shape this function exists to catch.
+        (
+            "checkrun PENDING is in flight, not green",
+            [{"__typename": "CheckRun", "status": "PENDING", "conclusion": None}],
+            "inflight",
+        ),
+        (
+            "checkrun REQUESTED is in flight, not green",
+            [{"__typename": "CheckRun", "status": "REQUESTED", "conclusion": None}],
+            "inflight",
+        ),
+        (
+            "PENDING alongside a green check is still just waiting",
+            [
+                {"__typename": "CheckRun", "status": "PENDING", "conclusion": None},
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+            "inflight",
+        ),
+        (
+            "a CANCELLED supersede must not fire while a REQUESTED run is pending",
+            [
+                {"status": "COMPLETED", "conclusion": "CANCELLED"},
+                {"__typename": "CheckRun", "status": "REQUESTED", "conclusion": None},
+            ],
+            "inflight",
+        ),
+        (
+            "a real failure still wins over a PENDING checkrun",
+            [
+                {"__typename": "CheckRun", "status": "PENDING", "conclusion": None},
+                {"status": "COMPLETED", "conclusion": "FAILURE"},
+            ],
+            "bad",
+        ),
     ],
 )
 def test_ci_state_classification(label: str, rollup: list[dict], expected: str) -> None:

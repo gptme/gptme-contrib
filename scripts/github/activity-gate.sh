@@ -636,12 +636,23 @@ check_ci_failures() {
         # so without this it fell out of `$inflight` while `$bad` still saw a
         # non-green `.state` — i.e. an instant `ci_failure` on a PR whose checks
         # simply had not started yet.
+        #
+        # The `.status` list must be the FULL non-terminal half of GraphQL's
+        # CheckStatusState enum (QUEUED, IN_PROGRESS, WAITING, PENDING,
+        # REQUESTED) — COMPLETED is the only terminal member. Listing only the
+        # first three silently mapped PENDING/REQUESTED CheckRuns to `green`:
+        # they match no `.status` literal, and a CheckRun carries no `.state`,
+        # so `$bad`'s `.conclusion // .state // ""` is "" and its `$c != ""`
+        # guard fails too — every predicate false, falling through to `green`.
+        # That deleted the stuck clock (`rm -f` below) on exactly the
+        # not-yet-started shape this function exists to catch.
         local ci_state
         ci_state=$(echo "$pr_data" | jq -r '
             select(.statusCheckRollup != null) | .statusCheckRollup
             | (any(.[]; ((.conclusion // .state // "") | ascii_upcase) == "FAILURE")) as $hard
             | (any(.[]; ((.status // "") | ascii_upcase) as $s
                    | $s == "QUEUED" or $s == "IN_PROGRESS" or $s == "WAITING"
+                     or $s == "PENDING" or $s == "REQUESTED"
                      or (((.conclusion // "") == "")
                          and (((.state // "") | ascii_upcase) as $st
                               | $st == "PENDING" or $st == "EXPECTED")))) as $inflight
