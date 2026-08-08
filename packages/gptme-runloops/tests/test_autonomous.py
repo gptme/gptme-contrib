@@ -366,7 +366,11 @@ def test_parse_cascade_routing_hint_propagates():
 
 
 def test_parse_cascade_routing_hint_absent_when_not_set():
-    """routing_hint must NOT appear in intent when complexity_tier is not low."""
+    """Omitted routing_hint must stay omitted from the intent.
+
+    The upstream selector owns the complexity-tier decision; this parser only
+    preserves an explicit hint when one is present.
+    """
     data = {
         "tier": 1,
         "recommended_scope": "standard",
