@@ -316,14 +316,19 @@ _our_trigger_status() {
         if [ -n "$_local_ts" ]; then
             # Only count this entry if it's from the CURRENT review cycle
             # (i.e., the timestamp is after the last Greptile review).
-            # Note: when review_cutoff is empty (no prior Greptile review), skip the
-            # fast-path — the trigger command only writes this file during re-reviews,
-            # which always have a non-empty cutoff, so this invariant holds.
+            # When review_cutoff is EMPTY there is no prior Greptile review at all,
+            # so there is only one cycle and any timestamp in the file is in it by
+            # definition. The fast-path must apply there too: the trigger command
+            # also writes this file on the initial-review fallback path, and skipping
+            # the guard for an empty cutoff would let two sequential runs both miss
+            # the (not-yet-propagated) comment via the API and both post.
             local _ts_in_cycle=0  # 1 = TS is from current review cycle; 0 = skip fast-path
             if [ -n "$review_cutoff" ]; then
                 if _timestamp_gt "$_local_ts" "$review_cutoff" 2>/dev/null; then
                     _ts_in_cycle=1
                 fi
+            else
+                _ts_in_cycle=1
             fi
             if [ "$_ts_in_cycle" -eq 1 ]; then
                 local _local_age
@@ -561,9 +566,18 @@ trigger)
     # trigger-timestamp record.
     _initial_grace="${GREPTILE_INITIAL_GRACE_MINS:-45}"
 
-    _ts_status=$(_our_trigger_status 2>/dev/null || echo "none")
-    if [ "$_ts_status" = "in-progress" ]; then
-        echo "  [greptile] Initial-review trigger already in flight on $REPO#$PR_NUMBER. Skipping."
+    # "trigger once" means exactly once. Any status other than "none" means a trigger
+    # comment from us already exists on this PR, so the fallback has already fired —
+    # back off regardless of whether it is "in-progress", "stale" or "stale-acked".
+    # The re-review path deliberately treats "stale"/"stale-acked" as re-triggerable
+    # (a new commit or a stuck ack justifies another nudge); this path has neither of
+    # those escape hatches, so treating them as re-triggerable would re-post every
+    # grace window until MAX_TOTAL_TRIGGERS — up to 8 `@greptileai review` comments on
+    # one PR. If Greptile never reviews after our one trigger, escalate to a human.
+    # Fail-safe: an unexpected non-zero return backs off rather than posting.
+    _ts_status=$(_our_trigger_status 2>/dev/null || echo "in-progress")
+    if [ "$_ts_status" != "none" ]; then
+        echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER (status: $_ts_status). Not triggering again — escalate to a human if Greptile never reviews."
         exit 0
     fi
 
