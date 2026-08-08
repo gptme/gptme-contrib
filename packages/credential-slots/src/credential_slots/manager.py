@@ -595,6 +595,10 @@ class SlotManager:
           Pass ``probe_ok=True`` to bypass this check when an online probe
           has already confirmed the slot's refresh token is valid (e.g. an
           expired access token that CC will auto-refresh on first use).
+          ``probe_ok`` is honored **only** for slots that actually hold a
+          refresh token — there is nothing to auto-refresh otherwise — and
+          every bypass is logged distinctly so a skipped safety check is
+          never indistinguishable from an ordinary switch.
         - On success, replaces the existing symlink atomically via a
           temp-symlink + ``os.replace`` (single rename syscall) so no
           concurrent reader sees a missing ``live_path``, then calls
@@ -629,7 +633,30 @@ class SlotManager:
             self._log(msg)
             return SwitchResult(ok=False, reason=msg)
 
-        if not probe_ok:
+        # ``probe_ok`` is a caller assertion ("an online probe says this slot
+        # works"), so it only earns the bypass when the slot could actually be
+        # revived the way the assertion implies: CC refreshes an expired access
+        # token from the stored refresh token. No refresh token, nothing to
+        # refresh — the assertion cannot be about this slot, so the offline gate
+        # stays in force.
+        bypass_expiry = probe_ok
+        if probe_ok and _read_refresh_token(slot) is None:
+            bypass_expiry = False
+            self._log(
+                f"probe_ok IGNORED for {sub}: slot holds no refresh token, "
+                "so an expired access token cannot be auto-refreshed; "
+                "applying the normal expiry gate"
+            )
+
+        if bypass_expiry:
+            # Never let a skipped safety check look like an ordinary switch in
+            # the logs — this line is the audit trail for the bypass.
+            self._log(
+                f"probe_ok BYPASS: skipping expiry gate for {sub} "
+                f"(caller asserts an online probe confirmed the refresh token) "
+                f"— {reason}"
+            )
+        else:
             fresh, fresh_reason = self.slot_is_fresh(sub)
             if not fresh:
                 msg = f"refusing to switch to {sub}: {fresh_reason}"
