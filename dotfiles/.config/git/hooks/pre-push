@@ -128,19 +128,37 @@ if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
         # Git passes the remote NAME as $1. Empty means invoked outside git
         # (tests) — keep the old behaviour there rather than silently skipping.
         #
-        # Compare URLs, not just names. A second remote can point at origin's
-        # own URL (`git remote add upstream <origin-url>`, or a fork workflow
-        # that renames things), and pushing to that name IS pushing to origin —
-        # so skipping on the name alone would drop the guard exactly where it
-        # still applies. Only a remote that resolves to a *different* URL is a
-        # genuine mirror.
+        # Compare canonical repository identities, not raw URL strings. Git
+        # accepts several spellings for the same remote (HTTPS with/without
+        # `.git`, scp-style SSH, case variants), and treating an alias spelling
+        # as a mirror would bypass the origin force-reset guard. Unknown URL
+        # shapes fail closed by staying distinct.
+        _canonical_remote_url() {
+            printf '%s\n' "$1" | sed -E \
+                -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^@/]+@)?##' \
+                -e 's#^[^/@:]+@##' \
+                -e 's#^([^/:]+):#\1/#' \
+                -e 's#^[^/]+@##' \
+                -e 's#/$##' \
+                -e 's#\.git$##' | tr '[:upper:]' '[:lower:]'
+        }
+
         _remote_branch="${remote_ref#refs/heads/}"
         if [ -n "${PUSH_REMOTE_NAME:-}" ] && [ "${PUSH_REMOTE_NAME:-}" != "origin" ]; then
-            _origin_url="$(git remote get-url origin 2>/dev/null || true)"
-            _push_url="$(git remote get-url "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
+            # `--push` on BOTH sides: the question is where a push LANDS, and
+            # `remote.<name>.pushurl` overrides `url` for exactly that. Reading
+            # the fetch URL inverted the guard in the case that matters most —
+            # a remote whose `url` differs from origin's but whose `pushurl` IS
+            # origin's compares unequal, so the guard was skipped for a push
+            # that really does rewrite origin. `--push` falls back to `url`
+            # when no pushurl is configured, so this is a strict refinement.
+            _origin_url="$(git remote get-url --push origin 2>/dev/null || true)"
+            _push_url="$(git remote get-url --push "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
+            _origin_identity="$(_canonical_remote_url "$_origin_url")"
+            _push_identity="$(_canonical_remote_url "$_push_url")"
             # Unknown/unresolvable remote: fall through to the guard rather than
             # skipping it — an unrecognised name is not evidence of a mirror.
-            if [ -n "$_origin_url" ] && [ -n "$_push_url" ] && [ "$_origin_url" != "$_push_url" ]; then
+            if [ -n "$_origin_identity" ] && [ -n "$_push_identity" ] && [ "$_origin_identity" != "$_push_identity" ]; then
                 continue
             fi
         fi

@@ -243,10 +243,10 @@ def test_guard_edited_on_a_checked_out_pr_branch_is_not_executed(
         "refs/remotes/origin/HEAD",
     ],
 )
-def test_any_origin_default_branch_ref_anchors_trust(
+def test_unambiguous_origin_default_branch_ref_anchors_trust(
     tmp_path: Path, trusted_ref: str
 ) -> None:
-    """Repos disagree on the default branch name; all three spellings anchor."""
+    """A symbolic HEAD or a sole conventional default ref can anchor."""
     repo, sentinel = _make_repo(tmp_path, TRUSTED, trusted_ref=trusted_ref)
     _run_hook(repo)
     assert sentinel.exists(), f"guard did not run with anchor {trusted_ref}"
@@ -318,6 +318,21 @@ def test_case_folding_does_not_admit_an_untrusted_origin(
     assert not sentinel.exists(), f"executed for untrusted origin={origin!r}"
 
 
+def _repo_with_stale_master_and_current_main(tmp_path: Path) -> tuple[Path, Path, Path]:
+    repo, sentinel = _make_repo(tmp_path, TRUSTED, commit_guard=True, trusted_ref=None)
+    guard = repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh"
+
+    _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+    _git(repo, "rm", "-q", str(guard))
+    _git(repo, "commit", "--no-verify", "-qm", "drop the guard on main")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    guard.write_text(f"#!/usr/bin/env bash\ntouch {sentinel}\nexit 0\n")
+    guard.chmod(0o755)
+    return repo, sentinel, guard
+
+
 def test_stale_origin_master_does_not_anchor_a_main_default_repo(
     tmp_path: Path,
 ) -> None:
@@ -327,23 +342,16 @@ def test_stale_origin_master_does_not_anchor_a_main_default_repo(
     resurrect a guard the maintainers had deleted from main — running policy the
     team removed, from a branch that is not their default.
     """
-    repo, sentinel = _make_repo(tmp_path, TRUSTED, commit_guard=True, trusted_ref=None)
-    guard = repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh"
-
-    # origin/master is stale and still carries the guard.
-    _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
-    # The default branch (main) has since deleted it.
-    _git(repo, "rm", "-q", str(guard))
-    _git(repo, "commit", "--no-verify", "-qm", "drop the guard on main")
-    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    repo, sentinel, _ = _repo_with_stale_master_and_current_main(tmp_path)
     _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
 
-    # The worktree still has the old guard (e.g. a merge brought it back).
-    guard.parent.mkdir(parents=True, exist_ok=True)
-    guard.write_text(f"#!/usr/bin/env bash\ntouch {sentinel}\nexit 0\n")
-    guard.chmod(0o755)
+    _run_hook(repo)
+    assert not sentinel.exists(), "anchored to stale master instead of origin/HEAD"
+
+
+def test_missing_origin_head_with_master_and_main_is_inert(tmp_path: Path) -> None:
+    """Without origin/HEAD, two conventional refs are an ambiguous anchor."""
+    repo, sentinel, _ = _repo_with_stale_master_and_current_main(tmp_path)
 
     _run_hook(repo)
-    assert (
-        not sentinel.exists()
-    ), "anchored to a stale origin/master, not the default branch"
+    assert not sentinel.exists(), "guessed master while origin's default was unknown"
