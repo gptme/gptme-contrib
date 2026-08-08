@@ -111,8 +111,9 @@ set -euo pipefail
 # GitHub App, so without this its reviews are indistinguishable from the agent
 # talking to itself and get silenced by the self-trigger guard. Matches both
 # the summary comment (`<!-- bob-ai-review {...} -->`) and inline findings
-# (`<!-- bob-ai-review-finding -->`).
-AI_REVIEW_MARKER="<!-- bob-ai-review"
+# (`<!-- bob-ai-review-finding -->`). The reviewer stamps summary comments at
+# the end, so this marker cannot be anchored to the first line.
+AI_REVIEW_MARKER_RE='^<!-- bob-ai-review(-finding| \{.*\}) -->$'
 
 # --- Parse args ---
 AUTHOR=""
@@ -493,7 +494,17 @@ has_actionable_update() {
     # PM dispatches -> push -> re-review), and it terminates the same way, via
     # the fingerprint dedup below plus the per-PR attempt counters. It is
     # bounded by the PR being fixed or merged, not by the reviewer's identity.
-    if [ "$last_actor" = "$AUTHOR" ] && ! echo "$last_body" | grep -q "$AI_REVIEW_MARKER"; then
+    #
+    # The marker must occupy a complete line. A normal reply that merely quotes
+    # or inline-copies the marker remains self-chatter; the reviewer itself emits
+    # the marker as a standalone HTML-comment line. The regex accepts only the
+    # two formats emitted by the reviewer: `-finding` or a JSON state object.
+    local is_ai_review=1
+    if [ "$last_actor" = "$AUTHOR" ] && printf '%s\n' "$last_body" \
+        | grep -qE "$AI_REVIEW_MARKER_RE"; then
+        is_ai_review=0
+    fi
+    if [ "$last_actor" = "$AUTHOR" ] && [ "$is_ai_review" -ne 0 ]; then
         return 1
     fi
 

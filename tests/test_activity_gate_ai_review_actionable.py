@@ -44,7 +44,7 @@ def _actionable(body: str, login: str) -> bool:
     script = f"""
 set -uo pipefail
 AUTHOR={BOT}
-AI_REVIEW_MARKER='{MARKER}'
+AI_REVIEW_MARKER_RE='^<!-- bob-ai-review(-finding| \\{{.*\\}}) -->$'
 {_extract_function("has_actionable_update")}
 if has_actionable_update '{json.dumps(pr)}'; then echo YES; else echo NO; fi
 """
@@ -56,7 +56,7 @@ if has_actionable_update '{json.dumps(pr)}'; then echo YES; else echo NO; fi
 
 def test_ai_review_summary_is_actionable():
     """The regression: our reviewer's findings must reach PM."""
-    assert _actionable(f'{MARKER} {{"sha": "abc"}} -->\n\n3 findings', BOT)
+    assert _actionable(f'3 findings\n\n{MARKER} {{"sha": "abc"}} -->', BOT)
 
 
 def test_ai_review_inline_finding_is_actionable():
@@ -66,6 +66,19 @@ def test_ai_review_inline_finding_is_actionable():
 def test_bobs_own_plain_comment_is_still_silenced():
     """The loop guard must survive — this is why we match the marker, not the login."""
     assert not _actionable("Pushed a fix, rerunning CI.", BOT)
+
+
+def test_bobs_reply_quoting_marker_inline_is_still_silenced():
+    assert not _actionable(f"Fixed the parsing of `{MARKER}` and pushed.", BOT)
+
+
+def test_bobs_reply_quoting_marker_line_is_still_silenced():
+    quoted = f"> {MARKER}-finding -->\n> P1 — stale state\n\nFixed in abc123."
+    assert not _actionable(quoted, BOT)
+
+
+def test_similar_standalone_marker_is_still_silenced():
+    assert not _actionable(f"Status update\n\n{MARKER}-manual -->", BOT)
 
 
 def test_human_comment_still_actionable():
