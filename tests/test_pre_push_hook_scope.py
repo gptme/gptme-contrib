@@ -47,6 +47,12 @@ def _init(tmp_path: Path) -> Path:
     # A dead origin URL: the hook's `git fetch origin` fails harmlessly (it is
     # `|| true`), which keeps the reflog we plant below under our control.
     _git(repo, "remote", "add", "origin", str(tmp_path / "nonexistent.git"))
+    # A genuine mirror: a real remote at a DIFFERENT url.
+    _git(repo, "remote", "add", "mirror", str(tmp_path / "mirror.git"))
+    _git(repo, "remote", "add", "forgejo", str(tmp_path / "forgejo.git"))
+    _git(repo, "remote", "add", "backup", str(tmp_path / "backup.git"))
+    # An ALIAS of origin: a different name pointing at origin's own url.
+    _git(repo, "remote", "add", "upstream", str(tmp_path / "nonexistent.git"))
     return repo
 
 
@@ -218,3 +224,37 @@ def test_non_numeric_range_limit_falls_back_to_the_default(tmp_path: Path) -> No
     assert "integer expression expected" not in proc.stderr, proc.stderr
     assert SKIP_MESSAGE not in proc.stderr, proc.stderr
     assert proc.returncode == 1
+
+
+def test_force_reset_guard_still_applies_to_a_remote_aliasing_origin(
+    tmp_path: Path,
+) -> None:
+    """`git remote add upstream <origin-url>` is still origin.
+
+    Scoping on the remote NAME alone dropped the guard for any second name
+    pointing at origin's own url — pushing there re-pushes the commits a human
+    force-removed from that very history, which is the whole point of the guard.
+    """
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        "upstream",
+        str(tmp_path / "nonexistent.git"),
+    )
+    assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
+    assert proc.returncode == 1
+
+
+def test_force_reset_guard_applies_when_the_remote_cannot_be_resolved(
+    tmp_path: Path,
+) -> None:
+    """An unrecognised remote name is not evidence of a mirror. Fail closed."""
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        "never-configured",
+        "git@example.com:o/x.git",
+    )
+    assert FORCE_RESET_ERROR in proc.stderr, proc.stderr

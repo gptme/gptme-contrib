@@ -127,9 +127,22 @@ if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
         #
         # Git passes the remote NAME as $1. Empty means invoked outside git
         # (tests) — keep the old behaviour there rather than silently skipping.
+        #
+        # Compare URLs, not just names. A second remote can point at origin's
+        # own URL (`git remote add upstream <origin-url>`, or a fork workflow
+        # that renames things), and pushing to that name IS pushing to origin —
+        # so skipping on the name alone would drop the guard exactly where it
+        # still applies. Only a remote that resolves to a *different* URL is a
+        # genuine mirror.
         _remote_branch="${remote_ref#refs/heads/}"
         if [ -n "${PUSH_REMOTE_NAME:-}" ] && [ "${PUSH_REMOTE_NAME:-}" != "origin" ]; then
-            continue
+            _origin_url="$(git remote get-url origin 2>/dev/null || true)"
+            _push_url="$(git remote get-url "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
+            # Unknown/unresolvable remote: fall through to the guard rather than
+            # skipping it — an unrecognised name is not evidence of a mirror.
+            if [ -n "$_origin_url" ] && [ -n "$_push_url" ] && [ "$_origin_url" != "$_push_url" ]; then
+                continue
+            fi
         fi
 
         # Fetch to get the latest remote state (updates reflog).

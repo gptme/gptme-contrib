@@ -269,3 +269,81 @@ def test_a_non_default_origin_branch_does_not_anchor(tmp_path: Path) -> None:
     )
     _run_hook(repo)
     assert not sentinel.exists(), "anchored trust to a non-default origin branch"
+
+
+# ---------------------------------------------------------------------------
+# Case folding, and picking the right ref.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://GITHUB.com/gptme/gptme-contrib.git",
+        "https://github.com/GPTME/gptme-contrib.git",
+        "https://GitHub.Com/ErikBjare/bob.git",
+        "HTTPS://github.com/gptme/gptme-contrib.git",
+        "git@GitHub.com:ActivityWatch/activitywatch.git",
+    ],
+)
+def test_case_variants_of_a_trusted_origin_still_run(
+    tmp_path: Path, origin: str
+) -> None:
+    """Byte-exact matching made the hook silently inert for real maintainers.
+
+    Hostnames are case-insensitive by DNS, and GitHub/Forgejo account names are
+    case-insensitive and unique case-insensitively, so folding case cannot admit
+    a different principal.
+    """
+    repo, sentinel = _make_repo(tmp_path, origin)
+    _run_hook(repo)
+    assert sentinel.exists(), f"guard did not run for origin={origin!r}"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://EVIL.com/gptme/malicious.git",
+        "https://GitHub.com.evil.com/gptme/x.git",
+        "https://github.com/GPTME-EVIL/x.git",
+        "git@EVIL.com:ErikBjare/bob.git",
+    ],
+)
+def test_case_folding_does_not_admit_an_untrusted_origin(
+    tmp_path: Path, origin: str
+) -> None:
+    """Folding case must not widen the allowlist to anything else."""
+    repo, sentinel = _make_repo(tmp_path, origin)
+    _run_hook(repo)
+    assert not sentinel.exists(), f"executed for untrusted origin={origin!r}"
+
+
+def test_stale_origin_master_does_not_anchor_a_main_default_repo(
+    tmp_path: Path,
+) -> None:
+    """The anchor is origin's DEFAULT branch, not whichever ref happens to have it.
+
+    Picking the first ref that resolves a *blob* let a stale origin/master
+    resurrect a guard the maintainers had deleted from main — running policy the
+    team removed, from a branch that is not their default.
+    """
+    repo, sentinel = _make_repo(tmp_path, TRUSTED, commit_guard=True, trusted_ref=None)
+    guard = repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh"
+
+    # origin/master is stale and still carries the guard.
+    _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+    # The default branch (main) has since deleted it.
+    _git(repo, "rm", "-q", str(guard))
+    _git(repo, "commit", "--no-verify", "-qm", "drop the guard on main")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+    # The worktree still has the old guard (e.g. a merge brought it back).
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    guard.write_text(f"#!/usr/bin/env bash\ntouch {sentinel}\nexit 0\n")
+    guard.chmod(0o755)
+
+    _run_hook(repo)
+    assert (
+        not sentinel.exists()
+    ), "anchored to a stale origin/master, not the default branch"

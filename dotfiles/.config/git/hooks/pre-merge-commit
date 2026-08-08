@@ -53,14 +53,25 @@ guard="$root/$guard_rel"
 #     origin anchor is in place there is no escalation path to protect against
 #     (the payload becoming the local HEAD no longer grants it execution).
 #   * While you are locally editing the guard, the hook is inert. Fail closed.
-trusted_blob=""
-for _trusted_ref in \
+#
+# Pick the REF first, then read the blob from that ref alone. Selecting on
+# "first ref that happens to contain a guard" instead would let a stale
+# refs/remotes/origin/master satisfy a repo whose default branch is main and
+# whose maintainers deleted the guard from main — resurrecting a policy the
+# team removed, from a branch that is not their default.
+trusted_ref=""
+for _candidate in \
     refs/remotes/origin/HEAD \
     refs/remotes/origin/master \
     refs/remotes/origin/main; do
-    trusted_blob="$(git rev-parse --quiet --verify "$_trusted_ref:$guard_rel" 2>/dev/null || true)"
-    [ -n "$trusted_blob" ] && break
+    if git rev-parse --quiet --verify "$_candidate" >/dev/null 2>&1; then
+        trusted_ref="$_candidate"
+        break
+    fi
 done
+[ -n "$trusted_ref" ] || exit 0
+
+trusted_blob="$(git rev-parse --quiet --verify "$trusted_ref:$guard_rel" 2>/dev/null || true)"
 work_blob="$(git hash-object "$guard" 2>/dev/null || true)"
 [ -n "$trusted_blob" ] && [ "$trusted_blob" = "$work_blob" ] || exit 0
 
@@ -77,13 +88,23 @@ origin="$(git config --get remote.origin.url 2>/dev/null || true)"
 # `gptme-fake` and `gptme-evil` but never an attacker host with an *exact*
 # allowed owner, so they all passed.
 #
+# Case is not significant, and treating it as significant made the hook
+# silently inert for legitimate maintainers: `git clone https://GITHUB.com/gptme/x`
+# or `https://github.com/GPTME/x` produced strings that failed a byte-exact
+# `case` and exited 0 with no warning. Hostnames are case-insensitive by DNS,
+# and GitHub/Forgejo account names are case-insensitive and unique
+# case-insensitively — `GPTME` *is* `gptme`, not a second account — so folding
+# case cannot admit a different principal. Uppercase schemes (`HTTPS://`) are
+# parsed too; the old `[a-z+]+` left the sed unmatched, so `host` became the
+# whole URL. `tr` rather than `${var,,}`: bash 3.2 still ships on macOS.
+#
 # Shapes handled: git@host:OWNER/repo(.git), scheme://[user@]host[:port]/OWNER/repo(.git)
 host=""
 owner=""
 case "$origin" in
     *://*)
-        host="$(printf '%s' "$origin" | sed -E 's#^[a-z+]+://([^/]+)/.*$#\1#')"
-        owner="$(printf '%s' "$origin" | sed -E 's#^[a-z+]+://[^/]+/([^/]+)/.*$#\1#')"
+        host="$(printf '%s' "$origin" | sed -E 's#^[a-zA-Z+]+://([^/]+)/.*$#\1#')"
+        owner="$(printf '%s' "$origin" | sed -E 's#^[a-zA-Z+]+://[^/]+/([^/]+)/.*$#\1#')"
         ;;
     *:*)
         host="$(printf '%s' "$origin" | sed -E 's#^([^:]+):.*$#\1#')"
@@ -95,12 +116,16 @@ esac
 host="${host##*@}"
 host="${host%%:*}"
 
+host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+owner="$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')"
+
+# Allowlists are spelled lowercase because both values are folded above.
 case "$host" in
     github.com | forgejo.hassel.bjareho.lt) ;;
     *) exit 0 ;;
 esac
 
 case "$owner" in
-    ErikBjare | gptme | ActivityWatch | superuserlabs) exec "$guard" ;;
+    erikbjare | gptme | activitywatch | superuserlabs) exec "$guard" ;;
     *) exit 0 ;;
 esac
