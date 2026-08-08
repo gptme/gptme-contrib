@@ -1628,7 +1628,27 @@ def test_js_ts_spec_files_are_still_test_files(path: str) -> None:
     assert self_merge_check.is_test_file(path) is True
 
 
-@pytest.mark.parametrize("path", ["foo.spec.ts", "foo.spec.js"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "foo.spec.mts",
+        "foo.spec.cts",
+        "src/lib/loader.spec.mts",
+        "packages/api/legacy.spec.cts",
+        "foo.SPEC.MTS",
+    ],
+)
+def test_typescript_module_spec_files_are_test_files(path: str) -> None:
+    """``.mts``/``.cts`` are the TS counterparts of the already-accepted
+    ``.mjs``/``.cjs``. Omitting them made ``foo.spec.mts`` a false negative for
+    ``type: module`` TypeScript repos, an internal inconsistency in the marker set.
+    """
+    assert self_merge_check.is_test_file(path) is True
+
+
+@pytest.mark.parametrize(
+    "path", ["foo.spec.ts", "foo.spec.js", "foo.spec.mts", "foo.spec.cts"]
+)
 def test_classify_category_js_ts_spec_files_are_test_only(path: str) -> None:
     category, reasons = self_merge_check.classify_category([path])
     assert category == "test-only", reasons

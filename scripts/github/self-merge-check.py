@@ -97,7 +97,11 @@ TEST_FILENAME_MARKERS = ("_test.", ".test.")
 # a bare ``.spec.`` substring would also match API/infrastructure specification
 # documents (``openapi.spec.yaml``, ``api.spec.json``, ``infra.spec.yaml``),
 # which are NOT tests and must not be self-mergeable as "test-only".
-SPEC_TEST_FILE_RE = re.compile(r"\.spec\.(ts|tsx|js|jsx|mjs|cjs)$", re.IGNORECASE)
+# ``.mts``/``.cts`` are the TypeScript counterparts of ``.mjs``/``.cjs`` and are
+# just as unambiguously code (never specification documents), so they belong here.
+SPEC_TEST_FILE_RE = re.compile(
+    r"\.spec\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$", re.IGNORECASE
+)
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
     "scripts/deploy",
