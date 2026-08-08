@@ -162,6 +162,7 @@ def _run_helper(
     capture_gh_log: Literal[False] = ...,
     capture_ts_file: Literal[False] = ...,
     pre_trigger_ts: str | None = ...,
+    ts_file_unwritable: bool = ...,
     repo: str = ...,
 ) -> subprocess.CompletedProcess[str]: ...
 
@@ -174,6 +175,7 @@ def _run_helper(
     capture_gh_log: Literal[True],
     capture_ts_file: Literal[False] = ...,
     pre_trigger_ts: str | None = ...,
+    ts_file_unwritable: bool = ...,
     repo: str = ...,
 ) -> tuple[subprocess.CompletedProcess[str], str]: ...
 
@@ -186,6 +188,7 @@ def _run_helper(
     capture_gh_log: Literal[False] = ...,
     capture_ts_file: Literal[True],
     pre_trigger_ts: str | None = ...,
+    ts_file_unwritable: bool = ...,
     repo: str = ...,
 ) -> tuple[subprocess.CompletedProcess[str], str | None]: ...
 
@@ -197,6 +200,7 @@ def _run_helper(
     capture_gh_log: bool = False,
     capture_ts_file: bool = False,
     pre_trigger_ts: str | None = None,
+    ts_file_unwritable: bool = False,
     repo: str = "gptme/gptme",
 ) -> (
     subprocess.CompletedProcess[str]
@@ -213,6 +217,9 @@ def _run_helper(
             ts_content is the content of _TRIGGER_TS_FILE if it was written, else None
         pre_trigger_ts: if set, pre-create the local trigger-timestamp file with
             this timestamp (simulates a prior successful trigger in the same TMPDIR)
+        ts_file_unwritable: create a DIRECTORY at the trigger-timestamp path so the
+            helper's write fails, without making TMPDIR itself unwritable (the
+            gh stub and its log live there too)
         repo: repo string passed to the helper (default "gptme/gptme")
     """
     if capture_gh_log and capture_ts_file:
@@ -232,6 +239,13 @@ def _run_helper(
             pr_number = int(str(fixture["pr_number"]))
             ts_file = tmp_path / f"greptile-trigger-ts-{_pr_hash(repo, pr_number)}.txt"
             ts_file.write_text(pre_trigger_ts)
+
+        # Make only the TS path unwritable — a directory at that exact name.
+        # Chmod-ing TMPDIR would also break the gh stub and its log, which live
+        # in the same directory.
+        if ts_file_unwritable:
+            pr_number = int(str(fixture["pr_number"]))
+            (tmp_path / f"greptile-trigger-ts-{_pr_hash(repo, pr_number)}.txt").mkdir()
 
         gh_log = tmp_path / "gh-log.json"
         env = os.environ.copy()
@@ -1182,3 +1196,47 @@ def test_stale_unacked_trigger_no_new_commits_does_not_retrigger():
         f"trigger must NOT post @greptileai review comment on stale+no-new-commits. "
         f"Got log: {gh_log!r}"
     )
+
+
+def test_fallback_refuses_to_trigger_when_ts_file_cannot_be_written():
+    """No propagation-delay guard → no trigger. Not "trigger anyway and warn".
+
+    The timestamp used to be written *after* a successful post, so a failed
+    write (read-only TMPDIR, full disk) left a window with no guard at all: the
+    next invocation inside TRIGGER_GRACE_SECONDS finds no TS file, the comments
+    API has not yet surfaced the comment we just made, `_our_trigger_status`
+    reports "none", and we post a second `@greptileai review`. That is INCIDENT
+    #5 (2026-03-19) exactly; warning that the guard is disabled does not prevent
+    it.
+
+    Writing first and treating a failed write as fatal costs one cycle. The
+    alternative costs a duplicate review comment.
+    """
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger", fixture, capture_gh_log=True, ts_file_unwritable=True
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "refusing to trigger" in result.stdout, result.stdout
+    assert not gh_log, f"posted a trigger with no propagation guard: {gh_log}"
+
+
+def test_fallback_records_the_timestamp_before_posting():
+    """The happy path still records the guard (and still posts)."""
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+    }
+    result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "triggering initial review" in result.stdout
+    assert ts_content, "_TRIGGER_TS_FILE should have been written by the fallback"
