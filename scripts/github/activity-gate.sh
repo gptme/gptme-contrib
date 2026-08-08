@@ -106,6 +106,14 @@
 
 set -euo pipefail
 
+# Marker stamped on every comment by Bob's self-hosted AI reviewer
+# (ErikBjare/bob#1122). It posts through Bob's user account rather than a
+# GitHub App, so without this its reviews are indistinguishable from the agent
+# talking to itself and get silenced by the self-trigger guard. Matches both
+# the summary comment (`<!-- bob-ai-review {...} -->`) and inline findings
+# (`<!-- bob-ai-review-finding -->`).
+AI_REVIEW_MARKER="<!-- bob-ai-review"
+
 # --- Parse args ---
 AUTHOR=""
 ORG=""
@@ -467,8 +475,25 @@ has_actionable_update() {
     # If no activity found, this might be a push — allow it
     [ -z "$last_actor" ] && return 0
 
-    # Skip if the last actor is the author (self-triggered update)
-    if [ "$last_actor" = "$AUTHOR" ]; then
+    # Skip if the last actor is the author (self-triggered update).
+    #
+    # EXCEPTION: Bob's self-hosted AI reviewer (ErikBjare/bob#1122) posts its
+    # findings through Bob's *user* account, not a GitHub App, so its reviews
+    # look exactly like the agent talking to itself and were silenced here.
+    # Greptile appears ~70 times in this file; the replacement appeared zero
+    # times, so PM listened to the reviewer we stopped paying for and ignored
+    # the one we run. Reviews were posted and then dropped on the floor.
+    #
+    # Those comments carry a machine marker, so they are distinguishable from
+    # Bob's genuine human-directed comments — which must STILL be silenced,
+    # since those are the actual self-trigger loop this guard exists to stop.
+    # Matching the marker rather than the login is what keeps both properties.
+    #
+    # Loop safety: this is the same cycle Greptile already drives (review ->
+    # PM dispatches -> push -> re-review), and it terminates the same way, via
+    # the fingerprint dedup below plus the per-PR attempt counters. It is
+    # bounded by the PR being fixed or merged, not by the reviewer's identity.
+    if [ "$last_actor" = "$AUTHOR" ] && ! echo "$last_body" | grep -q "$AI_REVIEW_MARKER"; then
         return 1
     fi
 
