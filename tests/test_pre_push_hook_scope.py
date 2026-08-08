@@ -226,24 +226,69 @@ def test_non_numeric_range_limit_falls_back_to_the_default(tmp_path: Path) -> No
     assert proc.returncode == 1
 
 
+@pytest.mark.parametrize(
+    ("origin_url", "alias_url"),
+    [
+        ("https://github.com/Org/Repo.git", "https://github.com/org/repo"),
+        ("git@github.com:Org/Repo.git", "ssh://git@GITHUB.com/org/repo"),
+        ("https://github.com/org/repo.git/", "git@github.com:org/repo.git"),
+    ],
+)
 def test_force_reset_guard_still_applies_to_a_remote_aliasing_origin(
-    tmp_path: Path,
+    tmp_path: Path, origin_url: str, alias_url: str
 ) -> None:
-    """`git remote add upstream <origin-url>` is still origin.
-
-    Scoping on the remote NAME alone dropped the guard for any second name
-    pointing at origin's own url — pushing there re-pushes the commits a human
-    force-removed from that very history, which is the whole point of the guard.
-    """
+    """Equivalent URL spellings still identify origin, not a mirror."""
     repo, head = _repo_with_force_reset_reflog(tmp_path)
+    _git(repo, "remote", "set-url", "origin", origin_url)
+    _git(repo, "remote", "set-url", "upstream", alias_url)
     proc = _run_hook(
         repo,
         f"refs/heads/master {head} refs/heads/master {head}\n",
         "upstream",
-        str(tmp_path / "nonexistent.git"),
+        alias_url,
     )
     assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
     assert proc.returncode == 1
+
+
+def test_force_reset_guard_applies_to_a_remote_whose_pushurl_is_origin(
+    tmp_path: Path,
+) -> None:
+    """A push lands at `pushurl`, not `url` — the guard must follow it.
+
+    `git remote add upstream <other>` + `git remote set-url --push upstream
+    <origin>` is a real fork workflow: fetch from one place, push to another.
+    Comparing fetch URLs made this remote look like a mirror and skipped the
+    guard, even though the push rewrites origin's own history.
+    """
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    origin_url = _git(repo, "remote", "get-url", "origin").strip()
+    _git(repo, "remote", "set-url", "upstream", "https://example.invalid/o/x.git")
+    _git(repo, "remote", "set-url", "--push", "upstream", origin_url)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        "upstream",
+        origin_url,
+    )
+    assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
+    assert proc.returncode == 1
+
+
+def test_mirror_push_is_still_skipped_when_pushurl_differs(tmp_path: Path) -> None:
+    """The converse: a genuine mirror (pushurl elsewhere) still skips the guard."""
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    _git(repo, "remote", "set-url", "mirror", "https://example.invalid/o/x.git")
+    _git(
+        repo, "remote", "set-url", "--push", "mirror", "https://example.invalid/o/y.git"
+    )
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        "mirror",
+        "https://example.invalid/o/y.git",
+    )
+    assert FORCE_RESET_ERROR not in proc.stderr, proc.stderr
 
 
 def test_force_reset_guard_applies_when_the_remote_cannot_be_resolved(
