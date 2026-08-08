@@ -31,6 +31,15 @@ The Bob parameter set proves byte parity with production; the Alice set
 proves the Bob-specific bits (identity name, author handle, hardcoded
 /home/bob/bob, peer roster, Gordon/Erik policy paragraph) are really
 parameters.
+
+Caveat — one deliberate divergence: the zero-checks/``retrigger-pr-checks.sh``
+guidance was added to the Python arms first and does not exist in the pinned
+bash. ``investigate.ci_failure.bob``, ``investigate.pr_update.bob``,
+``investigate.combined.ci_failure+pr_update.bob``, ``main_prompt.plain.bob``
+and ``main_prompt.full.bob`` were hand-updated to match the Python output, so
+for that region they assert Python-vs-snapshot, not bash parity. Re-capturing
+these five from an unmodified brain-repo checkout will NOT reproduce them until
+the bash builder carries the same text.
 """
 
 from __future__ import annotations

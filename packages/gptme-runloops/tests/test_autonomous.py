@@ -366,7 +366,13 @@ def test_parse_cascade_routing_hint_propagates():
 
 
 def test_parse_cascade_routing_hint_absent_when_not_set():
-    """routing_hint must NOT appear in intent when complexity_tier is not low."""
+    """routing_hint must NOT appear in intent when the selector omits it.
+
+    Note: the tier→hint decision belongs to the upstream cascade-selector, not
+    here. ``parse_cascade_selector_output`` never reads ``complexity_tier``; it
+    only propagates ``routing_hint`` when the selector sets it. The
+    ``complexity_tier`` below is realistic fixture context, not a gate.
+    """
     data = {
         "tier": 1,
         "recommended_scope": "standard",
