@@ -133,6 +133,17 @@ def read_slot_expiry(path: Path) -> datetime | None:
     return _parse_oauth_expiry(payload)
 
 
+#: Reason prefixes emitted by :func:`slot_is_fresh` when a slot fails purely
+#: because of its *access* token clock — already lapsed, or inside the grace
+#: window. Such a slot may still hold a valid refresh token. Kept as module
+#: constants so :func:`reason_is_refreshable` can never drift from the strings
+#: :func:`slot_is_fresh` actually produces.
+REASON_EXPIRED = "expired"
+REASON_WITHIN_GRACE = "expires within grace"
+
+_REFRESHABLE_REASON_MARKERS = (REASON_EXPIRED, REASON_WITHIN_GRACE)
+
+
 def slot_is_fresh(
     path: Path,
     *,
@@ -157,9 +168,35 @@ def slot_is_fresh(
     if expiry <= current + timedelta(seconds=grace_seconds):
         age = int((current - expiry).total_seconds())
         if age >= 0:
-            return False, f"expired {age // 60}m ago (at {expiry.isoformat()})"
-        return False, f"expires within grace ({-age}s left, at {expiry.isoformat()})"
+            return (
+                False,
+                f"{REASON_EXPIRED} {age // 60}m ago (at {expiry.isoformat()})",
+            )
+        return (
+            False,
+            f"{REASON_WITHIN_GRACE} ({-age}s left, at {expiry.isoformat()})",
+        )
     return True, f"valid until {expiry.isoformat()}"
+
+
+def reason_is_refreshable(reason: str) -> bool:
+    """Whether a :func:`slot_is_fresh` failure reason is *only* an expiry problem.
+
+    An expired access token is not necessarily a dead credential: Claude Code
+    refreshes it from the stored refresh token on first use. Callers can probe
+    such a slot online and, when the probe succeeds, switch into it with
+    ``probe_ok=True``.
+
+    Returns ``False`` for reasons no probe can fix (missing slot file,
+    unreadable/malformed slot payload) so those keep failing hard, and for
+    success reasons ("valid until ...").
+
+    Use this instead of substring-matching reason text at the call site: the
+    grace-window reason reads "expire\\ **s** within grace", so a naive
+    ``"expired" in reason`` check silently misses it.
+    """
+    lowered = reason.lower()
+    return any(lowered.startswith(marker) for marker in _REFRESHABLE_REASON_MARKERS)
 
 
 def _hash_file(path: Path) -> str | None:
