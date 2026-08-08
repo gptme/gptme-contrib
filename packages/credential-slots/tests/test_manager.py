@@ -398,6 +398,39 @@ class TestSwitchTo:
         assert result.ok is True
         assert mgr.get_active_subscription() == "bob"
 
+    def test_probe_ok_ignored_when_slot_has_no_refresh_token(
+        self, mgr: SlotManager
+    ) -> None:
+        """probe_ok only earns the bypass for slots CC could actually refresh.
+
+        Without a refresh token there is nothing to auto-refresh, so an
+        "online probe said it works" assertion cannot be about this slot —
+        the offline expiry gate must stay in force.
+        """
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600), refresh_token=None)
+        mgr.live_path.symlink_to(".credentials.json.alice")
+        lines: list[str] = []
+        mgr.logger = lines.append
+
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+
+        assert result.ok is False
+        assert "expired" in result.reason.lower()
+        assert mgr.get_active_subscription() == "alice"
+        assert any("probe_ok IGNORED" in line for line in lines)
+
+    def test_probe_ok_bypass_is_logged_distinctly(self, mgr: SlotManager) -> None:
+        """A skipped expiry gate must be distinguishable from an ordinary switch."""
+        self._seed(mgr, bob_ms=_ms_from_now(-3600), alice_ms=_ms_from_now(3600))
+        lines: list[str] = []
+        mgr.logger = lines.append
+
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+
+        assert result.ok is True
+        assert any("probe_ok BYPASS" in line for line in lines)
+
     def test_probe_ok_still_rejects_missing_slot(self, mgr: SlotManager) -> None:
         """probe_ok=True bypasses freshness but not existence checks."""
         mgr.live_path.symlink_to(".credentials.json.alice")

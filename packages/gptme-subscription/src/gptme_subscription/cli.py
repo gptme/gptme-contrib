@@ -385,7 +385,23 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         # manual switch unprotected for the next decision.
         sm.record_manual_switch_hold(target)
         print(f"Switched to {target}")
-        sm.check_usage(no_cache=True)
+        # Post-flip validation: this runs the usage script against the *live*
+        # credential, i.e. the slot we just switched into. Don't discard the
+        # result — a failure here is the one signal we have that the credential
+        # is not usable after the flip. ``check_usage`` also returns None when
+        # no usage script is configured, which says nothing about the
+        # credential, so only warn when a script was actually available to run.
+        usage_script = sm.config.usage_script
+        if sm.check_usage(no_cache=True) is None and (
+            usage_script is not None and usage_script.exists()
+        ):
+            print(
+                f"  WARNING: post-switch usage check against {target} failed — "
+                "the switch DID happen and is recorded, but the credential did "
+                "not answer. Verify with `--status --probe`; you may need to "
+                f"re-run /login for {target}.",
+                file=sys.stderr,
+            )
         return 0
     return 1
 

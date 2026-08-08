@@ -17,6 +17,7 @@ from gptme_subscription.cli import (
     _cmd_switch,
     _execute_switch_decision,
 )
+from gptme_subscription.config import Config
 from gptme_subscription.manager import Decision, SubscriptionManager
 
 
@@ -492,6 +493,115 @@ def test_cmd_switch_unprobeable_failure_is_not_probed(
     probe_mock.assert_not_called()
     assert len(sm.switch_calls) == 1
     assert sm.manual_hold_calls == []
+
+
+def _real_manager(
+    tmp_path: Path, *, usage_script: Path | None = None
+) -> SubscriptionManager:
+    """A real SubscriptionManager over tmp creds/state dirs (never real slots)."""
+    creds_dir = tmp_path / "creds"
+    creds_dir.mkdir()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    return SubscriptionManager(
+        Config(
+            subscriptions=["bob", "alice"],
+            primary="bob",
+            creds_dir=creds_dir,
+            state_dir=state_dir,
+            usage_script=usage_script,
+        )
+    )
+
+
+def _write_real_slot(sm: SubscriptionManager, slot: str, *, expires_in: float) -> None:
+    sm.config.slot_path(slot).write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "fake-access-token",
+                    "refreshToken": "fake-refresh-token",
+                    "expiresAt": int(
+                        (datetime.now(timezone.utc).timestamp() + expires_in) * 1000
+                    ),
+                }
+            }
+        )
+    )
+
+
+def test_cmd_switch_probe_ok_retry_flips_symlink_end_to_end(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End-to-end over a REAL SubscriptionManager: the retry must flip the symlink.
+
+    Exercises the CLI → SubscriptionManager → SlotManager seam that the
+    FakeManager-based tests cannot: if ``probe_ok`` were dropped anywhere along
+    the chain, the retry would be refused by the freshness gate and the live
+    symlink would stay on bob.
+    """
+    sm = _real_manager(tmp_path)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=-3600)  # access token lapsed
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    probe_mock = MagicMock(return_value=(None, True, "probe ok"))
+    monkeypatch.setattr("gptme_subscription.cli.probe_credential", probe_mock)
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 0
+    probe_mock.assert_called_once()
+    assert sm.get_active_subscription() == "alice"
+    assert sm.config.creds_link.resolve() == sm.config.slot_path("alice").resolve()
+
+
+def test_cmd_switch_warns_loudly_when_post_flip_usage_check_fails(
+    tmp_path: Path, capsys
+) -> None:
+    """A failed post-flip usage check must not be silently discarded.
+
+    The switch really happened and is recorded, so the exit code stays 0 — but
+    the operator has to be told the credential did not answer.
+    """
+    # Non-executable script → check_usage() returns None (probe could not run).
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\necho '{}'\n")
+    usage_script.chmod(0o644)
+
+    sm = _real_manager(tmp_path, usage_script=usage_script)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=3600)
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 0  # the flip did happen — exit 1 would read as "it did not"
+    assert sm.get_active_subscription() == "alice"
+    err = capsys.readouterr().err
+    assert "post-switch usage check against alice failed" in err
+
+
+def test_cmd_switch_no_warning_when_post_flip_usage_check_succeeds(
+    tmp_path: Path, capsys
+) -> None:
+    """A healthy post-flip usage check must stay quiet."""
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text('#!/bin/sh\necho \'{"seven_day": {"utilization": 0.1}}\'\n')
+    usage_script.chmod(0o755)
+
+    sm = _real_manager(tmp_path, usage_script=usage_script)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=3600)
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 0
+    assert "post-switch usage check" not in capsys.readouterr().err
 
 
 def test_cmd_switch_fresh_slot_failure_is_not_probed(

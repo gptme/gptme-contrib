@@ -233,6 +233,65 @@ def _write_cred(sm: SubscriptionManager, slot: str, *, age_days: float) -> None:
     os.utime(path, (old_ts, old_ts))
 
 
+def _write_oauth_slot(
+    sm: SubscriptionManager,
+    slot: str,
+    *,
+    expires_in_seconds: float,
+    refresh_token: str | None = "fake-refresh-token",
+) -> None:
+    """Write a real claudeAiOauth slot payload for ``slot``."""
+    oauth: dict[str, object] = {
+        "accessToken": "fake-access-token",
+        "expiresAt": int(
+            (datetime.now(timezone.utc).timestamp() + expires_in_seconds) * 1000
+        ),
+    }
+    if refresh_token is not None:
+        oauth["refreshToken"] = refresh_token
+    sm.config.slot_path(slot).write_text(json.dumps({"claudeAiOauth": oauth}))
+
+
+def test_switch_to_forwards_probe_ok_through_to_slot_manager(tmp_path: Path) -> None:
+    """The SubscriptionManager → SlotManager seam must carry ``probe_ok``.
+
+    The CLI probe-and-retry path is otherwise only exercised against a fake
+    manager that merely records the kwarg, so a wrapper that dropped or
+    mis-forwarded ``probe_ok`` would leave the retry silently refused by the
+    freshness gate with every test still green. This drives real slot files
+    and asserts the symlink actually flips.
+    """
+    sm = _make_manager(tmp_path)
+    _write_oauth_slot(sm, "alice", expires_in_seconds=3600)
+    _write_oauth_slot(sm, "bob", expires_in_seconds=-3600)  # access token lapsed
+    sm.config.creds_link.symlink_to(".credentials.json.alice")
+
+    # Without probe_ok the expiry gate refuses — even under force.
+    assert sm.switch_to("bob", "manual switch", force=True) is False
+    assert sm.get_active_subscription() == "alice"
+
+    # With probe_ok the gate is bypassed and the live symlink really moves.
+    assert sm.switch_to("bob", "manual switch (probe_ok)", force=True, probe_ok=True)
+    assert sm.get_active_subscription() == "bob"
+    assert sm.config.creds_link.resolve() == sm.config.slot_path("bob").resolve()
+
+
+def test_switch_to_probe_ok_still_refused_without_refresh_token(
+    tmp_path: Path,
+) -> None:
+    """probe_ok must not carry a slot CC could never auto-refresh."""
+    sm = _make_manager(tmp_path)
+    _write_oauth_slot(sm, "alice", expires_in_seconds=3600)
+    _write_oauth_slot(sm, "bob", expires_in_seconds=-3600, refresh_token=None)
+    sm.config.creds_link.symlink_to(".credentials.json.alice")
+
+    assert (
+        sm.switch_to("bob", "manual switch (probe_ok)", force=True, probe_ok=True)
+        is False
+    )
+    assert sm.get_active_subscription() == "alice"
+
+
 def test_evaluate_records_observation_for_active_primary(tmp_path: Path) -> None:
     """``evaluate`` must record the live observation for the active slot even
     when it is the primary. Previously gated on ``active != primary``, which

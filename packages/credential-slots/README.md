@@ -86,6 +86,11 @@ ok, reason = mgr.slot_is_fresh("bob")
 # its text — "expired 7m ago" and "expires within grace" are both probeable,
 # while "slot missing"/"unreadable" are not.
 if not ok and reason_is_refreshable(reason):
+    # probe_ok asserts "an online probe just confirmed this slot works". Only
+    # pass it with a *fresh* probe result in hand — it disables the expiry gate
+    # that force=True cannot. It is honored only for slots that actually hold a
+    # refresh token (nothing to auto-refresh otherwise; the gate stays in force
+    # and the ignore is logged), and every bypass is logged distinctly.
     if online_probe_succeeds("bob"):
         mgr.switch_to("bob", "operator switch", probe_ok=True)  # skips the expiry gate
 drift = mgr.detect_live_slot_drift()
