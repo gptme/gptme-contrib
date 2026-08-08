@@ -1673,3 +1673,48 @@ def test_real_e2e_directories_are_still_test_files(path: str) -> None:
 def test_classify_category_real_e2e_dirs_are_test_only(path: str) -> None:
     category, reasons = self_merge_check.classify_category([path])
     assert category == "test-only", reasons
+
+
+# --- pre-existing substring markers (`tests/`, `test_`) had the same weakness ---
+@pytest.mark.parametrize(
+    "path",
+    [
+        # `tests/` as a raw substring matched any directory ENDING in "tests"
+        "src/contests/foo.py",
+        "src/protests/view.py",
+        "app/latests/handler.rb",
+        # `test_` as a raw substring matched any filename CONTAINING it
+        "src/protest_ui.py",
+        "src/latest_thing.py",
+        "lib/greatest_hits.go",
+    ],
+)
+def test_legacy_substring_markers_do_not_match_lookalikes(path: str) -> None:
+    """Non-test source must not be classifiable as a test file.
+
+    These are ordinary source files that the raw-substring markers wrongly
+    claimed, which would have let them self-merge as "test-only".
+    """
+    assert self_merge_check.is_test_file(path) is False
+
+
+@pytest.mark.parametrize("path", ["src/contests/foo.py", "src/protest_ui.py"])
+def test_classify_category_legacy_lookalikes_are_not_test_only(path: str) -> None:
+    category, _reasons = self_merge_check.classify_category([path])
+    assert category != "test-only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/test_foo.py",
+        "tests/helpers/fixtures.json",
+        "packages/x/tests/test_bar.py",
+        "src/test_module.py",
+        "pkg/handler_test.go",
+        "src/utils/date.test.ts",
+        "./tests/test_root.py",
+    ],
+)
+def test_genuine_test_paths_still_match(path: str) -> None:
+    assert self_merge_check.is_test_file(path) is True

@@ -85,7 +85,14 @@ SPEC_LIKE_DOCS = {
     "TASKS.md",
     "OVERVIEW.md",
 }
-TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
+# Test detection is deliberately anchored (path COMPONENT / FILENAME), never a
+# raw substring: a false "test-only" classification lets non-test code merge
+# without human review, so this gate must fail closed.
+# Directory components that mark everything beneath them as tests.
+TEST_DIR_SEGMENTS = frozenset({"tests", "e2e"})
+# Filename prefixes/markers (pytest, Go, Jest/Vitest `.test.` naming).
+TEST_FILENAME_PREFIXES = ("test_",)
+TEST_FILENAME_MARKERS = ("_test.", ".test.")
 # Playwright/Jest/Vitest spec files. Anchored to real JS/TS test extensions:
 # a bare ``.spec.`` substring would also match API/infrastructure specification
 # documents (``openapi.spec.yaml``, ``api.spec.json``, ``infra.spec.yaml``),
@@ -814,14 +821,24 @@ def is_spec_like_doc(path: str) -> bool:
 
 
 def is_test_file(path: str) -> bool:
+    """Whether a changed path is a test file.
+
+    Matching is anchored to path COMPONENTS and FILENAMES, never raw
+    substrings. Substring matching produced false "test-only" classifications
+    that would let unrelated code self-merge unreviewed, e.g.
+    ``src/contests/foo.py`` (``tests/``), ``src/ee2e/bar.py`` (``e2e/``),
+    ``src/protest_ui.py`` (``test_``) and ``openapi.spec.yaml`` (``.spec.``).
+    """
     normalized = path.replace("\\", "/").removeprefix("./")
-    if any(marker in normalized for marker in TEST_MARKERS):
+    parts = normalized.split("/")
+    if any(part in TEST_DIR_SEGMENTS for part in parts[:-1]):
         return True
-    if SPEC_TEST_FILE_RE.search(normalized):
+    name = parts[-1]
+    if name.startswith(TEST_FILENAME_PREFIXES):
         return True
-    # ``e2e`` must be a real path COMPONENT. A bare "e2e/" substring also matches
-    # ``src/ee2e/bar.py`` and ``src/foo-e2e/bar.py``, neither of which is a test.
-    return normalized.startswith("e2e/") or "/e2e/" in normalized
+    if any(marker in name for marker in TEST_FILENAME_MARKERS):
+        return True
+    return bool(SPEC_TEST_FILE_RE.search(name))
 
 
 def is_internal_tooling(path: str) -> bool:
