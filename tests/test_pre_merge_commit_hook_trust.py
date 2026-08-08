@@ -41,13 +41,21 @@ def _git(repo: Path, *args: str) -> None:
 
 
 def _make_repo(
-    tmp_path: Path, origin: str | None, *, commit_guard: bool = True
+    tmp_path: Path,
+    origin: str | None,
+    *,
+    commit_guard: bool = True,
+    trusted_ref: str | None = "refs/remotes/origin/master",
 ) -> tuple[Path, Path]:
     """A git repo carrying a guard that touches a sentinel file when executed.
 
     ``commit_guard=False`` leaves the guard present in the worktree but absent
-    from HEAD — the shape a merge produces when an incoming branch *introduces*
-    the file. The hook must refuse that even in a trusted repo.
+    from the trusted ref — the shape a merge produces when an incoming branch
+    *introduces* the file. The hook must refuse that even in a trusted repo.
+
+    ``trusted_ref`` is pointed at whatever HEAD is once the guard has (or has
+    not) been committed, standing in for what a ``git fetch origin`` would have
+    left behind. ``None`` builds a repo with no remote-tracking refs at all.
     """
     repo = tmp_path / "repo"
     (repo / "scripts" / "precommit").mkdir(parents=True)
@@ -69,6 +77,8 @@ def _make_repo(
     if commit_guard:
         _git(repo, "add", str(guard))
         _git(repo, "commit", "--no-verify", "-qm", "add guard")
+    if trusted_ref is not None:
+        _git(repo, "update-ref", trusted_ref, "HEAD")
     return repo, sentinel
 
 
@@ -175,3 +185,87 @@ def test_committed_unmodified_guard_still_runs(tmp_path: Path) -> None:
     repo, sentinel = _make_repo(tmp_path, TRUSTED, commit_guard=True)
     _run_hook(repo)
     assert sentinel.exists(), "the repo's own committed guard did not run"
+
+
+# ---------------------------------------------------------------------------
+# ...and HEAD is not the trust anchor either.
+#
+# The previous round anchored to ``HEAD:$guard_rel``. But HEAD is wherever you
+# are standing: ``gh pr checkout <hostile-pr>`` moves it onto the contributor's
+# branch. The worktree then matches HEAD by construction, the origin is still on
+# the allowlist, and the next ``git merge`` in that checkout execs the payload.
+#
+# The anchor has to be a ref only ``git fetch origin`` can move. Fourth P0 on
+# this file (ErikBjare/bob#1122).
+# ---------------------------------------------------------------------------
+
+
+def test_guard_committed_on_a_checked_out_pr_branch_is_not_executed(
+    tmp_path: Path,
+) -> None:
+    """The exact ``gh pr checkout`` shape: hostile guard at HEAD, clean origin.
+
+    Under the HEAD anchor this passed every check — worktree == HEAD, origin
+    allowlisted — and ran the payload.
+    """
+    # origin/master is planted at the guard-less init commit...
+    repo, sentinel = _make_repo(
+        tmp_path, TRUSTED, commit_guard=False, trusted_ref="refs/remotes/origin/master"
+    )
+    # ...then the contributor's branch commits the payload, so HEAD carries it
+    # and the worktree matches HEAD exactly.
+    guard = repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh"
+    _git(repo, "add", str(guard))
+    _git(repo, "commit", "--no-verify", "-qm", "hostile PR branch adds a guard")
+    _run_hook(repo)
+    assert not sentinel.exists(), "executed a guard that only exists on a PR branch"
+
+
+def test_guard_edited_on_a_checked_out_pr_branch_is_not_executed(
+    tmp_path: Path,
+) -> None:
+    """Same shape, but the PR *edits* a guard that origin already ships."""
+    repo, sentinel = _make_repo(tmp_path, TRUSTED, commit_guard=True)
+    guard = repo / "scripts" / "precommit" / "prevent-master-merge-commits.sh"
+    guard.write_text(f"#!/usr/bin/env bash\ntouch {sentinel}\nexit 0\n# owned\n")
+    guard.chmod(0o755)
+    _git(repo, "add", str(guard))
+    _git(repo, "commit", "--no-verify", "-qm", "hostile PR branch edits the guard")
+    _run_hook(repo)
+    assert not sentinel.exists(), "executed a guard a PR branch had edited"
+
+
+@pytest.mark.parametrize(
+    "trusted_ref",
+    [
+        "refs/remotes/origin/master",
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/HEAD",
+    ],
+)
+def test_any_origin_default_branch_ref_anchors_trust(
+    tmp_path: Path, trusted_ref: str
+) -> None:
+    """Repos disagree on the default branch name; all three spellings anchor."""
+    repo, sentinel = _make_repo(tmp_path, TRUSTED, trusted_ref=trusted_ref)
+    _run_hook(repo)
+    assert sentinel.exists(), f"guard did not run with anchor {trusted_ref}"
+
+
+def test_no_remote_tracking_ref_is_inert(tmp_path: Path) -> None:
+    """Nothing to anchor against means no trust. Fail closed, quietly."""
+    repo, sentinel = _make_repo(tmp_path, TRUSTED, trusted_ref=None)
+    proc = subprocess.run(
+        [str(HOOK)], cwd=repo, capture_output=True, text=True, timeout=30
+    )
+    assert proc.returncode == 0
+    assert not sentinel.exists(), "ran the guard with no trusted ref to anchor to"
+
+
+def test_a_non_default_origin_branch_does_not_anchor(tmp_path: Path) -> None:
+    """A PR branch pushed to origin is still just a branch, not the anchor."""
+    repo, sentinel = _make_repo(
+        tmp_path, TRUSTED, trusted_ref="refs/remotes/origin/some-pr-branch"
+    )
+    _run_hook(repo)
+    assert not sentinel.exists(), "anchored trust to a non-default origin branch"
