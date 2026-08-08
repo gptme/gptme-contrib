@@ -123,6 +123,10 @@ def parse_cascade_selector_output(data: dict) -> str:
     if suggested_claim:
         intent["suggested_claim"] = suggested_claim
 
+    routing_hint = sel.get("routing_hint", "")
+    if routing_hint:
+        intent["routing_hint"] = routing_hint
+
     scope = data.get("recommended_scope", "standard")
     selected_id = sel.get("id", "")
     category = sel.get("category", "")
