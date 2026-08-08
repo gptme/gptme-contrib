@@ -703,6 +703,121 @@ def test_trigger_falls_back_to_initial_review_after_grace():
     assert gh_log, "a trigger comment should have been posted after the grace window"
 
 
+def test_trigger_fallback_does_not_repost_over_stale_trigger():
+    """Initial-review fallback must fire ONCE, not once per grace window.
+
+    Regression test: the fallback originally backed off only on "in-progress".
+    A trigger comment older than TRIGGER_GRACE_SECONDS with no Greptile ack
+    reports "stale", which fell through and posted another `@greptileai review`
+    — re-posting on every subsequent invocation until MAX_TOTAL_TRIGGERS (8).
+
+    Any status other than "none" means our one trigger already exists, so the
+    fallback must back off and leave escalation to a human.
+    """
+    fixture = {
+        "pr_number": 1385,
+        # Our trigger from 40min ago, never acked by Greptile → "stale".
+        # No greptile-authored comment at all → still no review.
+        "raw_comments": [_make_trigger_comment("test-user", _iso_ago(minutes=40))],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,  # never acked → "stale", not "stale-acked"
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, (
+        f"fallback must not re-post over an existing (stale) trigger comment. "
+        f"Got log: {gh_log!r}"
+    )
+    assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_trigger_fallback_stale_acked_does_not_repost():
+    """Same as above for "stale-acked" (Greptile acked but never reviewed).
+
+    The re-review path deliberately re-triggers on "stale-acked" to unstick
+    gptme#1651-style hangs. The initial-review fallback must NOT: our single
+    trigger is already posted and acked, so another comment adds only spam.
+    """
+    fixture = {
+        "pr_number": 1386,
+        # Trigger 3h ago — older than ACK_GRACE_SECONDS (7200s) — and acked.
+        "raw_comments": [_make_trigger_comment("test-user", _iso_ago(minutes=180))],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=300)},
+        "bot_reaction_count": 1,  # acked but never reviewed → "stale-acked"
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, (
+        f"fallback must not re-post over an acked-but-unreviewed trigger. "
+        f"Got log: {gh_log!r}"
+    )
+    assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_trigger_fallback_local_timestamp_blocks_with_no_prior_review():
+    """TS-file fast-path must apply when review_cutoff is empty (no prior review).
+
+    Regression test for the propagation-delay hole the initial-review fallback
+    opened: the fast-path only marked the local timestamp "in cycle" when a
+    review cutoff existed, on the (now-false) invariant that only re-reviews
+    write the file. The fallback writes it too, so with no prior review the
+    guard was skipped entirely and the function fell through to the comments
+    API — which lags by minutes. Two sequential runs both saw "none" and both
+    posted.
+
+    Simulates INCIDENT #5 on an unreviewed PR: we triggered 5 minutes ago, the
+    comment is not visible in the API yet, a second run must still back off.
+    """
+    fixture = {
+        "pr_number": 1387,
+        "raw_comments": [],  # propagation delay: our trigger is not visible yet
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},  # well past the grace window
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        pre_trigger_ts=_iso_ago(minutes=5),
+        repo="gptme/gptme-contrib",
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, (
+        f"local TS < 15min must block the initial-review fallback even though the "
+        f"API shows no trigger comment. Got log: {gh_log!r}"
+    )
+
+
+def test_trigger_fallback_stale_local_timestamp_still_allows_first_trigger():
+    """A TS file older than the grace window must not permanently block the fallback.
+
+    Guards the fix for the empty-cutoff fast-path against over-correcting into a
+    permanent block: with no visible trigger comment and a 60-minute-old local
+    timestamp, the fast-path expires and the API (authoritative) says "none".
+    """
+    fixture = {
+        "pr_number": 1388,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        pre_trigger_ts=_iso_ago(minutes=60),
+        repo="gptme/gptme-contrib",
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert (
+        gh_log
+    ), "stale local TS + no trigger comment in API should still trigger once"
+
+
 def test_trigger_skips_fresh_pr():
     """Trigger on fresh PR (< 20 min) → skips, waits for auto-review."""
     fixture = {
