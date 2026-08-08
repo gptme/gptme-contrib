@@ -281,6 +281,72 @@ def test_explicit_completed_clear_wins_over_auto_stamp(tmp_path: Path, monkeypat
     assert "completed" not in load_tasks(tasks_dir)[0].metadata
 
 
+def test_resaving_already_done_task_does_not_fabricate_completed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An idempotent re-save of an already-done task must not stamp "just now".
+
+    ``--set state done`` on a task that is *already* done is a no-op transition,
+    but the change is still recorded, so a post-edit-only check would stamp it.
+    Legacy tasks closed before this feature shipped carry no ``completed``; a
+    fabricated "completed just now" corrupts the very completion-duration and
+    fast-close signals the stamp exists to measure.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(ACTIVE_TASK.replace("state: active", "state: done"))
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "state", "done"])
+
+    assert result.exit_code == 0, result.output
+    task = load_tasks(tasks_dir)[0]
+    assert task.metadata["state"] == "done"
+    assert "completed" not in task.metadata, (
+        "re-saving an already-done task must not fabricate a completion time; "
+        "only a real non-terminal → terminal transition stamps"
+    )
+
+
+@pytest.mark.parametrize(
+    ("from_state", "to_state", "extra_frontmatter"),
+    [
+        ("waiting", "active", "waiting_for: someone\n"),
+        ("backlog", "todo", ""),
+    ],
+)
+def test_forward_transition_preserves_completed(
+    tmp_path: Path, monkeypatch, from_state: str, to_state: str, extra_frontmatter: str
+) -> None:
+    """Ordinary forward transitions must not delete a ``completed`` the task carries.
+
+    The reopen-clear exists for terminal → open only. Keyed off the post-edit
+    state alone it also fires on waiting → active / backlog → todo, silently
+    dropping a stamp that was set manually or left from an earlier cycle.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        ACTIVE_TASK_WITH_COMPLETED.replace("state: active", f"state: {from_state}").replace(
+            "completed:", f"{extra_frontmatter}completed:"
+        )
+    )
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "state", to_state])
+
+    assert result.exit_code == 0, result.output
+    task = load_tasks(tasks_dir)[0]
+    assert task.metadata["state"] == to_state
+    assert (
+        "completed" in task.metadata
+    ), f"{from_state} → {to_state} is not a reopen; completed must survive"
+    stored = datetime.fromisoformat(str(task.metadata["completed"]))
+    if stored.tzinfo is None:
+        stored = stored.replace(tzinfo=timezone.utc)
+    assert stored == datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+
 def test_recurring_reset_removes_existing_completed(tmp_path: Path, monkeypatch) -> None:
     """The recurrence reset drops a stale stamp carried in from a previous cycle."""
     tasks_dir = tmp_path / "tasks"

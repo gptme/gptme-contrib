@@ -2285,6 +2285,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
     for task in target_tasks:
         post = frontmatter.load(task.path)
 
+        # Snapshot the pre-edit state: the completed-stamp logic below must key off
+        # a real *transition*, not the post-edit final state (which cannot tell an
+        # idempotent re-save apart from a state change).
+        _prior_state = normalize_state(
+            str(post.metadata.get("state", "backlog") or "backlog"), warn=False
+        )
+
         # Apply all changes
         for op, field, value in changes:
             if op == "set_subtask":
@@ -2379,6 +2386,20 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # clear a stale stamp when this edit reopens a task. Both halves defer to an
         # explicit `--set completed ...` in the same edit: the user's value wins over
         # the automation in either direction.
+        #
+        # Both halves are gated on `_prior_state` — the state the task held *before*
+        # this edit — because a post-edit-only check cannot distinguish a transition
+        # from a re-assertion:
+        #   - Without the prior-state gate on the stamp, re-saving an already-done
+        #     legacy task (`--set state done` on a task that is already done and
+        #     predates this feature, so has no `completed`) fabricates a completion
+        #     of "just now", corrupting exactly the completion-duration / fast-close
+        #     signals this stamp exists to measure.
+        #   - Without the prior-state gate on the clear, an ordinary forward move
+        #     like waiting → active or backlog → todo silently deletes a `completed`
+        #     the task legitimately carries. Only a genuine reopen (terminal → open)
+        #     should drop it.
+        _terminal_states = ("done", "cancelled")
         _state_target = next(
             (value for op, field, value in reversed(changes) if op == "set" and field == "state"),
             None,
@@ -2391,15 +2412,17 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             for op, field, value in changes
         )
         if (
-            _state_target in ("done", "cancelled")
+            _prior_state not in _terminal_states
+            and _state_target in _terminal_states
             and _is_terminal_nonrecurring
             and not post.metadata.get("completed")
             and not _completed_explicitly_cleared
         ):
             post.metadata["completed"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         elif (
-            _state_target is not None
-            and _state_target not in ("done", "cancelled")
+            _prior_state in _terminal_states
+            and _state_target is not None
+            and _state_target not in _terminal_states
             and not _completed_explicitly_set
         ):
             post.metadata.pop("completed", None)
