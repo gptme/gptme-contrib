@@ -22,29 +22,50 @@ BOT = "TimeToBuildBob"
 MARKER = "<!-- bob-ai-review"
 
 
+def _gate_source() -> str:
+    return GATE.read_text()
+
+
 def _extract_function(name: str) -> str:
-    src = GATE.read_text()
+    src = _gate_source()
     start = src.index(f"{name}() {{")
     rest = src[start:]
     return rest[: rest.index("\n}\n") + len("\n}\n")]
 
 
-def _actionable(body: str, login: str) -> bool:
-    """Run has_actionable_update against a PR whose latest comment is (login, body)."""
-    pr = {
-        "comments": [
-            {
-                "author": {"login": login},
-                "createdAt": "2026-08-08T10:00:00Z",
-                "body": body,
-            }
-        ],
-        "latestReviews": [],
+def _extract_shell_assignment(name: str) -> str:
+    prefix = f"{name}="
+    line = next(line for line in _gate_source().splitlines() if line.startswith(prefix))
+    return line
+
+
+def _actionable(
+    body: str,
+    login: str,
+    *,
+    activity_type: str = "comment",
+) -> bool:
+    """Run has_actionable_update with the supplied comment or review activity."""
+    activity = {
+        "author": {"login": login},
+        "body": body,
     }
+    if activity_type == "comment":
+        activity["createdAt"] = "2026-08-08T10:00:00Z"
+        comments = [activity]
+        reviews = []
+    elif activity_type == "review":
+        activity["submittedAt"] = "2026-08-08T10:00:00Z"
+        comments = []
+        reviews = [activity]
+    else:
+        raise ValueError(f"unsupported activity type: {activity_type}")
+
+    pr = {"comments": comments, "latestReviews": reviews}
     script = f"""
 set -uo pipefail
 AUTHOR={BOT}
-AI_REVIEW_MARKER_RE='^<!-- bob-ai-review(-finding| \\{{.*\\}}) -->$'
+{_extract_shell_assignment("AI_REVIEW_MARKER_RE")}
 {_extract_function("has_actionable_update")}
 if has_actionable_update '{json.dumps(pr)}'; then echo YES; else echo NO; fi
 """
@@ -61,6 +82,20 @@ def test_ai_review_summary_is_actionable():
 
 def test_ai_review_inline_finding_is_actionable():
     assert _actionable(f"{MARKER}-finding -->\nP1 — the hash ignores .state", BOT)
+
+
+def test_ai_review_finding_in_latest_review_is_actionable():
+    assert _actionable(
+        f"{MARKER}-finding -->\nP1 — the hash ignores .state",
+        BOT,
+        activity_type="review",
+    )
+
+
+def test_ai_review_mentioning_maintainer_is_still_actionable():
+    assert _actionable(
+        f"{MARKER}-finding -->\nP1 — @ErikBjare should verify this path", BOT
+    )
 
 
 def test_bobs_own_plain_comment_is_still_silenced():

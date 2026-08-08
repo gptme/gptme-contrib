@@ -511,7 +511,7 @@ has_actionable_update() {
     # Skip if the comment/review @-mentions someone else but NOT the AUTHOR.
     # This catches cases like "@greptileai review" or "@someone what do you think?"
     # where the commenter is clearly addressing someone other than the agent.
-    if [ -n "$last_body" ]; then
+    if [ "$is_ai_review" -ne 0 ] && [ -n "$last_body" ]; then
         local mentions_anyone mentions_author
         # Match GitHub-style @mentions (start of line or after whitespace).
         # Avoids false positives from emails like user@example.com.
