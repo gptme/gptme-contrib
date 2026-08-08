@@ -563,7 +563,9 @@ def test_cmd_switch_warns_loudly_when_post_flip_usage_check_fails(
     """A failed post-flip usage check must not be silently discarded.
 
     The switch really happened and is recorded, so the exit code stays 0 — but
-    the operator has to be told the credential did not answer.
+    the operator has to be told no usage data came back. Note the failure here
+    is the *script* (non-executable), not the credential, so the message must
+    not assert the credential is dead or demand a re-login.
     """
     # Non-executable script → check_usage() returns None (probe could not run).
     usage_script = tmp_path / "check-usage.sh"
@@ -581,7 +583,9 @@ def test_cmd_switch_warns_loudly_when_post_flip_usage_check_fails(
     assert rc == 0  # the flip did happen — exit 1 would read as "it did not"
     assert sm.get_active_subscription() == "alice"
     err = capsys.readouterr().err
-    assert "post-switch usage check against alice failed" in err
+    assert "post-switch usage check against alice returned no usage data" in err
+    # The script is what broke — don't tell the operator to re-login blindly.
+    assert str(usage_script) in err
 
 
 def test_cmd_switch_no_warning_when_post_flip_usage_check_succeeds(
@@ -626,3 +630,90 @@ def test_cmd_switch_fresh_slot_failure_is_not_probed(
     assert rc == 1
     probe_mock.assert_not_called()
     assert sm.manual_hold_calls == []
+
+
+def test_cmd_switch_unprobeable_failure_explains_itself(tmp_path: Path, capsys) -> None:
+    """A non-refreshable failure must not exit 1 in silence.
+
+    The whole point of this command's retry path is to remove the
+    diagnosis-free ``--switch X --execute`` → exit 1. A corrupt slot payload
+    is not probeable, so no probe message is printed — without an explicit
+    failure line the operator gets zero output and a bare non-zero exit.
+    """
+    sm = _real_manager(tmp_path)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    sm.config.slot_path("alice").write_text("{ truncated json")
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 1
+    assert sm.get_active_subscription() == "bob"  # symlink untouched
+    err = capsys.readouterr().err
+    assert "Failed to switch to alice" in err
+    assert "expiresAt" in err  # the actual reason, not just "it failed"
+
+
+def test_cmd_switch_probe_ok_refusal_explains_itself(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A probe that succeeds but a switch the SlotManager still refuses must talk.
+
+    Slot has no refresh token, so ``probe_ok`` is ignored inside SlotManager
+    and the switch is refused after the probe already printed "probing...".
+    Previously the command then exited 1 with no explanation at all.
+    """
+    sm = _real_manager(tmp_path)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    sm.config.slot_path("alice").write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "fake",
+                    "expiresAt": int(
+                        (datetime.now(timezone.utc).timestamp() - 3600) * 1000
+                    ),
+                }
+            }
+        )
+    )
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+    monkeypatch.setattr(
+        "gptme_subscription.cli.probe_credential",
+        MagicMock(return_value=(None, True, "probe ok")),
+    )
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 1
+    assert sm.get_active_subscription() == "bob"
+    assert "Failed to switch to alice" in capsys.readouterr().err
+
+
+def test_cmd_switch_warns_when_post_flip_usage_returns_empty_dict(
+    tmp_path: Path, capsys
+) -> None:
+    """An empty usage payload is as useless a post-flip signal as None.
+
+    ``check_usage`` returns ``{}`` (not None) for a script that exits 0 printing
+    ``{}``, so an ``is None`` test lets a genuinely empty response through
+    silently — while ``_execute_switch_decision`` treats the same value as a
+    failure via ``if not new_usage``.
+    """
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\necho '{}'\n")
+    usage_script.chmod(0o755)
+
+    sm = _real_manager(tmp_path, usage_script=usage_script)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=3600)
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 0
+    assert sm.get_active_subscription() == "alice"
+    assert "post-switch usage check against alice" in capsys.readouterr().err

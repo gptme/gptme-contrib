@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import multiprocessing
 import os
 import time
@@ -283,6 +284,70 @@ def test_switch_to_probe_ok_still_refused_without_refresh_token(
     sm = _make_manager(tmp_path)
     _write_oauth_slot(sm, "alice", expires_in_seconds=3600)
     _write_oauth_slot(sm, "bob", expires_in_seconds=-3600, refresh_token=None)
+    sm.config.creds_link.symlink_to(".credentials.json.alice")
+
+    assert (
+        sm.switch_to("bob", "manual switch (probe_ok)", force=True, probe_ok=True)
+        is False
+    )
+    assert sm.get_active_subscription() == "alice"
+
+
+def test_probe_ok_bypass_is_logged_in_production_wiring(tmp_path: Path, caplog) -> None:
+    """The bypass audit trail must survive the real SubscriptionManager wiring.
+
+    ``SlotManager._log`` is a no-op when ``SlotManager.logger is None``, so the
+    ``probe_ok BYPASS`` line only exists in tests that assign ``mgr.logger``
+    themselves. If ``SubscriptionManager`` builds its SlotManager without a
+    logger, the one production path that skips the expiry gate does so with no
+    trace anywhere — exactly what an operator auditing a 401 needs to see.
+    """
+    sm = _make_manager(tmp_path)
+    _write_oauth_slot(sm, "alice", expires_in_seconds=3600)
+    _write_oauth_slot(sm, "bob", expires_in_seconds=-3600)
+    sm.config.creds_link.symlink_to(".credentials.json.alice")
+
+    with caplog.at_level(logging.WARNING, logger="gptme_subscription.manager"):
+        assert sm.switch_to("bob", "manual (probe_ok)", force=True, probe_ok=True)
+
+    assert any("probe_ok BYPASS" in record.getMessage() for record in caplog.records)
+
+
+def test_switch_refusal_is_logged_in_production_wiring(tmp_path: Path, caplog) -> None:
+    """A refused switch must also leave a trace through the real wiring."""
+    sm = _make_manager(tmp_path)
+    _write_oauth_slot(sm, "alice", expires_in_seconds=3600)
+    _write_oauth_slot(sm, "bob", expires_in_seconds=-3600)
+    sm.config.creds_link.symlink_to(".credentials.json.alice")
+
+    with caplog.at_level(logging.WARNING, logger="gptme_subscription.manager"):
+        assert sm.switch_to("bob", "manual", force=True) is False
+
+    assert any(
+        "refusing to switch to bob" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_switch_to_probe_ok_refused_for_slot_without_expiresat(
+    tmp_path: Path,
+) -> None:
+    """probe_ok must not push a malformed slot onto the live symlink.
+
+    A refresh token alone is not enough: a payload missing ``expiresAt`` fails
+    freshness as "unreadable", which no refresh can repair.
+    """
+    sm = _make_manager(tmp_path)
+    _write_oauth_slot(sm, "alice", expires_in_seconds=3600)
+    sm.config.slot_path("bob").write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "a",
+                    "refreshToken": "fake-refresh-token",
+                }
+            }
+        )
+    )
     sm.config.creds_link.symlink_to(".credentials.json.alice")
 
     assert (

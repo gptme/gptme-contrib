@@ -431,6 +431,44 @@ class TestSwitchTo:
         assert result.ok is True
         assert any("probe_ok BYPASS" in line for line in lines)
 
+    def test_probe_ok_refused_for_slot_with_refresh_token_but_no_expiresat(
+        self, mgr: SlotManager
+    ) -> None:
+        """probe_ok must not launder a malformed slot into the live symlink.
+
+        A payload with a valid ``refreshToken`` but a missing/non-numeric
+        ``expiresAt`` (truncated or rewritten mid-OAuth-refresh) fails
+        ``slot_is_fresh`` as "unreadable or no expiresAt" — a failure no token
+        refresh can fix, and one the docstring promises is refused regardless.
+        The refresh-token check alone does not catch it, so the bypass has to
+        be gated on the failure being expiry-class too.
+        """
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+        # refresh token present and valid, but no expiresAt at all
+        _write_slot(mgr.slot_path("bob"), None)
+        mgr.live_path.symlink_to(".credentials.json.alice")
+        lines: list[str] = []
+        mgr.logger = lines.append
+
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+
+        assert result.ok is False
+        assert "expiresat" in result.reason.lower()
+        assert mgr.get_active_subscription() == "alice"
+        assert any("probe_ok IGNORED" in line for line in lines)
+        assert not any("probe_ok BYPASS" in line for line in lines)
+
+    def test_probe_ok_refused_for_unreadable_slot(self, mgr: SlotManager) -> None:
+        """A slot whose JSON does not parse is refused even with probe_ok."""
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+        mgr.slot_path("bob").write_text("{ truncated json")
+        mgr.live_path.symlink_to(".credentials.json.alice")
+
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+
+        assert result.ok is False
+        assert mgr.get_active_subscription() == "alice"
+
     def test_probe_ok_still_rejects_missing_slot(self, mgr: SlotManager) -> None:
         """probe_ok=True bypasses freshness but not existence checks."""
         mgr.live_path.symlink_to(".credentials.json.alice")
