@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -25,6 +26,25 @@ from pathlib import Path
 import pytest
 
 GATE = Path(__file__).resolve().parents[1] / "scripts" / "github" / "activity-gate.sh"
+
+
+def _sha256_cmd() -> str:
+    """A sha256 command available on this host.
+
+    ``sha256sum`` is GNU coreutils and absent on macOS, which only ships
+    ``shasum`` — the same portability the gate's own ``portable_hash()`` handles
+    with an md5sum/shasum/cksum fallback chain.
+
+    Both the pre-seeded state-file digest and the ``portable_hash()`` stub
+    injected into the generated bash script go through this one helper. They
+    must stay identical: hash them differently and the state file looks like a
+    first sighting, so the test silently stops exercising the stuck path.
+    """
+    if shutil.which("sha256sum"):
+        return "sha256sum"
+    if shutil.which("shasum"):
+        return "shasum -a 256"
+    pytest.skip("no sha256 utility available (need sha256sum or shasum)")
 
 
 def _classify(rollup: list[dict]) -> str:
@@ -90,6 +110,38 @@ def _extract_classifier() -> str:
         ("status context green", [{"state": "SUCCESS"}], "green"),
         ("status context red", [{"state": "FAILURE"}], "bad"),
         ("status context pending", [{"state": "PENDING"}], "inflight"),
+        (
+            "status context failure fires even with checks still running",
+            [
+                {"__typename": "StatusContext", "state": "FAILURE"},
+                {"status": "IN_PROGRESS", "conclusion": ""},
+            ],
+            "bad",
+        ),
+        # EXPECTED is StatusState's "required context that hasn't reported yet".
+        # It has no .status and no .conclusion, so it must be recognised as
+        # in-flight via .state or it reads as a non-green terminal result.
+        (
+            "status context expected is not yet a result",
+            [{"__typename": "StatusContext", "state": "EXPECTED"}],
+            "inflight",
+        ),
+        (
+            "expected alongside a green check is still just waiting",
+            [
+                {"__typename": "StatusContext", "state": "EXPECTED"},
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+            "inflight",
+        ),
+        (
+            "a real failure still wins over an EXPECTED context",
+            [
+                {"__typename": "StatusContext", "state": "EXPECTED"},
+                {"__typename": "StatusContext", "state": "FAILURE"},
+            ],
+            "bad",
+        ),
     ],
 )
 def test_ci_state_classification(label: str, rollup: list[dict], expected: str) -> None:
@@ -123,7 +175,12 @@ def test_stuck_inflight_emits_only_after_threshold(
         {"status": "COMPLETED", "conclusion": "CANCELLED"},
         {"status": "QUEUED", "conclusion": ""},
     ]
-    pr = {"number": 3472, "title": "stuck pr", "statusCheckRollup": rollup}
+    pr = {
+        "number": 3472,
+        "title": "stuck pr",
+        "headRefOid": "a" * 40,
+        "statusCheckRollup": rollup,
+    }
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -135,7 +192,7 @@ def test_stuck_inflight_emits_only_after_threshold(
         [
             "bash",
             "-c",
-            f"jq -r '{_extract_hash_program()}' | sha256sum | cut -d' ' -f1",
+            f"jq -r '{_extract_hash_program()}' | {_sha256_cmd()} | cut -d' ' -f1",
         ],
         input=json.dumps(pr),
         capture_output=True,
@@ -152,7 +209,7 @@ def test_stuck_inflight_emits_only_after_threshold(
 set -uo pipefail
 STATE_DIR={state_dir!s}
 CI_STUCK_SECS=3600
-portable_hash() {{ sha256sum | cut -d' ' -f1; }}
+portable_hash() {{ {_sha256_cmd()} | cut -d' ' -f1; }}
 emit_item() {{ echo "EMIT type=$1 repo=$2 pr=$3 detail=$5"; }}
 source_only=1
 {_extract_function()}
@@ -184,10 +241,15 @@ def _extract_hash_program() -> str:
     return src.split(marker, 1)[1].split("'", 1)[0]
 
 
-def _ci_hash_key(rollup: list[dict]) -> str:
+def _ci_hash_key(rollup: list[dict], head_sha: str = "d" * 40) -> str:
+    """The gate's dedup key for a rollup on a given head commit.
+
+    ``head_sha`` defaults to a fixed value so callers comparing two rollups vary
+    only the thing they mean to vary.
+    """
     proc = subprocess.run(
         ["jq", "-r", _extract_hash_program()],
-        input=json.dumps({"statusCheckRollup": rollup}),
+        input=json.dumps({"headRefOid": head_sha, "statusCheckRollup": rollup}),
         capture_output=True,
         text=True,
         check=True,
@@ -229,3 +291,112 @@ def test_ci_hash_still_tracks_checkrun_transitions() -> None:
         {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}
     ]
     assert _ci_hash_key(running) != _ci_hash_key(failed)
+
+
+def test_green_clears_state_file(tmp_path: Path) -> None:
+    """A PR going green must delete the state file so a future inflight run that
+    hashes to the same initial state doesn't inherit a stale mtime and appear
+    immediately stuck.
+    """
+    rollup = [{"status": "COMPLETED", "conclusion": "SUCCESS"}]
+    pr = {"number": 1, "title": "green pr", "statusCheckRollup": rollup}
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state_file = state_dir / "o-r-pr-1-ci.state"
+    # Plant a very old state file — simulating a prior inflight sighting.
+    state_file.write_text("old-hash\n")
+    old = time.time() - 7200
+    os.utime(state_file, (old, old))
+
+    script = f"""
+set -uo pipefail
+STATE_DIR={state_dir!s}
+CI_STUCK_SECS=3600
+portable_hash() {{ {_sha256_cmd()} | cut -d' ' -f1; }}
+emit_item() {{ echo "EMIT type=$1 repo=$2 pr=$3 detail=$5"; }}
+source_only=1
+{_extract_function()}
+check_ci_failures "o/r" '{json.dumps([pr])}'
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "EMIT" not in proc.stdout, f"green PR emitted: {proc.stdout!r}"
+    assert not state_file.exists(), "green PR must clean up the state file"
+
+
+def test_ci_hash_changes_on_new_head_commit() -> None:
+    """A push must start a new stuck episode even for an identical rollup.
+
+    The stuck clock is the state file's mtime, and the state file is only
+    replaced when the hash changes. Without the head SHA in the hash, this
+    sequence produces a false "CI stuck" report:
+
+    1. checks go in flight on commit A; hash is "pending", file stamped at T0
+    2. checks go green, then a force-push lands commit B (the whole green window
+       fits between two gate runs, so the green cleanup never gets to run)
+    3. checks go in flight on commit B; the hash is "pending" again and matches,
+       so ``age = now - T0`` — hours — and the gate reports a run that started
+       minutes ago as stuck.
+    """
+    rollup = [{"status": "QUEUED", "conclusion": ""}]
+    assert _ci_hash_key(rollup, head_sha="a" * 40) != _ci_hash_key(
+        rollup, head_sha="b" * 40
+    ), "identical rollup on a new commit must not reuse the previous episode"
+
+
+def test_new_head_commit_resets_the_stuck_clock(tmp_path: Path) -> None:
+    """End-to-end form of the above, through the real shell function.
+
+    An hours-old state file recorded against the *previous* head commit must not
+    make freshly-queued checks on a new commit look stuck.
+    """
+    rollup = [
+        {"status": "COMPLETED", "conclusion": "CANCELLED"},
+        {"status": "QUEUED", "conclusion": ""},
+    ]
+    old_pr = {
+        "number": 7,
+        "title": "pushed pr",
+        "headRefOid": "a" * 40,
+        "statusCheckRollup": rollup,
+    }
+    new_pr = dict(old_pr, headRefOid="b" * 40)
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    stale_digest = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"jq -r '{_extract_hash_program()}' | {_sha256_cmd()} | cut -d' ' -f1",
+        ],
+        input=json.dumps(old_pr),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    state_file = state_dir / "o-r-pr-7-ci.state"
+    state_file.write_text(stale_digest + "\n")
+    old = time.time() - 7200
+    os.utime(state_file, (old, old))
+
+    script = f"""
+set -uo pipefail
+STATE_DIR={state_dir!s}
+CI_STUCK_SECS=3600
+portable_hash() {{ {_sha256_cmd()} | cut -d' ' -f1; }}
+emit_item() {{ echo "EMIT type=$1 repo=$2 pr=$3 detail=$5"; }}
+source_only=1
+{_extract_function()}
+check_ci_failures "o/r" '{json.dumps([new_pr])}'
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "CI stuck" not in proc.stdout, (
+        "checks queued on a brand-new commit reported as stuck using the "
+        f"previous commit's clock: {proc.stdout!r}"
+    )
+    assert "EMIT" not in proc.stdout, f"unexpected emit: {proc.stdout!r}"
+    # The new episode is recorded so the clock starts now, not two hours ago.
+    assert state_file.read_text().strip() != stale_digest
+    assert time.time() - state_file.stat().st_mtime < 60

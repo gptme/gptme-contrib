@@ -608,6 +608,12 @@ check_ci_failures() {
     now=$(date +%s)
 
     echo "$prs" | jq -c '.[]' | while read -r pr_data; do
+        local pr_number pr_title ci_hash state_file detail
+        # Derived before the classification branches so the green path below can
+        # clear the same file the stuck path writes — one naming site, no drift.
+        pr_number=$(echo "$pr_data" | jq -r '.number')
+        state_file="$STATE_DIR/${repo//\//-}-pr-${pr_number}-ci.state"
+
         # Three-way classification. Previously this matched only
         # `any(.conclusion == "FAILURE")`, which stranded two shapes the
         # 2026-08-06 GitHub Actions outage produced in bulk:
@@ -623,14 +629,22 @@ check_ci_failures() {
         # preserves the previous behaviour exactly. CANCELLED only counts once
         # nothing is in flight — otherwise every `cancel-in-progress` supersede
         # (which leaves CANCELLED behind while the new run starts) would fire.
+        #
+        # The in-flight arm covers both non-terminal StatusState values, not just
+        # PENDING: EXPECTED is what a required status context reports before it
+        # has run at all. An EXPECTED item has no `.status` and no `.conclusion`,
+        # so without this it fell out of `$inflight` while `$bad` still saw a
+        # non-green `.state` — i.e. an instant `ci_failure` on a PR whose checks
+        # simply had not started yet.
         local ci_state
         ci_state=$(echo "$pr_data" | jq -r '
             select(.statusCheckRollup != null) | .statusCheckRollup
-            | (any(.[]; ((.conclusion // "") | ascii_upcase) == "FAILURE")) as $hard
+            | (any(.[]; ((.conclusion // .state // "") | ascii_upcase) == "FAILURE")) as $hard
             | (any(.[]; ((.status // "") | ascii_upcase) as $s
                    | $s == "QUEUED" or $s == "IN_PROGRESS" or $s == "WAITING"
                      or (((.conclusion // "") == "")
-                         and (((.state // "") | ascii_upcase) == "PENDING")))) as $inflight
+                         and (((.state // "") | ascii_upcase) as $st
+                              | $st == "PENDING" or $st == "EXPECTED")))) as $inflight
             | (any(.[]; ((.conclusion // .state // "") | ascii_upcase) as $c
                    | $c != "" and $c != "SUCCESS" and $c != "SKIPPED"
                      and $c != "NEUTRAL")) as $bad
@@ -640,10 +654,17 @@ check_ci_failures() {
               else "green" end')
 
         [ -n "$ci_state" ] || continue
-        [ "$ci_state" = "green" ] && continue
+        if [ "$ci_state" = "green" ]; then
+            # Close the episode. The stuck clock is the state file's mtime, so a
+            # file left behind from an earlier in-flight sighting would make the
+            # *next* run that happens to hash the same look hours old — and
+            # "CI stuck: checks in flight" would fire on a run that started
+            # minutes ago. Deleting on green makes the next in-flight sighting a
+            # genuine first sighting.
+            rm -f "$state_file"
+            continue
+        fi
 
-        local pr_number pr_title ci_hash state_file detail
-        pr_number=$(echo "$pr_data" | jq -r '.number')
         pr_title=$(echo "$pr_data" | jq -r '.title')
         # Hash the CI conclusions to detect state changes.
         # Note: in-progress checks have empty conclusions (mapped to "pending").
@@ -658,8 +679,18 @@ check_ci_failures() {
         # dedup below silently swallowed the `ci_failure` that the classifier
         # above had correctly identified as `bad`. Keep this field list in sync
         # with the `ci_state` classifier.
-        ci_hash=$(echo "$pr_data" | jq -r '[.statusCheckRollup[] | .conclusion // .state // "pending"] | sort | join(",")' | portable_hash)
-        state_file="$STATE_DIR/${repo//\//-}-pr-${pr_number}-ci.state"
+        #
+        # `headRefOid` is part of the hash so a push starts a new episode
+        # *explicitly*, rather than relying on the gate having observed the green
+        # window in between. Green windows are easy to miss: the whole
+        # pending -> green -> force-push -> pending cycle can fit between two
+        # gate runs, leaving a "pending"-hashed file with an hours-old mtime that
+        # the new run matches and is instantly declared stuck. Deleting the file
+        # on green (above) fixes the observed case; keying on the head SHA fixes
+        # the unobserved one. Trade-off: a force-push that reproduces the same
+        # failure now re-emits `ci_failure`. That is the desired behaviour — new
+        # commit, still red, is a fresh actionable signal, not a duplicate.
+        ci_hash=$(echo "$pr_data" | jq -r '(.headRefOid // "") + ":" + ([.statusCheckRollup[] | .conclusion // .state // "pending"] | sort | join(","))' | portable_hash)
         detail="CI failing"
 
         if [ "$ci_state" = "inflight" ]; then
