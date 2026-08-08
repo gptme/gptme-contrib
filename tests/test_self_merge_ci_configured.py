@@ -65,6 +65,9 @@ class _Proc:
         ("auth failure", _Proc(1, "", "HTTP 401 Bad credentials"), None),
         ("empty stdout on success", _Proc(0, ""), None),
         ("unparseable stdout", _Proc(0, "null"), None),
+        # The jq type-guard sentinel: the contents path resolved to something
+        # that is not a directory listing, so there is nothing to count.
+        ("non-array payload (type-guard sentinel)", _Proc(0, "-1"), None),
     ],
 )
 def test_tri_state(
@@ -87,6 +90,32 @@ def test_exceptions_are_indeterminate(
     assert smc.repo_has_ci_configured("o/r") is None
 
 
+def test_workflows_lookup_jq_is_type_guarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The jq program must only count when the payload is a directory listing.
+
+    The Contents API returns a JSON *array* for a directory but a JSON *object*
+    for a regular file. A bare ``--jq length`` counts an object's keys instead,
+    so a repo where ``.github/workflows`` happened to be a file would report
+    ``True`` ("CI is configured") rather than the documented indeterminate
+    ``None``. Type-guard in jq and emit a negative sentinel for non-arrays.
+    """
+    captured: list[list[str]] = []
+
+    def _capture(args: list[str], **kwargs: object) -> _Proc:
+        captured.append(list(args))
+        return _Proc(0, "2")
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    assert smc.repo_has_ci_configured("o/r") is True
+
+    assert captured, "gh was never invoked"
+    argv = captured[0]
+    assert "--jq" in argv, f"no --jq in argv: {argv!r}"
+    jq_program = argv[argv.index("--jq") + 1]
+    assert "array" in jq_program, f"jq program is not type-guarded: {jq_program!r}"
+    assert "-1" in jq_program, f"jq program has no non-array sentinel: {jq_program!r}"
+
+
 def _evaluate_with(monkeypatch: pytest.MonkeyPatch, has_ci: bool | None) -> Any:
     """Run evaluate_pr against a PR whose statusCheckRollup came back empty."""
     pr = {
@@ -104,6 +133,16 @@ def _evaluate_with(monkeypatch: pytest.MonkeyPatch, has_ci: bool | None) -> Any:
     monkeypatch.setattr(smc, "repo_has_ci_configured", lambda repo: has_ci)
     monkeypatch.setattr(smc, "_fetch_greptile_review_data", lambda *a, **k: ([], []))
     monkeypatch.setattr(smc, "get_gh_user", lambda: "TimeToBuildBob")
+    # evaluate_pr reaches two more helpers that shell out to a real `gh`:
+    #   * merge_permission — and it is @cache'd, so an unstubbed call poisons the
+    #     cache for every later test in the session with a live network result.
+    #     A definitive False would append a disqualifying reason and mask the
+    #     CI-gate reasons these tests assert on.
+    #   * run_gh — reached via fetch_greptile_status's summary-comment fallback,
+    #     which fires because the stubbed review data is empty.
+    # Stub both so the CI gate is the only thing under test.
+    monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
+    monkeypatch.setattr(smc, "run_gh", lambda *a, **k: "")
     return smc.evaluate_pr("o/r", 1, workspace_repos=None)
 
 
@@ -131,3 +170,33 @@ def test_genuinely_no_ci_is_waived(monkeypatch: pytest.MonkeyPatch) -> None:
     # The CI requirement is waived; other gates (e.g. review) may still block.
     assert not any("CI checks not found" in r for r in result.reasons)
     assert not any("failing closed" in r for r in result.reasons)
+
+
+class _NoNetwork(RuntimeError):
+    """Raised if a test reaches a real subprocess. Not caught by the module.
+
+    Deliberately not a subclass of anything ``self-merge-check.py`` catches
+    (``TimeoutExpired`` / ``OSError`` / ``JSONDecodeError``), so an escape shows
+    up as an error rather than being silently swallowed into an indeterminate
+    result that happens to match the assertion.
+    """
+
+
+def test_evaluate_pr_is_hermetic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_evaluate_with`` must not shell out to a real ``gh``.
+
+    ``evaluate_pr`` reaches ``merge_permission`` and the ``fetch_greptile_status``
+    summary-comment fallback, neither of which was stubbed. Both ran a real
+    ``gh api`` against github.com, so these tests were network-dependent: they
+    could hang on a slow API, flip on rate limits, or — worse — quietly change
+    the assertion surface (a definitive "no merge permission" adds a
+    disqualifying reason, which would mask exactly the CI-gate reasons under
+    test).
+    """
+
+    def _explode(*a: object, **k: object) -> None:
+        raise _NoNetwork(f"real subprocess invoked: {a!r}")
+
+    monkeypatch.setattr(subprocess, "run", _explode)
+    result = _evaluate_with(monkeypatch, False)
+    assert any("No CI configured" in w for w in result.warnings)

@@ -809,7 +809,18 @@ def repo_has_ci_configured(repo: str) -> bool | None:
     """
     try:
         proc = subprocess.run(
-            ["gh", "api", f"repos/{repo}/contents/.github/workflows", "--jq", "length"],
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/contents/.github/workflows",
+                # Type-guard: the Contents API returns an array for a directory
+                # but an object for a regular file. A bare `length` would count
+                # that object's keys and report "CI configured" for a repo whose
+                # .github/workflows is not a directory at all. -1 is the
+                # "not a directory listing" sentinel, mapped to None below.
+                "--jq",
+                'if type == "array" then length else -1 end',
+            ],
             capture_output=True,
             text=True,
             timeout=10,
@@ -831,9 +842,14 @@ def repo_has_ci_configured(repo: str) -> bool | None:
     if not raw:
         return None
     try:
-        return int(raw) > 0
+        count = int(raw)
     except (ValueError, TypeError):
         return None
+    # Negative is the jq type-guard sentinel: the path exists but is not a
+    # directory listing, so there is nothing to count. Indeterminate, not False.
+    if count < 0:
+        return None
+    return count > 0
 
 
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
