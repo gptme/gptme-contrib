@@ -770,6 +770,47 @@ def test_trigger_fallback_stale_acked_does_not_repost():
     assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
 
 
+def test_trigger_fallback_ignores_unrelated_greptileai_mention():
+    """An unrelated comment mentioning greptileai must not suppress the fallback.
+
+    Regression test: the fallback backed off on any `_our_trigger_status` other
+    than "none", but that function's selector matches ANY comment of ours whose
+    body contains "greptileai" (case-insensitive) — not specifically
+    `@greptileai review`. On this path review_cutoff is empty, so neither the
+    spent-trigger normalisation nor the max-retries guard can age the match out.
+
+    We post comments of exactly this shape routinely when addressing review
+    feedback ("Thanks for the catch @greptileai! Fixed in ..."), so a single one
+    reported "stale" forever and permanently suppressed the initial-review
+    fallback on exactly the PRs it exists to rescue.
+
+    The back-off must key on real `@greptileai review` trigger comments instead.
+    """
+    fixture = {
+        "pr_number": 1389,
+        "raw_comments": [
+            {
+                "id": 4242,
+                "user": {"login": "test-user"},
+                "created_at": _iso_ago(minutes=50),
+                "updated_at": _iso_ago(minutes=50),
+                # Mentions greptileai, but is NOT a trigger.
+                "body": "Thanks for the catch @greptileai! Fixed in abc1234.",
+            }
+        ],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert gh_log, (
+        "an unrelated comment merely mentioning greptileai must not suppress the "
+        f"initial-review fallback. stdout: {result.stdout!r}"
+    )
+    assert "triggering initial review" in result.stdout, f"stdout: {result.stdout!r}"
+
+
 def test_trigger_fallback_local_timestamp_blocks_with_no_prior_review():
     """TS-file fast-path must apply when review_cutoff is empty (no prior review).
 
