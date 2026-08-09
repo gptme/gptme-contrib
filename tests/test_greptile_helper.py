@@ -84,7 +84,11 @@ elif endpoint.endswith(f"/pulls/{pr_number}/commits"):
 elif endpoint.endswith(f"/pulls/{pr_number}/reviews"):
     data = fixture.get("raw_reviews", [])
 elif endpoint.endswith(f"/pulls/{pr_number}"):
-    data = fixture.get("raw_pr", {"created_at": "2020-01-01T00:00:00Z"})
+    data = fixture.get(
+        "raw_pr", {"state": "open", "created_at": "2020-01-01T00:00:00Z"}
+    )
+    if endpoint.endswith(f"/pulls/{pr_number}") and isinstance(data, dict):
+        data = {"state": "open", **data}
 elif endpoint.endswith("/reactions"):
     if fixture.get("reactions_error"):
         raise SystemExit(1)
@@ -164,6 +168,7 @@ def _run_helper(
     pre_trigger_ts: str | None = ...,
     ts_file_unwritable: bool = ...,
     repo: str = ...,
+    extra_env: dict[str, str] | None = ...,
 ) -> subprocess.CompletedProcess[str]: ...
 
 
@@ -177,6 +182,7 @@ def _run_helper(
     pre_trigger_ts: str | None = ...,
     ts_file_unwritable: bool = ...,
     repo: str = ...,
+    extra_env: dict[str, str] | None = ...,
 ) -> tuple[subprocess.CompletedProcess[str], str]: ...
 
 
@@ -190,6 +196,7 @@ def _run_helper(
     pre_trigger_ts: str | None = ...,
     ts_file_unwritable: bool = ...,
     repo: str = ...,
+    extra_env: dict[str, str] | None = ...,
 ) -> tuple[subprocess.CompletedProcess[str], str | None]: ...
 
 
@@ -202,6 +209,7 @@ def _run_helper(
     pre_trigger_ts: str | None = None,
     ts_file_unwritable: bool = False,
     repo: str = "gptme/gptme",
+    extra_env: dict[str, str] | None = None,
 ) -> (
     subprocess.CompletedProcess[str]
     | tuple[subprocess.CompletedProcess[str], str]
@@ -221,6 +229,7 @@ def _run_helper(
             helper's write fails, without making TMPDIR itself unwritable (the
             gh stub and its log live there too)
         repo: repo string passed to the helper (default "gptme/gptme")
+        extra_env: environment overrides for the helper subprocess
     """
     if capture_gh_log and capture_ts_file:
         raise ValueError("capture_gh_log and capture_ts_file are mutually exclusive")
@@ -254,6 +263,7 @@ def _run_helper(
         env["GITHUB_AUTHOR"] = "test-user"
         env["PATH"] = f"{tmp}:{env['PATH']}"
         env["TMPDIR"] = tmp  # ensure helper writes state files to test's temp dir
+        env.update(extra_env or {})
 
         result = subprocess.run(
             ["bash", str(SCRIPT), command, repo, str(fixture["pr_number"])],
@@ -708,13 +718,49 @@ def test_trigger_falls_back_to_initial_review_after_grace():
         "pr_number": 999,
         "raw_comments": [],
         "raw_commits": [],
-        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "raw_pr": {"state": "open", "created_at": _iso_ago(minutes=60)},
         "bot_reaction_count": 0,
     }
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "triggering initial review" in result.stdout
     assert gh_log, "a trigger comment should have been posted after the grace window"
+
+
+def test_trigger_fallback_skips_closed_pr():
+    """Never post a fresh review request on a closed or merged PR."""
+    fixture = {
+        "pr_number": 998,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "closed", "created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, "a closed PR must not receive an initial-review trigger"
+    assert "not open" in result.stdout
+
+
+def test_trigger_fallback_invalid_grace_uses_default():
+    """A malformed grace override must not disable the anti-race window."""
+    fixture = {
+        "pr_number": 997,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "open", "created_at": _iso_ago(minutes=10)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        extra_env={"GREPTILE_INITIAL_GRACE_MINS": "not-a-number"},
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, "malformed grace must fall back to 45 minutes, not trigger early"
+    assert "using 45 minutes" in result.stderr
+    assert "Awaiting" in result.stdout
 
 
 def test_trigger_fallback_does_not_repost_over_stale_trigger():
@@ -800,7 +846,7 @@ def test_trigger_fallback_ignores_unrelated_greptileai_mention():
             }
         ],
         "raw_commits": [],
-        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "raw_pr": {"state": "open", "created_at": _iso_ago(minutes=180)},
         "bot_reaction_count": 0,
     }
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)

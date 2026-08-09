@@ -578,46 +578,54 @@ trigger)
     # the symptom reads as "PRs aren't ready" rather than "the reviewer never came".
     #
     # So after a grace period, trigger once. Every existing protection still
-    # applies: the flock above, the in-flight check, the lifetime cap, and the
-    # trigger-timestamp record.
+    # applies: the flock above, the local in-flight check, the lifetime cap, and
+    # the trigger-timestamp record.
     _initial_grace="${GREPTILE_INITIAL_GRACE_MINS:-45}"
+    case "$_initial_grace" in
+        ''|*[!0-9]*)
+            echo "  [greptile] Invalid GREPTILE_INITIAL_GRACE_MINS=$_initial_grace; using 45 minutes." >&2
+            _initial_grace=45
+            ;;
+    esac
 
     # "trigger once" means exactly once. Two guards, in order:
     #
-    #   1. "in-progress" — a trigger is in flight: either the local trigger-timestamp
-    #      file is fresh (propagation-delay guard, INCIDENT #5) or our comment is
-    #      younger than TRIGGER_GRACE_SECONDS. This is also the fail-safe value when
-    #      _our_trigger_status errors, so an API failure backs off instead of posting.
+    #   1. A fresh local trigger timestamp means a post is in flight but may not
+    #      be visible through GitHub's comments API yet (INCIDENT #5). The flock
+    #      handles concurrent runs; this guard handles sequential runs. Do not
+    #      reuse _our_trigger_status here: it broadly matches any of our comments
+    #      containing "greptileai", so fresh review-feedback prose can delay the
+    #      fallback even though no trigger was posted.
     #   2. lifetime trigger count >= 1 — we already posted our one `@greptileai review`
-    #      on this PR (it now reads "stale" or "stale-acked"). The re-review path
-    #      deliberately treats those as re-triggerable, since a new commit or a stuck
-    #      ack justifies another nudge; this path has neither escape hatch, so treating
-    #      them as re-triggerable would re-post every grace window. If Greptile never
-    #      reviews after our one trigger, escalate to a human.
-    #
-    # Guard 2 counts `@greptileai review` comments (_total_trigger_count) rather than
-    # reusing _our_trigger_status's verdict. That function matches ANY comment of ours
-    # containing "greptileai" (case-insensitive), and on this path review_cutoff is
-    # empty — so neither the spent-trigger normalisation nor the max-retries guard can
-    # ever age the match out. A single unrelated comment, e.g. "Thanks for the catch
-    # @greptileai! Fixed in abc123" (a shape we post routinely), would otherwise report
-    # "stale" forever and permanently suppress the fallback on exactly the PRs it
-    # exists to rescue.
-    #
-    # A ceiling of 1 is stricter than MAX_TOTAL_TRIGGERS (8, which governs the
-    # re-review path), and subsumes it — there is no separate cap check below.
-    _ts_status=$(_our_trigger_status 2>/dev/null || echo "in-progress")
-    if [ "$_ts_status" = "in-progress" ]; then
-        echo "  [greptile] Initial-review trigger already in flight on $REPO#$PR_NUMBER. Not triggering again."
+    #      on this PR. The re-review path deliberately permits later attempts after
+    #      new commits or a stuck acknowledgement; this path has no such escape hatch.
+    _initial_ts_in_flight=0
+    if [ -f "$_TRIGGER_TS_FILE" ]; then
+        _local_ts=$(cat "$_TRIGGER_TS_FILE" 2>/dev/null || true)
+        if [ -n "$_local_ts" ]; then
+            _local_age=$(_age_seconds "$_local_ts" 2>/dev/null) || _local_age=9999
+            if [ "${_local_age:-9999}" -lt "$TRIGGER_GRACE_SECONDS" ]; then
+                _initial_ts_in_flight=1
+            fi
+        fi
+    fi
+    if [ "$_initial_ts_in_flight" -eq 1 ]; then
+        echo "  [greptile] Initial-review trigger already in flight on $REPO#$PR_NUMBER (local timestamp is fresh). Not triggering again."
         exit 0
     fi
     _total_triggers=$(_total_trigger_count)
     if [ "${_total_triggers:-0}" -ge 1 ]; then
-        echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER ($_total_triggers trigger comment(s), status: $_ts_status). Not triggering again — escalate to a human if Greptile never reviews."
+        echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER ($_total_triggers trigger comment(s)). Not triggering again — escalate to a human if Greptile never reviews."
         exit 0
     fi
 
-    _created=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.created_at // ""' 2>/dev/null) || _created=""
+    _pr_info=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '{state: (.state // ""), created_at: (.created_at // "")}' 2>/dev/null) || _pr_info=""
+    _pr_state=$(printf '%s' "$_pr_info" | _json_field "state") || _pr_state=""
+    _created=$(printf '%s' "$_pr_info" | _json_field "created_at") || _created=""
+    if [ "$_pr_state" != "open" ]; then
+        echo "  [greptile] PR $REPO#$PR_NUMBER is ${_pr_state:-unavailable}, not open. Skipping initial-review trigger."
+        exit 0
+    fi
     _age_mins=0
     if [ -n "$_created" ]; then
         _created_epoch=$(date -u -d "$_created" +%s 2>/dev/null \
