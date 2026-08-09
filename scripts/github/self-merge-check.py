@@ -787,71 +787,35 @@ def fetch_unresolved_human_threads(
 
 
 def repo_has_ci_configured(repo: str) -> bool | None:
-    """Whether the repo has GitHub Actions workflows configured.
+    """Whether GitHub recognizes at least one active Actions workflow.
 
     Tri-state, and deliberately so:
 
-    * ``True``  — ``.github/workflows/`` contains at least one top-level YAML
-      workflow file.
-    * ``False`` — the directory listing succeeded and contains no top-level
-      ``.yml`` or ``.yaml`` files.
-    * ``None``  — indeterminate. The API errored, timed out, returned 404, or
-      returned something unparseable.
+    * ``True``  — the Actions API reports at least one active workflow.
+    * ``False`` — the query succeeded and reports no active workflows.
+    * ``None``  — indeterminate. The API errored, timed out, or returned
+      something unparseable.
 
-    ``None`` must never be treated as ``False``. An earlier version returned a
-    plain ``bool`` and collapsed every failure into ``False``, which made this
-    whole guard vacuous in the one situation it exists for: during a GitHub
-    outage the workflows lookup fails too, the helper said "no CI configured",
-    and the PR stayed self-merge eligible — the exact outage merge this check
-    is supposed to block. Fail closed on ``None`` at the call site.
-
-    Used to distinguish "repo has no CI at all" from "repo has CI but checks
-    produced no result" (e.g., an outage, paths filter mismatch, or
-    concurrency cancellation).
+    Querying the Actions API instead of listing ``.github/workflows`` avoids
+    treating malformed or placeholder YAML as runnable CI. ``None`` must never
+    be treated as ``False``: an API outage is exactly when the caller needs to
+    fail closed rather than waive missing checks.
     """
-    try:
-        proc = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{repo}/contents/.github/workflows",
-                # GitHub only loads top-level .yml/.yaml files as workflows.
-                # Ignore README files, placeholders, and subdirectories. A
-                # non-array payload is indeterminate rather than "no CI".
-                "--jq",
-                (
-                    'if type == "array" then '
-                    '[.[] | select(.type == "file" and '
-                    '(.name | test("\\.ya?ml$"; "i")))] | length '
-                    "else -1 end"
-                ),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        if stderr:
-            print(f"[gh error] {stderr}", file=sys.stderr)
-        # A Contents 404 is not proof that the path is absent: fine-grained
-        # tokens without Contents permission receive the same response. The
-        # repository metadata endpoint cannot disambiguate that case because
-        # Metadata read is always granted. Fail closed on every API error.
-        return None
-
-    raw = (proc.stdout or "").strip()
+    raw = run_gh(
+        [
+            "api",
+            f"repos/{repo}/actions/workflows",
+            "--jq",
+            '[.workflows[]? | select(.state == "active")] | length',
+        ],
+        timeout=10,
+    )
     if not raw:
         return None
     try:
         count = int(raw)
     except (ValueError, TypeError):
         return None
-    # Negative is the jq type-guard sentinel: the path exists but is not a
-    # directory listing, so there is nothing to count. Indeterminate, not False.
     if count < 0:
         return None
     return count > 0
@@ -1311,7 +1275,7 @@ def evaluate_pr(
     status_checks = pr.get("statusCheckRollup", [])
     if not status_checks:
         # Distinguish between "repo has no CI at all" and "repo has CI but no result".
-        # Only a definitive False ("GitHub says .github/workflows does not exist")
+        # Only a definitive False (the Actions API reports no active workflows)
         # may waive the CI requirement. None means we could not determine it —
         # fail closed, since the likeliest cause of an indeterminate answer is
         # the same outage that suppressed the checks in the first place.
