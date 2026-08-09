@@ -182,7 +182,7 @@ _total_trigger_count() {
     # trigger must not consume one of our slots.
     local count
     count=$(_issue_comments_json \
-        | jq -r '[.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("^@greptileai review( comment)?([[:space:]]|$)")))] | length' 2>/dev/null) || count=0
+        | jq -r '[.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("^@greptileai review( comment)?(\\s|$)")))] | length' 2>/dev/null) || count=0
     printf '%s\n' "${count:-0}"
 }
 
@@ -191,7 +191,7 @@ _any_trigger_count() {
     # manual trigger must suppress our fallback too.
     local count
     count=$(_issue_comments_json \
-        | jq -r '[.[][] | select(.body | test("^@greptileai review( comment)?([[:space:]]|$)"))] | length' 2>/dev/null) || count=0
+        | jq -r '[.[][] | select(.body | test("^@greptileai review( comment)?(\\s|$)"))] | length' 2>/dev/null) || count=0
     printf '%s\n' "${count:-0}"
 }
 

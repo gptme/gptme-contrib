@@ -862,6 +862,24 @@ def test_trigger_fallback_does_not_repost_another_authors_trigger():
     assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
 
 
+def test_trigger_fallback_counts_trigger_with_trailing_newline():
+    """A multiline helper trigger must suppress the initial fallback."""
+    trigger = _make_trigger_comment(
+        "maintainer", _iso_ago(minutes=40), head_sha="abc123"
+    )
+    fixture = {
+        "pr_number": 1385,
+        "raw_comments": [trigger],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"fallback duplicated a multiline trigger: {gh_log!r}"
+    assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
 def test_other_authors_triggers_do_not_consume_helper_lifetime_cap():
     """Manual maintainer triggers must not force the helper into global backoff."""
     reviewed_at = _iso_ago(minutes=60)
