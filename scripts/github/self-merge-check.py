@@ -733,8 +733,10 @@ def ai_review_abstained(repo: str, pr_number: int) -> bool | None:
         [
             "api",
             f"repos/{repo}/issues/{pr_number}/comments?per_page=100",
+            "--paginate",
+            "--slurp",
             "--jq",
-            f'[.[] | select(.body | contains("{AI_REVIEW_COMMENT_MARKER}"))]'
+            f'[.[][] | select(.body | contains("{AI_REVIEW_COMMENT_MARKER}"))]'
             ' | if length == 0 then "__NO_AI_REVIEW__" else last.body end',
         ],
         timeout=30,
