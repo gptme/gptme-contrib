@@ -106,6 +106,15 @@
 
 set -euo pipefail
 
+# Marker stamped on every comment by Bob's self-hosted AI reviewer
+# (ErikBjare/bob#1122). It posts through Bob's user account rather than a
+# GitHub App, so without this its reviews are indistinguishable from the agent
+# talking to itself and get silenced by the self-trigger guard. Matches both
+# the summary comment (`<!-- bob-ai-review {...} -->`) and inline findings
+# (`<!-- bob-ai-review-finding -->`). The reviewer stamps summary comments at
+# the end, so this marker cannot be anchored to the first line.
+AI_REVIEW_MARKER_RE='^<!-- bob-ai-review(-finding| \{.*\}) -->$'
+
 # --- Parse args ---
 AUTHOR=""
 ORG=""
@@ -467,15 +476,42 @@ has_actionable_update() {
     # If no activity found, this might be a push — allow it
     [ -z "$last_actor" ] && return 0
 
-    # Skip if the last actor is the author (self-triggered update)
-    if [ "$last_actor" = "$AUTHOR" ]; then
+    # Skip if the last actor is the author (self-triggered update).
+    #
+    # EXCEPTION: Bob's self-hosted AI reviewer (ErikBjare/bob#1122) posts its
+    # findings through Bob's *user* account, not a GitHub App, so its reviews
+    # look exactly like the agent talking to itself and were silenced here.
+    # Greptile appears ~70 times in this file; the replacement appeared zero
+    # times, so PM listened to the reviewer we stopped paying for and ignored
+    # the one we run. Reviews were posted and then dropped on the floor.
+    #
+    # Those comments carry a machine marker, so they are distinguishable from
+    # Bob's genuine human-directed comments — which must STILL be silenced,
+    # since those are the actual self-trigger loop this guard exists to stop.
+    # Matching the marker rather than the login is what keeps both properties.
+    #
+    # Loop safety: this is the same cycle Greptile already drives (review ->
+    # PM dispatches -> push -> re-review), and it terminates the same way, via
+    # the fingerprint dedup below plus the per-PR attempt counters. It is
+    # bounded by the PR being fixed or merged, not by the reviewer's identity.
+    #
+    # The marker must occupy a complete line. A normal reply that merely quotes
+    # or inline-copies the marker remains self-chatter; the reviewer itself emits
+    # the marker as a standalone HTML-comment line. The regex accepts only the
+    # two formats emitted by the reviewer: `-finding` or a JSON state object.
+    local is_ai_review=1
+    if [ "$last_actor" = "$AUTHOR" ] && printf '%s\n' "$last_body" \
+        | grep -qE "$AI_REVIEW_MARKER_RE"; then
+        is_ai_review=0
+    fi
+    if [ "$last_actor" = "$AUTHOR" ] && [ "$is_ai_review" -ne 0 ]; then
         return 1
     fi
 
     # Skip if the comment/review @-mentions someone else but NOT the AUTHOR.
     # This catches cases like "@greptileai review" or "@someone what do you think?"
     # where the commenter is clearly addressing someone other than the agent.
-    if [ -n "$last_body" ]; then
+    if [ "$is_ai_review" -ne 0 ] && [ -n "$last_body" ]; then
         local mentions_anyone mentions_author
         # Match GitHub-style @mentions (start of line or after whitespace).
         # Avoids false positives from emails like user@example.com.
