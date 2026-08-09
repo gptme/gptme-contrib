@@ -623,6 +623,13 @@ trigger)
         echo "  [greptile] Could not read PR comments for $REPO#$PR_NUMBER. Refusing to trigger an initial review without duplicate-check data."
         exit 3
     fi
+    # The exactly-once guard below is stricter than the general lifetime cap,
+    # but keep the cap explicit: it remains a hard backstop if that policy is
+    # relaxed later and makes the protection promised by this helper auditable.
+    if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+        echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Not triggering an initial review — escalate to a human."
+        exit 0
+    fi
     if [ "${_total_triggers:-0}" -ge 1 ]; then
         echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER ($_total_triggers trigger comment(s)). Not triggering again — escalate to a human if Greptile never reviews."
         exit 0

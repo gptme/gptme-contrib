@@ -795,6 +795,29 @@ def test_trigger_fallback_invalid_grace_uses_default():
     assert "Awaiting" in result.stdout
 
 
+def test_trigger_fallback_enforces_lifetime_cap():
+    """The initial-review path keeps the global trigger ceiling explicit."""
+    fixture = {
+        "pr_number": 1385,
+        "raw_comments": [
+            _make_trigger_comment("maintainer", _iso_ago(minutes=40)) for _ in range(8)
+        ],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        extra_env={"MAX_TOTAL_TRIGGERS": "8"},
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"fallback exceeded the lifetime cap: {gh_log!r}"
+    assert "BACKOFF" in result.stdout, f"stdout: {result.stdout!r}"
+    assert "cap 8" in result.stdout, f"stdout: {result.stdout!r}"
+
+
 def test_trigger_fallback_does_not_repost_over_stale_trigger():
     """Initial-review fallback must fire ONCE, not once per grace window.
 
