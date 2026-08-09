@@ -174,11 +174,13 @@ _issue_comments_json() {
 }
 
 _total_trigger_count() {
-    # Count ALL our `@greptileai review` trigger comments on this PR (lifetime).
-    # Fail-open to 0 on API error so a transient failure never blocks a legit trigger.
+    # Count ALL our actual `@greptileai review` trigger commands on this PR
+    # (lifetime), including the legacy `review comment` spelling. Do not count
+    # prose that merely contains the same substring. Fail-open to 0 on API
+    # error so a transient failure never blocks a legitimate trigger.
     local count
     count=$(_issue_comments_json \
-        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | length" 2>/dev/null) || count=0
+        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"^@greptileai review( comment)?([[:space:]]|$)\")))] | length" 2>/dev/null) || count=0
     printf '%s\n' "${count:-0}"
 }
 
@@ -651,9 +653,10 @@ trigger)
     #
     # So: write first, and treat a failed write as fatal for this trigger. Not
     # triggering costs one cycle; double-triggering is the incident. If the post
-    # then fails, the stale TS only backs us off until the grace window expires,
-    # after which the API query (which will correctly report no comment) lets a
-    # retry through — self-healing, in the safe direction.
+    # fails, remove the provisional timestamp so status does not report a phantom
+    # in-flight trigger and the next cycle can retry immediately. A process killed
+    # in the tiny write-to-post window still fails safe for at most the bounded
+    # TRIGGER_GRACE_SECONDS window.
     if ! date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null; then
         echo "  [greptile] Could not write trigger-timestamp file ($_TRIGGER_TS_FILE); refusing to trigger without the propagation-delay guard. Retrying next cycle."
         exit 0
@@ -661,6 +664,7 @@ trigger)
     if BOB_GREPTILE_HELPER=1 gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
         echo "  [greptile] Initial review triggered."
     else
+        rm -f "$_TRIGGER_TS_FILE"
         echo "  [greptile] Trigger failed (non-fatal)."
     fi
     exit 0

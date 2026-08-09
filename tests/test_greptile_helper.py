@@ -794,8 +794,9 @@ def test_trigger_fallback_ignores_unrelated_greptileai_mention():
                 "user": {"login": "test-user"},
                 "created_at": _iso_ago(minutes=50),
                 "updated_at": _iso_ago(minutes=50),
-                # Mentions greptileai, but is NOT a trigger.
-                "body": "Thanks for the catch @greptileai! Fixed in abc1234.",
+                # Contains the exact trigger substring, but is prose rather than a
+                # trigger command. Substring matching must not count this.
+                "body": "I saw @greptileai review this; thanks for the catch.",
             }
         ],
         "raw_commits": [],
@@ -1266,6 +1267,25 @@ def test_fallback_refuses_to_trigger_when_ts_file_cannot_be_written():
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "refusing to trigger" in result.stdout, result.stdout
     assert not gh_log, f"posted a trigger with no propagation guard: {gh_log}"
+
+
+def test_fallback_failed_post_removes_provisional_timestamp():
+    """A failed API post must not leave status reporting a phantom trigger."""
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+        "trigger_api_error": True,
+    }
+    result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Trigger failed" in result.stdout, result.stdout
+    assert ts_content is None, (
+        "failed initial-review post left a provisional timestamp that would "
+        f"misreport in-progress: {ts_content!r}"
+    )
 
 
 def test_fallback_records_the_timestamp_before_posting():
