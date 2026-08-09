@@ -177,13 +177,15 @@ _issue_comments_json() {
 }
 
 _total_trigger_count() {
-    # Count ALL our actual `@greptileai review` trigger commands on this PR
-    # (lifetime), including the legacy `review comment` spelling. Do not count
-    # prose that merely contains the same substring. Fail-open to 0 on API
-    # error so a transient failure never blocks a legitimate trigger.
+    # Count ALL actual `@greptileai review` trigger commands on this PR
+    # (lifetime), including the legacy `review comment` spelling. Initial-review
+    # deduplication is per PR, not per author: a maintainer's manual trigger must
+    # suppress our fallback too. Do not count prose that merely contains the same
+    # substring. Fail-open to 0 on API error; the caller separately checks the
+    # shared comments-error marker before triggering.
     local count
     count=$(_issue_comments_json \
-        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"^@greptileai review( comment)?([[:space:]]|$)\")))] | length" 2>/dev/null) || count=0
+        | jq -r '[.[][] | select(.body | test("^@greptileai review( comment)?([[:space:]]|$)"))] | length' 2>/dev/null) || count=0
     printf '%s\n' "${count:-0}"
 }
 
@@ -633,14 +635,12 @@ trigger)
         echo "  [greptile] PR $REPO#$PR_NUMBER is ${_pr_state:-unavailable}, not open. Skipping initial-review trigger."
         exit 0
     fi
-    _age_mins=0
-    if [ -n "$_created" ]; then
-        _created_epoch=$(date -u -d "$_created" +%s 2>/dev/null \
-            || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_created" +%s 2>/dev/null || echo "")
-        if [ -n "$_created_epoch" ]; then
-            _age_mins=$(( ( $(date -u +%s) - _created_epoch ) / 60 ))
-        fi
+    _age_seconds=$(_age_seconds "$_created" 2>/dev/null) || _age_seconds=""
+    if [ -z "$_age_seconds" ]; then
+        echo "  [greptile] Could not parse PR creation timestamp for $REPO#$PR_NUMBER. Refusing to trigger an initial review."
+        exit 3
     fi
+    _age_mins=$(( _age_seconds / 60 ))
 
     if [ "$_age_mins" -lt "$_initial_grace" ]; then
         echo "  [greptile] No review yet on $REPO#$PR_NUMBER (${_age_mins}m old, grace ${_initial_grace}m). Awaiting Greptile auto-review."

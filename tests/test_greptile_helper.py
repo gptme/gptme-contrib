@@ -744,6 +744,36 @@ def test_trigger_fallback_skips_closed_pr():
     assert "not open" in result.stdout
 
 
+def test_trigger_fallback_accepts_offset_creation_timestamp():
+    """ISO offsets must work without relying on platform-specific date flags."""
+    fixture = {
+        "pr_number": 996,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "open", "created_at": "2020-01-01T01:00:00+01:00"},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "triggering initial review" in result.stdout
+    assert gh_log, "an old PR with an offset timestamp should receive the fallback"
+
+
+def test_trigger_fallback_invalid_creation_timestamp_fails_safe():
+    """Unparseable age must neither trigger early nor masquerade as fresh forever."""
+    fixture = {
+        "pr_number": 995,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "open", "created_at": "not-a-timestamp"},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 3, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    assert "Could not parse" in result.stdout
+    assert not gh_log, f"fallback posted without a trustworthy PR age: {gh_log!r}"
+
+
 def test_trigger_fallback_invalid_grace_uses_default():
     """A malformed grace override must not disable the anti-race window."""
     fixture = {
@@ -791,6 +821,21 @@ def test_trigger_fallback_does_not_repost_over_stale_trigger():
         f"fallback must not re-post over an existing (stale) trigger comment. "
         f"Got log: {gh_log!r}"
     )
+    assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_trigger_fallback_does_not_repost_another_authors_trigger():
+    """Initial-review deduplication is per PR, not per helper account."""
+    fixture = {
+        "pr_number": 1385,
+        "raw_comments": [_make_trigger_comment("maintainer", _iso_ago(minutes=40))],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"fallback duplicated another author's trigger: {gh_log!r}"
     assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
 
 
