@@ -345,6 +345,49 @@ def test_parse_cascade_optional_task_fields():
     assert intent["suggested_claim"] == "cascade:task:task-x"
 
 
+def test_parse_cascade_routing_hint_propagates():
+    """routing_hint=haiku (from complexity_tier=low) must flow through to intent."""
+    data = {
+        "tier": 1,
+        "recommended_scope": "standard",
+        "selector_mode": "",
+        "blocked_tasks": [],
+        "selected": {
+            "id": "simple-task",
+            "category": "cleanup",
+            "state": "backlog",
+            "complexity_tier": "low",
+            "routing_hint": "haiku",
+        },
+    }
+    scope, sel_id, cat, exec_cat, all_blocked, sel_mode, intent_json = _parse(data)
+    intent = json.loads(intent_json)
+    assert intent.get("routing_hint") == "haiku"
+
+
+def test_parse_cascade_routing_hint_absent_when_not_set():
+    """Omitted routing_hint must stay omitted from the intent.
+
+    The upstream selector owns the complexity-tier decision; this parser only
+    preserves an explicit hint when one is present.
+    """
+    data = {
+        "tier": 1,
+        "recommended_scope": "standard",
+        "selector_mode": "",
+        "blocked_tasks": [],
+        "selected": {
+            "id": "complex-task",
+            "category": "code",
+            "state": "backlog",
+            "complexity_tier": "high",
+        },
+    }
+    scope, sel_id, cat, exec_cat, all_blocked, sel_mode, intent_json = _parse(data)
+    intent = json.loads(intent_json)
+    assert "routing_hint" not in intent
+
+
 def test_parse_cascade_minimal_empty_selected():
     # Degenerate case: empty selector output
     data: dict = {  # type: ignore[type-arg]
