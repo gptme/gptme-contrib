@@ -146,7 +146,8 @@ PY
 # Shell variable caching doesn't work here because callers use $() subshells.
 _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
 _ISSUE_COMMENTS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-$$.json"
-trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE"' EXIT
+_ISSUE_COMMENTS_ERROR_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-error-$$"
+trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE"' EXIT
 
 # Shared hash for per-PR state files (lock + trigger timestamp).
 # Used across trigger and _our_trigger_status to coordinate without the GitHub API.
@@ -167,9 +168,11 @@ _issue_comments_json() {
         cat "$_ISSUE_COMMENTS_CACHE_FILE"
         return
     fi
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate 2>/dev/null \
-        | jq -s '.' > "$_ISSUE_COMMENTS_CACHE_FILE" 2>/dev/null \
-        || echo '[]' > "$_ISSUE_COMMENTS_CACHE_FILE"
+    if ! gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate 2>/dev/null \
+        | jq -s '.' > "$_ISSUE_COMMENTS_CACHE_FILE" 2>/dev/null; then
+        echo '[]' > "$_ISSUE_COMMENTS_CACHE_FILE"
+        : > "$_ISSUE_COMMENTS_ERROR_FILE"
+    fi
     cat "$_ISSUE_COMMENTS_CACHE_FILE"
 }
 
@@ -614,6 +617,10 @@ trigger)
         exit 0
     fi
     _total_triggers=$(_total_trigger_count)
+    if [ -f "$_ISSUE_COMMENTS_ERROR_FILE" ]; then
+        echo "  [greptile] Could not read PR comments for $REPO#$PR_NUMBER. Refusing to trigger an initial review without duplicate-check data."
+        exit 3
+    fi
     if [ "${_total_triggers:-0}" -ge 1 ]; then
         echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER ($_total_triggers trigger comment(s)). Not triggering again — escalate to a human if Greptile never reviews."
         exit 0
@@ -661,10 +668,10 @@ trigger)
     #
     # So: write first, and treat a failed write as fatal for this trigger. Not
     # triggering costs one cycle; double-triggering is the incident. If the post
-    # fails, remove the provisional timestamp so status does not report a phantom
-    # in-flight trigger and the next cycle can retry immediately. A process killed
-    # in the tiny write-to-post window still fails safe for at most the bounded
-    # TRIGGER_GRACE_SECONDS window.
+    # fails, keep the provisional timestamp for the bounded grace window. A failed
+    # client response is ambiguous: GitHub may have committed the comment before a
+    # timeout, and deleting the guard would let the next invocation duplicate it
+    # before the comments API catches up.
     if ! date -u +%Y-%m-%dT%H:%M:%SZ > "$_TRIGGER_TS_FILE" 2>/dev/null; then
         echo "  [greptile] Could not write trigger-timestamp file ($_TRIGGER_TS_FILE); refusing to trigger without the propagation-delay guard. Retrying next cycle."
         exit 0
@@ -672,8 +679,7 @@ trigger)
     if BOB_GREPTILE_HELPER=1 gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
         echo "  [greptile] Initial review triggered."
     else
-        rm -f "$_TRIGGER_TS_FILE"
-        echo "  [greptile] Trigger failed (non-fatal)."
+        echo "  [greptile] Trigger failed or its result was ambiguous; retaining the propagation-delay guard for this grace window."
     fi
     exit 0
     ;;

@@ -78,6 +78,8 @@ if endpoint == "user":
     print(github_author)
     raise SystemExit(0)
 elif endpoint.endswith(f"/issues/{pr_number}/comments"):
+    if fixture.get("comments_api_error"):
+        raise SystemExit(1)
     data = fixture.get("raw_comments", [])
 elif endpoint.endswith(f"/pulls/{pr_number}/commits"):
     data = fixture.get("raw_commits", [])
@@ -1315,8 +1317,24 @@ def test_fallback_refuses_to_trigger_when_ts_file_cannot_be_written():
     assert not gh_log, f"posted a trigger with no propagation guard: {gh_log}"
 
 
-def test_fallback_failed_post_removes_provisional_timestamp():
-    """A failed API post must not leave status reporting a phantom trigger."""
+def test_fallback_comments_api_failure_is_fail_safe():
+    """Missing duplicate-check data must never become an initial trigger."""
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+        "comments_api_error": True,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 3, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    assert "Refusing to trigger" in result.stdout, result.stdout
+    assert not gh_log, f"posted despite comments API failure: {gh_log}"
+
+
+def test_fallback_failed_post_retains_provisional_timestamp():
+    """An ambiguous POST failure must retain the propagation-delay guard."""
     fixture = {
         "pr_number": 999,
         "raw_comments": [],
@@ -1327,11 +1345,8 @@ def test_fallback_failed_post_removes_provisional_timestamp():
     }
     result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert "Trigger failed" in result.stdout, result.stdout
-    assert ts_content is None, (
-        "failed initial-review post left a provisional timestamp that would "
-        f"misreport in-progress: {ts_content!r}"
-    )
+    assert "ambiguous" in result.stdout, result.stdout
+    assert ts_content, "ambiguous post failure removed its propagation-delay guard"
 
 
 def test_fallback_records_the_timestamp_before_posting():
