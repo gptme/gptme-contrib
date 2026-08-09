@@ -3,7 +3,9 @@
 This guard exists to stop a self-merge when a repo *has* CI but the checks
 produced no result — the shape seen during the 2026-08-06 GitHub Actions
 outage, where `statusCheckRollup` came back empty on repos that very much do
-run CI.
+run CI. It queries GitHub's Actions workflows endpoint so a successful empty
+result means the repo has no active workflows; API failures remain
+indeterminate and fail closed.
 
 The subtle failure mode, caught by our own self-hosted AI reviewer on
 gptme/gptme-contrib#1382 (see ErikBjare/bob#1122): the helper originally
@@ -51,21 +53,17 @@ class _Proc:
 @pytest.mark.parametrize(
     ("label", "proc", "expected"),
     [
-        ("two workflow files", _Proc(0, "2"), True),
-        ("one workflow file", _Proc(0, "1"), True),
-        ("directory exists but is empty", _Proc(0, "0"), False),
-        # A Contents 404 is ambiguous: the path may be absent, the repo may be
-        # unreadable, or a fine-grained token may lack Contents permission.
-        ("404 on contents", _Proc(1, "", "gh: Not Found (HTTP 404)"), None),
+        ("two active workflows", _Proc(0, "2"), True),
+        ("one active workflow", _Proc(0, "1"), True),
+        ("no active workflows", _Proc(0, "0"), False),
         # Everything below is indeterminate and MUST be None, not False.
+        ("404 from Actions API", _Proc(1, "", "gh: Not Found (HTTP 404)"), None),
         ("rate limited", _Proc(1, "", "API rate limit exceeded"), None),
         ("server error", _Proc(1, "", "HTTP 502 Bad Gateway"), None),
         ("auth failure", _Proc(1, "", "HTTP 401 Bad credentials"), None),
         ("empty stdout on success", _Proc(0, ""), None),
         ("unparseable stdout", _Proc(0, "null"), None),
-        # The jq type-guard sentinel: the contents path resolved to something
-        # that is not a directory listing, so there is nothing to count.
-        ("non-array payload (type-guard sentinel)", _Proc(0, "-1"), None),
+        ("negative count", _Proc(0, "-1"), None),
     ],
 )
 def test_tri_state(
@@ -78,26 +76,8 @@ def test_tri_state(
 _NOT_FOUND = _Proc(1, "", "gh: Not Found (HTTP 404)")
 
 
-def test_contents_404_is_indeterminate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A Contents 404 cannot prove either that CI is absent or unreadable.
-
-    Fine-grained PATs always have Metadata read, so probing ``repos/{repo}``
-    cannot distinguish a missing workflows path from withheld Contents access.
-    Waiving the CI gate on either response would fail open.
-    """
-    calls: list[list[str]] = []
-
-    def _run(args: list[str], **kwargs: object) -> _Proc:
-        calls.append(args)
-        return _NOT_FOUND
-
-    monkeypatch.setattr(subprocess, "run", _run)
-    assert smc.repo_has_ci_configured("o/r") is None
-    assert len(calls) == 1
-
-
-def test_contents_404_blocks_self_merge(monkeypatch: pytest.MonkeyPatch) -> None:
-    """End-to-end: an ambiguous 404 must disqualify, not warn-and-pass."""
+def test_actions_api_404_blocks_self_merge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: an Actions API error must disqualify, not warn-and-pass."""
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _NOT_FOUND)
     result = _evaluate_with(monkeypatch, smc.repo_has_ci_configured("o/r"))
     assert not result.eligible
@@ -117,10 +97,10 @@ def test_exceptions_are_indeterminate(
     assert smc.repo_has_ci_configured("o/r") is None
 
 
-def test_workflows_lookup_jq_filters_workflow_files(
+def test_workflows_lookup_uses_actions_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The jq program counts only top-level YAML files in the directory."""
+    """The query counts active workflows recognized by GitHub Actions."""
     captured: list[list[str]] = []
 
     def _capture(args: list[str], **kwargs: object) -> _Proc:
@@ -132,12 +112,11 @@ def test_workflows_lookup_jq_filters_workflow_files(
 
     assert captured, "gh was never invoked"
     argv = captured[0]
+    assert "repos/o/r/actions/workflows" in argv
     assert "--jq" in argv, f"no --jq in argv: {argv!r}"
     jq_program = argv[argv.index("--jq") + 1]
-    assert "array" in jq_program, f"jq program is not type-guarded: {jq_program!r}"
-    assert ".type" in jq_program, f"jq program does not filter files: {jq_program!r}"
-    assert "ya?ml" in jq_program, f"jq program does not filter YAML: {jq_program!r}"
-    assert "-1" in jq_program, f"jq program has no non-array sentinel: {jq_program!r}"
+    assert ".workflows" in jq_program
+    assert '.state == "active"' in jq_program
 
 
 def _evaluate_with(monkeypatch: pytest.MonkeyPatch, has_ci: bool | None) -> Any:
