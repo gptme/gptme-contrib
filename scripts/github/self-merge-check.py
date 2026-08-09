@@ -786,48 +786,17 @@ def fetch_unresolved_human_threads(
     }
 
 
-def _repo_is_readable(repo: str) -> bool:
-    """Whether ``repos/{repo}`` is *confirmed* readable by the current token.
-
-    Only ``True`` means confirmed. Any 404, error, timeout or empty answer
-    returns ``False`` ("not confirmed"), so callers that use this to justify a
-    fail-open decision stay fail-closed when the probe itself is unreliable.
-
-    Exists because the Contents API answers 404 for two very different things:
-    the path is absent, or the *repository* cannot be read at all (GitHub
-    returns 404 rather than 403 to avoid confirming a private repo's
-    existence). ``gh``'s stderr is byte-identical in both cases — verified:
-    ``repos/gptme/does-not-exist/contents/.github/workflows`` and
-    ``repos/gptme/gptme-contrib/contents/.github/no-such-dir`` both print
-    exactly ``gh: Not Found (HTTP 404)``. A token that can read pull requests
-    but not contents (a fine-grained PAT with Contents withheld) therefore
-    looked exactly like "this repo has no CI", waiving the CI gate.
-    """
-    try:
-        proc = subprocess.run(
-            ["gh", "api", f"repos/{repo}", "--jq", ".full_name"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    if proc.returncode != 0:
-        return False
-    return bool((proc.stdout or "").strip())
-
-
 def repo_has_ci_configured(repo: str) -> bool | None:
     """Whether the repo has GitHub Actions workflows configured.
 
     Tri-state, and deliberately so:
 
-    * ``True``  — ``.github/workflows/`` exists and holds at least one file.
-    * ``False`` — the repo is readable and definitively has no workflows to
-      run: GitHub answered 404 for the directory, or listed it as empty.
-    * ``None``  — indeterminate. The API errored, timed out, returned
-      something unparseable, or answered 404 in a way we could not attribute
-      to the directory rather than the whole repository.
+    * ``True``  — ``.github/workflows/`` contains at least one top-level YAML
+      workflow file.
+    * ``False`` — the directory listing succeeded and contains no top-level
+      ``.yml`` or ``.yaml`` files.
+    * ``None``  — indeterminate. The API errored, timed out, returned 404, or
+      returned something unparseable.
 
     ``None`` must never be treated as ``False``. An earlier version returned a
     plain ``bool`` and collapsed every failure into ``False``, which made this
@@ -846,13 +815,16 @@ def repo_has_ci_configured(repo: str) -> bool | None:
                 "gh",
                 "api",
                 f"repos/{repo}/contents/.github/workflows",
-                # Type-guard: the Contents API returns an array for a directory
-                # but an object for a regular file. A bare `length` would count
-                # that object's keys and report "CI configured" for a repo whose
-                # .github/workflows is not a directory at all. -1 is the
-                # "not a directory listing" sentinel, mapped to None below.
+                # GitHub only loads top-level .yml/.yaml files as workflows.
+                # Ignore README files, placeholders, and subdirectories. A
+                # non-array payload is indeterminate rather than "no CI".
                 "--jq",
-                'if type == "array" then length else -1 end',
+                (
+                    'if type == "array" then '
+                    '[.[] | select(.type == "file" and '
+                    '(.name | test("\\.ya?ml$"; "i")))] | length '
+                    "else -1 end"
+                ),
             ],
             capture_output=True,
             text=True,
@@ -865,14 +837,10 @@ def repo_has_ci_configured(repo: str) -> bool | None:
         stderr = (proc.stderr or "").strip()
         if stderr:
             print(f"[gh error] {stderr}", file=sys.stderr)
-        # A 404 here is ambiguous, not a real answer. It means either "the
-        # workflows directory does not exist" (safe to waive) or "this token
-        # cannot read this repository at all" (must never waive) — GitHub
-        # returns 404 for both, and gh's stderr is identical. Only conclude
-        # "no workflows" once the repository itself is confirmed readable.
-        # Anything else (rate limit, 5xx, auth, network) leaves us unsure.
-        if "404" in stderr or "Not Found" in stderr:
-            return False if _repo_is_readable(repo) else None
+        # A Contents 404 is not proof that the path is absent: fine-grained
+        # tokens without Contents permission receive the same response. The
+        # repository metadata endpoint cannot disambiguate that case because
+        # Metadata read is always granted. Fail closed on every API error.
         return None
 
     raw = (proc.stdout or "").strip()
