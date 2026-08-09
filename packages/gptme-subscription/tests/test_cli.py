@@ -120,6 +120,9 @@ class FakeManager:
         self.slot_is_fresh_calls.append(sub)
         return self._slot_fresh_result
 
+    def slot_has_refresh_token(self, sub: str) -> bool:
+        return True
+
     def save_rebalance_state(self, decision: dict[str, object]) -> None:
         self.saved_decision = decision
 
@@ -655,15 +658,10 @@ def test_cmd_switch_unprobeable_failure_explains_itself(tmp_path: Path, capsys) 
     assert "expiresAt" in err  # the actual reason, not just "it failed"
 
 
-def test_cmd_switch_probe_ok_refusal_explains_itself(
+def test_cmd_switch_without_refresh_token_skips_probe(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    """A probe that succeeds but a switch the SlotManager still refuses must talk.
-
-    Slot has no refresh token, so ``probe_ok`` is ignored inside SlotManager
-    and the switch is refused after the probe already printed "probing...".
-    Previously the command then exited 1 with no explanation at all.
-    """
+    """Do not probe when a stale slot has no token it can refresh with."""
     sm = _real_manager(tmp_path)
     _write_real_slot(sm, "bob", expires_in=3600)
     sm.config.slot_path("alice").write_text(
@@ -679,17 +677,19 @@ def test_cmd_switch_probe_ok_refusal_explains_itself(
         )
     )
     sm.config.creds_link.symlink_to(".credentials.json.bob")
-    monkeypatch.setattr(
-        "gptme_subscription.cli.probe_credential",
-        MagicMock(return_value=(None, True, "probe ok")),
-    )
+    probe = MagicMock(return_value=(None, True, "probe ok"))
+    monkeypatch.setattr("gptme_subscription.cli.probe_credential", probe)
 
     args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
     rc = _cmd_switch(args, sm)
 
     assert rc == 1
     assert sm.get_active_subscription() == "bob"
-    assert "Failed to switch to alice" in capsys.readouterr().err
+    probe.assert_not_called()
+    err = capsys.readouterr().err
+    assert "Failed to switch to alice" in err
+    assert "slot holds no refresh token" in err
+    assert "probing" not in err
 
 
 def test_cmd_switch_warns_when_post_flip_usage_returns_empty_dict(

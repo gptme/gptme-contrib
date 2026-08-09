@@ -398,6 +398,14 @@ class TestSwitchTo:
         assert result.ok is True
         assert mgr.get_active_subscription() == "bob"
 
+    def test_slot_has_refresh_token(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600))
+        assert mgr.slot_has_refresh_token("bob") is True
+
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600), refresh_token=None)
+        assert mgr.slot_has_refresh_token("bob") is False
+        assert mgr.slot_has_refresh_token("missing") is False
+
     def test_probe_ok_ignored_when_slot_has_no_refresh_token(
         self, mgr: SlotManager
     ) -> None:

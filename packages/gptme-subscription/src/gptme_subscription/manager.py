@@ -232,6 +232,10 @@ class SubscriptionManager:
         )
         return result
 
+    def slot_has_refresh_token(self, sub: str) -> bool:
+        """Return whether a subscription slot can refresh its access token."""
+        return self._slot_manager.slot_has_refresh_token(sub)
+
     def slot_credential_is_stale(
         self, sub: str, stale_days: float = 7.0, *, now: datetime | None = None
     ) -> tuple[bool, str]:

@@ -392,6 +392,10 @@ class SlotManager:
             now=now,
         )
 
+    def slot_has_refresh_token(self, sub: str) -> bool:
+        """Return whether a named slot contains a usable refresh token."""
+        return _read_refresh_token(self.slot_path(sub)) is not None
+
     # ---- Drift detection ----
 
     def detect_live_slot_drift(self) -> DriftInfo | None:

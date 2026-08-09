@@ -364,23 +364,31 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         if not fresh:
             failure_detail = fresh_reason
         if not fresh and reason_is_refreshable(fresh_reason):
-            print(
-                f"  Access token stale ({fresh_reason}); "
-                f"probing {target!r} to verify refresh token...",
-                file=sys.stderr,
-            )
-            _, probe_ok, probe_msg = probe_credential(
-                sm.config.slot_path(target), target, usage_script=sm.config.usage_script
-            )
-            if probe_ok:
-                ok = sm.switch_to(
-                    target,
-                    f"manual switch via --switch {target} (probe_ok)",
-                    force=True,
-                    probe_ok=True,
-                )
+            if not sm.slot_has_refresh_token(target):
+                failure_detail = f"{fresh_reason}; slot holds no refresh token"
             else:
-                print(f"  Probe failed ({probe_msg}); cannot switch.", file=sys.stderr)
+                print(
+                    f"  Access token stale ({fresh_reason}); "
+                    f"probing {target!r} to verify refresh token...",
+                    file=sys.stderr,
+                )
+                _, probe_ok, probe_msg = probe_credential(
+                    sm.config.slot_path(target),
+                    target,
+                    usage_script=sm.config.usage_script,
+                )
+                if probe_ok:
+                    ok = sm.switch_to(
+                        target,
+                        f"manual switch via --switch {target} (probe_ok)",
+                        force=True,
+                        probe_ok=True,
+                    )
+                else:
+                    print(
+                        f"  Probe failed ({probe_msg}); cannot switch.",
+                        file=sys.stderr,
+                    )
     if ok:
         # Protect the operator's explicit choice: write a manual-switch hold so a
         # concurrent automated --execute doesn't immediately rebalance / forward-
