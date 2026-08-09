@@ -162,9 +162,11 @@ def test_query_requests_latest_structured_marker() -> None:
         assert self_merge_check.ai_review_abstained("o/r", 42) is False
 
     assert "repos/o/r/issues/42/comments?per_page=100" in captured
-    assert "--paginate" not in captured
+    assert "--paginate" in captured
+    assert "--slurp" in captured
     query = captured[captured.index("--jq") + 1]
     assert self_merge_check.AI_REVIEW_COMMENT_MARKER in query
+    assert ".[][]" in query
     assert "last" in query
     assert "__NO_AI_REVIEW__" in query
 
