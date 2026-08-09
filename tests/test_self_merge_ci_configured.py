@@ -119,7 +119,12 @@ def test_workflows_lookup_uses_actions_api(
     assert '.state == "active"' in jq_program
 
 
-def _evaluate_with(monkeypatch: pytest.MonkeyPatch, has_ci: bool | None) -> Any:
+def _evaluate_with(
+    monkeypatch: pytest.MonkeyPatch,
+    has_ci: bool | None = None,
+    *,
+    use_real_ci_probe: bool = False,
+) -> Any:
     """Run evaluate_pr against a PR whose statusCheckRollup came back empty."""
     pr = {
         "number": 1,
@@ -134,7 +139,8 @@ def _evaluate_with(monkeypatch: pytest.MonkeyPatch, has_ci: bool | None) -> Any:
         "comments": [],
     }
     monkeypatch.setattr(smc, "fetch_pr", lambda *a, **k: pr)
-    monkeypatch.setattr(smc, "repo_has_ci_configured", lambda repo: has_ci)
+    if not use_real_ci_probe:
+        monkeypatch.setattr(smc, "repo_has_ci_configured", lambda repo: has_ci)
     greptile_review = {
         "author": {"login": "greptile-apps[bot]"},
         "submittedAt": "2026-08-09T00:00:00Z",
@@ -155,6 +161,16 @@ def _evaluate_with(monkeypatch: pytest.MonkeyPatch, has_ci: bool | None) -> Any:
     monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
     monkeypatch.setattr(smc, "run_gh", lambda *a, **k: "")
     return smc.evaluate_pr("o/r", 1, workspace_repos=["o/r"])
+
+
+def test_actions_api_404_blocks_via_real_evaluate_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the real helper wiring at the ``evaluate_pr`` call site."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _NOT_FOUND)
+    result = _evaluate_with(monkeypatch, use_real_ci_probe=True)
+    assert not result.eligible
+    assert any("failing closed" in r for r in result.reasons)
 
 
 def test_indeterminate_ci_blocks_self_merge(monkeypatch: pytest.MonkeyPatch) -> None:
