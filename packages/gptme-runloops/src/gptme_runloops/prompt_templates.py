@@ -520,7 +520,6 @@ gh api repos/{repo}/pulls/{number}/comments \\
 
 # CI status
 gh pr checks {number} --repo {repo}
-# If no checks appear at all (GHA webhook dropped): bash {workspace}/scripts/ci/retrigger-pr-checks.sh {repo} {number}
 
 # Merge conflict status
 gh pr view {number} --repo {repo} --json mergeable,mergeStateStatus
@@ -553,14 +552,6 @@ Also check master branch CI health:
 gh run list --repo {repo} --branch master --limit 3 --json name,conclusion,createdAt,url \\
   --jq '.[] | select(.conclusion == "failure") | {name, conclusion, createdAt, url}'
 ```
-
-**Zero checks (webhook dropped)?** If `gh pr checks` returns no results, no workflow run exists
-to re-run with `gh run rerun`. Regenerate the `pull_request` event instead:
-```bash
-bash {workspace}/scripts/ci/retrigger-pr-checks.sh {repo} {number}
-```
-The script closes and reopens the PR (no local checkout needed). Safe: refuses PRs that are
-already green or have checks in flight.
 """
 
 _ASSIGNED_ISSUE_ARM = """
