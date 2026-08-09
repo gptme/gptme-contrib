@@ -302,7 +302,7 @@ def test_check_blocks_recently_acknowledged_trigger():
     assert result.returncode == 1, f"stderr: {result.stderr}"
 
     status = _run_helper("status", fixture)
-    assert status.stdout.strip() == "in-progress"
+    assert status.stdout.strip() == "awaiting-initial-review"
 
 
 def test_check_retries_acknowledged_trigger_after_timeout():
@@ -796,11 +796,11 @@ def test_trigger_fallback_invalid_grace_uses_default():
 
 
 def test_trigger_fallback_enforces_lifetime_cap():
-    """The initial-review path keeps the global trigger ceiling explicit."""
+    """The initial-review path keeps the helper's trigger ceiling explicit."""
     fixture = {
         "pr_number": 1385,
         "raw_comments": [
-            _make_trigger_comment("maintainer", _iso_ago(minutes=40)) for _ in range(8)
+            _make_trigger_comment("test-user", _iso_ago(minutes=40)) for _ in range(8)
         ],
         "raw_commits": [],
         "raw_pr": {"created_at": _iso_ago(minutes=180)},
@@ -860,6 +860,31 @@ def test_trigger_fallback_does_not_repost_another_authors_trigger():
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert not gh_log, f"fallback duplicated another author's trigger: {gh_log!r}"
     assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_other_authors_triggers_do_not_consume_helper_lifetime_cap():
+    """Manual maintainer triggers must not force the helper into global backoff."""
+    reviewed_at = _iso_ago(minutes=60)
+    fixture = {
+        "pr_number": 1385,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+            *[
+                _make_trigger_comment("maintainer", _iso_ago(minutes=50 - index))
+                for index in range(8)
+            ],
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    status = _run_helper(
+        "status",
+        fixture,
+        extra_env={"MAX_TOTAL_TRIGGERS": "8"},
+    )
+    assert status.returncode == 0, f"stderr: {status.stderr}"
+    assert status.stdout.strip() == "needs-re-review"
 
 
 def test_trigger_fallback_stale_acked_does_not_repost():
@@ -926,6 +951,25 @@ def test_trigger_fallback_ignores_unrelated_greptileai_mention():
         f"initial-review fallback. stdout: {result.stdout!r}"
     )
     assert "triggering initial review" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_unreviewed_status_remains_awaiting_while_fallback_is_in_flight():
+    """Unreviewed PRs keep the documented public status during deduplication."""
+    fixture = {
+        "pr_number": 1387,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    status = _run_helper(
+        "status",
+        fixture,
+        pre_trigger_ts=_iso_ago(minutes=5),
+        repo="gptme/gptme-contrib",
+    )
+    assert status.returncode == 0, f"stderr: {status.stderr}"
+    assert status.stdout.strip() == "awaiting-initial-review"
 
 
 def test_trigger_fallback_local_timestamp_blocks_with_no_prior_review():

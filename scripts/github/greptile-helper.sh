@@ -177,12 +177,18 @@ _issue_comments_json() {
 }
 
 _total_trigger_count() {
-    # Count ALL actual `@greptileai review` trigger commands on this PR
-    # (lifetime), including the legacy `review comment` spelling. Initial-review
-    # deduplication is per PR, not per author: a maintainer's manual trigger must
-    # suppress our fallback too. Do not count prose that merely contains the same
-    # substring. Fail-open to 0 on API error; the caller separately checks the
-    # shared comments-error marker before triggering.
+    # Count our actual `@greptileai review` trigger commands over the PR lifetime.
+    # This count backs the helper's spam ceiling, so another maintainer's manual
+    # trigger must not consume one of our slots.
+    local count
+    count=$(_issue_comments_json \
+        | jq -r '[.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("^@greptileai review( comment)?([[:space:]]|$)")))] | length' 2>/dev/null) || count=0
+    printf '%s\n' "${count:-0}"
+}
+
+_any_trigger_count() {
+    # Initial-review deduplication is per PR, not per author: a maintainer's
+    # manual trigger must suppress our fallback too.
     local count
     count=$(_issue_comments_json \
         | jq -r '[.[][] | select(.body | test("^@greptileai review( comment)?([[:space:]]|$)"))] | length' 2>/dev/null) || count=0
@@ -619,6 +625,7 @@ trigger)
         exit 0
     fi
     _total_triggers=$(_total_trigger_count)
+    _any_triggers=$(_any_trigger_count)
     if [ -f "$_ISSUE_COMMENTS_ERROR_FILE" ]; then
         echo "  [greptile] Could not read PR comments for $REPO#$PR_NUMBER. Refusing to trigger an initial review without duplicate-check data."
         exit 3
@@ -627,11 +634,11 @@ trigger)
     # but keep the cap explicit: it remains a hard backstop if that policy is
     # relaxed later and makes the protection promised by this helper auditable.
     if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
-        echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Not triggering an initial review — escalate to a human."
+        echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER has $_total_triggers helper trigger(s) (cap $MAX_TOTAL_TRIGGERS). Not triggering an initial review — escalate to a human."
         exit 0
     fi
-    if [ "${_total_triggers:-0}" -ge 1 ]; then
-        echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER ($_total_triggers trigger comment(s)). Not triggering again — escalate to a human if Greptile never reviews."
+    if [ "${_any_triggers:-0}" -ge 1 ]; then
+        echo "  [greptile] Initial-review trigger already attempted on $REPO#$PR_NUMBER ($_any_triggers trigger comment(s), any author). Not triggering again — escalate to a human if Greptile never reviews."
         exit 0
     fi
 
@@ -720,13 +727,11 @@ status)
             echo "already-reviewed"
         fi
     else
-        # No review yet — check if there's a trigger in-flight (edge case: manual trigger)
-        _ts=$(_our_trigger_status || echo 'error')
-        if [ "$_ts" = "in-progress" ]; then
-            echo "in-progress"
-        else
-            echo "awaiting-initial-review"
-        fi
+        # Keep the public status contract stable for unreviewed PRs. The trigger
+        # command itself owns in-flight deduplication via the timestamp and comment
+        # guards above; callers use this state to distinguish initial-review waits
+        # from re-review work.
+        echo "awaiting-initial-review"
     fi
     ;;
 
