@@ -1017,13 +1017,16 @@ check_greptile_scores() {
         local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
         local now
         now=$(date +%s)
-        local last_state last_score last_timestamp last_sha
-        last_state="" last_score="" last_timestamp=0 last_sha=""
+        local last_state last_score last_timestamp last_sha last_verdict
+        last_state="" last_score="" last_timestamp=0 last_sha="" last_verdict=""
         if [ -f "$state_file" ]; then
             last_state=$(cat "$state_file")
             last_score=$(echo "$last_state" | cut -d: -f1)
             last_timestamp=$(echo "$last_state" | cut -d: -f2)
             last_sha=$(echo "$last_state" | cut -d: -f3)
+            # 4th field added later; state files written before it yield "" here,
+            # which reads as "no cached verdict" and simply costs one refetch.
+            last_verdict=$(echo "$last_state" | cut -d: -f4)
         fi
 
         # Skip the API call if we have a fresh cached score for the current HEAD SHA.
@@ -1069,14 +1072,27 @@ check_greptile_scores() {
         # Score 5 = clean by Greptile's reckoning — but OUR reviewer may still
         # have open findings on the same PR, and those are invisible to the
         # score above. A PR is only clean when both reviewers are satisfied.
+        # Routing may differ from what Greptile said, so it gets its own variable.
+        # greptile_score MUST stay Greptile's real score: it is what we persist and
+        # what every consumer reports. Overwriting it to steer one branch poisons
+        # the state file, and the poison is self-sticking — a persisted 3 fails the
+        # `-ge 5` test on the next cycle, so the AI verdict is never consulted again
+        # and the PR cannot recover even after its findings are resolved.
+        local route_score="$greptile_score"
+        local ai_verdict=""
         if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
-            local ai_verdict
-            ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
+            # ai_review_verdict() costs a paginated comments fetch, so it obeys the
+            # same TTL as the score above rather than firing every 2-minute cycle.
+            if [ -n "$last_verdict" ] && [ "$last_sha" = "$head_sha" ] \
+                    && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then
+                ai_verdict="$last_verdict"
+            else
+                ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
+            fi
             if [ "$ai_verdict" = "dirty" ]; then
-                # Fall through to the fix arm below. Scored as 3 so it routes to
-                # greptile_needs_fix rather than _needs_improvement: unaddressed
-                # findings are work to do, not a polish suggestion.
-                greptile_score=3
+                # Route to the fix arm: unaddressed findings are work to do, not a
+                # polish suggestion. Only the routing score moves.
+                route_score=3
                 pr_title="${pr_title} [our AI review wants changes]"
             else
                 # clean / pending / none: nothing WE can say is outstanding.
@@ -1084,22 +1100,26 @@ check_greptile_scores() {
                 # simply unreviewed yet, and the sweep re-reviews within minutes.
                 # Emitting a fix item off an unmeasured head would nag on PRs
                 # that may well be clean.
-                echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
+                echo "${greptile_score}:${now}:${head_sha}:${ai_verdict}" > "$state_file"
                 continue
             fi
         fi
 
         # Score >= 4 is minor, < 4 needs fix
         local item_type
-        if [ "$greptile_score" -lt 4 ]; then
+        if [ "$route_score" -lt 4 ]; then
             item_type="greptile_needs_fix"
         else
             item_type="greptile_needs_improvement"
         fi
 
         if [ -n "$last_state" ]; then
-            # Same score and same HEAD — check cooldown
-            if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ]; then
+            # Same score, same verdict and same HEAD — check cooldown.
+            # The verdict belongs in this test now that it, not the score, is what
+            # moves when our review flips: without it a clean -> dirty flip on an
+            # unchanged head would sit out the cooldown before anyone heard about it.
+            if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ] \
+                    && [ "$ai_verdict" = "$last_verdict" ]; then
                 local elapsed=$(( now - last_timestamp ))
                 if [ "$elapsed" -lt "$cooldown_seconds" ]; then
                     # Within cooldown — skip
@@ -1110,13 +1130,19 @@ check_greptile_scores() {
             # Otherwise: score changed or new commits pushed — always re-emit
         else
             # First time seeing this PR — seed state, don't report
-            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
+            echo "${greptile_score}:${now}:${head_sha}:${ai_verdict}" > "$state_file"
             continue
         fi
 
-        # Record state and emit
-        echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
-        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "Greptile score: ${greptile_score}/5"
+        # Record state and emit. The detail names whichever reviewer is actually
+        # asking for work: reporting "Greptile score: 5/5" on an item routed to
+        # the fix arm by OUR findings reads as a contradiction.
+        local detail="Greptile score: ${greptile_score}/5"
+        if [ "$ai_verdict" = "dirty" ]; then
+            detail="${detail} · our AI review has open findings"
+        fi
+        echo "${greptile_score}:${now}:${head_sha}:${ai_verdict}" > "$state_file"
+        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "$detail"
     done
 }
 
