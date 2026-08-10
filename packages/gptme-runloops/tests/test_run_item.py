@@ -1398,6 +1398,76 @@ def test_post_session_gate_exit_2_warns_no_helper(tmp_path) -> None:
     assert gate_rows[0]["gate_exit_code"] == 2
 
 
+def test_post_session_crashed_delivery_check_does_not_claim_observed_effect(
+    tmp_path,
+) -> None:
+    """PR review finding P1: a delivery check that crashes (non-zero exit /
+    OSError) must not be fed to the effect signal as if it had verified a
+    reply. The fallback ``{"outcome":"handled"}`` raw was passed straight
+    through to ``derive_effect_signal``, which short-circuits to
+    ``EFFECT_OBSERVED`` for ``delivery=="handled"``. That re-creates exactly
+    the lie the delivery_checked gate exists to prevent.
+
+    The PR head and state are identical before and after (no observable
+    effect on GitHub). With the fix, the effect is ``unknown`` — the only
+    honest reading when no signal was successfully verified.
+    """
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    item = make_item(types=["pr_update"], number=1234)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("rev-parse", stdout="abc123\n")
+    # Before-snapshot: head=before11, state=OPEN
+    # After-snapshot (fetch): identical — nothing moved on GitHub
+    run_cmd.on(
+        "gh",
+        stdout='{"state": "OPEN", "headRefOid": "before11", "mergeCommit": null}',
+    )
+    hooks = _effect_hooks(run_cmd, head_after="before11")
+    # Delivery check exits 1 (script broken / permission denied / network).
+    # Fallback raw is '{"outcome":"handled"}' but the check did not verify.
+    run_cmd.on("/fake/check-delivery.py", returncode=1)
+
+    rc = run_work_file(work_file, config, hooks, backend="claude-code", lane="slow")
+
+    assert rc == 0  # the worker was happy
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    # Without verified delivery, the PR head+state match (no_change) and the
+    # effect signal must NOT report observed. Before the fix, this was
+    # "observed" via the crashed-check fallback masquerading as a verified reply.
+    assert (
+        completed["effect"] != "observed"
+    ), f"crashed delivery check must not claim observed effect, got {completed['effect']!r}"
+    assert completed["outcome"] in {"no_effect", "unknown"}
+
+
+def test_timeout_tier_instruction_kind_routes_to_adjudication(tmp_path) -> None:
+    """PR review finding P2: Phase-A2 routes to adjudication via
+    InstructionKind.GREPTILE_CONVERGENCE without adding the type to
+    item.types. The timeout tier must honour the instruction kind so
+    backoff-spawned adjudication sessions get the 1500s budget rather
+    than the 900s default.
+    """
+    config = make_config(tmp_path)
+    # greptile_needs_improvement is the type the backoff path leaves in
+    # item.types; without the type fix, the default tier wins.
+    timeout, desc = timeout_tier(
+        ["greptile_needs_improvement"],
+        False,
+        config,
+        instruction_kind="GREPTILE_CONVERGENCE",
+    )
+    assert timeout == config.adjudication_timeout == 1500
+    assert desc == config.adjudication_time_desc == "~20 minutes"
+
+    # Sanity: a different instruction kind does NOT route to adjudication.
+    timeout, _ = timeout_tier(
+        ["greptile_needs_improvement"], False, config, instruction_kind="OTHER"
+    )
+    assert timeout == config.default_timeout == 900
+
+
 # --- Claim behavior via execute path ---
 
 

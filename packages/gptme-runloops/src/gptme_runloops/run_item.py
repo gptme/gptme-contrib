@@ -460,7 +460,11 @@ def predict_cc_trajectory_path(
 
 
 def timeout_tier(
-    types: Sequence[str], has_greptile_fix: bool, config: RunItemConfig
+    types: Sequence[str],
+    has_greptile_fix: bool,
+    config: RunItemConfig,
+    *,
+    instruction_kind: str | None = None,
 ) -> tuple[int, str]:
     """Complexity-based timeout tiers (p-m.sh:494-514); order matters:
     assigned_issue wins over adjudication, which wins over the greptile-fix
@@ -469,10 +473,19 @@ def timeout_tier(
     Adjudication reads findings, classifies them, possibly fixes one blocking
     issue and posts a structured recommendation — it never waits on a Greptile
     re-review, so it takes the 1500s tier rather than the 2700s fix tier.
+
+    ``instruction_kind`` lets callers route to the adjudication tier when the
+    lifecycle decision drove the session to adjudication (Phase-A2 early
+    exit on convergence, etc.) without modifying ``item.types``. Without
+    that, backoff-spawned adjudication sessions would land on the 900s
+    default tier because their item still classifies as ``greptile_needs_improvement``.
     """
     if "assigned_issue" in types:
         return config.assigned_issue_timeout, config.assigned_issue_time_desc
-    if "greptile_convergence_adjudication" in types:
+    if (
+        "greptile_convergence_adjudication" in types
+        or instruction_kind == "GREPTILE_CONVERGENCE"
+    ):
         return config.adjudication_timeout, config.adjudication_time_desc
     if "pr_update" in types and has_greptile_fix:
         return config.greptile_fix_timeout, config.greptile_fix_time_desc
@@ -1153,7 +1166,12 @@ def plan_item(
             lifecycle.instructions, params.to_prompt_context()
         ).rstrip("\n")
 
-    timeout, time_desc = timeout_tier(item.types, bool(greptile_fix), config)
+    timeout, time_desc = timeout_tier(
+        item.types,
+        bool(greptile_fix),
+        config,
+        instruction_kind=instruction_kind,
+    )
 
     mention = ""
     if is_direct_mention(item.detail):
@@ -1786,15 +1804,14 @@ def run_post_session(
     # NOTE: "handled" is the permissive DEFAULT, not an observation — it is
     # what the outcome stays at when no delivery check runs at all. Only a
     # check that actually ran produces evidence, so the effect signal is fed
-    # `delivery_outcome` solely when `delivery_checked` is True. Treating the
+    # `delivery_outcome` solely when `delivery_verified` is True. Treating the
     # default as evidence of effect would re-create the exact lie this whole
     # mechanism exists to prevent.
     delivery_outcome = "handled"
-    delivery_checked = False
+    delivery_verified = False  # True only when the check exited 0 with parseable output
     needs_fallback = "false"
     fallback_posted = "false"
     if item.repo and item.number is not None and hooks.delivery_check is not None:
-        delivery_checked = True
         try:
             try:
                 proc = hooks.run_cmd(
@@ -1815,7 +1832,11 @@ def run_post_session(
                     text=True,
                     cwd=str(config.workspace),
                 )
-                raw = proc.stdout if proc.returncode == 0 else '{"outcome":"handled"}'
+                if proc.returncode == 0:
+                    raw = proc.stdout
+                    delivery_verified = True
+                else:
+                    raw = '{"outcome":"handled"}'
             except (OSError, subprocess.SubprocessError):
                 raw = '{"outcome":"handled"}'
             delivery_outcome = normalize_delivery_outcome(
@@ -2073,7 +2094,7 @@ def run_post_session(
     # PR snapshot step 2 already fetched, so this costs no extra API call.
     effect = read_record_effect_signal(
         record_file,
-        delivery_outcome=delivery_outcome if delivery_checked else "",
+        delivery_outcome=delivery_outcome if delivery_verified else "",
     )
     if effect == EFFECT_NONE:
         _log(
