@@ -824,17 +824,13 @@ def _ai_review_enabled() -> bool:
 
 
 def _sha_matches_head(marker_sha: str, head_sha: str) -> bool:
-    """Whether a marker's (possibly abbreviated) SHA names the PR's current head.
-
-    The reviewer records 12 hex chars while the PR carries the full 40, so this
-    is prefix matching -- but only above ``MIN_SHA_PREFIX_LEN``, so a truncated
-    or garbage marker cannot prefix-match its way onto an arbitrary head.
-    """
+    """Whether a marker's abbreviated SHA names the PR's current head."""
     marker_sha = (marker_sha or "").strip().lower()
     head_sha = (head_sha or "").strip().lower()
     if len(marker_sha) < MIN_SHA_PREFIX_LEN or len(head_sha) < MIN_SHA_PREFIX_LEN:
         return False
-    return head_sha.startswith(marker_sha) or marker_sha.startswith(head_sha)
+    # The marker may abbreviate the authoritative head, never the reverse.
+    return head_sha.startswith(marker_sha)
 
 
 def _consensus_shortfall(consensus: Any) -> str | None:
@@ -880,8 +876,15 @@ def _consensus_shortfall(consensus: Any) -> str | None:
         return "no consensus pass answered"
     if answered < requested:
         return f"consensus degraded ({answered}/{requested} passes answered)"
+    if answered > requested:
+        return f"consensus has invalid pass counts ({answered}/{requested} answered)"
     if jobs_answered < jobs_requested:
         return f"consensus degraded ({jobs_answered}/{jobs_requested} jobs answered)"
+    if jobs_answered > jobs_requested:
+        return (
+            f"consensus has invalid job counts "
+            f"({jobs_answered}/{jobs_requested} answered)"
+        )
 
     applied, asked = _int("min_agreement"), _int("min_agreement_requested")
     if applied is None or asked is None:
@@ -1503,26 +1506,31 @@ def evaluate_pr(
 
     greptile = fetch_greptile_status(repo, number, review_data=shared_review_data)
     if not greptile["has_review"]:
-        # OR, not replacement: only reached when Greptile has not reviewed, so a
-        # repo where Greptile still runs takes the identical path it always has
-        # and does not even pay the extra API call. See "Accepting our own
-        # review" in the module docstring for why the bar is set where it is.
-        ai_review = fetch_ai_review_status(
-            repo,
-            number,
-            head_sha=result.head_sha,
-            expected_author=current_user,
-        )
-        if ai_review["accepted"]:
-            result.warnings.append(
-                f"Greptile review not found; satisfied by self-hosted "
-                f"AI review ({ai_review['detail']})"
+        # The alternative review is safe only after a successful GraphQL fetch
+        # proves there is no Greptile review. An API failure is unknown, not
+        # absence: accepting our marker there would turn a fail-closed outage into
+        # a path around potentially unresolved Greptile feedback.
+        if shared_review_data is None:
+            result.reasons.append(
+                "Could not verify Greptile review state; refusing AI-review fallback"
             )
         else:
-            reason = "Greptile review not found"
-            if ai_review["detail"]:
-                reason += f"; {ai_review['detail']}"
-            result.reasons.append(reason)
+            ai_review = fetch_ai_review_status(
+                repo,
+                number,
+                head_sha=result.head_sha,
+                expected_author=current_user,
+            )
+            if ai_review["accepted"]:
+                result.warnings.append(
+                    f"Greptile review not found; satisfied by self-hosted "
+                    f"AI review ({ai_review['detail']})"
+                )
+            else:
+                reason = "Greptile review not found"
+                if ai_review["detail"]:
+                    reason += f"; {ai_review['detail']}"
+                result.reasons.append(reason)
     elif greptile["unresolved"] > 0:
         result.reasons.append(
             f"Greptile has {greptile['unresolved']} unresolved review thread(s)"

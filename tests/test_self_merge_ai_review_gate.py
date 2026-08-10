@@ -110,9 +110,9 @@ def test_clean_current_full_consensus_review_is_accepted(gh_comments: Any) -> No
 
 
 def test_short_marker_sha_matches_full_head(gh_comments: Any) -> None:
-    """The marker records 12 chars; the PR carries 40. Prefix match, either way."""
+    """The marker may abbreviate the authoritative full PR head."""
     assert smc._sha_matches_head(MARKER_SHA, HEAD_SHA)
-    assert smc._sha_matches_head(HEAD_SHA, MARKER_SHA)
+    assert not smc._sha_matches_head(HEAD_SHA, MARKER_SHA)
     status = _status(gh_comments, [_comment(_marker(sha=HEAD_SHA))])
     assert status["accepted"] is True
 
@@ -147,6 +147,25 @@ def test_lost_fanout_jobs_are_rejected(gh_comments: Any) -> None:
     status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
     assert status["accepted"] is False
     assert "3/9 jobs" in (status["detail"] or "")
+
+
+@pytest.mark.parametrize(
+    ("field", "requested_field", "kind"),
+    [
+        ("answered", "requested", "pass"),
+        ("jobs_answered", "jobs_requested", "job"),
+    ],
+)
+def test_impossible_consensus_counts_are_rejected(
+    gh_comments: Any, field: str, requested_field: str, kind: str
+) -> None:
+    consensus = dict(FULL_CONSENSUS)
+    requested = consensus[requested_field]
+    assert isinstance(requested, int)
+    consensus[field] = requested + 1
+    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is False
+    assert f"invalid {kind} counts" in (status["detail"] or "")
 
 
 def test_clamped_agreement_threshold_is_rejected(gh_comments: Any) -> None:
@@ -386,6 +405,22 @@ def test_evaluate_pr_accepts_our_clean_review_without_greptile(evaluate: Any) ->
     assert result.eligible is True
     assert result.reasons == []
     assert any("satisfied by self-hosted AI review" in w for w in result.warnings)
+
+
+def test_evaluate_pr_blocks_fallback_when_greptile_state_fetch_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown Greptile state must not become absence and admit our review."""
+    monkeypatch.setattr(smc, "fetch_pr", lambda repo, number: _pr_payload())
+    monkeypatch.setattr(smc, "get_gh_user", lambda: AUTHOR)
+    monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
+    monkeypatch.setattr(smc, "_fetch_greptile_review_data", lambda r, n: None)
+    monkeypatch.setattr(smc, "greptile_summary_score", lambda r, n: 5)
+    result = smc.evaluate_pr(
+        "gptme/gptme-contrib", 1382, workspace_repos=["gptme/gptme-contrib"]
+    )
+    assert result.eligible is False
+    assert any("Could not verify Greptile review state" in r for r in result.reasons)
 
 
 def test_evaluate_pr_blocks_on_degraded_review(evaluate: Any) -> None:
