@@ -20,14 +20,43 @@ gh api repos/gptme/gptme-contrib/pulls/1234/comments \
 ```
 
 **Fix the substantive errors from the summary body FIRST**, then the inline
-findings (P1/P2/P3). After fixing AND pushing commits, re-trigger Greptile:
+findings (P1/P2/P3). **Closing the loop — required, and NOT the same thing as a PR comment.**
+
+An inline finding lives on a *review thread*. Posting to the PR conversation
+(`issues/1234/comments`) does not touch it: the thread stays open, and the
+self-merge gate counts unresolved threads. Every finding you address needs a
+reply **on its own thread**, and then a resolution.
+
+- **Fixed in code** — reply on the thread with the fix SHA, then let the
+  reviewer resolve it. Re-running the review verifies the finding no longer
+  reproduces and resolves the thread itself; that is evidence-based and
+  stronger than resolving by hand.
+  ```bash
+  # root comment ids: gh api repos/gptme/gptme-contrib/pulls/1234/comments --jq '.[] | {id, path, line}'
+  gh api repos/gptme/gptme-contrib/pulls/1234/comments/COMMENT_ID/replies -f body="Fixed in SHA — ..."
+  ```
+- **False positive, won't-fix, or an accepted trade-off** — no code change will
+  ever settle it, so reply AND resolve in one step. A reasoned rejection with
+  code citations IS a resolution; it is not a reason to leave the thread open.
+  ```bash
+  python3 /home/bob/bob/scripts/github/ai-review-dispose.py gptme/gptme-contrib 1234 --list
+  python3 /home/bob/bob/scripts/github/ai-review-dispose.py gptme/gptme-contrib 1234 \
+      --fingerprint FP --reason rejected --reply-file /tmp/why.md
+  ```
+  It is idempotent (a second run is a no-op) and can only ever touch threads our
+  own reviewer opened — never a human's.
+
+⚠️ Never resolve a human's review thread. Burying a person's comment is far
+worse than leaving a thread open.
+
+After fixing AND pushing commits, re-trigger Greptile:
 ```bash
 # ONLY call this AFTER pushing fix commits — NEVER trigger without actual fixes
 bash /home/bob/bob/scripts/github/greptile-helper.sh trigger gptme/gptme-contrib 1234
 ```
 Then run `POLL_BUDGET_SEC=1800 bash /home/bob/bob/scripts/github/pr-address-wait-and-merge.sh --repo gptme/gptme-contrib 1234` to wait for the re-review.
 - Exit 0: merged — done
-- Exit 2: new findings — address them, push, reply, re-run once more
+- Exit 2: new findings — address them, push, close their threads, re-run once more
 - Exit 3: poll budget exhausted — stop; next monitoring cycle will continue
 
 ⚠️ **If you cannot fix the issues this session, do NOT re-trigger Greptile.**

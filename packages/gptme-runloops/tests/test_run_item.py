@@ -42,6 +42,7 @@ from gptme_runloops.run_item import (
     RunItemHooks,
     _handle_cc_rate_limit,
     build_execution_plan,
+    clear_slot_event_markers,
     derive_lock_paths,
     derive_session_id,
     execute_plan,
@@ -50,8 +51,10 @@ from gptme_runloops.run_item import (
     plan_item,
     predict_cc_trajectory_path,
     promote_item_state,
+    redelivery_attempts_file,
     resolve_backend_trajectory,
     resolve_cc_sub_suffix,
+    rollback_failed_delivery,
     run_post_session,
     run_work_file,
     snapshot_codex_rollouts,
@@ -673,6 +676,150 @@ def test_run_work_file_counts_failures(tmp_path) -> None:
     assert completed["failures"] == 1 and completed["successes"] == 0
 
 
+# --- Outcome-verification invariant (symptom tests) ---
+#
+# The failure class: a worker exits non-zero while its ledger row says
+# `completed`, so nothing retries and nothing alerts (gptme/gptme#3468).
+# The invariant: the recorded outcome is DERIVED from exit status and
+# observable effect, never asserted by the phase alone.
+
+
+def test_completed_row_does_not_record_success_when_worker_exits_nonzero(
+    tmp_path,
+) -> None:
+    """THE symptom test: run a worker that exits 1, assert no recorded success."""
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=1)
+
+    rc = run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+
+    assert rc == 1
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["exit_code"] == 1
+    assert completed["outcome"] == "failed"
+    assert completed["outcome"] != "succeeded"
+
+
+def test_timeout_exit_is_recorded_as_failed_despite_zero_failures(tmp_path) -> None:
+    """The nastiest shape: exit 124 is deliberately NOT counted as a failure.
+
+    Before the derived outcome existed, such a row carried `failures: 0` and
+    was indistinguishable from a clean run — the ledger's only failure signal
+    said everything was fine while the worker had timed out.
+    """
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=124)
+
+    rc = run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+
+    assert rc == 124
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    # Item accounting still says "no failures" (worker.sh:100-104 parity) ...
+    assert completed["failures"] == 0
+    # ... but the exit status is recorded and the outcome derived from it.
+    assert completed["exit_code"] == 124
+    assert completed["outcome"] == "failed"
+
+
+def test_clean_run_records_verified_success(tmp_path) -> None:
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+
+    rc = run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+
+    assert rc == 0
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["exit_code"] == 0
+    assert completed["outcome"] == "succeeded"
+
+
+def _effect_hooks(run_cmd: FakeRunCmd, *, head_after: str) -> RunItemHooks:
+    """Hooks that write a real record and report a given post-session PR head."""
+    return make_hooks(
+        run_cmd=run_cmd,
+        make_record=lambda **kw: dict(kw),
+        fetch_pr_snapshot=lambda repo, num: {
+            "state": "OPEN",
+            "headRefOid": head_after,
+            "mergeCommit": "",
+        },
+        merge_lifecycle_io=FakeLifecycleIO(),
+    )
+
+
+def test_clean_exit_that_pushed_nothing_is_not_recorded_as_success(tmp_path) -> None:
+    """THE #3468 symptom test: worker exits 0, PR head never moves.
+
+    The worker read the findings, made the fix, committed it — and every
+    `git push` was rejected by a pre-push guard. Exit 0, log says success,
+    nothing reached GitHub. This must not record as a success.
+    """
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    work_file = _write_work_file(tmp_path, make_item(types=["pr_update"]))
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("rev-parse", stdout="abc123\n")
+    # Pre-session snapshot: head is deadbeef ...
+    run_cmd.on(
+        "gh", stdout='{"state": "OPEN", "headRefOid": "deadbeef", "mergeCommit": null}'
+    )
+    # ... and after the session it is STILL deadbeef: the push was rejected.
+    hooks = _effect_hooks(run_cmd, head_after="deadbeef")
+
+    rc = run_work_file(work_file, config, hooks, backend="claude-code", lane="slow")
+
+    assert rc == 0  # the worker itself was perfectly happy
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["exit_code"] == 0
+    assert completed["failures"] == 0
+    # ... and yet nothing shipped:
+    assert completed["effect"] == "none"
+    assert completed["outcome"] == "no_effect"
+    assert completed["outcome"] != "succeeded"
+
+
+def test_push_that_landed_records_observed_effect(tmp_path) -> None:
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    work_file = _write_work_file(tmp_path, make_item(types=["pr_update"]))
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("rev-parse", stdout="abc123\n")
+    run_cmd.on(
+        "gh", stdout='{"state": "OPEN", "headRefOid": "beforeaa", "mergeCommit": null}'
+    )
+    hooks = _effect_hooks(run_cmd, head_after="after0bb")
+
+    rc = run_work_file(work_file, config, hooks, backend="claude-code", lane="slow")
+
+    assert rc == 0
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["effect"] == "observed"
+    assert completed["outcome"] == "succeeded"
+
+
+def test_non_terminal_phases_never_carry_an_outcome(tmp_path) -> None:
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=1)
+
+    run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+
+    for row in _ledger_rows(config):
+        if row["phase"] != "completed":
+            assert row["outcome"] is None, row
+
+
 def test_run_work_file_self_merge_skips_session(tmp_path) -> None:
     item = make_item(types=["merge_ready"])
     work_file = _write_work_file(tmp_path, item)
@@ -1164,6 +1311,57 @@ def test_post_session_orphan_delivery_latency_outcome(tmp_path) -> None:
     assert latency_calls[0]["outcome"] == "orphan_no_delivery"
 
 
+def test_post_session_orphan_delivery_rolls_back_instead_of_promoting(
+    tmp_path, cooldown_dir
+) -> None:
+    """A session that delivered no reply must not consume the item's state.
+
+    Regression: the runloops port of worker.sh:661-676 promoted unconditionally,
+    so a failed delivery advanced the activity-gate cooldown AND left the
+    dispatcher's launch-stamped `.event` fingerprint in place — suppressing the
+    item for the 6h event-unchanged TTL with nothing ever having replied.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout='{"outcome": "orphan_no_delivery", "needs_fallback_reply": true, '
+        '"fallback_reply_posted": false}',
+    )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text(
+        "s"
+    )
+    (cooldown_dir / "gptme-gptme-contrib-1234.event").write_text("fingerprint")
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert not (config.state_dir / "gptme-gptme-contrib-pr-1234-update.state").exists()
+    assert not (cooldown_dir / "gptme-gptme-contrib-1234.event").exists()
+
+
+def test_post_session_orphan_delivery_promotes_after_redelivery_cap(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    """Past the cap the item promotes, so it stops burning a slot every cycle."""
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout='{"outcome": "orphan_no_delivery", "needs_fallback_reply": true, '
+        '"fallback_reply_posted": false}',
+    )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text(
+        "s"
+    )
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / "gptme-gptme-contrib-pr-1234-update.state").is_file()
+
+
 def test_post_session_failed_exit_maps_latency_failed(tmp_path) -> None:
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
         tmp_path, exit_code=1
@@ -1198,6 +1396,76 @@ def test_post_session_gate_exit_2_warns_no_helper(tmp_path) -> None:
         for line in config.resolved_wait_merge_gate_log.read_text().splitlines()
     ]
     assert gate_rows[0]["gate_exit_code"] == 2
+
+
+def test_post_session_crashed_delivery_check_does_not_claim_observed_effect(
+    tmp_path,
+) -> None:
+    """PR review finding P1: a delivery check that crashes (non-zero exit /
+    OSError) must not be fed to the effect signal as if it had verified a
+    reply. The fallback ``{"outcome":"handled"}`` raw was passed straight
+    through to ``derive_effect_signal``, which short-circuits to
+    ``EFFECT_OBSERVED`` for ``delivery=="handled"``. That re-creates exactly
+    the lie the delivery_checked gate exists to prevent.
+
+    The PR head and state are identical before and after (no observable
+    effect on GitHub). With the fix, the effect is ``unknown`` — the only
+    honest reading when no signal was successfully verified.
+    """
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    item = make_item(types=["pr_update"], number=1234)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("rev-parse", stdout="abc123\n")
+    # Before-snapshot: head=before11, state=OPEN
+    # After-snapshot (fetch): identical — nothing moved on GitHub
+    run_cmd.on(
+        "gh",
+        stdout='{"state": "OPEN", "headRefOid": "before11", "mergeCommit": null}',
+    )
+    hooks = _effect_hooks(run_cmd, head_after="before11")
+    # Delivery check exits 1 (script broken / permission denied / network).
+    # Fallback raw is '{"outcome":"handled"}' but the check did not verify.
+    run_cmd.on("/fake/check-delivery.py", returncode=1)
+
+    rc = run_work_file(work_file, config, hooks, backend="claude-code", lane="slow")
+
+    assert rc == 0  # the worker was happy
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    # Without verified delivery, the PR head+state match (no_change) and the
+    # effect signal must NOT report observed. Before the fix, this was
+    # "observed" via the crashed-check fallback masquerading as a verified reply.
+    assert (
+        completed["effect"] != "observed"
+    ), f"crashed delivery check must not claim observed effect, got {completed['effect']!r}"
+    assert completed["outcome"] in {"no_effect", "unknown"}
+
+
+def test_timeout_tier_instruction_kind_routes_to_adjudication(tmp_path) -> None:
+    """PR review finding P2: Phase-A2 routes to adjudication via
+    InstructionKind.GREPTILE_CONVERGENCE without adding the type to
+    item.types. The timeout tier must honour the instruction kind so
+    backoff-spawned adjudication sessions get the 1500s budget rather
+    than the 900s default.
+    """
+    config = make_config(tmp_path)
+    # greptile_needs_improvement is the type the backoff path leaves in
+    # item.types; without the type fix, the default tier wins.
+    timeout, desc = timeout_tier(
+        ["greptile_needs_improvement"],
+        False,
+        config,
+        instruction_kind="GREPTILE_CONVERGENCE",
+    )
+    assert timeout == config.adjudication_timeout == 1500
+    assert desc == config.adjudication_time_desc == "~20 minutes"
+
+    # Sanity: a different instruction kind does NOT route to adjudication.
+    timeout, _ = timeout_tier(
+        ["greptile_needs_improvement"], False, config, instruction_kind="OTHER"
+    )
+    assert timeout == config.default_timeout == 900
 
 
 # --- Claim behavior via execute path ---
@@ -1243,6 +1511,110 @@ def test_promote_item_state_copies_matching_files(tmp_path) -> None:
         "gptme-gptme-issue-5.state",
         "gptme-gptme-master-ci.state",
     }
+
+
+# --- Delivery rollback (bash lib.sh:946-995 parity) ---
+#
+# Regression cover for the runloops port dropping worker.sh's conditional
+# promote: a session that exits without a thread reply must NOT consume the
+# item's gate state or leave the dispatcher's launch-stamped event fingerprint
+# in place, or the item is suppressed for the 6h event-unchanged TTL and never
+# retried (live bite: gptme/gptme#3468, 2026-08-10).
+
+
+@pytest.fixture
+def cooldown_dir(tmp_path, monkeypatch):
+    d = tmp_path / "cooldown"
+    d.mkdir()
+    monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(d))
+    return d
+
+
+def test_rollback_clears_event_marker_and_leaves_state_pending(
+    tmp_path, cooldown_dir
+) -> None:
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    (pending / "gptme-gptme-pr-3468-greptile.state").write_text("5:1:sha:dirty")
+    (cooldown_dir / "gptme-gptme-3468.event").write_text("fingerprint")
+    (cooldown_dir / "gptme-gptme-3468.event_logged").write_text("fingerprint")
+
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+    # Event fingerprint gone => next dispatch cycle re-evaluates the item.
+    assert not (cooldown_dir / "gptme-gptme-3468.event").exists()
+    assert not (cooldown_dir / "gptme-gptme-3468.event_logged").exists()
+    # Pending state NOT promoted => the activity gate re-emits it.
+    assert not config.state_dir.exists() or not list(config.state_dir.iterdir())
+    assert (pending / "gptme-gptme-pr-3468-greptile.state").exists()
+
+
+def test_rollback_reads_slot_key_from_env(tmp_path, cooldown_dir, monkeypatch) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme#3468")
+    (cooldown_dir / "gptme-gptme-3468.event").write_text("fingerprint")
+
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    assert not (cooldown_dir / "gptme-gptme-3468.event").exists()
+
+
+def test_rollback_drops_matching_notification_state(tmp_path, cooldown_dir) -> None:
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    (pending / "notif-1.map").write_text("gptme/gptme#3468")
+    (pending / "notif-1.state").write_text("ts")
+    (pending / "notif-2.map").write_text("gptme/gptme#9999")
+    (pending / "notif-2.state").write_text("ts")
+
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+    assert not (pending / "notif-1.map").exists()
+    assert not (pending / "notif-1.state").exists()
+    assert (pending / "notif-2.map").exists()
+    assert (pending / "notif-2.state").exists()
+
+
+def test_rollback_gives_up_after_max_attempts(tmp_path, cooldown_dir) -> None:
+    config = make_config(tmp_path)
+    # Default cap is 2: two rollbacks, then the caller is told to promote.
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    # Counter reset so a future genuine failure gets a full budget.
+    assert not redelivery_attempts_file(config, "gptme/gptme", 3468).exists()
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+
+def test_rollback_respects_max_attempts_env(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "1")
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+
+def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:
+    config = make_config(tmp_path)
+    config.pending_state_dir.mkdir(parents=True)
+    attempts = redelivery_attempts_file(config, "gptme/gptme", 3468)
+    assert attempts is not None  # ensure the path was created
+    attempts.write_text("1")
+
+    promote_item_state(config, "gptme/gptme", 3468)
+
+    assert not attempts.exists()
+
+
+def test_clear_slot_event_markers_is_noop_without_slot_key(
+    tmp_path, cooldown_dir
+) -> None:
+    config = make_config(tmp_path)
+    (cooldown_dir / "gptme-gptme-3468.event").write_text("fingerprint")
+    assert clear_slot_event_markers(config, "") is False
+    assert (cooldown_dir / "gptme-gptme-3468.event").exists()
 
 
 def test_promote_item_state_number_zero_promotes_notifs(tmp_path) -> None:

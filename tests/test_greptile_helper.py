@@ -78,13 +78,19 @@ if endpoint == "user":
     print(github_author)
     raise SystemExit(0)
 elif endpoint.endswith(f"/issues/{pr_number}/comments"):
+    if fixture.get("comments_api_error"):
+        raise SystemExit(1)
     data = fixture.get("raw_comments", [])
 elif endpoint.endswith(f"/pulls/{pr_number}/commits"):
     data = fixture.get("raw_commits", [])
 elif endpoint.endswith(f"/pulls/{pr_number}/reviews"):
     data = fixture.get("raw_reviews", [])
 elif endpoint.endswith(f"/pulls/{pr_number}"):
-    data = fixture.get("raw_pr", {"created_at": "2020-01-01T00:00:00Z"})
+    data = fixture.get(
+        "raw_pr", {"state": "open", "created_at": "2020-01-01T00:00:00Z"}
+    )
+    if endpoint.endswith(f"/pulls/{pr_number}") and isinstance(data, dict):
+        data = {"state": "open", **data}
 elif endpoint.endswith("/reactions"):
     if fixture.get("reactions_error"):
         raise SystemExit(1)
@@ -162,7 +168,9 @@ def _run_helper(
     capture_gh_log: Literal[False] = ...,
     capture_ts_file: Literal[False] = ...,
     pre_trigger_ts: str | None = ...,
+    ts_file_unwritable: bool = ...,
     repo: str = ...,
+    extra_env: dict[str, str] | None = ...,
 ) -> subprocess.CompletedProcess[str]: ...
 
 
@@ -174,7 +182,9 @@ def _run_helper(
     capture_gh_log: Literal[True],
     capture_ts_file: Literal[False] = ...,
     pre_trigger_ts: str | None = ...,
+    ts_file_unwritable: bool = ...,
     repo: str = ...,
+    extra_env: dict[str, str] | None = ...,
 ) -> tuple[subprocess.CompletedProcess[str], str]: ...
 
 
@@ -186,7 +196,9 @@ def _run_helper(
     capture_gh_log: Literal[False] = ...,
     capture_ts_file: Literal[True],
     pre_trigger_ts: str | None = ...,
+    ts_file_unwritable: bool = ...,
     repo: str = ...,
+    extra_env: dict[str, str] | None = ...,
 ) -> tuple[subprocess.CompletedProcess[str], str | None]: ...
 
 
@@ -197,7 +209,9 @@ def _run_helper(
     capture_gh_log: bool = False,
     capture_ts_file: bool = False,
     pre_trigger_ts: str | None = None,
+    ts_file_unwritable: bool = False,
     repo: str = "gptme/gptme",
+    extra_env: dict[str, str] | None = None,
 ) -> (
     subprocess.CompletedProcess[str]
     | tuple[subprocess.CompletedProcess[str], str]
@@ -213,7 +227,11 @@ def _run_helper(
             ts_content is the content of _TRIGGER_TS_FILE if it was written, else None
         pre_trigger_ts: if set, pre-create the local trigger-timestamp file with
             this timestamp (simulates a prior successful trigger in the same TMPDIR)
+        ts_file_unwritable: create a DIRECTORY at the trigger-timestamp path so the
+            helper's write fails, without making TMPDIR itself unwritable (the
+            gh stub and its log live there too)
         repo: repo string passed to the helper (default "gptme/gptme")
+        extra_env: environment overrides for the helper subprocess
     """
     if capture_gh_log and capture_ts_file:
         raise ValueError("capture_gh_log and capture_ts_file are mutually exclusive")
@@ -233,6 +251,13 @@ def _run_helper(
             ts_file = tmp_path / f"greptile-trigger-ts-{_pr_hash(repo, pr_number)}.txt"
             ts_file.write_text(pre_trigger_ts)
 
+        # Make only the TS path unwritable — a directory at that exact name.
+        # Chmod-ing TMPDIR would also break the gh stub and its log, which live
+        # in the same directory.
+        if ts_file_unwritable:
+            pr_number = int(str(fixture["pr_number"]))
+            (tmp_path / f"greptile-trigger-ts-{_pr_hash(repo, pr_number)}.txt").mkdir()
+
         gh_log = tmp_path / "gh-log.json"
         env = os.environ.copy()
         env["GH_FIXTURE"] = str(fixture_path)
@@ -240,6 +265,7 @@ def _run_helper(
         env["GITHUB_AUTHOR"] = "test-user"
         env["PATH"] = f"{tmp}:{env['PATH']}"
         env["TMPDIR"] = tmp  # ensure helper writes state files to test's temp dir
+        env.update(extra_env or {})
 
         result = subprocess.run(
             ["bash", str(SCRIPT), command, repo, str(fixture["pr_number"])],
@@ -276,7 +302,7 @@ def test_check_blocks_recently_acknowledged_trigger():
     assert result.returncode == 1, f"stderr: {result.stderr}"
 
     status = _run_helper("status", fixture)
-    assert status.stdout.strip() == "in-progress"
+    assert status.stdout.strip() == "awaiting-initial-review"
 
 
 def test_check_retries_acknowledged_trigger_after_timeout():
@@ -661,19 +687,369 @@ def test_score_5_with_new_commits_needs_rereview():
     assert status.stdout.strip() == "needs-re-review"
 
 
-def test_trigger_skips_unreviewed_pr_initial_review():
-    """Trigger on old PR with no review → skips (awaiting Greptile auto-review)."""
+def test_trigger_waits_for_auto_review_within_grace():
+    """No review yet and inside the grace window → do not race Greptile's auto-review.
+
+    This is the primary behaviour: manually triggering the first review races the
+    bot and yields two reviews.
+    """
     fixture = {
         "pr_number": 999,
         "raw_comments": [],
         "raw_commits": [],
-        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "raw_pr": {"created_at": _iso_ago(minutes=10)},
         "bot_reaction_count": 0,
     }
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "Awaiting" in result.stdout
-    assert not gh_log, "gh pr comment should NOT have been called"
+    assert (
+        not gh_log
+    ), "gh pr comment should NOT have been called inside the grace window"
+
+
+def test_trigger_falls_back_to_initial_review_after_grace():
+    """Auto-review never arrived → trigger once, rather than dead-ending forever.
+
+    Regression test for 2026-08-06/07: Greptile stopped auto-reviewing
+    gptme-contrib entirely (#1380-#1383) while still reviewing other repos in
+    minutes. This branch previously returned unconditionally, so those PRs could
+    never obtain the Greptile review the self-merge gate requires.
+    """
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "open", "created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "triggering initial review" in result.stdout
+    assert gh_log, "a trigger comment should have been posted after the grace window"
+
+
+def test_trigger_fallback_skips_closed_pr():
+    """Never post a fresh review request on a closed or merged PR."""
+    fixture = {
+        "pr_number": 998,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "closed", "created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, "a closed PR must not receive an initial-review trigger"
+    assert "not open" in result.stdout
+
+
+def test_trigger_fallback_accepts_offset_creation_timestamp():
+    """ISO offsets must work without relying on platform-specific date flags."""
+    fixture = {
+        "pr_number": 996,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "open", "created_at": "2020-01-01T01:00:00+01:00"},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "triggering initial review" in result.stdout
+    assert gh_log, "an old PR with an offset timestamp should receive the fallback"
+
+
+def test_trigger_fallback_invalid_creation_timestamp_fails_safe():
+    """Unparseable age must neither trigger early nor masquerade as fresh forever."""
+    fixture = {
+        "pr_number": 995,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "open", "created_at": "not-a-timestamp"},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 3, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    assert "Could not parse" in result.stdout
+    assert not gh_log, f"fallback posted without a trustworthy PR age: {gh_log!r}"
+
+
+def test_trigger_fallback_invalid_grace_uses_default():
+    """A malformed grace override must not disable the anti-race window."""
+    fixture = {
+        "pr_number": 997,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"state": "open", "created_at": _iso_ago(minutes=10)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        extra_env={"GREPTILE_INITIAL_GRACE_MINS": "not-a-number"},
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, "malformed grace must fall back to 45 minutes, not trigger early"
+    assert "using 45 minutes" in result.stderr
+    assert "Awaiting" in result.stdout
+
+
+def test_trigger_fallback_enforces_lifetime_cap():
+    """The initial-review path keeps the helper's trigger ceiling explicit."""
+    fixture = {
+        "pr_number": 1385,
+        "raw_comments": [
+            _make_trigger_comment("test-user", _iso_ago(minutes=40)) for _ in range(8)
+        ],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        extra_env={"MAX_TOTAL_TRIGGERS": "8"},
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"fallback exceeded the lifetime cap: {gh_log!r}"
+    assert "BACKOFF" in result.stdout, f"stdout: {result.stdout!r}"
+    assert "cap 8" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_trigger_fallback_does_not_repost_over_stale_trigger():
+    """Initial-review fallback must fire ONCE, not once per grace window.
+
+    Regression test: the fallback originally backed off only on "in-progress".
+    A trigger comment older than TRIGGER_GRACE_SECONDS with no Greptile ack
+    reports "stale", which fell through and posted another `@greptileai review`
+    — re-posting on every subsequent invocation until MAX_TOTAL_TRIGGERS (8).
+
+    Any status other than "none" means our one trigger already exists, so the
+    fallback must back off and leave escalation to a human.
+    """
+    fixture = {
+        "pr_number": 1385,
+        # Our trigger from 40min ago, never acked by Greptile → "stale".
+        # No greptile-authored comment at all → still no review.
+        "raw_comments": [_make_trigger_comment("test-user", _iso_ago(minutes=40))],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,  # never acked → "stale", not "stale-acked"
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, (
+        f"fallback must not re-post over an existing (stale) trigger comment. "
+        f"Got log: {gh_log!r}"
+    )
+    assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_trigger_fallback_does_not_repost_another_authors_trigger():
+    """Initial-review deduplication is per PR, not per helper account."""
+    fixture = {
+        "pr_number": 1385,
+        "raw_comments": [_make_trigger_comment("maintainer", _iso_ago(minutes=40))],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"fallback duplicated another author's trigger: {gh_log!r}"
+    assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_trigger_fallback_counts_trigger_with_trailing_newline():
+    """A multiline helper trigger must suppress the initial fallback."""
+    trigger = _make_trigger_comment(
+        "maintainer", _iso_ago(minutes=40), head_sha="abc123"
+    )
+    fixture = {
+        "pr_number": 1385,
+        "raw_comments": [trigger],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"fallback duplicated a multiline trigger: {gh_log!r}"
+    assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_other_authors_triggers_do_not_consume_helper_lifetime_cap():
+    """Manual maintainer triggers must not force the helper into global backoff."""
+    reviewed_at = _iso_ago(minutes=60)
+    fixture = {
+        "pr_number": 1385,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+            *[
+                _make_trigger_comment("maintainer", _iso_ago(minutes=50 - index))
+                for index in range(8)
+            ],
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    status = _run_helper(
+        "status",
+        fixture,
+        extra_env={"MAX_TOTAL_TRIGGERS": "8"},
+    )
+    assert status.returncode == 0, f"stderr: {status.stderr}"
+    assert status.stdout.strip() == "needs-re-review"
+
+
+def test_trigger_fallback_stale_acked_does_not_repost():
+    """Same as above for "stale-acked" (Greptile acked but never reviewed).
+
+    The re-review path deliberately re-triggers on "stale-acked" to unstick
+    gptme#1651-style hangs. The initial-review fallback must NOT: our single
+    trigger is already posted and acked, so another comment adds only spam.
+    """
+    fixture = {
+        "pr_number": 1386,
+        # Trigger 3h ago — older than ACK_GRACE_SECONDS (7200s) — and acked.
+        "raw_comments": [_make_trigger_comment("test-user", _iso_ago(minutes=180))],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=300)},
+        "bot_reaction_count": 1,  # acked but never reviewed → "stale-acked"
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, (
+        f"fallback must not re-post over an acked-but-unreviewed trigger. "
+        f"Got log: {gh_log!r}"
+    )
+    assert "already attempted" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_trigger_fallback_ignores_unrelated_greptileai_mention():
+    """An unrelated comment mentioning greptileai must not suppress the fallback.
+
+    Regression test: the fallback backed off on any `_our_trigger_status` other
+    than "none", but that function's selector matches ANY comment of ours whose
+    body contains "greptileai" (case-insensitive) — not specifically
+    `@greptileai review`. On this path review_cutoff is empty, so neither the
+    spent-trigger normalisation nor the max-retries guard can age the match out.
+
+    We post comments of exactly this shape routinely when addressing review
+    feedback ("Thanks for the catch @greptileai! Fixed in ..."), so a single one
+    reported "stale" forever and permanently suppressed the initial-review
+    fallback on exactly the PRs it exists to rescue.
+
+    The back-off must key on real `@greptileai review` trigger comments instead.
+    """
+    fixture = {
+        "pr_number": 1389,
+        "raw_comments": [
+            {
+                "id": 4242,
+                "user": {"login": "test-user"},
+                "created_at": _iso_ago(minutes=50),
+                "updated_at": _iso_ago(minutes=50),
+                # Contains the exact trigger substring, but is prose rather than a
+                # trigger command. Substring matching must not count this.
+                "body": "I saw @greptileai review this; thanks for the catch.",
+            }
+        ],
+        "raw_commits": [],
+        "raw_pr": {"state": "open", "created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert gh_log, (
+        "an unrelated comment merely mentioning greptileai must not suppress the "
+        f"initial-review fallback. stdout: {result.stdout!r}"
+    )
+    assert "triggering initial review" in result.stdout, f"stdout: {result.stdout!r}"
+
+
+def test_unreviewed_status_remains_awaiting_while_fallback_is_in_flight():
+    """Unreviewed PRs keep the documented public status during deduplication."""
+    fixture = {
+        "pr_number": 1387,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    status = _run_helper(
+        "status",
+        fixture,
+        pre_trigger_ts=_iso_ago(minutes=5),
+        repo="gptme/gptme-contrib",
+    )
+    assert status.returncode == 0, f"stderr: {status.stderr}"
+    assert status.stdout.strip() == "awaiting-initial-review"
+
+
+def test_trigger_fallback_local_timestamp_blocks_with_no_prior_review():
+    """TS-file fast-path must apply when review_cutoff is empty (no prior review).
+
+    Regression test for the propagation-delay hole the initial-review fallback
+    opened: the fast-path only marked the local timestamp "in cycle" when a
+    review cutoff existed, on the (now-false) invariant that only re-reviews
+    write the file. The fallback writes it too, so with no prior review the
+    guard was skipped entirely and the function fell through to the comments
+    API — which lags by minutes. Two sequential runs both saw "none" and both
+    posted.
+
+    Simulates INCIDENT #5 on an unreviewed PR: we triggered 5 minutes ago, the
+    comment is not visible in the API yet, a second run must still back off.
+    """
+    fixture = {
+        "pr_number": 1387,
+        "raw_comments": [],  # propagation delay: our trigger is not visible yet
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},  # well past the grace window
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        pre_trigger_ts=_iso_ago(minutes=5),
+        repo="gptme/gptme-contrib",
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, (
+        f"local TS < 15min must block the initial-review fallback even though the "
+        f"API shows no trigger comment. Got log: {gh_log!r}"
+    )
+
+
+def test_trigger_fallback_stale_local_timestamp_still_allows_first_trigger():
+    """A TS file older than the grace window must not permanently block the fallback.
+
+    Guards the fix for the empty-cutoff fast-path against over-correcting into a
+    permanent block: with no visible trigger comment and a 60-minute-old local
+    timestamp, the fast-path expires and the API (authoritative) says "none".
+    """
+    fixture = {
+        "pr_number": 1388,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=180)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        pre_trigger_ts=_iso_ago(minutes=60),
+        repo="gptme/gptme-contrib",
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert (
+        gh_log
+    ), "stale local TS + no trigger comment in API should still trigger once"
 
 
 def test_trigger_skips_fresh_pr():
@@ -1040,3 +1416,79 @@ def test_stale_unacked_trigger_no_new_commits_does_not_retrigger():
         f"trigger must NOT post @greptileai review comment on stale+no-new-commits. "
         f"Got log: {gh_log!r}"
     )
+
+
+def test_fallback_refuses_to_trigger_when_ts_file_cannot_be_written():
+    """No propagation-delay guard → no trigger. Not "trigger anyway and warn".
+
+    The timestamp used to be written *after* a successful post, so a failed
+    write (read-only TMPDIR, full disk) left a window with no guard at all: the
+    next invocation inside TRIGGER_GRACE_SECONDS finds no TS file, the comments
+    API has not yet surfaced the comment we just made, `_our_trigger_status`
+    reports "none", and we post a second `@greptileai review`. That is INCIDENT
+    #5 (2026-03-19) exactly; warning that the guard is disabled does not prevent
+    it.
+
+    Writing first and treating a failed write as fatal costs one cycle. The
+    alternative costs a duplicate review comment.
+    """
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+    }
+    result, gh_log = _run_helper(
+        "trigger", fixture, capture_gh_log=True, ts_file_unwritable=True
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "refusing to trigger" in result.stdout, result.stdout
+    assert not gh_log, f"posted a trigger with no propagation guard: {gh_log}"
+
+
+def test_fallback_comments_api_failure_is_fail_safe():
+    """Missing duplicate-check data must never become an initial trigger."""
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+        "comments_api_error": True,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 3, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    assert "Refusing to trigger" in result.stdout, result.stdout
+    assert not gh_log, f"posted despite comments API failure: {gh_log}"
+
+
+def test_fallback_failed_post_retains_provisional_timestamp():
+    """An ambiguous POST failure must retain the propagation-delay guard."""
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+        "trigger_api_error": True,
+    }
+    result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "ambiguous" in result.stdout, result.stdout
+    assert ts_content, "ambiguous post failure removed its propagation-delay guard"
+
+
+def test_fallback_records_the_timestamp_before_posting():
+    """The happy path still records the guard (and still posts)."""
+    fixture = {
+        "pr_number": 999,
+        "raw_comments": [],
+        "raw_commits": [],
+        "raw_pr": {"created_at": _iso_ago(minutes=60)},
+        "bot_reaction_count": 0,
+    }
+    result, ts_content = _run_helper("trigger", fixture, capture_ts_file=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "triggering initial review" in result.stdout
+    assert ts_content, "_TRIGGER_TS_FILE should have been written by the fallback"

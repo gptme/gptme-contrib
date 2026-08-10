@@ -76,6 +76,13 @@
 #   GitHub notifications clear when marked as read upstream, so old state files
 #   become inert.
 #
+#   Maintainer fix requests: a whole-line `@TimeToBuildBob fix` comment from an
+#   OWNER/MEMBER/COLLABORATOR forces a greptile_needs_fix item for that PR even
+#   when every organic route is quiet (clean AI verdict, Greptile 5/5, or inside
+#   the 1h cooldown). Served-ness is derived from GitHub — the 👀 reaction we post
+#   on the trigger comment IS the watermark, so exactly one item is emitted per
+#   trigger comment and no state file can drift. See check_fix_requests().
+#
 #   Item grouping: This gate emits one item per event (a PR can produce separate
 #   pr_update, ci_failure, and merge_conflict items). Callers that dispatch
 #   per-item sessions should group items by repo#number before dispatching to
@@ -933,6 +940,69 @@ check_merge_conflicts() {
 # Emits:
 #   greptile_needs_fix       — score < 4 (significant findings to address)
 #   greptile_needs_improvement — score = 4 (minor fixes needed)
+# Does our own AI reviewer still want changes on this PR?
+#
+# Why this exists: check_greptile_scores() reads Greptile's score and nothing
+# else, so a PR sitting at Greptile 5/5 with unaddressed findings from our
+# reviewer emits merge_ready and never enters the fix loop. Observed on
+# gptme/gptme#3468 — 5/5 from Greptile, 4 of our findings open, PM silent, and a
+# human triaging the PR reads those findings as blockers.
+#
+# The authoritative signal is the LATEST REVIEW AT THE CURRENT HEAD, not the
+# state of comment threads.
+#
+# An earlier version counted unresolved threads and excluded GitHub's
+# `isOutdated` ones, treating outdated as "addressed". Erik flagged that as a
+# cheap heuristic, and he is right: GitHub marks a thread outdated whenever the
+# lines it anchored to change — a rebase, a reformat, or an unrelated edit in the
+# same hunk all do it, with the bug fully intact. Reading that as "fixed"
+# produces a false clean, which is the one direction that costs an unreviewed
+# merge rather than a wasted round.
+#
+# So we ask the reviewer instead of guessing. Our reviewer re-reviews on every
+# head change and deliberately re-raises findings that were never fixed
+# (suppression happens only on explicit dismissal), so the finding count it
+# recorded FOR THE CURRENT HEAD is a measurement, not an inference.
+#
+# Echoes: "dirty" (findings at current head), "clean" (reviewed, none),
+# "pending" (current head not reviewed yet — the sweep will get to it), or
+# "none" (never reviewed).
+ai_review_verdict() {
+    local repo=$1 pr_number=$2 head_sha=$3
+    local marker
+    marker=$(gh api "repos/${repo}/issues/${pr_number}/comments" --paginate \
+        --jq '[.[] | .body // "" | capture("<!-- bob-ai-review (?<j>\\{[^>]*\\}) -->").j] | last // empty' \
+        2>/dev/null | tail -1)
+    [ -z "$marker" ] && { echo "none"; return 0; }
+
+    local reviewed_sha score findings
+    reviewed_sha=$(printf '%s' "$marker" | jq -r '.sha // empty' 2>/dev/null)
+    [ -z "$reviewed_sha" ] && { echo "none"; return 0; }
+
+    # Marker records a short SHA.
+    case "$head_sha" in
+        "$reviewed_sha"*) ;;
+        *) echo "pending"; return 0 ;;
+    esac
+
+    score=$(printf '%s' "$marker" | jq -r '.score // empty' 2>/dev/null)
+    if [ -n "$score" ] && [ "$score" != "null" ]; then
+        [ "$score" -ge 5 ] 2>/dev/null && echo "clean" || echo "dirty"
+        return 0
+    fi
+    # Markers written before the score field shipped (2026-08-07/08) carry none,
+    # and those are exactly the older PRs sitting in the backlog. Fall back to the
+    # finding count the same review recorded.
+    findings=$(printf '%s' "$marker" \
+        | jq -r '(.history // []) | last | .findings // empty' 2>/dev/null)
+    if [ -n "$findings" ] && [ "$findings" != "null" ]; then
+        [ "$findings" -gt 0 ] 2>/dev/null && echo "dirty" || echo "clean"
+        return 0
+    fi
+    echo "none"
+}
+
+
 check_greptile_scores() {
     local repo=$1
     local prs=$2
@@ -954,14 +1024,25 @@ check_greptile_scores() {
         local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
         local now
         now=$(date +%s)
-        local last_state last_score last_timestamp last_sha
-        last_state="" last_score="" last_timestamp=0 last_sha=""
+        local last_state last_score last_timestamp last_sha last_verdict
+        last_state="" last_score="" last_timestamp=0 last_sha="" last_verdict=""
         if [ -f "$state_file" ]; then
             last_state=$(cat "$state_file")
             last_score=$(echo "$last_state" | cut -d: -f1)
             last_timestamp=$(echo "$last_state" | cut -d: -f2)
             last_sha=$(echo "$last_state" | cut -d: -f3)
+            # 4th field added later; state files written before it yield "" here,
+            # which reads as "no cached verdict" and simply costs one refetch.
+            last_verdict=$(echo "$last_state" | cut -d: -f4)
         fi
+
+        # The persisted timestamp means "when we last FETCHED", not "when we last
+        # ran". Stamping it with $now on a cache hit refreshes the TTL on every
+        # 2-minute cycle, so it never expires and neither the score nor the verdict
+        # is ever refetched for that head — a PR whose verdict was 'pending'
+        # (head not yet reviewed, the normal state right after a push) would stay
+        # pending forever and never reach the fix arm.
+        local fetched_at="$last_timestamp"
 
         # Skip the API call if we have a fresh cached score for the current HEAD SHA.
         # Greptile edits its review comment in-place (PR updatedAt doesn't bump), but
@@ -981,6 +1062,7 @@ check_greptile_scores() {
             # Note: --paginate with --jq applies the filter per-page, so if multiple
             # pages each contain Greptile comments, we'd get multiple lines of output.
             # We take only the last line (tail -1) to get the most recent score.
+            fetched_at="$now"
             greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
                 --paginate --jq '
                     [.[] | select(.user.login | test("greptile"; "i"))] | last |
@@ -1003,24 +1085,58 @@ check_greptile_scores() {
             continue
         fi
 
-        # Score 5 = clean — update state file (so check_merge_ready sees
-        # the perfect score instead of a stale sub-5 entry) and skip.
+        # Score 5 = clean by Greptile's reckoning — but OUR reviewer may still
+        # have open findings on the same PR, and those are invisible to the
+        # score above. A PR is only clean when both reviewers are satisfied.
+        # Routing may differ from what Greptile said, so it gets its own variable.
+        # greptile_score MUST stay Greptile's real score: it is what we persist and
+        # what every consumer reports. Overwriting it to steer one branch poisons
+        # the state file, and the poison is self-sticking — a persisted 3 fails the
+        # `-ge 5` test on the next cycle, so the AI verdict is never consulted again
+        # and the PR cannot recover even after its findings are resolved.
+        local route_score="$greptile_score"
+        local ai_verdict=""
         if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
-            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
-            continue
+            # ai_review_verdict() costs a paginated comments fetch, so it obeys the
+            # same TTL as the score above rather than firing every 2-minute cycle.
+            if [ -n "$last_verdict" ] && [ "$last_sha" = "$head_sha" ] \
+                    && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then
+                ai_verdict="$last_verdict"
+            else
+                ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
+                fetched_at="$now"
+            fi
+            if [ "$ai_verdict" = "dirty" ]; then
+                # Route to the fix arm: unaddressed findings are work to do, not a
+                # polish suggestion. Only the routing score moves.
+                route_score=3
+                pr_title="${pr_title} [our AI review wants changes]"
+            else
+                # clean / pending / none: nothing WE can say is outstanding.
+                # 'pending' is deliberately not treated as dirty — the head is
+                # simply unreviewed yet, and the sweep re-reviews within minutes.
+                # Emitting a fix item off an unmeasured head would nag on PRs
+                # that may well be clean.
+                echo "${greptile_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                continue
+            fi
         fi
 
         # Score >= 4 is minor, < 4 needs fix
         local item_type
-        if [ "$greptile_score" -lt 4 ]; then
+        if [ "$route_score" -lt 4 ]; then
             item_type="greptile_needs_fix"
         else
             item_type="greptile_needs_improvement"
         fi
 
         if [ -n "$last_state" ]; then
-            # Same score and same HEAD — check cooldown
-            if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ]; then
+            # Same score, same verdict and same HEAD — check cooldown.
+            # The verdict belongs in this test now that it, not the score, is what
+            # moves when our review flips: without it a clean -> dirty flip on an
+            # unchanged head would sit out the cooldown before anyone heard about it.
+            if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ] \
+                    && [ "$ai_verdict" = "$last_verdict" ]; then
                 local elapsed=$(( now - last_timestamp ))
                 if [ "$elapsed" -lt "$cooldown_seconds" ]; then
                     # Within cooldown — skip
@@ -1031,13 +1147,19 @@ check_greptile_scores() {
             # Otherwise: score changed or new commits pushed — always re-emit
         else
             # First time seeing this PR — seed state, don't report
-            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
+            echo "${greptile_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
             continue
         fi
 
-        # Record state and emit
-        echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
-        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "Greptile score: ${greptile_score}/5"
+        # Record state and emit. The detail names whichever reviewer is actually
+        # asking for work: reporting "Greptile score: 5/5" on an item routed to
+        # the fix arm by OUR findings reads as a contradiction.
+        local detail="Greptile score: ${greptile_score}/5"
+        if [ "$ai_verdict" = "dirty" ]; then
+            detail="${detail} · our AI review has open findings"
+        fi
+        echo "${greptile_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "$detail"
     done
 }
 
@@ -1146,6 +1268,145 @@ check_own_pr_review_state() {
         echo "${signature}:${now}" > "$state_file"
         emit_item "$item_type" "$repo" "$pr_number" "$pr_title" \
             "own-PR review: Greptile ${greptile_score}/5 (merge_state: ${merge_state})"
+    done
+}
+
+# --- Maintainer-forced fix requests (`@TimeToBuildBob fix`) ---
+#
+# `@TimeToBuildBob review` (ai-review-sweep.py) forces a fresh REVIEW of a PR.
+# This is its sibling: it forces a WORKER to act on the PR's outstanding review
+# findings, by emitting the item type that Project Monitoring already routes to
+# the fix lane (greptile_needs_fix → slow lane → greptile-fix bandit arm).
+#
+# It exists because every organic route into that lane is gated on a signal the
+# maintainer may already disagree with: check_greptile_scores() only fires on a
+# sub-5 Greptile score or a `dirty` verdict from our own reviewer, and then only
+# once per hour per PR. A maintainer looking at a PR with findings they want
+# addressed *now* had no way to say so.
+#
+# ANTI-SPAM (hard requirement — see memory/feedback_greptile_spam_bug.md, where a
+# poll that waited for a reaction which could never appear posted `@greptileai
+# review` 29 times on one PR):
+#
+#   * Served-ness is DERIVED FROM GITHUB, never from a state file: a request is
+#     pending iff its comment carries no reaction from us. State files drift;
+#     the reaction is on the same object as the request.
+#   * The reaction is POSTED BEFORE the item is emitted, and a failed POST
+#     suppresses the emit. A watermark written after the fact leaves a window in
+#     which a concurrent (or retried) run re-emits — that is exactly the greptile
+#     incident's shape.
+#   * Every API failure is read as "no pending request". Guards that fail open
+#     are how the 29x spam happened.
+#
+# Detection reads the already-fetched PR payload (`comments` is part of
+# fetch_pr_data's GraphQL selection), so it costs ZERO extra API calls on PRs
+# with no trigger comment. Only a comment that literally matches the trigger
+# line costs a reactions lookup.
+#
+# SCOPE, inherited from that payload: fetch_pr_data() lists `--author $AUTHOR`
+# and drops drafts, so the trigger reaches non-draft PRs authored by the bot —
+# which is the case it exists for (a maintainer asking us to fix our own PR).
+# On someone else's PR it is silently inert; widening it means widening the
+# fetch, which is a separate cost decision.
+
+#: The account the trigger addresses, and whose reactions are the watermark.
+#: Matches ``REVIEWER_LOGIN`` in scripts/github/ai-review-sweep.py so the two
+#: triggers read identically to an operator.
+FIX_TRIGGER_LOGIN="TimeToBuildBob"
+
+#: Whole-line trigger, case-insensitive. Same shape as ai-review-sweep.py's
+#: ``TRIGGER_RE``: prose that merely mentions the phrase must not fire it.
+#: Trailing ``\r`` is allowed because GitHub stores comment bodies CRLF.
+FIX_TRIGGER_LINE_RE='^[ \t]*@'"$FIX_TRIGGER_LOGIN"'[ \t]+fix[ \t\r]*$'
+
+#: Anyone can comment on a public PR; only maintainers can spend worker budget.
+FIX_TRUSTED_ASSOCIATIONS='["OWNER","MEMBER","COLLABORATOR"]'
+
+#: Greptile's convention, reused: 👀 means "queued". Reactions do not touch the
+#: comment body and do not bump ``updated_at``.
+FIX_REACTION_QUEUED="eyes"
+
+# The REST id of the newest UNSERVED `@TimeToBuildBob fix` comment on this PR,
+# or nothing. Prints nothing on any failure (fail toward skip).
+# Args: <owner/repo> <pr_json from fetch_pr_data>
+pending_fix_request() {
+    local repo=$1 pr_json=$2
+
+    # jq's `^`/`$` anchor to the whole string, not to lines, so split first
+    # rather than depending on an inline-modifier dialect.
+    local comment_id
+    comment_id=$(printf '%s' "$pr_json" | jq -r \
+        --arg me "$FIX_TRIGGER_LOGIN" \
+        --arg author "$AUTHOR" \
+        --arg re "$FIX_TRIGGER_LINE_RE" \
+        --argjson trusted "$FIX_TRUSTED_ASSOCIATIONS" '
+        [ (.comments // [])[]
+          # Self-trigger guard: a worker that quotes the trigger phrase in its
+          # own reply (our review footer does exactly that) must never re-arm it.
+          | select((((.author // {}).login) // "") as $l
+                   | ($l | ascii_downcase) != ($me | ascii_downcase)
+                     and ($l | ascii_downcase) != ($author | ascii_downcase))
+          | select(((.authorAssociation) // "") | IN($trusted[]))
+          | select(((.body) // "") | split("\n")
+                   | any(test($re; "i")))
+          | { id: (((.url // "") | capture("issuecomment-(?<n>[0-9]+)")) // {n:""} | .n),
+              created: ((.createdAt) // "") }
+          | select(.id != "")
+        ] | sort_by(.created) | last | .id // empty
+    ' 2>/dev/null) || return 0
+    [ -z "$comment_id" ] && return 0
+    # Defensive: only ever interpolate a bare number into an API path.
+    [[ "$comment_id" =~ ^[0-9]+$ ]] || return 0
+
+    # Served-ness: any reaction of ours on the trigger comment. Deliberately
+    # broader than the 👀 we post — a superset can only suppress, never spam.
+    local ours
+    # Must paginate. If our reaction falls outside the first page, we would read
+    # the comment as unserved and emit again on every cycle — an unbounded
+    # dispatch loop, the exact shape of the 29x @greptileai incident. --slurp
+    # wraps the pages in an outer array, hence the `.[][]` flatten.
+    ours=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions" \
+        --paginate --slurp -F per_page=100 \
+        --jq "[.[][] | select(((.user // {}).login // \"\") == \"$FIX_TRIGGER_LOGIN\")] | length" \
+        2>/dev/null) || return 0
+    # Empty output means the call failed or returned something unparseable →
+    # treat as served, same as a real reaction. Never as pending.
+    [ -z "$ours" ] && return 0
+    [ "$ours" = "0" ] || return 0
+
+    printf '%s' "$comment_id"
+}
+
+# Emit greptile_needs_fix for every PR carrying an unserved maintainer fix
+# request. Exactly one emit per trigger comment.
+# Args: <owner/repo> <prs json>
+check_fix_requests() {
+    local repo=$1
+    local prs=$2
+    [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
+
+    echo "$prs" | jq -c '.[]' | while read -r pr_data; do
+        local pr_number pr_title comment_id
+        pr_number=$(echo "$pr_data" | jq -r '.number')
+        pr_title=$(echo "$pr_data" | jq -r '.title')
+
+        comment_id=$(pending_fix_request "$repo" "$pr_data")
+        [ -z "$comment_id" ] && continue
+
+        # Consume BEFORE emitting. This reaction IS the watermark: if the POST
+        # fails we must not emit, because nothing would stop the next cycle from
+        # emitting again. Costs at most one deferred dispatch; the alternative
+        # costs an unbounded dispatch loop.
+        if ! gh api -X POST \
+                "repos/${repo}/issues/comments/${comment_id}/reactions" \
+                -f "content=${FIX_REACTION_QUEUED}" \
+                >/dev/null 2>&1; then
+            continue
+        fi
+
+        emit_item "greptile_needs_fix" "$repo" "$pr_number" \
+            "${pr_title} [maintainer fix request]" \
+            "fix_request · maintainer asked us to act on outstanding review findings (comment ${comment_id})"
     done
 }
 
@@ -1298,6 +1559,20 @@ check_merge_ready() {
             greptile_score=$(cut -d: -f1 < "$greptile_state_file")
             # Must be perfect score (>= 5) to be merge-ready
             if [ -n "$greptile_score" ] && [ "$greptile_score" -lt 5 ] 2>/dev/null; then
+                continue
+            fi
+            # ...and OUR reviewer must have nothing open either. Before the score
+            # stopped being overwritten, a dirty verdict reached here disguised as
+            # a Greptile 3 and was filtered by the check above; now that the real 5
+            # is persisted, that accidental filter is gone and a PR with open AI
+            # findings would emit greptile_needs_fix AND merge_ready in the same
+            # run — the dispatcher could merge exactly what the fix arm is queued
+            # to repair. Only "dirty" blocks: clean/pending/none/"" all mean we
+            # have nothing to say, and blocking on an unmeasured head would stall
+            # every merge behind a review that has not happened yet.
+            local greptile_state_verdict
+            greptile_state_verdict=$(cut -d: -f4 < "$greptile_state_file")
+            if [ "$greptile_state_verdict" = "dirty" ]; then
                 continue
             fi
         fi
@@ -1542,6 +1817,16 @@ for repo in $all_repos; do
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         items=$(check_merge_ready "$repo" "$live_pr_data" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
+
+        # Maintainer-forced `@TimeToBuildBob fix`. Uses the live lane (180s TTL)
+        # so a maintainer's comment is picked up in minutes rather than after the
+        # 480s cached lane; falls back to the cached lane when live returns [].
+        fix_input="$live_pr_data"
+        if [ "$fix_input" = "[]" ] || [ -z "$fix_input" ]; then
+            fix_input="$pr_data"
+        fi
+        items=$(check_fix_requests "$repo" "$fix_input" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         [ -n "$repo_items" ] && printf '%s' "$repo_items" > "$PARALLEL_TMPDIR/$repo_safe"

@@ -42,6 +42,14 @@ def test_space_datetime_rejected():
     assert "T" in errors[0]
 
 
+def test_completed_space_datetime_rejected():
+    raw = "completed: 2026-07-10 12:00:00\n"
+    errors = validate_timestamp_syntax(raw)
+    assert len(errors) == 1
+    assert "completed" in errors[0]
+    assert "T" in errors[0]
+
+
 def test_iso_datetime_ok():
     raw = "created: 2026-07-02T20:00:00+00:00\n"
     assert validate_timestamp_syntax(raw) == []

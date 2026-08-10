@@ -116,6 +116,20 @@ class SubscriptionManager:
             fingerprint_template=config.fingerprint_template,
             lock_guard=self._lock_guard,
             on_switch=self._log_switch,
+            # Without this the SlotManager's audit trail is a no-op: its
+            # ``probe_ok BYPASS`` / ``probe_ok IGNORED`` / refusal lines are
+            # emitted only via ``SlotManager._log``, which discards everything
+            # when ``logger is None``. This is the production wiring, so a
+            # skipped safety check has to be visible here, not just in tests.
+            # Safe as a bare bound method: ``SlotManager._log`` calls
+            # ``self.logger(msg)`` with exactly one argument, and logging only
+            # applies ``%`` interpolation when record args are present. Percent
+            # signs in slot names and reasons ("100% exhausted") therefore pass
+            # through verbatim. Pinned by
+            # ``test_slot_logger_survives_percent_signs_in_messages`` -- do not
+            # "fix" this into ``logger.warning(fmt, *args)``, which would make
+            # the message a format string and reintroduce the hazard.
+            logger=logger.warning,
         )
 
     # ---- Lock guard (autonomous sessions) ----
@@ -224,6 +238,11 @@ class SubscriptionManager:
         result: tuple[bool, str] = self._slot_manager.slot_is_fresh(
             sub, grace_seconds=grace_seconds
         )
+        return result
+
+    def slot_has_refresh_token(self, sub: str) -> bool:
+        """Return whether a subscription slot can refresh its access token."""
+        result: bool = self._slot_manager.slot_has_refresh_token(sub)
         return result
 
     def slot_credential_is_stale(
@@ -344,10 +363,14 @@ class SubscriptionManager:
 
     # ---- Switch ----
 
-    def switch_to(self, sub: str, reason: str, force: bool = False) -> bool:
+    def switch_to(
+        self, sub: str, reason: str, force: bool = False, probe_ok: bool = False
+    ) -> bool:
         """Flip the live symlink to a named slot. Returns True on success."""
         self._last_switch_deferred = False
-        result = self._slot_manager.switch_to(sub, reason, force=force)
+        result = self._slot_manager.switch_to(
+            sub, reason, force=force, probe_ok=probe_ok
+        )
         if not result.ok:
             if result.deferred_locks and not force:
                 self._last_switch_deferred = True

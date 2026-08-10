@@ -40,6 +40,7 @@ from credential_slots.manager import (
     SwitchResult,
     compute_slot_fingerprint,
     read_slot_expiry,
+    reason_is_refreshable,
     slot_is_fresh,
 )
 
@@ -54,6 +55,7 @@ __all__ = [
     "SwitchResult",
     "compute_slot_fingerprint",
     "read_slot_expiry",
+    "reason_is_refreshable",
     "slot_is_fresh",
 ]
 

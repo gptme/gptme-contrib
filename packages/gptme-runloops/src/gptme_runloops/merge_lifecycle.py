@@ -118,6 +118,97 @@ class InstructionKind(Enum):
     CROSS_REPO_GREPTILE_REFRESH = "cross_repo_greptile_refresh"  # lib.sh:474-517
     GREPTILE_NEEDS_FIX = "greptile_needs_fix"  # lib.sh:886-912
     GREPTILE_NEEDS_IMPROVEMENT = "greptile_needs_improvement"  # lib.sh:913-932
+    GREPTILE_CONVERGENCE = "greptile_convergence"  # lib.sh:889-893 adjudication
+
+
+@dataclass(frozen=True)
+class ConvergenceVerdict:
+    """Parsed ``greptile-convergence.py --json`` output (lib.sh:875-882).
+
+    ``verdict`` is the top-level key; ``should_request_review`` is
+    ``round_convergence.should_request_review_after_fixes``, which the bash
+    defaults to True when absent — i.e. absent data means "keep going", never
+    "stop".
+    """
+
+    verdict: str = "unknown"
+    should_request_review: bool = True
+
+    @classmethod
+    def from_json(cls, raw: str) -> ConvergenceVerdict:
+        """Parse the script's stdout; any failure yields the permissive default.
+
+        The bash pipes through two `python3 -c` filters, each `|| true`, so a
+        crashed or empty script degrades to verdict "unknown" +
+        should_request_review True. Preserved: a broken convergence check must
+        never silently suppress a dispatch.
+        """
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return cls()
+        if not isinstance(data, dict):
+            return cls()
+        rounds = data.get("round_convergence")
+        should = True
+        if isinstance(rounds, dict):
+            should = bool(rounds.get("should_request_review_after_fixes", True))
+        return cls(
+            verdict=str(data.get("verdict", "unknown")), should_request_review=should
+        )
+
+
+# Verdicts that mean "Greptile has nothing further to say" (lib.sh:881).
+CONVERGED_VERDICTS = frozenset({"converged", "no_findings"})
+
+
+def greptile_convergence_applicable(item: WorkItem, *, helper_available: bool) -> bool:
+    """bash gate at lib.sh:870-873.
+
+    Requires the helper, at least one type, and *every* type to be
+    ``greptile_needs_improvement`` — the bash spells this as
+    ``! grep -qvx 'greptile_needs_improvement'``, i.e. a mixed item (a PR that
+    also has a CI failure) is deliberately NOT short-circuited.
+    """
+    if not helper_available or not item.types:
+        return False
+    return all(t == "greptile_needs_improvement" for t in item.types)
+
+
+def decide_greptile_convergence(
+    verdict: ConvergenceVerdict,
+) -> LifecycleDecision:
+    """Route a backoff-state item on its convergence verdict (lib.sh:880-894).
+
+    - converged / no_findings → skip the session entirely and promote state.
+      Greptile is in backoff *and* the convergence check agrees there is
+      nothing left; dispatching would burn a full slot session to no effect.
+    - ``should_request_review_after_fixes == False`` → the rounds are stable
+      but findings remain, so spawn an adjudication session instead of
+      another fix-and-re-review round.
+    - otherwise → proceed normally.
+    """
+    if verdict.verdict in CONVERGED_VERDICTS:
+        return LifecycleDecision(
+            action=MergeLifecycleAction.SKIP_ITEM,
+            reason=(
+                "Greptile helper is in backoff and convergence check is "
+                f"{verdict.verdict}; skipping pure Greptile re-emit"
+            ),
+        )
+    if not verdict.should_request_review:
+        return LifecycleDecision(
+            action=MergeLifecycleAction.FIX_FINDINGS,
+            reason=(
+                "Greptile helper is in backoff and round convergence says no "
+                "more re-review; spawning adjudication session"
+            ),
+            instructions=InstructionKind.GREPTILE_CONVERGENCE,
+        )
+    return LifecycleDecision(
+        action=MergeLifecycleAction.PROCEED,
+        reason="Greptile in backoff but convergence has not settled; proceeding",
+    )
 
 
 class SelfMergeBlockClass(Enum):
@@ -577,6 +668,10 @@ class MergeLifecycleIO(Protocol):
         """Advance the item's activity-gate state after a self-merge."""
         ...
 
+    def convergence_verdict(self, repo: str, number: int | str) -> ConvergenceVerdict:
+        """Run ``greptile-convergence.py --json``; permissive default on failure."""
+        ...
+
 
 def run_merge_lifecycle(
     item: WorkItem,
@@ -655,6 +750,26 @@ def run_merge_lifecycle(
         else:
             emit(f"  {decision.reason}")
 
+    # --- Phase A2: converged-backoff early exit (lib.sh:869-895) ---
+    # An item whose ONLY reason to run is a Greptile re-emit, whose helper is
+    # in backoff, and whose convergence check says there is nothing left, must
+    # not get a session at all: bash promotes state and returns, Python used
+    # to burn a full slot session every cycle. This is the expensive half of
+    # the P3 divergence.
+    if greptile_convergence_applicable(item, helper_available=helper_available):
+        status = io.greptile_status(item.repo, item.number)
+        if status == "backoff":
+            verdict = io.convergence_verdict(item.repo, item.number)
+            decision = decide_greptile_convergence(verdict)
+            result.decisions.append(decision)
+            emit(f"  {decision.reason}")
+            if decision.action is MergeLifecycleAction.SKIP_ITEM:
+                io.promote_item_state(item.repo, item.number)
+                result.skip_item = True
+                return result
+            if decision.action is MergeLifecycleAction.FIX_FINDINGS:
+                result.instructions = decision.instructions
+
     # --- Phase B: cross-repo Greptile lifecycle (lib.sh:577-606) ---
     pending = fix_instructions_pending or result.instructions is not None
     if cross_repo_review_applicable(item, config, fix_instructions_pending=pending):
@@ -715,6 +830,10 @@ class SubprocessMergeLifecycleIO:
     env: Mapping[str, str] | None = None
     promote_state: Callable[[str, int | str], None] | None = None
     timeout: float | None = None
+    # argv prefix for greptile-convergence.py, invoked as
+    # `<cmd> --json <repo> <number>` (lib.sh:876). None disables the
+    # converged-backoff early exit, matching the bash `[ -f ... ]` guard.
+    convergence_cmd: Sequence[str] | None = None
 
     def _env(self) -> dict[str, str] | None:
         if self.env is None:
@@ -769,6 +888,27 @@ class SubprocessMergeLifecycleIO:
             return proc.stdout.strip() or "in-progress"
         except (OSError, subprocess.SubprocessError):
             return "in-progress"
+
+    def convergence_verdict(self, repo: str, number: int | str) -> ConvergenceVerdict:
+        # lib.sh:874-879. The bash guards on the script existing and pipes
+        # both extractions through `|| true`, so every failure mode — missing
+        # script, crash, garbage output — degrades to the permissive default
+        # rather than suppressing a dispatch.
+        if not self.convergence_cmd:
+            return ConvergenceVerdict()
+        try:
+            proc = subprocess.run(
+                [*self.convergence_cmd, "--json", repo, str(number)],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                env=self._env(),
+            )
+            if proc.returncode != 0:
+                return ConvergenceVerdict()
+            return ConvergenceVerdict.from_json(proc.stdout)
+        except (OSError, subprocess.SubprocessError):
+            return ConvergenceVerdict()
 
     def trigger_review(self, repo: str, number: int | str) -> None:
         # lib.sh:555/589: helper output passes through; failures non-fatal.

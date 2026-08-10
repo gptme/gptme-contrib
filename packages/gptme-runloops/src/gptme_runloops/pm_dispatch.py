@@ -34,6 +34,7 @@ SLOW_LANE_TYPES: set[str] = {
     "merge_conflict",
     "greptile_needs_fix",
     "greptile_needs_improvement",
+    "greptile_convergence_adjudication",
 }
 
 # Default slot cap for concurrent dispatch workers
@@ -195,6 +196,77 @@ def _maybe_int(value: str | int | None) -> int | None:
         return None
 
 
+# Phases that assert a dispatch reached the end of its item loop. Only these
+# carry a derived ``outcome`` — the ``skipped_*`` phases never ran anything.
+TERMINAL_LEDGER_PHASES = frozenset({"completed"})
+
+OUTCOME_SUCCEEDED = "succeeded"
+OUTCOME_FAILED = "failed"
+OUTCOME_NO_EFFECT = "no_effect"
+
+# Observable-effect verdicts (see worker_records.derive_effect_signal).
+EFFECT_OBSERVED = "observed"
+EFFECT_NONE = "none"
+EFFECT_UNKNOWN = "unknown"
+
+
+def derive_dispatch_outcome(
+    phase: str,
+    exit_code: str | int | None,
+    failures: str | int | None,
+    effect: str | None = None,
+) -> str | None:
+    """Derive a dispatch's recorded outcome from its exit status and effect.
+
+    **Invariant**: a recorded outcome is never asserted independently of the
+    worker's exit status *and* its observable external effect.
+    ``phase="completed"`` only means "the item loop returned" — it says
+    nothing about whether the work succeeded. This function is the single
+    place that decides.
+
+    Returns ``None`` for non-terminal phases (``launched``/``started``/
+    ``skipped_*``), which carry no outcome at all.
+
+    Terminal phases resolve in this order:
+
+    :data:`OUTCOME_FAILED`
+        ``exit_code`` present and non-zero, or ``failures`` greater than
+        zero. Either bad signal is sufficient.
+    :data:`OUTCOME_NO_EFFECT`
+        Clean exit, but the item was observed *not* to change — no push, no
+        comment, no state transition. The worker exited 0 and may well have
+        narrated success; nothing reached GitHub. Real instance:
+        gptme/gptme#3468, where every ``git push`` failed on a pre-push
+        guard after the fix was committed locally.
+    ``None``
+        No usable signal at all — neither exit status nor failure count.
+        Refuses to assert success rather than guessing.
+    :data:`OUTCOME_SUCCEEDED`
+        Clean exit and no contrary evidence.
+
+    ``effect=EFFECT_UNKNOWN`` (or ``None``) does not by itself block
+    ``succeeded`` — but the pair is recorded separately on the ledger row so
+    a reader can tell corroborated success from merely-uncontradicted
+    success. See ``scripts/monitoring/pm-outcome-integrity.py``.
+    """
+    if phase not in TERMINAL_LEDGER_PHASES:
+        return None
+
+    code = _maybe_int(exit_code)
+    fails = _maybe_int(failures)
+    effect_norm = str(effect).strip().lower() if effect else ""
+
+    if (code is not None and code != 0) or (fails is not None and fails > 0):
+        return OUTCOME_FAILED
+    if effect_norm == EFFECT_NONE:
+        # Exit status says fine; the world says nothing happened. The world wins.
+        return OUTCOME_NO_EFFECT
+    if code is None and fails is None:
+        # Nothing observable to derive from — refuse to assert success.
+        return None
+    return OUTCOME_SUCCEEDED
+
+
 def build_full_ledger_entry(
     *,
     phase: str,
@@ -208,6 +280,8 @@ def build_full_ledger_entry(
     successes: str | int | None = None,
     failures: str | int | None = None,
     duration_seconds: str | int | None = None,
+    exit_code: str | int | None = None,
+    effect: str | None = None,
     timestamp: str | None = None,
     max_items: int = 20,
 ) -> dict[str, Any]:
@@ -216,7 +290,9 @@ def build_full_ledger_entry(
     Mirrors the on-disk schema produced by the bash
     ``append_dispatch_ledger()`` function:
     ``timestamp/phase/lane/dispatch_id/unit/item_count/item_refs/types/items``
-    plus optional ``running_units/cap/note/successes/failures/duration_seconds``.
+    plus optional ``running_units/cap/note/successes/failures/duration_seconds``
+    and the derived pair ``exit_code``/``outcome`` (see
+    :func:`derive_dispatch_outcome`).
 
     The ``items`` list is capped at *max_items* entries (default 20). Items
     are read from *work_file* (a JSONL of grouped items) when provided.
@@ -272,6 +348,9 @@ def build_full_ledger_entry(
         "successes": _maybe_int(successes),
         "failures": _maybe_int(failures),
         "duration_seconds": _maybe_int(duration_seconds),
+        "exit_code": _maybe_int(exit_code),
+        "effect": (effect or None) if phase in TERMINAL_LEDGER_PHASES else None,
+        "outcome": derive_dispatch_outcome(phase, exit_code, failures, effect),
     }
 
 
@@ -371,6 +450,11 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
         return "ci-fix"
     if types_set & {"greptile_needs_fix", "greptile_needs_improvement"}:
         return "greptile-fix"
+    if "greptile_convergence_adjudication" in types_set:
+        # Adjudication is a deep review-and-classify task — distinct arm from
+        # the first-pass greptile-fix, so the bandit tracks its own outcomes
+        # and the slow lane (with the capable model) handles it.
+        return "greptile-convergence"
     if "merge_conflict" in types_set:
         return "merge-conflict"
     if "pr_update" in types_set:
@@ -1378,6 +1462,25 @@ def _append_ledger_main(argv: list[str]) -> int:
     parser.add_argument("--successes", default="")
     parser.add_argument("--failures", default="")
     parser.add_argument("--duration-seconds", default="")
+    parser.add_argument(
+        "--exit-code",
+        default="",
+        help=(
+            "Worker exit status. Empty means 'unknown' — the outcome is then "
+            "derived from --failures alone, and never asserted as success "
+            "when neither signal is present."
+        ),
+    )
+    parser.add_argument(
+        "--effect",
+        default="",
+        choices=["", EFFECT_OBSERVED, EFFECT_NONE, EFFECT_UNKNOWN],
+        help=(
+            "Observable external effect of the dispatch. 'none' downgrades a "
+            "clean exit to outcome=no_effect — a worker that changed nothing "
+            "on GitHub is not a success however it exited."
+        ),
+    )
     args = parser.parse_args(argv)
 
     append_full_ledger_entry(
@@ -1393,6 +1496,8 @@ def _append_ledger_main(argv: list[str]) -> int:
         successes=args.successes,
         failures=args.failures,
         duration_seconds=args.duration_seconds,
+        exit_code=args.exit_code,
+        effect=args.effect or None,
     )
     return 0
 

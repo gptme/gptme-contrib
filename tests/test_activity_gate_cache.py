@@ -32,6 +32,8 @@ from pathlib import Path
 argv = sys.argv[1:]
 head_sha  = os.environ.get("TEST_HEAD_SHA", "abc123")
 pr_number = int(os.environ.get("TEST_PR_NUMBER", "42"))
+greptile_score = os.environ.get("TEST_GREPTILE_SCORE", "4")
+ai_review_score = os.environ.get("TEST_AI_REVIEW_SCORE", "")
 count_file = os.environ.get("GH_COMMENT_CALL_COUNT", "")
 
 def apply_jq(data: object, jq_expr: str) -> str:
@@ -92,8 +94,16 @@ if argv[0] == "api":
             "user": {"login": "greptile-apps[bot]"},
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
-            "body": "<h3>Greptile Summary</h3>\nScore: 4/5\nSome findings.",
+            "body": f"<h3>Greptile Summary</h3>\nScore: {greptile_score}/5\nSome findings.",
         }]
+        if ai_review_score:
+            marker = json.dumps({"sha": head_sha[:8], "score": int(ai_review_score)})
+            comments.append({
+                "user": {"login": "test-author"},
+                "created_at": "2026-01-01T00:01:00Z",
+                "updated_at": "2026-01-01T00:01:00Z",
+                "body": f"<!-- bob-ai-review {marker} -->",
+            })
         print(apply_jq(comments, jq_expr))
         sys.exit(0)
 
@@ -115,6 +125,9 @@ def _run_gate(
     tmp: Path,
     state_dir: Path,
     head_sha: str = TEST_HEAD_SHA,
+    *,
+    greptile_score: int = 4,
+    ai_review_score: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     """Run activity-gate.sh with fake gh. Returns (result, comment_api_call_count)."""
     fake_gh = tmp / "gh"
@@ -126,6 +139,9 @@ def _run_gate(
     env = os.environ.copy()
     env["TEST_HEAD_SHA"] = head_sha
     env["TEST_PR_NUMBER"] = str(TEST_PR)
+    env["TEST_GREPTILE_SCORE"] = str(greptile_score)
+    if ai_review_score is not None:
+        env["TEST_AI_REVIEW_SCORE"] = str(ai_review_score)
     env["GH_COMMENT_CALL_COUNT"] = str(count_file)
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
@@ -235,3 +251,34 @@ def test_no_state_file_calls_api() -> None:
         assert _state_file(
             state_dir
         ).exists(), "State file should be created on first run"
+
+
+def test_dirty_ai_verdict_keeps_real_greptile_score_and_is_cached() -> None:
+    """A dirty own-review routes to fix without poisoning the Greptile cache."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Legacy state has a fresh Greptile score but predates cached AI verdicts.
+        ts = int(time.time()) - 300
+        _state_file(state_dir).write_text(f"5:{ts}:{TEST_HEAD_SHA}")
+
+        result, call_count = _run_gate(
+            tmp, state_dir, greptile_score=5, ai_review_score=3
+        )
+        assert result.returncode == 0, result.stderr
+        assert call_count == 1, "Only the uncached AI verdict should be fetched"
+        assert "GREPTILE FIX #42" in result.stdout
+        assert "Greptile score: 5/5 · our AI review has open findings" in result.stdout
+
+        score, _, sha, verdict = _state_file(state_dir).read_text().split(":")
+        assert (score, sha, verdict.strip()) == ("5", TEST_HEAD_SHA, "dirty")
+
+        # The next sweep reuses both cached signals and respects the cooldown.
+        result, call_count = _run_gate(
+            tmp, state_dir, greptile_score=5, ai_review_score=3
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert call_count == 1, "Second sweep must not add another comments fetch"
+        assert "GREPTILE FIX #42" not in result.stdout

@@ -1046,3 +1046,90 @@ def read_record_pr_state_after(record_path: Path | str) -> str:
         return str(data.get("pr_state_after", "")).upper()
     except Exception:
         return ""
+
+
+# --- Observable-effect signal ---
+#
+# A worker can exit 0, log that it did the work, and still have changed
+# nothing on GitHub. Real instance (2026-08-10, gptme/gptme#3468): the worker
+# read the findings, made the fix, committed it, then every `git push` failed
+# on a pre-push guard. Exit status and the worker's own narration both said
+# success; the PR head OID never moved.
+#
+# So success must be corroborated by an OBSERVABLE EXTERNAL EFFECT, never by
+# the worker's own claim. The before/after PR snapshot the worker already
+# fetches (apply_pr_state_diff) gives that for free — no extra API call.
+
+EFFECT_OBSERVED = "observed"
+EFFECT_NONE = "none"
+EFFECT_UNKNOWN = "unknown"
+
+
+def derive_effect_signal(
+    payload: Mapping[str, Any],
+    *,
+    delivery_outcome: str = "",
+) -> str:
+    """Derive whether a session produced an observable external effect.
+
+    Reads only what the record already carries (``apply_pr_state_diff``
+    output plus the delivery-check verdict):
+
+    - head OID advanced        → a push landed              → ``observed``
+    - PR state transitioned    → merged/closed              → ``observed``
+    - merge commit appeared    → merged                     → ``observed``
+    - delivery outcome handled → a reply was posted         → ``observed``
+    - ``orphan_no_delivery``   → session ended with no reply → ``none``
+    - before/after both known and identical → nothing moved → ``none``
+    - otherwise (fields absent) → ``unknown``
+
+    ``unknown`` is deliberately distinct from ``observed``: absence of
+    evidence must never be recorded as evidence of effect.
+
+    .. warning::
+       Pass ``delivery_outcome`` **only when a delivery check actually ran**.
+       ``"handled"`` is also the permissive default the caller holds when no
+       check runs at all — feeding that default in would report observed
+       effect for every session that never looked.
+    """
+    delivery = str(delivery_outcome or "").strip().lower()
+    if delivery == "orphan_no_delivery":
+        return EFFECT_NONE
+    if delivery == "handled":
+        return EFFECT_OBSERVED
+
+    before_head = normalize_oid(payload.get("pr_head_oid_before"))
+    after_head = normalize_oid(payload.get("pr_head_oid_after"))
+    before_state = str(payload.get("pr_state_before") or "").strip().upper()
+    after_state = str(payload.get("pr_state_after") or "").strip().upper()
+    merge_before = normalize_oid(payload.get("pr_merge_commit_before"))
+    merge_after = normalize_oid(payload.get("pr_merge_commit_after"))
+
+    if before_head and after_head and before_head != after_head:
+        return EFFECT_OBSERVED
+    if before_state and after_state and before_state != after_state:
+        return EFFECT_OBSERVED
+    if merge_after and merge_after != merge_before:
+        return EFFECT_OBSERVED
+
+    # Nothing moved — but only call that "none" when we actually observed
+    # both sides of at least one signal.
+    if (before_head and after_head) or (before_state and after_state):
+        return EFFECT_NONE
+    return EFFECT_UNKNOWN
+
+
+def read_record_effect_signal(
+    record_path: Path | str,
+    *,
+    delivery_outcome: str = "",
+) -> str:
+    """:func:`derive_effect_signal` over a record file. ``unknown`` on any error."""
+    try:
+        with open(record_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            return EFFECT_UNKNOWN
+        return derive_effect_signal(data, delivery_outcome=delivery_outcome)
+    except Exception:
+        return EFFECT_UNKNOWN

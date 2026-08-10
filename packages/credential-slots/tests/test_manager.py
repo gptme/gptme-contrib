@@ -20,6 +20,7 @@ from credential_slots import (
     SwitchResult,
     compute_slot_fingerprint,
     read_slot_expiry,
+    reason_is_refreshable,
     slot_is_fresh,
 )
 
@@ -174,6 +175,49 @@ class TestSlotIsFresh:
         _write_slot(p, _ms_from_now(3600))
         ok, _ = slot_is_fresh(p)
         assert ok is True
+
+
+class TestReasonIsRefreshable:
+    """Classify ``slot_is_fresh`` reasons into probeable vs hopeless.
+
+    Driven through real slot states rather than hand-written strings so the
+    predicate can't drift from the reasons ``slot_is_fresh`` actually emits.
+    """
+
+    def test_expired_reason_is_refreshable(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600))
+        fresh, reason = mgr.slot_is_fresh("bob")
+        assert fresh is False
+        assert reason_is_refreshable(reason) is True
+
+    def test_within_grace_reason_is_refreshable(self, mgr: SlotManager) -> None:
+        """Regression: the grace reason says "expire**s**", not "expire**d**".
+
+        A naive ``"expired" in reason`` check misses this branch entirely, which
+        made ``--switch`` fail hard for a slot that only needed a token refresh.
+        """
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(60))
+        fresh, reason = mgr.slot_is_fresh("bob", grace_seconds=300)
+        assert fresh is False
+        assert "expired" not in reason.lower()  # the trap this predicate exists for
+        assert reason_is_refreshable(reason) is True
+
+    def test_missing_slot_reason_is_not_refreshable(self, mgr: SlotManager) -> None:
+        fresh, reason = mgr.slot_is_fresh("bob")
+        assert fresh is False
+        assert reason_is_refreshable(reason) is False
+
+    def test_unreadable_slot_reason_is_not_refreshable(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), expires_at_ms=None)
+        fresh, reason = mgr.slot_is_fresh("bob")
+        assert fresh is False
+        assert reason_is_refreshable(reason) is False
+
+    def test_valid_reason_is_not_refreshable(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(3600))
+        fresh, reason = mgr.slot_is_fresh("bob")
+        assert fresh is True
+        assert reason_is_refreshable(reason) is False
 
 
 class TestGetActiveSubscription:
@@ -341,6 +385,105 @@ class TestSwitchTo:
         result = mgr.switch_to("bob", "manual", force=True)
         assert result.ok is False
         assert mgr.get_active_subscription() == "alice"
+
+    def test_probe_ok_bypasses_expiry_check(self, mgr: SlotManager) -> None:
+        """probe_ok=True allows switching to a slot with an expired access token.
+
+        An expired access token with a valid refresh token is NOT a dead credential
+        — CC auto-refreshes on first use. When the caller has already confirmed this
+        via an online probe, probe_ok=True bypasses the offline freshness check.
+        """
+        self._seed(mgr, bob_ms=_ms_from_now(-3600), alice_ms=_ms_from_now(3600))
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+        assert result.ok is True
+        assert mgr.get_active_subscription() == "bob"
+
+    def test_slot_has_refresh_token(self, mgr: SlotManager) -> None:
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600))
+        assert mgr.slot_has_refresh_token("bob") is True
+
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600), refresh_token=None)
+        assert mgr.slot_has_refresh_token("bob") is False
+        assert mgr.slot_has_refresh_token("missing") is False
+
+    def test_probe_ok_ignored_when_slot_has_no_refresh_token(
+        self, mgr: SlotManager
+    ) -> None:
+        """probe_ok only earns the bypass for slots CC could actually refresh.
+
+        Without a refresh token there is nothing to auto-refresh, so an
+        "online probe said it works" assertion cannot be about this slot —
+        the offline expiry gate must stay in force.
+        """
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+        _write_slot(mgr.slot_path("bob"), _ms_from_now(-3600), refresh_token=None)
+        mgr.live_path.symlink_to(".credentials.json.alice")
+        lines: list[str] = []
+        mgr.logger = lines.append
+
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+
+        assert result.ok is False
+        assert "expired" in result.reason.lower()
+        assert mgr.get_active_subscription() == "alice"
+        assert any("probe_ok IGNORED" in line for line in lines)
+
+    def test_probe_ok_bypass_is_logged_distinctly(self, mgr: SlotManager) -> None:
+        """A skipped expiry gate must be distinguishable from an ordinary switch."""
+        self._seed(mgr, bob_ms=_ms_from_now(-3600), alice_ms=_ms_from_now(3600))
+        lines: list[str] = []
+        mgr.logger = lines.append
+
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+
+        assert result.ok is True
+        assert any("probe_ok BYPASS" in line for line in lines)
+
+    def test_probe_ok_refused_for_slot_with_refresh_token_but_no_expiresat(
+        self, mgr: SlotManager
+    ) -> None:
+        """probe_ok must not launder a malformed slot into the live symlink.
+
+        A payload with a valid ``refreshToken`` but a missing/non-numeric
+        ``expiresAt`` (truncated or rewritten mid-OAuth-refresh) fails
+        ``slot_is_fresh`` as "unreadable or no expiresAt" — a failure no token
+        refresh can fix, and one the docstring promises is refused regardless.
+        The refresh-token check alone does not catch it, so the bypass has to
+        be gated on the failure being expiry-class too.
+        """
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+        # refresh token present and valid, but no expiresAt at all
+        _write_slot(mgr.slot_path("bob"), None)
+        mgr.live_path.symlink_to(".credentials.json.alice")
+        lines: list[str] = []
+        mgr.logger = lines.append
+
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+
+        assert result.ok is False
+        assert "expiresat" in result.reason.lower()
+        assert mgr.get_active_subscription() == "alice"
+        assert any("probe_ok IGNORED" in line for line in lines)
+        assert not any("probe_ok BYPASS" in line for line in lines)
+
+    def test_probe_ok_refused_for_unreadable_slot(self, mgr: SlotManager) -> None:
+        """A slot whose JSON does not parse is refused even with probe_ok."""
+        _write_slot(mgr.slot_path("alice"), _ms_from_now(3600))
+        mgr.slot_path("bob").write_text("{ truncated json")
+        mgr.live_path.symlink_to(".credentials.json.alice")
+
+        result = mgr.switch_to("bob", "manual --probe-ok", probe_ok=True)
+
+        assert result.ok is False
+        assert mgr.get_active_subscription() == "alice"
+
+    def test_probe_ok_still_rejects_missing_slot(self, mgr: SlotManager) -> None:
+        """probe_ok=True bypasses freshness but not existence checks."""
+        mgr.live_path.symlink_to(".credentials.json.alice")
+        # No slot files at all
+        result = mgr.switch_to("bob", "probe", probe_ok=True)
+        assert result.ok is False
+        assert "missing" in result.reason.lower()
 
     def test_missing_slot_rejected(self, mgr: SlotManager) -> None:
         mgr.live_path.symlink_to(".credentials.json.alice")

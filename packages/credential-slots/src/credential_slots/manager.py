@@ -133,6 +133,17 @@ def read_slot_expiry(path: Path) -> datetime | None:
     return _parse_oauth_expiry(payload)
 
 
+#: Reason prefixes emitted by :func:`slot_is_fresh` when a slot fails purely
+#: because of its *access* token clock — already lapsed, or inside the grace
+#: window. Such a slot may still hold a valid refresh token. Kept as module
+#: constants so :func:`reason_is_refreshable` can never drift from the strings
+#: :func:`slot_is_fresh` actually produces.
+REASON_EXPIRED = "expired"
+REASON_WITHIN_GRACE = "expires within grace"
+
+_REFRESHABLE_REASON_MARKERS = (REASON_EXPIRED, REASON_WITHIN_GRACE)
+
+
 def slot_is_fresh(
     path: Path,
     *,
@@ -157,9 +168,35 @@ def slot_is_fresh(
     if expiry <= current + timedelta(seconds=grace_seconds):
         age = int((current - expiry).total_seconds())
         if age >= 0:
-            return False, f"expired {age // 60}m ago (at {expiry.isoformat()})"
-        return False, f"expires within grace ({-age}s left, at {expiry.isoformat()})"
+            return (
+                False,
+                f"{REASON_EXPIRED} {age // 60}m ago (at {expiry.isoformat()})",
+            )
+        return (
+            False,
+            f"{REASON_WITHIN_GRACE} ({-age}s left, at {expiry.isoformat()})",
+        )
     return True, f"valid until {expiry.isoformat()}"
+
+
+def reason_is_refreshable(reason: str) -> bool:
+    """Whether a :func:`slot_is_fresh` failure reason is *only* an expiry problem.
+
+    An expired access token is not necessarily a dead credential: Claude Code
+    refreshes it from the stored refresh token on first use. Callers can probe
+    such a slot online and, when the probe succeeds, switch into it with
+    ``probe_ok=True``.
+
+    Returns ``False`` for reasons no probe can fix (missing slot file,
+    unreadable/malformed slot payload) so those keep failing hard, and for
+    success reasons ("valid until ...").
+
+    Use this instead of substring-matching reason text at the call site: the
+    grace-window reason reads "expire\\ **s** within grace", so a naive
+    ``"expired" in reason`` check silently misses it.
+    """
+    lowered = reason.lower()
+    return any(lowered.startswith(marker) for marker in _REFRESHABLE_REASON_MARKERS)
 
 
 def _hash_file(path: Path) -> str | None:
@@ -355,6 +392,10 @@ class SlotManager:
             now=now,
         )
 
+    def slot_has_refresh_token(self, sub: str) -> bool:
+        """Return whether a named slot contains a usable refresh token."""
+        return _read_refresh_token(self.slot_path(sub)) is not None
+
     # ---- Drift detection ----
 
     def detect_live_slot_drift(self) -> DriftInfo | None:
@@ -544,6 +585,7 @@ class SlotManager:
         reason: str,
         *,
         force: bool = False,
+        probe_ok: bool = False,
     ) -> SwitchResult:
         """Flip the live symlink to point at ``sub``'s slot file.
 
@@ -554,6 +596,15 @@ class SlotManager:
         - If the target slot is expired or unreadable, the switch is
           refused **regardless of** ``force`` — landing on a known-bad
           credential just moves the 401 crash loop to the next run.
+          Pass ``probe_ok=True`` to bypass this check when an online probe
+          has already confirmed the slot's refresh token is valid (e.g. an
+          expired access token that CC will auto-refresh on first use).
+          ``probe_ok`` is honored **only** when the freshness failure is
+          expiry-class (see :func:`reason_is_refreshable`) *and* the slot
+          actually holds a refresh token — an unreadable/malformed slot, or
+          one with nothing to refresh, is still refused. Every bypass and
+          every ignored ``probe_ok`` is logged distinctly so a skipped safety
+          check is never indistinguishable from an ordinary switch.
         - On success, replaces the existing symlink atomically via a
           temp-symlink + ``os.replace`` (single rename syscall) so no
           concurrent reader sees a missing ``live_path``, then calls
@@ -590,9 +641,48 @@ class SlotManager:
 
         fresh, fresh_reason = self.slot_is_fresh(sub)
         if not fresh:
-            msg = f"refusing to switch to {sub}: {fresh_reason}"
-            self._log(msg)
-            return SwitchResult(ok=False, reason=msg)
+            # ``probe_ok`` is a caller assertion ("an online probe says this
+            # slot works"), so it only earns a bypass when *both* halves of the
+            # assertion can hold for this slot. It is deliberately narrow:
+            #
+            #  1. The failure must be expiry-class. A slot that is unreadable,
+            #     malformed, or missing ``expiresAt`` (truncated / rewritten
+            #     mid-OAuth-refresh) is not something a refresh can fix, and the
+            #     docstring promises those are refused regardless. Letting
+            #     ``probe_ok`` swallow the whole gate would hand any current or
+            #     future caller a malformed-slot bypass for free.
+            #  2. The slot must hold a refresh token. No refresh token, nothing
+            #     for CC to auto-refresh — the assertion cannot be about this
+            #     slot.
+            #
+            # Anything else keeps the offline gate in force, and says why.
+            bypass_expiry = False
+            if probe_ok and not reason_is_refreshable(fresh_reason):
+                self._log(
+                    f"probe_ok IGNORED for {sub}: {fresh_reason} — not an "
+                    "expiry-class failure, so no token refresh can fix it; "
+                    "applying the normal freshness gate"
+                )
+            elif probe_ok and _read_refresh_token(slot) is None:
+                self._log(
+                    f"probe_ok IGNORED for {sub}: slot holds no refresh token, "
+                    "so an expired access token cannot be auto-refreshed; "
+                    "applying the normal expiry gate"
+                )
+            elif probe_ok:
+                bypass_expiry = True
+                # Never let a skipped safety check look like an ordinary switch
+                # in the logs — this line is the audit trail for the bypass.
+                self._log(
+                    f"probe_ok BYPASS: skipping expiry gate for {sub} "
+                    f"(caller asserts an online probe confirmed the refresh token) "
+                    f"— {reason}"
+                )
+
+            if not bypass_expiry:
+                msg = f"refusing to switch to {sub}: {fresh_reason}"
+                self._log(msg)
+                return SwitchResult(ok=False, reason=msg)
 
         live = self.live_path
         tmp = self.creds_dir / (self.live_name + f".tmp{os.getpid()}")

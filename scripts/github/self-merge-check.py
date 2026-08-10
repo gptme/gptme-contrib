@@ -6,7 +6,9 @@ autonomous AI agent can safely merge its own PRs without human review.
 
 Policy summary:
 - CI must be green (or skipped)
-- Greptile review must be present and have no unresolved threads
+- A machine review must be present and clean: EITHER a Greptile review with no
+  unresolved threads, OR a high-confidence review from the agent's own
+  self-hosted AI reviewer (see "Accepting our own review" below)
 - PR must be authored by the authenticated user
 - Changed files must fall into a low-risk category (tests, docs, lessons, internal
   tooling, task metadata)
@@ -20,6 +22,43 @@ To allow cross-repo merges, either:
   category/CI/Greptile checks still apply.
 - Or clear WORKSPACE_REPO entirely (set it to empty string) to disable the
   cross-repo restriction (not recommended; widens the merge surface).
+
+Accepting our own review
+------------------------
+Greptile does not run on every repo, and when it is absent this gate used to be
+unsatisfiable — "Greptile review not found" blocked PRs that our own reviewer had
+already reviewed in full (observed on gptme/gptme-contrib#1382). The reviewer's
+verdict is now accepted as an *alternative* to Greptile. It is strictly an OR:
+when Greptile has reviewed, nothing about this gate's behaviour changes, and the
+marker is not even fetched.
+
+The strictness here is set by which direction the errors run. The reviewer's
+measured precision is 37%, but precision governs *false findings*, and a false
+finding lowers the score, which makes this gate more conservative — it costs a
+wasted round, not a bad merge. The dangerous direction is **recall**: a missed
+bug produces a clean score and an unreviewed merge. So every condition below
+exists to make "clean" mean "clean on real evidence", and anything short of that
+falls back to requiring Greptile rather than approving:
+
+- score is 5/5 — the rubric's only "nothing outstanding on this head" value.
+  Deliberately not env-overridable, unlike the Greptile floor.
+- the review is at the current head SHA (a review of an older push says nothing
+  about the code about to merge)
+- consensus is present and undegraded — no lost passes, no lost fan-out jobs, no
+  clamped agreement threshold. A degraded run reached its score on less evidence
+  than it asked for, which is exactly the recall failure. A **missing** consensus
+  record means no consensus stage ran at all (the hourly sweep's single-pass
+  reviews, or the agent engine); the reviewer documents that as "unknown, never
+  read as full consensus", so it does not satisfy this gate either. Get a
+  qualifying review with a consensus re-review: `ai-review.py OWNER/REPO N --force`.
+- the reviewer did not abstain (a null score is "no verdict" — the submodule
+  pointer-bump case — and must never read as a pass)
+- the marker comment was posted by the authenticated user. Anyone can write the
+  marker string into a comment on our PR; only our own account posts a real one.
+
+Unresolved findings do not need a separate check: 5/5 is defined as zero findings
+on the reviewed head, and the reviewer deletes its own superseded inline comments
+on each re-review.
 
 Usage:
     python3 scripts/github/self-merge-check.py <pr-url>
@@ -46,6 +85,10 @@ Environment:
                     "owner/repo:path-glob[,owner/repo:path-glob...]".
                     Uses repo-relative segment globs (* stays within one
                     directory segment; ** matches zero or more directories).
+    SELF_MERGE_ACCEPT_AI_REVIEW
+                    Set to 0/false/no/off to disable the self-hosted-AI-review
+                    alternative entirely, restoring the Greptile-only gate.
+                    Kill switch for the "Accepting our own review" path above.
 
 Exit codes:
     0   Eligible for self-merge
@@ -67,10 +110,20 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Iterator, cast
 
 MAX_GRAPHQL_PAGE_SIZE = 100
 DEFAULT_MIN_GREPTILE_SCORE = 5
+
+# The one score on the reviewer's 0-5 rubric that means "nothing outstanding on
+# the commit reviewed". Not env-overridable, deliberately: SELF_MERGE_MIN_GREPTILE_SCORE
+# can be lowered, and letting the same knob lower *this* floor would turn the
+# alternative path into the weakest link in the gate.
+AI_REVIEW_CLEAN_SCORE = 5
+# Shortest marker SHA prefix accepted when matching against the PR head. The
+# reviewer writes 12 hex chars; this only guards against a truncated/garbage
+# marker whose 1-2 char "sha" would prefix-match almost any head.
+MIN_SHA_PREFIX_LEN = 7
 
 DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
 SPEC_LIKE_DOCS = {
@@ -85,7 +138,79 @@ SPEC_LIKE_DOCS = {
     "TASKS.md",
     "OVERVIEW.md",
 }
-TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
+# Test detection is deliberately anchored (path COMPONENT / FILENAME), never a
+# raw substring: a false "test-only" classification lets non-test code merge
+# without human review, so this gate must fail closed.
+# Directory components that mark everything beneath them as tests.
+TEST_DIR_SEGMENTS = frozenset({"tests"})
+# ``e2e`` is trusted only as the repository-root suite. A nested ``src/e2e/`` or
+# ``packages/e2e/`` can hold shipped code; files there still qualify via an
+# explicit test filename such as ``*.spec.ts``.
+TEST_ROOT_DIR_SEGMENTS = frozenset({"e2e"})
+# Filename prefixes/markers (pytest, Go, Jest/Vitest `.test.` naming).
+TEST_FILENAME_PREFIXES = ("test_",)
+TEST_FILENAME_MARKERS = ("_test.", ".test.")
+# Files that are never "test-only", wherever they live — including under a test
+# directory. The gate's premise is that test changes are low-risk because they
+# only affect the suite. These break that premise: they define or launch the
+# environment CI executes, so a change here can run arbitrary commands while
+# presenting as a test edit. ``e2e/Dockerfile`` and ``e2e/docker-compose.yml``
+# are the concrete cases; ``tests/Dockerfile`` had the same hole beforehand.
+NEVER_TEST_FILENAMES = frozenset(
+    {
+        "containerfile",
+        "dockerfile",
+        "makefile",
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "tsconfig.json",
+    }
+)
+NEVER_TEST_FILENAME_PREFIXES = (
+    "dockerfile.",
+    "docker-compose.",
+    "docker_compose.",
+    "compose.",
+    # Playwright/Vitest run these before any test, commonly to start servers or
+    # seed databases — arbitrary process launch, not assertions.
+    "global-setup.",
+    "global_setup.",
+    "global-teardown.",
+    "global_teardown.",
+    "globalsetup.",
+    "globalteardown.",
+)
+# Shell/PowerShell scripts execute directly; test-runner configs (Playwright's
+# ``webServer.command``, Vitest's ``globalSetup``) name processes to launch.
+NEVER_TEST_SUFFIXES = (".sh", ".bash", ".zsh", ".ps1", ".dockerfile")
+NEVER_TEST_RUNNER_CONFIG_RE = re.compile(
+    r"^(?:(playwright|vitest|jest|mocha|cypress|karma)\.(config|workspace)"
+    r"|(?:start|launch)-server)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$",
+    re.IGNORECASE,
+)
+NEVER_TEST_PREFIXES = (".env",)
+NEVER_TEST_DEPENDENCY_FILENAMES = frozenset(
+    {
+        "requirements.txt",
+        "requirements.in",
+        "pipfile",
+        "gemfile",
+    }
+)
+# Playwright/Jest/Vitest spec files. Anchored to real JS/TS test extensions:
+# a bare ``.spec.`` substring would also match API/infrastructure specification
+# documents (``openapi.spec.yaml``, ``api.spec.json``, ``infra.spec.yaml``),
+# which are NOT tests and must not be self-mergeable as "test-only".
+# ``.mts``/``.cts`` are the TypeScript counterparts of ``.mjs``/``.cjs`` and are
+# just as valid as test modules, so they belong here. API-contract names remain
+# fail-closed because JavaScript/TypeScript can also serialize specifications.
+SPEC_TEST_FILE_RE = re.compile(
+    r"\.spec\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$", re.IGNORECASE
+)
+SPEC_DOCUMENT_PREFIX_RE = re.compile(
+    r"^(api|openapi|asyncapi|swagger|infra|schema|contract)\.spec\.", re.IGNORECASE
+)
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
     "scripts/deploy",
@@ -167,6 +292,7 @@ BOT_CONFIG_FILES = {
 }
 BOT_CONFIG_PREFIXES = (".github/",)
 SELF_MERGE_ALLOWED_PATHS_ENV = "SELF_MERGE_ALLOWED_PATHS"
+SELF_MERGE_ACCEPT_AI_REVIEW_ENV = "SELF_MERGE_ACCEPT_AI_REVIEW"
 GATE_HELPER_ENV = "GH_RATE_LIMIT_HELPER"
 GATE_HELPER_ENV_LEGACY = "BOB_GH_RATE_LIMIT_HELPER"
 FORCE_SELF_MERGE_CHECK_ENV = "FORCE_SELF_MERGE_CHECK"
@@ -206,6 +332,31 @@ def run_gh(args: list[str], timeout: int = 30) -> str:
         return result.stdout.strip()
     except (subprocess.TimeoutExpired, OSError):
         return ""
+
+
+def run_gh_checked(args: list[str], timeout: int = 30) -> str | None:
+    """`run_gh`, but `None` means *the call failed* rather than *the result was empty*.
+
+    `run_gh` collapses both into `""`, which is fine wherever an empty result and
+    a failed lookup lead to the same decision. It is not fine where absence is
+    treated as evidence: reading "no Greptile summary comment" out of a timed-out
+    request turns an unknown into a clean bill of health, and here that unknown
+    is what opens the AI-review fallback path.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            if result.stderr:
+                print(f"[gh error] {result.stderr.strip()}", file=sys.stderr)
+            return None
+        return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return None
 
 
 def get_gh_user() -> str:
@@ -656,7 +807,7 @@ def fetch_greptile_status(
     if not greptile_reviews:
         # Fall back to issue comments for summary-only reviews.
         # Use --paginate so Greptile's comment is found even on PRs with >30 comments.
-        comments_raw = run_gh(
+        comments_raw = run_gh_checked(
             [
                 "api",
                 f"repos/{repo}/issues/{pr_number}/comments",
@@ -666,7 +817,18 @@ def fetch_greptile_status(
             ],
             timeout=30,
         )
-        has_summary = bool(comments_raw and comments_raw.strip())
+        if comments_raw is None:
+            # Could not check — unknown, never absence. Reporting "no Greptile
+            # review" here would open the AI-review fallback on a transient
+            # timeout and could merge a PR that Greptile had unresolved feedback
+            # on, silently bypassing the review this gate exists to require.
+            return {
+                "has_review": False,
+                "unresolved": 0,
+                "total": 0,
+                "unknown": True,
+            }
+        has_summary = bool(comments_raw.strip())
         return {"has_review": has_summary, "unresolved": 0, "total": 0}
 
     def _parse_ts(ts: str) -> datetime:
@@ -695,6 +857,123 @@ def fetch_greptile_status(
             unresolved += 1
 
     return {"has_review": True, "unresolved": unresolved, "total": total}
+
+
+# --- Our own AI reviewer's explicit abstention -------------------------------
+#
+# The self-hosted reviewer (ErikBjare/bob#1122) can decline to review at all.
+# Today that happens on submodule-pointer bumps, where the diff is a SHA and no
+# source, so there is nothing in it to assess. It says so verbatim:
+#
+#     ℹ️ **Submodule pointer change only — not reviewed.**
+#     ...Treat this as *not reviewed*, not as approved.
+#
+# The gate could not see that. gptme/gptme-cloud#850 self-merged carrying exactly
+# that comment, pinning prod's submodule to a commit 5 ahead of gptme master —
+# a merge of two still-open PRs' heads, reviewed by nobody.
+#
+# This is deliberately a NEGATIVE signal only. An abstention blocks. The inverse
+# ("our AI review found nothing, therefore mergeable") is a separate, explicitly
+# gated mechanism -- see `fetch_ai_review_status`, added later -- with its own
+# staleness, consensus and identity requirements. Reaching this function's
+# `False` return means only "the reviewer did not decline"; it grants nothing.
+#
+# The reviewer encodes abstention as `score: null` in its structured marker.
+# Reading that field avoids coupling this safety gate to human-facing prose.
+AI_REVIEW_COMMENT_MARKER = "<!-- bob-ai-review {"
+AI_REVIEW_MARKER_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
+
+
+class _MarkerUnset:
+    """Sentinel for "no shared marker supplied, fetch it yourself".
+
+    Distinct from every meaningful marker value, including ``None`` ("fetched,
+    found nothing") and ``MARKER_LOOKUP_FAILED``, so a caller can pass a shared
+    result of any kind without it being mistaken for "not supplied".
+
+    Deliberately not reusing the module's older ``_UNSET``: that one is typed as
+    a bare ``object`` for the Greptile review-data parameter, and sharing it here
+    would make the two unrelated "not supplied" states indistinguishable to a
+    reader and to mypy.
+    """
+
+    __slots__ = ()
+
+
+_MARKER_UNSET = _MarkerUnset()
+
+
+def ai_review_abstained(
+    repo: str,
+    pr_number: int,
+    *,
+    expected_author: str,
+    head_sha: str = "",
+    marker_result: dict[str, Any]
+    | None
+    | _MarkerLookupFailed
+    | _MarkerUnset = _MARKER_UNSET,
+) -> bool | None:
+    """Whether our AI reviewer's latest review explicitly declined to review.
+
+    ``None`` means the review state could not be determined and callers must
+    fail closed. Only the latest marker comment counts: a later real review
+    supersedes an earlier abstention.
+
+    The marker is read through `_fetch_ai_review_marker`, which accepts markers
+    only from *expected_author*. That matters more here than it looks: the
+    marker is plain text in a comment body and is invisible in GitHub's rendered
+    view, so without an author check any account able to comment could paste a
+    `score: null` marker and permanently block the PR from merging. Sharing the
+    fetch with the positive path also means this gate is exercised by that
+    path's tests rather than through a bespoke jq pipeline of its own.
+    """
+    result = (
+        _fetch_ai_review_marker_checked(
+            repo, pr_number, expected_author=expected_author
+        )
+        if isinstance(marker_result, _MarkerUnset)
+        else marker_result
+    )
+    if isinstance(result, _MarkerLookupFailed):
+        # The lookup failed, so we cannot tell whether the reviewer abstained.
+        # Fail closed: inferring "not an abstention" from a failed call would
+        # reopen the gptme-cloud#850 hole on any flaky API response.
+        return None
+    if result is None:
+        # Looked, and there is no marker from our reviewer at all. That is not
+        # an abstention -- it is a PR our reviewer never posted on, which is the
+        # ordinary case in repos the reviewer does not run against. Blocking
+        # here would turn this narrow safety check into a universal blocker.
+        return False
+
+    marker = result
+
+    # An abstention only speaks for the commit it was written against. Without
+    # this, a `score: null` posted for an older head blocks the PR forever: the
+    # head moves, the new head gets reviewed cleanly, and the stale abstention
+    # still fires because this block runs unconditionally. The positive path
+    # already rejects stale markers via `_sha_matches_head`; matching that here
+    # keeps the two directions consistent.
+    #
+    # Only applied when a head is supplied and the marker carries a sha, so a
+    # marker without provenance keeps its previous fail-closed behaviour.
+    if head_sha:
+        marker_sha = str(marker.get("sha") or "")
+        if marker_sha and not _sha_matches_head(marker_sha, head_sha):
+            return False
+
+    if "score" in marker:
+        score = marker["score"]
+        if score is None:
+            return True
+        if isinstance(score, int) and not isinstance(score, bool) and 1 <= score <= 5:
+            return False
+        return None
+
+    # Markers written before score provenance was added are not abstentions:
+    # the old reviewer had no explicit structured abstention state.
+    return False
 
 
 # Known bot logins (exact match, case-insensitive) to exclude when counting
@@ -733,6 +1012,313 @@ def _is_ai_review_thread(comments: list[dict[str, Any]]) -> bool:
     if not comments:
         return False
     return _AI_REVIEW_FINDING_MARKER in (comments[0].get("body") or "")
+
+
+# Summary marker upserted by the self-hosted reviewer onto one issue comment per
+# PR: `<!-- bob-ai-review {json} -->`. The space before `{` is load-bearing — it
+# is what stops this pattern from also matching `<!-- bob-ai-review-finding -->`
+# and the per-finding `<!-- bob-ai-review-fp {...} -->`.
+_AI_REVIEW_MARKER_PREFIX = "<!-- bob-ai-review "
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _iter_ai_review_markers(body: str) -> Iterator[dict[str, Any]]:
+    """Yield complete JSON objects from self-hosted-review summary markers.
+
+    Regex cannot safely delimit JSON because real markers contain nested objects.
+    ``raw_decode`` consumes exactly one complete JSON value, after which we verify
+    the marker suffix so arbitrary prose containing the prefix is ignored.
+    """
+    offset = 0
+    while (start := body.find(_AI_REVIEW_MARKER_PREFIX, offset)) != -1:
+        json_start = start + len(_AI_REVIEW_MARKER_PREFIX)
+        try:
+            parsed, json_end = _JSON_DECODER.raw_decode(body, json_start)
+        except json.JSONDecodeError:
+            offset = json_start
+            continue
+        if body.startswith(" -->", json_end) and isinstance(parsed, dict):
+            yield parsed
+        offset = max(json_end, json_start + 1)
+
+
+def _ai_review_enabled() -> bool:
+    """Whether our own review may satisfy the machine-review requirement."""
+    raw = os.environ.get(SELF_MERGE_ACCEPT_AI_REVIEW_ENV, "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _sha_matches_head(marker_sha: str, head_sha: str) -> bool:
+    """Whether a marker's abbreviated SHA names the PR's current head."""
+    marker_sha = (marker_sha or "").strip().lower()
+    head_sha = (head_sha or "").strip().lower()
+    if len(marker_sha) < MIN_SHA_PREFIX_LEN or len(head_sha) < MIN_SHA_PREFIX_LEN:
+        return False
+    # The marker may abbreviate the authoritative head, never the reverse.
+    return head_sha.startswith(marker_sha)
+
+
+def _consensus_shortfall(consensus: Any) -> str | None:
+    """Why a review's consensus is not trustworthy evidence, or None if it is.
+
+    Mirrors the reviewer's own ``consensus_degraded`` (lost passes OR lost
+    fan-out jobs) and additionally rejects a *clamped* agreement threshold and a
+    run where nothing at all answered:
+
+    - lost passes / lost jobs: the score was reached on less evidence than was
+      requested. Job loss is the one that matters in practice -- a pass counts as
+      "answered" when any single one of its aspect jobs returns, so a wave can
+      lose two thirds of its jobs and still report every pass answered.
+    - clamped agreement: the filter that ran is weaker than the filter asked for.
+    - zero answered: every call failed, so there are no findings, so the score
+      computes to a clean 5/5 off an empty result. That is the exact recall
+      failure this whole function exists to catch.
+    """
+    if not isinstance(consensus, dict):
+        # Absent or malformed. The reviewer's contract is explicit that a missing
+        # record means "no consensus stage ran" (single-pass sweep review, or the
+        # agent engine) and must be read as unknown -- never as full consensus.
+        return "no consensus record (single-pass or agent review)"
+
+    def _int(key: str) -> int | None:
+        value = consensus.get(key)
+        # bool is an int subclass in Python, but it is never a valid count.
+        return value if type(value) is int else None
+
+    requested, answered = _int("requested"), _int("answered")
+    jobs_requested, jobs_answered = _int("jobs_requested"), _int("jobs_answered")
+    if requested is None or answered is None:
+        return "consensus record is missing pass counts"
+    if jobs_requested is None or jobs_answered is None:
+        return "consensus record is missing job counts"
+
+    # One pass is the sweep's non-consensus mode even if a marker explicitly
+    # serializes 1/1 counts. Qualifying evidence must contain multiple independent
+    # passes, not merely a present consensus object.
+    if requested < 2:
+        return "consensus requires at least 2 requested passes"
+    if answered < 1 or jobs_answered < 1:
+        return "no consensus pass answered"
+    if answered < requested:
+        return f"consensus degraded ({answered}/{requested} passes answered)"
+    if answered > requested:
+        return f"consensus has invalid pass counts ({answered}/{requested} answered)"
+    if jobs_answered < jobs_requested:
+        return f"consensus degraded ({jobs_answered}/{jobs_requested} jobs answered)"
+    if jobs_answered > jobs_requested:
+        return (
+            f"consensus has invalid job counts "
+            f"({jobs_answered}/{jobs_requested} answered)"
+        )
+
+    applied, asked = _int("min_agreement"), _int("min_agreement_requested")
+    if applied is None or asked is None:
+        return "consensus record is missing agreement thresholds"
+    # A threshold below 1 is not a weaker consensus, it is *no* consensus: a
+    # finding surviving on zero agreeing passes is exactly what a single pass
+    # already produces. Checking only `applied < asked` misses it, because a
+    # record with min_agreement 0 AND min_agreement_requested 0 is unclamped and
+    # would read as full consensus — while `answered >= 1` above is satisfied by
+    # one pass. That combination hands the gate a single-pass review dressed as
+    # consensus, gutting the recall guard this whole path exists to enforce.
+    # Negatives are rejected by the same test rather than a separate one; both
+    # mean "no agreement was required".
+    if applied < 1 or asked < 1:
+        return (
+            f"consensus agreement threshold below 1 "
+            f"(applied {applied}, requested {asked})"
+        )
+    if applied < asked:
+        return f"consensus agreement clamped to {applied} (requested {asked})"
+    return None
+
+
+class _MarkerLookupFailed:
+    """Sentinel: the marker lookup itself failed, so nothing can be concluded.
+
+    Distinct from ``None`` ("looked, found no marker"). Collapsing the two is
+    the failure mode this gate keeps re-learning: a timed-out or rate-limited
+    call must never be read as evidence about what a reviewer did or did not do.
+    """
+
+    __slots__ = ()
+
+
+MARKER_LOOKUP_FAILED = _MarkerLookupFailed()
+
+
+def _fetch_ai_review_marker_checked(
+    repo: str, pr_number: int, *, expected_author: str
+) -> dict[str, Any] | None | _MarkerLookupFailed:
+    """Latest review marker, distinguishing "no marker" from "lookup failed".
+
+    Returns the parsed marker, ``None`` when the fetch succeeded but the PR
+    carries no marker from *expected_author*, or ``MARKER_LOOKUP_FAILED`` when
+    the lookup could not be completed.
+    """
+    if not expected_author:
+        # Identity could not be established, so no marker can be attributed.
+        # This is a failed lookup, not an absence of markers.
+        return MARKER_LOOKUP_FAILED
+    raw = run_gh_checked(
+        [
+            "api",
+            f"repos/{repo}/issues/{pr_number}/comments",
+            "--paginate",
+            "--jq",
+            ".[] | {author: .user.login, body: .body}",
+        ],
+        timeout=30,
+    )
+    if raw is None:
+        return MARKER_LOOKUP_FAILED
+
+    latest: dict[str, Any] | None = None
+    latest_is_unreadable = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            comment = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(comment, dict) or comment.get("author") != expected_author:
+            continue
+        body = comment.get("body") or ""
+        # Last match wins within a body, and the last qualifying comment wins
+        # overall: the reviewer upserts a single comment, but a repo with legacy
+        # append-style comments should still be read at its most recent verdict.
+        parsed_any = False
+        for parsed in _iter_ai_review_markers(body):
+            latest = parsed
+            parsed_any = True
+        if parsed_any:
+            latest_is_unreadable = False
+        elif AI_REVIEW_COMMENT_MARKER in body:
+            # Our reviewer wrote a marker we cannot read. That is corruption,
+            # not absence -- reporting "no marker" here would let a mangled
+            # abstention read as "did not abstain".
+            #
+            # Tracked as a property of the MOST RECENT marker-bearing comment,
+            # not as "did we ever see one". Gating on `latest is None` instead
+            # would silently fall back to an older, still-parseable marker when
+            # the newest verdict is the corrupt one -- so a truncated abstention
+            # posted after a clean 5/5 would be read as that stale 5/5.
+            latest_is_unreadable = True
+
+    if latest_is_unreadable:
+        return MARKER_LOOKUP_FAILED
+    return latest
+
+
+def _fetch_ai_review_marker(
+    repo: str, pr_number: int, *, expected_author: str
+) -> dict[str, Any] | None:
+    """Latest self-hosted-review summary marker on the PR, parsed.
+
+    Only comments authored by *expected_author* are considered: the marker is
+    plain text in a comment body, so any account that can comment on the PR could
+    otherwise forge a clean verdict for a gate that then merges without a human.
+    An empty *expected_author* means the identity could not be established, and
+    the marker is not trusted at all.
+
+    A failed lookup is reported as ``None`` here, which the positive path treats
+    exactly as "no marker" -- correct for that direction, because both leave the
+    PR on the Greptile-only path and neither can make it *more* mergeable.
+    """
+    result = _fetch_ai_review_marker_checked(
+        repo, pr_number, expected_author=expected_author
+    )
+    if isinstance(result, _MarkerLookupFailed):
+        return None
+    return result
+
+
+def fetch_ai_review_status(
+    repo: str,
+    pr_number: int,
+    *,
+    head_sha: str,
+    expected_author: str,
+    marker_result: dict[str, Any]
+    | None
+    | _MarkerLookupFailed
+    | _MarkerUnset = _MARKER_UNSET,
+) -> dict[str, Any]:
+    """Whether our own reviewer's verdict is strong enough to stand in for Greptile.
+
+    Returns ``{"accepted": bool, "detail": str | None}``. ``detail`` explains a
+    refusal so the gate's "Greptile review not found" reason can say *why* the
+    fallback did not apply, rather than leaving the operator to guess whether the
+    reviewer ran at all.
+
+    Every refusal path falls back to today's Greptile-only behaviour. Nothing
+    here can make a PR *more* mergeable than the rest of the gate allows -- CI,
+    category, human threads and author identity are all still evaluated.
+    """
+    if not _ai_review_enabled():
+        return {"accepted": False, "detail": None}
+
+    if isinstance(marker_result, _MarkerUnset):
+        marker = _fetch_ai_review_marker(
+            repo, pr_number, expected_author=expected_author
+        )
+    elif isinstance(marker_result, _MarkerLookupFailed):
+        marker = None
+    else:
+        marker = marker_result
+    if marker is None:
+        return {"accepted": False, "detail": None}
+
+    if not _sha_matches_head(str(marker.get("sha") or ""), head_sha):
+        return {
+            "accepted": False,
+            "detail": (
+                f"AI review is stale (reviewed {marker.get('sha') or 'unknown'}, "
+                f"head is {head_sha[:12]})"
+            ),
+        }
+
+    score = marker.get("score")
+    if score is None:
+        return {"accepted": False, "detail": "AI reviewer abstained (no score)"}
+    # Type and threshold are separate refusals so the detail names the actual
+    # defect. Folding them together reported a malformed marker (score "5" as a
+    # string, or 5.0) as `AI review score 5/5 below 5/5` — a sentence that is
+    # false on its face and sends whoever reads it hunting for a scoring bug
+    # instead of the marker corruption that caused it. Both still fail closed.
+    # `type(...) is not int` rather than `isinstance`, matching `_int` above:
+    # bool is an int subclass, and `True` is not a review score.
+    if type(score) is not int:
+        return {
+            "accepted": False,
+            "detail": (
+                f"AI review score is not an integer ({type(score).__name__}: {score!r})"
+            ),
+        }
+    # Exactly the rubric's clean value, not "at least" it. `confidence_score`
+    # emits 1-5 and nothing else, so a 6 is not a better review — it is a
+    # corrupted or foreign marker, and `<` would wave it through as clean while
+    # every other check (author, SHA, consensus) still passed.
+    if score != AI_REVIEW_CLEAN_SCORE:
+        below = "below" if score < AI_REVIEW_CLEAN_SCORE else "outside the rubric,"
+        return {
+            "accepted": False,
+            "detail": f"AI review score {score}/5 {below} {AI_REVIEW_CLEAN_SCORE}/5",
+        }
+
+    shortfall = _consensus_shortfall(marker.get("consensus"))
+    if shortfall:
+        return {"accepted": False, "detail": f"AI review {shortfall}"}
+
+    return {
+        "accepted": True,
+        "detail": (
+            f"AI review {score}/5 at current head {str(marker.get('sha'))[:12]}, "
+            "full consensus"
+        ),
+    }
 
 
 def fetch_unresolved_human_threads(
@@ -957,8 +1543,54 @@ def is_spec_like_doc(path: str) -> bool:
     return "/" not in normalized and Path(path).name in SPEC_LIKE_DOCS
 
 
+def is_never_test_file(name: str) -> bool:
+    """Whether a filename can never count as a test, whatever directory holds it.
+
+    Fail-closed by construction: these define or launch what CI executes, so
+    treating them as "just a test" would let an environment change self-merge
+    unreviewed.
+    """
+    lowered = name.lower()
+    if lowered in NEVER_TEST_FILENAMES or lowered in NEVER_TEST_DEPENDENCY_FILENAMES:
+        return True
+    if lowered.startswith(NEVER_TEST_PREFIXES):
+        return True
+    if lowered.startswith(NEVER_TEST_FILENAME_PREFIXES):
+        return True
+    if lowered.endswith(NEVER_TEST_SUFFIXES):
+        return True
+    return bool(NEVER_TEST_RUNNER_CONFIG_RE.fullmatch(lowered))
+
+
 def is_test_file(path: str) -> bool:
-    return any(marker in path for marker in TEST_MARKERS)
+    """Whether a changed path is a test file.
+
+    Matching is anchored to path COMPONENTS and FILENAMES, never raw
+    substrings. Substring matching produced false "test-only" classifications
+    that would let unrelated code self-merge unreviewed, e.g.
+    ``src/contests/foo.py`` (``tests/``), ``src/ee2e/bar.py`` (``e2e/``),
+    ``src/protest_ui.py`` (``test_``) and ``openapi.spec.yaml`` (``.spec.``).
+
+    Living under a test directory is not sufficient: environment-defining files
+    such as ``e2e/Dockerfile`` are excluded first, so no directory rule can
+    admit them.
+    """
+    normalized = path.replace("\\", "/").removeprefix("./")
+    parts = normalized.split("/")
+    name = parts[-1]
+    if is_never_test_file(name):
+        return False
+    if any(part in TEST_DIR_SEGMENTS for part in parts[:-1]):
+        return True
+    if len(parts) > 1 and parts[0] in TEST_ROOT_DIR_SEGMENTS:
+        return True
+    if name.startswith(TEST_FILENAME_PREFIXES):
+        return True
+    if any(marker in name for marker in TEST_FILENAME_MARKERS):
+        return True
+    if SPEC_DOCUMENT_PREFIX_RE.match(name):
+        return False
+    return bool(SPEC_TEST_FILE_RE.search(name))
 
 
 def is_internal_tooling(path: str) -> bool:
@@ -1404,9 +2036,47 @@ def evaluate_pr(
     # Fetch once; pass to both helpers to avoid duplicate GraphQL round-trips.
     shared_review_data = _fetch_greptile_review_data(repo, number)
 
+    # One fetch, shared by both readers of the review marker: the Greptile-
+    # substitute path below and the abstention blocker after it. They ask
+    # different questions of the same comment, so fetching twice would double
+    # the API cost of every evaluation for no extra information.
+    shared_marker = _fetch_ai_review_marker_checked(
+        repo, number, expected_author=current_user
+    )
+
     greptile = fetch_greptile_status(repo, number, review_data=shared_review_data)
     if not greptile["has_review"]:
-        result.reasons.append("Greptile review not found")
+        # The alternative review is safe only after a successful GraphQL fetch
+        # proves there is no Greptile review. An API failure is unknown, not
+        # absence: accepting our marker there would turn a fail-closed outage into
+        # a path around potentially unresolved Greptile feedback.
+        # `greptile["unknown"]` covers the second way the lookup can fail: the
+        # GraphQL fetch succeeds and reports no reviews, but the summary-comment
+        # fallback inside `fetch_greptile_status` errors out. That path also
+        # yields `has_review: False`, so gating on `shared_review_data` alone
+        # would let a transient comment-API failure open the AI fallback.
+        if shared_review_data is None or greptile.get("unknown"):
+            result.reasons.append(
+                "Could not verify Greptile review state; refusing AI-review fallback"
+            )
+        else:
+            ai_review = fetch_ai_review_status(
+                repo,
+                number,
+                head_sha=result.head_sha,
+                expected_author=current_user,
+                marker_result=shared_marker,
+            )
+            if ai_review["accepted"]:
+                result.warnings.append(
+                    f"Greptile review not found; satisfied by self-hosted "
+                    f"AI review ({ai_review['detail']})"
+                )
+            else:
+                reason = "Greptile review not found"
+                if ai_review["detail"]:
+                    reason += f"; {ai_review['detail']}"
+                result.reasons.append(reason)
     elif greptile["unresolved"] > 0:
         result.reasons.append(
             f"Greptile has {greptile['unresolved']} unresolved review thread(s)"
@@ -1423,6 +2093,32 @@ def evaluate_pr(
         score = greptile_summary_score(repo, number)
         if score is not None and score < min_score:
             result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
+
+    # An explicit abstention blocks in its own right. If the structured review
+    # state cannot be read, fail closed rather than silently removing the gate.
+    ai_abstention = ai_review_abstained(
+        repo,
+        number,
+        expected_author=current_user,
+        head_sha=result.head_sha,
+        marker_result=shared_marker,
+    )
+    if ai_abstention is True:
+        result.reasons.append("AI review abstained — not reviewed")
+    elif ai_abstention is None and not greptile["has_review"]:
+        # Indeterminate blocks only when our own reviewer is the sole evidence.
+        #
+        # Failing closed unconditionally would let one flaky call on the
+        # issue-comments endpoint disqualify EVERY self-merge, including PRs
+        # Greptile reviewed cleanly with all threads resolved -- trading the
+        # deadlock this gate family just escaped for a wider one.
+        #
+        # When Greptile has reviewed, that is independent review evidence and
+        # this check is defence in depth, so its unavailability must not veto.
+        # When Greptile has NOT reviewed, the PR is leaning on our own reviewer,
+        # and an unreadable verdict is exactly the "nobody actually reviewed
+        # this" case (gptme-cloud#850) -- so it still fails closed there.
+        result.reasons.append("AI review status unavailable")
 
     human_threads = fetch_unresolved_human_threads(
         repo, number, review_data=shared_review_data

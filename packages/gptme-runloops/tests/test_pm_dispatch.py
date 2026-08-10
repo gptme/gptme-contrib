@@ -177,8 +177,54 @@ class TestClassifyLane:
             "merge_conflict",
             "greptile_needs_fix",
             "greptile_needs_improvement",
+            "greptile_convergence_adjudication",
         }
         assert SLOW_LANE_TYPES == expected
+
+    def test_greptile_convergence_adjudication_is_slow(self):
+        assert classify_lane(["greptile_convergence_adjudication"]) == "slow"
+
+
+class TestClassifyItemWorkTypeGreptileConvergence:
+    """P1 finding on PR #1400: greptile_convergence_adjudication must
+    route to a distinct bandit arm (greptile-convergence), not fall through
+    to notification-triage, AND must hit the slow lane (capable model).
+    """
+
+    def test_adjudication_is_greptile_convergence(self):
+        assert (
+            classify_item_work_type(["greptile_convergence_adjudication"])
+            == "greptile-convergence"
+        )
+
+    def test_adjudication_does_not_fall_through_to_notification_triage(self):
+        # Regression: pre-fix this returned "notification-triage"
+        # and the bandit would record the adjudication outcome under the wrong arm.
+        assert (
+            classify_item_work_type(["greptile_convergence_adjudication"])
+            != "notification-triage"
+        )
+
+    def test_adjudication_does_not_collide_with_greptile_fix(self):
+        # Two distinct Greptile-related work types; bandit arms must not be merged.
+        adjudication = classify_item_work_type(["greptile_convergence_adjudication"])
+        first_pass = classify_item_work_type(["greptile_needs_fix"])
+        assert adjudication != first_pass
+
+    def test_adjudication_takes_precedence_over_pr_update(self):
+        # If an item carries both, the deep review arm wins.
+        assert (
+            classify_item_work_type(["greptile_convergence_adjudication", "pr_update"])
+            == "greptile-convergence"
+        )
+
+    def test_adjudication_is_a_valid_pm_work_type(self):
+        from gptme_runloops.pm_bandit import PM_WORK_TYPES
+
+        assert (
+            classify_item_work_type(["greptile_convergence_adjudication"])
+            in PM_WORK_TYPES
+        )
 
 
 # --- Partition items ---
@@ -345,7 +391,7 @@ class TestDispatchLedger:
 class TestBuildFullLedgerEntry:
     """Schema-parity tests for the bash-compatible ledger builder."""
 
-    EXPECTED_KEYS = {
+    LEGACY_KEYS = {
         "timestamp",
         "phase",
         "lane",
@@ -362,10 +408,20 @@ class TestBuildFullLedgerEntry:
         "failures",
         "duration_seconds",
     }
+    # Added by the outcome-verification invariant: the recorded outcome is
+    # derived from exit status + observable effect, never asserted by the
+    # phase alone. See test_pm_dispatch_outcome.py.
+    DERIVED_OUTCOME_KEYS = {"exit_code", "effect", "outcome"}
+    EXPECTED_KEYS = LEGACY_KEYS | DERIVED_OUTCOME_KEYS
 
     def test_schema_keys_match_bash(self):
         entry = build_full_ledger_entry(phase="planned")
         assert set(entry.keys()) == self.EXPECTED_KEYS
+
+    def test_legacy_keys_are_not_dropped(self):
+        """Consumers read these by name — the change must stay additive."""
+        entry = build_full_ledger_entry(phase="planned")
+        assert self.LEGACY_KEYS <= set(entry.keys())
 
     def test_minimal_entry(self):
         entry = build_full_ledger_entry(phase="planned", lane="fast")
