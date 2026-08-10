@@ -42,7 +42,7 @@ from gptme_runloops.run_item import (
     RunItemHooks,
     _handle_cc_rate_limit,
     build_execution_plan,
-    clear_slot_event_marker,
+    clear_slot_event_markers,
     derive_lock_paths,
     derive_session_id,
     execute_plan,
@@ -1538,11 +1538,12 @@ def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) ->
     assert not attempts.exists()
 
 
-def test_clear_slot_event_marker_is_noop_without_slot_key(
+def test_clear_slot_event_markers_is_noop_without_slot_key(
     tmp_path, cooldown_dir
 ) -> None:
+    config = make_config(tmp_path)
     (cooldown_dir / "gptme-gptme-3468.event").write_text("fingerprint")
-    clear_slot_event_marker("")
+    assert clear_slot_event_markers(config, "") is False
     assert (cooldown_dir / "gptme-gptme-3468.event").exists()
 
 
