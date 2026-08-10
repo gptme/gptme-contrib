@@ -431,6 +431,7 @@ class ItemPromptKind(Enum):
     NOTIFICATION = "notification"
     MASTER_CI_FAILURE = "master_ci_failure"
     MERGE_CONFLICT = "merge_conflict"
+    GREPTILE_CONVERGENCE_ADJUDICATION = "greptile_convergence_adjudication"
 
 
 @dataclass(frozen=True)
@@ -712,6 +713,41 @@ gh pr view {number} --repo {repo} --json mergeable,mergeStateStatus,headRefName
 To resolve: create a worktree, rebase onto master, resolve conflicts, force-push.
 """
 
+_GREPTILE_CONVERGENCE_ADJUDICATION_ARM = """
+### Greptile Convergence Adjudication
+This PR ({repo}#{number}) hit the Greptile attempt cap: the escalation ledger recorded
+the maximum number of fix-session dispatches without the score clearing the floor. This session
+must adjudicate the remaining findings — **do NOT trigger another Greptile review**.
+
+```bash
+# Check the convergence state (round history, new-blocking count, stable rounds)
+python3 {workspace}/scripts/greptile-convergence.py --json {repo} {number}
+
+# Read the PR and all Greptile findings
+gh pr view {number} --repo {repo} --comments
+gh api repos/{repo}/pulls/{number}/comments \\
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\\n")[0:5] | join(" "))}'
+# Also read the Greptile summary comment (contains score-DRIVING findings and Confidence Score)
+gh api repos/{repo}/issues/{number}/comments \\
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | select(.body | test("Confidence Score"; "i")) | .body'
+
+# CI status
+gh pr checks {number} --repo {repo}
+```
+
+**Action**: Classify each remaining finding (blocking bug / security / nitpick / false positive).
+Fix blocking ones. Dismiss non-blocking ones with explicit, checkable reasons.
+Post **one** structured merge recommendation:
+- Fixed: list of findings addressed in this session
+- Remaining: non-blocking findings plus the dismissal reason for each
+- CI: current status
+- Domain risk: any fragile area warranting a maintainer manual test
+- Convergence: quote the `round_convergence` stable-round count from the detector
+
+Do NOT post raw `@greptileai review` — do NOT use greptile-helper.sh trigger.
+Stop at maintainer judgment. Merge-ready does not mean auto-merge.
+"""
+
 _ITEM_ARMS: dict[ItemPromptKind, str] = {
     ItemPromptKind.PR_UPDATE: _PR_UPDATE_ARM,
     ItemPromptKind.CI_FAILURE: _CI_FAILURE_ARM,
@@ -722,6 +758,9 @@ _ITEM_ARMS: dict[ItemPromptKind, str] = {
     ItemPromptKind.NOTIFICATION: _NOTIFICATION_ARM,
     ItemPromptKind.MASTER_CI_FAILURE: _MASTER_CI_FAILURE_ARM,
     ItemPromptKind.MERGE_CONFLICT: _MERGE_CONFLICT_ARM,
+    ItemPromptKind.GREPTILE_CONVERGENCE_ADJUDICATION: (
+        _GREPTILE_CONVERGENCE_ADJUDICATION_ARM
+    ),
 }
 
 

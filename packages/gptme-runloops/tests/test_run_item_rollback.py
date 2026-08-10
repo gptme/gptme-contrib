@@ -308,3 +308,56 @@ class TestRedeliveryCounter:
         path.write_text("garbage")
         assert rollback_failed_delivery(env, "gptme/gptme", 3468, "gptme/gptme#3468")
         assert path.read_text() == "1"
+
+
+class TestAdjudicationTimeoutTier:
+    """P3 (partial) — the adjudication arm and its timeout tier were unported.
+
+    Without the tier an adjudication item fell through to the 900s default
+    (or, with greptile fix instructions present, the 2700s re-review tier it
+    does not need). Adjudication never waits on a Greptile re-review.
+    """
+
+    def test_adjudication_gets_the_1500s_tier(self, env: RunItemConfig) -> None:
+        from gptme_runloops.run_item import timeout_tier
+
+        timeout, desc = timeout_tier(["greptile_convergence_adjudication"], False, env)
+        assert timeout == 1500
+        assert desc == "~20 minutes"
+
+    def test_assigned_issue_still_outranks_adjudication(
+        self, env: RunItemConfig
+    ) -> None:
+        from gptme_runloops.run_item import timeout_tier
+
+        assert timeout_tier(
+            ["assigned_issue", "greptile_convergence_adjudication"], False, env
+        ) == (env.assigned_issue_timeout, env.assigned_issue_time_desc)
+
+    def test_adjudication_outranks_the_greptile_fix_tier(
+        self, env: RunItemConfig
+    ) -> None:
+        # p-m.sh:507 puts adjudication BEFORE the pr_update+greptile branch:
+        # it must not inherit the 2700s re-review budget it never uses.
+        from gptme_runloops.run_item import timeout_tier
+
+        timeout, _ = timeout_tier(
+            ["greptile_convergence_adjudication", "pr_update"], True, env
+        )
+        assert timeout == 1500
+
+    def test_adjudication_arm_renders_and_forbids_re_triggering(self) -> None:
+        from gptme_runloops.prompt_templates import ItemPromptParams, build_investigate
+
+        params = ItemPromptParams(
+            repo="gptme/gptme", number=3468, workspace="/ws", detail="d"
+        )
+        out = build_investigate(["greptile_convergence_adjudication"], params)
+        assert "Greptile Convergence Adjudication" in out
+        assert "gptme/gptme#3468" in out
+        assert "do NOT trigger another Greptile review" in out
+        assert "greptile-helper.sh trigger" in out  # named as forbidden
+        # Token substitution must be complete and jq objects left intact.
+        assert "{repo}" not in out and "{number}" not in out
+        assert "{{" not in out
+        assert "{id, path, line" in out

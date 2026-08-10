@@ -263,6 +263,9 @@ class RunItemConfig:
     default_time_desc: str = "~10 minutes"
     assigned_issue_timeout: int = 1500
     assigned_issue_time_desc: str = "~20 minutes"
+    # Greptile convergence adjudication (p-m.sh:507-511): no re-review wait.
+    adjudication_timeout: int = 1500
+    adjudication_time_desc: str = "~20 minutes"
     greptile_fix_timeout: int = 2700
     greptile_fix_time_desc: str = "~35 minutes"
 
@@ -458,10 +461,18 @@ def predict_cc_trajectory_path(
 def timeout_tier(
     types: Sequence[str], has_greptile_fix: bool, config: RunItemConfig
 ) -> tuple[int, str]:
-    """Complexity-based timeout tiers (p-m.sh:513-528); order matters:
-    assigned_issue wins over the greptile-fix tier."""
+    """Complexity-based timeout tiers (p-m.sh:494-514); order matters:
+    assigned_issue wins over adjudication, which wins over the greptile-fix
+    tier.
+
+    Adjudication reads findings, classifies them, possibly fixes one blocking
+    issue and posts a structured recommendation — it never waits on a Greptile
+    re-review, so it takes the 1500s tier rather than the 2700s fix tier.
+    """
     if "assigned_issue" in types:
         return config.assigned_issue_timeout, config.assigned_issue_time_desc
+    if "greptile_convergence_adjudication" in types:
+        return config.adjudication_timeout, config.adjudication_time_desc
     if "pr_update" in types and has_greptile_fix:
         return config.greptile_fix_timeout, config.greptile_fix_time_desc
     return config.default_timeout, config.default_time_desc
