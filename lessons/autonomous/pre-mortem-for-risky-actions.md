@@ -11,6 +11,7 @@ match:
   session_categories: [infrastructure, cleanup]
 target_grade: alignment
 status: active
+confound_note: "LOO 2026-08-09: causal Δ=-0.079 (n=37, p=0.008) — LIKELY CONFOUNDED: session_categories:[infrastructure,cleanup] and keywords describe risky/destructive operations (force push, modifying production infrastructure). Sessions that trigger these keywords are already in high-risk scenarios with lower expected reward baseline. Rule is correct safety guidance; the causal delta reflects session baseline, not lesson harm."
 ---
 
 # Pre-Mortem for Risky Actions
