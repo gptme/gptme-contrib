@@ -301,6 +301,61 @@ def test_preheld_block_appends_after_optional_blocks() -> None:
     assert with_preheld.replace(render_preheld_claim_block("github:a/b#1"), "") == base
 
 
+# --- Unsubstituted placeholder regression ---
+
+
+def test_no_unsubstituted_angle_bracket_tokens_in_any_arm() -> None:
+    """No rendered investigate arm may retain a literal <...> token.
+
+    Latent-bug regression for the voice_postcall <stem> placeholder
+    (P6 commit a5b79048 carried the literal across from bash). _substitute
+    only replaces {name}-style tokens, so any leftover <...> survives
+    verbatim and breaks the command it is embedded in.
+
+    Scans every arm — including voice_postcall / erik_decision / greptile
+    arms — for the canonical substitution-target shape (regex:
+    ``<[a-z][a-z0-9_-]*>``).
+
+    The whitelist below names intentional *instructional* placeholders:
+    the agent is meant to read the surrounding context (the ``detail=``,
+    a task id from the play, today's date, etc.) and fill them in at
+    runtime. They are NOT substitution targets and are not bugs. When you
+    add a new <...> placeholder, decide which it is and either wire it
+    through ``ItemPromptParams._tokens()`` or append it here with a
+    one-line rationale — otherwise this test fails on your commit.
+    """
+    import re
+
+    pattern = re.compile(r"<[a-z][a-z0-9_-]*>")
+    # Instructional placeholders the agent fills in from context, not
+    # substitution targets. Keep sorted; cite the line where each appears.
+    intentional = frozenset(
+        {
+            "<record-path>",  # voice_postcall: agent extracts from detail.record=
+            "<task-id>",  # erik_decision: literal task id from the playbook
+            "<date>",  # erik_decision: today's date for the note heading
+            "<decision_id>",  # erik_decision: decision permalink id
+        }
+    )
+    arms = SIMPLE_ARMS + [
+        "master_ci_failure",
+        "voice_postcall",
+        "erik_decision",
+        "greptile_convergence_adjudication",
+    ]
+    leftovers = []
+    for arm_name in arms:
+        rendered = render_item_investigate(ItemPromptKind(arm_name), BOB_PARAMS)
+        for match in pattern.findall(rendered):
+            if match in intentional:
+                continue
+            leftovers.append((arm_name, match))
+    assert not leftovers, (
+        f"rendered arms retain unsubstituted <...> tokens: {leftovers}"
+        f"  (if intentional, add to the whitelist with a rationale)"
+    )
+
+
 def test_every_expected_golden_exists() -> None:
     expected = {f"investigate.{t}.bob" for t in SIMPLE_ARMS}
     expected |= {

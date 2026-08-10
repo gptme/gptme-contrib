@@ -583,6 +583,13 @@ class ItemPromptParams:
     greptile_helper: str | None = None
     pr_address_script: str | None = None
     poll_budget_sec: int = 1800
+    # Trace-ledger terminal-event regex used by the voice_postcall arm to
+    # verify the post-call.sh script wrote a row. Matches the three terminal
+    # rows post-call.sh can write: run_completed (happy path),
+    # stub_call_skip (transcript-empty stub call), run_failed (subprocess
+    # exit != 0). Default keeps callers from needing to set it; override per
+    # render for tests or future arm variants.
+    stem: str = "(run_completed|stub_call_skip|run_failed)"
 
     def to_prompt_context(self) -> PromptContext:
         """The step-2 context for the greptile investigate arms."""
@@ -610,6 +617,7 @@ class ItemPromptParams:
             "peer_agents": self.peer_agents,
             "greptile_helper": ctx.resolved_greptile_helper,
             "pr_address_script": ctx.resolved_pr_address_script,
+            "stem": self.stem,
         }
 
 
@@ -875,7 +883,7 @@ It is idempotent — re-running on a completed record is harmless.
 
 After the worker finishes, verify the trace ledger shows a terminal row:
 ```bash
-grep '<stem>' "{workspace}/state/voice-calls/post-call-events.tsv" | tail -3
+grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | tail -3
 ```
 """
 
