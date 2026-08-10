@@ -1361,9 +1361,13 @@ pending_fix_request() {
     # Served-ness: any reaction of ours on the trigger comment. Deliberately
     # broader than the 👀 we post — a superset can only suppress, never spam.
     local ours
+    # Must paginate. If our reaction falls outside the first page, we would read
+    # the comment as unserved and emit again on every cycle — an unbounded
+    # dispatch loop, the exact shape of the 29x @greptileai incident. --slurp
+    # wraps the pages in an outer array, hence the `.[][]` flatten.
     ours=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions" \
-        -F per_page=100 \
-        --jq "[.[] | select(((.user // {}).login // \"\") == \"$FIX_TRIGGER_LOGIN\")] | length" \
+        --paginate --slurp -F per_page=100 \
+        --jq "[.[][] | select(((.user // {}).login // \"\") == \"$FIX_TRIGGER_LOGIN\")] | length" \
         2>/dev/null) || return 0
     # Empty output means the call failed or returned something unparseable →
     # treat as served, same as a real reaction. Never as pending.

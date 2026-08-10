@@ -68,6 +68,7 @@ endpoint = ""
 jq_expr = ""
 method = "GET"
 fields = {}
+slurp = False
 i = 1
 while i < len(argv):
     a = argv[i]
@@ -85,6 +86,8 @@ while i < len(argv):
         i += 2; continue
     if a == "--paginate":
         i += 1; continue
+    if a == "--slurp":
+        slurp = True; i += 1; continue
     if a.startswith("-"):
         i += 1; continue
     endpoint = a; i += 1
@@ -102,7 +105,15 @@ if endpoint.endswith("/reactions"):
             fh.write(json.dumps({"endpoint": endpoint, "content": fields.get("content")}) + "\n")
         print("{}")
         sys.exit(0)
-    data = fixture.get("reactions", [])
+    # `reactions_pages` emulates a paginated response (list of pages); plain
+    # `reactions` is the single-page case. Real `gh --paginate --slurp` wraps
+    # every page in an outer array, so the stub must too — otherwise a jq
+    # filter that is wrong in production would still pass here.
+    pages = fixture.get("reactions_pages")
+    data = pages if pages is not None else [fixture.get("reactions", [])]
+    if not slurp:
+        # Without --slurp real gh returns only the first page.
+        data = data[0] if data else []
 else:
     # Every other REST call the gate makes (greptile comment sweep, merge
     # permission probes, ...) sees an empty result.
@@ -286,6 +297,99 @@ def test_single_trigger_emits_exactly_once_across_runs() -> None:
         assert (
             posts2 == []
         ), f"no reaction should be posted on a served trigger: {posts2}"
+
+
+def test_watermark_on_a_later_reactions_page_still_suppresses() -> None:
+    """The watermark must be found even when it is not on page 1.
+
+    A popular trigger comment can accumulate >100 reactions. If the served-ness
+    lookup reads only the first page, ours falls off the end, the comment reads
+    as unserved, and the gate re-emits on every cycle — an unbounded dispatch
+    loop, which is precisely the 29x @greptileai incident shape. This is why the
+    lookup paginates.
+    """
+    filler = [
+        {"id": n, "content": "heart", "user": {"login": f"fan{n}"}} for n in range(100)
+    ]
+    ours = [{"id": 999, "content": "eyes", "user": {"login": BOT}}]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result, posts = _run_gate(
+            tmp,
+            _fixture(_trusted_request(), reactions_pages=[filler, ours]),
+            state_dir=state_dir,
+            gh_log=tmp / "gh.log",
+        )
+        assert _fix_items(result) == [], (
+            "watermark on page 2 was missed — the gate would re-emit every cycle. "
+            f"stdout: {result.stdout}"
+        )
+        assert posts == [], f"no reaction should be posted on a served trigger: {posts}"
+
+
+def test_two_pending_triggers_collapse_to_one_dispatch() -> None:
+    """Two unserved trigger comments on one PR → exactly ONE dispatch.
+
+    The trigger means "act on this PR's outstanding review findings". That work
+    is the same regardless of how many times it was asked for, so requests
+    collapse. Emitting once per comment would let a maintainer double-post and
+    get two workers on identical findings.
+    """
+    comments = [
+        _comment(body=f"@{BOT} fix", comment_id=111, created_at="2026-08-10T12:00:00Z"),
+        _comment(body=f"@{BOT} fix", comment_id=222, created_at="2026-08-10T12:05:00Z"),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result, posts = _run_gate(
+            tmp,
+            _fixture(comments),
+            state_dir=state_dir,
+            gh_log=tmp / "gh.log",
+        )
+        assert (
+            len(_fix_items(result)) == 1
+        ), f"two triggers must collapse to one dispatch, got: {result.stdout}"
+        assert len(posts) == 1, f"exactly one watermark should be posted: {posts}"
+        assert "222" in posts[0]["endpoint"], (
+            "the newest trigger should carry the watermark, so a maintainer's "
+            f"most recent ask is the one marked served: {posts[0]}"
+        )
+
+
+def test_served_newest_trigger_does_not_reopen_an_older_one() -> None:
+    """Once the newest trigger is served, an older one must not re-fire.
+
+    Deliberate: the older comment asked for the same work that the newest one
+    already dispatched. Walking back to it would emit a second dispatch for
+    findings a worker is already handling.
+    """
+    comments = [
+        _comment(body=f"@{BOT} fix", comment_id=111, created_at="2026-08-10T12:00:00Z"),
+        _comment(body=f"@{BOT} fix", comment_id=222, created_at="2026-08-10T12:05:00Z"),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result, posts = _run_gate(
+            tmp,
+            _fixture(
+                comments,
+                reactions=[{"id": 1, "content": "eyes", "user": {"login": BOT}}],
+            ),
+            state_dir=state_dir,
+            gh_log=tmp / "gh.log",
+        )
+        assert _fix_items(result) == [], (
+            "an older trigger re-fired after the newest was served — this "
+            f"re-dispatches work already in flight. stdout: {result.stdout}"
+        )
+        assert posts == [], f"no reaction should be posted: {posts}"
 
 
 def test_existing_eyes_reaction_suppresses_emit() -> None:
