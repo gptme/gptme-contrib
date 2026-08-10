@@ -2400,6 +2400,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # explicit `--set completed ...` in the same edit: the user's value wins over
         # the automation in either direction.
         #
+        # A non-terminal task carrying completed is stale even if the reopen happened
+        # outside gptodo (for example by editing the Markdown directly). Replace that
+        # stale value on the next terminal transition so the latest completion gets
+        # the timestamp, unless this invocation explicitly supplies or clears it.
+        #
         # Both halves are gated on `_prior_state` — the state the task held *before*
         # this edit — because a post-edit-only check cannot distinguish a transition
         # from a re-assertion:
@@ -2424,11 +2429,14 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             op == "set" and field == "completed" and value is not None
             for op, field, value in changes
         )
-        if (
+        _is_terminal_transition = (
             _prior_state not in _terminal_states
             and _state_target in _terminal_states
             and _is_terminal_nonrecurring
-            and not post.metadata.get("completed")
+        )
+        if (
+            _is_terminal_transition
+            and not _completed_explicitly_set
             and not _completed_explicitly_cleared
         ):
             post.metadata["completed"] = datetime.now(timezone.utc).isoformat(timespec="seconds")

@@ -107,8 +107,8 @@ def test_edit_state_cancelled_auto_sets_completed(tmp_path: Path, monkeypatch) -
     assert before <= injected <= after
 
 
-def test_edit_state_done_does_not_override_existing_completed(tmp_path: Path, monkeypatch) -> None:
-    """If completed is already set, it should not be overwritten on done transition."""
+def test_edit_state_done_replaces_stale_completed(tmp_path: Path, monkeypatch) -> None:
+    """A task reopened outside gptodo gets a fresh completion timestamp."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     (tasks_dir / "my-task.md").write_text(ACTIVE_TASK_WITH_COMPLETED)
@@ -120,13 +120,8 @@ def test_edit_state_done_does_not_override_existing_completed(tmp_path: Path, mo
 
     tasks = load_tasks(tasks_dir)
     assert len(tasks) == 1
-    # YAML parses ISO datetimes to Python datetime objects; compare via fromisoformat
     stored = datetime.fromisoformat(str(tasks[0].metadata["completed"]))
-    if stored.tzinfo is None:
-        stored = stored.replace(tzinfo=timezone.utc)
-    assert stored == datetime(
-        2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc
-    ), "pre-existing completed must not change"
+    assert stored > datetime(2026, 6, 10, 12, tzinfo=timezone.utc)
 
 
 def test_edit_unrelated_field_does_not_inject_completed(tmp_path: Path, monkeypatch) -> None:
