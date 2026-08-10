@@ -110,16 +110,20 @@ NEVER_TEST_FILENAMES = frozenset(
         "package.json",
         "pyproject.toml",
         "setup.py",
+        "tsconfig.json",
     }
 )
 NEVER_TEST_FILENAME_PREFIXES = (
     "dockerfile.",
     "docker-compose.",
+    "docker_compose.",
     "compose.",
     # Playwright/Vitest run these before any test, commonly to start servers or
     # seed databases — arbitrary process launch, not assertions.
     "global-setup.",
+    "global_setup.",
     "global-teardown.",
+    "global_teardown.",
     "globalsetup.",
     "globalteardown.",
 )
@@ -127,8 +131,17 @@ NEVER_TEST_FILENAME_PREFIXES = (
 # ``webServer.command``, Vitest's ``globalSetup``) name processes to launch.
 NEVER_TEST_SUFFIXES = (".sh", ".bash", ".zsh", ".ps1", ".dockerfile")
 NEVER_TEST_RE = re.compile(
-    r"(^|\.)(config|conf|workspace)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$",
+    r"(^|[-_.])(config|conf|workspace|server)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$",
     re.IGNORECASE,
+)
+NEVER_TEST_PREFIXES = (".env",)
+NEVER_TEST_DEPENDENCY_FILENAMES = frozenset(
+    {
+        "requirements.txt",
+        "requirements.in",
+        "pipfile",
+        "gemfile",
+    }
 )
 # Playwright/Jest/Vitest spec files. Anchored to real JS/TS test extensions:
 # a bare ``.spec.`` substring would also match API/infrastructure specification
@@ -869,7 +882,9 @@ def is_never_test_file(name: str) -> bool:
     unreviewed.
     """
     lowered = name.lower()
-    if lowered in NEVER_TEST_FILENAMES:
+    if lowered in NEVER_TEST_FILENAMES or lowered in NEVER_TEST_DEPENDENCY_FILENAMES:
+        return True
+    if lowered.startswith(NEVER_TEST_PREFIXES):
         return True
     if lowered.startswith(NEVER_TEST_FILENAME_PREFIXES):
         return True
