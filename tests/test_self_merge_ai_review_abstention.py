@@ -231,7 +231,10 @@ def _evaluate(*comment_bodies: str) -> Any:
         "isDraft": False,
         "state": "OPEN",
         "reviewDecision": None,
-        "headRefOid": "abc123",
+        # Matches ABSTENTION_BODY's marker sha: the #850 regression is an
+        # abstention written for THIS head, and the gate now ignores abstentions
+        # left behind by an older one.
+        "headRefOid": "c096e25e50f8",
         "mergeStateStatus": "CLEAN",
     }
     with (
@@ -304,7 +307,10 @@ def test_unverifiable_greptile_state_refuses_the_ai_fallback() -> None:
         "isDraft": False,
         "state": "OPEN",
         "reviewDecision": None,
-        "headRefOid": "abc123",
+        # Matches ABSTENTION_BODY's marker sha: the #850 regression is an
+        # abstention written for THIS head, and the gate now ignores abstentions
+        # left behind by an older one.
+        "headRefOid": "c096e25e50f8",
         "mergeStateStatus": "CLEAN",
     }
     with (
@@ -336,3 +342,51 @@ def test_unverifiable_greptile_state_refuses_the_ai_fallback() -> None:
         )
     assert not result.eligible
     assert any("Could not verify Greptile review state" in r for r in result.reasons)
+
+
+def test_corrupt_newer_marker_does_not_fall_back_to_older_valid_one() -> None:
+    """A mangled newest verdict must fail closed, not read as the previous one.
+
+    Gating on "no valid marker at all" silently accepts a stale marker when the
+    newest marker-bearing comment is the corrupt one — so a truncated abstention
+    posted after a clean 5/5 would be read as that 5/5 and let the PR merge.
+    """
+    assert _abstained(CLEAN_REVIEW_BODY, "<!-- bob-ai-review {bad json") is None
+
+
+def test_a_readable_newer_marker_clears_an_earlier_corrupt_one() -> None:
+    """The converse: corruption is a property of the latest verdict, not history."""
+    assert _abstained("<!-- bob-ai-review {bad json", CLEAN_REVIEW_BODY) is False
+
+
+def test_abstention_for_an_older_head_is_ignored() -> None:
+    """A stale abstention must not block a PR whose head has since moved on.
+
+    Without a SHA check the abstention block, which runs unconditionally, keeps
+    firing forever: the head advances, the new head is reviewed cleanly, and the
+    old `score: null` still disqualifies the PR.
+    """
+    with patch.object(
+        self_merge_check, "run_gh_checked", _gh_returning(ABSTENTION_BODY)
+    ):
+        stale: bool | None = self_merge_check.ai_review_abstained(
+            "o/r",
+            1,
+            expected_author=REVIEWER,
+            head_sha="ffffffffffffffffffffffffffffffffffffffff",
+        )
+    assert stale is False
+
+
+def test_abstention_for_the_current_head_still_blocks() -> None:
+    """Pins that the staleness carve-out did not disable the check itself."""
+    with patch.object(
+        self_merge_check, "run_gh_checked", _gh_returning(ABSTENTION_BODY)
+    ):
+        current: bool | None = self_merge_check.ai_review_abstained(
+            "o/r",
+            1,
+            expected_author=REVIEWER,
+            head_sha="c096e25e50f8aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+    assert current is True

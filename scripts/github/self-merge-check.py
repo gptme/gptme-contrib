@@ -908,6 +908,7 @@ def ai_review_abstained(
     pr_number: int,
     *,
     expected_author: str,
+    head_sha: str = "",
     marker_result: dict[str, Any]
     | None
     | _MarkerLookupFailed
@@ -947,6 +948,21 @@ def ai_review_abstained(
         return False
 
     marker = result
+
+    # An abstention only speaks for the commit it was written against. Without
+    # this, a `score: null` posted for an older head blocks the PR forever: the
+    # head moves, the new head gets reviewed cleanly, and the stale abstention
+    # still fires because this block runs unconditionally. The positive path
+    # already rejects stale markers via `_sha_matches_head`; matching that here
+    # keeps the two directions consistent.
+    #
+    # Only applied when a head is supplied and the marker carries a sha, so a
+    # marker without provenance keeps its previous fail-closed behaviour.
+    if head_sha:
+        marker_sha = str(marker.get("sha") or "")
+        if marker_sha and not _sha_matches_head(marker_sha, head_sha):
+            return False
+
     if "score" in marker:
         score = marker["score"]
         if score is None:
@@ -1158,7 +1174,7 @@ def _fetch_ai_review_marker_checked(
         return MARKER_LOOKUP_FAILED
 
     latest: dict[str, Any] | None = None
-    saw_unparseable_marker = False
+    latest_is_unreadable = False
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -1177,13 +1193,21 @@ def _fetch_ai_review_marker_checked(
         for parsed in _iter_ai_review_markers(body):
             latest = parsed
             parsed_any = True
-        if not parsed_any and AI_REVIEW_COMMENT_MARKER in body:
+        if parsed_any:
+            latest_is_unreadable = False
+        elif AI_REVIEW_COMMENT_MARKER in body:
             # Our reviewer wrote a marker we cannot read. That is corruption,
             # not absence -- reporting "no marker" here would let a mangled
             # abstention read as "did not abstain".
-            saw_unparseable_marker = True
+            #
+            # Tracked as a property of the MOST RECENT marker-bearing comment,
+            # not as "did we ever see one". Gating on `latest is None` instead
+            # would silently fall back to an older, still-parseable marker when
+            # the newest verdict is the corrupt one -- so a truncated abstention
+            # posted after a clean 5/5 would be read as that stale 5/5.
+            latest_is_unreadable = True
 
-    if latest is None and saw_unparseable_marker:
+    if latest_is_unreadable:
         return MARKER_LOOKUP_FAILED
     return latest
 
@@ -1917,11 +1941,27 @@ def evaluate_pr(
     # An explicit abstention blocks in its own right. If the structured review
     # state cannot be read, fail closed rather than silently removing the gate.
     ai_abstention = ai_review_abstained(
-        repo, number, expected_author=current_user, marker_result=shared_marker
+        repo,
+        number,
+        expected_author=current_user,
+        head_sha=result.head_sha,
+        marker_result=shared_marker,
     )
     if ai_abstention is True:
         result.reasons.append("AI review abstained — not reviewed")
-    elif ai_abstention is None:
+    elif ai_abstention is None and not greptile["has_review"]:
+        # Indeterminate blocks only when our own reviewer is the sole evidence.
+        #
+        # Failing closed unconditionally would let one flaky call on the
+        # issue-comments endpoint disqualify EVERY self-merge, including PRs
+        # Greptile reviewed cleanly with all threads resolved -- trading the
+        # deadlock this gate family just escaped for a wider one.
+        #
+        # When Greptile has reviewed, that is independent review evidence and
+        # this check is defence in depth, so its unavailability must not veto.
+        # When Greptile has NOT reviewed, the PR is leaning on our own reviewer,
+        # and an unreadable verdict is exactly the "nobody actually reviewed
+        # this" case (gptme-cloud#850) -- so it still fails closed there.
         result.reasons.append("AI review status unavailable")
 
     human_threads = fetch_unresolved_human_threads(
