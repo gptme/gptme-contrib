@@ -76,6 +76,13 @@
 #   GitHub notifications clear when marked as read upstream, so old state files
 #   become inert.
 #
+#   Maintainer fix requests: a whole-line `@TimeToBuildBob fix` comment from an
+#   OWNER/MEMBER/COLLABORATOR forces a greptile_needs_fix item for that PR even
+#   when every organic route is quiet (clean AI verdict, Greptile 5/5, or inside
+#   the 1h cooldown). Served-ness is derived from GitHub — the 👀 reaction we post
+#   on the trigger comment IS the watermark, so exactly one item is emitted per
+#   trigger comment and no state file can drift. See check_fix_requests().
+#
 #   Item grouping: This gate emits one item per event (a PR can produce separate
 #   pr_update, ci_failure, and merge_conflict items). Callers that dispatch
 #   per-item sessions should group items by repo#number before dispatching to
@@ -1264,6 +1271,145 @@ check_own_pr_review_state() {
     done
 }
 
+# --- Maintainer-forced fix requests (`@TimeToBuildBob fix`) ---
+#
+# `@TimeToBuildBob review` (ai-review-sweep.py) forces a fresh REVIEW of a PR.
+# This is its sibling: it forces a WORKER to act on the PR's outstanding review
+# findings, by emitting the item type that Project Monitoring already routes to
+# the fix lane (greptile_needs_fix → slow lane → greptile-fix bandit arm).
+#
+# It exists because every organic route into that lane is gated on a signal the
+# maintainer may already disagree with: check_greptile_scores() only fires on a
+# sub-5 Greptile score or a `dirty` verdict from our own reviewer, and then only
+# once per hour per PR. A maintainer looking at a PR with findings they want
+# addressed *now* had no way to say so.
+#
+# ANTI-SPAM (hard requirement — see memory/feedback_greptile_spam_bug.md, where a
+# poll that waited for a reaction which could never appear posted `@greptileai
+# review` 29 times on one PR):
+#
+#   * Served-ness is DERIVED FROM GITHUB, never from a state file: a request is
+#     pending iff its comment carries no reaction from us. State files drift;
+#     the reaction is on the same object as the request.
+#   * The reaction is POSTED BEFORE the item is emitted, and a failed POST
+#     suppresses the emit. A watermark written after the fact leaves a window in
+#     which a concurrent (or retried) run re-emits — that is exactly the greptile
+#     incident's shape.
+#   * Every API failure is read as "no pending request". Guards that fail open
+#     are how the 29x spam happened.
+#
+# Detection reads the already-fetched PR payload (`comments` is part of
+# fetch_pr_data's GraphQL selection), so it costs ZERO extra API calls on PRs
+# with no trigger comment. Only a comment that literally matches the trigger
+# line costs a reactions lookup.
+#
+# SCOPE, inherited from that payload: fetch_pr_data() lists `--author $AUTHOR`
+# and drops drafts, so the trigger reaches non-draft PRs authored by the bot —
+# which is the case it exists for (a maintainer asking us to fix our own PR).
+# On someone else's PR it is silently inert; widening it means widening the
+# fetch, which is a separate cost decision.
+
+#: The account the trigger addresses, and whose reactions are the watermark.
+#: Matches ``REVIEWER_LOGIN`` in scripts/github/ai-review-sweep.py so the two
+#: triggers read identically to an operator.
+FIX_TRIGGER_LOGIN="TimeToBuildBob"
+
+#: Whole-line trigger, case-insensitive. Same shape as ai-review-sweep.py's
+#: ``TRIGGER_RE``: prose that merely mentions the phrase must not fire it.
+#: Trailing ``\r`` is allowed because GitHub stores comment bodies CRLF.
+FIX_TRIGGER_LINE_RE='^[ \t]*@'"$FIX_TRIGGER_LOGIN"'[ \t]+fix[ \t\r]*$'
+
+#: Anyone can comment on a public PR; only maintainers can spend worker budget.
+FIX_TRUSTED_ASSOCIATIONS='["OWNER","MEMBER","COLLABORATOR"]'
+
+#: Greptile's convention, reused: 👀 means "queued". Reactions do not touch the
+#: comment body and do not bump ``updated_at``.
+FIX_REACTION_QUEUED="eyes"
+
+# The REST id of the newest UNSERVED `@TimeToBuildBob fix` comment on this PR,
+# or nothing. Prints nothing on any failure (fail toward skip).
+# Args: <owner/repo> <pr_json from fetch_pr_data>
+pending_fix_request() {
+    local repo=$1 pr_json=$2
+
+    # jq's `^`/`$` anchor to the whole string, not to lines, so split first
+    # rather than depending on an inline-modifier dialect.
+    local comment_id
+    comment_id=$(printf '%s' "$pr_json" | jq -r \
+        --arg me "$FIX_TRIGGER_LOGIN" \
+        --arg author "$AUTHOR" \
+        --arg re "$FIX_TRIGGER_LINE_RE" \
+        --argjson trusted "$FIX_TRUSTED_ASSOCIATIONS" '
+        [ (.comments // [])[]
+          # Self-trigger guard: a worker that quotes the trigger phrase in its
+          # own reply (our review footer does exactly that) must never re-arm it.
+          | select((((.author // {}).login) // "") as $l
+                   | ($l | ascii_downcase) != ($me | ascii_downcase)
+                     and ($l | ascii_downcase) != ($author | ascii_downcase))
+          | select(((.authorAssociation) // "") | IN($trusted[]))
+          | select(((.body) // "") | split("\n")
+                   | any(test($re; "i")))
+          | { id: (((.url // "") | capture("issuecomment-(?<n>[0-9]+)")) // {n:""} | .n),
+              created: ((.createdAt) // "") }
+          | select(.id != "")
+        ] | sort_by(.created) | last | .id // empty
+    ' 2>/dev/null) || return 0
+    [ -z "$comment_id" ] && return 0
+    # Defensive: only ever interpolate a bare number into an API path.
+    [[ "$comment_id" =~ ^[0-9]+$ ]] || return 0
+
+    # Served-ness: any reaction of ours on the trigger comment. Deliberately
+    # broader than the 👀 we post — a superset can only suppress, never spam.
+    local ours
+    # Must paginate. If our reaction falls outside the first page, we would read
+    # the comment as unserved and emit again on every cycle — an unbounded
+    # dispatch loop, the exact shape of the 29x @greptileai incident. --slurp
+    # wraps the pages in an outer array, hence the `.[][]` flatten.
+    ours=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions" \
+        --paginate --slurp -F per_page=100 \
+        --jq "[.[][] | select(((.user // {}).login // \"\") == \"$FIX_TRIGGER_LOGIN\")] | length" \
+        2>/dev/null) || return 0
+    # Empty output means the call failed or returned something unparseable →
+    # treat as served, same as a real reaction. Never as pending.
+    [ -z "$ours" ] && return 0
+    [ "$ours" = "0" ] || return 0
+
+    printf '%s' "$comment_id"
+}
+
+# Emit greptile_needs_fix for every PR carrying an unserved maintainer fix
+# request. Exactly one emit per trigger comment.
+# Args: <owner/repo> <prs json>
+check_fix_requests() {
+    local repo=$1
+    local prs=$2
+    [ "$prs" = "[]" ] || [ -z "$prs" ] && return 0
+
+    echo "$prs" | jq -c '.[]' | while read -r pr_data; do
+        local pr_number pr_title comment_id
+        pr_number=$(echo "$pr_data" | jq -r '.number')
+        pr_title=$(echo "$pr_data" | jq -r '.title')
+
+        comment_id=$(pending_fix_request "$repo" "$pr_data")
+        [ -z "$comment_id" ] && continue
+
+        # Consume BEFORE emitting. This reaction IS the watermark: if the POST
+        # fails we must not emit, because nothing would stop the next cycle from
+        # emitting again. Costs at most one deferred dispatch; the alternative
+        # costs an unbounded dispatch loop.
+        if ! gh api -X POST \
+                "repos/${repo}/issues/comments/${comment_id}/reactions" \
+                -f "content=${FIX_REACTION_QUEUED}" \
+                >/dev/null 2>&1; then
+            continue
+        fi
+
+        emit_item "greptile_needs_fix" "$repo" "$pr_number" \
+            "${pr_title} [maintainer fix request]" \
+            "fix_request · maintainer asked us to act on outstanding review findings (comment ${comment_id})"
+    done
+}
+
 # Check if the bot account has already posted a maintainer-facing status comment
 # on this PR indicating that the ball is in the maintainer's court.
 #
@@ -1671,6 +1817,16 @@ for repo in $all_repos; do
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         items=$(check_merge_ready "$repo" "$live_pr_data" 2>/dev/null || true)
+        [ -n "$items" ] && repo_items+="$items"$'\n'
+
+        # Maintainer-forced `@TimeToBuildBob fix`. Uses the live lane (180s TTL)
+        # so a maintainer's comment is picked up in minutes rather than after the
+        # 480s cached lane; falls back to the cached lane when live returns [].
+        fix_input="$live_pr_data"
+        if [ "$fix_input" = "[]" ] || [ -z "$fix_input" ]; then
+            fix_input="$pr_data"
+        fi
+        items=$(check_fix_requests "$repo" "$fix_input" 2>/dev/null || true)
         [ -n "$items" ] && repo_items+="$items"$'\n'
 
         [ -n "$repo_items" ] && printf '%s' "$repo_items" > "$PARALLEL_TMPDIR/$repo_safe"
