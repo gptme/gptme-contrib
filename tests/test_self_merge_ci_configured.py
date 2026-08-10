@@ -275,6 +275,70 @@ def test_probe_scopes_sample_to_the_base_branch(
     assert "--base" not in captured[0], "unknown base must not be sent as a filter"
 
 
+def test_branch_scoped_silence_widens_before_failing_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1 regression: a branch-scoped sample needs a branch-aware conclusion.
+
+    A repo that gates `master` but not `dev` has a silent `--base dev` sample
+    while the repo-wide corroboration sees plenty of master-triggered runs. If
+    the scoped sample is judged against the repo-wide signal, every `dev` PR
+    reports indeterminate and is blocked forever — the same permanent-block
+    trade this change already refused once.
+
+    So a silent *scoped* sample is widened first: checks elsewhere in the repo
+    but none on this branch means this branch is genuinely ungated.
+    """
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **kwargs: object) -> _Proc:
+        calls.append(list(args))
+        if "runs?event=pull_request" in " ".join(args):
+            return _Proc(0, "13664")  # repo has plenty of PR runs, on master
+        if "--base" in args:
+            return _Proc(0, _pr_list(0, 0, 0))  # dev merges: no checks
+        return _Proc(0, _pr_list(16, 13))  # repo-wide: master merges have checks
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    assert smc.repo_gates_prs_with_checks("o/r", "dev") is False
+    assert any("--base" in c for c in calls), "scoped sample was never taken"
+    assert any(
+        c[:3] == ["gh", "pr", "list"] and "--base" not in c for c in calls
+    ), "silent scoped sample was not widened"
+
+
+def test_branch_scoped_silence_still_fails_closed_when_repo_is_silent_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Widening must not become an escape hatch from the corroboration.
+
+    Silent on the branch *and* silent repo-wide, but Actions has run on PRs:
+    that is the unrepresentative-sample case, and it must stay indeterminate.
+    """
+
+    def _run(args: list[str], **kwargs: object) -> _Proc:
+        if "runs?event=pull_request" in " ".join(args):
+            return _Proc(0, "1151")
+        return _Proc(0, _pr_list(0, 0))
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    assert smc.repo_gates_prs_with_checks("o/r", "master") is None
+
+
+def test_branch_scoped_silence_with_unusable_wide_sample_is_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the widening query fails, we cannot conclude anything."""
+
+    def _run(args: list[str], **kwargs: object) -> _Proc:
+        if "--base" in args:
+            return _Proc(0, _pr_list(0, 0))
+        return _NOT_FOUND
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    assert smc.repo_gates_prs_with_checks("o/r", "dev") is None
+
+
 @pytest.mark.parametrize(
     ("stdout", "expected"),
     [("13664", True), ("1", True), ("0", False), ("", None), ("nope", None)],

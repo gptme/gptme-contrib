@@ -1489,11 +1489,24 @@ def repo_gates_prs_with_checks(repo: str, base_branch: str = "") -> bool | None:
     concentrated on ``dev``.
 
     A negative sample is never trusted on its own. "None of the sampled PRs
-    reported checks" is ambiguous — the repo may genuinely not gate PRs, or the
-    sample may be unrepresentative (CI added after those merges; every sampled
-    merge came from a fork whose workflows were never approved). So ``False`` is
-    returned only when :func:`repo_has_pull_request_workflow_runs` corroborates
-    it; otherwise the answer is ``None`` and the caller fails closed.
+    reported checks" is ambiguous, with three explanations that need telling
+    apart:
+
+    1. This *branch* is not gated, though the repo gates another one. Detected
+       by widening the sample to the whole repo: checks elsewhere but none here
+       means this branch is genuinely ungated → ``False``.
+    2. The repo genuinely gates nothing. Confirmed when
+       :func:`repo_has_pull_request_workflow_runs` also reports zero →
+       ``False``.
+    3. The sample is unrepresentative — CI added after those merges, or every
+       sampled merge came from a fork whose workflows were never approved. This
+       is what is left when neither of the above holds → ``None``, fail closed.
+
+    The widening in (1) is not optional: without it the branch-scoped sample and
+    the repo-wide corroboration would be asking about different populations, and
+    a repo that gates ``master`` but not ``dev`` would report indeterminate for
+    every ``dev`` PR forever — the permanent block this change already refused
+    once.
 
     Known limits, both in the safe direction or self-healing:
 
@@ -1505,6 +1518,41 @@ def repo_gates_prs_with_checks(repo: str, base_branch: str = "") -> bool | None:
       reads ``None`` rather than ``False``, since the corroborating endpoint
       only knows about Actions. Fail-closed, so this costs a manual merge
       rather than a waived requirement.
+    """
+    scoped = _sample_pr_check_history(repo, base_branch)
+    if scoped is not False:
+        # True (gated) or None (unusable sample) — both are final.
+        return scoped
+
+    # The sample is silent. Before believing it, work out *why*.
+    if base_branch:
+        # A branch-scoped silence has an extra innocent explanation the
+        # repo-wide corroboration below cannot see: the repo gates another
+        # branch but not this one. Widen the sample to tell the two apart —
+        # otherwise a repo that gates `master` but not `dev` would report
+        # indeterminate for every `dev` PR forever, which is the permanent
+        # block this PR already refused once.
+        repo_wide = _sample_pr_check_history(repo, "")
+        if repo_wide is None:
+            return None
+        if repo_wide:
+            # Checks elsewhere in the repo, none on this branch: this branch is
+            # genuinely not gated.
+            return False
+
+    # Silent everywhere we can see. Only call that "ungated" if Actions has
+    # never run on a pull_request here either; otherwise the sample is
+    # unrepresentative and the honest answer is "don't know" — fail closed.
+    if repo_has_pull_request_workflow_runs(repo) is False:
+        return False
+    return None
+
+
+def _sample_pr_check_history(repo: str, base_branch: str) -> bool | None:
+    """Did any of the last N merged PRs (optionally into ``base_branch``) report checks?
+
+    ``None`` means the sample is unusable — the query failed, the payload was
+    unparseable, or there is no merged-PR history to judge from.
     """
     raw = run_gh(
         [
@@ -1529,19 +1577,13 @@ def repo_gates_prs_with_checks(repo: str, base_branch: str = "") -> bool | None:
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     if not isinstance(merged_prs, list) or not merged_prs:
-        # No merged-PR history to judge from — indeterminate, not "no CI".
         return None
     for merged_pr in merged_prs:
         if not isinstance(merged_pr, dict):
             return None
         if merged_pr.get("statusCheckRollup") or []:
             return True
-    # Silent sample. Only call it "ungated" if Actions has never run on a
-    # pull_request here either; otherwise the sample is unrepresentative and
-    # the honest answer is "don't know" — which fails closed.
-    if repo_has_pull_request_workflow_runs(repo) is False:
-        return False
-    return None
+    return False
 
 
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
