@@ -26,7 +26,12 @@ ZERO="0000000000000000000000000000000000000000"
 push_remote_refs=()
 all_deletions=true
 any_pushed=false
-while read -r _local_ref local_sha remote_ref _remote_sha; do
+# The `|| [ -n "$_local_ref" ]` handles a final line with no trailing newline
+# (e.g. stdin piped from a Python subprocess or `printf` without `\n`). Without
+# it, `read` returns non-zero on that last line and the loop drops it — which
+# silently skips validation for the only ref being pushed rather than failing
+# loudly. pre-push uses the same guard when it reads git's stdin.
+while read -r _local_ref local_sha remote_ref _remote_sha || [ -n "${_local_ref:-}" ]; do
     # Skip blank lines. An up-to-date push ("Everything up-to-date") makes git
     # invoke the hook with empty stdin; the caller may forward a single empty
     # line. Treating that as a real ref produced a false "no upstream" error.
@@ -53,27 +58,46 @@ fi
 upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
 
 if [ -z "$upstream" ]; then
-    # Check if this is a push to create new remote branch
-    new_branch_push=false
-    expected_ref="refs/heads/$current_branch"
+    # No upstream tracking branch.
+    #
+    # The hazard this guard exists for is the `git worktree add -b feat origin/master`
+    # + `push.default=upstream` trap, where a *plain* `git push` silently lands on
+    # master. That hazard is entirely about the push DESTINATION — and git resolves
+    # refspecs before invoking this hook, so every destination is already on stdin.
+    # Checking the destination is therefore both necessary and sufficient;
+    # additionally demanding an upstream adds no protection over that check.
+    #
+    # It does produce false blocks. An explicit refspec cannot go somewhere
+    # unintended, because the destination is written out in the command:
+    #     git push origin pr-3468:fix-3440-server-e2e
+    # The old rule only accepted destinations matching the *current branch name*,
+    # so it rejected every PR worker that checks a PR out under a local name
+    # differing from the PR's remote branch — teaching `--no-verify` and local
+    # branch renames as the workaround, which is the habit this hook exists to
+    # prevent. See gptme/gptme#3468 for the case that surfaced it.
+    #
+    # So: block only when a destination actually is master/main.
+    pushing_to_default=false
     for remote_ref in "${push_remote_refs[@]}"; do
-        if [ "$remote_ref" = "$expected_ref" ]; then
-            # Pushing to same-named branch on origin - likely creating new branch
-            new_branch_push=true
+        if [ "$remote_ref" = "refs/heads/master" ] || [ "$remote_ref" = "refs/heads/main" ]; then
+            pushing_to_default=true
             break
         fi
     done
 
-    if [ "$new_branch_push" = true ]; then
-        echo "ℹ️  No upstream set - assuming new branch push to origin/$current_branch"
-        exit 0
+    if [ "$pushing_to_default" = true ]; then
+        echo "❌ Error: Branch '$current_branch' has no upstream tracking branch"
+        echo "   and this push targets master/main — the wrong-destination case"
+        echo "   this guard exists to catch."
+        echo "   Fix with: git branch --set-upstream-to=origin/$current_branch"
+        echo ""
+        exit 1
     fi
 
-    echo "❌ Error: Branch '$current_branch' has no upstream tracking branch"
-    echo "   This can cause pushes to wrong location or branch."
-    echo "   Fix with: git branch --set-upstream-to=origin/$current_branch"
-    echo ""
-    exit 1
+    # Never downgrade a safety check silently — name what was allowed, so an
+    # unexpected destination is visible in the push output rather than implied.
+    echo "ℹ️  No upstream set - allowing push to explicit destination(s): ${push_remote_refs[*]}"
+    exit 0
 fi
 
 # Verify upstream is on origin (not a local branch)
