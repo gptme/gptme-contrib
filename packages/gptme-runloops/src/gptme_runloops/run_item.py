@@ -1692,6 +1692,16 @@ def run_post_session(
                         "--since",
                         outcome.started_iso,
                         "--require-thread-reply",
+                        # `--require-thread-reply` reads issues/{n}/comments,
+                        # which contains no inline review replies at all — so a
+                        # worker that posted one "fixed it" comment and left
+                        # every finding thread open scored `handled` while the
+                        # merge gate (which counts unresolved threads) still
+                        # blocked the PR. Unconditional here because the strict
+                        # check is self-scoping: it only tightens when our
+                        # reviewer actually has open findings on the item, and
+                        # is a no-op otherwise.
+                        "--require-inline-thread-reply",
                         "--post-fallback-reply",
                         "--session-id",
                         plan.session_id,

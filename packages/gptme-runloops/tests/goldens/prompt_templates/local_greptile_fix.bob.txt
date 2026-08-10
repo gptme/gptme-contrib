@@ -1,8 +1,16 @@
 ### Also: Address Greptile Review Findings
 
-This PR has a Greptile review below the score floor (or unresolved findings).
-The confidence score is driven by the **summary-comment body**, not the inline
-P2 nits. Fixing only inline threads leaves the score unchanged (fake remediation).
+This PR has a review below the score floor (or unresolved findings).
+
+**The two reviewers score differently — check which one flagged this PR.**
+- **Greptile**: the score is driven by the **summary-comment body**, not the
+  inline P2 nits. Fixing only inline threads leaves it unchanged (fake
+  remediation) — this is why STEP 1 below comes first.
+- **Our own reviewer** (`<!-- bob-ai-review -->`): the score is computed
+  arithmetically from the findings on the current head — any P2 caps it at 4/5,
+  one P1 at 3/5. Findings that could not be anchored to a diff line appear ONLY
+  in the summary body under "Comments outside the diff" and have no thread to
+  reply to, so read the summary for those as well.
 
 **STEP 1 — Read the score-DRIVING findings in the summary comment (do this FIRST):**
 ```bash
@@ -24,8 +32,37 @@ gh api repos/gptme/gptme-contrib/pulls/1234/comments \
 findings (P1/P2/P3). A fix that only touches inline nits forces an extra
 round-trip and the score does not move.
 
+**Closing the loop — required, and NOT the same thing as a PR comment.**
+
+An inline finding lives on a *review thread*. Posting to the PR conversation
+(`issues/1234/comments`) does not touch it: the thread stays open, and the
+self-merge gate counts unresolved threads. Every finding you address needs a
+reply **on its own thread**, and then a resolution.
+
+- **Fixed in code** — reply on the thread with the fix SHA, then let the
+  reviewer resolve it. Re-running the review verifies the finding no longer
+  reproduces and resolves the thread itself; that is evidence-based and
+  stronger than resolving by hand.
+  ```bash
+  # root comment ids: gh api repos/gptme/gptme-contrib/pulls/1234/comments --jq '.[] | {id, path, line}'
+  gh api repos/gptme/gptme-contrib/pulls/1234/comments/COMMENT_ID/replies -f body="Fixed in SHA — ..."
+  ```
+- **False positive, won't-fix, or an accepted trade-off** — no code change will
+  ever settle it, so reply AND resolve in one step. A reasoned rejection with
+  code citations IS a resolution; it is not a reason to leave the thread open.
+  ```bash
+  python3 /home/bob/bob/scripts/github/ai-review-dispose.py gptme/gptme-contrib 1234 --list
+  python3 /home/bob/bob/scripts/github/ai-review-dispose.py gptme/gptme-contrib 1234 \
+      --fingerprint FP --reason rejected --reply-file /tmp/why.md
+  ```
+  It is idempotent (a second run is a no-op) and can only ever touch threads our
+  own reviewer opened — never a human's.
+
+⚠️ Never resolve a human's review thread. Burying a person's comment is far
+worse than leaving a thread open.
+
 **After addressing the findings:**
-1. Push fixes and reply to each comment thread individually with the fix SHA
+1. Push fixes, then close the loop on every finding as described above
 2. Run `POLL_BUDGET_SEC=1800 bash /home/bob/bob/scripts/github/pr-address-wait-and-merge.sh --repo gptme/gptme-contrib 1234`
    - Exit 0: merged — done
    - Exit 2: Greptile re-reviewed and found new issues — read the new unresolved threads, fix them, push, reply, then re-run the command once more
@@ -35,8 +72,13 @@ round-trip and the score does not move.
 NEVER post raw `@greptileai review` comments — the pr-address-wait-and-merge.sh script triggers Greptile internally.
 Only call it AFTER you have actually pushed fix commits.
 
-**Do NOT loop to chase 5/5.** A confidence score is a holistic judgment, not a
-resolved-thread counter — some PRs will not reach 5/5 even after every stated
-finding is genuinely addressed. Address the summary-body findings, re-review
-**once**, and if the score still does not clear the floor, **stop and leave it
-for human review** (the self-merge gate correctly blocks below-floor merges).
+**Do NOT loop to chase 5/5.** Some PRs will not reach 5/5 even after every
+stated finding is genuinely addressed: Greptile's score is a holistic judgment
+rather than a resolved-thread counter, and our own reviewer re-reads the diff
+each round, so fixing two nits routinely surfaces two new ones. Address the
+findings, close their threads, re-review **once**, and if the score still does
+not clear the floor, **stop and leave it for human review** (the self-merge gate
+correctly blocks below-floor merges).
+
+Closing the threads is still required even when the score does not move — an
+open thread blocks the merge gate independently of the score.
