@@ -98,10 +98,22 @@ def gh_comments(monkeypatch: pytest.MonkeyPatch) -> Any:
     return _install
 
 
-def _status(gh_comments: Any, lines: list[str], head: str = HEAD_SHA) -> dict[str, Any]:
+def _status(
+    gh_comments: Any,
+    lines: list[str],
+    head: str = HEAD_SHA,
+    review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = (
+        [],
+        [],
+    ),
+) -> dict[str, Any]:
     gh_comments(lines)
     result: dict[str, Any] = smc.fetch_ai_review_status(
-        "gptme/gptme-contrib", 1382, head_sha=head, expected_author=AUTHOR
+        "gptme/gptme-contrib",
+        1382,
+        head_sha=head,
+        expected_author=AUTHOR,
+        review_data=review_data,
     )
     return result
 
@@ -307,11 +319,25 @@ def test_abstain_is_rejected(gh_comments: Any) -> None:
     assert "abstain" in (status["detail"] or "")
 
 
-@pytest.mark.parametrize("score", [1, 2, 3, 4])
-def test_sub_clean_scores_are_rejected(gh_comments: Any, score: int) -> None:
+@pytest.mark.parametrize("score", [1, 2, 3])
+def test_p0p1_scores_are_rejected_when_no_thread_proves_disposition(
+    gh_comments: Any, score: int
+) -> None:
+    """Scores claiming a P0/P1 on this head block unless a finding thread proves
+    it was disposed. With no finding thread at all (unanchored findings, or a
+    reviewer that stopped posting), we cannot verify disposition — fail closed."""
     status = _status(gh_comments, [_comment(_marker(score=score))])
     assert status["accepted"] is False
-    assert f"{score}/5" in (status["detail"] or "")
+    assert "no finding thread" in (status["detail"] or "")
+
+
+def test_p2_only_score_does_not_block(gh_comments: Any) -> None:
+    """A 4/5 means only P2 findings survive. Those demonstrably regenerate on
+    unchanged code (a frozen head scored 4,5,4,5,4 across six passes with zero
+    code changes), so they must not block — this is the core of replacing the
+    literal 5/5 score floor with a disposition check."""
+    status = _status(gh_comments, [_comment(_marker(score=4))])
+    assert status["accepted"] is True
 
 
 def test_marker_from_another_account_is_ignored(gh_comments: Any) -> None:
@@ -573,3 +599,139 @@ def test_empty_summary_comment_fetch_is_absence_not_unknown(
     )
     assert status["has_review"] is False
     assert not status.get("unknown")
+
+
+# --- disposition-based acceptance (replaces the 5/5 score floor) ------------
+#
+# The literal `score == 5` floor is a sampling event, not a converged state:
+# measured on gptme-contrib#1393 with the head frozen, six re-review passes
+# with zero code changes scored 4,5,4,5,4. So the gate now reads the finding
+# threads directly: no open P0/P1, every P0/P1 finding addressed (replied) AND
+# disposed (resolved), and surviving P2s never block.
+
+
+def _finding_thread(severity: str, *, resolved: bool, total: int) -> dict[str, Any]:
+    """One AI finding thread with the reviewer's marker, severity, and replies."""
+    body = (
+        f"{smc._AI_REVIEW_FINDING_MARKER}\n🛑 **{severity}** — the hash ignores .state"
+    )
+    return {
+        "isResolved": resolved,
+        "comments": {
+            "totalCount": total,
+            "nodes": [{"author": {"login": AUTHOR}, "body": body}],
+        },
+    }
+
+
+def test_open_p0_finding_blocks(gh_comments: Any) -> None:
+    """A P0 finding thread that is not resolved hard-blocks, whatever the score."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1))],
+        review_data=([], [_finding_thread("P0", resolved=False, total=1)]),
+    )
+    assert status["accepted"] is False
+    assert "not resolved" in (status["detail"] or "")
+
+
+def test_open_p1_finding_blocks(gh_comments: Any) -> None:
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=3))],
+        review_data=([], [_finding_thread("P1", resolved=False, total=1)]),
+    )
+    assert status["accepted"] is False
+    assert "P1" in (status["detail"] or "")
+    assert "not resolved" in (status["detail"] or "")
+
+
+def test_resolved_p1_with_reply_is_accepted(gh_comments: Any) -> None:
+    """A P1 that was replied to AND resolved is disposed — that is the gate."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=3))],
+        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is True
+
+
+def test_resolved_without_reply_blocks(gh_comments: Any) -> None:
+    """The #1389 failure: a resolved P0/P1 thread with no reply is not a
+    disposition. Resolution alone is not evidence anybody addressed it."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=3))],
+        review_data=([], [_finding_thread("P1", resolved=True, total=1)]),
+    )
+    assert status["accepted"] is False
+    assert "without a reply" in (status["detail"] or "")
+
+
+def test_resolved_without_reply_but_auto_resolved_is_accepted(
+    gh_comments: Any,
+) -> None:
+    """The reviewer itself retires a finding when a fix makes it stop
+    reproducing — the marker's `auto_resolved` ledger names those fingerprints.
+    That is evidence-based (the code change is the answer), so no reply is owed."""
+    fp = "abcdef123456"
+    body = (
+        f"{smc._AI_REVIEW_FINDING_MARKER}\n"
+        f'<!-- bob-ai-review-fp {{"fp": "{fp}"}} -->\n'
+        f"🛑 **P1** — the hash ignores .state"
+    )
+    thread = {
+        "isResolved": True,
+        "comments": {
+            "totalCount": 1,
+            "nodes": [{"author": {"login": AUTHOR}, "body": body}],
+        },
+    }
+    marker = _marker(score=3, auto_resolved=[fp])
+    status = _status(gh_comments, [_comment(marker)], review_data=([], [thread]))
+    assert status["accepted"] is True
+
+
+def test_surviving_p2_never_blocks(gh_comments: Any) -> None:
+    """Even an OPEN P2 finding thread must not block — P2s regenerate on
+    unchanged code, so gating on them is the treadmill failure mode."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=4))],
+        review_data=([], [_finding_thread("P2", resolved=False, total=1)]),
+    )
+    assert status["accepted"] is True
+
+
+def test_unanchored_p0p1_fails_closed(gh_comments: Any) -> None:
+    """A score <= 3 with no P0/P1 finding thread at all is unverifiable. The
+    finding may be unanchored (only in the summary body) or the reviewer may
+    have stopped posting. Fail closed rather than merge an unverified P0/P1."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=2))],
+        review_data=([], []),
+    )
+    assert status["accepted"] is False
+    assert "no finding thread" in (status["detail"] or "")
+
+
+def test_unreadable_thread_state_fails_closed(gh_comments: Any) -> None:
+    """review_data=None (fetch failed) is unknown, never clean — same fail-closed
+    property as the Greptile fallback."""
+    status = _status(gh_comments, [_comment(_marker())], review_data=None)
+    assert status["accepted"] is False
+    assert "could not read" in (status["detail"] or "")
+
+
+def test_p0p1_score_with_all_disposed_passes(gh_comments: Any) -> None:
+    """A score of 3 (one P1 reported) is acceptable when the P1 thread proves
+    it was replied to and resolved — the disposition is the truth, not the
+    score."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=3))],
+        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is True
+    assert "findings disposed" in (status["detail"] or "")
