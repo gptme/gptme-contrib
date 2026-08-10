@@ -262,6 +262,31 @@ def run_gh(args: list[str], timeout: int = 30) -> str:
         return ""
 
 
+def run_gh_checked(args: list[str], timeout: int = 30) -> str | None:
+    """`run_gh`, but `None` means *the call failed* rather than *the result was empty*.
+
+    `run_gh` collapses both into `""`, which is fine wherever an empty result and
+    a failed lookup lead to the same decision. It is not fine where absence is
+    treated as evidence: reading "no Greptile summary comment" out of a timed-out
+    request turns an unknown into a clean bill of health, and here that unknown
+    is what opens the AI-review fallback path.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            if result.stderr:
+                print(f"[gh error] {result.stderr.strip()}", file=sys.stderr)
+            return None
+        return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def get_gh_user() -> str:
     return run_gh(["api", "user", "-q", ".login"]) or ""
 
@@ -710,7 +735,7 @@ def fetch_greptile_status(
     if not greptile_reviews:
         # Fall back to issue comments for summary-only reviews.
         # Use --paginate so Greptile's comment is found even on PRs with >30 comments.
-        comments_raw = run_gh(
+        comments_raw = run_gh_checked(
             [
                 "api",
                 f"repos/{repo}/issues/{pr_number}/comments",
@@ -720,7 +745,18 @@ def fetch_greptile_status(
             ],
             timeout=30,
         )
-        has_summary = bool(comments_raw and comments_raw.strip())
+        if comments_raw is None:
+            # Could not check — unknown, never absence. Reporting "no Greptile
+            # review" here would open the AI-review fallback on a transient
+            # timeout and could merge a PR that Greptile had unresolved feedback
+            # on, silently bypassing the review this gate exists to require.
+            return {
+                "has_review": False,
+                "unresolved": 0,
+                "total": 0,
+                "unknown": True,
+            }
+        has_summary = bool(comments_raw.strip())
         return {"has_review": has_summary, "unresolved": 0, "total": 0}
 
     def _parse_ts(ts: str) -> datetime:
@@ -1001,10 +1037,15 @@ def fetch_ai_review_status(
                 f"({type(score).__name__}: {score!r})"
             ),
         }
-    if score < AI_REVIEW_CLEAN_SCORE:
+    # Exactly the rubric's clean value, not "at least" it. `confidence_score`
+    # emits 1-5 and nothing else, so a 6 is not a better review — it is a
+    # corrupted or foreign marker, and `<` would wave it through as clean while
+    # every other check (author, SHA, consensus) still passed.
+    if score != AI_REVIEW_CLEAN_SCORE:
+        below = "below" if score < AI_REVIEW_CLEAN_SCORE else "outside the rubric,"
         return {
             "accepted": False,
-            "detail": f"AI review score {score}/5 below {AI_REVIEW_CLEAN_SCORE}/5",
+            "detail": f"AI review score {score}/5 {below} {AI_REVIEW_CLEAN_SCORE}/5",
         }
 
     shortfall = _consensus_shortfall(marker.get("consensus"))
@@ -1539,7 +1580,12 @@ def evaluate_pr(
         # proves there is no Greptile review. An API failure is unknown, not
         # absence: accepting our marker there would turn a fail-closed outage into
         # a path around potentially unresolved Greptile feedback.
-        if shared_review_data is None:
+        # `greptile["unknown"]` covers the second way the lookup can fail: the
+        # GraphQL fetch succeeds and reports no reviews, but the summary-comment
+        # fallback inside `fetch_greptile_status` errors out. That path also
+        # yields `has_review: False`, so gating on `shared_review_data` alone
+        # would let a transient comment-API failure open the AI fallback.
+        if shared_review_data is None or greptile.get("unknown"):
             result.reasons.append(
                 "Could not verify Greptile review state; refusing AI-review fallback"
             )

@@ -997,19 +997,27 @@ def test_fetch_greptile_status_fallback_paginates_issue_comments() -> None:
     # Fallback REST call returns a Greptile comment ID (one line of output)
     fallback_response = "123456789"
 
-    with patch.object(
-        self_merge_check,
-        "run_gh",
-        side_effect=[
-            self_merge_check.json.dumps(graphql_page),
-            fallback_response,
-        ],
-    ) as mock_run_gh:
+    # The GraphQL fetch still goes through `run_gh`; the summary-comment
+    # fallback uses `run_gh_checked`, which distinguishes a failed call from an
+    # empty result so a timeout cannot read as "no Greptile review".
+    with (
+        patch.object(
+            self_merge_check,
+            "run_gh",
+            side_effect=[self_merge_check.json.dumps(graphql_page)],
+        ),
+        patch.object(
+            self_merge_check,
+            "run_gh_checked",
+            side_effect=[fallback_response],
+        ) as mock_fallback,
+    ):
         result = self_merge_check.fetch_greptile_status("gptme/gptme-contrib", 504)
 
     assert result["has_review"] is True
+    assert not result.get("unknown")
     # Verify --paginate was passed to the fallback REST call
-    fallback_call_args = mock_run_gh.call_args_list[1].args[0]
+    fallback_call_args = mock_fallback.call_args_list[0].args[0]
     assert "--paginate" in fallback_call_args
 
 

@@ -515,3 +515,47 @@ def test_greptile_unresolved_still_blocks_despite_clean_ai_review(
     result, _ = evaluate(greptile=greptile, comments=[_comment(_marker())])
     assert result.eligible is False
     assert any("2 unresolved review thread(s)" in r for r in result.reasons)
+
+
+@pytest.mark.parametrize("score", [6, 7, 100])
+def test_score_above_the_rubric_is_rejected(gh_comments: Any, score: int) -> None:
+    """`confidence_score` emits 1-5; a 6 is corruption, not a better review.
+
+    `score < AI_REVIEW_CLEAN_SCORE` waved these through as clean while author,
+    SHA and consensus checks all still passed — one corrupted numeric field was
+    enough to satisfy the whole alternative path.
+    """
+    status = _status(gh_comments, [_comment(_marker(score=score))])
+    assert status["accepted"] is False
+    assert "outside the rubric" in (status["detail"] or "")
+
+
+def test_failed_summary_comment_fetch_is_unknown_not_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient comment-API failure must not open the AI-review fallback.
+
+    `run_gh` returns "" for both "no Greptile comment" and "the call failed", so
+    `fetch_greptile_status` reported `has_review: False` on a timeout. That is
+    the same shape as a genuinely un-reviewed PR, and `evaluate_pr` only guarded
+    on the GraphQL fetch — so a flaky comment fetch could hand the AI marker a
+    PR that Greptile had unresolved feedback on.
+    """
+    monkeypatch.setattr(smc, "run_gh_checked", lambda *a, **k: None)
+    status = smc.fetch_greptile_status(
+        "gptme/gptme-contrib", 1382, review_data=([], [])
+    )
+    assert status["has_review"] is False
+    assert status["unknown"] is True
+
+
+def test_empty_summary_comment_fetch_is_absence_not_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side of the same coin: a real empty result stays actionable."""
+    monkeypatch.setattr(smc, "run_gh_checked", lambda *a, **k: "")
+    status = smc.fetch_greptile_status(
+        "gptme/gptme-contrib", 1382, review_data=([], [])
+    )
+    assert status["has_review"] is False
+    assert not status.get("unknown")
