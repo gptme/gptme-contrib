@@ -90,3 +90,44 @@ def test_cooldown_compares_the_verdict_too() -> None:
         "without this, a clean -> dirty flip on an unchanged head sits out the "
         "cooldown before PM hears about it"
     )
+
+
+def test_state_writes_use_the_fetch_time_not_the_current_time() -> None:
+    """Stamping $now on a cache hit makes the TTL immortal.
+
+    The persisted timestamp means "when we last fetched". If a cache hit rewrites
+    it with $now, every 2-minute cycle refreshes the TTL, so it never expires and
+    neither the score nor the verdict is ever refetched for that head. A PR whose
+    verdict is 'pending' — the normal state right after a push, before the sweep
+    reviews the new head — would stay pending forever and never reach the fix arm,
+    defeating the entire point of consulting our reviewer.
+
+    fetch_cache_ttl and cooldown_seconds are both 3600 by design (the source says
+    "= cooldown"), so preserving the fetch time keeps the nag cooldown correct
+    too: the TTL expiry and the cooldown expiry fall on the same instant.
+    """
+    body = _extract_function("check_greptile_scores")
+    writes = re.findall(r'^\s*echo "([^"]*)" > "\$state_file"$', body, re.MULTILINE)
+    assert writes, "expected greptile state writes"
+    stale = [w for w in writes if "${now}" in w]
+    assert not stale, (
+        f"state writes stamping $now: {stale} — on a cache hit this refreshes the "
+        "TTL every cycle and the verdict is never refetched"
+    )
+    assert all("${fetched_at}" in w for w in writes), writes
+
+
+def test_merge_ready_is_blocked_by_a_dirty_ai_verdict() -> None:
+    """A PR with open findings must not be reported merge-ready.
+
+    check_merge_ready gates on the Greptile score alone. While the score was being
+    overwritten with 3 for dirty verdicts, that check filtered them out by
+    accident; now that the real 5 is persisted, the accidental filter is gone and
+    the same PR would emit greptile_needs_fix AND merge_ready in one run — the
+    dispatcher could merge exactly what the fix arm is queued to repair.
+    """
+    body = _extract_function("check_merge_ready")
+    assert (
+        "cut -d: -f4" in body
+    ), "check_merge_ready must read the verdict field from the greptile state file"
+    assert '= "dirty"' in body, "…and skip the PR when that verdict is dirty"
