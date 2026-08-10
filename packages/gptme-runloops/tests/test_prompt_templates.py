@@ -132,11 +132,22 @@ def test_explicit_helper_paths_override_workspace_derivation() -> None:
         workspace="/ws",
         greptile_helper="/opt/tools/greptile.sh",
         pr_address_script="/opt/tools/pr-wait.sh",
+        dispose_script="/opt/tools/dispose.py",
     )
     cross = render_instruction(InstructionKind.CROSS_REPO_GREPTILE_REFRESH, ctx)
     assert "bash /opt/tools/greptile.sh trigger o/r 1" in cross
     assert "bash /opt/tools/pr-wait.sh --repo o/r 1" in cross
+    assert "python3 /opt/tools/dispose.py o/r 1 --list" in cross
+    # Every helper path must be overridable together: one un-overridden default
+    # is enough to point a non-Bob agent at a script that does not exist there.
     assert "/ws/scripts" not in cross
+
+
+def test_dispose_script_defaults_to_the_workspace() -> None:
+    cross = render_instruction(
+        InstructionKind.CROSS_REPO_GREPTILE_REFRESH, PromptContext("o/r", 1, "/ws")
+    )
+    assert "python3 /ws/scripts/github/ai-review-dispose.py o/r 1 --list" in cross
 
 
 def test_poll_budget_is_a_parameter_with_bash_default() -> None:

@@ -89,6 +89,7 @@ class PromptContext:
     workspace: str
     greptile_helper: str | None = None
     pr_address_script: str | None = None
+    dispose_script: str | None = None
     poll_budget_sec: int = 1800
 
     @property
@@ -96,6 +97,17 @@ class PromptContext:
         if self.greptile_helper is not None:
             return self.greptile_helper
         return f"{self.workspace}/scripts/github/greptile-helper.sh"
+
+    @property
+    def resolved_dispose_script(self) -> str:
+        """``ai-review-dispose.py`` — reply-into-a-thread AND resolve it.
+
+        Derived from the workspace like the other helpers rather than
+        hardcoded, since the repo lives at a different path on each host.
+        """
+        if self.dispose_script is not None:
+            return self.dispose_script
+        return f"{self.workspace}/scripts/github/ai-review-dispose.py"
 
     @property
     def resolved_pr_address_script(self) -> str:
@@ -158,12 +170,65 @@ findings (P1/P2/P3). {followup}
 # NOTE(parity): the local variant's intro never names the PR (no
 # repo#number interpolation) while the cross-repo intro does — preserved
 # from lib.sh:429 vs lib.sh:478.
+# --- Shared: closing the review loop ---
+#
+# Every fix variant used to end at "reply to each comment thread individually",
+# with no command for how, no mention of resolving, and no distinction between
+# the two GitHub APIs involved. Workers therefore reported back on the ISSUE
+# COMMENT stream, which leaves the review threads untouched.
+#
+# That is not cosmetic. `self-merge-check.py` counts UNRESOLVED review threads,
+# so a PR whose findings were genuinely handled still reads as unaddressed,
+# never becomes merge-ready, and never leaves the queue. Observed on
+# gptme/gptme#3468 (three findings answered in the stream at 16:33, three
+# threads still open) and #3516.
+#
+# Erik, 2026-08-10: "a reply AND a resolution sounds wise". A reply alone is
+# what we had and it is not enough.
+_CLOSE_THE_LOOP = """\
+**Closing the loop — required, and NOT the same thing as a PR comment.**
+
+An inline finding lives on a *review thread*. Posting to the PR conversation
+(`issues/{number}/comments`) does not touch it: the thread stays open, and the
+self-merge gate counts unresolved threads. Every finding you address needs a
+reply **on its own thread**, and then a resolution.
+
+- **Fixed in code** — reply on the thread with the fix SHA, then let the
+  reviewer resolve it. Re-running the review verifies the finding no longer
+  reproduces and resolves the thread itself; that is evidence-based and
+  stronger than resolving by hand.
+  ```bash
+  # root comment ids: gh api repos/{repo}/pulls/{number}/comments --jq '.[] | {id, path, line}'
+  gh api repos/{repo}/pulls/{number}/comments/COMMENT_ID/replies -f body="Fixed in SHA — ..."
+  ```
+- **False positive, won't-fix, or an accepted trade-off** — no code change will
+  ever settle it, so reply AND resolve in one step. A reasoned rejection with
+  code citations IS a resolution; it is not a reason to leave the thread open.
+  ```bash
+  python3 {dispose_script} {repo} {number} --list
+  python3 {dispose_script} {repo} {number} \\
+      --fingerprint FP --reason rejected --reply-file /tmp/why.md
+  ```
+  It is idempotent (a second run is a no-op) and can only ever touch threads our
+  own reviewer opened — never a human's.
+
+⚠️ Never resolve a human's review thread. Burying a person's comment is far
+worse than leaving a thread open."""
+
 _LOCAL_FIX_SECTIONS = {
     "title_suffix": "",
     "intro": (
-        "This PR has a Greptile review below the score floor (or unresolved findings).\n"
-        "The confidence score is driven by the **summary-comment body**, not the inline\n"
-        "P2 nits. Fixing only inline threads leaves the score unchanged (fake remediation)."
+        "This PR has a review below the score floor (or unresolved findings).\n"
+        "\n"
+        "**The two reviewers score differently — check which one flagged this PR.**\n"
+        "- **Greptile**: the score is driven by the **summary-comment body**, not the\n"
+        "  inline P2 nits. Fixing only inline threads leaves it unchanged (fake\n"
+        "  remediation) — this is why STEP 1 below comes first.\n"
+        "- **Our own reviewer** (`<!-- bob-ai-review -->`): the score is computed\n"
+        "  arithmetically from the findings on the current head — any P2 caps it at 4/5,\n"
+        "  one P1 at 3/5. Findings that could not be anchored to a diff line appear ONLY\n"
+        '  in the summary body under "Comments outside the diff" and have no thread to\n'
+        "  reply to, so read the summary for those as well."
     ),
     # NOTE(parity): the local STEP-1 comment is the 3-line explanatory form
     # ("— THESE are what move the score. Read them:"); the cross-repo one
@@ -182,9 +247,10 @@ _LOCAL_FIX_SECTIONS = {
     "followup": (
         "A fix that only touches inline nits forces an extra\n"
         "round-trip and the score does not move.\n"
+        "\n" + _CLOSE_THE_LOOP + "\n"
         "\n"
         "**After addressing the findings:**\n"
-        "1. Push fixes and reply to each comment thread individually with the fix SHA\n"
+        "1. Push fixes, then close the loop on every finding as described above\n"
         "2. Run `POLL_BUDGET_SEC={poll_budget_sec} bash {pr_address_script} --repo {repo} {number}`\n"
         "   - Exit 0: merged — done\n"
         "   - Exit 2: Greptile re-reviewed and found new issues — read the new unresolved threads, fix them, push, reply, then re-run the command once more\n"
@@ -200,11 +266,16 @@ _LOCAL_FIX_SECTIONS = {
         "Only call it AFTER you have actually pushed fix commits."
     ),
     "no_loop": (
-        "**Do NOT loop to chase 5/5.** A confidence score is a holistic judgment, not a\n"
-        "resolved-thread counter — some PRs will not reach 5/5 even after every stated\n"
-        "finding is genuinely addressed. Address the summary-body findings, re-review\n"
-        "**once**, and if the score still does not clear the floor, **stop and leave it\n"
-        "for human review** (the self-merge gate correctly blocks below-floor merges)."
+        "**Do NOT loop to chase 5/5.** Some PRs will not reach 5/5 even after every\n"
+        "stated finding is genuinely addressed: Greptile's score is a holistic judgment\n"
+        "rather than a resolved-thread counter, and our own reviewer re-reads the diff\n"
+        "each round, so fixing two nits routinely surfaces two new ones. Address the\n"
+        "findings, close their threads, re-review **once**, and if the score still does\n"
+        "not clear the floor, **stop and leave it for human review** (the self-merge gate\n"
+        "correctly blocks below-floor merges).\n"
+        "\n"
+        "Closing the threads is still required even when the score does not move — an\n"
+        "open thread blocks the merge gate independently of the score."
     ),
 }
 
@@ -221,6 +292,8 @@ _CROSS_REPO_REFRESH_SECTIONS = {
     ),
     "step2_qualifier": "",
     "followup": (
+        _CLOSE_THE_LOOP + "\n"
+        "\n"
         "After fixing AND pushing commits, re-trigger Greptile:\n"
         "```bash\n"
         "# ONLY call this AFTER pushing fix commits — NEVER trigger without actual fixes\n"
@@ -228,7 +301,7 @@ _CROSS_REPO_REFRESH_SECTIONS = {
         "```\n"
         "Then run `POLL_BUDGET_SEC={poll_budget_sec} bash {pr_address_script} --repo {repo} {number}` to wait for the re-review.\n"
         "- Exit 0: merged — done\n"
-        "- Exit 2: new findings — address them, push, reply, re-run once more\n"
+        "- Exit 2: new findings — address them, push, close their threads, re-run once more\n"
         "- Exit 3: poll budget exhausted — stop; next monitoring cycle will continue"
     ),
     "warning": (
@@ -364,6 +437,7 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
         "number": str(ctx.number),
         "greptile_helper": ctx.resolved_greptile_helper,
         "pr_address_script": ctx.resolved_pr_address_script,
+        "dispose_script": ctx.resolved_dispose_script,
         "poll_budget_sec": str(ctx.poll_budget_sec),
     }
     # Sections may themselves carry {repo}/{number}/... tokens — resolve
