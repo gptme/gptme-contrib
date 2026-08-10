@@ -105,6 +105,7 @@ TEST_FILENAME_MARKERS = ("_test.", ".test.")
 # are the concrete cases; ``tests/Dockerfile`` had the same hole beforehand.
 NEVER_TEST_FILENAMES = frozenset(
     {
+        "containerfile",
         "dockerfile",
         "makefile",
         "package.json",
@@ -130,8 +131,9 @@ NEVER_TEST_FILENAME_PREFIXES = (
 # Shell/PowerShell scripts execute directly; test-runner configs (Playwright's
 # ``webServer.command``, Vitest's ``globalSetup``) name processes to launch.
 NEVER_TEST_SUFFIXES = (".sh", ".bash", ".zsh", ".ps1", ".dockerfile")
-NEVER_TEST_RE = re.compile(
-    r"(^|[-_.])(config|conf|workspace|server)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$",
+NEVER_TEST_RUNNER_CONFIG_RE = re.compile(
+    r"^(?:(playwright|vitest|jest|mocha|cypress|karma)\.(config|workspace)"
+    r"|(?:start|launch)-server)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$",
     re.IGNORECASE,
 )
 NEVER_TEST_PREFIXES = (".env",)
@@ -148,9 +150,13 @@ NEVER_TEST_DEPENDENCY_FILENAMES = frozenset(
 # documents (``openapi.spec.yaml``, ``api.spec.json``, ``infra.spec.yaml``),
 # which are NOT tests and must not be self-mergeable as "test-only".
 # ``.mts``/``.cts`` are the TypeScript counterparts of ``.mjs``/``.cjs`` and are
-# just as unambiguously code (never specification documents), so they belong here.
+# just as valid as test modules, so they belong here. API-contract names remain
+# fail-closed because JavaScript/TypeScript can also serialize specifications.
 SPEC_TEST_FILE_RE = re.compile(
     r"\.spec\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$", re.IGNORECASE
+)
+SPEC_DOCUMENT_PREFIX_RE = re.compile(
+    r"^(api|openapi|asyncapi|swagger|infra|schema|contract)\.spec\.", re.IGNORECASE
 )
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
@@ -890,7 +896,7 @@ def is_never_test_file(name: str) -> bool:
         return True
     if lowered.endswith(NEVER_TEST_SUFFIXES):
         return True
-    return bool(NEVER_TEST_RE.search(lowered))
+    return bool(NEVER_TEST_RUNNER_CONFIG_RE.fullmatch(lowered))
 
 
 def is_test_file(path: str) -> bool:
@@ -919,6 +925,8 @@ def is_test_file(path: str) -> bool:
         return True
     if any(marker in name for marker in TEST_FILENAME_MARKERS):
         return True
+    if SPEC_DOCUMENT_PREFIX_RE.match(name):
+        return False
     return bool(SPEC_TEST_FILE_RE.search(name))
 
 

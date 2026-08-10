@@ -1606,7 +1606,16 @@ def test_api_spec_documents_are_not_test_files(path: str) -> None:
     assert self_merge_check.is_test_file(path) is False
 
 
-@pytest.mark.parametrize("path", ["openapi.spec.yaml", "api.spec.json"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "openapi.spec.yaml",
+        "api.spec.json",
+        "openapi.spec.js",
+        "api.spec.ts",
+        "infra.spec.mts",
+    ],
+)
 def test_classify_category_api_spec_documents_are_not_test_only(path: str) -> None:
     category, _reasons = self_merge_check.classify_category([path])
     assert category != "test-only"
@@ -1710,6 +1719,7 @@ def test_nested_e2e_directories_are_not_implicitly_test_files(path: str) -> None
     [
         # The four that shipped as self-mergeable when `e2e` was added.
         "e2e/Dockerfile",
+        "e2e/Containerfile",
         "e2e/docker-compose.yml",
         "e2e/docker_compose.yml",
         "e2e/playwright.config.ts",
@@ -1756,6 +1766,8 @@ def test_environment_defining_files_are_never_test_only(path: str) -> None:
         "e2e/fixtures/data.json",
         "tests/fixtures/setup.sql",
         "tests/data/config.json",
+        "tests/helpers/client-config.ts",
+        "tests/mock-server.ts",
         "tests/helpers/util.py",
         "tests/conftest.py",
     ],
