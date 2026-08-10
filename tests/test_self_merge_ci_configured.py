@@ -268,6 +268,13 @@ def _evaluate_with(
 
     monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
     monkeypatch.setattr(smc, "run_gh", _run_gh)
+    # `_fetch_ai_review_marker_checked` goes through `run_gh_checked`, which calls
+    # `subprocess.run` directly rather than through `run_gh` — so stubbing `run_gh`
+    # does not cover it. `evaluate_pr` fetches the marker unconditionally, so
+    # without this the CI-gate tests shell out to a real `gh`. None means "fetch
+    # succeeded, PR carries no marker"; the stubbed Greptile review above is what
+    # satisfies the review gate, leaving CI as the only thing under test.
+    monkeypatch.setattr(smc, "_fetch_ai_review_marker_checked", lambda *a, **k: None)
     return smc.evaluate_pr("o/r", 1, workspace_repos=["o/r"])
 
 
