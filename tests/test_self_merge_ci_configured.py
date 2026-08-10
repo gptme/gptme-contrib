@@ -217,6 +217,8 @@ def _evaluate_with(
     gates_prs: bool | None = None,
     *,
     use_real_ci_probe: bool = False,
+    is_cross_repository: bool = False,
+    author_association: str = "MEMBER",
 ) -> Any:
     """Run evaluate_pr against a PR whose statusCheckRollup came back empty."""
     pr = {
@@ -230,6 +232,7 @@ def _evaluate_with(
         "author": {"login": "TimeToBuildBob"},
         "reviews": [],
         "comments": [],
+        "isCrossRepository": is_cross_repository,
     }
     monkeypatch.setattr(smc, "fetch_pr", lambda *a, **k: pr)
     real_run_gh = smc.run_gh
@@ -258,6 +261,9 @@ def _evaluate_with(
     def _run_gh(args: list[str], **kwargs: Any) -> str:
         if use_real_ci_probe and args[:2] == ["pr", "list"]:
             return str(real_run_gh(args, **kwargs))
+        # pr_author_association's REST lookup — gh pr view --json cannot supply it.
+        if args[:2] == ["api", "repos/o/r/pulls/1"]:
+            return author_association
         return ""
 
     monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
@@ -306,6 +312,95 @@ def test_gated_repo_with_no_checks_blocks(monkeypatch: pytest.MonkeyPatch) -> No
     result = _evaluate_with(monkeypatch, True)
     assert not result.eligible
     assert any("anomalous" in r for r in result.reasons)
+
+
+@pytest.mark.parametrize("association", sorted(smc.UNAPPROVED_WORKFLOW_ASSOCIATIONS))
+def test_unapproved_fork_workflows_name_the_approval_button(
+    monkeypatch: pytest.MonkeyPatch, association: str
+) -> None:
+    """The un-approved-workflow case must be reported as itself.
+
+    Real-world control: gptme-contrib#1232 is a fork PR by a
+    FIRST_TIME_CONTRIBUTOR that sat at zero check runs for 36 days because
+    GitHub held its workflows behind "Approve and run workflows". The repo's
+    `pre-commit.yml` fires on every PR to master with no path filter — nothing
+    was missing but the button press. Reporting that as "no CI configured"
+    sends the reader hunting for a workflow file that exists, and the un-run
+    job would have caught a real defect (a stray `END` heredoc marker).
+    """
+    result = _evaluate_with(
+        monkeypatch,
+        True,
+        is_cross_repository=True,
+        author_association=association,
+    )
+    assert not result.eligible
+    reason = " ".join(result.reasons)
+    assert "Approve and run workflows" in reason
+    assert "no workflow file is missing" in reason
+    assert association in reason
+
+
+def test_member_fork_gets_the_generic_anomaly_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fork provenance alone must not trigger the approval message.
+
+    Control: gptme-contrib#1240 is *also* a fork PR, but its author is a
+    MEMBER, so its workflows ran automatically (17 checks). Keying the message
+    off `isCrossRepository` alone would misreport it.
+    """
+    result = _evaluate_with(
+        monkeypatch, True, is_cross_repository=True, author_association="MEMBER"
+    )
+    assert not result.eligible
+    reason = " ".join(result.reasons)
+    assert "Approve and run workflows" not in reason
+    assert "anomalous" in reason
+
+
+def test_same_repo_first_timer_gets_the_generic_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Branch PRs are not held for approval, so the button is not the answer."""
+    result = _evaluate_with(
+        monkeypatch,
+        True,
+        is_cross_repository=False,
+        author_association="FIRST_TIME_CONTRIBUTOR",
+    )
+    assert "Approve and run workflows" not in " ".join(result.reasons)
+
+
+def test_generic_message_still_lists_pending_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stricter repo settings hold more associations, so keep it in the list."""
+    result = _evaluate_with(monkeypatch, True, author_association="CONTRIBUTOR")
+    assert any("pending maintainer approval" in r for r in result.reasons)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("FIRST_TIME_CONTRIBUTOR\n", "FIRST_TIME_CONTRIBUTOR"),
+        ("member", "MEMBER"),
+        ("", ""),
+    ],
+)
+def test_pr_author_association(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, expected: str
+) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(0, stdout))
+    assert smc.pr_author_association("o/r", 1) == expected
+
+
+def test_pr_author_association_is_unreadable_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An API failure must degrade to the generic message, not crash."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _NOT_FOUND)
+    assert smc.pr_author_association("o/r", 1) == ""
 
 
 def test_ungated_repo_is_waived(monkeypatch: pytest.MonkeyPatch) -> None:

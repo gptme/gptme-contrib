@@ -479,7 +479,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository",
         ]
     )
     if not raw:
@@ -784,6 +784,38 @@ def fetch_unresolved_human_threads(
         "total": total,
         "authors": sorted(unresolved_authors),
     }
+
+
+#: ``author_association`` values whose workflow runs GitHub can hold behind the
+#: "Approve and run workflows" button. A repo's default setting ("require
+#: approval for first-time contributors") gates exactly these; stricter
+#: settings gate more, which is why the generic message still lists pending
+#: approval as a possible cause.
+#:
+#: Observed: gptme-contrib#1232 (fork, FIRST_TIME_CONTRIBUTOR) sat at zero
+#: check runs for 36 days because nobody pressed the button, while #1240 —
+#: also from a fork, but by a MEMBER — ran automatically. Fork provenance
+#: alone therefore does not discriminate; the association does.
+UNAPPROVED_WORKFLOW_ASSOCIATIONS = frozenset(
+    {"FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE"}
+)
+
+
+def pr_author_association(repo: str, number: int) -> str:
+    """The PR author's ``author_association``, uppercased, or "" if unreadable.
+
+    ``gh pr view --json`` does not expose this field; only the REST pulls
+    endpoint does. Called only on the already-disqualifying path, so it adds no
+    request to the common case.
+    """
+    return (
+        run_gh(
+            ["api", f"repos/{repo}/pulls/{number}", "--jq", ".author_association"],
+            timeout=10,
+        )
+        .strip()
+        .upper()
+    )
 
 
 #: How many recently-merged PRs to sample when asking whether a repo gates
@@ -1338,11 +1370,29 @@ def evaluate_pr(
                 "with checks (GitHub API error, or no merged-PR history) — failing closed"
             )
         elif gates_prs:
-            result.reasons.append(
-                "CI checks not found; recently-merged PRs in this repo did report checks, "
-                "so an empty check set here is anomalous (possible GitHub outage, paths "
-                "filter mismatch, or concurrency cancellation)"
-            )
+            # Name the un-approved-workflow case explicitly. It needs a specific
+            # operator action ("Approve and run workflows" on the PR page), and
+            # reporting it as "no CI configured" sends whoever reads this looking
+            # for a missing workflow file that is not missing. gptme-contrib#1232
+            # cost 36 days that way, and the un-run pre-commit job would have
+            # caught a real defect in it.
+            association = pr_author_association(repo, number)
+            if association in UNAPPROVED_WORKFLOW_ASSOCIATIONS and pr.get(
+                "isCrossRepository"
+            ):
+                result.reasons.append(
+                    "CI checks not found; this repo's PRs do report checks, and this one "
+                    f"is from a fork by a {association} author — GitHub is holding its "
+                    'workflow runs behind the "Approve and run workflows" button on the '
+                    "PR page. A maintainer has to press it; no workflow file is missing"
+                )
+            else:
+                result.reasons.append(
+                    "CI checks not found; recently-merged PRs in this repo did report checks, "
+                    "so an empty check set here is anomalous (possible GitHub outage, workflow "
+                    "runs pending maintainer approval, paths filter mismatch, or concurrency "
+                    "cancellation)"
+                )
         else:
             result.warnings.append(
                 "No CI gates PRs in this repo (recently-merged PRs reported no checks); "
