@@ -1302,6 +1302,12 @@ check_own_pr_review_state() {
 # fetch_pr_data's GraphQL selection), so it costs ZERO extra API calls on PRs
 # with no trigger comment. Only a comment that literally matches the trigger
 # line costs a reactions lookup.
+#
+# SCOPE, inherited from that payload: fetch_pr_data() lists `--author $AUTHOR`
+# and drops drafts, so the trigger reaches non-draft PRs authored by the bot —
+# which is the case it exists for (a maintainer asking us to fix our own PR).
+# On someone else's PR it is silently inert; widening it means widening the
+# fetch, which is a separate cost decision.
 
 #: The account the trigger addresses, and whose reactions are the watermark.
 #: Matches ``REVIEWER_LOGIN`` in scripts/github/ai-review-sweep.py so the two
