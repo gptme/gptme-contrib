@@ -2239,47 +2239,6 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         console.print("[red]No changes specified. Use --set, --add, or --remove.[/]")
         return
 
-    # Show changes to be made
-    console.print("\nChanges to apply:")
-    for task in target_tasks:
-        task_changes = []
-
-        # Group changes by field for cleaner display
-        field_changes: dict[str, list[tuple[str, str | None]]] = {}
-        for op, field, value in changes:
-            if field not in field_changes:
-                field_changes[field] = []
-            field_changes[field].append((op, value))
-
-        # Show changes for each field
-        for field, field_ops in field_changes.items():
-            if field in CANONICAL_LIST_FIELDS:
-                current = task.metadata.get(field, [])
-                new = current.copy()
-
-                # Apply all operations for this field
-                for op, value in field_ops:
-                    if op == "add":
-                        new = list(set(new + [value]))
-                    else:  # remove
-                        new = [x for x in new if x != value]
-
-                if new != current:
-                    task_changes.append(f"{field}: {', '.join(current)} -> {', '.join(new)}")
-            else:
-                # For set operations, only show the final value
-                set_ops = [v for op, v in field_ops if op == "set"]
-                if set_ops:
-                    current = task.metadata.get(field)
-                    new = set_ops[-1]  # Use the last set value
-                    if new != current:
-                        task_changes.append(f"{field}: {current} -> {new}")
-
-        if task_changes:
-            console.print(f"  {task.name}:")
-            for change in task_changes:
-                console.print(f"    {change}")
-
     # Apply changes
     for task in target_tasks:
         post = frontmatter.load(task.path)
@@ -2447,6 +2406,16 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             and not _completed_explicitly_set
         ):
             post.metadata.pop("completed", None)
+
+        # Report the actual metadata changes, including automatic fields such as
+        # completed and waiting_since, immediately before writing them.
+        console.print(f"\nChanges to apply:\n  {task.name}:")
+        before = task.metadata
+        for field in sorted(set(before) | set(post.metadata)):
+            current = before.get(field)
+            new = post.metadata.get(field)
+            if current != new:
+                console.print(f"    {field}: {current} -> {new}")
 
         # Save changes
         with open(task.path, "w") as f:

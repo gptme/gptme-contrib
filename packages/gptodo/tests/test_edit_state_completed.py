@@ -16,6 +16,7 @@ from click.testing import CliRunner
 
 from gptodo.cli import cli
 from gptodo.utils import load_tasks
+from gptodo.validate_frontmatter import validate_timestamp_syntax
 
 
 ACTIVE_TASK = """\
@@ -75,12 +76,15 @@ def test_edit_state_done_auto_sets_completed(tmp_path: Path, monkeypatch) -> Non
     task = tasks[0]
     assert task.metadata["state"] == "done"
     assert "completed" in task.metadata, "completed should be auto-set on done transition"
+    assert "completed: None ->" in result.output
     injected = datetime.fromisoformat(str(task.metadata["completed"]))
     if injected.tzinfo is None:
         injected = injected.replace(tzinfo=timezone.utc)
     assert (
         before <= injected <= after
     ), f"completed {injected!r} not between {before!r} and {after!r}"
+    raw_frontmatter = (tasks_dir / "my-task.md").read_text().split("---", maxsplit=2)[1]
+    assert validate_timestamp_syntax(raw_frontmatter) == []
 
 
 def test_edit_state_cancelled_auto_sets_completed(tmp_path: Path, monkeypatch) -> None:
