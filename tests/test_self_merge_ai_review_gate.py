@@ -176,6 +176,52 @@ def test_clamped_agreement_threshold_is_rejected(gh_comments: Any) -> None:
     assert "clamped" in (status["detail"] or "")
 
 
+@pytest.mark.parametrize(
+    ("applied", "asked"),
+    [
+        (0, 0),  # unclamped, but no agreement was ever required
+        (0, 2),  # clamped to nothing — caught twice over, still must fail
+        (-1, -1),  # nonsense thresholds must not read as "not clamped"
+        (2, 0),  # asked for nothing; `applied < asked` is False here
+    ],
+)
+def test_sub_unit_agreement_thresholds_are_rejected(
+    gh_comments: Any, applied: int, asked: int
+) -> None:
+    """A threshold below 1 is no consensus at all, clamped or not.
+
+    The regression guarded here: `applied < asked` alone accepts `0/0` as
+    undegraded, and since one answered pass satisfies `answered >= 1`, a
+    single-pass review would enter the gate wearing a full-consensus record —
+    the exact recall guard this path exists to enforce, bypassed.
+    """
+    consensus = dict(
+        FULL_CONSENSUS, min_agreement=applied, min_agreement_requested=asked
+    )
+    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is False
+    assert "below 1" in (status["detail"] or "")
+
+
+@pytest.mark.parametrize("score", ["5", 5.0, True, [5]])
+def test_non_integer_score_is_named_as_a_type_defect(
+    gh_comments: Any, score: Any
+) -> None:
+    """A malformed score must not be reported as a threshold failure.
+
+    `AI review score 5/5 below 5/5` is false on its face and sends a reader
+    hunting for a scoring bug instead of the marker corruption that caused it.
+    Fails closed either way; this pins the *diagnostic*.
+    """
+    marker = _marker()
+    marker["score"] = score
+    status = _status(gh_comments, [_comment(marker)])
+    assert status["accepted"] is False
+    detail = status["detail"] or ""
+    assert "is not an integer" in detail
+    assert "below" not in detail
+
+
 def test_zero_answered_passes_are_rejected(gh_comments: Any) -> None:
     """Every call failed → no findings → a clean 5/5 off an empty result."""
     consensus = dict(FULL_CONSENSUS, answered=0, jobs_answered=0)

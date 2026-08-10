@@ -889,6 +889,20 @@ def _consensus_shortfall(consensus: Any) -> str | None:
     applied, asked = _int("min_agreement"), _int("min_agreement_requested")
     if applied is None or asked is None:
         return "consensus record is missing agreement thresholds"
+    # A threshold below 1 is not a weaker consensus, it is *no* consensus: a
+    # finding surviving on zero agreeing passes is exactly what a single pass
+    # already produces. Checking only `applied < asked` misses it, because a
+    # record with min_agreement 0 AND min_agreement_requested 0 is unclamped and
+    # would read as full consensus — while `answered >= 1` above is satisfied by
+    # one pass. That combination hands the gate a single-pass review dressed as
+    # consensus, gutting the recall guard this whole path exists to enforce.
+    # Negatives are rejected by the same test rather than a separate one; both
+    # mean "no agreement was required".
+    if applied < 1 or asked < 1:
+        return (
+            f"consensus agreement threshold below 1 "
+            f"(applied {applied}, requested {asked})"
+        )
     if applied < asked:
         return f"consensus agreement clamped to {applied} (requested {asked})"
     return None
@@ -972,7 +986,22 @@ def fetch_ai_review_status(
     score = marker.get("score")
     if score is None:
         return {"accepted": False, "detail": "AI reviewer abstained (no score)"}
-    if not isinstance(score, int) or score < AI_REVIEW_CLEAN_SCORE:
+    # Type and threshold are separate refusals so the detail names the actual
+    # defect. Folding them together reported a malformed marker (score "5" as a
+    # string, or 5.0) as `AI review score 5/5 below 5/5` — a sentence that is
+    # false on its face and sends whoever reads it hunting for a scoring bug
+    # instead of the marker corruption that caused it. Both still fail closed.
+    # `type(...) is not int` rather than `isinstance`, matching `_int` above:
+    # bool is an int subclass, and `True` is not a review score.
+    if type(score) is not int:
+        return {
+            "accepted": False,
+            "detail": (
+                f"AI review score is not an integer "
+                f"({type(score).__name__}: {score!r})"
+            ),
+        }
+    if score < AI_REVIEW_CLEAN_SCORE:
         return {
             "accepted": False,
             "detail": f"AI review score {score}/5 below {AI_REVIEW_CLEAN_SCORE}/5",
