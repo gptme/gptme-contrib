@@ -933,6 +933,42 @@ check_merge_conflicts() {
 # Emits:
 #   greptile_needs_fix       — score < 4 (significant findings to address)
 #   greptile_needs_improvement — score = 4 (minor fixes needed)
+# Count UNRESOLVED inline findings posted by our own AI reviewer.
+#
+# Why this exists: check_greptile_scores() reads Greptile's score and nothing
+# else, so a PR sitting at Greptile 5/5 with four unaddressed findings from our
+# reviewer emits merge_ready and never enters the fix loop. Observed on
+# gptme/gptme#3468 — 5/5 from Greptile, 4 of our findings open, PM silent, and a
+# human triaging the PR reads those findings as blockers.
+#
+# "Unresolved" deliberately excludes OUTDATED threads: GitHub marks a review
+# comment outdated once the code it anchored to changes, which is the cheapest
+# available evidence that the finding was addressed. Counting those would nag
+# forever on PRs that already did the work.
+#
+# Note we cannot read our own marker's `score` here: markers written before the
+# score field shipped (2026-08-07/08) carry none, and those are exactly the old
+# PRs sitting in the backlog. Counting open finding threads works on every
+# marker version.
+count_unresolved_ai_findings() {
+    local repo=$1 pr_number=$2
+    gh api graphql -f query='
+      query($owner:String!, $name:String!, $num:Int!) {
+        repository(owner:$owner, name:$name) {
+          pullRequest(number:$num) {
+            reviewThreads(first:100) {
+              nodes { isResolved isOutdated comments(first:1) { nodes { body } } }
+            }
+          }
+        }
+      }' -F owner="${repo%%/*}" -F name="${repo##*/}" -F num="$pr_number" \
+      --jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+             | select(.isResolved == false and .isOutdated == false)
+             | select(.comments.nodes[0].body // "" | contains("bob-ai-review-finding"))]
+            | length' 2>/dev/null || echo 0
+}
+
+
 check_greptile_scores() {
     local repo=$1
     local prs=$2
@@ -1003,11 +1039,22 @@ check_greptile_scores() {
             continue
         fi
 
-        # Score 5 = clean — update state file (so check_merge_ready sees
-        # the perfect score instead of a stale sub-5 entry) and skip.
+        # Score 5 = clean by Greptile's reckoning — but OUR reviewer may still
+        # have open findings on the same PR, and those are invisible to the
+        # score above. A PR is only clean when both reviewers are satisfied.
         if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
-            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
-            continue
+            local ai_open
+            ai_open=$(count_unresolved_ai_findings "$repo" "$pr_number")
+            if [ "${ai_open:-0}" -gt 0 ] 2>/dev/null; then
+                # Fall through to the fix arm below. Scored as 3 so it routes to
+                # greptile_needs_fix rather than _needs_improvement: unaddressed
+                # findings are work to do, not a polish suggestion.
+                greptile_score=3
+                pr_title="${pr_title} [${ai_open} open AI-review finding(s)]"
+            else
+                echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
+                continue
+            fi
         fi
 
         # Score >= 4 is minor, < 4 needs fix
