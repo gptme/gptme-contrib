@@ -786,22 +786,21 @@ def fetch_unresolved_human_threads(
     }
 
 
-def repo_has_ci_configured(repo: str) -> bool | None:
-    """Whether GitHub recognizes at least one active Actions workflow.
+def repo_ci_status(repo: str, base_ref: str) -> bool | None:
+    """Whether the target branch has configured CI.
 
-    Tri-state, and deliberately so:
+    ``True`` means GitHub reports an active Actions workflow or a required
+    status check. ``False`` means both probes succeeded and found neither.
+    ``None`` means either probe was indeterminate, which callers must treat as
+    fail-closed.
 
-    * ``True``  — the Actions API reports at least one active workflow.
-    * ``False`` — the query succeeded and reports no active workflows.
-    * ``None``  — indeterminate. The API errored, timed out, or returned
-      something unparseable.
-
-    Querying the Actions API instead of listing ``.github/workflows`` avoids
-    treating malformed or placeholder YAML as runnable CI. ``None`` must never
-    be treated as ``False``: an API outage is exactly when the caller needs to
-    fail closed rather than waive missing checks.
+    Counting active workflows is intentionally conservative: the Actions list
+    endpoint does not expose triggers, branch/path filters, or reusable calls,
+    so a push-only workflow can cause a false-positive manual merge gate. That
+    is safer than guessing that a workflow cannot apply and recreating the
+    outage fail-open this probe exists to prevent.
     """
-    raw = run_gh(
+    workflows_raw = run_gh(
         [
             "api",
             f"repos/{repo}/actions/workflows",
@@ -810,15 +809,29 @@ def repo_has_ci_configured(repo: str) -> bool | None:
         ],
         timeout=10,
     )
-    if not raw:
-        return None
-    try:
-        count = int(raw)
-    except (ValueError, TypeError):
-        return None
-    if count < 0:
-        return None
-    return count > 0
+    required_checks_raw = run_gh(
+        [
+            "api",
+            f"repos/{repo}/branches/{base_ref}",
+            "--jq",
+            "[.protection.required_status_checks.contexts[]?, "
+            ".protection.required_status_checks.checks[]?] | length",
+        ],
+        timeout=10,
+    )
+
+    counts: list[int] = []
+    for raw in (workflows_raw, required_checks_raw):
+        if not raw:
+            return None
+        try:
+            count = int(raw)
+        except (ValueError, TypeError):
+            return None
+        if count < 0:
+            return None
+        counts.append(count)
+    return any(count > 0 for count in counts)
 
 
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
@@ -1279,7 +1292,7 @@ def evaluate_pr(
         # may waive the CI requirement. None means we could not determine it —
         # fail closed, since the likeliest cause of an indeterminate answer is
         # the same outage that suppressed the checks in the first place.
-        has_ci = repo_has_ci_configured(repo)
+        has_ci = repo_ci_status(repo, pr.get("baseRefName", "master"))
         if has_ci is None:
             result.reasons.append(
                 "CI checks not found and could not determine whether the repo has "
