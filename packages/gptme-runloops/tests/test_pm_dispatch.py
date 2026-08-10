@@ -345,7 +345,7 @@ class TestDispatchLedger:
 class TestBuildFullLedgerEntry:
     """Schema-parity tests for the bash-compatible ledger builder."""
 
-    EXPECTED_KEYS = {
+    LEGACY_KEYS = {
         "timestamp",
         "phase",
         "lane",
@@ -362,10 +362,20 @@ class TestBuildFullLedgerEntry:
         "failures",
         "duration_seconds",
     }
+    # Added by the outcome-verification invariant: the recorded outcome is
+    # derived from exit status + observable effect, never asserted by the
+    # phase alone. See test_pm_dispatch_outcome.py.
+    DERIVED_OUTCOME_KEYS = {"exit_code", "effect", "outcome"}
+    EXPECTED_KEYS = LEGACY_KEYS | DERIVED_OUTCOME_KEYS
 
     def test_schema_keys_match_bash(self):
         entry = build_full_ledger_entry(phase="planned")
         assert set(entry.keys()) == self.EXPECTED_KEYS
+
+    def test_legacy_keys_are_not_dropped(self):
+        """Consumers read these by name — the change must stay additive."""
+        entry = build_full_ledger_entry(phase="planned")
+        assert self.LEGACY_KEYS <= set(entry.keys())
 
     def test_minimal_entry(self):
         entry = build_full_ledger_entry(phase="planned", lane="fast")

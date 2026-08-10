@@ -93,7 +93,13 @@ from gptme_runloops.merge_lifecycle import (
     WorkItem,
     run_merge_lifecycle,
 )
-from gptme_runloops.pm_dispatch import append_full_ledger_entry, is_direct_mention
+from gptme_runloops.pm_dispatch import (
+    EFFECT_NONE,
+    EFFECT_OBSERVED,
+    EFFECT_UNKNOWN,
+    append_full_ledger_entry,
+    is_direct_mention,
+)
 from gptme_runloops.prompt_templates import (
     ItemPromptParams,
     build_investigate,
@@ -112,6 +118,7 @@ from gptme_runloops.worker_records import (
     fallback_outcome,
     normalize_delivery_outcome,
     parse_rate_limit_rejection,
+    read_record_effect_signal,
     read_record_pr_state_after,
     update_record_pr_state,
     write_fallback_session_record,
@@ -1553,13 +1560,16 @@ def run_post_session(
     outcome: RunItemOutcome,
     config: RunItemConfig,
     hooks: RunItemHooks,
-) -> None:
+) -> str:
     """One Python composition of the six worker.sh heredoc shims, in order.
 
     Every step is non-fatal (WARN + continue), matching the bash ``|| true``
     tolerance — EXCEPT delivery-extraction total death, which records the
     delivery outcome as ``failed`` (never ``handled``; the step-3 divergence,
     kept).
+
+    Returns the observable-effect signal for this item (``observed`` /
+    ``none`` / ``unknown``) — see :func:`derive_effect_signal`.
     """
     record_file = Path(plan.record_file)
     exit_code = outcome.exit_code
@@ -1676,10 +1686,18 @@ def run_post_session(
         )
 
     # 4. Delivery post-condition (worker.sh:440-515)
+    # NOTE: "handled" is the permissive DEFAULT, not an observation — it is
+    # what the outcome stays at when no delivery check runs at all. Only a
+    # check that actually ran produces evidence, so the effect signal is fed
+    # `delivery_outcome` solely when `delivery_checked` is True. Treating the
+    # default as evidence of effect would re-create the exact lie this whole
+    # mechanism exists to prevent.
     delivery_outcome = "handled"
+    delivery_checked = False
     needs_fallback = "false"
     fallback_posted = "false"
     if item.repo and item.number is not None and hooks.delivery_check is not None:
+        delivery_checked = True
         try:
             try:
                 proc = hooks.run_cmd(
@@ -1945,7 +1963,24 @@ def run_post_session(
             promote_item_state(config, item.repo, item.number)
     else:
         promote_item_state(config, item.repo, item.number)
+
+    # 9. Observable-effect signal.
+    # A clean exit is not evidence the work landed: a worker can commit a fix
+    # and have every `git push` rejected, exiting 0 with a log that says it
+    # succeeded (gptme/gptme#3468, 2026-08-10). Derived from the before/after
+    # PR snapshot step 2 already fetched, so this costs no extra API call.
+    effect = read_record_effect_signal(
+        record_file,
+        delivery_outcome=delivery_outcome if delivery_checked else "",
+    )
+    if effect == EFFECT_NONE:
+        _log(
+            f"WARN: PM dispatch produced NO observable effect on {plan.repo}#{plan.number} "
+            "— nothing pushed, posted, or resolved (exit status alone is not success)"
+        )
+
     _log(f"=== Item {plan.index} complete ===")
+    return effect
 
 
 # --- Ledger ---
@@ -1962,6 +1997,8 @@ def _append_ledger(
     successes: int | None = None,
     failures: int | None = None,
     duration_seconds: int | None = None,
+    exit_code: int | None = None,
+    effect: str | None = None,
 ) -> None:
     try:
         append_full_ledger_entry(
@@ -1975,6 +2012,8 @@ def _append_ledger(
             successes=successes,
             failures=failures,
             duration_seconds=duration_seconds,
+            exit_code=exit_code,
+            effect=effect,
         )
     except Exception as exc:
         _log(f"WARN: dispatch-ledger append failed ({phase}): {exc}")
@@ -2223,6 +2262,7 @@ def run_work_file(
         failures = 0
         rate_limited = False
         overall_exit = 0
+        item_effects: list[str] = []
 
         for index, item in enumerate(items, start=1):
             _log("")
@@ -2302,7 +2342,9 @@ def run_work_file(
                     rate_limited = True
                 if item_outcome.exit_code != 0 and overall_exit == 0:
                     overall_exit = item_outcome.exit_code
-                run_post_session(plan, item, item_outcome, config, hooks)
+                item_effects.append(
+                    run_post_session(plan, item, item_outcome, config, hooks)
+                )
             finally:
                 # bash EXIT-trap parity: the claim is abandoned on every exit
                 # path, including SIGTERM (the CLI converts it to SystemExit
@@ -2320,6 +2362,22 @@ def run_work_file(
         # the A/B would otherwise diverge on every skip).
         successes = group_count - failures
         duration = int(time.time()) - run_start
+        # INVARIANT: the ledger's `outcome` is derived from `exit_code`,
+        # `failures`, and the observable external `effect`
+        # (pm_dispatch.derive_dispatch_outcome) — never asserted by the phase
+        # alone. `phase="completed"` only means the item loop returned;
+        # `overall_exit` is the worst item exit code seen above.
+        #
+        # Effect rolls up pessimistically-but-honestly: any item that
+        # demonstrably moved something → observed; otherwise, if any item was
+        # observed to move nothing → none; else unknown. A dispatch where
+        # nothing reached GitHub is not a success however cleanly it exited.
+        if EFFECT_OBSERVED in item_effects:
+            dispatch_effect = EFFECT_OBSERVED
+        elif EFFECT_NONE in item_effects:
+            dispatch_effect = EFFECT_NONE
+        else:
+            dispatch_effect = EFFECT_UNKNOWN
         _append_ledger(
             config,
             "completed",
@@ -2330,6 +2388,8 @@ def run_work_file(
             successes=successes,
             failures=failures,
             duration_seconds=duration,
+            exit_code=overall_exit,
+            effect=dispatch_effect,
         )
         _log(f"Items: {group_count} total, {successes} succeeded, {failures} failed")
 

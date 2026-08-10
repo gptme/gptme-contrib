@@ -676,6 +676,150 @@ def test_run_work_file_counts_failures(tmp_path) -> None:
     assert completed["failures"] == 1 and completed["successes"] == 0
 
 
+# --- Outcome-verification invariant (symptom tests) ---
+#
+# The failure class: a worker exits non-zero while its ledger row says
+# `completed`, so nothing retries and nothing alerts (gptme/gptme#3468).
+# The invariant: the recorded outcome is DERIVED from exit status and
+# observable effect, never asserted by the phase alone.
+
+
+def test_completed_row_does_not_record_success_when_worker_exits_nonzero(
+    tmp_path,
+) -> None:
+    """THE symptom test: run a worker that exits 1, assert no recorded success."""
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=1)
+
+    rc = run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+
+    assert rc == 1
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["exit_code"] == 1
+    assert completed["outcome"] == "failed"
+    assert completed["outcome"] != "succeeded"
+
+
+def test_timeout_exit_is_recorded_as_failed_despite_zero_failures(tmp_path) -> None:
+    """The nastiest shape: exit 124 is deliberately NOT counted as a failure.
+
+    Before the derived outcome existed, such a row carried `failures: 0` and
+    was indistinguishable from a clean run — the ledger's only failure signal
+    said everything was fine while the worker had timed out.
+    """
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=124)
+
+    rc = run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+
+    assert rc == 124
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    # Item accounting still says "no failures" (worker.sh:100-104 parity) ...
+    assert completed["failures"] == 0
+    # ... but the exit status is recorded and the outcome derived from it.
+    assert completed["exit_code"] == 124
+    assert completed["outcome"] == "failed"
+
+
+def test_clean_run_records_verified_success(tmp_path) -> None:
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+
+    rc = run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+
+    assert rc == 0
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["exit_code"] == 0
+    assert completed["outcome"] == "succeeded"
+
+
+def _effect_hooks(run_cmd: FakeRunCmd, *, head_after: str) -> RunItemHooks:
+    """Hooks that write a real record and report a given post-session PR head."""
+    return make_hooks(
+        run_cmd=run_cmd,
+        make_record=lambda **kw: dict(kw),
+        fetch_pr_snapshot=lambda repo, num: {
+            "state": "OPEN",
+            "headRefOid": head_after,
+            "mergeCommit": "",
+        },
+        merge_lifecycle_io=FakeLifecycleIO(),
+    )
+
+
+def test_clean_exit_that_pushed_nothing_is_not_recorded_as_success(tmp_path) -> None:
+    """THE #3468 symptom test: worker exits 0, PR head never moves.
+
+    The worker read the findings, made the fix, committed it — and every
+    `git push` was rejected by a pre-push guard. Exit 0, log says success,
+    nothing reached GitHub. This must not record as a success.
+    """
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    work_file = _write_work_file(tmp_path, make_item(types=["pr_update"]))
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("rev-parse", stdout="abc123\n")
+    # Pre-session snapshot: head is deadbeef ...
+    run_cmd.on(
+        "gh", stdout='{"state": "OPEN", "headRefOid": "deadbeef", "mergeCommit": null}'
+    )
+    # ... and after the session it is STILL deadbeef: the push was rejected.
+    hooks = _effect_hooks(run_cmd, head_after="deadbeef")
+
+    rc = run_work_file(work_file, config, hooks, backend="claude-code", lane="slow")
+
+    assert rc == 0  # the worker itself was perfectly happy
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["exit_code"] == 0
+    assert completed["failures"] == 0
+    # ... and yet nothing shipped:
+    assert completed["effect"] == "none"
+    assert completed["outcome"] == "no_effect"
+    assert completed["outcome"] != "succeeded"
+
+
+def test_push_that_landed_records_observed_effect(tmp_path) -> None:
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    work_file = _write_work_file(tmp_path, make_item(types=["pr_update"]))
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("rev-parse", stdout="abc123\n")
+    run_cmd.on(
+        "gh", stdout='{"state": "OPEN", "headRefOid": "beforeaa", "mergeCommit": null}'
+    )
+    hooks = _effect_hooks(run_cmd, head_after="after0bb")
+
+    rc = run_work_file(work_file, config, hooks, backend="claude-code", lane="slow")
+
+    assert rc == 0
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["effect"] == "observed"
+    assert completed["outcome"] == "succeeded"
+
+
+def test_non_terminal_phases_never_carry_an_outcome(tmp_path) -> None:
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=1)
+
+    run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+
+    for row in _ledger_rows(config):
+        if row["phase"] != "completed":
+            assert row["outcome"] is None, row
+
+
 def test_run_work_file_self_merge_skips_session(tmp_path) -> None:
     item = make_item(types=["merge_ready"])
     work_file = _write_work_file(tmp_path, item)
