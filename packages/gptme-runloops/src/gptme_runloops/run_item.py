@@ -614,7 +614,131 @@ class SlotLock:
             pass
 
 
-# --- State promotion (lib.sh:611-631; p-m.sh:695-704) ---
+# --- State promotion / delivery rollback (lib.sh:894-995) ---
+
+# Per-slot dispatch marker directory, shared with the bash dispatcher
+# (project-monitoring-dispatch.sh) and pm_dispatch.py. The dispatcher stamps
+# ``<slot_safe>.event`` at LAUNCH; a slot that delivers nothing must clear it,
+# otherwise the item is suppressed by the event-unchanged TTL (6h) even though
+# no reply was ever posted.
+DISPATCH_COOLDOWN_DIR_ENV = "PM_DISPATCH_COOLDOWN_DIR"
+DEFAULT_DISPATCH_COOLDOWN_DIR = "/tmp/bob-pm-dispatch-cooldown"
+
+# Bash parity: PM_MAX_REDELIVERY_ATTEMPTS (lib.sh:949).
+MAX_REDELIVERY_ATTEMPTS_ENV = "PM_MAX_REDELIVERY_ATTEMPTS"
+DEFAULT_MAX_REDELIVERY_ATTEMPTS = 2
+
+
+def dispatch_cooldown_dir() -> Path:
+    """Resolve the shared dispatch-marker dir (bash ``PM_DISPATCH_COOLDOWN_DIR``)."""
+    return Path(
+        os.environ.get(DISPATCH_COOLDOWN_DIR_ENV) or DEFAULT_DISPATCH_COOLDOWN_DIR
+    )
+
+
+def slot_safe_name(slot_key: str) -> str:
+    """``gptme/gptme#3468`` -> ``gptme-gptme-3468`` (bash ``${k//\\//-}`` + ``#``)."""
+    return slot_key.replace("/", "-").replace("#", "-")
+
+
+def clear_slot_event_marker(slot_key: str) -> None:
+    """Drop the launch-stamped event fingerprint so the item re-enters the queue.
+
+    Mirrors the bash clears in ``rollback_failed_delivery`` (lib.sh:971-979) and
+    the lock-busy path (lib.sh:1011-1027). Without this a slot that delivered
+    nothing still looks dispatched for ``PM_EVENT_UNCHANGED_TTL_SECS`` (6h).
+    """
+    if not slot_key:
+        return
+    safe = slot_safe_name(slot_key)
+    base = dispatch_cooldown_dir()
+    for suffix in (".event", ".event_logged"):
+        try:
+            (base / f"{safe}{suffix}").unlink()
+        except OSError:
+            pass
+
+
+def redelivery_attempts_file(repo: str, number: int | str | None) -> Path:
+    """Path of the per-item redelivery counter (lib.sh:923-929)."""
+    repo_safe = str(repo).replace("/", "-")
+    return dispatch_cooldown_dir() / f"redeliver-{repo_safe}-{number}.attempts"
+
+
+def rollback_failed_delivery(
+    config: RunItemConfig,
+    repo: str,
+    number: int | str | None,
+    slot_key: str | None = None,
+) -> bool:
+    """Undo state consumption for an item whose session delivered no reply.
+
+    Port of bash ``rollback_failed_delivery`` (lib.sh:946-995). Returns ``True``
+    when the item was rolled back (caller must NOT promote), ``False`` when the
+    redelivery cap is reached and the caller should promote instead to end the
+    re-dispatch treadmill.
+
+    Three things get undone, all of which otherwise make a failed delivery look
+    identical to a successful one:
+
+    1. Pending activity-gate state files are left un-promoted, so the gate
+       re-emits the item next cycle.
+    2. The launch-stamped ``.event`` fingerprint is cleared, so the dispatcher
+       does not skip the item as ``event_unchanged`` for the 6h TTL.
+    3. Notification state files mapped to ``repo#number`` are dropped from the
+       pending dir so the notification path re-fires too.
+    """
+    # bash: `local slot_key=${3:-${PM_SLOT_KEY:-}}` (lib.sh:948). The bash stops
+    # there and silently skips the marker clear when the global is unset; derive
+    # it from repo#number instead, which is exactly what derive_slot_key builds
+    # for PR/issue items — the only items that reach a delivery check.
+    if slot_key is None:
+        slot_key = os.environ.get("PM_SLOT_KEY", "") or f"{repo}#{number}"
+
+    attempts_file = redelivery_attempts_file(repo, number)
+    max_attempts = DEFAULT_MAX_REDELIVERY_ATTEMPTS
+    raw_max = os.environ.get(MAX_REDELIVERY_ATTEMPTS_ENV)
+    if raw_max and raw_max.isdigit():
+        max_attempts = int(raw_max)
+
+    attempts = 0
+    try:
+        attempts = int(attempts_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        attempts = 0
+    attempts += 1
+    if attempts > max_attempts:
+        # Give up: reset so a future failure starts with a full budget, and tell
+        # the caller to promote. The item stays visible via the WARN + probes.
+        try:
+            attempts_file.unlink()
+        except OSError:
+            pass
+        return False
+    try:
+        attempts_file.parent.mkdir(parents=True, exist_ok=True)
+        attempts_file.write_text(str(attempts), encoding="utf-8")
+    except OSError:
+        # No durable place to count — fail toward redelivery (bash behavior).
+        pass
+
+    clear_slot_event_marker(slot_key)
+
+    pending = config.pending_state_dir
+    if pending.is_dir():
+        target = f"{repo}#{number}"
+        for map_file in pending.glob("notif-*.map"):
+            try:
+                if map_file.read_text(encoding="utf-8").strip() != target:
+                    continue
+            except OSError:
+                continue
+            for path in (map_file, map_file.with_suffix(".state")):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+    return True
 
 
 def promote_item_state(
@@ -622,6 +746,14 @@ def promote_item_state(
 ) -> None:
     """Copy the item's pending activity-gate state files to the real state dir."""
     import shutil
+
+    # The item advanced, so any redelivery treadmill for it is over — restore
+    # its full retry budget for a future, genuine delivery failure (lib.sh:915-919).
+    # Done before the pending-dir guard so the reset is unconditional, as in bash.
+    try:
+        redelivery_attempts_file(repo, number).unlink()
+    except OSError:
+        pass
 
     pending = config.pending_state_dir
     state = config.state_dir
@@ -1790,8 +1922,29 @@ def run_post_session(
             except (OSError, subprocess.SubprocessError):
                 pass
 
-    # 8. State promotion (worker.sh:661-663)
-    promote_item_state(config, item.repo, item.number)
+    # 8. State promotion / delivery rollback (worker.sh:661-676)
+    #
+    # A session that exited without posting a thread reply consumed the item's
+    # activity-gate state and the dispatcher's launch-stamped event fingerprint,
+    # but delivered nothing. Promoting here would make that failure look exactly
+    # like a success: the gate restarts its cooldown and the dispatcher skips the
+    # item as `event_unchanged` for the 6h TTL, so nothing retries.
+    if delivery_outcome == "orphan_no_delivery":
+        if rollback_failed_delivery(config, plan.repo, plan.number):
+            _log(
+                "WARN: PM delivery post-condition FAILED — rolling back state for re-emission"
+            )
+        else:
+            # Redelivery cap hit: this item has no reply to deliver (typically an
+            # escalated PR awaiting human review), not a transient failure. Promote
+            # so it stops consuming a PM slot every cycle.
+            _log(
+                f"WARN: PM redelivery cap reached for {plan.repo}#{plan.number} — "
+                "promoting state to end re-dispatch churn (no reply is likely correct here)"
+            )
+            promote_item_state(config, item.repo, item.number)
+    else:
+        promote_item_state(config, item.repo, item.number)
     _log(f"=== Item {plan.index} complete ===")
 
 
@@ -1994,6 +2147,18 @@ def run_work_file(
             "No work: another project-monitoring run is active for lock scope "
             f"'{lock_scope}' (PID {pid or 'unknown'})"
         )
+        # Clear this slot's event fingerprint: the parent dispatcher stamped it
+        # at LAUNCH, but we delivered nothing — the lock holder is working the
+        # PREVIOUS event payload. Without this, a fresh human event that arrives
+        # during a long-running slot session is silently consumed and suppressed
+        # for the 6h TTL (lib.sh:1011-1027). The .ts cooldown still bounds churn.
+        if lock_scope.startswith("slot:"):
+            safe = slot_safe_name(lock_scope[len("slot:") :])
+            clear_slot_event_marker(lock_scope[len("slot:") :])
+            _log(
+                f"Cleared event marker for {safe} (lock-busy launch delivered "
+                "nothing; next cycle re-evaluates)"
+            )
         return 0
 
     run_start = int(time.time())

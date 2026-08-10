@@ -42,6 +42,7 @@ from gptme_runloops.run_item import (
     RunItemHooks,
     _handle_cc_rate_limit,
     build_execution_plan,
+    clear_slot_event_marker,
     derive_lock_paths,
     derive_session_id,
     execute_plan,
@@ -50,8 +51,10 @@ from gptme_runloops.run_item import (
     plan_item,
     predict_cc_trajectory_path,
     promote_item_state,
+    redelivery_attempts_file,
     resolve_backend_trajectory,
     resolve_cc_sub_suffix,
+    rollback_failed_delivery,
     run_post_session,
     run_work_file,
     snapshot_codex_rollouts,
@@ -1164,6 +1167,57 @@ def test_post_session_orphan_delivery_latency_outcome(tmp_path) -> None:
     assert latency_calls[0]["outcome"] == "orphan_no_delivery"
 
 
+def test_post_session_orphan_delivery_rolls_back_instead_of_promoting(
+    tmp_path, cooldown_dir
+) -> None:
+    """A session that delivered no reply must not consume the item's state.
+
+    Regression: the runloops port of worker.sh:661-676 promoted unconditionally,
+    so a failed delivery advanced the activity-gate cooldown AND left the
+    dispatcher's launch-stamped `.event` fingerprint in place — suppressing the
+    item for the 6h event-unchanged TTL with nothing ever having replied.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout='{"outcome": "orphan_no_delivery", "needs_fallback_reply": true, '
+        '"fallback_reply_posted": false}',
+    )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text(
+        "s"
+    )
+    (cooldown_dir / "gptme-gptme-contrib-1234.event").write_text("fingerprint")
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert not (config.state_dir / "gptme-gptme-contrib-pr-1234-update.state").exists()
+    assert not (cooldown_dir / "gptme-gptme-contrib-1234.event").exists()
+
+
+def test_post_session_orphan_delivery_promotes_after_redelivery_cap(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    """Past the cap the item promotes, so it stops burning a slot every cycle."""
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout='{"outcome": "orphan_no_delivery", "needs_fallback_reply": true, '
+        '"fallback_reply_posted": false}',
+    )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text(
+        "s"
+    )
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / "gptme-gptme-contrib-pr-1234-update.state").is_file()
+
+
 def test_post_session_failed_exit_maps_latency_failed(tmp_path) -> None:
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
         tmp_path, exit_code=1
@@ -1243,6 +1297,108 @@ def test_promote_item_state_copies_matching_files(tmp_path) -> None:
         "gptme-gptme-issue-5.state",
         "gptme-gptme-master-ci.state",
     }
+
+
+# --- Delivery rollback (bash lib.sh:946-995 parity) ---
+#
+# Regression cover for the runloops port dropping worker.sh's conditional
+# promote: a session that exits without a thread reply must NOT consume the
+# item's gate state or leave the dispatcher's launch-stamped event fingerprint
+# in place, or the item is suppressed for the 6h event-unchanged TTL and never
+# retried (live bite: gptme/gptme#3468, 2026-08-10).
+
+
+@pytest.fixture
+def cooldown_dir(tmp_path, monkeypatch):
+    d = tmp_path / "cooldown"
+    d.mkdir()
+    monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(d))
+    return d
+
+
+def test_rollback_clears_event_marker_and_leaves_state_pending(
+    tmp_path, cooldown_dir
+) -> None:
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    (pending / "gptme-gptme-pr-3468-greptile.state").write_text("5:1:sha:dirty")
+    (cooldown_dir / "gptme-gptme-3468.event").write_text("fingerprint")
+    (cooldown_dir / "gptme-gptme-3468.event_logged").write_text("fingerprint")
+
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+    # Event fingerprint gone => next dispatch cycle re-evaluates the item.
+    assert not (cooldown_dir / "gptme-gptme-3468.event").exists()
+    assert not (cooldown_dir / "gptme-gptme-3468.event_logged").exists()
+    # Pending state NOT promoted => the activity gate re-emits it.
+    assert not config.state_dir.exists() or not list(config.state_dir.iterdir())
+    assert (pending / "gptme-gptme-pr-3468-greptile.state").exists()
+
+
+def test_rollback_reads_slot_key_from_env(tmp_path, cooldown_dir, monkeypatch) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme#3468")
+    (cooldown_dir / "gptme-gptme-3468.event").write_text("fingerprint")
+
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468)
+    assert not (cooldown_dir / "gptme-gptme-3468.event").exists()
+
+
+def test_rollback_drops_matching_notification_state(tmp_path, cooldown_dir) -> None:
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    (pending / "notif-1.map").write_text("gptme/gptme#3468")
+    (pending / "notif-1.state").write_text("ts")
+    (pending / "notif-2.map").write_text("gptme/gptme#9999")
+    (pending / "notif-2.state").write_text("ts")
+
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+    assert not (pending / "notif-1.map").exists()
+    assert not (pending / "notif-1.state").exists()
+    assert (pending / "notif-2.map").exists()
+    assert (pending / "notif-2.state").exists()
+
+
+def test_rollback_gives_up_after_max_attempts(tmp_path, cooldown_dir) -> None:
+    config = make_config(tmp_path)
+    # Default cap is 2: two rollbacks, then the caller is told to promote.
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    # Counter reset so a future genuine failure gets a full budget.
+    assert not redelivery_attempts_file("gptme/gptme", 3468).exists()
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+
+def test_rollback_respects_max_attempts_env(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "1")
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+    assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+
+def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:
+    config = make_config(tmp_path)
+    config.pending_state_dir.mkdir(parents=True)
+    attempts = redelivery_attempts_file("gptme/gptme", 3468)
+    attempts.write_text("1")
+
+    promote_item_state(config, "gptme/gptme", 3468)
+
+    assert not attempts.exists()
+
+
+def test_clear_slot_event_marker_is_noop_without_slot_key(
+    tmp_path, cooldown_dir
+) -> None:
+    (cooldown_dir / "gptme-gptme-3468.event").write_text("fingerprint")
+    clear_slot_event_marker("")
+    assert (cooldown_dir / "gptme-gptme-3468.event").exists()
 
 
 def test_promote_item_state_number_zero_promotes_notifs(tmp_path) -> None:
