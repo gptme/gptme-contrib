@@ -138,7 +138,79 @@ SPEC_LIKE_DOCS = {
     "TASKS.md",
     "OVERVIEW.md",
 }
-TEST_MARKERS = ("tests/", "test_", "_test.", ".test.")
+# Test detection is deliberately anchored (path COMPONENT / FILENAME), never a
+# raw substring: a false "test-only" classification lets non-test code merge
+# without human review, so this gate must fail closed.
+# Directory components that mark everything beneath them as tests.
+TEST_DIR_SEGMENTS = frozenset({"tests"})
+# ``e2e`` is trusted only as the repository-root suite. A nested ``src/e2e/`` or
+# ``packages/e2e/`` can hold shipped code; files there still qualify via an
+# explicit test filename such as ``*.spec.ts``.
+TEST_ROOT_DIR_SEGMENTS = frozenset({"e2e"})
+# Filename prefixes/markers (pytest, Go, Jest/Vitest `.test.` naming).
+TEST_FILENAME_PREFIXES = ("test_",)
+TEST_FILENAME_MARKERS = ("_test.", ".test.")
+# Files that are never "test-only", wherever they live — including under a test
+# directory. The gate's premise is that test changes are low-risk because they
+# only affect the suite. These break that premise: they define or launch the
+# environment CI executes, so a change here can run arbitrary commands while
+# presenting as a test edit. ``e2e/Dockerfile`` and ``e2e/docker-compose.yml``
+# are the concrete cases; ``tests/Dockerfile`` had the same hole beforehand.
+NEVER_TEST_FILENAMES = frozenset(
+    {
+        "containerfile",
+        "dockerfile",
+        "makefile",
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "tsconfig.json",
+    }
+)
+NEVER_TEST_FILENAME_PREFIXES = (
+    "dockerfile.",
+    "docker-compose.",
+    "docker_compose.",
+    "compose.",
+    # Playwright/Vitest run these before any test, commonly to start servers or
+    # seed databases — arbitrary process launch, not assertions.
+    "global-setup.",
+    "global_setup.",
+    "global-teardown.",
+    "global_teardown.",
+    "globalsetup.",
+    "globalteardown.",
+)
+# Shell/PowerShell scripts execute directly; test-runner configs (Playwright's
+# ``webServer.command``, Vitest's ``globalSetup``) name processes to launch.
+NEVER_TEST_SUFFIXES = (".sh", ".bash", ".zsh", ".ps1", ".dockerfile")
+NEVER_TEST_RUNNER_CONFIG_RE = re.compile(
+    r"^(?:(playwright|vitest|jest|mocha|cypress|karma)\.(config|workspace)"
+    r"|(?:start|launch)-server)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$",
+    re.IGNORECASE,
+)
+NEVER_TEST_PREFIXES = (".env",)
+NEVER_TEST_DEPENDENCY_FILENAMES = frozenset(
+    {
+        "requirements.txt",
+        "requirements.in",
+        "pipfile",
+        "gemfile",
+    }
+)
+# Playwright/Jest/Vitest spec files. Anchored to real JS/TS test extensions:
+# a bare ``.spec.`` substring would also match API/infrastructure specification
+# documents (``openapi.spec.yaml``, ``api.spec.json``, ``infra.spec.yaml``),
+# which are NOT tests and must not be self-mergeable as "test-only".
+# ``.mts``/``.cts`` are the TypeScript counterparts of ``.mjs``/``.cjs`` and are
+# just as valid as test modules, so they belong here. API-contract names remain
+# fail-closed because JavaScript/TypeScript can also serialize specifications.
+SPEC_TEST_FILE_RE = re.compile(
+    r"\.spec\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$", re.IGNORECASE
+)
+SPEC_DOCUMENT_PREFIX_RE = re.compile(
+    r"^(api|openapi|asyncapi|swagger|infra|schema|contract)\.spec\.", re.IGNORECASE
+)
 SENSITIVE_PATH_PREFIXES = (
     ".github/workflows/",
     "scripts/deploy",
@@ -1165,8 +1237,54 @@ def is_spec_like_doc(path: str) -> bool:
     return "/" not in normalized and Path(path).name in SPEC_LIKE_DOCS
 
 
+def is_never_test_file(name: str) -> bool:
+    """Whether a filename can never count as a test, whatever directory holds it.
+
+    Fail-closed by construction: these define or launch what CI executes, so
+    treating them as "just a test" would let an environment change self-merge
+    unreviewed.
+    """
+    lowered = name.lower()
+    if lowered in NEVER_TEST_FILENAMES or lowered in NEVER_TEST_DEPENDENCY_FILENAMES:
+        return True
+    if lowered.startswith(NEVER_TEST_PREFIXES):
+        return True
+    if lowered.startswith(NEVER_TEST_FILENAME_PREFIXES):
+        return True
+    if lowered.endswith(NEVER_TEST_SUFFIXES):
+        return True
+    return bool(NEVER_TEST_RUNNER_CONFIG_RE.fullmatch(lowered))
+
+
 def is_test_file(path: str) -> bool:
-    return any(marker in path for marker in TEST_MARKERS)
+    """Whether a changed path is a test file.
+
+    Matching is anchored to path COMPONENTS and FILENAMES, never raw
+    substrings. Substring matching produced false "test-only" classifications
+    that would let unrelated code self-merge unreviewed, e.g.
+    ``src/contests/foo.py`` (``tests/``), ``src/ee2e/bar.py`` (``e2e/``),
+    ``src/protest_ui.py`` (``test_``) and ``openapi.spec.yaml`` (``.spec.``).
+
+    Living under a test directory is not sufficient: environment-defining files
+    such as ``e2e/Dockerfile`` are excluded first, so no directory rule can
+    admit them.
+    """
+    normalized = path.replace("\\", "/").removeprefix("./")
+    parts = normalized.split("/")
+    name = parts[-1]
+    if is_never_test_file(name):
+        return False
+    if any(part in TEST_DIR_SEGMENTS for part in parts[:-1]):
+        return True
+    if len(parts) > 1 and parts[0] in TEST_ROOT_DIR_SEGMENTS:
+        return True
+    if name.startswith(TEST_FILENAME_PREFIXES):
+        return True
+    if any(marker in name for marker in TEST_FILENAME_MARKERS):
+        return True
+    if SPEC_DOCUMENT_PREFIX_RE.match(name):
+        return False
+    return bool(SPEC_TEST_FILE_RE.search(name))
 
 
 def is_internal_tooling(path: str) -> bool:

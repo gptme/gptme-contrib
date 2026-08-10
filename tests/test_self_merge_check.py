@@ -1558,3 +1558,273 @@ def test_fetch_pr_raises_on_missing_number() -> None:
     ):
         with pytest.raises(RuntimeError, match="PR data mismatch.*1257.*None"):
             self_merge_check.fetch_pr("gptme/gptme-contrib", 1257)
+
+
+def test_is_test_file_spec_ts() -> None:
+    """Playwright-style .spec.ts files must be recognised as test files."""
+    assert self_merge_check.is_test_file("e2e/demo-real-chat.spec.ts")
+    assert self_merge_check.is_test_file("tests/foo.spec.ts")
+    assert self_merge_check.is_test_file("src/components/Button.spec.tsx")
+
+
+def test_is_test_file_spec_js() -> None:
+    """Jest/Vitest .spec.js files must be recognised as test files."""
+    assert self_merge_check.is_test_file("e2e/login.spec.js")
+    assert self_merge_check.is_test_file("src/utils/helper.spec.js")
+
+
+def test_is_test_file_e2e_directory() -> None:
+    """Files under the repository-root e2e/ suite are recognised as test files."""
+    assert self_merge_check.is_test_file("e2e/fixtures/data.json")
+    assert self_merge_check.is_test_file("src/e2e/login.spec.ts")
+
+
+def test_is_test_file_spec_plain_name_not_matched() -> None:
+    """A file named 'spec.ts' without a leading dot must NOT be a test file."""
+    assert not self_merge_check.is_test_file("src/spec.ts")
+    assert not self_merge_check.is_test_file("docs/spec.md")
+
+
+def test_classify_category_e2e_spec_ts_is_test_only() -> None:
+    """A PR touching only e2e/*.spec.ts files must be 'test-only' (regression: gptme-cloud#847)."""
+    category, reasons = self_merge_check.classify_category(
+        ["e2e/demo-real-chat.spec.ts"]
+    )
+    assert category == "test-only", reasons
+
+
+# --- `.spec.` must be anchored to JS/TS test extensions, not a bare substring ---
+@pytest.mark.parametrize(
+    "path",
+    [
+        "openapi.spec.yaml",
+        "api.spec.json",
+        "infra.spec.yaml",
+        "docs/openapi.spec.yaml",
+        "schemas/service.spec.yml",
+        "proto/wire.spec.toml",
+    ],
+)
+def test_api_spec_documents_are_not_test_files(path: str) -> None:
+    """API/infra specification documents must NOT be treated as tests.
+
+    A bare ``.spec.`` substring marker matched these, letting a PR that only
+    changes an OpenAPI/infra spec self-merge as "test-only" without review.
+    """
+    assert self_merge_check.is_test_file(path) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "openapi.spec.yaml",
+        "api.spec.json",
+        "openapi.spec.js",
+        "api.spec.ts",
+        "infra.spec.mts",
+    ],
+)
+def test_classify_category_api_spec_documents_are_not_test_only(path: str) -> None:
+    category, _reasons = self_merge_check.classify_category([path])
+    assert category != "test-only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "foo.spec.ts",
+        "foo.spec.js",
+        "src/components/Button.spec.tsx",
+        "e2e/login.spec.jsx",
+        "test/setup.spec.mjs",
+        "scripts/legacy.spec.cjs",
+    ],
+)
+def test_js_ts_spec_files_are_still_test_files(path: str) -> None:
+    """The feature this PR adds must keep working for real JS/TS spec files."""
+    assert self_merge_check.is_test_file(path) is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "foo.spec.mts",
+        "foo.spec.cts",
+        "src/lib/loader.spec.mts",
+        "packages/api/legacy.spec.cts",
+        "foo.SPEC.MTS",
+    ],
+)
+def test_typescript_module_spec_files_are_test_files(path: str) -> None:
+    """``.mts``/``.cts`` are the TS counterparts of the already-accepted
+    ``.mjs``/``.cjs``. Omitting them made ``foo.spec.mts`` a false negative for
+    ``type: module`` TypeScript repos, an internal inconsistency in the marker set.
+    """
+    assert self_merge_check.is_test_file(path) is True
+
+
+@pytest.mark.parametrize(
+    "path", ["foo.spec.ts", "foo.spec.js", "foo.spec.mts", "foo.spec.cts"]
+)
+def test_classify_category_js_ts_spec_files_are_test_only(path: str) -> None:
+    category, reasons = self_merge_check.classify_category([path])
+    assert category == "test-only", reasons
+
+
+# --- `e2e` must be a path COMPONENT, not a bare substring ---
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/ee2e/bar.py",
+        "src/foo-e2e/bar.py",
+        "packages/pre2e2e/main.go",
+        "e2estuff/thing.py",
+    ],
+)
+def test_e2e_substring_lookalikes_are_not_test_files(path: str) -> None:
+    """`e2e/` as a raw substring matched directories merely *containing* "e2e"."""
+    assert self_merge_check.is_test_file(path) is False
+
+
+@pytest.mark.parametrize("path", ["src/ee2e/bar.py", "src/foo-e2e/bar.py"])
+def test_classify_category_e2e_lookalikes_are_not_test_only(path: str) -> None:
+    category, _reasons = self_merge_check.classify_category([path])
+    assert category != "test-only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "e2e/foo.ts",
+        "e2e/fixtures/data.json",
+        "./e2e/foo.ts",
+    ],
+)
+def test_real_e2e_directories_are_still_test_files(path: str) -> None:
+    assert self_merge_check.is_test_file(path) is True
+
+
+@pytest.mark.parametrize("path", ["e2e/foo.ts", "./e2e/foo.ts"])
+def test_classify_category_real_e2e_dirs_are_test_only(path: str) -> None:
+    category, reasons = self_merge_check.classify_category([path])
+    assert category == "test-only", reasons
+
+
+@pytest.mark.parametrize("path", ["src/e2e/helpers.ts", "packages/x/e2e/runner.py"])
+def test_nested_e2e_directories_are_not_implicitly_test_files(path: str) -> None:
+    """Only the conventional repository-root e2e/ suite is trusted.
+
+    A nested ``e2e`` package can hold shipped code, so trusting every ``e2e``
+    component would make the gate fail open. Files there still qualify through
+    an explicit test filename such as ``*.spec.ts``.
+    """
+    assert self_merge_check.is_test_file(path) is False
+
+
+# --- environment-defining files are never test-only, wherever they live ---
+@pytest.mark.parametrize(
+    "path",
+    [
+        # The four that shipped as self-mergeable when `e2e` was added.
+        "e2e/Dockerfile",
+        "e2e/Containerfile",
+        "e2e/docker-compose.yml",
+        "e2e/docker_compose.yml",
+        "e2e/playwright.config.ts",
+        "e2e/global-setup.ts",
+        "e2e/global_setup.ts",
+        "e2e/globalSetup.ts",
+        "e2e/global-teardown.ts",
+        "e2e/global_teardown.ts",
+        "e2e/globalTeardown.ts",
+        "e2e/vitest.workspace.ts",
+        "e2e/vitest.workspace.mts",
+        "e2e/.env",
+        "e2e/.env.local",
+        "e2e/start-server.js",
+        "e2e/tsconfig.json",
+        "e2e/requirements.txt",
+        # Same hole, pre-existing, under `tests/`.
+        "tests/Dockerfile",
+        "tests/Makefile",
+        "tests/package.json",
+        "tests/run.sh",
+        # Variants.
+        "e2e/Dockerfile.ci",
+        "e2e/compose.yaml",
+        "e2e/global-teardown.ts",
+        "tests/vitest.config.mts",
+    ],
+)
+def test_environment_defining_files_are_never_test_only(path: str) -> None:
+    """A Dockerfile under e2e/ defines what CI executes — not "just a test".
+
+    Classifying these as test-only let an environment change self-merge with no
+    human review, in a gate whose own comment says it must fail closed.
+    """
+    assert self_merge_check.is_test_file(path) is False
+    category, reasons = self_merge_check.classify_category([path])
+    assert category != "test-only", reasons
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "e2e/login.spec.ts",
+        "e2e/fixtures/data.json",
+        "tests/fixtures/setup.sql",
+        "tests/data/config.json",
+        "tests/helpers/client-config.ts",
+        "tests/mock-server.ts",
+        "tests/helpers/util.py",
+        "tests/conftest.py",
+    ],
+)
+def test_ordinary_test_files_and_fixtures_still_qualify(path: str) -> None:
+    """The exclusion must not swallow genuine test code or test data."""
+    assert self_merge_check.is_test_file(path) is True
+
+
+# --- pre-existing substring markers (`tests/`, `test_`) had the same weakness ---
+@pytest.mark.parametrize(
+    "path",
+    [
+        # `tests/` as a raw substring matched any directory ENDING in "tests"
+        "src/contests/foo.py",
+        "src/protests/view.py",
+        "app/latests/handler.rb",
+        # `test_` as a raw substring matched any filename CONTAINING it
+        "src/protest_ui.py",
+        "src/latest_thing.py",
+        "lib/greatest_hits.go",
+    ],
+)
+def test_legacy_substring_markers_do_not_match_lookalikes(path: str) -> None:
+    """Non-test source must not be classifiable as a test file.
+
+    These are ordinary source files that the raw-substring markers wrongly
+    claimed, which would have let them self-merge as "test-only".
+    """
+    assert self_merge_check.is_test_file(path) is False
+
+
+@pytest.mark.parametrize("path", ["src/contests/foo.py", "src/protest_ui.py"])
+def test_classify_category_legacy_lookalikes_are_not_test_only(path: str) -> None:
+    category, _reasons = self_merge_check.classify_category([path])
+    assert category != "test-only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/test_foo.py",
+        "tests/helpers/fixtures.json",
+        "packages/x/tests/test_bar.py",
+        "src/test_module.py",
+        "pkg/handler_test.go",
+        "src/utils/date.test.ts",
+        "./tests/test_root.py",
+    ],
+)
+def test_genuine_test_paths_still_match(path: str) -> None:
+    assert self_merge_check.is_test_file(path) is True
