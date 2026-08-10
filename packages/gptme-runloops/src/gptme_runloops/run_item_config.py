@@ -327,9 +327,21 @@ def assemble_hooks(config: RunItemConfig, raw: dict[str, Any]) -> RunItemHooks:
             self_merge_check_cmd=["python3", str(self_merge_check)],
             self_merge_cmd=[str(self_merge_script)],
             greptile_helper=str(greptile_helper),
+            # Env PRECEDENCE (abc4c739df): when the dispatcher launches a slot
+            # it exports WORKSPACE_REPO / SELF_MERGE_ALLOWED_PATHS computed
+            # from the live bash defaults (lib.sh:522-523). Those are
+            # authoritative and must win. The config values are only a
+            # fallback for a run outside a dispatched slot — passing them
+            # unconditionally overwrote the inherited allowlist with a
+            # hand-copied one that had silently drifted, quietly narrowing
+            # which repos could self-merge.
             env={
-                "WORKSPACE_REPO": config.self_merge_repos,
-                "SELF_MERGE_ALLOWED_PATHS": config.self_merge_allowed_paths,
+                key: value
+                for key, value in (
+                    ("WORKSPACE_REPO", config.self_merge_repos),
+                    ("SELF_MERGE_ALLOWED_PATHS", config.self_merge_allowed_paths),
+                )
+                if not os.environ.get(key)
             },
             promote_state=partial(promote_item_state, config),
             convergence_cmd=(

@@ -486,3 +486,61 @@ class TestConvergedBackoffEarlyExit:
         v = io.convergence_verdict("a/b", 1)
         assert v.verdict == "unknown"
         assert v.should_request_review is True
+
+
+class TestPortedInvestigateArms:
+    """P6 — voice_postcall and erik_decision had no arm in the Python port.
+
+    An item type with no arm contributes an EMPTY investigate section, so the
+    session got a prompt with no instructions at all — it did not fail, it just
+    did nothing useful. Asserted on content, not merely non-emptiness.
+    """
+
+    @staticmethod
+    def _params(detail: str):
+        from gptme_runloops.prompt_templates import ItemPromptParams
+
+        return ItemPromptParams(
+            repo="gptme/gptme-contrib",
+            number=1234,
+            workspace="/home/bob/bob",
+            detail=detail,
+        )
+
+    def test_voice_postcall_arm_renders_the_runbook(self) -> None:
+        from gptme_runloops.prompt_templates import build_investigate
+
+        out = build_investigate(
+            ["voice_postcall"], self._params("record=/tmp/rec.json")
+        )
+        assert "### Voice Post-Call Follow-Up" in out
+        assert "/home/bob/bob/scripts/runs/voice/post-call.sh" in out
+        assert "record=/tmp/rec.json" in out  # the detail token is substituted
+        assert "post-call-events.tsv" in out  # the verification step survives
+
+    def test_erik_decision_arm_keeps_the_merge_routing_guardrail(self) -> None:
+        from gptme_runloops.prompt_templates import build_investigate
+
+        out = build_investigate(
+            ["erik_decision"], self._params("snapshot=state/x.json")
+        )
+        assert "### Erik Dashboard Decision" in out
+        assert "snapshot=state/x.json" in out
+        # The load-bearing guardrail: never bare `gh pr merge`.
+        assert "NEVER bare" in out and "gh pr merge" in out
+        assert "self-merge-if-eligible.sh" in out
+
+    @pytest.mark.parametrize("kind", ["voice_postcall", "erik_decision"])
+    def test_tokens_are_fully_substituted(self, kind: str) -> None:
+        from gptme_runloops.prompt_templates import build_investigate
+
+        out = build_investigate([kind], self._params("d=1"))
+        for token in ("{workspace}", "{detail}", "{repo}", "{number}"):
+            assert token not in out, f"{kind} leaked {token}"
+
+    @pytest.mark.parametrize("kind", ["voice_postcall", "erik_decision"])
+    def test_arm_is_non_empty(self, kind: str) -> None:
+        # The pre-port behaviour: an unknown type contributed "" silently.
+        from gptme_runloops.prompt_templates import build_investigate
+
+        assert build_investigate([kind], self._params("d=1")).strip()

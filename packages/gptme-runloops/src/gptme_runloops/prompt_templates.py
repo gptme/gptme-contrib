@@ -466,6 +466,8 @@ class ItemPromptKind(Enum):
     NOTIFICATION = "notification"
     MASTER_CI_FAILURE = "master_ci_failure"
     MERGE_CONFLICT = "merge_conflict"
+    VOICE_POSTCALL = "voice_postcall"
+    ERIK_DECISION = "erik_decision"
     GREPTILE_CONVERGENCE_ADJUDICATION = "greptile_convergence_adjudication"
 
 
@@ -783,6 +785,95 @@ Do NOT post raw `@greptileai review` — do NOT use greptile-helper.sh trigger.
 Stop at maintainer judgment. Merge-ready does not mean auto-merge.
 """
 
+_VOICE_POSTCALL_ARM = """
+### Voice Post-Call Follow-Up
+A voice call with Erik has ended and needs the standard post-call session.
+Item detail: {detail}
+
+Extract the record path from the `record=` token in the detail above, then run:
+```bash
+bash "{workspace}/scripts/runs/voice/post-call.sh" <record-path>
+```
+
+The post-call.sh script handles stub-call detection, silent-call alerting,
+trace ledger updates (run_completed / stub_call_skip), and journal writing.
+It is idempotent — re-running on a completed record is harmless.
+
+After the worker finishes, verify the trace ledger shows a terminal row:
+```bash
+grep '<stem>' "{workspace}/state/voice-calls/post-call-events.tsv" | tail -3
+```
+"""
+
+_ERIK_DECISION_ARM = """
+### Erik Dashboard Decision (execute the consequence)
+Erik decided YES or NO on a decision-queue item via the dashboard.
+Decision details: {detail}
+
+Read the full decision record first (the `snapshot=` path in the detail):
+```bash
+cat "{workspace}"/<snapshot path from detail>
+```
+
+**Enumerated playbook — do these inline (cheap + deterministic):**
+- YES on a `kind=task` item that resolves its wait: flip the task
+  `gptodo edit <task-id> --set state todo` and append a
+  `## Erik decision <date>` note (verdict + comment) to the task file.
+- YES on a `kind=standing` item: retire the ask — remove its entry from
+  `config/standing-asks.yaml` (leave a dated comment) and commit scoped.
+- NO with a reason on a `kind=task` item: append the reason as a note to
+  the task file; adjust state only if the reason clearly says to
+  (e.g. 'cancel' → cancelled).
+- YES on a `kind=issue` item (a GitHub issue asking for an Erik decision):
+  act per the issue's ask if it is in Bob's power now that Erik approved
+  (do the work, comment the outcome on the issue via
+  comment-from-stdin.sh --anti-spam); if the ask needs Erik's own hands
+  (credentials, org settings, account actions), comment that Erik approved
+  via dashboard + what remains, and keep the issue open.
+- NO on a `kind=issue` item: comment Erik's reason on the issue and close
+  it only when the reason unambiguously ends the ask; otherwise leave it
+  open with the reason noted. (Closing the issue is what removes it from
+  the decision queue — it self-drops on the next build.)
+
+**Route, don't improvise:**
+- YES on a `kind=pr` merge item: NEVER bare `gh pr merge`. Verify then
+  merge via the sanctioned path only:
+  ```bash
+  python3 {workspace}/scripts/github/self-merge-check.py --json <PR_URL>
+  bash {workspace}/scripts/github/self-merge-if-eligible.sh <PR_URL>
+  ```
+  If not eligible: comment on the PR that Erik approved via dashboard
+  (that IS merge authority per lessons/tools/explicit-go-ahead-merge-authority.md,
+  quote the decision), then merge only if the remaining gate is one you may
+  clear; otherwise leave a comment stating what still blocks.
+- NO with a reason on a `kind=pr` item: post the reason as a PR comment
+  (comment-from-stdin.sh --anti-spam) and act per the reason; close the PR
+  ONLY if the reason unambiguously says so.
+- Anything ambiguous: create a todo task file carrying the decision record
+  and say so in your summary — do NOT guess.
+
+Erik's comment is the highest-signal text in this item — a NO-with-reason
+is direction, not rejection. Never re-ask him what he already answered.
+
+**REQUIRED before finishing — report the outcome back to the decision:**
+The decision permalink (bob.hassel.bjareho.lt/decisions/decision/<decision_id>)
+shows Erik what happened BECAUSE of his click. Append a structured outcome
+record via the helper (validated + flock'd — NEVER hand-write the jsonl):
+```bash
+python3 {workspace}/scripts/report-decision-outcome.py \\
+  --decision-id DECISION_ID_FROM_DETAIL \\
+  --outcome done \\
+  --summary 'What was done because of the decision (1-3 sentences)' \\
+  --artifact commit=COMMIT_SHA \\
+  --artifact pr=https://github.com/OWNER/REPO/pull/N \\
+  --artifact issue_comment='https://github.com/OWNER/REPO/issues/N#issuecomment-ID'
+```
+outcome: done | partial | blocked | noop. Artifact kinds: commit, pr,
+issue_comment, task, journal, file (paths become blob/master permalinks).
+Skipping this is a playbook violation — the dashboard renders 'no explicit
+report' against your session.
+"""
+
 _ITEM_ARMS: dict[ItemPromptKind, str] = {
     ItemPromptKind.PR_UPDATE: _PR_UPDATE_ARM,
     ItemPromptKind.CI_FAILURE: _CI_FAILURE_ARM,
@@ -793,6 +884,8 @@ _ITEM_ARMS: dict[ItemPromptKind, str] = {
     ItemPromptKind.NOTIFICATION: _NOTIFICATION_ARM,
     ItemPromptKind.MASTER_CI_FAILURE: _MASTER_CI_FAILURE_ARM,
     ItemPromptKind.MERGE_CONFLICT: _MERGE_CONFLICT_ARM,
+    ItemPromptKind.VOICE_POSTCALL: _VOICE_POSTCALL_ARM,
+    ItemPromptKind.ERIK_DECISION: _ERIK_DECISION_ARM,
     ItemPromptKind.GREPTILE_CONVERGENCE_ADJUDICATION: (
         _GREPTILE_CONVERGENCE_ADJUDICATION_ARM
     ),
