@@ -27,7 +27,7 @@ _FRONTMATTER_BLOCK_RE = re.compile(r"(?ms)^---\s*$\n(.*?)^---\s*$")
 
 # Matches timestamp field lines in raw YAML text.
 _TIMESTAMP_FIELD_RE = re.compile(
-    r"^\s*(created|created_at|modified|waiting_since|wait)\s*:\s*(.+?)\s*$"
+    r"^\s*(created|created_at|modified|waiting_since|wait|completed)\s*:\s*(.+?)\s*$"
 )
 
 # Detects space-separated datetime (e.g. ``2026-07-02 20:00:00``) before YAML
