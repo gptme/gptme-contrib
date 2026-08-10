@@ -967,13 +967,6 @@ def promote_item_state(
     # The item advanced, so any redelivery treadmill for it is over — restore
     # its full retry budget for a future, genuine delivery failure (lib.sh:915-919).
     # Done before the pending-dir guard so the reset is unconditional, as in bash.
-    try:
-        redelivery_attempts_file(repo, number).unlink()
-    except OSError:
-        pass
-
-    pending = config.pending_state_dir
-    state = config.state_dir
     # bash promote_item_state resets the redelivery counter (lib.sh:928-929)
     # so a later genuine failure gets a full retry budget. Without this the
     # budget degrades monotonically until every failure promotes immediately.
@@ -983,6 +976,9 @@ def promote_item_state(
             attempts_file.unlink()
         except OSError:
             pass
+
+    pending = config.pending_state_dir
+    state = config.state_dir
     if not pending.is_dir():
         return
     state.mkdir(parents=True, exist_ok=True)
@@ -2425,7 +2421,7 @@ def run_work_file(
         if lock_scope.startswith("slot:"):
             if clear_slot_event_markers(config, lock_scope[len("slot:") :]):
                 _log(
-                    f"Cleared event marker for {lock_scope[len('slot:'):]} "
+                    f"Cleared event marker for {lock_scope[len('slot:') :]} "
                     "(lock-busy launch delivered nothing; next cycle re-evaluates)"
                 )
         return 0

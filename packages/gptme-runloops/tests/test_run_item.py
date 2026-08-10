@@ -1485,7 +1485,7 @@ def test_rollback_reads_slot_key_from_env(tmp_path, cooldown_dir, monkeypatch) -
     monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme#3468")
     (cooldown_dir / "gptme-gptme-3468.event").write_text("fingerprint")
 
-    assert rollback_failed_delivery(config, "gptme/gptme", 3468)
+    assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
     assert not (cooldown_dir / "gptme-gptme-3468.event").exists()
 
 
@@ -1513,7 +1513,7 @@ def test_rollback_gives_up_after_max_attempts(tmp_path, cooldown_dir) -> None:
     assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
     assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
     # Counter reset so a future genuine failure gets a full budget.
-    assert not redelivery_attempts_file("gptme/gptme", 3468).exists()
+    assert not redelivery_attempts_file(config, "gptme/gptme", 3468).exists()
     assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
 
 
@@ -1529,7 +1529,8 @@ def test_rollback_respects_max_attempts_env(
 def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:
     config = make_config(tmp_path)
     config.pending_state_dir.mkdir(parents=True)
-    attempts = redelivery_attempts_file("gptme/gptme", 3468)
+    attempts = redelivery_attempts_file(config, "gptme/gptme", 3468)
+    assert attempts is not None  # ensure the path was created
     attempts.write_text("1")
 
     promote_item_state(config, "gptme/gptme", 3468)
