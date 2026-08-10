@@ -356,6 +356,21 @@ def test_no_unsubstituted_angle_bracket_tokens_in_any_arm() -> None:
     )
 
 
+def test_voice_postcall_stem_token_substituted() -> None:
+    """Regression: {stem} must be replaced in the voice_postcall arm.
+
+    _substitute silently leaves unknown {key} tokens verbatim, so if
+    ItemPromptParams._tokens() ever drops the 'stem' key the grep command
+    in voice_postcall embeds the literal string '{stem}' and matches nothing.
+    The angle-bracket test above would NOT catch this (it only scans <...>).
+    """
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), BOB_PARAMS)
+    assert "{stem}" not in rendered, (
+        "{stem} survived substitution in voice_postcall — "
+        "likely ItemPromptParams._tokens() lost the 'stem' key"
+    )
+
+
 def test_every_expected_golden_exists() -> None:
     expected = {f"investigate.{t}.bob" for t in SIMPLE_ARMS}
     expected |= {
