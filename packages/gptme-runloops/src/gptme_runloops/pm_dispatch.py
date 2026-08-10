@@ -34,6 +34,7 @@ SLOW_LANE_TYPES: set[str] = {
     "merge_conflict",
     "greptile_needs_fix",
     "greptile_needs_improvement",
+    "greptile_convergence_adjudication",
 }
 
 # Default slot cap for concurrent dispatch workers
@@ -449,6 +450,11 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
         return "ci-fix"
     if types_set & {"greptile_needs_fix", "greptile_needs_improvement"}:
         return "greptile-fix"
+    if "greptile_convergence_adjudication" in types_set:
+        # Adjudication is a deep review-and-classify task — distinct arm from
+        # the first-pass greptile-fix, so the bandit tracks its own outcomes
+        # and the slow lane (with the capable model) handles it.
+        return "greptile-convergence"
     if "merge_conflict" in types_set:
         return "merge-conflict"
     if "pr_update" in types_set:

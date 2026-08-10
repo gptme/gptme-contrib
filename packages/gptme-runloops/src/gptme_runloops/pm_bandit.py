@@ -51,6 +51,7 @@ PM_WORK_TYPES: set[str] = {
     "strategy-reply",
     "ci-fix",
     "greptile-fix",
+    "greptile-convergence",
     "pr-review",
     "automated-pr-review",
     "merge-conflict",
