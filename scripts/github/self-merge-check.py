@@ -630,7 +630,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository,baseRefName",
         ]
     )
     if not raw:
@@ -1411,7 +1411,42 @@ def pr_author_association(repo: str, number: int) -> str:
 PR_CHECK_HISTORY_SAMPLE = 10
 
 
-def repo_gates_prs_with_checks(repo: str) -> bool | None:
+def repo_has_pull_request_workflow_runs(repo: str) -> bool | None:
+    """Whether Actions has ever run a workflow on a ``pull_request`` event here.
+
+    Tri-state: ``True``/``False`` on a parseable answer, ``None`` on any error.
+
+    Used only to corroborate a *negative* history sample. "None of the last N
+    merged PRs reported checks" has two causes that the sample cannot tell
+    apart: the repo genuinely does not gate PRs, or the sample is
+    unrepresentative (CI added after those merges, or every sampled merge came
+    from a fork whose workflows were never approved). This endpoint separates
+    them — it counts runs across the repo's whole history, not just the sample.
+
+    Note the asymmetry with :func:`repo_gates_prs_with_checks`: counting
+    ``pull_request``-event *runs* is safe here where counting *workflows* was
+    not, because a push-only repo has workflows but zero PR runs. Verified:
+    ``ErikBjare/erikbjare.github.io`` (2 active workflows, push-triggered) → 0,
+    while ``gptme/gptme-contrib`` → 13664 and ``ErikBjare/bob`` → 1151.
+    """
+    raw = run_gh(
+        [
+            "api",
+            f"repos/{repo}/actions/runs?event=pull_request&per_page=1",
+            "--jq",
+            ".total_count",
+        ],
+        timeout=10,
+    )
+    if not raw:
+        return None
+    try:
+        return int(raw) > 0
+    except (ValueError, TypeError):
+        return None
+
+
+def repo_gates_prs_with_checks(repo: str, base_branch: str = "") -> bool | None:
     """Whether pull requests in ``repo`` normally report check results.
 
     Tri-state, and deliberately so:
@@ -1448,15 +1483,28 @@ def repo_gates_prs_with_checks(repo: str) -> bool | None:
     job. It is also unaffected by an ongoing outage, because it reads what
     already-merged PRs recorded rather than what is running now.
 
+    The sample is scoped to ``base_branch`` when known, because CI is often
+    branch-specific: a repo that gates ``master`` but not ``dev`` would
+    otherwise read as ungated whenever recent merge activity happened to be
+    concentrated on ``dev``.
+
+    A negative sample is never trusted on its own. "None of the sampled PRs
+    reported checks" is ambiguous — the repo may genuinely not gate PRs, or the
+    sample may be unrepresentative (CI added after those merges; every sampled
+    merge came from a fork whose workflows were never approved). So ``False`` is
+    returned only when :func:`repo_has_pull_request_workflow_runs` corroborates
+    it; otherwise the answer is ``None`` and the caller fails closed.
+
     Known limits, both in the safe direction or self-healing:
 
-    * A repo that has *just* added CI, whose sampled history predates it,
-      reads ``False``. Narrow: it also requires the PR under evaluation to
-      have no checks at all.
     * A repo that *removed* CI reads ``True`` until the sample rolls over.
       That blocks self-merge — the conservative direction — and clears itself.
     * A repo with no merged PRs at all is ``None`` (fail closed) and
       self-heals after a single manual merge establishes history.
+    * A repo gated exclusively by non-Actions CI *and* with a silent sample
+      reads ``None`` rather than ``False``, since the corroborating endpoint
+      only knows about Actions. Fail-closed, so this costs a manual merge
+      rather than a waived requirement.
     """
     raw = run_gh(
         [
@@ -1466,6 +1514,7 @@ def repo_gates_prs_with_checks(repo: str) -> bool | None:
             repo,
             "--state",
             "merged",
+            *(["--base", base_branch] if base_branch else []),
             "--limit",
             str(PR_CHECK_HISTORY_SAMPLE),
             "--json",
@@ -1487,7 +1536,12 @@ def repo_gates_prs_with_checks(repo: str) -> bool | None:
             return None
         if merged_pr.get("statusCheckRollup") or []:
             return True
-    return False
+    # Silent sample. Only call it "ungated" if Actions has never run on a
+    # pull_request here either; otherwise the sample is unrepresentative and
+    # the honest answer is "don't know" — which fails closed.
+    if repo_has_pull_request_workflow_runs(repo) is False:
+        return False
+    return None
 
 
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
@@ -1995,7 +2049,7 @@ def evaluate_pr(
         # None means we could not determine it, so fail closed: the likeliest
         # cause of an indeterminate answer is the same outage that suppressed
         # the checks in the first place.
-        gates_prs = repo_gates_prs_with_checks(repo)
+        gates_prs = repo_gates_prs_with_checks(repo, pr.get("baseRefName", ""))
         if gates_prs is None:
             result.reasons.append(
                 "CI checks not found and could not determine whether this repo gates PRs "

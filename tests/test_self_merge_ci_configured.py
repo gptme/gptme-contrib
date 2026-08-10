@@ -27,10 +27,22 @@ answers the question the gate actually asks and resolves both at once:
 so external CI counts, while a push-only repo's PRs are correctly seen to carry
 no checks.
 
-The tests below pin both directions against real-world shapes:
+A follow-up review found the remaining hole: a *silent* sample (every sampled PR
+reported zero checks) has an innocent cause and a dangerous one, and the sample
+cannot tell them apart — the repo may genuinely not gate PRs, or the sample may
+be unrepresentative because CI was added after those merges or every sampled
+merge came from a fork whose workflows were never approved. So `False` is
+returned only when `repo_has_pull_request_workflow_runs` corroborates it;
+otherwise the answer is `None` and the caller fails closed. Counting
+pull_request-event *runs* is safe where counting *workflows* was not, because a
+push-only repo has workflows but zero PR runs. The sample is also scoped to the
+PR's base branch, since CI is often branch-specific.
+
+The tests below pin every direction against real-world shapes:
 `ErikBjare/erikbjare.github.io` (2 active workflows, 0 checks on all 4 merged
-PRs) is the push-only control; a Jenkins-style `StatusContext` payload is the
-external-CI control.
+PRs, 0 pull_request runs) is the push-only control; a Jenkins-style
+`StatusContext` payload is the external-CI control; `gptme/gptme-contrib`
+(13664 pull_request runs) and `ErikBjare/bob` (1151) are the gated controls.
 """
 
 from __future__ import annotations
@@ -107,13 +119,28 @@ _EXTERNAL_CI_PR_LIST = json.dumps(
 )
 
 
+def _route(pr_list: str, pr_runs: str = "0", pr_list_rc: int = 0):
+    """Dispatch a fake `subprocess.run` on argv.
+
+    The probe makes up to two different calls — `gh pr list` for the history
+    sample and `gh api .../actions/runs?event=pull_request` to corroborate a
+    silent one — so a single canned response cannot stand in for both.
+    """
+
+    def _run(args: list[str], **kwargs: object) -> _Proc:
+        if "runs?event=pull_request" in " ".join(args):
+            return _Proc(0, pr_runs)
+        return _Proc(pr_list_rc, pr_list if pr_list_rc == 0 else "")
+
+    return _run
+
+
 @pytest.mark.parametrize(
     ("label", "proc", "expected"),
     [
         ("every sampled PR reported checks", _Proc(0, _pr_list(16, 13, 16)), True),
         ("one sampled PR reported checks", _Proc(0, _pr_list(0, 0, 4, 0)), True),
         ("external CI via StatusContext", _Proc(0, _EXTERNAL_CI_PR_LIST), True),
-        ("no sampled PR reported checks", _Proc(0, _pr_list(0, 0, 0, 0)), False),
         # Everything below is indeterminate and MUST be None, not False.
         ("no merged PRs to judge from", _Proc(0, "[]"), None),
         ("404 from the API", _Proc(1, "", "gh: Not Found (HTTP 404)"), None),
@@ -183,14 +210,80 @@ def test_push_only_workflow_repo_is_not_blocked(
     PR on the repo forever. History says "these PRs are not gated", which is the
     truth, so the waiver applies.
     """
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: _Proc(0, _pr_list(0, 0, 0, 0))
-    )
+    monkeypatch.setattr(subprocess, "run", _route(_pr_list(0, 0, 0, 0), pr_runs="0"))
     assert smc.repo_gates_prs_with_checks("ErikBjare/erikbjare.github.io") is False
 
     result = _evaluate_with(monkeypatch, False)
     assert result.eligible
     assert not any("anomalous" in r for r in result.reasons)
+
+
+def test_silent_sample_is_indeterminate_when_pr_runs_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1 regression: a silent sample is not proof the repo is ungated.
+
+    The same "all sampled PRs reported zero checks" observation has an innocent
+    cause (the repo really does not gate PRs) and a dangerous one (the sample is
+    unrepresentative — CI added after those merges, or every sampled merge came
+    from a fork whose workflows were never approved). Trusting it blindly would
+    waive the CI requirement for a genuinely gated repo, recreating the
+    fail-open this change exists to close.
+
+    So a negative sample must be corroborated. Actions reporting *any*
+    pull_request-event run means the sample is not the whole story → None →
+    fail closed.
+    """
+    monkeypatch.setattr(subprocess, "run", _route(_pr_list(0, 0, 0), pr_runs="1151"))
+    assert smc.repo_gates_prs_with_checks("o/r") is None
+
+
+def test_silent_sample_with_unreadable_corroboration_is_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a definitive "no PR runs" may downgrade a silent sample to False."""
+
+    def _run(args: list[str], **kwargs: object) -> _Proc:
+        if "runs?event=pull_request" in " ".join(args):
+            return _NOT_FOUND
+        return _Proc(0, _pr_list(0, 0))
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    assert smc.repo_gates_prs_with_checks("o/r") is None
+
+
+def test_probe_scopes_sample_to_the_base_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CI is often branch-specific, so the sample must be too.
+
+    A repo that gates `master` but not `dev` would otherwise read as ungated
+    whenever recent merge activity happened to be concentrated on `dev`.
+    """
+    captured: list[list[str]] = []
+
+    def _capture(args: list[str], **kwargs: object) -> _Proc:
+        captured.append(list(args))
+        return _Proc(0, _pr_list(3))
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    assert smc.repo_gates_prs_with_checks("o/r", "master") is True
+    assert captured[0][captured[0].index("--base") + 1] == "master"
+
+    captured.clear()
+    assert smc.repo_gates_prs_with_checks("o/r") is True
+    assert "--base" not in captured[0], "unknown base must not be sent as a filter"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [("13664", True), ("1", True), ("0", False), ("", None), ("nope", None)],
+)
+def test_repo_has_pull_request_workflow_runs(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, expected: bool | None
+) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(0, stdout))
+    assert smc.repo_has_pull_request_workflow_runs("o/r") is expected
 
 
 def test_external_ci_repo_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,11 +326,14 @@ def _evaluate_with(
         "reviews": [],
         "comments": [],
         "isCrossRepository": is_cross_repository,
+        "baseRefName": "master",
     }
     monkeypatch.setattr(smc, "fetch_pr", lambda *a, **k: pr)
     real_run_gh = smc.run_gh
     if not use_real_ci_probe:
-        monkeypatch.setattr(smc, "repo_gates_prs_with_checks", lambda repo: gates_prs)
+        monkeypatch.setattr(
+            smc, "repo_gates_prs_with_checks", lambda *a, **k: gates_prs
+        )
     greptile_review = {
         "author": {"login": "greptile-apps[bot]"},
         "submittedAt": "2026-08-09T00:00:00Z",
