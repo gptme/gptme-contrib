@@ -744,3 +744,73 @@ def test_cmd_switch_warns_when_post_flip_usage_returns_empty_dict(
     assert rc == 0
     assert sm.get_active_subscription() == "alice"
     assert "post-switch usage check against alice" in capsys.readouterr().err
+
+
+def test_cmd_switch_probe_ok_retry_does_not_false_alarm_on_usage_check(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The probe_ok retry must not warn that the credential "did not answer".
+
+    That path exists precisely to switch into a slot whose access token is still
+    expired but whose refresh token is good. Claude Code refreshes on first use,
+    so the post-flip usage script necessarily queries with a stale token and gets
+    nothing back. Reporting that as a possible bad credential fires a false alarm
+    on *every* successful retry and sends the operator to `--status --probe` (or
+    worse, a re-login) for a slot that is fine.
+    """
+    fresh, reason = _real_fresh_reason(tmp_path, expires_in=-3600)
+    assert fresh is False
+
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\necho '{}'\n")
+    usage_script.chmod(0o755)
+
+    sm = FakeManager(
+        active="bob",
+        switch_results=[(False, False), (True, False)],
+        slot_fresh_result=(fresh, reason),
+        post_switch_usage={},
+    )
+    sm.config.usage_script = usage_script
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    monkeypatch.setattr(
+        "gptme_subscription.cli.probe_credential",
+        MagicMock(return_value=(None, True, "probe ok")),
+    )
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+    err = capsys.readouterr().err
+
+    assert rc == 0
+    assert sm.switch_probe_ok_flags == [False, True]
+    # The check still ran and is still reported — we lose no information.
+    assert "no data" in err
+    # But not as a fault, and without sending the operator diagnosing.
+    assert "WARNING" not in err
+    assert "did not answer" not in err
+    assert "re-login" not in err
+    assert "expected here" in err
+
+
+def test_cmd_switch_without_probe_ok_retry_still_warns(tmp_path: Path, capsys) -> None:
+    """A plain switch with no usage data keeps the original warning.
+
+    Pins that the probe_ok carve-out above is scoped to the retry path and did
+    not quietly downgrade the real post-flip credential check.
+    """
+    usage_script = tmp_path / "check-usage.sh"
+    usage_script.write_text("#!/bin/sh\necho '{}'\n")
+    usage_script.chmod(0o755)
+
+    sm = FakeManager(active="bob", switch_results=[(True, False)], post_switch_usage={})
+    sm.config.usage_script = usage_script
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+
+    rc = _cmd_switch(args, cast(SubscriptionManager, sm))
+    err = capsys.readouterr().err
+
+    assert rc == 0
+    assert sm.switch_probe_ok_flags == [False]
+    assert "WARNING" in err
+    assert "did not answer" in err

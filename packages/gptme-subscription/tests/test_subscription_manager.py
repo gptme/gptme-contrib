@@ -84,9 +84,9 @@ def test_check_usage_stale_cache_fallback_on_script_failure(tmp_path: Path) -> N
     result = sm.check_usage(stale_cache=stale_cache)
     assert result is not None
     assert result["seven_day"]["utilization"] == pytest.approx(0.3)
-    assert (
-        result.get("_stale") is True
-    ), "stale fallback must be flagged with _stale=True"
+    assert result.get("_stale") is True, (
+        "stale fallback must be flagged with _stale=True"
+    )
 
 
 def test_check_usage_stale_cache_rejected_when_too_old(tmp_path: Path) -> None:
@@ -402,9 +402,9 @@ def test_evaluate_does_not_record_observation_for_stale_usage(
 
     sm.evaluate(usage, "bob")
 
-    assert (
-        not sm.config.reset_times_file.exists()
-    ), "record_sub_reset_time must not be called when usage._stale=True"
+    assert not sm.config.reset_times_file.exists(), (
+        "record_sub_reset_time must not be called when usage._stale=True"
+    )
 
 
 def test_evaluate_skips_stale_fallback_picks_fresh(tmp_path: Path) -> None:
@@ -664,3 +664,28 @@ def test_record_manual_switch_hold_persists_state(tmp_path: Path) -> None:
     decision = sm.evaluate(_healthy_usage(), "alice", now=now, rebalance_state=loaded)
     assert decision.action == "stay"
     assert decision.mode == "manual-switch-hold"
+
+
+def test_slot_logger_survives_percent_signs_in_messages(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A percent sign in a slot audit line must not kill the switch.
+
+    ``SlotManager._log`` calls ``self.logger(msg)`` with a single, already
+    interpolated string, and ``logging`` only applies ``%`` formatting when a
+    record carries args. So the current wiring is safe, and this test pins that:
+    it fails the moment someone rewrites the call as
+    ``logger.warning(fmt, *args)``, which would turn slot names and reasons into
+    format strings and raise ValueError mid-switch -- leaving ``switch_to`` to
+    die with a traceback instead of returning a SwitchResult.
+    """
+    sm = _make_manager(tmp_path)
+    logger_fn = sm._slot_manager.logger
+    assert logger_fn is not None
+
+    with caplog.at_level(logging.WARNING):
+        # Would raise "ValueError: unsupported format character" if the message
+        # were being interpolated as a format string.
+        logger_fn("probe_ok BYPASS for slot bob%: 100% exhausted")
+
+    assert "100% exhausted" in caplog.text

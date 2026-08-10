@@ -354,6 +354,10 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         return 0
     ok = sm.switch_to(target, f"manual switch via --switch {target}", force=True)
     failure_detail: str | None = None
+    # Whether we got in via the probe_ok retry below. That path deliberately
+    # accepts a slot whose access token is still expired, so the post-flip usage
+    # check cannot succeed and must not be reported as a credential problem.
+    switched_via_probe_ok = False
     if not ok:
         # Retry with probe_ok=True if the slot has an expired access token but a
         # valid refresh token — CC auto-refreshes on first use, so this is safe.
@@ -384,6 +388,7 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
                         force=True,
                         probe_ok=True,
                     )
+                    switched_via_probe_ok = ok
                     if not ok:
                         retry_fresh, retry_reason = sm.slot_is_fresh(target)
                         failure_detail = (
@@ -420,14 +425,29 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
         if not sm.check_usage(no_cache=True) and (
             usage_script is not None and usage_script.exists()
         ):
-            print(
-                f"  WARNING: post-switch usage check against {target} returned "
-                "no usage data — the switch DID happen and is recorded. Either "
-                f"the credential did not answer, or {usage_script} itself failed "
-                "(not executable / timed out / bad output). Verify with "
-                f"`--status --probe` before assuming {target} needs a re-login.",
-                file=sys.stderr,
-            )
+            if switched_via_probe_ok:
+                # Expected, not a fault: we got here precisely because the access
+                # token is expired but refreshable. Claude Code refreshes it on
+                # first use, so the usage script is querying with a token that is
+                # still stale and will 401. Reporting this as "the credential did
+                # not answer" would raise an alarm on every successful retry.
+                print(
+                    f"  Note: post-switch usage check against {target} returned "
+                    "no data, which is expected here — the switch was allowed on "
+                    "a verified refresh token while the access token is still "
+                    "expired. Claude Code refreshes it on first use; usage data "
+                    "appears after that.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"  WARNING: post-switch usage check against {target} returned "
+                    "no usage data — the switch DID happen and is recorded. Either "
+                    f"the credential did not answer, or {usage_script} itself failed "
+                    "(not executable / timed out / bad output). Verify with "
+                    f"`--status --probe` before assuming {target} needs a re-login.",
+                    file=sys.stderr,
+                )
         return 0
     # Never exit 1 in silence: a bare non-zero exit is the diagnosis-free
     # failure this command's retry path exists to remove. Say what blocked it.

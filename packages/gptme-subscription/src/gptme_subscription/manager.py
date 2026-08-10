@@ -121,6 +121,14 @@ class SubscriptionManager:
             # emitted only via ``SlotManager._log``, which discards everything
             # when ``logger is None``. This is the production wiring, so a
             # skipped safety check has to be visible here, not just in tests.
+            # Safe as a bare bound method: ``SlotManager._log`` calls
+            # ``self.logger(msg)`` with exactly one argument, and logging only
+            # applies ``%`` interpolation when record args are present. Percent
+            # signs in slot names and reasons ("100% exhausted") therefore pass
+            # through verbatim. Pinned by
+            # ``test_slot_logger_survives_percent_signs_in_messages`` -- do not
+            # "fix" this into ``logger.warning(fmt, *args)``, which would make
+            # the message a format string and reintroduce the hazard.
             logger=logger.warning,
         )
 
