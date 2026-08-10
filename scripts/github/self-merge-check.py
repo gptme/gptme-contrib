@@ -57,6 +57,8 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import re
@@ -722,31 +724,41 @@ AI_REVIEW_COMMENT_MARKER = "<!-- bob-ai-review {"
 AI_REVIEW_MARKER_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
 
 
-def ai_review_abstained(repo: str, pr_number: int) -> bool | None:
+def ai_review_abstained(
+    repo: str, pr_number: int, *, reviewer_login: str
+) -> bool | None:
     """Whether our AI reviewer's latest review explicitly declined to review.
 
-    ``None`` means the review state could not be determined and callers must
-    fail closed. Only the latest marker comment counts: a later real review
-    supersedes an earlier abstention.
+    ``None`` means the review state could not be determined. Only the latest
+    marker comment from the authenticated reviewer account counts: a later real
+    review supersedes an earlier abstention, while another user cannot forge
+    either state by copying the marker.
     """
     raw = run_gh(
         [
             "api",
             f"repos/{repo}/issues/{pr_number}/comments?per_page=100",
             "--paginate",
-            "--slurp",
             "--jq",
-            f'[.[][] | select(.body | contains("{AI_REVIEW_COMMENT_MARKER}"))]'
-            ' | if length == 0 then "__NO_AI_REVIEW__" else last.body end',
+            f'.[] | select(.user.login == "{reviewer_login}" and '
+            f'(.body | contains("{AI_REVIEW_COMMENT_MARKER}"))) | .body | @base64',
         ],
         timeout=30,
     )
     if not raw or not raw.strip():
-        return None
-    if raw == "__NO_AI_REVIEW__":
         return False
 
-    match = AI_REVIEW_MARKER_RE.search(raw)
+    encoded = [line for line in raw.splitlines() if line.strip()]
+    if not encoded:
+        return False
+    try:
+        latest_review = base64.b64decode(encoded[-1], validate=True).decode(
+            "utf-8", errors="replace"
+        )
+    except (ValueError, binascii.Error):
+        return None
+
+    match = AI_REVIEW_MARKER_RE.search(latest_review)
     if match is None:
         return None
     try:
@@ -1338,13 +1350,13 @@ def evaluate_pr(
         if score is not None and score < min_score:
             result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
 
-    # An explicit abstention blocks in its own right. If the structured review
-    # state cannot be read, fail closed rather than silently removing the gate.
-    ai_abstention = ai_review_abstained(repo, number)
+    # An explicit abstention blocks in its own right. An unreadable optional
+    # signal is advisory: it must not disable the entire self-merge path.
+    ai_abstention = ai_review_abstained(repo, number, reviewer_login=current_user)
     if ai_abstention is True:
         result.reasons.append("AI review abstained — not reviewed")
     elif ai_abstention is None:
-        result.reasons.append("AI review status unavailable")
+        result.warnings.append("AI review status unavailable")
 
     human_threads = fetch_unresolved_human_threads(
         repo, number, review_data=shared_review_data

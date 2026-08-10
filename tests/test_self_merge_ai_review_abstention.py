@@ -19,6 +19,7 @@ ordinary AI review (and no AI review at all) leaves eligibility untouched.
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import sys
 from pathlib import Path
@@ -71,11 +72,11 @@ ABSTENTION_REASON = "AI review abstained — not reviewed"
 
 
 def _gh_returning(*bodies: str):
-    """Stand in for the jq query returning the latest marker comment body."""
+    """Stand in for paginated jq output (one base64 body per line)."""
 
     def _run_gh(args: list[str], **kwargs: Any) -> str:
         selected = [b for b in bodies if self_merge_check.AI_REVIEW_COMMENT_MARKER in b]
-        return selected[-1] if selected else "__NO_AI_REVIEW__"
+        return "\n".join(base64.b64encode(b.encode()).decode() for b in selected)
 
     return _run_gh
 
@@ -87,18 +88,33 @@ def _gh_returning(*bodies: str):
 
 def test_abstention_is_detected() -> None:
     with patch.object(self_merge_check, "run_gh", _gh_returning(ABSTENTION_BODY)):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is True
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is True
+        )
 
 
 @pytest.mark.parametrize("body", [ORDINARY_REVIEW_BODY, CLEAN_REVIEW_BODY])
 def test_ordinary_review_is_not_an_abstention(body: str) -> None:
     with patch.object(self_merge_check, "run_gh", _gh_returning(body)):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is False
+        )
 
 
 def test_no_ai_review_at_all_is_not_an_abstention() -> None:
     with patch.object(self_merge_check, "run_gh", _gh_returning()):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is False
+        )
 
 
 def test_legacy_marker_without_score_is_not_an_abstention() -> None:
@@ -107,7 +123,12 @@ def test_legacy_marker_without_score_is_not_an_abstention() -> None:
         '<!-- bob-ai-review {"sha": "deadbeef1234", "engine": "llm"} -->'
     )
     with patch.object(self_merge_check, "run_gh", _gh_returning(legacy)):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is False
+        )
 
 
 def test_only_the_latest_review_counts() -> None:
@@ -121,7 +142,12 @@ def test_only_the_latest_review_counts() -> None:
         "run_gh",
         _gh_returning(ABSTENTION_BODY, ORDINARY_REVIEW_BODY),
     ):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is False
+        )
 
 
 def test_latest_abstention_after_an_earlier_real_review_blocks() -> None:
@@ -130,25 +156,60 @@ def test_latest_abstention_after_an_earlier_real_review_blocks() -> None:
         "run_gh",
         _gh_returning(ORDINARY_REVIEW_BODY, ABSTENTION_BODY),
     ):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is True
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is True
+        )
 
 
 def test_a_human_comment_quoting_the_abstention_does_not_count() -> None:
-    """Selection is on the HTML marker, not the visible heading."""
-    quoted = (
-        "> ℹ️ **Submodule pointer change only — not reviewed.**\n\n"
-        "Discussing this, but I am not the reviewer.\n"
-    )
-    with patch.object(self_merge_check, "run_gh", _gh_returning(quoted)):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+    """Selection is on the authenticated author as well as the HTML marker."""
+    captured: list[str] = []
+
+    def _capture(args: list[str], **kwargs: Any) -> str:
+        captured.extend(args)
+        return ""
+
+    with patch.object(self_merge_check, "run_gh", _capture):
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is False
+        )
+
+    query = captured[captured.index("--jq") + 1]
+    assert '.user.login == "TimeToBuildBob"' in query
 
 
 @pytest.mark.parametrize(
-    "raw", ["", "   \n", "not a marker", "<!-- bob-ai-review {bad json} -->"]
+    "raw",
+    [
+        "not base64",
+        base64.b64encode(b"not a marker").decode(),
+        base64.b64encode(b"<!-- bob-ai-review {bad json} -->").decode(),
+    ],
 )
-def test_api_or_decode_failure_is_unknown(raw: str) -> None:
+def test_decode_failure_is_unknown(raw: str) -> None:
     with patch.object(self_merge_check, "run_gh", lambda *a, **k: raw):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is None
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is None
+        )
+
+
+def test_api_failure_is_no_review() -> None:
+    with patch.object(self_merge_check, "run_gh", return_value=""):
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is False
+        )
 
 
 def test_query_requests_latest_structured_marker() -> None:
@@ -156,19 +217,37 @@ def test_query_requests_latest_structured_marker() -> None:
 
     def _capture(args: list[str], **kwargs: Any) -> str:
         captured.extend(args)
-        return CLEAN_REVIEW_BODY
+        return base64.b64encode(CLEAN_REVIEW_BODY.encode()).decode()
 
     with patch.object(self_merge_check, "run_gh", _capture):
-        assert self_merge_check.ai_review_abstained("o/r", 42) is False
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 42, reviewer_login="TimeToBuildBob"
+            )
+            is False
+        )
 
     assert "repos/o/r/issues/42/comments?per_page=100" in captured
     assert "--paginate" in captured
-    assert "--slurp" in captured
+    assert "--slurp" not in captured
     query = captured[captured.index("--jq") + 1]
     assert self_merge_check.AI_REVIEW_COMMENT_MARKER in query
-    assert ".[][]" in query
-    assert "last" in query
-    assert "__NO_AI_REVIEW__" in query
+    assert '.user.login == "TimeToBuildBob"' in query
+    assert ".body | @base64" in query
+
+
+def test_paginated_output_uses_latest_complete_marker() -> None:
+    with patch.object(
+        self_merge_check,
+        "run_gh",
+        _gh_returning(ABSTENTION_BODY, ORDINARY_REVIEW_BODY),
+    ):
+        assert (
+            self_merge_check.ai_review_abstained(
+                "o/r", 1, reviewer_login="TimeToBuildBob"
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
