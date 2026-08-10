@@ -300,6 +300,198 @@ class TestWorktreeValidation:
         assert result.returncode == 0, f"Hook failed on detached HEAD: {result.stderr}"
 
 
+def run_validate_worktree_tracking(
+    repo_path: Path,
+    ref_info: str,
+) -> subprocess.CompletedProcess:
+    """Invoke validate-worktree-tracking.sh directly with the given stdin.
+
+    Calling the validator directly (rather than through pre-push) isolates the
+    tracking rules from the master/main-protection and mass-delete stanzas, which
+    would otherwise mask which check actually fired.
+    """
+    script = repo_path / ".git" / "hooks" / "validate-worktree-tracking.sh"
+    if not script.exists():
+        pytest.skip("validate-worktree-tracking.sh not found")
+
+    # A remote must exist for `git branch --set-upstream-to=origin/...` in the
+    # upstream tests; harmless for the rest. Ignore failure if already added.
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/test/repo"],
+        cwd=repo_path,
+        capture_output=True,
+        env=_clean_git_env(),
+    )
+
+    return subprocess.run(
+        ["bash", str(script), "origin", "https://github.com/test/repo"],
+        cwd=repo_path,
+        input=ref_info,
+        text=True,
+        capture_output=True,
+        env=_clean_git_env(),
+    )
+
+
+def _checkout_branch(repo_path: Path, name: str) -> None:
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", name],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        env=_clean_git_env(),
+    )
+
+
+class TestNoUpstreamTracking:
+    """Rules applied when the current branch has no upstream.
+
+    Regression coverage for the false block that hit every PR worker checking a
+    PR out under a local name differing from the PR's remote branch (gptme#3468).
+    The guard's real purpose is preventing a push from landing on master/main
+    unintentionally, which is a property of the *destination* — git resolves
+    refspecs before the hook runs, so the destination is always known here.
+    """
+
+    def test_allows_explicit_refspec_to_differently_named_feature_branch(
+        self, hook_env
+    ):
+        """The #3468 shape: local `pr-3468` -> remote `fix-3440-server-e2e`.
+
+        Destination is explicit and is not master/main, so it must be allowed.
+        """
+        _checkout_branch(hook_env, "pr-3468")
+        result = run_validate_worktree_tracking(
+            hook_env,
+            "refs/heads/pr-3468 abc123 refs/heads/fix-3440-server-e2e "
+            "0000000000000000000000000000000000000000",
+        )
+        assert result.returncode == 0, (
+            f"Explicit refspec to a feature branch was blocked: "
+            f"{result.stdout}{result.stderr}"
+        )
+        # Must not be a silent downgrade — the allowed destination is named.
+        assert "fix-3440-server-e2e" in result.stdout
+
+    def test_blocks_push_to_master_with_no_upstream(self, hook_env):
+        """No upstream + destination master is the real hazard — still blocked."""
+        _checkout_branch(hook_env, "some-feature")
+        result = run_validate_worktree_tracking(
+            hook_env,
+            "refs/heads/some-feature abc123 refs/heads/master def456",
+        )
+        assert result.returncode == 1
+        assert "master" in result.stdout.lower()
+
+    def test_blocks_push_to_main_with_no_upstream(self, hook_env):
+        """Same for `main`-default repos."""
+        _checkout_branch(hook_env, "some-feature")
+        result = run_validate_worktree_tracking(
+            hook_env,
+            "refs/heads/some-feature abc123 refs/heads/main def456",
+        )
+        assert result.returncode == 1
+
+    def test_allows_same_name_new_branch_push(self, hook_env):
+        """The pre-existing allowance (same-named new branch) must keep working."""
+        _checkout_branch(hook_env, "my-feature")
+        result = run_validate_worktree_tracking(
+            hook_env,
+            "refs/heads/my-feature abc123 refs/heads/my-feature "
+            "0000000000000000000000000000000000000000",
+        )
+        assert result.returncode == 0
+
+    def test_allows_branch_deletion(self, hook_env):
+        """Deletions carry a zero local sha and touch nothing we protect."""
+        _checkout_branch(hook_env, "my-feature")
+        result = run_validate_worktree_tracking(
+            hook_env,
+            "(delete) 0000000000000000000000000000000000000000 "
+            "refs/heads/old-branch abc123",
+        )
+        assert result.returncode == 0
+
+    def test_allows_empty_stdin(self, hook_env):
+        """An up-to-date push invokes the hook with nothing to validate."""
+        _checkout_branch(hook_env, "my-feature")
+        result = run_validate_worktree_tracking(hook_env, "")
+        assert result.returncode == 0
+
+    def test_allows_blank_line_stdin(self, hook_env):
+        """A forwarded single empty line must not read as a real ref."""
+        _checkout_branch(hook_env, "my-feature")
+        result = run_validate_worktree_tracking(hook_env, "\n")
+        assert result.returncode == 0
+
+    def test_mixed_push_with_master_destination_is_blocked(self, hook_env):
+        """A feature destination must not launder a master destination beside it."""
+        _checkout_branch(hook_env, "pr-999")
+        result = run_validate_worktree_tracking(
+            hook_env,
+            "refs/heads/pr-999 abc123 refs/heads/some-feature def456\n"
+            "refs/heads/pr-999 abc123 refs/heads/master def456",
+        )
+        assert result.returncode == 1
+
+
+class TestUpstreamTracksDefaultBranch:
+    """The `worktree add -b feat origin/master` trap: upstream IS origin/master."""
+
+    def _set_upstream_to_master(self, repo_path: Path, branch: str) -> None:
+        clean_env = _clean_git_env()
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/test/repo"],
+            cwd=repo_path,
+            capture_output=True,
+            env=clean_env,
+        )
+        # Fabricate a remote-tracking ref so `@{u}` resolves without a network.
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=clean_env,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/master", head],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            env=clean_env,
+        )
+        subprocess.run(
+            ["git", "branch", "--set-upstream-to=origin/master", branch],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            env=clean_env,
+        )
+
+    def test_blocks_when_upstream_is_master_and_destination_is_master(self, hook_env):
+        """The original hazard — must stay blocked."""
+        _checkout_branch(hook_env, "trap-branch")
+        self._set_upstream_to_master(hook_env, "trap-branch")
+        result = run_validate_worktree_tracking(
+            hook_env,
+            "refs/heads/trap-branch abc123 refs/heads/master def456",
+        )
+        assert result.returncode == 1
+        assert "trap-branch" in result.stdout
+
+    def test_allows_when_upstream_is_master_but_destination_is_feature(self, hook_env):
+        """Explicit feature-branch push is safe even with a bad upstream."""
+        _checkout_branch(hook_env, "trap-branch")
+        self._set_upstream_to_master(hook_env, "trap-branch")
+        result = run_validate_worktree_tracking(
+            hook_env,
+            "refs/heads/trap-branch abc123 refs/heads/trap-branch def456",
+        )
+        assert result.returncode == 0
+
+
 def test_hooks_exist():
     """Verify that required hook files exist."""
     assert HOOKS_DIR.exists(), f"Hooks directory not found: {HOOKS_DIR}"
