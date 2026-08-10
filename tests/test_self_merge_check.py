@@ -28,16 +28,18 @@ _REAL_MERGE_PERMISSION = self_merge_check.merge_permission.__wrapped__
 
 
 @pytest.fixture(autouse=True)
-def _stub_merge_permission():
-    """Default merge_permission to True so evaluate_pr tests don't make a live
-    gh call (and aren't sensitive to the test runner's actual repo access).
+def _stub_external_merge_checks():
+    """Keep evaluate_pr tests independent of GitHub access.
 
-    merge_permission is @cache'd, so clear the cache around each test to keep
-    per-test patches (True/False/None) isolated. Tests exercising the
-    permission gate itself patch merge_permission explicitly.
+    The permission and AI-review helpers both make live ``gh`` calls and fail
+    closed when their state is unreadable. Tests for those gates patch the
+    helpers explicitly.
     """
     self_merge_check.merge_permission.cache_clear()
-    with patch.object(self_merge_check, "merge_permission", return_value=True):
+    with (
+        patch.object(self_merge_check, "merge_permission", return_value=True),
+        patch.object(self_merge_check, "ai_review_abstained", return_value=False),
+    ):
         yield
     self_merge_check.merge_permission.cache_clear()
 
