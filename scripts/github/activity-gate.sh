@@ -933,39 +933,66 @@ check_merge_conflicts() {
 # Emits:
 #   greptile_needs_fix       — score < 4 (significant findings to address)
 #   greptile_needs_improvement — score = 4 (minor fixes needed)
-# Count UNRESOLVED inline findings posted by our own AI reviewer.
+# Does our own AI reviewer still want changes on this PR?
 #
 # Why this exists: check_greptile_scores() reads Greptile's score and nothing
-# else, so a PR sitting at Greptile 5/5 with four unaddressed findings from our
+# else, so a PR sitting at Greptile 5/5 with unaddressed findings from our
 # reviewer emits merge_ready and never enters the fix loop. Observed on
 # gptme/gptme#3468 — 5/5 from Greptile, 4 of our findings open, PM silent, and a
 # human triaging the PR reads those findings as blockers.
 #
-# "Unresolved" deliberately excludes OUTDATED threads: GitHub marks a review
-# comment outdated once the code it anchored to changes, which is the cheapest
-# available evidence that the finding was addressed. Counting those would nag
-# forever on PRs that already did the work.
+# The authoritative signal is the LATEST REVIEW AT THE CURRENT HEAD, not the
+# state of comment threads.
 #
-# Note we cannot read our own marker's `score` here: markers written before the
-# score field shipped (2026-08-07/08) carry none, and those are exactly the old
-# PRs sitting in the backlog. Counting open finding threads works on every
-# marker version.
-count_unresolved_ai_findings() {
-    local repo=$1 pr_number=$2
-    gh api graphql -f query='
-      query($owner:String!, $name:String!, $num:Int!) {
-        repository(owner:$owner, name:$name) {
-          pullRequest(number:$num) {
-            reviewThreads(first:100) {
-              nodes { isResolved isOutdated comments(first:1) { nodes { body } } }
-            }
-          }
-        }
-      }' -F owner="${repo%%/*}" -F name="${repo##*/}" -F num="$pr_number" \
-      --jq '[.data.repository.pullRequest.reviewThreads.nodes[]
-             | select(.isResolved == false and .isOutdated == false)
-             | select(.comments.nodes[0].body // "" | contains("bob-ai-review-finding"))]
-            | length' 2>/dev/null || echo 0
+# An earlier version counted unresolved threads and excluded GitHub's
+# `isOutdated` ones, treating outdated as "addressed". Erik flagged that as a
+# cheap heuristic, and he is right: GitHub marks a thread outdated whenever the
+# lines it anchored to change — a rebase, a reformat, or an unrelated edit in the
+# same hunk all do it, with the bug fully intact. Reading that as "fixed"
+# produces a false clean, which is the one direction that costs an unreviewed
+# merge rather than a wasted round.
+#
+# So we ask the reviewer instead of guessing. Our reviewer re-reviews on every
+# head change and deliberately re-raises findings that were never fixed
+# (suppression happens only on explicit dismissal), so the finding count it
+# recorded FOR THE CURRENT HEAD is a measurement, not an inference.
+#
+# Echoes: "dirty" (findings at current head), "clean" (reviewed, none),
+# "pending" (current head not reviewed yet — the sweep will get to it), or
+# "none" (never reviewed).
+ai_review_verdict() {
+    local repo=$1 pr_number=$2 head_sha=$3
+    local marker
+    marker=$(gh api "repos/${repo}/issues/${pr_number}/comments" --paginate \
+        --jq '[.[] | .body // "" | capture("<!-- bob-ai-review (?<j>\\{[^>]*\\}) -->").j] | last // empty' \
+        2>/dev/null | tail -1)
+    [ -z "$marker" ] && { echo "none"; return 0; }
+
+    local reviewed_sha score findings
+    reviewed_sha=$(printf '%s' "$marker" | jq -r '.sha // empty' 2>/dev/null)
+    [ -z "$reviewed_sha" ] && { echo "none"; return 0; }
+
+    # Marker records a short SHA.
+    case "$head_sha" in
+        "$reviewed_sha"*) ;;
+        *) echo "pending"; return 0 ;;
+    esac
+
+    score=$(printf '%s' "$marker" | jq -r '.score // empty' 2>/dev/null)
+    if [ -n "$score" ] && [ "$score" != "null" ]; then
+        [ "$score" -ge 5 ] 2>/dev/null && echo "clean" || echo "dirty"
+        return 0
+    fi
+    # Markers written before the score field shipped (2026-08-07/08) carry none,
+    # and those are exactly the older PRs sitting in the backlog. Fall back to the
+    # finding count the same review recorded.
+    findings=$(printf '%s' "$marker" \
+        | jq -r '(.history // []) | last | .findings // empty' 2>/dev/null)
+    if [ -n "$findings" ] && [ "$findings" != "null" ]; then
+        [ "$findings" -gt 0 ] 2>/dev/null && echo "dirty" || echo "clean"
+        return 0
+    fi
+    echo "none"
 }
 
 
@@ -1043,15 +1070,20 @@ check_greptile_scores() {
         # have open findings on the same PR, and those are invisible to the
         # score above. A PR is only clean when both reviewers are satisfied.
         if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
-            local ai_open
-            ai_open=$(count_unresolved_ai_findings "$repo" "$pr_number")
-            if [ "${ai_open:-0}" -gt 0 ] 2>/dev/null; then
+            local ai_verdict
+            ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
+            if [ "$ai_verdict" = "dirty" ]; then
                 # Fall through to the fix arm below. Scored as 3 so it routes to
                 # greptile_needs_fix rather than _needs_improvement: unaddressed
                 # findings are work to do, not a polish suggestion.
                 greptile_score=3
-                pr_title="${pr_title} [${ai_open} open AI-review finding(s)]"
+                pr_title="${pr_title} [our AI review wants changes]"
             else
+                # clean / pending / none: nothing WE can say is outstanding.
+                # 'pending' is deliberately not treated as dirty — the head is
+                # simply unreviewed yet, and the sweep re-reviews within minutes.
+                # Emitting a fix item off an unmeasured head would nag on PRs
+                # that may well be clean.
                 echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
                 continue
             fi
