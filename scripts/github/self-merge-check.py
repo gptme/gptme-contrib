@@ -110,7 +110,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Iterator, cast
 
 MAX_GRAPHQL_PAGE_SIZE = 100
 DEFAULT_MIN_GREPTILE_SCORE = 5
@@ -792,9 +792,29 @@ def _is_ai_review_thread(comments: list[dict[str, Any]]) -> bool:
 # Summary marker upserted by the self-hosted reviewer onto one issue comment per
 # PR: `<!-- bob-ai-review {json} -->`. The space before `{` is load-bearing — it
 # is what stops this pattern from also matching `<!-- bob-ai-review-finding -->`
-# and the per-finding `<!-- bob-ai-review-fp {...} -->`. Same regex the reviewer's
-# own consumers (ai-review.py, ai-review-sweep.py) use; keep them in step.
-_AI_REVIEW_SUMMARY_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
+# and the per-finding `<!-- bob-ai-review-fp {...} -->`.
+_AI_REVIEW_MARKER_PREFIX = "<!-- bob-ai-review "
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _iter_ai_review_markers(body: str) -> Iterator[dict[str, Any]]:
+    """Yield complete JSON objects from self-hosted-review summary markers.
+
+    Regex cannot safely delimit JSON because real markers contain nested objects.
+    ``raw_decode`` consumes exactly one complete JSON value, after which we verify
+    the marker suffix so arbitrary prose containing the prefix is ignored.
+    """
+    offset = 0
+    while (start := body.find(_AI_REVIEW_MARKER_PREFIX, offset)) != -1:
+        json_start = start + len(_AI_REVIEW_MARKER_PREFIX)
+        try:
+            parsed, json_end = _JSON_DECODER.raw_decode(body, json_start)
+        except json.JSONDecodeError:
+            offset = json_start
+            continue
+        if body.startswith(" -->", json_end) and isinstance(parsed, dict):
+            yield parsed
+        offset = max(json_end, json_start + 1)
 
 
 def _ai_review_enabled() -> bool:
@@ -903,13 +923,8 @@ def _fetch_ai_review_marker(
         # Last match wins within a body, and the last qualifying comment wins
         # overall: the reviewer upserts a single comment, but a repo with legacy
         # append-style comments should still be read at its most recent verdict.
-        for match in _AI_REVIEW_SUMMARY_RE.finditer(comment.get("body") or ""):
-            try:
-                parsed = json.loads(match.group(1))
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                latest = parsed
+        for parsed in _iter_ai_review_markers(comment.get("body") or ""):
+            latest = parsed
     return latest
 
 

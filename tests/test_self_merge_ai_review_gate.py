@@ -222,19 +222,31 @@ def test_no_marker_at_all(gh_comments: Any) -> None:
 
 def test_inline_finding_marker_is_not_a_summary_marker() -> None:
     """`-finding` and `-fp {..}` share the prefix; only `bob-ai-review {` counts."""
-    assert not smc._AI_REVIEW_SUMMARY_RE.search(smc._AI_REVIEW_FINDING_MARKER)
-    assert not smc._AI_REVIEW_SUMMARY_RE.search('<!-- bob-ai-review-fp {"a": 1} -->')
-    assert smc._AI_REVIEW_SUMMARY_RE.search('<!-- bob-ai-review {"sha": "x"} -->')
+    assert not list(smc._iter_ai_review_markers(smc._AI_REVIEW_FINDING_MARKER))
+    assert not list(smc._iter_ai_review_markers('<!-- bob-ai-review-fp {"a": 1} -->'))
+    assert list(smc._iter_ai_review_markers('<!-- bob-ai-review {"sha": "x"} -->'))
 
 
 def test_nested_json_marker_parses_whole() -> None:
-    """The real marker nests objects in `history`; a lazy match must not stop early."""
+    """The real marker nests objects; parsing must reach the top-level close."""
     marker = _marker(history=[{"sha": "aaaabbbbcccc", "score": 3}])
-    match = smc._AI_REVIEW_SUMMARY_RE.search(
-        f"text\n<!-- bob-ai-review {json.dumps(marker)} -->\n"
+    parsed = list(
+        smc._iter_ai_review_markers(
+            f"text\n<!-- bob-ai-review {json.dumps(marker)} -->\n"
+        )
     )
-    assert match is not None
-    assert json.loads(match.group(1))["consensus"]["jobs_answered"] == 9
+    assert parsed[0]["consensus"]["jobs_answered"] == 9
+
+
+def test_multiple_markers_and_malformed_marker_recover() -> None:
+    body = "\n".join(
+        [
+            '<!-- bob-ai-review {"broken": } -->',
+            '<!-- bob-ai-review {"score": 3} -->',
+            '<!-- bob-ai-review {"score": 5, "nested": {"ok": true}} -->',
+        ]
+    )
+    assert [marker["score"] for marker in smc._iter_ai_review_markers(body)] == [3, 5]
 
 
 def test_truncated_sha_cannot_prefix_match_any_head() -> None:
