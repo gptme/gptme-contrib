@@ -861,7 +861,8 @@ def _consensus_shortfall(consensus: Any) -> str | None:
 
     def _int(key: str) -> int | None:
         value = consensus.get(key)
-        return value if isinstance(value, int) else None
+        # bool is an int subclass in Python, but it is never a valid count.
+        return value if type(value) is int else None
 
     requested, answered = _int("requested"), _int("answered")
     jobs_requested, jobs_answered = _int("jobs_requested"), _int("jobs_answered")
@@ -870,15 +871,22 @@ def _consensus_shortfall(consensus: Any) -> str | None:
     if jobs_requested is None or jobs_answered is None:
         return "consensus record is missing job counts"
 
+    # One pass is the sweep's non-consensus mode even if a marker explicitly
+    # serializes 1/1 counts. Qualifying evidence must contain multiple independent
+    # passes, not merely a present consensus object.
+    if requested < 2:
+        return "consensus requires at least 2 requested passes"
     if answered < 1 or jobs_answered < 1:
         return "no consensus pass answered"
-    if requested > 1 and answered < requested:
+    if answered < requested:
         return f"consensus degraded ({answered}/{requested} passes answered)"
-    if jobs_requested > 1 and jobs_answered < jobs_requested:
+    if jobs_answered < jobs_requested:
         return f"consensus degraded ({jobs_answered}/{jobs_requested} jobs answered)"
 
     applied, asked = _int("min_agreement"), _int("min_agreement_requested")
-    if applied is not None and asked is not None and applied < asked:
+    if applied is None or asked is None:
+        return "consensus record is missing agreement thresholds"
+    if applied < asked:
         return f"consensus agreement clamped to {applied} (requested {asked})"
     return None
 

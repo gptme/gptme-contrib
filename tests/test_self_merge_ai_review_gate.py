@@ -178,6 +178,50 @@ def test_missing_consensus_record_is_rejected(gh_comments: Any) -> None:
     assert "no consensus record" in (status["detail"] or "")
 
 
+def test_explicit_single_pass_consensus_is_rejected(gh_comments: Any) -> None:
+    """A serialized 1/1 record is still a single sample, not consensus."""
+    consensus = dict(
+        FULL_CONSENSUS,
+        requested=1,
+        answered=1,
+        jobs_requested=1,
+        jobs_answered=1,
+        min_agreement=1,
+        min_agreement_requested=1,
+    )
+    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is False
+    assert "at least 2 requested passes" in (status["detail"] or "")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "requested",
+        "answered",
+        "jobs_requested",
+        "jobs_answered",
+        "min_agreement",
+        "min_agreement_requested",
+    ],
+)
+def test_boolean_consensus_counts_are_rejected(gh_comments: Any, field: str) -> None:
+    """Booleans are JSON-valid but are not trustworthy numeric counts."""
+    consensus = dict(FULL_CONSENSUS, **{field: True})
+    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is False
+    assert "missing" in (status["detail"] or "")
+
+
+@pytest.mark.parametrize("field", ["min_agreement", "min_agreement_requested"])
+def test_missing_agreement_threshold_is_rejected(gh_comments: Any, field: str) -> None:
+    consensus = dict(FULL_CONSENSUS)
+    del consensus[field]
+    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is False
+    assert "missing agreement thresholds" in (status["detail"] or "")
+
+
 def test_stale_sha_is_rejected(gh_comments: Any) -> None:
     """A review of an earlier push says nothing about the code about to merge."""
     status = _status(gh_comments, [_comment(_marker(sha="deadbeefcafe"))])
