@@ -94,10 +94,12 @@ from gptme_runloops.merge_lifecycle import (
     run_merge_lifecycle,
 )
 from gptme_runloops.pm_dispatch import (
+    DISPATCH_COOLDOWN_DIR_ENV,
     EFFECT_NONE,
     EFFECT_OBSERVED,
     EFFECT_UNKNOWN,
     append_full_ledger_entry,
+    derive_slot_key,
     is_direct_mention,
 )
 from gptme_runloops.prompt_templates import (
@@ -748,6 +750,203 @@ def rollback_failed_delivery(
     return True
 
 
+# --- Dispatch cooldown / redelivery bookkeeping (lib.sh:928-1005) ---
+
+
+def slot_safe_candidates(slot_key: str) -> list[str]:
+    """Every filename spelling a ``.event`` marker for *slot_key* could have.
+
+    The writers disagree, and the disagreement is load-bearing:
+
+    - the dispatcher stamps with ``tr '/#:' '---'``
+      (project-monitoring-dispatch.sh:563) — colons included;
+    - bash's own rollback strips only ``/`` and ``#``
+      (project-monitoring-lib.sh:985-986, and again at :1031-1032).
+
+    So for any slot key containing a colon — every CI-check slot, e.g.
+    ``ActivityWatch/aw-server-rust#master-ci:dependabot-auto-merge`` — bash's
+    rollback computes a path the dispatcher never wrote, its ``rm -f``
+    silently no-ops, and the item stays suppressed for the full 6h TTL. That
+    is an upstream bug, not something to port faithfully.
+
+    Rather than pick a side and risk being wrong for some key shape, clear
+    every spelling. Unlinking a path that does not exist is free.
+    """
+    dispatcher = slot_key.translate(str.maketrans("/#:", "---")).replace(" ", "-")
+    bash_rollback = slot_key.replace("/", "-").replace("#", "-")
+    no_space = slot_key.translate(str.maketrans("/#:", "---"))
+    seen: list[str] = []
+    for candidate in (dispatcher, bash_rollback, no_space):
+        if candidate and candidate not in seen:
+            seen.append(candidate)
+    return seen
+
+
+def resolve_slot_key(config: RunItemConfig, item: RunItem, fallback: str = "") -> str:
+    """The slot key for an item — bash's ``${3:-${PM_SLOT_KEY:-}}`` (lib.sh:958).
+
+    The dispatcher exports ``PM_SLOT_KEY`` for the slot it launched, which is
+    authoritative. Falling back to deriving it from the item keeps the
+    rollback working when run outside a dispatched slot (tests, manual runs).
+    """
+    env_key = os.environ.get("PM_SLOT_KEY") or ""
+    if env_key:
+        return env_key
+    if fallback:
+        return fallback
+    if not item.repo:
+        return ""
+    # derive_slot_key is typed `number: int | None`, but RunItem.number is
+    # `int | str | None`. For master-CI items the number is unused (the key
+    # comes from the check slug), so delegate; otherwise the key is a plain
+    # interpolation that works for str numbers too — do it directly rather
+    # than coerce a str to None and silently derive `#unknown`.
+    if "master_ci_failure" in item.types:
+        return derive_slot_key(item.repo, None, list(item.types), item.title)
+    if item.number is None:
+        return f"{item.repo}#unknown"
+    return f"{item.repo}#{item.number}"
+
+
+def resolve_cooldown_dir(config: RunItemConfig) -> Path | None:
+    """The dispatch cooldown dir, or None when unset.
+
+    bash treats an unset ``PM_DISPATCH_COOLDOWN_DIR`` as "nowhere durable to
+    count" and fails *toward* redelivery (lib.sh:961-962, the
+    ErikBjare/bob#1127 behavior). None here reproduces that.
+    """
+    raw = os.environ.get(DISPATCH_COOLDOWN_DIR_ENV)
+    return Path(raw) if raw else None
+
+
+def clear_slot_event_markers(config: RunItemConfig, slot_key: str) -> bool:
+    """Delete a slot's ``.event``/``.event_logged`` fingerprints (lib.sh:983-989).
+
+    The dispatcher stamps the fingerprint at LAUNCH. If the launch then
+    delivers nothing, leaving the stamp suppresses the item for the 6h TTL —
+    so a fresh human mention that arrives at the wrong moment is silently
+    consumed and never answered. Clearing lets the next cycle re-evaluate;
+    the 10-minute ``.ts`` cooldown still bounds re-dispatch churn.
+
+    Returns True when a marker was actually removed.
+    """
+    cooldown = resolve_cooldown_dir(config)
+    if not slot_key or cooldown is None:
+        return False
+    removed = False
+    for stem in slot_safe_candidates(slot_key):
+        for suffix in (".event", ".event_logged"):
+            try:
+                (cooldown / f"{stem}{suffix}").unlink()
+                removed = True
+            except OSError:
+                pass
+    return removed
+
+
+def redelivery_attempts_file(
+    config: RunItemConfig, repo: str, number: int | str | None
+) -> Path | None:
+    """bash ``_redelivery_attempts_file`` (lib.sh:934-939).
+
+    MUST live in the dispatch cooldown dir under the bash filename, or the
+    bash and runloops executors keep *separate* counters and an item gets up
+    to 2x its redelivery budget while both paths serve traffic.
+    """
+    cooldown = resolve_cooldown_dir(config)
+    if cooldown is None:
+        return None
+    return cooldown / f"redeliver-{str(repo).replace('/', '-')}-{number}.attempts"
+
+
+def max_redelivery_attempts() -> int:
+    """bash ``${PM_MAX_REDELIVERY_ATTEMPTS:-2}`` (lib.sh:959)."""
+    try:
+        return int(os.environ.get("PM_MAX_REDELIVERY_ATTEMPTS") or 2)
+    except ValueError:
+        return 2
+
+
+def purge_pending_notif_state(
+    config: RunItemConfig, repo: str, number: int | str | None
+) -> int:
+    """Delete this item's pending ``notif-*.map``/``.state`` (lib.sh:991-1004).
+
+    Notification state is keyed by GitHub API id, not ``repo#number``, so a
+    ``.map`` sidecar carries the association. Leaving these pending is NOT
+    enough to roll back: ``promote_notification_states()`` promotes *every*
+    pending ``notif-*.state`` at end of run, which would consume exactly what
+    the rollback just claimed to preserve. They must be removed.
+
+    Returns the number of ``.map`` files purged.
+    """
+    pending = config.pending_state_dir
+    if not pending.is_dir():
+        return 0
+    target = f"{repo}#{number}"
+    purged = 0
+    for map_file in pending.glob("notif-*.map"):
+        if not map_file.is_file():
+            continue
+        try:
+            content = map_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        # bash matches the anchored regex ^repo#number$ against the file body.
+        if content != target:
+            continue
+        for path in (map_file, map_file.with_suffix(".state")):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        purged += 1
+    return purged
+
+
+def rollback_failed_delivery(
+    config: RunItemConfig, repo: str, number: int | str | None, slot_key: str
+) -> bool:
+    """bash ``rollback_failed_delivery`` (lib.sh:956-1005), in full.
+
+    Three effects, all required — a partial rollback is a no-op:
+
+    1. Count the attempt; past ``PM_MAX_REDELIVERY_ATTEMPTS`` reset the
+       counter and return False, telling the caller to promote instead (this
+       is what stops the re-dispatch treadmill on items where no reply is
+       ever appropriate).
+    2. Clear the slot's ``.event``/``.event_logged`` fingerprints so the item
+       is not suppressed for the 6h TTL.
+    3. Purge this item's pending ``notif-*`` state so the end-of-run blanket
+       promotion cannot consume it.
+
+    Returns True when the state was rolled back (caller must NOT promote),
+    False when the redelivery cap was reached (caller SHOULD promote).
+    """
+    attempts_file = redelivery_attempts_file(config, repo, number)
+    if attempts_file is not None:
+        try:
+            raw = attempts_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            raw = ""
+        attempts = int(raw) + 1 if raw.isdigit() else 1
+        if attempts > max_redelivery_attempts():
+            try:
+                attempts_file.unlink()
+            except OSError:
+                pass
+            return False
+        try:
+            attempts_file.parent.mkdir(parents=True, exist_ok=True)
+            attempts_file.write_text(str(attempts), encoding="utf-8")
+        except OSError:
+            pass
+
+    clear_slot_event_markers(config, slot_key)
+    purge_pending_notif_state(config, repo, number)
+    return True
+
+
 def promote_item_state(
     config: RunItemConfig, repo: str, number: int | str | None
 ) -> None:
@@ -764,6 +963,15 @@ def promote_item_state(
 
     pending = config.pending_state_dir
     state = config.state_dir
+    # bash promote_item_state resets the redelivery counter (lib.sh:928-929)
+    # so a later genuine failure gets a full retry budget. Without this the
+    # budget degrades monotonically until every failure promotes immediately.
+    attempts_file = redelivery_attempts_file(config, repo, number)
+    if attempts_file is not None:
+        try:
+            attempts_file.unlink()
+        except OSError:
+            pass
     if not pending.is_dir():
         return
     state.mkdir(parents=True, exist_ok=True)
@@ -1940,17 +2148,25 @@ def run_post_session(
             except (OSError, subprocess.SubprocessError):
                 pass
 
-    # 8. State promotion / delivery rollback (worker.sh:661-676)
+    # 8. State promotion (worker.sh:661-676)
+    # If delivery failed (orphan_no_delivery), roll back so the item re-enters
+    # the dispatch queue next cycle — capped by PM_MAX_REDELIVERY_ATTEMPTS.
     #
-    # A session that exited without posting a thread reply consumed the item's
-    # activity-gate state and the dispatcher's launch-stamped event fingerprint,
-    # but delivered nothing. Promoting here would make that failure look exactly
-    # like a success: the gate restarts its cooldown and the dispatcher skips the
-    # item as `event_unchanged` for the 6h TTL, so nothing retries.
+    # NOTE(history): the first port of this did only *part* of the rollback —
+    # it counted attempts and skipped promote_item_state, but left the slot's
+    # .event fingerprint stamped and left pending notif-* state in place. Both
+    # omissions independently defeat the rollback: the fingerprint suppresses
+    # the item for 6h, and promote_notification_states() at end of run promotes
+    # every pending notif-*.state, consuming exactly what was "rolled back".
+    # The result was a fix that passed its tests and changed nothing. Keep all
+    # three effects together in rollback_failed_delivery().
     if delivery_outcome == "orphan_no_delivery":
-        if rollback_failed_delivery(config, plan.repo, plan.number):
+        rollback_slot_key = resolve_slot_key(config, item)
+        if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
             _log(
-                "WARN: PM delivery post-condition FAILED — rolling back state for re-emission"
+                "WARN: PM delivery post-condition FAILED — rolled back state, "
+                f"event marker, and pending notif state for {plan.repo}#{plan.number} "
+                "(item re-enters the dispatch queue next cycle)"
             )
         else:
             # Redelivery cap hit: this item has no reply to deliver (typically an
@@ -2186,18 +2402,21 @@ def run_work_file(
             "No work: another project-monitoring run is active for lock scope "
             f"'{lock_scope}' (PID {pid or 'unknown'})"
         )
-        # Clear this slot's event fingerprint: the parent dispatcher stamped it
-        # at LAUNCH, but we delivered nothing — the lock holder is working the
-        # PREVIOUS event payload. Without this, a fresh human event that arrives
-        # during a long-running slot session is silently consumed and suppressed
-        # for the 6h TTL (lib.sh:1011-1027). The .ts cooldown still bounds churn.
+        # Clear this slot's event fingerprint (lib.sh:1029-1037). The parent
+        # dispatcher stamped it at LAUNCH, but we delivered nothing — the lock
+        # holder is working the PREVIOUS event payload. Without this, a fresh
+        # human mention that arrives during a long-running slot session is
+        # silently consumed and suppressed for the 6h TTL, and nothing ever
+        # retries it: the person assumes they were seen. Live bite 2026-08-05
+        # — Erik's 17:43 mention on ErikBjare/bob#1127 lock-busy'd at 17:48 and
+        # went unanswered for 1.5h+. The 10-minute .ts cooldown still bounds
+        # re-dispatch churn.
         if lock_scope.startswith("slot:"):
-            safe = slot_safe_name(lock_scope[len("slot:") :])
-            clear_slot_event_marker(lock_scope[len("slot:") :])
-            _log(
-                f"Cleared event marker for {safe} (lock-busy launch delivered "
-                "nothing; next cycle re-evaluates)"
-            )
+            if clear_slot_event_markers(config, lock_scope[len("slot:") :]):
+                _log(
+                    f"Cleared event marker for {lock_scope[len('slot:'):]} "
+                    "(lock-busy launch delivered nothing; next cycle re-evaluates)"
+                )
         return 0
 
     run_start = int(time.time())
