@@ -786,39 +786,90 @@ def fetch_unresolved_human_threads(
     }
 
 
-def repo_has_ci_configured(repo: str) -> bool | None:
-    """Whether GitHub recognizes at least one active Actions workflow.
+#: How many recently-merged PRs to sample when asking whether a repo gates
+#: PRs with checks. Large enough that one fluke PR (all jobs skipped by a
+#: paths filter) cannot flip the answer to "no CI"; small enough to stay a
+#: single API call.
+PR_CHECK_HISTORY_SAMPLE = 10
+
+
+def repo_gates_prs_with_checks(repo: str) -> bool | None:
+    """Whether pull requests in ``repo`` normally report check results.
 
     Tri-state, and deliberately so:
 
-    * ``True``  — the Actions API reports at least one active workflow.
-    * ``False`` — the query succeeded and reports no active workflows.
-    * ``None``  — indeterminate. The API errored, timed out, or returned
-      something unparseable.
+    * ``True``  — at least one of the last ``PR_CHECK_HISTORY_SAMPLE`` merged
+      PRs reported checks. PRs here *are* gated, so an empty check set on the
+      PR under evaluation is anomalous and must not waive the requirement.
+    * ``False`` — every sampled merged PR reported zero checks. Nothing gates
+      PRs in this repo, so there is no missing build to wait for.
+    * ``None``  — indeterminate: the API errored, returned something
+      unparseable, or the repo has no merged-PR history to judge from.
 
-    Querying the Actions API instead of listing ``.github/workflows`` avoids
-    treating malformed or placeholder YAML as runnable CI. ``None`` must never
-    be treated as ``False``: an API outage is exactly when the caller needs to
-    fail closed rather than waive missing checks.
+    ``None`` must never be collapsed into ``False``: an API outage is exactly
+    when the caller needs to fail closed rather than waive missing checks.
+
+    **Why PR-check history and not "does the repo have workflows".** The
+    question this gate needs answered is *does this repo gate PRs with
+    checks*, and workflow presence answers neither direction of it:
+
+    * Counting active Actions workflows reports ``False`` for any repo gated
+      by Jenkins, Azure Pipelines, Travis, or any GitHub App status context —
+      waiving the requirement and reopening the very outage fail-open this
+      check exists to close, just for non-Actions CI.
+    * It reports ``True`` for a repo whose only workflows are ``push``- or
+      ``schedule``-triggered (a deploy-on-master job). Such a repo produces no
+      PR checks *by design*, so every PR would be permanently ineligible —
+      replacing a fail-open with a permanent block. ``ErikBjare/erikbjare.github.io``
+      is exactly this shape: two active workflows, zero checks on every
+      merged PR.
+
+    Sampling history sidesteps both. ``statusCheckRollup`` carries ``CheckRun``
+    *and* ``StatusContext`` entries (see :func:`checks_green`), so the probe is
+    provider-agnostic — it sees a Jenkins commit status the same as an Actions
+    job. It is also unaffected by an ongoing outage, because it reads what
+    already-merged PRs recorded rather than what is running now.
+
+    Known limits, both in the safe direction or self-healing:
+
+    * A repo that has *just* added CI, whose sampled history predates it,
+      reads ``False``. Narrow: it also requires the PR under evaluation to
+      have no checks at all.
+    * A repo that *removed* CI reads ``True`` until the sample rolls over.
+      That blocks self-merge — the conservative direction — and clears itself.
+    * A repo with no merged PRs at all is ``None`` (fail closed) and
+      self-heals after a single manual merge establishes history.
     """
     raw = run_gh(
         [
-            "api",
-            f"repos/{repo}/actions/workflows",
-            "--jq",
-            '[.workflows[]? | select(.state == "active")] | length',
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "merged",
+            "--limit",
+            str(PR_CHECK_HISTORY_SAMPLE),
+            "--json",
+            "number,statusCheckRollup",
         ],
-        timeout=10,
+        timeout=30,
     )
     if not raw:
         return None
     try:
-        count = int(raw)
-    except (ValueError, TypeError):
+        merged_prs = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
         return None
-    if count < 0:
+    if not isinstance(merged_prs, list) or not merged_prs:
+        # No merged-PR history to judge from — indeterminate, not "no CI".
         return None
-    return count > 0
+    for merged_pr in merged_prs:
+        if not isinstance(merged_pr, dict):
+            return None
+        if merged_pr.get("statusCheckRollup") or []:
+            return True
+    return False
 
 
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
@@ -1274,25 +1325,28 @@ def evaluate_pr(
 
     status_checks = pr.get("statusCheckRollup", [])
     if not status_checks:
-        # Distinguish between "repo has no CI at all" and "repo has CI but no result".
-        # Only a definitive False (the Actions API reports no active workflows)
-        # may waive the CI requirement. None means we could not determine it —
-        # fail closed, since the likeliest cause of an indeterminate answer is
-        # the same outage that suppressed the checks in the first place.
-        has_ci = repo_has_ci_configured(repo)
-        if has_ci is None:
+        # Distinguish "this repo does not gate PRs with checks" from "it does,
+        # and this PR's checks are missing". Only a definitive False — every
+        # recently-merged PR reported zero checks — may waive the requirement.
+        # None means we could not determine it, so fail closed: the likeliest
+        # cause of an indeterminate answer is the same outage that suppressed
+        # the checks in the first place.
+        gates_prs = repo_gates_prs_with_checks(repo)
+        if gates_prs is None:
             result.reasons.append(
-                "CI checks not found and could not determine whether the repo has "
-                "workflows configured (GitHub API error) — failing closed"
+                "CI checks not found and could not determine whether this repo gates PRs "
+                "with checks (GitHub API error, or no merged-PR history) — failing closed"
             )
-        elif has_ci:
+        elif gates_prs:
             result.reasons.append(
-                "CI checks not found; repo has workflows configured but produced no check results "
-                "(possible GitHub outage, paths filter mismatch, or concurrency cancellation)"
+                "CI checks not found; recently-merged PRs in this repo did report checks, "
+                "so an empty check set here is anomalous (possible GitHub outage, paths "
+                "filter mismatch, or concurrency cancellation)"
             )
         else:
             result.warnings.append(
-                "No CI configured; CI requirement satisfied without running checks"
+                "No CI gates PRs in this repo (recently-merged PRs reported no checks); "
+                "CI requirement satisfied without running checks"
             )
     elif not checks_green(status_checks):
         result.reasons.append("CI is not fully green")
