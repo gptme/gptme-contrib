@@ -19,8 +19,18 @@ existed. See `scripts/workflow/read-the-task-before-reinvestigating` patterns.)
 | Read the score signal | `greptile-merge-signal.py` (summary score ≥ threshold + "Safe to merge") | reusable; default 5/5 |
 | Address findings, push | (agent session) | fix the code |
 | **Resolve addressed threads** | `resolve-greptile-threads.py` | the `resolveReviewThread` mutation; fix-first; resolves Greptile-bot threads only |
-| Gate the merge | `self-merge-check.py` | CI green + Greptile present + no unresolved threads + **score floor** (`SELF_MERGE_MIN_GREPTILE_SCORE`, default 5/5) + category/sensitive-path filter |
+| Gate the merge | `self-merge-check.py` | CI green + a clean machine review + no unresolved threads + **score floor** (`SELF_MERGE_MIN_GREPTILE_SCORE`, default 5/5) + category/sensitive-path filter |
 | Merge | `self-merge-if-eligible.sh` / `pr-address-wait-and-merge.sh` *(Bob)* | bounded poll-budget wait → merge |
+
+**Greptile is not the only accepted reviewer.** On repos Greptile does not cover, the gate was
+unsatisfiable ("Greptile review not found"). `self-merge-check.py` now also accepts the self-hosted
+reviewer's `<!-- bob-ai-review {…} -->` summary marker — but only at full strength: 5/5, at the
+current head SHA, with an undegraded consensus record, non-abstaining, and posted by the
+authenticated user. Anything less falls back to requiring Greptile. It is an OR, never a
+replacement: when Greptile has reviewed, the path is byte-for-byte what it always was and the
+marker is not even fetched. Kill switch: `SELF_MERGE_ACCEPT_AI_REVIEW=0`. The strictness is tuned
+for **recall**, not precision — a false finding only lowers the score and costs a wasted round,
+whereas a missed bug produces a clean score and an unreviewed merge.
 
 **Robustness patterns (tuned at scale — reuse, don't reinvent):**
 - **Rate limits**: gate on `github-rate-limit-health.sh` (`GH_RATE_LIMIT_HELPER`; `self-merge-check.py`
