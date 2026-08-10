@@ -1,0 +1,27 @@
+### Also: Greptile Convergence Adjudication — Do NOT Re-Trigger
+
+This PR (ErikBjare/alice#7) hit the Greptile helper backoff, and
+`scripts/greptile-convergence.py --json ErikBjare/alice 7` reports zero
+new blocking P1 findings in the convergence window or no current blocking P1s.
+
+**Do not trigger another Greptile review in this session.** The loop has reached
+the judgment point: classify the remaining findings, fix only clearly blocking
+bugs/security issues, dismiss nitpicks or false positives with explicit reasons,
+then post ONE structured merge recommendation.
+
+```bash
+python3 /srv/agents/alice/workspace/scripts/greptile-convergence.py --json ErikBjare/alice 7
+gh pr view 7 --repo ErikBjare/alice --comments
+gh api repos/ErikBjare/alice/pulls/7/comments \
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\n")[0:5] | join(" "))}'
+gh pr checks 7 --repo ErikBjare/alice
+```
+
+Recommendation shape:
+- Fixed: substantive findings handled in this cycle
+- Remaining: non-blocking findings plus the dismissal reason
+- CI: current status
+- Domain risk: any fragile area that warrants maintainer/manual testing
+- Convergence: quote the `round_convergence` status/stable-rounds from the detector
+
+Stop at maintainer judgment. Merge-ready does not mean auto-merge.

@@ -335,7 +335,41 @@ _NEEDS_IMPROVEMENT_SECTIONS = {
 
 # --- Variant table ---
 
+# lib.sh:770-800 (_build_local_greptile_convergence_instructions). Structurally
+# unlike the fix skeleton: its whole point is to STOP the fix-and-re-review loop
+# and hand over to judgment, so it shares no steps with it.
+_CONVERGENCE_SKELETON = """\
+### Also: Greptile Convergence Adjudication — Do NOT Re-Trigger
+
+This PR ({repo}#{number}) hit the Greptile helper backoff, and
+`scripts/greptile-convergence.py --json {repo} {number}` reports zero
+new blocking P1 findings in the convergence window or no current blocking P1s.
+
+**Do not trigger another Greptile review in this session.** The loop has reached
+the judgment point: classify the remaining findings, fix only clearly blocking
+bugs/security issues, dismiss nitpicks or false positives with explicit reasons,
+then post ONE structured merge recommendation.
+
+```bash
+python3 {workspace}/scripts/greptile-convergence.py --json {repo} {number}
+gh pr view {number} --repo {repo} --comments
+gh api repos/{repo}/pulls/{number}/comments \\
+  --jq '.[] | select(.user.login | test("greptile"; "i")) | {id, path, line, body: (.body | split("\\n")[0:5] | join(" "))}'
+gh pr checks {number} --repo {repo}
+```
+
+Recommendation shape:
+- Fixed: substantive findings handled in this cycle
+- Remaining: non-blocking findings plus the dismissal reason
+- CI: current status
+- Domain risk: any fragile area that warrants maintainer/manual testing
+- Convergence: quote the `round_convergence` status/stable-rounds from the detector
+
+Stop at maintainer judgment. Merge-ready does not mean auto-merge.
+"""
+
 _VARIANTS: dict[InstructionKind, tuple[str, Mapping[str, str]]] = {
+    InstructionKind.GREPTILE_CONVERGENCE: (_CONVERGENCE_SKELETON, {}),
     InstructionKind.LOCAL_GREPTILE_FIX: (_FIX_SKELETON, _LOCAL_FIX_SECTIONS),
     InstructionKind.CROSS_REPO_GREPTILE_REFRESH: (
         _FIX_SKELETON,
@@ -362,6 +396,7 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
     params = {
         "repo": ctx.repo,
         "number": str(ctx.number),
+        "workspace": ctx.workspace,
         "greptile_helper": ctx.resolved_greptile_helper,
         "pr_address_script": ctx.resolved_pr_address_script,
         "poll_budget_sec": str(ctx.poll_budget_sec),

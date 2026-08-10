@@ -361,3 +361,128 @@ class TestAdjudicationTimeoutTier:
         assert "{repo}" not in out and "{number}" not in out
         assert "{{" not in out
         assert "{id, path, line" in out
+
+
+class TestConvergedBackoffEarlyExit:
+    """P3's expensive half: Python burned a full slot session where bash skips.
+
+    An item whose ONLY reason to run is a Greptile re-emit, whose helper is in
+    backoff, and whose convergence check says nothing is left, must not get a
+    session at all. Asserted by symptom — the runner is never invoked — not by
+    inspecting the decision object.
+    """
+
+    @staticmethod
+    def _io(status: str, verdict_json: str):
+        from gptme_runloops.merge_lifecycle import ConvergenceVerdict
+
+        class IO:
+            def __init__(self) -> None:
+                self.promoted: list = []
+
+            def self_merge_check(self, repo, number):
+                from gptme_runloops.merge_lifecycle import SelfMergeCheckResult
+
+                return SelfMergeCheckResult(eligible=False, reasons=())
+
+            def self_merge(self, repo, number):
+                return False
+
+            def greptile_status(self, repo, number):
+                return status
+
+            def convergence_verdict(self, repo, number):
+                return ConvergenceVerdict.from_json(verdict_json)
+
+            def trigger_review(self, repo, number):
+                raise AssertionError("must not trigger a review after convergence")
+
+            def promote_item_state(self, repo, number):
+                self.promoted.append((repo, number))
+
+        return IO()
+
+    def _run(self, io, types=("greptile_needs_improvement",)):
+        from gptme_runloops.merge_lifecycle import (
+            LifecycleConfig,
+            WorkItem,
+            run_merge_lifecycle,
+        )
+
+        return run_merge_lifecycle(
+            WorkItem(repo="gptme/gptme", number=3468, types=tuple(types)),
+            LifecycleConfig(
+                primary_repo="ErikBjare/bob",
+                greptile_repos_pattern="^gptme/gptme$",
+            ),
+            io,
+            gate_available=False,
+            helper_available=True,
+        )
+
+    @pytest.mark.parametrize("verdict", ["converged", "no_findings"])
+    def test_converged_skips_the_session_and_promotes_state(self, verdict: str) -> None:
+        io = self._io("backoff", f'{{"verdict": "{verdict}"}}')
+        result = self._run(io)
+        assert result.skip_item is True  # the session never runs
+        assert io.promoted == [("gptme/gptme", 3468)]
+
+    def test_stable_rounds_spawn_adjudication_instead_of_another_round(self) -> None:
+        from gptme_runloops.merge_lifecycle import InstructionKind
+
+        io = self._io(
+            "backoff",
+            '{"verdict": "unconverged", '
+            '"round_convergence": {"should_request_review_after_fixes": false}}',
+        )
+        result = self._run(io)
+        assert result.skip_item is False
+        assert result.instructions is InstructionKind.GREPTILE_CONVERGENCE
+
+    def test_unsettled_convergence_proceeds_normally(self) -> None:
+        io = self._io(
+            "backoff",
+            '{"verdict": "unconverged", '
+            '"round_convergence": {"should_request_review_after_fixes": true}}',
+        )
+        result = self._run(io)
+        assert result.skip_item is False
+        assert result.instructions is None
+
+    def test_no_early_exit_when_helper_is_not_in_backoff(self) -> None:
+        io = self._io("in-progress", '{"verdict": "converged"}')
+        assert self._run(io).skip_item is False
+        assert io.promoted == []
+
+    def test_mixed_item_is_never_short_circuited(self) -> None:
+        # bash `! grep -qvx greptile_needs_improvement`: a PR that ALSO has a
+        # CI failure still needs its session, however converged Greptile is.
+        io = self._io("backoff", '{"verdict": "converged"}')
+        result = self._run(io, types=("greptile_needs_improvement", "ci_failure"))
+        assert result.skip_item is False
+        assert io.promoted == []
+
+    @pytest.mark.parametrize(
+        "raw", ["", "not json", "[]", "null", '{"round_convergence": "wat"}']
+    )
+    def test_broken_convergence_output_never_suppresses_a_dispatch(
+        self, raw: str
+    ) -> None:
+        # The bash pipes both extractions through `|| true`; a crashed or
+        # garbage-emitting script must fail toward running the session.
+        io = self._io("backoff", raw)
+        result = self._run(io)
+        assert result.skip_item is False
+        assert io.promoted == []
+
+    def test_missing_convergence_cmd_disables_the_early_exit(self) -> None:
+        from gptme_runloops.merge_lifecycle import SubprocessMergeLifecycleIO
+
+        io = SubprocessMergeLifecycleIO(
+            self_merge_check_cmd=["true"],
+            self_merge_cmd=["true"],
+            greptile_helper="/nonexistent",
+        )
+        v = io.convergence_verdict("a/b", 1)
+        assert v.verdict == "unknown"
+        assert v.should_request_review is True

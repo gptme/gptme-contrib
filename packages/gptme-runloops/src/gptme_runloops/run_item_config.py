@@ -313,6 +313,9 @@ def assemble_hooks(config: RunItemConfig, raw: dict[str, Any]) -> RunItemHooks:
     self_merge_check = ws / "scripts/github/self-merge-check.py"
     self_merge_script = ws / "scripts/github/self-merge-if-eligible.sh"
     greptile_helper = ws / "scripts/github/greptile-helper.sh"
+    # lib.sh:875 guards the converged-backoff early exit on this file existing;
+    # absent → convergence_cmd stays None and the early exit is inert.
+    convergence_script = ws / "scripts/greptile-convergence.py"
     hooks.self_merge_gate_available = self_merge_script.is_file() and os.access(
         self_merge_script, os.X_OK
     )
@@ -329,6 +332,11 @@ def assemble_hooks(config: RunItemConfig, raw: dict[str, Any]) -> RunItemHooks:
                 "SELF_MERGE_ALLOWED_PATHS": config.self_merge_allowed_paths,
             },
             promote_state=partial(promote_item_state, config),
+            convergence_cmd=(
+                ["python3", str(convergence_script)]
+                if convergence_script.is_file()
+                else None
+            ),
         )
 
     return hooks
