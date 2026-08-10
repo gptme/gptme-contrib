@@ -95,7 +95,11 @@ def _abstained(*bodies: str, author: str = REVIEWER) -> bool | None:
     with patch.object(
         self_merge_check, "run_gh_checked", _gh_returning(*bodies, author=author)
     ):
-        return self_merge_check.ai_review_abstained("o/r", 1, expected_author=REVIEWER)
+        # The module is loaded via importlib, so mypy sees its members as Any.
+        result: bool | None = self_merge_check.ai_review_abstained(
+            "o/r", 1, expected_author=REVIEWER
+        )
+        return result
 
 
 # ---------------------------------------------------------------------------
