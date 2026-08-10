@@ -120,12 +120,15 @@ NEVER_TEST_FILENAME_PREFIXES = (
     # seed databases — arbitrary process launch, not assertions.
     "global-setup.",
     "global-teardown.",
+    "globalsetup.",
+    "globalteardown.",
 )
 # Shell/PowerShell scripts execute directly; test-runner configs (Playwright's
 # ``webServer.command``, Vitest's ``globalSetup``) name processes to launch.
 NEVER_TEST_SUFFIXES = (".sh", ".bash", ".zsh", ".ps1", ".dockerfile")
 NEVER_TEST_RE = re.compile(
-    r"(^|\.)(config|conf)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$", re.IGNORECASE
+    r"(^|\.)(config|conf|workspace)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$",
+    re.IGNORECASE,
 )
 # Playwright/Jest/Vitest spec files. Anchored to real JS/TS test extensions:
 # a bare ``.spec.`` substring would also match API/infrastructure specification

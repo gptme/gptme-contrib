@@ -1713,6 +1713,10 @@ def test_nested_e2e_directories_are_not_implicitly_test_files(path: str) -> None
         "e2e/docker-compose.yml",
         "e2e/playwright.config.ts",
         "e2e/global-setup.ts",
+        "e2e/globalSetup.ts",
+        "e2e/globalTeardown.ts",
+        "e2e/vitest.workspace.ts",
+        "e2e/vitest.workspace.mts",
         # Same hole, pre-existing, under `tests/`.
         "tests/Dockerfile",
         "tests/Makefile",
