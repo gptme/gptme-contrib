@@ -210,8 +210,11 @@ def test_session_state_empty_for_new_session(hook, tmp_path, monkeypatch):
 # --- find_workspace ---
 
 
-def test_find_workspace_uses_cwd(hook, workspace, monkeypatch):
+def test_find_workspace_uses_cwd(hook, workspace, tmp_path, monkeypatch):
     """Workspace is found from cwd when script is not inside workspace."""
+    # Mock __file__ to a path outside any real workspace so the script-location
+    # walk finds nothing and falls through to the CWD walk.
+    monkeypatch.setattr(hook, "__file__", str(tmp_path / "mock_hook.py"))
     monkeypatch.chdir(workspace)
     # Reset cached workspace
     hook._workspace = None
@@ -222,6 +225,9 @@ def test_find_workspace_uses_cwd(hook, workspace, monkeypatch):
 
 def test_find_workspace_walks_up(hook, workspace, tmp_path, monkeypatch):
     """Workspace found by walking up from subdirectory."""
+    # Mock __file__ to a path outside any real workspace so the script-location
+    # walk finds nothing and falls through to the CWD walk.
+    monkeypatch.setattr(hook, "__file__", str(tmp_path / "mock_hook.py"))
     subdir = workspace / "subdir" / "deep"
     subdir.mkdir(parents=True)
     monkeypatch.chdir(subdir)
