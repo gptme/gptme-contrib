@@ -20,6 +20,7 @@ ordinary AI review (and no AI review at all) leaves eligibility untouched.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -70,14 +71,31 @@ CLEAN_REVIEW_BODY = """## 🤖 AI code review
 ABSTENTION_REASON = "AI review abstained — not reviewed"
 
 
-def _gh_returning(*bodies: str):
-    """Stand in for the jq query returning the latest marker comment body."""
+REVIEWER = "TimeToBuildBob"
+
+
+def _gh_returning(*bodies: str, author: str = REVIEWER):
+    """Stand in for the comments fetch, in the shared `{author, body}` JSONL form.
+
+    The abstention check reads markers through the same author-validated fetch as
+    the positive path, so the stub returns what `gh` actually emits rather than a
+    pre-selected body. That keeps the selection logic under test instead of
+    hard-coding its answer.
+    """
 
     def _run_gh(args: list[str], **kwargs: Any) -> str:
-        selected = [b for b in bodies if self_merge_check.AI_REVIEW_COMMENT_MARKER in b]
-        return selected[-1] if selected else "__NO_AI_REVIEW__"
+        return "\n".join(
+            json.dumps({"author": author, "body": body}) for body in bodies
+        )
 
     return _run_gh
+
+
+def _abstained(*bodies: str, author: str = REVIEWER) -> bool | None:
+    with patch.object(
+        self_merge_check, "run_gh_checked", _gh_returning(*bodies, author=author)
+    ):
+        return self_merge_check.ai_review_abstained("o/r", 1, expected_author=REVIEWER)
 
 
 # ---------------------------------------------------------------------------
@@ -86,19 +104,16 @@ def _gh_returning(*bodies: str):
 
 
 def test_abstention_is_detected() -> None:
-    with patch.object(self_merge_check, "run_gh", _gh_returning(ABSTENTION_BODY)):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is True
+    assert _abstained(ABSTENTION_BODY) is True
 
 
 @pytest.mark.parametrize("body", [ORDINARY_REVIEW_BODY, CLEAN_REVIEW_BODY])
 def test_ordinary_review_is_not_an_abstention(body: str) -> None:
-    with patch.object(self_merge_check, "run_gh", _gh_returning(body)):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+    assert _abstained(body) is False
 
 
 def test_no_ai_review_at_all_is_not_an_abstention() -> None:
-    with patch.object(self_merge_check, "run_gh", _gh_returning()):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+    assert _abstained() is False
 
 
 def test_legacy_marker_without_score_is_not_an_abstention() -> None:
@@ -106,8 +121,7 @@ def test_legacy_marker_without_score_is_not_an_abstention() -> None:
         "## 🤖 AI code review\n\n"
         '<!-- bob-ai-review {"sha": "deadbeef1234", "engine": "llm"} -->'
     )
-    with patch.object(self_merge_check, "run_gh", _gh_returning(legacy)):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+    assert _abstained(legacy) is False
 
 
 def test_only_the_latest_review_counts() -> None:
@@ -116,21 +130,11 @@ def test_only_the_latest_review_counts() -> None:
     A submodule-only PR that grows source commits gets re-reviewed for real;
     the stale abstention above it is not a verdict on the current diff.
     """
-    with patch.object(
-        self_merge_check,
-        "run_gh",
-        _gh_returning(ABSTENTION_BODY, ORDINARY_REVIEW_BODY),
-    ):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+    assert _abstained(ABSTENTION_BODY, ORDINARY_REVIEW_BODY) is False
 
 
 def test_latest_abstention_after_an_earlier_real_review_blocks() -> None:
-    with patch.object(
-        self_merge_check,
-        "run_gh",
-        _gh_returning(ORDINARY_REVIEW_BODY, ABSTENTION_BODY),
-    ):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is True
+    assert _abstained(ORDINARY_REVIEW_BODY, ABSTENTION_BODY) is True
 
 
 def test_a_human_comment_quoting_the_abstention_does_not_count() -> None:
@@ -139,36 +143,71 @@ def test_a_human_comment_quoting_the_abstention_does_not_count() -> None:
         "> ℹ️ **Submodule pointer change only — not reviewed.**\n\n"
         "Discussing this, but I am not the reviewer.\n"
     )
-    with patch.object(self_merge_check, "run_gh", _gh_returning(quoted)):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is False
+    assert _abstained(quoted) is False
 
 
-@pytest.mark.parametrize(
-    "raw", ["", "   \n", "not a marker", "<!-- bob-ai-review {bad json} -->"]
-)
-def test_api_or_decode_failure_is_unknown(raw: str) -> None:
-    with patch.object(self_merge_check, "run_gh", lambda *a, **k: raw):
-        assert self_merge_check.ai_review_abstained("o/r", 1) is None
+def test_failed_lookup_is_unknown() -> None:
+    """A failed call is not evidence. It must never read as 'did not abstain'."""
+    with patch.object(self_merge_check, "run_gh_checked", lambda *a, **k: None):
+        assert (
+            self_merge_check.ai_review_abstained("o/r", 1, expected_author=REVIEWER)
+            is None
+        )
 
 
-def test_query_requests_latest_structured_marker() -> None:
+def test_unknown_identity_is_unknown() -> None:
+    """Without an identity no marker can be attributed, so nothing is concluded."""
+    with patch.object(
+        self_merge_check, "run_gh_checked", _gh_returning(ABSTENTION_BODY)
+    ):
+        assert (
+            self_merge_check.ai_review_abstained("o/r", 1, expected_author="") is None
+        )
+
+
+def test_corrupt_marker_from_our_reviewer_is_unknown() -> None:
+    """A marker we cannot parse is corruption, not absence.
+
+    Reading it as "no marker" would let a mangled abstention pass as
+    "did not abstain" — the failure this gate exists to prevent.
+    """
+    assert _abstained("<!-- bob-ai-review {bad json} -->") is None
+
+
+@pytest.mark.parametrize("body", ["", "   \n", "not a marker"])
+def test_comments_without_any_marker_are_not_an_abstention(body: str) -> None:
+    assert _abstained(body) is False
+
+
+def test_marker_from_another_account_is_ignored() -> None:
+    """The marker is plain text and invisible in the rendered view.
+
+    Without an author check, anyone able to comment could paste a `score: null`
+    marker and block the PR from ever merging.
+    """
+    assert _abstained(ABSTENTION_BODY, author="mallory") is False
+
+
+def test_fetch_is_author_scoped_and_paginated() -> None:
     captured: list[str] = []
 
     def _capture(args: list[str], **kwargs: Any) -> str:
         captured.extend(args)
-        return CLEAN_REVIEW_BODY
+        return json.dumps({"author": REVIEWER, "body": CLEAN_REVIEW_BODY})
 
-    with patch.object(self_merge_check, "run_gh", _capture):
-        assert self_merge_check.ai_review_abstained("o/r", 42) is False
+    with patch.object(self_merge_check, "run_gh_checked", _capture):
+        assert (
+            self_merge_check.ai_review_abstained("o/r", 42, expected_author=REVIEWER)
+            is False
+        )
 
-    assert "repos/o/r/issues/42/comments?per_page=100" in captured
+    assert "repos/o/r/issues/42/comments" in captured
     assert "--paginate" in captured
-    assert "--slurp" in captured
+    # The author is carried in the response and filtered in Python, so the query
+    # must actually request it rather than selecting on body alone.
     query = captured[captured.index("--jq") + 1]
-    assert self_merge_check.AI_REVIEW_COMMENT_MARKER in query
-    assert ".[][]" in query
-    assert "last" in query
-    assert "__NO_AI_REVIEW__" in query
+    assert "author" in query
+    assert "body" in query
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +249,9 @@ def _evaluate(*comment_bodies: str) -> Any:
             return_value={"unresolved": 0, "authors": []},
         ),
         patch.object(self_merge_check, "run_gh", _gh_returning(*comment_bodies)),
+        patch.object(
+            self_merge_check, "run_gh_checked", _gh_returning(*comment_bodies)
+        ),
     ):
         return self_merge_check.evaluate_pr(
             "gptme/gptme-cloud", 999, workspace_repos=["gptme/gptme-cloud"]
@@ -241,8 +283,13 @@ def test_evaluate_pr_unchanged_when_there_is_no_ai_review() -> None:
     assert result.eligible
 
 
-def test_greptile_blocker_is_untouched() -> None:
-    """The existing `Greptile review not found` gate must still fire on its own."""
+def test_unverifiable_greptile_state_refuses_the_ai_fallback() -> None:
+    """A clean AI review must not rescue a PR whose Greptile state cannot be read.
+
+    `_fetch_greptile_review_data` returning None means the lookup failed, not that
+    Greptile is absent. Treating it as absence would open the AI-review fallback
+    on any transient API error, so the gate fails closed instead.
+    """
     pr_data: dict[str, object] = {
         "number": 999,
         "author": {"login": "TimeToBuildBob"},
@@ -274,11 +321,14 @@ def test_greptile_blocker_is_untouched() -> None:
             "fetch_unresolved_human_threads",
             return_value={"unresolved": 0, "authors": []},
         ),
-        # A clean AI review does not rescue a PR Greptile never reviewed.
+        # A clean AI review does not rescue a PR whose Greptile state is unknown.
         patch.object(self_merge_check, "run_gh", _gh_returning(CLEAN_REVIEW_BODY)),
+        patch.object(
+            self_merge_check, "run_gh_checked", _gh_returning(CLEAN_REVIEW_BODY)
+        ),
     ):
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-cloud", 999, workspace_repos=["gptme/gptme-cloud"]
         )
     assert not result.eligible
-    assert "Greptile review not found" in result.reasons
+    assert any("Could not verify Greptile review state" in r for r in result.reasons)

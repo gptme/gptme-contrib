@@ -872,11 +872,11 @@ def fetch_greptile_status(
 # that comment, pinning prod's submodule to a commit 5 ahead of gptme master —
 # a merge of two still-open PRs' heads, reviewed by nobody.
 #
-# This is deliberately a NEGATIVE signal only. An abstention blocks; the inverse
-# ("our AI review found nothing, therefore mergeable") is NOT implemented and
-# must not be. That would make our own reviewer a merge credential in place of
-# Greptile, which is Erik's open decision and not this gate's to make. Nothing
-# here touches the existing `Greptile review not found` blocker.
+# This is deliberately a NEGATIVE signal only. An abstention blocks. The inverse
+# ("our AI review found nothing, therefore mergeable") is a separate, explicitly
+# gated mechanism -- see `fetch_ai_review_status`, added later -- with its own
+# staleness, consensus and identity requirements. Reaching this function's
+# `False` return means only "the reviewer did not decline"; it grants nothing.
 #
 # The reviewer encodes abstention as `score: null` in its structured marker.
 # Reading that field avoids coupling this safety gate to human-facing prose.
@@ -884,38 +884,69 @@ AI_REVIEW_COMMENT_MARKER = "<!-- bob-ai-review {"
 AI_REVIEW_MARKER_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
 
 
-def ai_review_abstained(repo: str, pr_number: int) -> bool | None:
+class _MarkerUnset:
+    """Sentinel for "no shared marker supplied, fetch it yourself".
+
+    Distinct from every meaningful marker value, including ``None`` ("fetched,
+    found nothing") and ``MARKER_LOOKUP_FAILED``, so a caller can pass a shared
+    result of any kind without it being mistaken for "not supplied".
+
+    Deliberately not reusing the module's older ``_UNSET``: that one is typed as
+    a bare ``object`` for the Greptile review-data parameter, and sharing it here
+    would make the two unrelated "not supplied" states indistinguishable to a
+    reader and to mypy.
+    """
+
+    __slots__ = ()
+
+
+_MARKER_UNSET = _MarkerUnset()
+
+
+def ai_review_abstained(
+    repo: str,
+    pr_number: int,
+    *,
+    expected_author: str,
+    marker_result: dict[str, Any]
+    | None
+    | _MarkerLookupFailed
+    | _MarkerUnset = _MARKER_UNSET,
+) -> bool | None:
     """Whether our AI reviewer's latest review explicitly declined to review.
 
     ``None`` means the review state could not be determined and callers must
     fail closed. Only the latest marker comment counts: a later real review
     supersedes an earlier abstention.
+
+    The marker is read through `_fetch_ai_review_marker`, which accepts markers
+    only from *expected_author*. That matters more here than it looks: the
+    marker is plain text in a comment body and is invisible in GitHub's rendered
+    view, so without an author check any account able to comment could paste a
+    `score: null` marker and permanently block the PR from merging. Sharing the
+    fetch with the positive path also means this gate is exercised by that
+    path's tests rather than through a bespoke jq pipeline of its own.
     """
-    raw = run_gh(
-        [
-            "api",
-            f"repos/{repo}/issues/{pr_number}/comments?per_page=100",
-            "--paginate",
-            "--slurp",
-            "--jq",
-            f'[.[][] | select(.body | contains("{AI_REVIEW_COMMENT_MARKER}"))]'
-            ' | if length == 0 then "__NO_AI_REVIEW__" else last.body end',
-        ],
-        timeout=30,
+    result = (
+        _fetch_ai_review_marker_checked(
+            repo, pr_number, expected_author=expected_author
+        )
+        if isinstance(marker_result, _MarkerUnset)
+        else marker_result
     )
-    if not raw or not raw.strip():
+    if isinstance(result, _MarkerLookupFailed):
+        # The lookup failed, so we cannot tell whether the reviewer abstained.
+        # Fail closed: inferring "not an abstention" from a failed call would
+        # reopen the gptme-cloud#850 hole on any flaky API response.
         return None
-    if raw == "__NO_AI_REVIEW__":
+    if result is None:
+        # Looked, and there is no marker from our reviewer at all. That is not
+        # an abstention -- it is a PR our reviewer never posted on, which is the
+        # ordinary case in repos the reviewer does not run against. Blocking
+        # here would turn this narrow safety check into a universal blocker.
         return False
 
-    match = AI_REVIEW_MARKER_RE.search(raw)
-    if match is None:
-        return None
-    try:
-        marker = json.loads(match.group(1))
-    except (json.JSONDecodeError, TypeError):
-        return None
-
+    marker = result
     if "score" in marker:
         score = marker["score"]
         if score is None:
@@ -1086,20 +1117,34 @@ def _consensus_shortfall(consensus: Any) -> str | None:
     return None
 
 
-def _fetch_ai_review_marker(
-    repo: str, pr_number: int, *, expected_author: str
-) -> dict[str, Any] | None:
-    """Latest self-hosted-review summary marker on the PR, parsed.
+class _MarkerLookupFailed:
+    """Sentinel: the marker lookup itself failed, so nothing can be concluded.
 
-    Only comments authored by *expected_author* are considered: the marker is
-    plain text in a comment body, so any account that can comment on the PR could
-    otherwise forge a clean verdict for a gate that then merges without a human.
-    An empty *expected_author* means the identity could not be established, and
-    the marker is not trusted at all.
+    Distinct from ``None`` ("looked, found no marker"). Collapsing the two is
+    the failure mode this gate keeps re-learning: a timed-out or rate-limited
+    call must never be read as evidence about what a reviewer did or did not do.
+    """
+
+    __slots__ = ()
+
+
+MARKER_LOOKUP_FAILED = _MarkerLookupFailed()
+
+
+def _fetch_ai_review_marker_checked(
+    repo: str, pr_number: int, *, expected_author: str
+) -> dict[str, Any] | None | _MarkerLookupFailed:
+    """Latest review marker, distinguishing "no marker" from "lookup failed".
+
+    Returns the parsed marker, ``None`` when the fetch succeeded but the PR
+    carries no marker from *expected_author*, or ``MARKER_LOOKUP_FAILED`` when
+    the lookup could not be completed.
     """
     if not expected_author:
-        return None
-    raw = run_gh(
+        # Identity could not be established, so no marker can be attributed.
+        # This is a failed lookup, not an absence of markers.
+        return MARKER_LOOKUP_FAILED
+    raw = run_gh_checked(
         [
             "api",
             f"repos/{repo}/issues/{pr_number}/comments",
@@ -1109,10 +1154,11 @@ def _fetch_ai_review_marker(
         ],
         timeout=30,
     )
-    if not raw:
-        return None
+    if raw is None:
+        return MARKER_LOOKUP_FAILED
 
     latest: dict[str, Any] | None = None
+    saw_unparseable_marker = False
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -1123,16 +1169,58 @@ def _fetch_ai_review_marker(
             continue
         if not isinstance(comment, dict) or comment.get("author") != expected_author:
             continue
+        body = comment.get("body") or ""
         # Last match wins within a body, and the last qualifying comment wins
         # overall: the reviewer upserts a single comment, but a repo with legacy
         # append-style comments should still be read at its most recent verdict.
-        for parsed in _iter_ai_review_markers(comment.get("body") or ""):
+        parsed_any = False
+        for parsed in _iter_ai_review_markers(body):
             latest = parsed
+            parsed_any = True
+        if not parsed_any and AI_REVIEW_COMMENT_MARKER in body:
+            # Our reviewer wrote a marker we cannot read. That is corruption,
+            # not absence -- reporting "no marker" here would let a mangled
+            # abstention read as "did not abstain".
+            saw_unparseable_marker = True
+
+    if latest is None and saw_unparseable_marker:
+        return MARKER_LOOKUP_FAILED
     return latest
 
 
+def _fetch_ai_review_marker(
+    repo: str, pr_number: int, *, expected_author: str
+) -> dict[str, Any] | None:
+    """Latest self-hosted-review summary marker on the PR, parsed.
+
+    Only comments authored by *expected_author* are considered: the marker is
+    plain text in a comment body, so any account that can comment on the PR could
+    otherwise forge a clean verdict for a gate that then merges without a human.
+    An empty *expected_author* means the identity could not be established, and
+    the marker is not trusted at all.
+
+    A failed lookup is reported as ``None`` here, which the positive path treats
+    exactly as "no marker" -- correct for that direction, because both leave the
+    PR on the Greptile-only path and neither can make it *more* mergeable.
+    """
+    result = _fetch_ai_review_marker_checked(
+        repo, pr_number, expected_author=expected_author
+    )
+    if isinstance(result, _MarkerLookupFailed):
+        return None
+    return result
+
+
 def fetch_ai_review_status(
-    repo: str, pr_number: int, *, head_sha: str, expected_author: str
+    repo: str,
+    pr_number: int,
+    *,
+    head_sha: str,
+    expected_author: str,
+    marker_result: dict[str, Any]
+    | None
+    | _MarkerLookupFailed
+    | _MarkerUnset = _MARKER_UNSET,
 ) -> dict[str, Any]:
     """Whether our own reviewer's verdict is strong enough to stand in for Greptile.
 
@@ -1148,7 +1236,14 @@ def fetch_ai_review_status(
     if not _ai_review_enabled():
         return {"accepted": False, "detail": None}
 
-    marker = _fetch_ai_review_marker(repo, pr_number, expected_author=expected_author)
+    if isinstance(marker_result, _MarkerUnset):
+        marker = _fetch_ai_review_marker(
+            repo, pr_number, expected_author=expected_author
+        )
+    elif isinstance(marker_result, _MarkerLookupFailed):
+        marker = None
+    else:
+        marker = marker_result
     if marker is None:
         return {"accepted": False, "detail": None}
 
@@ -1175,8 +1270,7 @@ def fetch_ai_review_status(
         return {
             "accepted": False,
             "detail": (
-                f"AI review score is not an integer "
-                f"({type(score).__name__}: {score!r})"
+                f"AI review score is not an integer ({type(score).__name__}: {score!r})"
             ),
         }
     # Exactly the rubric's clean value, not "at least" it. `confidence_score`
@@ -1762,6 +1856,14 @@ def evaluate_pr(
     # Fetch once; pass to both helpers to avoid duplicate GraphQL round-trips.
     shared_review_data = _fetch_greptile_review_data(repo, number)
 
+    # One fetch, shared by both readers of the review marker: the Greptile-
+    # substitute path below and the abstention blocker after it. They ask
+    # different questions of the same comment, so fetching twice would double
+    # the API cost of every evaluation for no extra information.
+    shared_marker = _fetch_ai_review_marker_checked(
+        repo, number, expected_author=current_user
+    )
+
     greptile = fetch_greptile_status(repo, number, review_data=shared_review_data)
     if not greptile["has_review"]:
         # The alternative review is safe only after a successful GraphQL fetch
@@ -1783,6 +1885,7 @@ def evaluate_pr(
                 number,
                 head_sha=result.head_sha,
                 expected_author=current_user,
+                marker_result=shared_marker,
             )
             if ai_review["accepted"]:
                 result.warnings.append(
@@ -1813,7 +1916,9 @@ def evaluate_pr(
 
     # An explicit abstention blocks in its own right. If the structured review
     # state cannot be read, fail closed rather than silently removing the gate.
-    ai_abstention = ai_review_abstained(repo, number)
+    ai_abstention = ai_review_abstained(
+        repo, number, expected_author=current_user, marker_result=shared_marker
+    )
     if ai_abstention is True:
         result.reasons.append("AI review abstained — not reviewed")
     elif ai_abstention is None:

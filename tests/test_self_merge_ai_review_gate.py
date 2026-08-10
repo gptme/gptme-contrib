@@ -77,7 +77,12 @@ def _comment(marker: dict[str, Any] | None, author: str = AUTHOR) -> str:
 
 @pytest.fixture
 def gh_comments(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Stub run_gh so the issue-comments fetch returns canned JSONL."""
+    """Stub the gh helpers so the issue-comments fetch returns canned JSONL.
+
+    Both ``run_gh`` and ``run_gh_checked`` are stubbed: the marker fetch uses the
+    checked variant so it can tell a failed call from an empty one, while other
+    call sites still use the plain one.
+    """
 
     def _install(lines: list[str]) -> list[list[str]]:
         calls: list[list[str]] = []
@@ -87,6 +92,7 @@ def gh_comments(monkeypatch: pytest.MonkeyPatch) -> Any:
             return "\n".join(lines)
 
         monkeypatch.setattr(smc, "run_gh", fake_run_gh)
+        monkeypatch.setattr(smc, "run_gh_checked", fake_run_gh)
         return calls
 
     return _install
@@ -416,6 +422,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
             return "\n".join(comments)
 
         monkeypatch.setattr(smc, "run_gh", fake_run_gh)
+        monkeypatch.setattr(smc, "run_gh_checked", fake_run_gh)
         monkeypatch.setattr(smc, "fetch_pr", lambda repo, number: _pr_payload())
         monkeypatch.setattr(smc, "get_gh_user", lambda: AUTHOR)
         monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
@@ -500,11 +507,18 @@ def test_evaluate_pr_reason_unchanged_when_no_ai_review(evaluate: Any) -> None:
     assert "Greptile review not found" in result.reasons
 
 
-def test_greptile_path_is_untouched_and_pays_no_extra_call(evaluate: Any) -> None:
-    """It's an OR: when Greptile reviewed, the marker is never even fetched."""
+def test_greptile_path_is_untouched_and_pays_one_marker_fetch(evaluate: Any) -> None:
+    """It's an OR: a Greptile review still decides the outcome on its own.
+
+    The marker *is* fetched now, because the abstention blocker has to read it on
+    every PR regardless of Greptile. What matters is that it costs exactly one
+    fetch shared by both readers, not one each, and that it does not change the
+    verdict on the Greptile path.
+    """
     result, calls = evaluate(greptile=GREPTILE_CLEAN, comments=[_comment(_marker())])
     assert result.eligible is True
-    assert not any("issues/1382/comments" in " ".join(c) for c in calls)
+    marker_fetches = [c for c in calls if "issues/1382/comments" in " ".join(c)]
+    assert len(marker_fetches) == 1
 
 
 def test_greptile_unresolved_still_blocks_despite_clean_ai_review(
