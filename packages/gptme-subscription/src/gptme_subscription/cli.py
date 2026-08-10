@@ -384,6 +384,13 @@ def _cmd_switch(args: argparse.Namespace, sm: SubscriptionManager) -> int:
                         force=True,
                         probe_ok=True,
                     )
+                    if not ok:
+                        retry_fresh, retry_reason = sm.slot_is_fresh(target)
+                        failure_detail = (
+                            retry_reason
+                            if not retry_fresh
+                            else "switch refused after successful probe"
+                        )
                 else:
                     print(
                         f"  Probe failed ({probe_msg}); cannot switch.",

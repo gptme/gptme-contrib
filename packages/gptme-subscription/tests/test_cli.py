@@ -396,7 +396,8 @@ def _real_fresh_reason(
                 (datetime.now(timezone.utc).timestamp() + expires_in) * 1000
             )
         path.write_text(json.dumps({"claudeAiOauth": oauth}))
-    return slot_is_fresh(path)
+    result: tuple[bool, str] = slot_is_fresh(path)
+    return result
 
 
 @pytest.mark.parametrize(
@@ -690,6 +691,32 @@ def test_cmd_switch_without_refresh_token_skips_probe(
     assert "Failed to switch to alice" in err
     assert "slot holds no refresh token" in err
     assert "probing" not in err
+
+
+def test_cmd_switch_retry_failure_reports_current_reason(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A failed probe_ok retry must not report the stale pre-probe reason."""
+    sm = _real_manager(tmp_path)
+    _write_real_slot(sm, "bob", expires_in=3600)
+    _write_real_slot(sm, "alice", expires_in=-3600)
+    sm.config.creds_link.symlink_to(".credentials.json.bob")
+
+    def probe_then_remove(*args, **kwargs):
+        sm.config.slot_path("alice").unlink()
+        return None, True, "probe ok"
+
+    monkeypatch.setattr("gptme_subscription.cli.probe_credential", probe_then_remove)
+
+    args = argparse.Namespace(switch="alice", execute=True, dry_run=False)
+    rc = _cmd_switch(args, sm)
+
+    assert rc == 1
+    assert sm.get_active_subscription() == "bob"
+    err = capsys.readouterr().err
+    failure_line = err.strip().splitlines()[-1]
+    assert failure_line.startswith("Failed to switch to alice: slot missing")
+    assert "expired 60m ago" not in failure_line
 
 
 def test_cmd_switch_warns_when_post_flip_usage_returns_empty_dict(
