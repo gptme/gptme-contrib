@@ -933,6 +933,69 @@ check_merge_conflicts() {
 # Emits:
 #   greptile_needs_fix       — score < 4 (significant findings to address)
 #   greptile_needs_improvement — score = 4 (minor fixes needed)
+# Does our own AI reviewer still want changes on this PR?
+#
+# Why this exists: check_greptile_scores() reads Greptile's score and nothing
+# else, so a PR sitting at Greptile 5/5 with unaddressed findings from our
+# reviewer emits merge_ready and never enters the fix loop. Observed on
+# gptme/gptme#3468 — 5/5 from Greptile, 4 of our findings open, PM silent, and a
+# human triaging the PR reads those findings as blockers.
+#
+# The authoritative signal is the LATEST REVIEW AT THE CURRENT HEAD, not the
+# state of comment threads.
+#
+# An earlier version counted unresolved threads and excluded GitHub's
+# `isOutdated` ones, treating outdated as "addressed". Erik flagged that as a
+# cheap heuristic, and he is right: GitHub marks a thread outdated whenever the
+# lines it anchored to change — a rebase, a reformat, or an unrelated edit in the
+# same hunk all do it, with the bug fully intact. Reading that as "fixed"
+# produces a false clean, which is the one direction that costs an unreviewed
+# merge rather than a wasted round.
+#
+# So we ask the reviewer instead of guessing. Our reviewer re-reviews on every
+# head change and deliberately re-raises findings that were never fixed
+# (suppression happens only on explicit dismissal), so the finding count it
+# recorded FOR THE CURRENT HEAD is a measurement, not an inference.
+#
+# Echoes: "dirty" (findings at current head), "clean" (reviewed, none),
+# "pending" (current head not reviewed yet — the sweep will get to it), or
+# "none" (never reviewed).
+ai_review_verdict() {
+    local repo=$1 pr_number=$2 head_sha=$3
+    local marker
+    marker=$(gh api "repos/${repo}/issues/${pr_number}/comments" --paginate \
+        --jq '[.[] | .body // "" | capture("<!-- bob-ai-review (?<j>\\{[^>]*\\}) -->").j] | last // empty' \
+        2>/dev/null | tail -1)
+    [ -z "$marker" ] && { echo "none"; return 0; }
+
+    local reviewed_sha score findings
+    reviewed_sha=$(printf '%s' "$marker" | jq -r '.sha // empty' 2>/dev/null)
+    [ -z "$reviewed_sha" ] && { echo "none"; return 0; }
+
+    # Marker records a short SHA.
+    case "$head_sha" in
+        "$reviewed_sha"*) ;;
+        *) echo "pending"; return 0 ;;
+    esac
+
+    score=$(printf '%s' "$marker" | jq -r '.score // empty' 2>/dev/null)
+    if [ -n "$score" ] && [ "$score" != "null" ]; then
+        [ "$score" -ge 5 ] 2>/dev/null && echo "clean" || echo "dirty"
+        return 0
+    fi
+    # Markers written before the score field shipped (2026-08-07/08) carry none,
+    # and those are exactly the older PRs sitting in the backlog. Fall back to the
+    # finding count the same review recorded.
+    findings=$(printf '%s' "$marker" \
+        | jq -r '(.history // []) | last | .findings // empty' 2>/dev/null)
+    if [ -n "$findings" ] && [ "$findings" != "null" ]; then
+        [ "$findings" -gt 0 ] 2>/dev/null && echo "dirty" || echo "clean"
+        return 0
+    fi
+    echo "none"
+}
+
+
 check_greptile_scores() {
     local repo=$1
     local prs=$2
@@ -954,14 +1017,25 @@ check_greptile_scores() {
         local state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
         local now
         now=$(date +%s)
-        local last_state last_score last_timestamp last_sha
-        last_state="" last_score="" last_timestamp=0 last_sha=""
+        local last_state last_score last_timestamp last_sha last_verdict
+        last_state="" last_score="" last_timestamp=0 last_sha="" last_verdict=""
         if [ -f "$state_file" ]; then
             last_state=$(cat "$state_file")
             last_score=$(echo "$last_state" | cut -d: -f1)
             last_timestamp=$(echo "$last_state" | cut -d: -f2)
             last_sha=$(echo "$last_state" | cut -d: -f3)
+            # 4th field added later; state files written before it yield "" here,
+            # which reads as "no cached verdict" and simply costs one refetch.
+            last_verdict=$(echo "$last_state" | cut -d: -f4)
         fi
+
+        # The persisted timestamp means "when we last FETCHED", not "when we last
+        # ran". Stamping it with $now on a cache hit refreshes the TTL on every
+        # 2-minute cycle, so it never expires and neither the score nor the verdict
+        # is ever refetched for that head — a PR whose verdict was 'pending'
+        # (head not yet reviewed, the normal state right after a push) would stay
+        # pending forever and never reach the fix arm.
+        local fetched_at="$last_timestamp"
 
         # Skip the API call if we have a fresh cached score for the current HEAD SHA.
         # Greptile edits its review comment in-place (PR updatedAt doesn't bump), but
@@ -981,6 +1055,7 @@ check_greptile_scores() {
             # Note: --paginate with --jq applies the filter per-page, so if multiple
             # pages each contain Greptile comments, we'd get multiple lines of output.
             # We take only the last line (tail -1) to get the most recent score.
+            fetched_at="$now"
             greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
                 --paginate --jq '
                     [.[] | select(.user.login | test("greptile"; "i"))] | last |
@@ -1003,24 +1078,58 @@ check_greptile_scores() {
             continue
         fi
 
-        # Score 5 = clean — update state file (so check_merge_ready sees
-        # the perfect score instead of a stale sub-5 entry) and skip.
+        # Score 5 = clean by Greptile's reckoning — but OUR reviewer may still
+        # have open findings on the same PR, and those are invisible to the
+        # score above. A PR is only clean when both reviewers are satisfied.
+        # Routing may differ from what Greptile said, so it gets its own variable.
+        # greptile_score MUST stay Greptile's real score: it is what we persist and
+        # what every consumer reports. Overwriting it to steer one branch poisons
+        # the state file, and the poison is self-sticking — a persisted 3 fails the
+        # `-ge 5` test on the next cycle, so the AI verdict is never consulted again
+        # and the PR cannot recover even after its findings are resolved.
+        local route_score="$greptile_score"
+        local ai_verdict=""
         if [ "$greptile_score" -ge 5 ] 2>/dev/null; then
-            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
-            continue
+            # ai_review_verdict() costs a paginated comments fetch, so it obeys the
+            # same TTL as the score above rather than firing every 2-minute cycle.
+            if [ -n "$last_verdict" ] && [ "$last_sha" = "$head_sha" ] \
+                    && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then
+                ai_verdict="$last_verdict"
+            else
+                ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
+                fetched_at="$now"
+            fi
+            if [ "$ai_verdict" = "dirty" ]; then
+                # Route to the fix arm: unaddressed findings are work to do, not a
+                # polish suggestion. Only the routing score moves.
+                route_score=3
+                pr_title="${pr_title} [our AI review wants changes]"
+            else
+                # clean / pending / none: nothing WE can say is outstanding.
+                # 'pending' is deliberately not treated as dirty — the head is
+                # simply unreviewed yet, and the sweep re-reviews within minutes.
+                # Emitting a fix item off an unmeasured head would nag on PRs
+                # that may well be clean.
+                echo "${greptile_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                continue
+            fi
         fi
 
         # Score >= 4 is minor, < 4 needs fix
         local item_type
-        if [ "$greptile_score" -lt 4 ]; then
+        if [ "$route_score" -lt 4 ]; then
             item_type="greptile_needs_fix"
         else
             item_type="greptile_needs_improvement"
         fi
 
         if [ -n "$last_state" ]; then
-            # Same score and same HEAD — check cooldown
-            if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ]; then
+            # Same score, same verdict and same HEAD — check cooldown.
+            # The verdict belongs in this test now that it, not the score, is what
+            # moves when our review flips: without it a clean -> dirty flip on an
+            # unchanged head would sit out the cooldown before anyone heard about it.
+            if [ "$greptile_score" = "$last_score" ] && [ "$head_sha" = "$last_sha" ] \
+                    && [ "$ai_verdict" = "$last_verdict" ]; then
                 local elapsed=$(( now - last_timestamp ))
                 if [ "$elapsed" -lt "$cooldown_seconds" ]; then
                     # Within cooldown — skip
@@ -1031,13 +1140,19 @@ check_greptile_scores() {
             # Otherwise: score changed or new commits pushed — always re-emit
         else
             # First time seeing this PR — seed state, don't report
-            echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
+            echo "${greptile_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
             continue
         fi
 
-        # Record state and emit
-        echo "${greptile_score}:${now}:${head_sha}" > "$state_file"
-        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "Greptile score: ${greptile_score}/5"
+        # Record state and emit. The detail names whichever reviewer is actually
+        # asking for work: reporting "Greptile score: 5/5" on an item routed to
+        # the fix arm by OUR findings reads as a contradiction.
+        local detail="Greptile score: ${greptile_score}/5"
+        if [ "$ai_verdict" = "dirty" ]; then
+            detail="${detail} · our AI review has open findings"
+        fi
+        echo "${greptile_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "$detail"
     done
 }
 
@@ -1298,6 +1413,20 @@ check_merge_ready() {
             greptile_score=$(cut -d: -f1 < "$greptile_state_file")
             # Must be perfect score (>= 5) to be merge-ready
             if [ -n "$greptile_score" ] && [ "$greptile_score" -lt 5 ] 2>/dev/null; then
+                continue
+            fi
+            # ...and OUR reviewer must have nothing open either. Before the score
+            # stopped being overwritten, a dirty verdict reached here disguised as
+            # a Greptile 3 and was filtered by the check above; now that the real 5
+            # is persisted, that accidental filter is gone and a PR with open AI
+            # findings would emit greptile_needs_fix AND merge_ready in the same
+            # run — the dispatcher could merge exactly what the fix arm is queued
+            # to repair. Only "dirty" blocks: clean/pending/none/"" all mean we
+            # have nothing to say, and blocking on an unmeasured head would stall
+            # every merge behind a review that has not happened yet.
+            local greptile_state_verdict
+            greptile_state_verdict=$(cut -d: -f4 < "$greptile_state_file")
+            if [ "$greptile_state_verdict" = "dirty" ]; then
                 continue
             fi
         fi
