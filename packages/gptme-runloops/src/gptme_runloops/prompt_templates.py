@@ -591,6 +591,28 @@ class ItemPromptParams:
     # render for tests or future arm variants.
     stem: str = "(run_completed|stub_call_skip|run_failed)"
 
+    @property
+    def _record_path(self) -> str:
+        """Extract the record= path from detail for per-record TSV filtering.
+
+        Returns a sentinel that grep -F won't find when detail has no record=
+        token, so the verification command fails closed (NO TERMINAL ROW) rather
+        than matching every line with grep -F ''.
+
+        Single quotes in the path are escaped for shell single-quoted context so
+        the rendered grep -F '...' command is always syntactically valid.
+
+        Separator logic: letter-starting tokens (e.g. 'event_type=') stop the
+        capture; digit-starting substrings (e.g. '2026=') inside the path do
+        not.  Paths containing a space followed by a letter-starting 'word='
+        pattern are unsupported — by convention, voice-call paths use ISO
+        timestamps with hyphens and never contain such sequences.
+        """
+        m = re.search(r"\brecord=(.+?)(?=\s+[a-z][a-z0-9_]*=|\s*$)", self.detail)
+        if not m:
+            return "__RECORD_PATH_MISSING__"
+        return m.group(1).replace("'", "'\\''")
+
     def to_prompt_context(self) -> PromptContext:
         """The step-2 context for the greptile investigate arms."""
         return PromptContext(
@@ -618,6 +640,7 @@ class ItemPromptParams:
             "greptile_helper": ctx.resolved_greptile_helper,
             "pr_address_script": ctx.resolved_pr_address_script,
             "stem": self.stem,
+            "record_path": self._record_path,
         }
 
 
@@ -881,9 +904,10 @@ The post-call.sh script handles stub-call detection, silent-call alerting,
 trace ledger updates (run_completed / stub_call_skip), and journal writing.
 It is idempotent — re-running on a completed record is harmless.
 
-After the worker finishes, verify the trace ledger shows a terminal row:
+After the worker finishes, verify the trace ledger shows a terminal row for this record:
 ```bash
-grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | tail -3
+rows=$(grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | grep -F '{record_path}' | tail -3)
+[ -n "$rows" ] && printf '%s\n' "$rows" || { echo "NO TERMINAL ROW — verification FAILED"; exit 1; }
 ```
 """
 

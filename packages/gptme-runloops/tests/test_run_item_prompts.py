@@ -371,6 +371,188 @@ def test_voice_postcall_stem_token_substituted() -> None:
     )
 
 
+def test_voice_postcall_explicit_negative_branch() -> None:
+    """Regression: the verification command must report NO TERMINAL ROW on empty grep output.
+
+    Empty stdout is ambiguous to an LLM worker — it looks like success.  The
+    negative branch makes the failure visible so the worker can report it instead
+    of silently declaring verification complete.
+
+    Also pins the branch *ordering*: printf (success path) must appear before
+    "NO TERMINAL ROW" (failure path).  An inverted branch would produce the
+    opposite ordering and silently put the failure message on the success path.
+    """
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), BOB_PARAMS)
+    assert "NO TERMINAL ROW" in rendered, (
+        "voice_postcall arm is missing the explicit negative-case message — "
+        "the worker cannot distinguish empty grep output from a missing terminal row"
+    )
+    assert (
+        "printf" in rendered
+    ), "voice_postcall arm should use printf to display matched rows on success"
+    assert rendered.index("printf") < rendered.index("NO TERMINAL ROW"), (
+        "voice_postcall arm has wrong branch ordering — "
+        "printf (success path) must appear before 'NO TERMINAL ROW' (failure path); "
+        "an inverted branch would silently put the failure message on the success path"
+    )
+    assert "exit 1" in rendered, (
+        "voice_postcall negative branch must exit non-zero so status-aware callers "
+        "treat a missing terminal row as failure, not success"
+    )
+
+
+def test_voice_postcall_record_path_substituted() -> None:
+    """Regression: {record_path} must be replaced in the voice_postcall grep command.
+
+    If the token survives substitution, grep -F '{record_path}' filters by the
+    literal string rather than the archive path, matching nothing and always
+    triggering the false-negative "NO TERMINAL ROW" branch.
+    """
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), BOB_PARAMS)
+    assert "{record_path}" not in rendered, (
+        "{record_path} survived substitution in voice_postcall — "
+        "likely ItemPromptParams._tokens() lost the 'record_path' key"
+    )
+    # When detail has no record= token the sentinel must appear, not an empty
+    # grep -F '' that would match every line (false-positive fallback).
+    assert "__RECORD_PATH_MISSING__" in rendered, (
+        "voice_postcall with no record= token should render the sentinel "
+        "'__RECORD_PATH_MISSING__' so grep -F fails closed instead of matching all lines"
+    )
+
+
+def test_voice_postcall_positive_record_path() -> None:
+    """Regression: the record= path extracted from detail must reach the grep command.
+
+    Previously all voice_postcall tests used BOB_PARAMS whose detail has no
+    record= token, so the positive extraction branch (_record_path regex match)
+    was never exercised.  A broken regex or wrong capture group would pass the
+    suite while producing a wrong or empty path in production.
+    """
+    params_with_record = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice-2026-01-01T12-00-00.wav",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(
+        ItemPromptKind("voice_postcall"), params_with_record
+    )
+    assert "grep -F '/tmp/voice-2026-01-01T12-00-00.wav'" in rendered, (
+        "voice_postcall grep command does not contain the extracted record path — "
+        "check ItemPromptParams._record_path regex and _tokens() registration"
+    )
+    assert (
+        "__RECORD_PATH_MISSING__" not in rendered
+    ), "voice_postcall rendered the missing-path sentinel even though detail contained record="
+
+
+def test_voice_postcall_spaced_record_path() -> None:
+    """Regression: record paths containing spaces must not be truncated.
+
+    The old regex used \\S+ which stops at the first space, so
+    'record=/tmp/voice call 2026.wav' would extract only '/tmp/voice', causing
+    grep to match no lines (false NO TERMINAL ROW) or wrong lines (false pass).
+    The fix uses a lookahead that stops at the next key= token or end of string.
+    """
+    params_spaced = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice call 2026.wav",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), params_spaced)
+    assert "grep -F '/tmp/voice call 2026.wav'" in rendered, (
+        "voice_postcall truncated a spaced record path — "
+        "the regex must capture until the next key= token or end of string"
+    )
+    assert (
+        "__RECORD_PATH_MISSING__" not in rendered
+    ), "voice_postcall rendered the missing-path sentinel for a spaced path"
+
+
+def test_voice_postcall_digit_key_in_path_not_truncated() -> None:
+    """Regression: digit-starting substrings like '2026=full' inside a path must not
+    be treated as key= separators.
+
+    The regex lookahead (?=\\s+\\w+=|\\s*$) matched \\w+= which includes
+    '2026=', so 'record=/tmp/voice 2026=full.wav other=val' extracted only
+    '/tmp/voice'.  The fix restricts to [a-z][a-z0-9_]*= so only
+    letter-starting identifiers are treated as key separators.
+    """
+    params = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice 2026=full.wav other=val",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), params)
+    assert "grep -F '/tmp/voice 2026=full.wav'" in rendered, (
+        "voice_postcall truncated a path containing a digit-starting 'word=' token — "
+        "only letter-starting identifiers should be treated as key separators"
+    )
+
+
+def test_voice_postcall_letter_key_in_detail_is_separator() -> None:
+    """Regression: letter-starting key=value tokens in detail must terminate path capture.
+
+    The regex lookahead (?=\\s+[a-z][a-z0-9_]*=|\\s*$) treats letter-starting
+    identifiers as key separators.  This is the complementary case to
+    test_voice_postcall_digit_key_in_path_not_truncated: letter-starting keys
+    like 'event_type=' MUST stop the capture so the rendered grep -F uses only
+    the record path, not the subsequent key=value pair.  Changing the lookahead
+    from [a-z][a-z0-9_]*= to \\w+= (or removing it) would pass the digit-key
+    test while silently breaking this one.
+    """
+    params_with_event_type = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice-2026-01-01T12-00-00.wav event_type=terminal",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(
+        ItemPromptKind("voice_postcall"), params_with_event_type
+    )
+    assert "grep -F '/tmp/voice-2026-01-01T12-00-00.wav'" in rendered, (
+        "voice_postcall failed to stop path capture at letter-starting token 'event_type=' — "
+        "the regex lookahead (?=\\s+[a-z][a-z0-9_]*=|\\s*$) must treat letter-starting "
+        "identifiers as key separators"
+    )
+    assert "event_type" not in rendered.split("grep -F")[1].split("\n")[0], (
+        "letter-starting key 'event_type' leaked into the extracted record path "
+        "or the grep command line — path must stop before the detail token"
+    )
+    assert "__RECORD_PATH_MISSING__" not in rendered
+
+
+def test_voice_postcall_single_quote_in_record_path() -> None:
+    """Regression: single quotes in the record path must be shell-escaped.
+
+    _record_path escapes via .replace(\"'\", \"'\\\\''\"``).  A broken escape
+    would produce invalid shell and either a syntax error (false NO TERMINAL ROW)
+    or command injection (if the broken quote lets arbitrary text execute).
+    """
+    params = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice's-call.wav",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), params)
+    # The escaped form of /tmp/voice's-call.wav in a single-quoted shell string is:
+    # '/tmp/voice'\''s-call.wav'
+    assert "grep -F '/tmp/voice'\\''s-call.wav'" in rendered, (
+        "voice_postcall did not shell-escape the single quote in the record path — "
+        "check _record_path: m.group(1).replace(\"'\", \"'\\\\''\")"
+    )
+    assert "__RECORD_PATH_MISSING__" not in rendered
+
+
 def test_every_expected_golden_exists() -> None:
     expected = {f"investigate.{t}.bob" for t in SIMPLE_ARMS}
     expected |= {
