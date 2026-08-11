@@ -1560,7 +1560,7 @@ def fetch_ai_review_status(
     if isinstance(raw, _MarkerLookupFailed):
         return {
             "accepted": False,
-            "detail": "AI review marker lookup failed (API timeout or rate limit)",
+            "detail": "AI review marker lookup failed (API error, timeout, or identity resolution failure)",
         }
     marker = raw
     if marker is None:
