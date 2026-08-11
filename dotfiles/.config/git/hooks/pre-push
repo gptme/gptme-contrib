@@ -141,7 +141,8 @@ if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
                 -e 's#^([^/:]+):#\1/#' \
                 -e 's#^[^/]+@##' \
                 -e 's#/$##' \
-                -e 's#\.git$##' | tr '[:upper:]' '[:lower:]'
+                -e 's#\.git$##' | tr '[:upper:]' '[:lower:]' | \
+                sed -e 's#^ssh\.github\.com/#github.com/#'
         }
 
         _remote_branch="${remote_ref#refs/heads/}"

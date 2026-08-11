@@ -10,6 +10,11 @@ their commit — trusted_blob == work_blob, exec "$guard" runs the payload.
 Fix: the hook inlines the brain-repo check without any in-repo delegation.
 Worst case for a spoofed origin URL is a blocked merge (false positive), not RCE.
 (ErikBjare/bob#1122 — four P0s on this file, all found by our own AI reviewer.)
+
+The pre-commit hook carries a companion guard (Part 0.7) for the conflicted-merge
+path: git merge stops on conflicts, the user resolves them and runs `git commit`
+(or `git merge --continue`), which invokes pre-commit but NOT pre-merge-commit.
+MERGE_HEAD is still present at that point, so the pre-commit hook also blocks.
 """
 
 from __future__ import annotations
@@ -26,6 +31,15 @@ HOOK = (
     / "git"
     / "hooks"
     / "pre-merge-commit"
+)
+
+PRE_COMMIT_HOOK = (
+    Path(__file__).resolve().parents[1]
+    / "dotfiles"
+    / ".config"
+    / "git"
+    / "hooks"
+    / "pre-commit"
 )
 
 
@@ -200,3 +214,75 @@ def test_crafted_git_dir_with_planted_refs_cannot_cause_rce(tmp_path: Path) -> N
     (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
     _run_hook(repo)
     assert not sentinel.exists(), "crafted .git/ refs caused RCE"
+
+
+# ---------------------------------------------------------------------------
+# pre-commit hook: conflicted-merge path (P1 regression)
+#
+# git merge stops on conflicts; the user resolves them and runs `git commit`
+# (or `git merge --continue`). That invokes pre-commit but NOT pre-merge-commit.
+# MERGE_HEAD is still present at that point. The pre-commit hook (Part 0.7)
+# must intercept this path in the brain repo — otherwise a conflict-resolved
+# pull on master still mints the merge commit that origin's ruleset rejects.
+# ---------------------------------------------------------------------------
+
+
+def _run_pre_commit_hook(repo: Path) -> subprocess.CompletedProcess:
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(repo.parent),
+        # Suppress the identity and allowed-repos guards so the test is scoped
+        # to the merge-commit check only.
+        "ALLOW_GIT_IDENTITY": "1",
+        "ALLOW_MASTER_COMMITS": "1",
+    }
+    return subprocess.run(
+        [str(PRE_COMMIT_HOOK)], cwd=repo, capture_output=True, text=True, timeout=30,
+        env=env,
+    )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "git@github.com:ErikBjare/bob.git",
+        "https://github.com/ErikBjare/bob.git",
+        "https://github.com/erikbjare/bob.git",
+        "https://GITHUB.COM/ERIKBJARE/BOB.GIT",
+    ],
+)
+def test_pre_commit_blocks_conflicted_merge_on_master_in_brain_repo(
+    tmp_path: Path, origin: str
+) -> None:
+    """pre-commit must block a conflict-resolved merge on master (pre-merge-commit gap)."""
+    repo = _make_repo(tmp_path, origin)
+    (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
+    proc = _run_pre_commit_hook(repo)
+    assert proc.returncode == 1, (
+        f"pre-commit did not block conflicted merge for origin={origin!r}\n{proc.stderr}"
+    )
+    assert "Refusing" in proc.stderr or "🚫" in proc.stderr, proc.stderr
+
+
+def test_pre_commit_does_not_block_non_merge_commit_in_brain_repo(
+    tmp_path: Path,
+) -> None:
+    """pre-commit must not block normal commits (no MERGE_HEAD) on master."""
+    repo = _make_repo(tmp_path, "git@github.com:ErikBjare/bob.git")
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    proc = _run_pre_commit_hook(repo)
+    # The hook may exit non-zero for other reasons (identity check, etc.) but
+    # must NOT emit the merge-commit refusal — that guard must stay silent.
+    assert "Refusing" not in proc.stderr
+    assert "🚫" not in proc.stderr
+
+
+def test_pre_commit_does_not_block_conflicted_merge_in_non_brain_repo(
+    tmp_path: Path,
+) -> None:
+    """pre-commit merge guard is brain-repo-only; other repos are unaffected."""
+    repo = _make_repo(tmp_path, "git@github.com:gptme/gptme-contrib.git")
+    (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
+    proc = _run_pre_commit_hook(repo)
+    assert "Refusing" not in proc.stderr
+    assert "🚫" not in proc.stderr
