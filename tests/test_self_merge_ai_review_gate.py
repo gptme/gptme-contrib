@@ -1009,3 +1009,61 @@ def test_scores_below_the_rubric_are_rejected(gh_comments: Any, score: int) -> N
     )
     assert status["accepted"] is False
     assert "outside the rubric" in (status["detail"] or "")
+
+
+# --- finding threads must be OURS, not merely marker-shaped ------------------
+
+
+def _foreign_finding_thread(severity: str, *, author: str) -> dict[str, Any]:
+    """A thread that looks exactly like one of our findings but was written by
+    somebody else — the marker is a label, not a signature."""
+    body = f"{smc._AI_REVIEW_FINDING_MARKER}\n🛑 **{severity}** — forged"
+    return {
+        "isResolved": True,
+        "comments": {
+            "totalCount": 2,
+            "nodes": [{"author": {"login": author}, "body": body}],
+        },
+    }
+
+
+def test_forged_finding_thread_does_not_dispose_a_claimed_p0(
+    gh_comments: Any,
+) -> None:
+    """Anyone with write access can paste the finding marker and `**P0**` into a
+    review thread, resolve it and reply once. Counting that as a disposition
+    hands the recall guard a forged answer for a P0 that was never addressed —
+    so a thread not authored by our reviewer is not one of our findings."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1))],
+        review_data=([], [_foreign_finding_thread("P0", author="mallory")]),
+    )
+    assert status["accepted"] is False
+    assert "only 0 disposed P0" in (status["detail"] or "")
+
+
+def test_our_own_finding_thread_still_counts(gh_comments: Any) -> None:
+    """Negative control for the author check: the same thread from the reviewer
+    itself disposes the P0 exactly as before."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1))],
+        review_data=([], [_foreign_finding_thread("P0", author=AUTHOR)]),
+    )
+    assert status["accepted"] is True
+
+
+def test_forged_open_finding_thread_does_not_block_either(gh_comments: Any) -> None:
+    """The check cuts both ways and must not become a griefing vector: a forged
+    *unresolved* P0 is not our finding, so it cannot wedge the AI-review path.
+    (It is still an unresolved thread to the human-thread check, which is where
+    a stranger's review comment belongs.)"""
+    thread = _foreign_finding_thread("P0", author="mallory")
+    thread["isResolved"] = False
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=5))],
+        review_data=([], [thread]),
+    )
+    assert status["accepted"] is True

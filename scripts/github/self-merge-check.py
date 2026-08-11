@@ -1099,6 +1099,11 @@ def _ai_review_disposition_shortfall(
     claimed finding. Threads the reviewer itself retired (``auto_resolved``) do
     not count toward it: they are its own bookkeeping for findings that stopped
     reproducing, so by construction they are not the P0/P1 the score reports.
+    Only threads authored by *expected_author* are read as ours at all. The
+    finding marker is a label anyone with write access can paste, so without
+    that check a forged thread — marker, ``**P0**``, resolved, one reply — is a
+    disposition the gate accepts for a P0 it never saw addressed.
+
     Neither does a thread whose severity did not parse — crediting it against a
     claimed P0 would be guessing in the merge direction.
 
@@ -1127,6 +1132,18 @@ def _ai_review_disposition_shortfall(
         body = str(nodes[0].get("body") or "")
         if _AI_REVIEW_FINDING_MARKER not in body:
             continue  # not one of our findings
+        # The marker is a *label*, not a signature: anyone who can open a review
+        # thread can paste `<!-- bob-ai-review-finding -->` and `**P0**` into a
+        # root comment, resolve it, reply once, and hand the recall guard a
+        # forged disposition for a P0 that was never addressed. The summary
+        # marker has always been author-checked (`_fetch_ai_review_marker`);
+        # these threads were not, and the author is already in the payload the
+        # query fetches, so the check costs nothing. A thread that fails it is
+        # not "ignored" — it stays whatever it is to the rest of the gate,
+        # including an unresolved human thread, which blocks on its own.
+        author = (nodes[0].get("author") or {}).get("login")
+        if expected_author and author != expected_author:
+            continue  # marker-shaped, but not written by our reviewer
         m = _AI_REVIEW_SEVERITY_RE.search(body)
         # A thread carrying our finding marker whose severity we cannot read is
         # NOT a P2. Defaulting it to P2 was a fail-OPEN on the severity parse:
@@ -1547,6 +1564,7 @@ def fetch_ai_review_status(
         ),
         marker=marker,
         score=score,
+        expected_author=expected_author,
     )
     if disposition:
         return {"accepted": False, "detail": f"AI review {disposition}"}
