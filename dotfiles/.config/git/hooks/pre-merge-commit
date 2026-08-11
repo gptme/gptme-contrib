@@ -1,136 +1,50 @@
 #!/usr/bin/env bash
-# Dispatcher: core.hooksPath is global, so this runs for every repo. Delegate to
-# the repo's own guard when it ships one; do nothing anywhere else.
-# Real logic: <brain-repo>/scripts/precommit/prevent-master-merge-commits.sh
+# Prevent merge commits on master in the Bob brain repo (ErikBjare/bob).
 #
-# SECURITY: the guard path is repo-controlled content, and this hook runs in
-# EVERY repository — including untrusted clones. Executing it unconditionally is
-# a remote-code-execution vector: an adversary commits an executable script at
-# that exact path, and a routine `git merge` after cloning runs it with the
-# user's full privileges. Git's normal hook model is opt-in precisely because
-# repo-local .git/hooks are never fetched from a remote; core.hooksPath opts
-# every repo in at once, so the trust check has to be reintroduced here.
+# core.hooksPath is set globally, so this hook fires in EVERY repository on
+# this machine. The original design delegated to a repo-local guard script after
+# verifying the guard's blob against refs/remotes/origin/master. But every
+# possible trust anchor inside .git/ is attacker-controlled in a crafted
+# directory: set remote.origin.url to a trusted org, point
+# refs/remotes/origin/master at your own commit containing a malicious guard,
+# and trusted_blob == work_blob passes. exec "$guard" then runs the payload.
+# No in-repo blob check can close this gap. (Four P0s on this file —
+# ErikBjare/bob#1122.)
 #
-# So: only delegate in repos whose `origin` belongs to an org we control. This
-# keeps the guard working where it is meant to while making a hostile clone
-# inert. Found by our own AI reviewer on gptme/gptme-contrib#1380 (P0).
+# Fix: inline the guard logic here. No delegation to repo-local code. The
+# origin_url check still reads from .git/config (repo-controlled), but since we
+# exec nothing from the repo, the worst outcome of a spoofed URL is a blocked
+# merge (false positive) — not code execution.
 set -uo pipefail
 
-root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-[ -n "$root" ] || exit 0
-
-guard_rel="scripts/precommit/prevent-master-merge-commits.sh"
-guard="$root/$guard_rel"
-[ -x "$guard" ] || exit 0
-
-# The guard must be byte-identical to the version on ORIGIN's default branch.
-#
-# A trusted origin does NOT make merged-in content trusted, and this hook runs
-# at the worst possible moment for that distinction: pre-merge-commit fires
-# *after* the merge has been applied to the worktree and before the commit
-# object exists. So a branch from an untrusted fork can introduce — or modify —
-# this exact file, and merging it into a repo whose origin is on the allowlist
-# below would execute the attacker's version with the user's privileges. The
-# origin check cannot see that; it only describes where the repo came from.
-#
-# The first attempt at this anchored to `HEAD:$guard_rel`, which is NOT a trust
-# anchor: `gh pr checkout` moves HEAD onto the contributor's branch, so a
-# hostile PR that carries this exact file makes worktree and HEAD agree, and the
-# next `git merge` in that checkout execs the payload. Anchoring to HEAD only
-# proves "the worktree matches the branch you are standing on" — it says nothing
-# about who wrote that branch. (Fourth P0 on this file, all four found by our own
-# AI reviewer — ErikBjare/bob#1122.)
-#
-# `refs/remotes/origin/*` is the anchor that actually means something: those refs
-# only move on `git fetch origin`, so a match proves the guard is the version
-# that already landed on the trusted org's default branch. A PR branch — even
-# one pushed to origin — is never origin/HEAD, origin/master, or origin/main.
-#
-# Consequences, both intentional:
-#   * A merge that ADDS or EDITS the guard has no matching origin blob, so the
-#     hook goes inert for that merge. It does not abort the merge: refusing
-#     would break every legitimate PR that updates the guard, and once the
-#     origin anchor is in place there is no escalation path to protect against
-#     (the payload becoming the local HEAD no longer grants it execution).
-#   * While you are locally editing the guard, the hook is inert. Fail closed.
-#
-# Only origin/HEAD identifies the remote's default branch unambiguously. Falling
-# back to a conventional branch name is safe only when exactly one of master or
-# main exists. If both exist and origin/HEAD is missing, either could be a stale
-# former default; choosing one would risk resurrecting a guard the maintainers
-# deliberately removed. Ambiguity makes the dispatcher inert.
-trusted_ref=""
-if git rev-parse --quiet --verify refs/remotes/origin/HEAD >/dev/null 2>&1; then
-    trusted_ref="refs/remotes/origin/HEAD"
-else
-    _fallback_ref=""
-    for _candidate in \
-        refs/remotes/origin/master \
-        refs/remotes/origin/main; do
-        if git rev-parse --quiet --verify "$_candidate" >/dev/null 2>&1; then
-            [ -z "$_fallback_ref" ] || exit 0
-            _fallback_ref="$_candidate"
-        fi
-    done
-    trusted_ref="$_fallback_ref"
-fi
-[ -n "$trusted_ref" ] || exit 0
-
-trusted_blob="$(git rev-parse --quiet --verify "$trusted_ref:$guard_rel" 2>/dev/null || true)"
-work_blob="$(git hash-object "$guard" 2>/dev/null || true)"
-[ -n "$trusted_blob" ] && [ "$trusted_blob" = "$work_blob" ] || exit 0
-
-origin="$(git config --get remote.origin.url 2>/dev/null || true)"
-[ -n "$origin" ] || exit 0
-
-# Both HOST and OWNER must be trusted, as a pair.
-#
-# Matching the owner alone is not enough, and that bug shipped here first:
-# `https://evil.com/gptme/malicious.git` parses to owner `gptme`, which was on
-# the allowlist, so an attacker only had to name their account after one of
-# ours to get the RCE back. Caught by our own AI reviewer re-reviewing this PR
-# after the first fix (P0, ErikBjare/bob#1122) — the original tests probed
-# `gptme-fake` and `gptme-evil` but never an attacker host with an *exact*
-# allowed owner, so they all passed.
-#
-# Case is not significant, and treating it as significant made the hook
-# silently inert for legitimate maintainers: `git clone https://GITHUB.com/gptme/x`
-# or `https://github.com/GPTME/x` produced strings that failed a byte-exact
-# `case` and exited 0 with no warning. Hostnames are case-insensitive by DNS,
-# and GitHub/Forgejo account names are case-insensitive and unique
-# case-insensitively — `GPTME` *is* `gptme`, not a second account — so folding
-# case cannot admit a different principal. Uppercase schemes (`HTTPS://`) are
-# parsed too; the old `[a-z+]+` left the sed unmatched, so `host` became the
-# whole URL. `tr` rather than `${var,,}`: bash 3.2 still ships on macOS.
-#
-# Shapes handled: git@host:OWNER/repo(.git), scheme://[user@]host[:port]/OWNER/repo(.git)
-host=""
-owner=""
-case "$origin" in
-    *://*)
-        host="$(printf '%s' "$origin" | sed -E 's#^[a-zA-Z+]+://([^/]+)/.*$#\1#')"
-        owner="$(printf '%s' "$origin" | sed -E 's#^[a-zA-Z+]+://[^/]+/([^/]+)/.*$#\1#')"
-        ;;
-    *:*)
-        host="$(printf '%s' "$origin" | sed -E 's#^([^:]+):.*$#\1#')"
-        owner="$(printf '%s' "$origin" | sed -E 's#^[^:]+:([^/]+)/.*$#\1#')"
-        ;;
-esac
-
-# Strip any userinfo ("git@") and port (":3000") from the host.
-host="${host##*@}"
-host="${host%%:*}"
-
-host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-owner="$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')"
-
-# Allowlists are spelled lowercase because both values are folded above.
-case "$host" in
-    github.com | forgejo.hassel.bjareho.lt) ;;
+# Only guard the brain repo — other repos legitimately allow merges on master.
+origin_url="$(git config --get remote.origin.url 2>/dev/null || true)"
+case "$origin_url" in
+    *ErikBjare/bob*) ;;
     *) exit 0 ;;
 esac
 
-case "$owner" in
-    erikbjare | gptme | activitywatch | superuserlabs) exec "$guard" ;;
-    *) exit 0 ;;
-esac
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+[ "$branch" = "master" ] || exit 0
+
+git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+[ -f "$git_dir/MERGE_HEAD" ] || exit 0
+
+cat >&2 <<'EOF'
+🚫 Refusing to create a merge commit on master in the brain repo.
+
+origin rejects merge commits on master (repo ruleset), so this commit could
+never be pushed — it would only jam every session's push path until someone
+squashed the backlog, losing per-commit history for the whole window.
+
+Recover, then use the off-tree path:
+
+    git merge --abort
+    git-safe-push-master
+
+git-safe-push-master reconciles with origin OFF-TREE (never touches this
+working tree), so it is safe to run while sibling sessions are mid-edit. If you
+were only trying to get origin's commits locally: run it first — once your
+local commits are published, a plain pull fast-forwards with no merge commit.
+EOF
+exit 1
