@@ -3,12 +3,12 @@ import json
 import logging
 import subprocess
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from datetime import datetime
 from fnmatch import fnmatch as fnmatch_path
 from logging import Filter
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import chromadb
 from chromadb import Collection
@@ -48,6 +48,8 @@ for logger_name in [
 
 
 logger = logging.getLogger(__name__)
+
+QueryEmbeddings = list[Sequence[float]]
 
 
 def get_client(settings: Settings | None = None) -> ClientAPI:
@@ -607,9 +609,8 @@ class Indexer:
         # Now do a test search
         print("\nTest search for 'Lorem ipsum':")
         if self.embedding_function is not None:
-            search_results = self.collection.query(
-                query_embeddings=self.embedding_function(["Lorem ipsum"]), n_results=3
-            )
+            query_embeddings = cast(QueryEmbeddings, self.embedding_function(["Lorem ipsum"]))
+            search_results = self.collection.query(query_embeddings=query_embeddings, n_results=3)
         else:
             search_results = self.collection.query(query_texts=["Lorem ipsum"], n_results=3)
         print("\nRaw search results:")
@@ -889,7 +890,7 @@ class Indexer:
         # falling back to query_texts in that case lets chromadb use its default
         # 384-dim MiniLM, which mismatches 768-dim ModernBERT stored vectors).
         if self.embedding_function is not None:
-            query_embeddings = self.embedding_function([query])
+            query_embeddings = cast(QueryEmbeddings, self.embedding_function([query]))
             results = self.collection.query(
                 query_embeddings=query_embeddings,
                 n_results=query_n_results,
