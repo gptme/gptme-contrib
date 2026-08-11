@@ -54,7 +54,13 @@ FULL_CONSENSUS = {
 
 
 def _marker(**overrides: Any) -> dict[str, Any]:
-    """A clean, current, full-consensus marker as the reviewer writes it."""
+    """A clean, current, full-consensus marker as the reviewer writes it.
+
+    No ``findings`` key by default: that is the legacy marker shape, and it is
+    what exercises the score/severity-count guard. Tests for per-fingerprint
+    matching pass ``findings=[...]`` explicitly — and must pass one consistent
+    with the score they set, since a marker claiming a P0 while publishing no
+    P0 entry is refused as self-contradictory rather than downgraded."""
     marker: dict[str, Any] = {
         "sha": MARKER_SHA,
         "score": 5,
@@ -62,7 +68,6 @@ def _marker(**overrides: Any) -> dict[str, Any]:
         "consensus": dict(FULL_CONSENSUS),
         "history": [],
         "suppressed": [],
-        "findings": [],
     }
     marker.update(overrides)
     return marker
@@ -1065,5 +1070,76 @@ def test_forged_open_finding_thread_does_not_block_either(gh_comments: Any) -> N
         gh_comments,
         [_comment(_marker(score=5))],
         review_data=([], [thread]),
+    )
+    assert status["accepted"] is True
+
+
+# --- a PRESENT `findings` key is authoritative, even empty or unreadable -----
+
+
+def test_empty_findings_list_does_not_fall_back_to_the_score_guard(
+    gh_comments: Any,
+) -> None:
+    """`findings: []` with `score: 1` is a self-contradictory marker. Reading
+    the empty list as "key absent" drops to the score-only guard, which accepts
+    any disposed P0 thread — so a stale, already-disposed P0 would clear a head
+    whose own P0 was never addressed. Presence is the signal, not truthiness."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1, findings=[]))],
+        review_data=([], [_finding_thread("P0", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is False
+    assert "publishes 0 P0 finding(s)" in (status["detail"] or "")
+
+
+def test_findings_entry_without_a_fingerprint_fails_closed(gh_comments: Any) -> None:
+    """Silently skipping an unreadable entry shrinks the set of dispositions
+    demanded — the fail-open direction. An entry we cannot read is refused."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1, findings=[{"severity": "P0"}]))],
+        review_data=([], [_finding_thread("P0", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is False
+    assert "cannot read" in (status["detail"] or "")
+
+
+def test_findings_must_account_for_the_score(gh_comments: Any) -> None:
+    """A score of 2 means two or more P1s; publishing one P1 entry contradicts
+    it, so the marker is refused rather than half-believed."""
+    fp = "aaaabbbbcccc"
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=2, findings=[{"fp": fp, "severity": "P1"}]))],
+        # The one published finding IS disposed, so this isolates the score
+        # check from the per-fingerprint one.
+        review_data=(
+            [],
+            [
+                _finding_thread_body(
+                    "\u274c **P1** \u2014 the hash ignores .state",
+                    fp=fp,
+                    resolved=True,
+                    total=2,
+                )
+            ],
+        ),
+    )
+    assert status["accepted"] is False
+    assert "publishes 1 P1 finding(s), not 2" in (status["detail"] or "")
+
+
+def test_missing_findings_key_still_uses_the_legacy_score_guard(
+    gh_comments: Any,
+) -> None:
+    """Negative control: markers written before `findings` existed must keep
+    working, or the gate breaks on every PR reviewed by an older reviewer."""
+    marker = _marker(score=3)
+    assert "findings" not in marker
+    status = _status(
+        gh_comments,
+        [_comment(marker)],
+        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
     )
     assert status["accepted"] is True

@@ -1110,8 +1110,12 @@ def _ai_review_disposition_shortfall(
     When the marker publishes ``findings`` for the current head, the recall
     guard upgrades from severity-count matching to per-fingerprint matching:
     every current P0/P1 fingerprint must have a disposed thread whose root body
-    names that exact ``fp``. A missing ``findings`` key falls back to the older
-    severity-count guard so legacy markers keep working.
+    names that exact ``fp``. Only a *missing* ``findings`` key falls back to the
+    older severity-count guard, so legacy markers keep working; a key that is
+    present is authoritative even when empty or unreadable, because reading
+    those as "absent" would downgrade to the weaker guard exactly when the
+    marker is least trustworthy, and the marker must also publish enough
+    findings to account for its own score.
     """
     if review_data is None:
         return "could not read review thread state"
@@ -1120,7 +1124,9 @@ def _ai_review_disposition_shortfall(
         for fp in ((marker or {}).get("auto_resolved") or [])
         if isinstance(fp, str) and fp
     }
-    current_findings = (marker or {}).get("findings") or []
+    # NOT `... or []`: that reads a present-but-empty list as an absent key and
+    # silently drops to the weaker score-only guard. Presence is the signal.
+    current_findings = (marker or {}).get("findings")
     _, threads = review_data
     disposed: dict[str, int] = {"P0": 0, "P1": 0}
     disposed_fps: set[str] = set()
@@ -1182,26 +1188,44 @@ def _ai_review_disposition_shortfall(
             if fp:
                 disposed_fps.add(fp)
 
-    def _blocking_findings(marker_findings: Any) -> list[tuple[str, str]]:
+    def _blocking_findings(
+        marker_findings: list[Any],
+    ) -> tuple[list[tuple[str, str]], bool]:
+        """``(blocking entries, any entry unreadable)``.
+
+        Unreadable is reported rather than skipped. Dropping a malformed entry
+        shrinks the set of dispositions we demand, which is the fail-open
+        direction: an entry that should have required a disposed thread simply
+        stops requiring one.
+        """
         out: list[tuple[str, str]] = []
-        if not isinstance(marker_findings, list):
-            return out
+        malformed = False
         for item in marker_findings:
             if not isinstance(item, dict):
+                malformed = True
                 continue
             fp = item.get("fp")
             severity = item.get("severity")
-            if not isinstance(fp, str) or not fp:
-                continue
-            if not isinstance(severity, str):
+            if not isinstance(fp, str) or not fp or not isinstance(severity, str):
+                malformed = True
                 continue
             if severity not in AI_REVIEW_BLOCKING_SEVERITIES:
                 continue
             out.append((fp, severity))
-        return out
+        return out, malformed
 
-    blocking_findings = _blocking_findings(current_findings)
-    if blocking_findings:
+    # `findings` PRESENT is authoritative — including when it is empty. Reading
+    # a present-but-empty (or malformed) list as "absent" and dropping to the
+    # score-only guard below is a fail-open: that guard accepts any disposed
+    # thread of the right severity, so a marker publishing `findings: []` with
+    # `score: 1` would be cleared by a stale, already-disposed P0 thread while
+    # this head's P0 went unaddressed. A marker that names its findings must be
+    # taken at its word, and a marker that contradicts itself must not be
+    # quietly downgraded to a weaker check.
+    if isinstance(current_findings, list):
+        blocking_findings, malformed = _blocking_findings(current_findings)
+        if malformed:
+            return "marker publishes a findings entry we cannot read"
         missing = [
             (fp, severity)
             for fp, severity in blocking_findings
@@ -1219,6 +1243,18 @@ def _ai_review_disposition_shortfall(
             return "current marker findings lack disposed threads for: " + ", ".join(
                 parts
             )
+        # The list must also account for the score. `confidence_score` is
+        # arithmetic over the same findings, so a score claiming a P0 with no
+        # P0 entry published is a self-contradictory marker, not a clean head.
+        claimed = {1: ("P0", 1), 2: ("P1", 2), 3: ("P1", 1)}.get(score or 0)
+        if claimed:
+            need_severity, need_count = claimed
+            published = sum(1 for _, sev in blocking_findings if sev == need_severity)
+            if published < need_count:
+                return (
+                    f"marker scores {score}/5 but publishes {published} "
+                    f"{need_severity} finding(s), not {need_count}"
+                )
         return None
 
     # Legacy fallback for markers that predate the `findings` key: bind the
