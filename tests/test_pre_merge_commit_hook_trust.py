@@ -124,12 +124,24 @@ def test_bob_repo_on_master_no_merge_head_is_noop(tmp_path: Path) -> None:
     assert proc.returncode == 0
 
 
-def test_bob_repo_merge_on_master_is_blocked(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "git@github.com:ErikBjare/bob.git",
+        "https://github.com/ErikBjare/bob.git",
+        "https://github.com/erikbjare/bob.git",  # lowercase — GitHub is case-insensitive
+        "https://github.com/ErikBjare/bob",  # no .git suffix
+        "https://GITHUB.COM/ERIKBJARE/BOB.GIT",  # all-caps
+    ],
+)
+def test_bob_repo_merge_on_master_is_blocked(tmp_path: Path, origin: str) -> None:
     """Hook exits 1 when a merge commit is about to land on master."""
-    repo = _make_repo(tmp_path, "git@github.com:ErikBjare/bob.git")
+    repo = _make_repo(tmp_path, origin)
     (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
     proc = _run_hook(repo)
-    assert proc.returncode == 1
+    assert (
+        proc.returncode == 1
+    ), f"merge was not blocked for origin={origin!r}\n{proc.stderr}"
     assert "Refusing" in proc.stderr or "🚫" in proc.stderr
 
 
