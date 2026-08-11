@@ -242,3 +242,70 @@ class TestSetSubtaskToggleSkipped:
         counts = count_subtasks(content)
         assert counts.skipped == 0
         assert counts.pending == 1
+
+    def test_bare_skip_partial_match_does_not_truncate_title(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """P1 regression: partial subtask_text must not clip the rest of the title.
+
+        Before the fix, `new_line.find("Wire GitHub")` on
+        "- [-] Wire GitHub issue indexing (deferred: X)" returned the position
+        of "Wire GitHub", so `new_line[:idx+len("Wire GitHub")]` produced
+        "- [x] Wire GitHub" — silently losing " issue indexing".
+        """
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "test-toggle.md"
+        task_file.write_text(
+            self.TASK_TEMPLATE.format(
+                line="- [-] Wire GitHub issue indexing (deferred: cache mutates)"
+            )
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        # Pass only the prefix — a realistic short identifier
+        result = runner.invoke(
+            cli,
+            ["edit", "test-toggle", "--set-subtask", "Wire GitHub issue indexing", "done"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        content = task_file.read_text()
+        # Full title must be preserved; nothing after "indexing" was desired
+        assert "- [x] Wire GitHub issue indexing" in content
+        assert "(deferred:" not in content
+        counts = count_subtasks(content)
+        assert counts.skipped == 0
+        assert counts.completed == 1
+
+    def test_prose_marker_in_subtask_text_does_not_steal_toggle(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """P2 regression: marker in prose must not be toggled instead of the checkbox.
+
+        For a line "- [x] Refer to - [ ] old checklist", the old code iterated
+        markers in tuple order and found "- [ ]" first (a prose occurrence), so
+        line.replace("- [ ]", "- [ ]", 1) rewrote the prose and left the leading
+        "- [x]" untouched — a silent no-op for the todo direction.
+        """
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "test-toggle.md"
+        task_file.write_text(
+            self.TASK_TEMPLATE.format(
+                line="- [x] Refer to - [ ] old checklist"
+            )
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["edit", "test-toggle", "--set-subtask", "Refer to - [ ] old checklist", "todo"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        content = task_file.read_text()
+        # Leading checkbox must flip from [x] to [ ]; prose "- [ ]" must survive
+        assert "- [ ] Refer to - [ ] old checklist" in content
+        # The original leading [x] must be gone
+        assert "- [x] Refer to" not in content

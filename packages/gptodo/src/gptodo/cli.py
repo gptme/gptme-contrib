@@ -2278,7 +2278,12 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     if subtask_text in line and any(m in line for m in markers):
                         target = "- [x]" if state == "done" else "- [ ]"
                         for marker in markers:
-                            if marker in line:
+                            # Anchor to line start (after optional whitespace/blockquote)
+                            # so prose occurrences like "- [x] See - [ ] item" don't
+                            # steal the slot before the actual leading checkbox is found.
+                            if re.match(
+                                rf"^\s*(?:>\s*)?{re.escape(marker)}", line
+                            ):
                                 new_line = line.replace(marker, target, 1)
                                 # Strikethrough forms (- [ ] ~~text~~ or - [x] ~~text~~)
                                 # must have their ~~ markup stripped when toggling back
@@ -2289,13 +2294,14 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                                     r"\1 \2",
                                     new_line,
                                 )
-                                # For the bare [-] form, also strip the trailing reason
-                                # parenthetical (e.g. '(deferred: X)') so the toggled
-                                # item doesn't carry a stale annotation.
+                                # For the bare [-] form, strip the trailing reason
+                                # parenthetical via regex — not a position-based
+                                # truncation — so partial-match subtask_text values
+                                # (prefixes of the full title) don't clip the title.
                                 if marker == "- [-]":
-                                    idx = new_line.find(subtask_text)
-                                    if idx != -1:
-                                        new_line = new_line[: idx + len(subtask_text)].rstrip()
+                                    new_line = re.sub(
+                                        r"\s*\([^)]+\)\s*$", "", new_line
+                                    ).rstrip()
                                 lines[i] = new_line
                                 break
                         updated = True
