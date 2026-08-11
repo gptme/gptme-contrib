@@ -561,7 +561,12 @@ class Indexer:
 
         # Now do a test search
         print("\nTest search for 'Lorem ipsum':")
-        search_results = self.collection.query(query_texts=["Lorem ipsum"], n_results=3)
+        if self.embedding_function is not None:
+            search_results = self.collection.query(
+                query_embeddings=self.embedding_function(["Lorem ipsum"]), n_results=3
+            )
+        else:
+            search_results = self.collection.query(query_texts=["Lorem ipsum"], n_results=3)
         print("\nRaw search results:")
         print(f"IDs: {(search_results['ids'] or [[]])[0]}")
         print(f"Distances: {(search_results['distances'] or [[]])[0]}")
@@ -831,12 +836,26 @@ class Indexer:
                 logger.debug("No files matched the filter patterns")
                 return [], [], [] if explain else None
 
-        # Query the collection
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=query_n_results,
-            where=search_where or None,  # chromadb 1.x rejects empty dict
-        )
+        # Query the collection.
+        # Always embed via self.embedding_function when available so the query
+        # dimension matches the stored vectors even when the collection handle
+        # was loaded without an embedding function (e.g. the auto-detect path
+        # loads via get_collection() with no ef to avoid chromadb conflicts;
+        # falling back to query_texts in that case lets chromadb use its default
+        # 384-dim MiniLM, which mismatches 768-dim ModernBERT stored vectors).
+        if self.embedding_function is not None:
+            query_embeddings = self.embedding_function([query])
+            results = self.collection.query(
+                query_embeddings=query_embeddings,
+                n_results=query_n_results,
+                where=search_where or None,  # chromadb 1.x rejects empty dict
+            )
+        else:
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=query_n_results,
+                where=search_where or None,  # chromadb 1.x rejects empty dict
+            )
 
         result_ids = results["ids"] or [[]]
         result_docs = results["documents"] or [[]]
