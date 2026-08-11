@@ -500,14 +500,29 @@ STATE_EMOJIS = {
 
 
 class SubtaskCount(NamedTuple):
-    """Count of completed and total subtasks."""
+    """Count of completed, total, and intentionally-skipped subtasks.
+
+    ``total`` deliberately includes ``skipped`` so a completion ratio can never
+    be inflated to 100% by marking the remaining work skipped. See
+    :func:`count_subtasks` for the three skipped forms and the denominator rule.
+    """
 
     completed: int
     total: int
+    skipped: int = 0
+
+    @property
+    def pending(self) -> int:
+        """Items that are neither done nor deliberately skipped."""
+        return self.total - self.completed - self.skipped
 
     def __str__(self) -> str:
-        """Return string representation like (4/16)."""
-        return f"({self.completed}/{self.total})" if self.total > 0 else ""
+        """Return string representation like (4/16) or (4/16, 2 skipped)."""
+        if self.total == 0:
+            return ""
+        if self.skipped:
+            return f"({self.completed}/{self.total}, {self.skipped} skipped)"
+        return f"({self.completed}/{self.total})"
 
 
 @dataclass
@@ -999,21 +1014,54 @@ def check_links(content: str, task_path: Path, repo_root: Path) -> List[str]:
 
 
 def count_subtasks(content: str) -> SubtaskCount:
-    """Count completed and total subtasks in markdown content.
+    """Count completed, total, and intentionally-skipped subtasks.
 
     Looks for markdown task list items in the format:
     - [ ] Incomplete task
     - [x] Completed task
     - ✅ Completed task
     - 🏃 In-progress task
-    - [SKIP] Skipped task (not counted)
+
+    Three interchangeable forms mean "intentionally skipped, and here is why":
+    - [-] Wire GitHub issue indexing (deferred: cache mutates under you)
+    - [ ] ~~Wire GitHub issue indexing~~ (deferred: spec'd separately)
+    - [x] ~~Wire GitHub issue indexing~~ (decided against: superseded)
+
+    GFM does not render ``- [-]`` as a checkbox, which is why the strikethrough
+    forms exist; all three are treated identically.
+
+    ``- [SKIP]`` is NOT a supported form. This docstring previously advertised
+    it as "Skipped task (not counted)" while no regex implemented it — and "not
+    counted" is precisely the laundering semantics rejected below. It is left
+    unimplemented deliberately: it renders no better than ``[-]`` on GitHub and
+    widens the parse surface past the three specified forms.
+
+    THE DENOMINATOR RULE: skipped items stay in ``total``.
+    ``total = completed + pending + skipped``. Simply ignoring the ``[-]``
+    marker would drop the item from *both* numerator and denominator, so a task
+    whose hard criteria were all marked skipped would report 100% complete and
+    sail through :func:`gptodo.checker.check_subtask_completion`. That turns the
+    marker into a laundering mechanism. Skipped is counted separately and never
+    inflates a completion ratio.
+
+    Sibling implementation: Bob's ``metaproductivity.tasks.count_checkboxes``
+    parses the same three forms with the same denominator rule, but anchors at
+    line start (``^- ``) where this one does not, so the two are intentionally
+    not shared. Keep the skipped-form definitions in sync when either changes.
 
     Returns:
-        SubtaskCount with completed and total counts
+        SubtaskCount with completed, total, and skipped counts
     """
     completed = len(re.findall(r"- (\[x\]|✅)", content))
-    total = len(re.findall(r"- (\[ \]|🏃)", content)) + completed
-    return SubtaskCount(completed, total)
+    pending = len(re.findall(r"- (\[ \]|🏃)", content))
+    # Strikethrough-form skips are already counted above (they use [x] / [ ]),
+    # so move them out of completed/pending rather than double-counting.
+    struck_done = len(re.findall(r"- \[x\]\s*~~", content))
+    struck_pending = len(re.findall(r"- \[ \]\s*~~", content))
+    completed -= struck_done
+    pending -= struck_pending
+    skipped = len(re.findall(r"- \[-\]", content)) + struck_done + struck_pending
+    return SubtaskCount(completed, completed + pending + skipped, skipped)
 
 
 # =============================================================================

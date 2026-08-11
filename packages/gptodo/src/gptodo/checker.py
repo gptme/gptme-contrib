@@ -28,6 +28,7 @@ class CheckDetails(TypedDict, total=False):
 
     completed: int
     total: int
+    skipped: int
     percentage: float
     resolved: list[str]
     unresolved: list[str]
@@ -120,19 +121,28 @@ def check_subtask_completion(task: TaskInfo) -> CheckResultDict:
         result["message"] = "No subtasks defined"
         return result
 
+    # ``total`` includes intentionally-skipped items on purpose, so marking the
+    # hard criteria skipped cannot drive this to 100% (see count_subtasks).
     completion_pct = (task.subtasks.completed / task.subtasks.total) * 100
     details["completed"] = task.subtasks.completed
     details["total"] = task.subtasks.total
+    details["skipped"] = task.subtasks.skipped
     details["percentage"] = completion_pct
+
+    skipped_note = (
+        f", {task.subtasks.skipped} intentionally skipped" if task.subtasks.skipped else ""
+    )
 
     if task.state in ["done", "ready_for_review"] and completion_pct < 100:
         result["passed"] = False
         result["message"] = (
             f"Task marked as {task.state} but only {task.subtasks.completed}/{task.subtasks.total} "
-            f"subtasks completed ({completion_pct:.0f}%)"
+            f"subtasks completed ({completion_pct:.0f}%){skipped_note}"
         )
     else:
-        result["message"] = f"{task.subtasks.completed}/{task.subtasks.total} subtasks completed"
+        result["message"] = (
+            f"{task.subtasks.completed}/{task.subtasks.total} subtasks completed{skipped_note}"
+        )
 
     return result
 

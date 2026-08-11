@@ -2260,13 +2260,21 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                 # Parse markdown body to find and update subtask
                 lines = post.content.split("\n")
                 updated = False
+                # "- [-]" is the intentionally-skipped marker; recognize it here
+                # so an already-skipped item can still be toggled back to
+                # done/todo. Setting an item *to* skipped is not exposed via the
+                # CLI: a skip must carry a reason, and there is no flag to pass
+                # one — write the line by hand (see TASKS.md, Checkbox
+                # Semantics).
+                markers = ("- [ ]", "- [x]", "- [-]")
                 for i, line in enumerate(lines):
                     # Check if this line is a subtask checkbox with matching text
-                    if subtask_text in line and ("- [ ]" in line or "- [x]" in line):
-                        if state == "done":
-                            lines[i] = line.replace("- [ ]", "- [x]")
-                        else:  # state == "todo"
-                            lines[i] = line.replace("- [x]", "- [ ]")
+                    if subtask_text in line and any(m in line for m in markers):
+                        target = "- [x]" if state == "done" else "- [ ]"
+                        for marker in markers:
+                            if marker in line:
+                                lines[i] = line.replace(marker, target, 1)
+                                break
                         updated = True
                         break
 
