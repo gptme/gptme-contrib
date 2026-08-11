@@ -2285,7 +2285,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                                 # to done/todo; otherwise count_subtasks re-classifies
                                 # the result as skipped and the toggle is a silent no-op.
                                 new_line = re.sub(
-                                    r"^(- \[[x ]\])\s*~~(.+?)~~.*$",
+                                    r"([ \t]*- \[[x ]\])\s*~~(.+?)~~.*$",
                                     r"\1 \2",
                                     new_line,
                                 )

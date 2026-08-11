@@ -1060,7 +1060,11 @@ def count_subtasks(content: str) -> SubtaskCount:
     struck_pending = len(re.findall(r"- \[ \]\s*~~", content))
     completed -= struck_done
     pending -= struck_pending
-    skipped = len(re.findall(r"- \[-\]", content)) + struck_done + struck_pending
+    skipped = (
+        len(re.findall(r"^\s*(?:>\s*)?- \[-\]", content, re.MULTILINE))
+        + struck_done
+        + struck_pending
+    )
     return SubtaskCount(completed, completed + pending + skipped, skipped)
 
 

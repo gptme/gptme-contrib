@@ -182,3 +182,23 @@ class TestSetSubtaskToggleSkipped:
         counts = count_subtasks(content)
         assert counts.skipped == 0
         assert counts.pending == 1
+
+    @pytest.mark.parametrize(
+        "skipped_line",
+        [
+            "  - [ ] ~~Wire GitHub issue indexing~~ (deferred: spec'd separately)",
+            "  - [x] ~~Wire GitHub issue indexing~~ (decided against: superseded)",
+        ],
+    )
+    def test_indented_struck_form_toggle_strips_strikethrough(
+        self, tmp_path: Path, monkeypatch, skipped_line: str
+    ):
+        """Indented checkboxes must de-strike correctly — the regex was anchored at ^
+        which skipped any leading whitespace, leaving ~~markup~~ intact and causing
+        count_subtasks to re-classify the toggled item as skipped (silent no-op).
+        """
+        content = self._run_toggle(tmp_path, monkeypatch, skipped_line, "done")
+        assert "~~Wire GitHub issue indexing~~" not in content
+        counts = count_subtasks(content)
+        assert counts.skipped == 0
+        assert counts.completed == 1
