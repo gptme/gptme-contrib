@@ -883,7 +883,8 @@ It is idempotent — re-running on a completed record is harmless.
 
 After the worker finishes, verify the trace ledger shows a terminal row:
 ```bash
-grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | tail -3
+rows=$(grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | tail -3)
+[ -n "$rows" ] && printf '%s\n' "$rows" || echo "NO TERMINAL ROW — verification FAILED"
 ```
 """
 

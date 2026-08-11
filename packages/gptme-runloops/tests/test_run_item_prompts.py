@@ -371,6 +371,23 @@ def test_voice_postcall_stem_token_substituted() -> None:
     )
 
 
+def test_voice_postcall_explicit_negative_branch() -> None:
+    """Regression: the verification command must report NO TERMINAL ROW on empty grep output.
+
+    Empty stdout is ambiguous to an LLM worker — it looks like success.  The
+    negative branch makes the failure visible so the worker can report it instead
+    of silently declaring verification complete.
+    """
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), BOB_PARAMS)
+    assert "NO TERMINAL ROW" in rendered, (
+        "voice_postcall arm is missing the explicit negative-case message — "
+        "the worker cannot distinguish empty grep output from a missing terminal row"
+    )
+    assert (
+        "printf" in rendered
+    ), "voice_postcall arm should use printf to display matched rows on success"
+
+
 def test_every_expected_golden_exists() -> None:
     expected = {f"investigate.{t}.bob" for t in SIMPLE_ARMS}
     expected |= {
