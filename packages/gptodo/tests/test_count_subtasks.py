@@ -202,3 +202,43 @@ class TestSetSubtaskToggleSkipped:
         counts = count_subtasks(content)
         assert counts.skipped == 0
         assert counts.completed == 1
+
+    @pytest.mark.parametrize(
+        "skipped_line",
+        [
+            "- [-] Wire GitHub issue indexing (deferred: cache mutates under you)",
+            "- [-] Wire GitHub issue indexing (decided against: superseded)",
+        ],
+    )
+    def test_bare_skip_form_toggle_to_done_strips_reason(
+        self, tmp_path: Path, monkeypatch, skipped_line: str
+    ):
+        """Toggling bare [-] to done must strip the trailing reason parenthetical.
+
+        Without this, '- [x] Wire ... (deferred: X)' would remain — stale
+        annotation on a completed item, inconsistent with the strikethrough forms.
+        """
+        content = self._run_toggle(tmp_path, monkeypatch, skipped_line, "done")
+        assert "- [x] Wire GitHub issue indexing" in content
+        assert "(deferred:" not in content
+        assert "(decided against:" not in content
+        counts = count_subtasks(content)
+        assert counts.skipped == 0
+        assert counts.completed == 1
+
+    @pytest.mark.parametrize(
+        "skipped_line",
+        [
+            "- [-] Wire GitHub issue indexing (deferred: cache mutates under you)",
+        ],
+    )
+    def test_bare_skip_form_toggle_to_todo_strips_reason(
+        self, tmp_path: Path, monkeypatch, skipped_line: str
+    ):
+        """Toggling bare [-] to todo must also strip the trailing reason."""
+        content = self._run_toggle(tmp_path, monkeypatch, skipped_line, "todo")
+        assert "- [ ] Wire GitHub issue indexing" in content
+        assert "(deferred:" not in content
+        counts = count_subtasks(content)
+        assert counts.skipped == 0
+        assert counts.pending == 1

@@ -2289,6 +2289,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                                     r"\1 \2",
                                     new_line,
                                 )
+                                # For the bare [-] form, also strip the trailing reason
+                                # parenthetical (e.g. '(deferred: X)') so the toggled
+                                # item doesn't carry a stale annotation.
+                                if marker == "- [-]":
+                                    idx = new_line.find(subtask_text)
+                                    if idx != -1:
+                                        new_line = new_line[: idx + len(subtask_text)].rstrip()
                                 lines[i] = new_line
                                 break
                         updated = True
