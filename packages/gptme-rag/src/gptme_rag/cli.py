@@ -424,14 +424,11 @@ def search(
             try:
                 with contextlib.redirect_stdout(devnull), stderr_ctx:
                     # Initialize indexer with explicit arguments
-                    # Always use ModernBERT by default for better results
                     indexer = Indexer(
                         persist_directory=persist_dir,
                         enable_persist=True,
                         scoring_weights=scoring_weights,
-                        embedding_function=(
-                            "modernbert" if embedding_function is None else embedding_function
-                        ),
+                        embedding_function=embedding_function or "auto",
                         device=device or "cpu",
                     )
                     assembler = ContextAssembler(max_tokens=max_tokens)
@@ -729,7 +726,7 @@ def watch(
         indexer = Indexer(
             persist_directory=persist_dir,
             enable_persist=True,
-            embedding_function=("modernbert" if embedding_function is None else embedding_function),
+            embedding_function=embedding_function or "auto",
             device=device or "cpu",
             chunk_size=chunk_size,  # Now optional in Indexer
             chunk_overlap=chunk_overlap,  # Now optional in Indexer

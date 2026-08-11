@@ -275,6 +275,46 @@ def test_compute_relevance_score_accepts_iso_last_modified():
     assert explanation["explanations"]["recency_boost"].startswith("Modified ")
 
 
+def test_auto_embedding_mode_does_not_destroy_foreign_model_collection(tmp_path):
+    """Indexer with embedding_function='auto' must not silently recreate a collection
+    that was indexed with a non-default model (e.g. OpenRouter).
+
+    Regression test for P0 data-loss bug: status/search commands default to
+    'auto' but previously passed 'modernbert', which triggered the mismatch
+    guard and deleted all indexed content.
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Simulate a collection created by the OpenRouter embedding backend
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    fake_model = "openai/text-embedding-3-large"
+    col = client.create_collection(
+        name="default",
+        metadata={"hnsw:space": "cosine", "embedding_model": fake_model},
+    )
+    # Add a sentinel document with a raw embedding (dim=384 matches MiniLM)
+    col.add(ids=["sentinel"], embeddings=[[0.0] * 384], documents=["sentinel doc"])
+    assert col.count() == 1
+
+    # Open via auto mode (simulates what `gptme-rag status` / `search` does)
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="auto",
+        collection_name="default",
+    )
+
+    # Collection must still have the sentinel document — not been recreated
+    assert indexer.collection.count() == 1, (
+        "auto mode destroyed the collection indexed with a non-default embedding model"
+    )
+
+
 def test_reset_collection_preserves_embedding_metadata(indexer):
     """reset_collection must recreate with the same embedding model metadata."""
     indexer.reset_collection()

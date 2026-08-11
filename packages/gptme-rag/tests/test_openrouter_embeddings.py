@@ -68,3 +68,18 @@ def test_openrouter_embedding_requires_api_key(monkeypatch: pytest.MonkeyPatch, 
 
     with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
         OpenRouterEmbedding(cache_path=tmp_path / "embeddings.sqlite")
+
+
+def test_openrouter_embedding_raises_on_oversized_text(tmp_path: Path):
+    """_make_batches must raise ValueError with a descriptive message for texts that
+    exceed max_tokens_per_request, rather than silently sending them to the API where
+    an HTTP 400 would produce a generic RuntimeError."""
+    embedding = OpenRouterEmbedding(
+        api_key="test-key",
+        cache_path=tmp_path / "embeddings.sqlite",
+        max_tokens_per_request=10,
+    )
+    oversized = "x" * 100  # ~33 approx tokens, well above max of 10
+
+    with pytest.raises(ValueError, match="too large"):
+        embedding([oversized])

@@ -94,7 +94,7 @@ class Indexer:
         chunk_overlap: int | None = None,
         enable_persist: bool = False,  # Default to False due to multi-threading issues
         scoring_weights: dict | None = None,
-        embedding_function: str = "modernbert",
+        embedding_function: str = "auto",
         device: str = "cpu",
         force_recreate: bool = False,  # Force recreation of collection
     ):
@@ -108,7 +108,10 @@ class Indexer:
             enable_persist: Whether to persist the index
             scoring_weights: Custom weights for scoring
             embedding_function: Which embedding function to use
-                ("modernbert", "minilm", "mpnet", "openrouter", or "default")
+                ("auto", "modernbert", "minilm", "mpnet", "openrouter", or "default").
+                "auto" (default) reads the stored model from an existing collection and
+                uses that, preventing silent data loss when a collection was indexed with
+                a different embedding model than the default.
             device: Device to run embeddings on ("cuda" or "cpu")
         """
         self.collection_name = collection_name
@@ -118,7 +121,8 @@ class Indexer:
         default_chunk_overlap = 200
 
         # Initialize embedding function
-        if embedding_function == "modernbert":
+        # "auto" is deferred until after client init (needs to peek at stored metadata)
+        if embedding_function in ("auto", "modernbert"):
             self.embedding_function = ModernBERTEmbedding(device=device)
             # Adjust defaults for msmarco model
             if self.embedding_function.is_msmarco:
@@ -175,6 +179,29 @@ class Indexer:
             self.persist_directory = None
             self.client = get_client(settings)
 
+        # Auto-detect stored embedding model to avoid silently destroying existing index.
+        # When no explicit embedding function is requested, peek at the stored metadata
+        # and re-initialize so the mismatch check below never triggers for read-only ops.
+        # Also hold onto the peeked collection so we don't call get_collection again with
+        # a mismatched embedding function (newer chromadb raises on that conflict).
+        _auto_peeked_collection = None
+        if embedding_function == "auto":
+            try:
+                _auto_peeked_collection = self.client.get_collection(name=collection_name)
+                detected = (_auto_peeked_collection.metadata or {}).get("embedding_model", "modernbert")
+                if detected not in ("modernbert", "default", "unknown"):
+                    # The stored model is an OpenRouter model name; re-init to match.
+                    try:
+                        self.embedding_function = OpenRouterEmbedding(model_name=detected)
+                    except ValueError:
+                        logger.warning(
+                            "Stored index uses OpenRouter model %r but OPENROUTER_API_KEY is not set; "
+                            "falling back to ModernBERT (search quality may be degraded)",
+                            detected,
+                        )
+            except Exception:
+                pass  # No existing collection; keep ModernBERT default
+
         need_recreate = False
         if isinstance(self.embedding_function, ModernBERTEmbedding):
             current_model = "modernbert"
@@ -186,27 +213,35 @@ class Indexer:
         else:
             current_model = "default"
 
-        try:
-            # Try to get existing collection
-            self.collection = self.client.get_collection(
-                name=collection_name,
-                embedding_function=self.embedding_function,  # Important: Use current embedding function
-            )
-
-            # Check if we need to recreate
-            metadata = self.collection.metadata or {}
-            stored_model = metadata.get("embedding_model", "unknown")
-
-            if stored_model != current_model or force_recreate:
-                logger.info(
-                    f"Model mismatch (stored: {stored_model}, current: {current_model}) or force recreate"
-                )
+        if _auto_peeked_collection is not None:
+            # Reuse the no-embedding-function collection handle from auto-detect;
+            # calling get_collection again with a mismatched embedding_function raises
+            # a conflict error in newer chromadb versions.
+            self.collection = _auto_peeked_collection
+            if force_recreate:
                 need_recreate = True
+        else:
+            try:
+                # Try to get existing collection
+                self.collection = self.client.get_collection(
+                    name=collection_name,
+                    embedding_function=self.embedding_function,  # Important: Use current embedding function
+                )
 
-        except (ValueError, Exception) as e:
-            # Collection doesn't exist or other error
-            logger.debug(f"Collection access error: {e}")
-            need_recreate = True
+                # Check if we need to recreate
+                metadata = self.collection.metadata or {}
+                stored_model = metadata.get("embedding_model", "unknown")
+
+                if stored_model != current_model or force_recreate:
+                    logger.info(
+                        f"Model mismatch (stored: {stored_model}, current: {current_model}) or force recreate"
+                    )
+                    need_recreate = True
+
+            except (ValueError, Exception) as e:
+                # Collection doesn't exist or other error
+                logger.debug(f"Collection access error: {e}")
+                need_recreate = True
 
         if need_recreate:
             # Delete if exists

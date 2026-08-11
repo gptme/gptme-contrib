@@ -200,6 +200,12 @@ class OpenRouterEmbedding(EmbeddingFunction):
 
         for idx, text in items:
             token_count = self._approx_tokens(text)
+            if token_count > self.max_tokens_per_request:
+                raise ValueError(
+                    f"Text at index {idx} is too large (~{token_count} tokens) for the OpenRouter "
+                    f"embeddings API (max {self.max_tokens_per_request} tokens per request). "
+                    f"Reduce --chunk-size to avoid this error."
+                )
             if current and (
                 len(current) >= self.max_inputs_per_request
                 or current_tokens + token_count > self.max_tokens_per_request
