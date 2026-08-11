@@ -602,7 +602,7 @@ class ItemPromptParams:
         Single quotes in the path are escaped for shell single-quoted context so
         the rendered grep -F '...' command is always syntactically valid.
         """
-        m = re.search(r"\brecord=(.+?)(?=\s+\w+=|\s*$)", self.detail)
+        m = re.search(r"\brecord=(.+?)(?=\s+[a-z][a-z0-9_]*=|\s*$)", self.detail)
         if not m:
             return "__RECORD_PATH_MISSING__"
         return m.group(1).replace("'", "'\\''")

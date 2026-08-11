@@ -473,6 +473,53 @@ def test_voice_postcall_spaced_record_path() -> None:
     ), "voice_postcall rendered the missing-path sentinel for a spaced path"
 
 
+def test_voice_postcall_digit_key_in_path_not_truncated() -> None:
+    """Regression: digit-starting substrings like '2026=full' inside a path must not
+    be treated as key= separators.
+
+    The regex lookahead (?=\\s+\\w+=|\\s*$) matched \\w+= which includes
+    '2026=', so 'record=/tmp/voice 2026=full.wav other=val' extracted only
+    '/tmp/voice'.  The fix restricts to [a-z][a-z0-9_]*= so only
+    letter-starting identifiers are treated as key separators.
+    """
+    params = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice 2026=full.wav other=val",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), params)
+    assert "grep -F '/tmp/voice 2026=full.wav'" in rendered, (
+        "voice_postcall truncated a path containing a digit-starting 'word=' token — "
+        "only letter-starting identifiers should be treated as key separators"
+    )
+
+
+def test_voice_postcall_single_quote_in_record_path() -> None:
+    """Regression: single quotes in the record path must be shell-escaped.
+
+    _record_path escapes via .replace(\"'\", \"'\\\\''\"``).  A broken escape
+    would produce invalid shell and either a syntax error (false NO TERMINAL ROW)
+    or command injection (if the broken quote lets arbitrary text execute).
+    """
+    params = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice's-call.wav",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), params)
+    # The escaped form of /tmp/voice's-call.wav in a single-quoted shell string is:
+    # '/tmp/voice'\''s-call.wav'
+    assert "grep -F '/tmp/voice'\\''s-call.wav'" in rendered, (
+        "voice_postcall did not shell-escape the single quote in the record path — "
+        "check _record_path: m.group(1).replace(\"'\", \"'\\\\''\")"
+    )
+    assert "__RECORD_PATH_MISSING__" not in rendered
+
+
 def test_every_expected_golden_exists() -> None:
     expected = {f"investigate.{t}.bob" for t in SIMPLE_ARMS}
     expected |= {
