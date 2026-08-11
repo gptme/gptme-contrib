@@ -591,6 +591,16 @@ class ItemPromptParams:
     # render for tests or future arm variants.
     stem: str = "(run_completed|stub_call_skip|run_failed)"
 
+    @property
+    def _record_path(self) -> str:
+        """Extract the record= path from detail for per-record TSV filtering.
+
+        Returns empty string when detail has no record= token, which causes
+        grep -F '' to match every line (unfiltered fallback).
+        """
+        m = re.search(r"\brecord=(\S+)", self.detail)
+        return m.group(1) if m else ""
+
     def to_prompt_context(self) -> PromptContext:
         """The step-2 context for the greptile investigate arms."""
         return PromptContext(
@@ -618,6 +628,7 @@ class ItemPromptParams:
             "greptile_helper": ctx.resolved_greptile_helper,
             "pr_address_script": ctx.resolved_pr_address_script,
             "stem": self.stem,
+            "record_path": self._record_path,
         }
 
 
@@ -881,9 +892,9 @@ The post-call.sh script handles stub-call detection, silent-call alerting,
 trace ledger updates (run_completed / stub_call_skip), and journal writing.
 It is idempotent — re-running on a completed record is harmless.
 
-After the worker finishes, verify the trace ledger shows a terminal row:
+After the worker finishes, verify the trace ledger shows a terminal row for this record:
 ```bash
-rows=$(grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | tail -3)
+rows=$(grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | grep -F '{record_path}' | tail -3)
 [ -n "$rows" ] && printf '%s\n' "$rows" || echo "NO TERMINAL ROW — verification FAILED"
 ```
 """

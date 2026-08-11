@@ -377,6 +377,10 @@ def test_voice_postcall_explicit_negative_branch() -> None:
     Empty stdout is ambiguous to an LLM worker — it looks like success.  The
     negative branch makes the failure visible so the worker can report it instead
     of silently declaring verification complete.
+
+    Also pins the branch *ordering*: printf (success path) must appear before
+    "NO TERMINAL ROW" (failure path).  An inverted branch would produce the
+    opposite ordering and silently put the failure message on the success path.
     """
     rendered = render_item_investigate(ItemPromptKind("voice_postcall"), BOB_PARAMS)
     assert "NO TERMINAL ROW" in rendered, (
@@ -386,6 +390,25 @@ def test_voice_postcall_explicit_negative_branch() -> None:
     assert (
         "printf" in rendered
     ), "voice_postcall arm should use printf to display matched rows on success"
+    assert rendered.index("printf") < rendered.index("NO TERMINAL ROW"), (
+        "voice_postcall arm has wrong branch ordering — "
+        "printf (success path) must appear before 'NO TERMINAL ROW' (failure path); "
+        "an inverted branch would silently put the failure message on the success path"
+    )
+
+
+def test_voice_postcall_record_path_substituted() -> None:
+    """Regression: {record_path} must be replaced in the voice_postcall grep command.
+
+    If the token survives substitution, grep -F '{record_path}' filters by the
+    literal string rather than the archive path, matching nothing and always
+    triggering the false-negative "NO TERMINAL ROW" branch.
+    """
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), BOB_PARAMS)
+    assert "{record_path}" not in rendered, (
+        "{record_path} survived substitution in voice_postcall — "
+        "likely ItemPromptParams._tokens() lost the 'record_path' key"
+    )
 
 
 def test_every_expected_golden_exists() -> None:
