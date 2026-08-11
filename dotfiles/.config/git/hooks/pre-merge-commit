@@ -21,7 +21,7 @@ set -uo pipefail
 origin_url="$(git config --get remote.origin.url 2>/dev/null || true)"
 origin_url_lower="$(printf '%s' "$origin_url" | tr '[:upper:]' '[:lower:]')"
 case "$origin_url_lower" in
-    *erikbjare/bob|*erikbjare/bob.git|*erikbjare/bob/|*erikbjare/bob.git/) ;;
+    *github.com[/:]erikbjare/bob|*github.com[/:]erikbjare/bob.git|*github.com[/:]erikbjare/bob/|*github.com[/:]erikbjare/bob.git/) ;;
     *) exit 0 ;;
 esac
 

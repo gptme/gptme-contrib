@@ -122,11 +122,14 @@ def _make_clean_merge_fixture(tmp_path: Path) -> Path:
         "https://github.com/evil/pwn.git",
         "git@github.com:ErikBjare/not-bob.git",
         "https://github.com/ErikBjare/bob-clone.git",
+        # P1: non-GitHub host with matching path must NOT trigger the guard
+        "https://gitlab.com/ErikBjare/bob.git",
+        "git@gitlab.com:ErikBjare/bob.git",
         None,  # no origin at all
     ],
 )
 def test_non_bob_repo_is_noop(tmp_path: Path, origin: str | None) -> None:
-    """Hook exits 0 for any repo that isn't ErikBjare/bob."""
+    """Hook exits 0 for any repo that isn't ErikBjare/bob on GitHub."""
     repo = _make_repo(tmp_path, origin)
     proc = _run_hook(repo)
     assert (
@@ -413,12 +416,21 @@ def test_pre_commit_does_not_block_non_merge_commit_in_brain_repo(
     assert "🚫" not in proc.stderr
 
 
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "git@github.com:gptme/gptme-contrib.git",
+        # P1: same path on a non-GitHub host must NOT trigger the guard
+        "https://gitlab.com/ErikBjare/bob.git",
+        "git@gitlab.com:ErikBjare/bob.git",
+    ],
+)
 def test_pre_commit_does_not_block_conflicted_merge_in_non_brain_repo(
-    tmp_path: Path,
+    tmp_path: Path, origin: str
 ) -> None:
     """pre-commit merge guard is brain-repo-only; other repos are unaffected."""
-    repo = _make_repo(tmp_path, "git@github.com:gptme/gptme-contrib.git")
+    repo = _make_repo(tmp_path, origin)
     (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
     proc = _run_pre_commit_hook(repo)
-    assert "Refusing" not in proc.stderr
-    assert "🚫" not in proc.stderr
+    assert "Refusing" not in proc.stderr, f"false positive for origin={origin!r}"
+    assert "🚫" not in proc.stderr, f"false positive for origin={origin!r}"
