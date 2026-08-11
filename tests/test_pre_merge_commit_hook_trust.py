@@ -84,6 +84,26 @@ def test_non_bob_repo_is_noop(tmp_path: Path, origin: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_non_bob_repo_with_active_merge_is_noop(tmp_path: Path) -> None:
+    """Hook exits 0 for repos whose names merely contain 'bob' as a substring."""
+    for i, origin in enumerate(
+        (
+            "https://github.com/ErikBjare/bob-clone.git",
+            "https://github.com/ErikBjare/bob-backup.git",
+            "git@github.com:ErikBjare/bob2.git",
+        )
+    ):
+        sub = tmp_path / str(i)
+        sub.mkdir()
+        repo = _make_repo(sub, origin)
+        # Simulate an active merge — the old glob *ErikBjare/bob* wrongly blocked this.
+        (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
+        proc = _run_hook(repo)
+        assert (
+            proc.returncode == 0
+        ), f"false positive: hook blocked merge in {origin!r}\n{proc.stderr}"
+
+
 def test_bob_repo_not_on_master_is_noop(tmp_path: Path) -> None:
     """Hook exits 0 when not on master, even in the brain repo."""
     repo = _make_repo(tmp_path, "git@github.com:ErikBjare/bob.git")
