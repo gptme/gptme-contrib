@@ -234,7 +234,7 @@ def test_non_numeric_range_limit_falls_back_to_the_default(tmp_path: Path) -> No
         ("https://github.com/org/repo.git/", "git@github.com:org/repo.git"),
         # Explicit SSH port 22 (default) is still origin — the port must be stripped.
         ("git@github.com:org/repo.git", "ssh://git@github.com:22/org/repo.git"),
-        # Non-standard port (e.g. corporate proxy or SSH-on-8443) also strips cleanly.
+        # Explicit HTTPS port 443 (default) is still origin — well-known port stripped.
         ("https://github.com/org/repo.git", "https://github.com:443/org/repo.git"),
         # GitHub's alternative SSH host (port 443 for firewall traversal) is still origin.
         ("git@github.com:org/repo.git", "ssh://git@ssh.github.com:443/org/repo.git"),
@@ -255,6 +255,28 @@ def test_force_reset_guard_still_applies_to_a_remote_aliasing_origin(
     )
     assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
     assert proc.returncode == 1
+
+
+def test_force_reset_guard_does_not_block_push_to_non_standard_port(
+    tmp_path: Path,
+) -> None:
+    """A non-standard port produces a distinct canonical identity — not origin.
+
+    origin is https://github.com/org/repo.git (port 443 implicit).
+    A mirror on port 8443 of the same host must not be treated as origin — it is
+    a genuinely different endpoint. The port-strip rule must only strip well-known
+    defaults (22 for SSH, 443 for HTTPS), not all numeric ports.
+    """
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    _git(repo, "remote", "set-url", "origin", "https://github.com/org/repo.git")
+    _git(repo, "remote", "add", "mirror8443", "https://github.com:8443/org/repo.git")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        "mirror8443",
+        "https://github.com:8443/org/repo.git",
+    )
+    assert FORCE_RESET_ERROR not in proc.stderr, proc.stderr
 
 
 def test_force_reset_guard_applies_to_a_remote_whose_pushurl_is_origin(

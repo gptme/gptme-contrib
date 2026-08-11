@@ -100,7 +100,7 @@ if [ -n "$_merge_git_dir" ] && [ -f "$_merge_git_dir/MERGE_HEAD" ]; then
     _merge_origin_lower="$(printf '%s' "$_merge_origin" | tr '[:upper:]' '[:lower:]')"
     _merge_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     case "$_merge_origin_lower" in
-        *erikbjare/bob|*erikbjare/bob.git)
+        *erikbjare/bob|*erikbjare/bob.git|*erikbjare/bob/|*erikbjare/bob.git/)
             if [ "$_merge_branch" = "master" ]; then
                 cat >&2 <<'MERGE_EOF'
 🚫 Refusing to create a merge commit on master in the brain repo.

@@ -146,6 +146,8 @@ def test_bob_repo_on_master_no_merge_head_is_noop(tmp_path: Path) -> None:
         "https://github.com/erikbjare/bob.git",  # lowercase — GitHub is case-insensitive
         "https://github.com/ErikBjare/bob",  # no .git suffix
         "https://GITHUB.COM/ERIKBJARE/BOB.GIT",  # all-caps
+        "https://github.com/ErikBjare/bob/",  # trailing slash after repo
+        "https://github.com/ErikBjare/bob.git/",  # trailing slash after .git
     ],
 )
 def test_bob_repo_merge_on_master_is_blocked(tmp_path: Path, origin: str) -> None:
@@ -253,6 +255,8 @@ def _run_pre_commit_hook(repo: Path) -> subprocess.CompletedProcess:
         "https://github.com/ErikBjare/bob.git",
         "https://github.com/erikbjare/bob.git",
         "https://GITHUB.COM/ERIKBJARE/BOB.GIT",
+        "https://github.com/ErikBjare/bob/",  # trailing slash after repo
+        "https://github.com/ErikBjare/bob.git/",  # trailing slash after .git
     ],
 )
 def test_pre_commit_blocks_conflicted_merge_on_master_in_brain_repo(
