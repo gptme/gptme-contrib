@@ -777,3 +777,71 @@ def test_dark_branch_cooldown_dirty_not_emitted() -> None:
             f"recent timestamp); got: {dark_items}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
+
+
+def test_ai_review_verdict_call_has_error_handling() -> None:
+    """Dark branch must tolerate ai_review_verdict failure (|| ai_verdict=... guard).
+
+    Regression guard for P1 fp `7b8c5490114c`: the dark branch calls
+    ai_review_verdict, which runs a gh api command. Under set -euo pipefail
+    a non-zero exit (rate limit, network) propagates and aborts the entire gate,
+    so the dark branch needs error handling.
+
+    Static check: the call site must have a || fallback immediately after
+    ai_review_verdict so API failures are treated as 'none' (no emit) rather
+    than crashing the gate.
+    """
+    src = GATE.read_text()
+    func_start = src.index("check_greptile_scores() {")
+    # Find the dark-branch block (no-score branch)
+    dark_branch_start = src.index(
+        'if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then',
+        func_start,
+    )
+    dark_branch_end = src.index("\n        fi\n", dark_branch_start)
+    dark_body = src[dark_branch_start:dark_branch_end]
+
+    # The call must be followed by a || fallback on the same or next line.
+    assert (
+        "ai_review_verdict" in dark_body
+    ), "ai_review_verdict not found in dark branch of check_greptile_scores"
+    # Require either "|| ai_verdict=" or "|| true" immediately after the call.
+    assert "|| ai_verdict=" in dark_body or "|| true" in dark_body, (
+        "Dark branch must have error handling (|| ai_verdict=... or || true) after "
+        "ai_review_verdict call so a failing gh api call does not abort the gate under "
+        "set -euo pipefail. Found dark branch body:\n" + dark_body
+    )
+
+
+def test_check_merge_ready_field5_fallback_before_emit() -> None:
+    """check_merge_ready must read preserved score from field 5 before emitting merge_ready.
+
+    Regression guard for P2 fp `fe919616dcae`: the dark-state format leaves
+    field 1 empty and stores the preserved Greptile score in field 5. If
+    check_merge_ready did not have the fallback to read field 5, a dark-state
+    PR with a preserved sub-5 score and a clean AI verdict would emit merge_ready
+    despite having a failing Greptile score, silently bypassing the merge floor.
+
+    Static check: the fallback (`cut -d: -f5`) must appear in check_merge_ready
+    before the `emit_item "merge_ready"` call.
+    """
+    src = GATE.read_text()
+    func_start = src.index("check_merge_ready() {")
+    func_end = src.index("\n}\n", func_start)
+    func_body = src[func_start:func_end]
+
+    assert "cut -d: -f5" in func_body, (
+        "check_merge_ready must read preserved score from field 5 of the dark-state "
+        "file (dark-state format: ':fetched_at:sha:verdict:preserved_score'). "
+        "The fallback 'cut -d: -f5' was not found in the function body."
+    )
+    assert (
+        'emit_item "merge_ready"' in func_body
+    ), "emit_item merge_ready not found in check_merge_ready (test precondition)"
+
+    fallback_pos = func_body.index("cut -d: -f5")
+    emit_pos = func_body.index('emit_item "merge_ready"')
+    assert fallback_pos < emit_pos, (
+        f"field-5 fallback (pos {fallback_pos}) must appear before emit_item merge_ready "
+        f"(pos {emit_pos}) in check_merge_ready — the score check fires before the emit"
+    )

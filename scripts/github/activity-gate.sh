@@ -1087,7 +1087,7 @@ check_greptile_scores() {
             # resolved.  We already made one API call to re-fetch Greptile
             # comments; paying for a second to get a fresh AI verdict is correct.
             local ai_verdict=""
-            ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
+            ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha") || ai_verdict="none"
             fetched_at="$now"
             # Field 1 is ALWAYS empty in dark-state writes (note the leading ":" below).
             # This is intentional: if field 1 held a non-empty score, the cache-hit
