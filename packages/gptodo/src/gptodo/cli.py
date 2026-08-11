@@ -2281,31 +2281,27 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                             # Anchor to line start (after optional whitespace/blockquote)
                             # so prose occurrences like "- [x] See - [ ] item" don't
                             # steal the slot before the actual leading checkbox is found.
-                            if re.match(
-                                rf"^\s*(?:>\s*)?{re.escape(marker)}", line
-                            ):
+                            if re.match(rf"^\s*(?:>\s*)?{re.escape(marker)}", line):
                                 new_line = line.replace(marker, target, 1)
-                                # Strikethrough forms (- [ ] ~~text~~ or - [x] ~~text~~)
-                                # must have their ~~ markup stripped when toggling back
-                                # to done/todo; otherwise count_subtasks re-classifies
-                                # the result as skipped and the toggle is a silent no-op.
+                                # Strikethrough forms (- [ ] ~~text~~ or - [x] ~~text~~):
+                                # strip ~~ markers while preserving any text that follows
+                                # the closing ~~ (partial-strike forms keep their tail).
                                 new_line = re.sub(
-                                    r"([ \t]*- \[[x ]\])\s*~~(.+?)~~.*$",
+                                    r"([ \t]*- \[[x ]\])\s*~~(.+?)~~",
                                     r"\1 \2",
                                     new_line,
                                 )
-                                # For the bare [-] form, strip the trailing reason
-                                # parenthetical via regex — not a position-based
-                                # truncation — so partial-match subtask_text values
-                                # (prefixes of the full title) don't clip the title.
-                                if marker == "- [-]":
-                                    new_line = re.sub(
-                                        r"\s*\([^)]+\)\s*$", "", new_line
-                                    ).rstrip()
+                                # Strip trailing skip-reason parenthetical, identified by
+                                # a colon inside — e.g. "(deferred: X)" or "(decided
+                                # against: Y)". This preserves title-only parens that have
+                                # no colon, e.g. "(backend)", while dropping skip reasons
+                                # on both strikethrough and bare [-] forms.
+                                new_line = re.sub(r"\s*\([^)]*:[^)]*\)\s*$", "", new_line).rstrip()
                                 lines[i] = new_line
+                                updated = True
                                 break
-                        updated = True
-                        break
+                        if updated:
+                            break
 
                 if not updated:
                     console.print(f"[red]Subtask not found: {subtask_text}[/]")

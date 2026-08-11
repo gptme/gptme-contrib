@@ -243,9 +243,7 @@ class TestSetSubtaskToggleSkipped:
         assert counts.skipped == 0
         assert counts.pending == 1
 
-    def test_bare_skip_partial_match_does_not_truncate_title(
-        self, tmp_path: Path, monkeypatch
-    ):
+    def test_bare_skip_partial_match_does_not_truncate_title(self, tmp_path: Path, monkeypatch):
         """P1 regression: partial subtask_text must not clip the rest of the title.
 
         Before the fix, `new_line.find("Wire GitHub")` on
@@ -278,9 +276,68 @@ class TestSetSubtaskToggleSkipped:
         assert counts.skipped == 0
         assert counts.completed == 1
 
-    def test_prose_marker_in_subtask_text_does_not_steal_toggle(
-        self, tmp_path: Path, monkeypatch
-    ):
+    def test_partial_strike_non_struck_tail_preserved(self, tmp_path: Path, monkeypatch):
+        """P2 regression: text after the closing ~~ must not be swallowed.
+
+        The old regex `~~(.+?)~~.*$` let `.*$` discard everything after the
+        closing ~~, including non-struck title text like 'spec TBD'. The fix
+        strips only the ~~ markers in step 1 and a trailing (reason: X) with a
+        colon in step 2, so purely-title text after ~~ is preserved.
+        """
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "test-toggle.md"
+        task_file.write_text(
+            self.TASK_TEMPLATE.format(
+                line="- [ ] ~~Wire GitHub~~ issue indexing (deferred: spec'd separately)"
+            )
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["edit", "test-toggle", "--set-subtask", "Wire GitHub", "done"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        content = task_file.read_text()
+        assert "issue indexing" in content, "non-struck tail must be preserved"
+        assert "~~Wire GitHub~~" not in content
+        assert "(deferred:" not in content
+
+    def test_bare_skip_title_paren_without_colon_is_preserved(self, tmp_path: Path, monkeypatch):
+        """P2 regression: title-only parens with no colon must survive the toggle.
+
+        The old regex `\\([^)]+\\)` stripped any trailing parenthetical, so
+        '- [-] Fix bug in (backend) (deferred: X)' became '- [x] Fix bug in'
+        after two strip passes — the '(backend)' part of the title was gone.
+        The fix restricts stripping to parens that contain a colon (skip-reason
+        convention), so '(backend)' is preserved while '(deferred: X)' is dropped.
+        """
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "test-toggle.md"
+        task_file.write_text(
+            self.TASK_TEMPLATE.format(
+                line="- [-] Fix bug in (backend) (deferred: needs upstream fix)"
+            )
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["edit", "test-toggle", "--set-subtask", "Fix bug in (backend)", "done"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        content = task_file.read_text()
+        assert "(backend)" in content, "title paren without colon must be preserved"
+        assert "(deferred:" not in content
+        counts = count_subtasks(content)
+        assert counts.skipped == 0
+        assert counts.completed == 1
+
+    def test_prose_marker_in_subtask_text_does_not_steal_toggle(self, tmp_path: Path, monkeypatch):
         """P2 regression: marker in prose must not be toggled instead of the checkbox.
 
         For a line "- [x] Refer to - [ ] old checklist", the old code iterated
@@ -291,11 +348,7 @@ class TestSetSubtaskToggleSkipped:
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()
         task_file = tasks_dir / "test-toggle.md"
-        task_file.write_text(
-            self.TASK_TEMPLATE.format(
-                line="- [x] Refer to - [ ] old checklist"
-            )
-        )
+        task_file.write_text(self.TASK_TEMPLATE.format(line="- [x] Refer to - [ ] old checklist"))
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
         result = runner.invoke(
