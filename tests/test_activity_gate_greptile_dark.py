@@ -198,25 +198,49 @@ def test_ai_review_verdict_called_outside_ge5_branch() -> None:
     )
 
 
-def test_no_score_state_write_uses_empty_greptile_field() -> None:
-    """State writes in the no-score branch must record an empty Greptile score.
+def test_no_score_state_write_uses_dark_score_field() -> None:
+    """State writes in the no-score branch must use ${dark_score} as the first field.
 
-    Greptile's real score is the empty string when it has not reviewed.
-    Writing a literal digit instead would poison the state file and make later
-    cycles with a real Greptile score fall into the wrong branch.
+    dark_score is empty when there is no previous real score (genuine dark
+    case) and equals last_score when the same SHA had a real score before
+    (transient API failure: P1 fix).  Writing a bare `:${fetched_at}` would
+    always lose a previously-cached real score on transient failures.
     """
     body = _extract_function("check_greptile_scores")
     writes = re.findall(r'^\s*echo "([^"]*)" > "\$state_file"$', body, re.MULTILINE)
-    # The no-score branch writes start with ":${fetched_at}" (empty first field).
-    dark_writes = [w for w in writes if w.startswith(":${fetched_at}")]
+    # The no-score branch writes start with "${dark_score}:${fetched_at}".
+    dark_writes = [w for w in writes if w.startswith("${dark_score}:${fetched_at}")]
     assert dark_writes, (
         "expected at least one state write in the no-score branch starting with "
-        "':${fetched_at}' (empty Greptile-score field); found writes: " + str(writes)
+        "'${dark_score}:${fetched_at}' (P1 fix: preserve or empty Greptile-score "
+        "field); found writes: " + str(writes)
     )
     for w in dark_writes:
         assert (
             "${ai_verdict}" in w
         ), f"no-score branch write missing the verdict field: {w!r}"
+
+
+def test_dark_branch_calls_ai_review_verdict_unconditionally() -> None:
+    """In the dark branch, ai_review_verdict must be called unconditionally (P2 fix).
+
+    The old cache used last_timestamp (old state epoch), so a stale dirty verdict
+    could persist for up to fetch_cache_ttl even after findings are resolved.
+    The fix: remove the cache check — always call ai_review_verdict.
+    """
+    body = _extract_function("check_greptile_scores")
+    # Find the dark branch (after the empty-score check).
+    dark_start = body.index('if [ -z "$greptile_score" ]')
+    dark_body = body[dark_start:]
+    verdict_call_pos = dark_body.index("ai_review_verdict ")
+    # There must be no last_timestamp cache condition before the call.
+    pre_call = dark_body[:verdict_call_pos]
+    assert "last_timestamp" not in pre_call, (
+        "The dark branch caches ai_review_verdict based on last_timestamp — "
+        "stale dirty verdicts can persist for up to fetch_cache_ttl after "
+        "findings are resolved (P2). Remove the cache check: always call "
+        "ai_review_verdict unconditionally in the dark branch."
+    )
 
 
 # ── Subprocess (behavioral) ──────────────────────────────────────────────────
@@ -324,6 +348,48 @@ def test_no_greptile_score_clean_ai_review_does_not_emit() -> None:
         assert items == [], (
             f"clean AI verdict with no Greptile score must not emit; "
             f"got {items}\nstdout: {result.stdout}"
+        )
+
+
+def test_dark_branch_preserves_last_score_on_same_sha() -> None:
+    """Dark branch preserves last_score when API returns empty and SHA matches (P1 fix).
+
+    Scenario: previous cycle wrote a real Greptile score (4) but the TTL
+    expired and the API now returns empty (transient failure).  The state
+    file must keep the '4' in the first field so check_merge_ready does not
+    treat this PR as having no Greptile review and emit merge_ready.
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        # AI review is clean (score=5) — no emit expected.
+        # No Greptile comment → dark branch entered.
+        "comments": [_bob_ai_review_comment(short_sha, score=5)],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Pre-seed with a real Greptile score (4) for the same SHA, but TTL expired
+        # so the score cache misses and we re-fetch (getting empty → dark branch).
+        state_file = _state_file(state_dir)
+        old_ts = int(time.time()) - 7200  # 2 hours ago, past the 3600-s TTL
+        state_file.write_text(f"4:{old_ts}:{TEST_HEAD_SHA}:clean")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        # State file must preserve the real score '4', not overwrite with empty.
+        written = state_file.read_text().strip()
+        fields = written.split(":")
+        assert fields[0] == "4", (
+            f"P1 fix: state file first field must preserve previous Greptile "
+            f"score '4' when API returns empty and SHA is unchanged; "
+            f"got: {written!r}\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
 

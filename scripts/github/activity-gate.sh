@@ -1081,19 +1081,28 @@ check_greptile_scores() {
         # The state file records an empty first field so later cycles that DO
         # get a real Greptile score are not confused by a poisoned cache.
         if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
+            # P2 fix: always call ai_review_verdict — the previous cache used
+            # last_timestamp (old state epoch), so a stale dirty verdict could
+            # persist for up to fetch_cache_ttl even after all findings are
+            # resolved.  We already made one API call to re-fetch Greptile
+            # comments; paying for a second to get a fresh AI verdict is correct.
             local ai_verdict=""
-            if [ -n "$last_verdict" ] && [ "$last_sha" = "$head_sha" ] \
-                    && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then
-                ai_verdict="$last_verdict"
-            else
-                ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
-                fetched_at="$now"
+            ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
+            fetched_at="$now"
+            # P1 fix: preserve last_score when same SHA so a transient API
+            # failure (greptile_score empty due to network error or malformed
+            # comment) does not silently wipe a real previously-cached score.
+            # check_merge_ready reads the first field; an empty field is treated
+            # as "no Greptile review" and can emit merge_ready for a sub-5 PR.
+            local dark_score=""
+            if [ -n "$last_score" ] && [ "$last_sha" = "$head_sha" ]; then
+                dark_score="$last_score"
             fi
             if [ "$ai_verdict" = "dirty" ]; then
                 local detail="our AI review has open findings (Greptile dark on this repo)"
                 # First time seeing this PR with no Greptile score — seed state, don't emit.
                 if [ -z "$last_state" ]; then
-                    echo ":${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                    echo "${dark_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
                     continue
                 fi
                 # Same head and same verdict — respect the cooldown before nagging.
@@ -1103,11 +1112,11 @@ check_greptile_scores() {
                         continue
                     fi
                 fi
-                echo ":${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                echo "${dark_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
                 emit_item "greptile_needs_improvement" "$repo" "$pr_number" "$pr_title" "$detail"
             else
                 # clean / pending / none — seed/update state, don't emit.
-                echo ":${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                echo "${dark_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
             fi
             continue
         fi
