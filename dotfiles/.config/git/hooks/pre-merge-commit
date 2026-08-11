@@ -19,7 +19,7 @@ set -uo pipefail
 
 # Only guard the brain repo — other repos legitimately allow merges on master.
 origin_url="$(git config --get remote.origin.url 2>/dev/null || true)"
-origin_url_lower="${origin_url,,}"
+origin_url_lower="$(printf '%s' "$origin_url" | tr '[:upper:]' '[:lower:]')"
 case "$origin_url_lower" in
     *erikbjare/bob|*erikbjare/bob.git) ;;
     *) exit 0 ;;
