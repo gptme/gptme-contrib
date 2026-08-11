@@ -19,6 +19,22 @@ fi
 # Auto-symlink node_modules in linked git worktrees to prevent --no-verify bypass.
 # Proper worktree detection via git-common-dir vs git-dir (works for all git versions).
 #
+# WHAT YOU ARE TRADING: this is a SHARED tree, not a private copy. Every linked
+# worktree points at the ONE node_modules in the main checkout, so anything that
+# writes through it — `npm install`, a pnpm store write, a postinstall script,
+# `node_modules/.cache` — writes into the main checkout, and two worktrees doing
+# that at once race on the same files. That is accepted deliberately: the tree is
+# here to be READ, by lint/format hooks resolving binaries, and the alternative it
+# replaces is not an isolated tree per worktree — a fresh worktree has NO
+# node_modules at all, which fails those hooks with exit 127 and sends the worker
+# to `--no-verify`, i.e. no hooks whatsoever. A shared read-mostly tree is the
+# better of those two, not a free lunch.
+#
+# So: DO NOT run `npm install` (or any installer) inside a linked worktree. If you
+# need one, `rm` the symlink first and let the installer create a real directory —
+# an existing non-symlink node_modules is left alone by the loop below, so a
+# worktree that opts out this way stays opted out across checkouts.
+#
 # ORDERING IS LOAD-BEARING: this runs BEFORE the branch-base validation below,
 # which returns `exit 0` on detached HEAD, on master/main, and when origin has
 # no default branch. Placing the symlinking after those guards makes it a
