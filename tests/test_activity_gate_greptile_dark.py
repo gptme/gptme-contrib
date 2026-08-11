@@ -2,8 +2,10 @@
 
 When Greptile has not reviewed a PR (billing outage, initial indexing, etc.),
 the Greptile score is absent. `check_greptile_scores` must consult our own
-AI reviewer and emit greptile_needs_improvement when it finds open findings,
-rather than skipping the PR silently.
+AI reviewer and emit greptile_needs_fix when it finds open findings (dirty verdict),
+rather than skipping the PR silently. Using greptile_needs_fix (not improvement)
+matches the non-dark path, which always routes a dirty AI verdict to route_score=3
+(< 4 → fix).
 
 The state file records an empty Greptile-score field so later cycles that do
 receive a real Greptile score are not confused by a poisoned cache.
@@ -246,11 +248,13 @@ def test_dark_branch_calls_ai_review_verdict_unconditionally() -> None:
 # ── Subprocess (behavioral) ──────────────────────────────────────────────────
 
 
-def test_no_greptile_score_dirty_ai_review_emits_needs_improvement() -> None:
-    """Greptile dark + dirty AI verdict → greptile_needs_improvement emitted.
+def test_no_greptile_score_dirty_ai_review_emits_needs_fix() -> None:
+    """Greptile dark + dirty AI verdict → greptile_needs_fix emitted.
 
     The fix: when there is no Greptile comment (Greptile dark), fall through
-    to our own AI reviewer and emit if it finds open findings.
+    to our own AI reviewer and emit greptile_needs_fix if it finds open findings.
+    Always fix, not improvement — matching the non-dark path which sets route_score=3
+    (< 4 → fix) whenever the AI verdict is dirty.
     """
     # ai_review_verdict does prefix matching: marker sha is a prefix of head sha.
     short_sha = TEST_HEAD_SHA[:10]  # "deadbeef12"
@@ -277,7 +281,10 @@ def test_no_greptile_score_dirty_ai_review_emits_needs_improvement() -> None:
             f"expected one greptile item, got {items}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        assert items[0]["type"] == "greptile_needs_improvement", items[0]
+        assert items[0]["type"] == "greptile_needs_fix", (
+            f"dirty AI on Greptile-dark PR must emit greptile_needs_fix (not improvement); "
+            f"got: {items[0]}"
+        )
         assert items[0]["number"] == TEST_PR
         assert "Greptile dark" in (
             items[0].get("detail") or ""
@@ -523,4 +530,107 @@ def test_dark_branch_sub4_dark_score_emits_needs_fix() -> None:
         assert improvement_items == [], (
             f"no item should use greptile_needs_improvement when dark_score=3 (<4); "
             f"got: {improvement_items}"
+        )
+
+
+def test_dark_branch_high_dark_score_dirty_ai_emits_needs_fix() -> None:
+    """Dark branch with preserved dark_score >= 4 and dirty AI must emit greptile_needs_fix.
+
+    Regression guard for the P1 finding on 615671b2: when Greptile is dark and the
+    preserved cached score is high (e.g. 5/5), a dirty AI verdict must still route to
+    greptile_needs_fix — matching the non-dark path which always sets route_score=3
+    (< 4 → fix) whenever the AI verdict is dirty. The old code used
+    dark_item_type="greptile_needs_improvement" as the default and only overrode to
+    greptile_needs_fix when dark_score < 4, causing the wrong item type for
+    high-score PRs with unresolved AI findings.
+
+    Scenario:
+    - Previous cycle: Greptile posted 5/5 → state written as "5:ts:sha:dirty"
+    - Current cycle: Greptile dark (score fetch returns empty), AI verdict = dirty
+    - Expected: greptile_needs_fix emitted (not greptile_needs_improvement)
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        # AI review is dirty (score=4, which ai_review_verdict maps to "dirty");
+        # no Greptile score comment present.
+        "comments": [_bob_ai_review_comment(short_sha, score=4)],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Pre-seed with a high Greptile score (5) for the same SHA but old
+        # timestamp so the cache TTL is expired → re-fetch returns empty → dark branch.
+        state_file = _state_file(state_dir)
+        old_ts = int(time.time()) - 7200  # 2 hours ago, past the 3600-s TTL
+        state_file.write_text(f"5:{old_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        dark_items = [i for i in items if "Greptile dark" in (i.get("detail") or "")]
+        assert len(dark_items) == 1, (
+            f"expected one dark-branch greptile item; got {items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert dark_items[0]["type"] == "greptile_needs_fix", (
+            f"dirty AI with dark_score=5 (>=4) must still route to greptile_needs_fix "
+            f"(not greptile_needs_improvement); got: {dark_items[0]}"
+        )
+        improvement_items = [
+            i for i in items if i.get("type") == "greptile_needs_improvement"
+        ]
+        assert (
+            improvement_items == []
+        ), f"no improvement item expected when AI verdict is dirty; got: {improvement_items}"
+
+
+def test_dark_branch_cooldown_dirty_not_emitted() -> None:
+    """Dark branch must respect cooldown: dirty AI on same head within cooldown → no emit.
+
+    Regression guard for the P2 finding on 615671b2: the cooldown check at
+    lines 1109-1113 was untested. A regression removing or miscomputing the
+    cooldown would cause the gate to re-emit greptile_needs_fix every 2-minute
+    sweep cycle, flooding the dispatcher.
+
+    Scenario:
+    - Previous cycle: dirty AI verdict, state written with current timestamp and same SHA
+    - Current cycle: same head SHA, same dirty verdict, but well within cooldown_seconds
+    - Expected: no greptile item emitted (cooldown still active)
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        "comments": [_bob_ai_review_comment(short_sha, score=4)],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Pre-seed state with a very recent timestamp (30 s ago) for the same
+        # SHA and the same dirty verdict — well within the default cooldown window.
+        state_file = _state_file(state_dir)
+        recent_ts = int(time.time()) - 30  # 30 s ago, well within default cooldown
+        # dark_score empty: Greptile was already dark on the previous cycle too.
+        state_file.write_text(f":{recent_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        dark_items = [i for i in items if "Greptile dark" in (i.get("detail") or "")]
+        assert dark_items == [], (
+            f"dark branch must NOT emit while within cooldown (same sha, same dirty verdict, "
+            f"recent timestamp); got: {dark_items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
