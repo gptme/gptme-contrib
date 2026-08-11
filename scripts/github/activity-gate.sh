@@ -1070,9 +1070,43 @@ check_greptile_scores() {
                 ' 2>/dev/null | tail -1 || true)
         fi
 
-        # No Greptile review or no score found — skip
-        # Guard against both empty string and literal "null" from jq
-        [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
+        # No Greptile review or no score found — Greptile may be dark on this
+        # repo (billing outage, initial indexing, etc.). Rather than skipping,
+        # consult our own AI reviewer: if it has open findings, emit
+        # greptile_needs_improvement so the fix loop can still dispatch.
+        # The state file records an empty first field so later cycles that DO
+        # get a real Greptile score are not confused by a poisoned cache.
+        if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
+            local ai_verdict=""
+            if [ -n "$last_verdict" ] && [ "$last_sha" = "$head_sha" ] \
+                    && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then
+                ai_verdict="$last_verdict"
+            else
+                ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
+                fetched_at="$now"
+            fi
+            if [ "$ai_verdict" = "dirty" ]; then
+                local detail="our AI review has open findings (Greptile dark on this repo)"
+                # First time seeing this PR with no Greptile score — seed state, don't emit.
+                if [ -z "$last_state" ]; then
+                    echo ":${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                    continue
+                fi
+                # Same head and same verdict — respect the cooldown before nagging.
+                if [ "$head_sha" = "$last_sha" ] && [ "$ai_verdict" = "$last_verdict" ]; then
+                    local elapsed=$(( now - last_timestamp ))
+                    if [ "$elapsed" -lt "$cooldown_seconds" ]; then
+                        continue
+                    fi
+                fi
+                echo ":${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                emit_item "greptile_needs_improvement" "$repo" "$pr_number" "$pr_title" "$detail"
+            else
+                # clean / pending / none — seed/update state, don't emit.
+                echo ":${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+            fi
+            continue
+        fi
 
         # Guard: score must be a single decimal digit [0-9]. Non-digit values
         # (e.g. "}" from a failed jq capture whose tail -1 picks up the closing
