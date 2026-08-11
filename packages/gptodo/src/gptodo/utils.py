@@ -1381,7 +1381,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
     - parent: parent task ID
     - discovered_from: list of tasks this was discovered from
     - depends: list of dependencies (deprecated, same as requires)
-    - subtasks: {completed: int, total: int}
+    - subtasks: {completed: int, total: int, skipped: int}
     """
     return {
         "id": task.id,
@@ -1399,6 +1399,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "subtasks": {
             "completed": task.subtasks.completed,
             "total": task.subtasks.total,
+            "skipped": task.subtasks.skipped,
         },
         "has_issues": task.has_issues,
         # Scheduling fields

@@ -4,9 +4,14 @@ The three skipped forms and, critically, the denominator rule: skipped items
 stay in ``total`` so they can never launder a partial closure into 100%.
 """
 
+import textwrap
+from pathlib import Path
+
 import pytest
+from click.testing import CliRunner
 
 from gptodo.checker import check_subtask_completion
+from gptodo.cli import cli
 from gptodo.utils import SubtaskCount, count_subtasks
 
 
@@ -108,3 +113,72 @@ class TestCheckerDoesNotPassOnSkipped:
         counts = count_subtasks("- [x] a\n- [x] b\n")
         result = check_subtask_completion(self._task(counts))
         assert result["passed"] is True
+
+
+class TestSetSubtaskToggleSkipped:
+    """--set-subtask must de-strikethrough struck forms when toggling back to done/todo.
+
+    Regression for the P1 bug where toggling `- [ ] ~~text~~ (reason)` to done
+    produced `- [x] ~~text~~ (reason)`, which count_subtasks re-classifies as
+    skipped, making the toggle a silent no-op.
+    """
+
+    TASK_TEMPLATE = textwrap.dedent("""\
+        ---
+        state: active
+        created: 2026-01-01T00:00:00+00:00
+        ---
+        # Test task
+
+        {line}
+        """)
+
+    def _run_toggle(self, tmp_path: Path, monkeypatch, line: str, state: str) -> str:
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "test-toggle.md"
+        task_file.write_text(self.TASK_TEMPLATE.format(line=line))
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["edit", "test-toggle", "--set-subtask", "Wire GitHub issue indexing", state],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        return task_file.read_text()
+
+    @pytest.mark.parametrize(
+        "skipped_line",
+        [
+            "- [ ] ~~Wire GitHub issue indexing~~ (deferred: spec'd separately)",
+            "- [x] ~~Wire GitHub issue indexing~~ (decided against: superseded)",
+        ],
+    )
+    def test_struck_form_toggle_to_done_produces_plain_checkbox(
+        self, tmp_path: Path, monkeypatch, skipped_line: str
+    ):
+        content = self._run_toggle(tmp_path, monkeypatch, skipped_line, "done")
+        assert "- [x] Wire GitHub issue indexing" in content
+        # The struck form must be gone — if it stays the item is still skipped
+        assert "~~Wire GitHub issue indexing~~" not in content
+        counts = count_subtasks(content)
+        assert counts.skipped == 0
+        assert counts.completed == 1
+
+    @pytest.mark.parametrize(
+        "skipped_line",
+        [
+            "- [ ] ~~Wire GitHub issue indexing~~ (deferred: spec'd separately)",
+            "- [x] ~~Wire GitHub issue indexing~~ (decided against: superseded)",
+        ],
+    )
+    def test_struck_form_toggle_to_todo_produces_plain_checkbox(
+        self, tmp_path: Path, monkeypatch, skipped_line: str
+    ):
+        content = self._run_toggle(tmp_path, monkeypatch, skipped_line, "todo")
+        assert "- [ ] Wire GitHub issue indexing" in content
+        assert "~~Wire GitHub issue indexing~~" not in content
+        counts = count_subtasks(content)
+        assert counts.skipped == 0
+        assert counts.pending == 1
