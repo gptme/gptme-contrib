@@ -1395,6 +1395,16 @@ def _consensus_shortfall(consensus: Any) -> str | None:
         )
     if applied < asked:
         return f"consensus agreement clamped to {applied} (requested {asked})"
+    # An agreement threshold higher than the requested pass count is internally
+    # impossible: you cannot have 5 agreeing passes when only 3 were requested.
+    # This is not emitted by our reviewer (it clamps threshold ≤ requested), but
+    # a corrupted or foreign marker could carry it. Treating it as valid would let
+    # a marker escape the clamping guard while still being semantically incoherent.
+    if applied > requested:
+        return (
+            f"consensus agreement threshold {applied} exceeds requested pass count "
+            f"{requested}"
+        )
     return None
 
 
@@ -1539,13 +1549,20 @@ def fetch_ai_review_status(
         return {"accepted": False, "detail": None}
 
     if isinstance(marker_result, _MarkerUnset):
-        marker = _fetch_ai_review_marker(
+        # Use the checked variant so a failed API call (timeout, rate limit,
+        # 5xx) is reported as a distinct detail rather than silently collapsing
+        # into the same "no marker" response that hides the actual root cause.
+        raw = _fetch_ai_review_marker_checked(
             repo, pr_number, expected_author=expected_author
         )
-    elif isinstance(marker_result, _MarkerLookupFailed):
-        marker = None
     else:
-        marker = marker_result
+        raw = marker_result
+    if isinstance(raw, _MarkerLookupFailed):
+        return {
+            "accepted": False,
+            "detail": "AI review marker lookup failed (API timeout or rate limit)",
+        }
+    marker = raw
     if marker is None:
         return {"accepted": False, "detail": None}
 
