@@ -237,7 +237,11 @@ def _run_pre_commit_hook(repo: Path) -> subprocess.CompletedProcess:
         "ALLOW_MASTER_COMMITS": "1",
     }
     return subprocess.run(
-        [str(PRE_COMMIT_HOOK)], cwd=repo, capture_output=True, text=True, timeout=30,
+        [str(PRE_COMMIT_HOOK)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=30,
         env=env,
     )
 
@@ -258,9 +262,9 @@ def test_pre_commit_blocks_conflicted_merge_on_master_in_brain_repo(
     repo = _make_repo(tmp_path, origin)
     (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
     proc = _run_pre_commit_hook(repo)
-    assert proc.returncode == 1, (
-        f"pre-commit did not block conflicted merge for origin={origin!r}\n{proc.stderr}"
-    )
+    assert (
+        proc.returncode == 1
+    ), f"pre-commit did not block conflicted merge for origin={origin!r}\n{proc.stderr}"
     assert "Refusing" in proc.stderr or "🚫" in proc.stderr, proc.stderr
 
 
