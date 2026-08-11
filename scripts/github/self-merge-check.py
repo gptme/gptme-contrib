@@ -1063,7 +1063,12 @@ def _ai_review_disposition_shortfall(
       ``auto_resolved`` ledger — that is evidence-based, the code change is
       the answer, no reply is owed);
     - **surviving P2s do not block** — they regenerate on unchanged code, so
-      gating on them is the treadmill failure mode on file.
+      gating on them is the treadmill failure mode on file;
+    - **an unreadable severity is not a P2** — a thread carrying our finding
+      marker whose ``**P0**``/``**P1**``/``**P2**`` text does not parse blocks
+      and must be disposed like a P0/P1. Defaulting it to P2 would be a
+      fail-open on the severity parse, in a wire protocol whose renderer lives
+      in another repo.
 
     Each finding thread carries its severity in the root body (``**P0**`` etc.)
     and its resolution state on the thread itself; ``totalCount`` on the
@@ -1078,7 +1083,16 @@ def _ai_review_disposition_shortfall(
     diff line ("Comments outside the diff" in the summary body) and with a
     reviewer that silently stopped posting. Failing open there would let a
     genuine P0/P1 merge unreviewed — the exact recall failure this path exists
-    to prevent.
+    to prevent. Threads the reviewer itself retired (``auto_resolved``) do not
+    satisfy that guard: they are its own bookkeeping for findings that stopped
+    reproducing, so by construction they are not the P0/P1 the score reports.
+
+    **Known residual, tracked separately.** A P0/P1 thread disposed on an
+    *earlier* head stays resolved-and-replied forever and cannot be told apart
+    from one disposed on this head, so it can still satisfy the recall guard
+    for a *different*, unanchored P0/P1 the reviewer reports now. Closing that
+    needs the marker to publish the current pass's finding fingerprints, which
+    is a change to the reviewer, not to this gate.
     """
     if review_data is None:
         return "could not read review thread state"
@@ -1098,21 +1112,40 @@ def _ai_review_disposition_shortfall(
         if _AI_REVIEW_FINDING_MARKER not in body:
             continue  # not one of our findings
         m = _AI_REVIEW_SEVERITY_RE.search(body)
-        severity = m.group(1) if m else "P2"
-        if severity not in ("P0", "P1"):
+        # A thread carrying our finding marker whose severity we cannot read is
+        # NOT a P2. Defaulting it to P2 was a fail-OPEN on the severity parse:
+        # the reviewer renders `{icon} **{sev}** —` from a normalised severity,
+        # so a body without it means the wire protocol changed under us (the
+        # renderer lives in a different repo — see the "Keep the exact string"
+        # note on `INLINE_FINDING_MARKER`) or the body is malformed. Silently
+        # downgrading a possible P0 to non-blocking is the exact recall failure
+        # this path exists to prevent, so an unreadable severity blocks and is
+        # cleared the same way a P0/P1 is: resolved, with a reply.
+        severity = m.group(1) if m else None
+        if severity is not None and severity not in ("P0", "P1"):
             continue  # surviving P2s never block
-        saw_blocking_finding = True
+        label = (
+            f"{severity} finding" if severity else "finding with unreadable severity"
+        )
+        fp = _ai_review_fp_from_body(body)
+        # Only threads that could correspond to a CURRENT finding count toward
+        # the recall guard. A fingerprint in `auto_resolved` is the reviewer's
+        # own record that this finding stopped reproducing and it retired the
+        # thread as bookkeeping — by construction not a finding on this head,
+        # so letting it satisfy the guard would let the reviewer's bookkeeping
+        # stand in for a real disposition. (This does not over-block: if the
+        # score still claims a P0/P1, that finding is either open — refused
+        # above — or unanchored, which is precisely what the guard is for.)
+        if not (fp and fp in auto_resolved):
+            saw_blocking_finding = True
         if not thread.get("isResolved"):
-            return f"AI review {severity} finding is not resolved"
+            return f"{label} is not resolved"
         total = comments.get("totalCount")
         replied = isinstance(total, int) and total >= 2
         if not replied:
-            fp = _ai_review_fp_from_body(body)
             if fp and fp in auto_resolved:
                 continue  # reviewer-retired because the fix stopped it reproducing
-            return (
-                f"AI review {severity} finding resolved without a reply (not disposed)"
-            )
+            return f"{label} resolved without a reply (not disposed)"
 
     # Recall guard: the marker says a P0/P1 is on this head, but no P0/P1
     # thread is present to confirm it was disposed (unanchored finding, or the
@@ -1120,7 +1153,7 @@ def _ai_review_disposition_shortfall(
     # the strength of an empty thread list.
     if score is not None and score <= 3 and not saw_blocking_finding:
         return (
-            "AI review reports a P0/P1 on this head but no finding thread "
+            "reports a P0/P1 on this head but no finding thread "
             "verifies its disposition"
         )
     return None

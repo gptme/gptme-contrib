@@ -673,7 +673,13 @@ def test_resolved_without_reply_but_auto_resolved_is_accepted(
 ) -> None:
     """The reviewer itself retires a finding when a fix makes it stop
     reproducing — the marker's `auto_resolved` ledger names those fingerprints.
-    That is evidence-based (the code change is the answer), so no reply is owed."""
+    That is evidence-based (the code change is the answer), so no reply is owed.
+
+    Scored 4, not 3, because those are the states that can actually coexist: the
+    retirement and the score are written by the same reviewer run, so a run that
+    retired the P1 no longer reports one. A score of 3 alongside nothing but
+    auto-resolved threads is a contradiction, and the recall guard blocks it —
+    see `test_auto_resolved_thread_does_not_satisfy_the_recall_guard`."""
     fp = "abcdef123456"
     body = (
         f"{smc._AI_REVIEW_FINDING_MARKER}\n"
@@ -687,7 +693,7 @@ def test_resolved_without_reply_but_auto_resolved_is_accepted(
             "nodes": [{"author": {"login": AUTHOR}, "body": body}],
         },
     }
-    marker = _marker(score=3, auto_resolved=[fp])
+    marker = _marker(score=4, auto_resolved=[fp])
     status = _status(gh_comments, [_comment(marker)], review_data=([], [thread]))
     assert status["accepted"] is True
 
@@ -735,3 +741,122 @@ def test_p0p1_score_with_all_disposed_passes(gh_comments: Any) -> None:
     )
     assert status["accepted"] is True
     assert "findings disposed" in (status["detail"] or "")
+
+
+# --- fail-closed on unreadable severity, and the recall guard's blind spot ---
+
+
+def _finding_thread_body(
+    severity_text: str, *, fp: str | None = None, resolved: bool, total: int
+) -> dict[str, Any]:
+    """A finding thread whose severity text is written verbatim, so a test can
+    render a malformed / missing severity the way a protocol drift would."""
+    fp_line = f'<!-- bob-ai-review-fp {{"fp": "{fp}"}} -->\n' if fp else ""
+    body = f"{smc._AI_REVIEW_FINDING_MARKER}\n{fp_line}{severity_text}"
+    return {
+        "isResolved": resolved,
+        "comments": {
+            "totalCount": total,
+            "nodes": [{"author": {"login": AUTHOR}, "body": body}],
+        },
+    }
+
+
+def test_finding_without_severity_text_blocks_instead_of_defaulting_to_p2(
+    gh_comments: Any,
+) -> None:
+    """A thread carrying our finding marker whose severity does not parse is NOT
+    a P2. The renderer that writes `**P0**` lives in another repo, so a body
+    without it means the wire protocol drifted or the body is malformed —
+    downgrading a possible P0 to non-blocking would be a fail-open on the parse.
+    """
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=5))],
+        review_data=(
+            [],
+            [
+                _finding_thread_body(
+                    "Security vulnerability in auth", resolved=False, total=1
+                )
+            ],
+        ),
+    )
+    assert status["accepted"] is False
+    assert "unreadable severity" in (status["detail"] or "")
+
+
+def test_finding_without_severity_text_can_still_be_disposed(
+    gh_comments: Any,
+) -> None:
+    """Blocking on an unreadable severity must stay clearable the same way a
+    P0/P1 is — replied to and resolved — not become a permanent wedge."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=5))],
+        review_data=(
+            [],
+            [
+                _finding_thread_body(
+                    "Security vulnerability in auth", resolved=True, total=2
+                )
+            ],
+        ),
+    )
+    assert status["accepted"] is True
+
+
+def test_severity_below_p1_still_never_blocks(gh_comments: Any) -> None:
+    """A readable severity outside P0/P1 (P2 today, P3 if the rubric grows) is
+    non-blocking. The fail-closed rule above applies only to severities we
+    cannot read at all, so widening the rubric does not wedge the gate."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=4))],
+        review_data=(
+            [],
+            [_finding_thread_body("⚠️ **P3** — nit", resolved=False, total=1)],
+        ),
+    )
+    assert status["accepted"] is True
+
+
+def test_auto_resolved_thread_does_not_satisfy_the_recall_guard(
+    gh_comments: Any,
+) -> None:
+    """`auto_resolved` is the reviewer's own record that a finding stopped
+    reproducing and it retired the thread as bookkeeping. Such a thread is by
+    construction not the P0/P1 the score reports for THIS head, so it must not
+    stand in for a real disposition — otherwise the reviewer's bookkeeping
+    silently disarms the recall guard for an unanchored finding."""
+    fp = "abcdef123456"
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=2, auto_resolved=[fp]))],
+        review_data=(
+            [],
+            [
+                _finding_thread_body(
+                    "🛑 **P1** — the hash ignores .state",
+                    fp=fp,
+                    resolved=True,
+                    total=1,
+                )
+            ],
+        ),
+    )
+    assert status["accepted"] is False
+    assert "no finding thread" in (status["detail"] or "")
+
+
+def test_refusal_detail_is_not_double_prefixed(gh_comments: Any) -> None:
+    """The caller prefixes `AI review `; the shortfall returns a bare fragment.
+    Both prefixing produced `AI review AI review P1 finding is not resolved`."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=3))],
+        review_data=([], [_finding_thread("P1", resolved=False, total=1)]),
+    )
+    detail = status["detail"] or ""
+    assert detail.count("AI review") == 1, detail
+    assert detail == "AI review P1 finding is not resolved"
