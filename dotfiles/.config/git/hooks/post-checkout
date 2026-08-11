@@ -32,6 +32,16 @@ _gw_common_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
 if [ -n "$_gw_git_dir" ] && [ "$_gw_git_dir" != "$_gw_common_dir" ]; then
     _gw_main_root=$(realpath "$_gw_common_dir/.." 2>/dev/null || true)
     _gw_wt_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    # `<common-dir>/..` is the main CHECKOUT only when the shared git dir is a
+    # `.git` inside one. Off a BARE repo (`/srv/repo.git`) it is that repo's
+    # parent directory instead — an unrelated tree. Requiring a `.git` there
+    # (a dir normally, a file when the main checkout is itself submoduled)
+    # stops two things: symlinking a *sibling project's* node_modules into the
+    # worktree, and running `find` across something like /home/bob on every
+    # single checkout.
+    if [ ! -e "$_gw_main_root/.git" ]; then
+        _gw_main_root=""
+    fi
     if [ -n "$_gw_main_root" ] && [ -n "$_gw_wt_root" ] && [ "$_gw_main_root" != "$_gw_wt_root" ]; then
         while IFS= read -r -d '' _gw_base; do
             _gw_rel="${_gw_base#"$_gw_main_root"/}"
