@@ -1049,8 +1049,12 @@ check_greptile_scores() {
         # a re-review only occurs after new commits (→ head_sha changes, invalidates
         # cache) or a manual @greptileai trigger (greptile-helper.sh's 15-min guard
         # ensures any such review completes within the 30-min TTL).
+        #
+        # Require a non-empty last_score: if the previous cycle wrote an empty first
+        # field (Greptile dark), we must re-fetch so a real score posted by Greptile
+        # during the TTL window is not silently ignored.
         local greptile_score=""
-        if [ -n "$last_state" ] && [ "$last_sha" = "$head_sha" ] \
+        if [ -n "$last_state" ] && [ -n "$last_score" ] && [ "$last_sha" = "$head_sha" ] \
                 && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then
             greptile_score="$last_score"
         else

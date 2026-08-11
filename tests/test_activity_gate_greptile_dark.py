@@ -325,3 +325,76 @@ def test_no_greptile_score_clean_ai_review_does_not_emit() -> None:
             f"clean AI verdict with no Greptile score must not emit; "
             f"got {items}\nstdout: {result.stdout}"
         )
+
+
+def _greptile_score_comment(score: int) -> dict:
+    """A comment from Greptile containing a score line."""
+    return {
+        "id": 888,
+        "user": {"login": "greptile-review[bot]"},
+        "body": f"Code review complete.\n\nScore: {score}/5\n\nSome findings.",
+        "created_at": "2026-08-11T13:00:00Z",
+    }
+
+
+def test_empty_last_score_reraises_real_greptile_score() -> None:
+    """Empty last_score must NOT be used as a cache hit — always re-fetch.
+
+    Regression guard for the P1 finding in the AI review:
+    the code at line 1057 checks `[ -n "$last_score" ]`, so a state file
+    written by the no-score arm (empty first field) forces a re-fetch on
+    the next cycle. When Greptile has now posted a real score (e.g. 4/5),
+    that score must be picked up immediately — not suppressed until the TTL
+    expires.
+
+    Scenario:
+    - Previous cycle: Greptile dark → state file written as `:ts:sha:dirty`
+    - Current cycle: Greptile posts 4/5, timestamp still within fetch_cache_ttl
+    - Expected: score "4" is fetched and a greptile item is emitted
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        "comments": [
+            # Greptile has now posted a 4/5 score
+            _greptile_score_comment(score=4),
+            # Bob's AI review marker is still present (but Greptile score takes precedence)
+            _bob_ai_review_comment(short_sha, score=4),
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Simulate the state left by a Greptile-dark cycle:
+        # empty first field, recent timestamp (well within fetch_cache_ttl=3600s),
+        # same head SHA. Without the `[ -n "$last_score" ]` guard this would be
+        # treated as a cache hit and greptile_score would stay "".
+        state_file = _state_file(state_dir)
+        recent_ts = int(time.time()) - 60  # 60 s ago, within the 3600-s TTL
+        state_file.write_text(f":{recent_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        # The real Greptile score (4) must be picked up and a greptile item emitted.
+        # (check_own_pr_review_state may also emit an item for this PR — allow both.)
+        score_items = [
+            i for i in items if "Greptile score: 4/5" in (i.get("detail") or "")
+        ]
+        assert len(score_items) >= 1, (
+            f"expected a greptile item with real score 4/5 after re-fetch; got {items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+        # State file first field must now be the real score, not empty.
+        fields = state_file.read_text().strip().split(":")
+        assert fields[0] == "4", (
+            f"state file first field must be real Greptile score '4' after re-fetch; "
+            f"got: {state_file.read_text()!r}"
+        )
