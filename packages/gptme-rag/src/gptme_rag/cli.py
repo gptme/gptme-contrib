@@ -16,7 +16,6 @@ from rich.syntax import Syntax
 from tqdm import tqdm
 
 from .benchmark import RagBenchmark
-from .embeddings import ModernBERTEmbedding
 from .indexing.document import Document
 from .indexing.indexer import Indexer
 from .indexing.watcher import FileWatcher
@@ -27,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: change this to a more appropriate location
 default_persist_dir = Path.home() / ".cache" / "gptme" / "rag"
+EMBEDDING_FUNCTION_CHOICES = ["modernbert", "minilm", "mpnet", "openrouter", "default"]
 
 
 class ChunkMerger:
@@ -159,9 +159,9 @@ def cli(verbose: bool):
 )
 @click.option(
     "--embedding-function",
-    type=click.Choice(["modernbert", "default"]),
+    type=click.Choice(EMBEDDING_FUNCTION_CHOICES),
     default="modernbert",
-    help="Embedding function to use (modernbert or default)",
+    help="Embedding function to use",
 )
 @click.option(
     "--device",
@@ -346,8 +346,8 @@ def index(
 )
 @click.option(
     "--embedding-function",
-    type=click.Choice(["modernbert", "default"]),
-    help="Embedding function to use (modernbert or default)",
+    type=click.Choice(EMBEDDING_FUNCTION_CHOICES),
+    help="Embedding function to use",
 )
 @click.option(
     "--device",
@@ -693,8 +693,8 @@ def search(
 )
 @click.option(
     "--embedding-function",
-    type=click.Choice(["modernbert", "default"]),
-    help="Embedding function to use (modernbert or default)",
+    type=click.Choice(EMBEDDING_FUNCTION_CHOICES),
+    help="Embedding function to use",
 )
 @click.option(
     "--device",
@@ -831,15 +831,7 @@ def status():
         console.print(f"Chunk Size: [blue]{status['config']['chunk_size']:,}[/blue] tokens")
         console.print(f"Chunk Overlap: [blue]{status['config']['chunk_overlap']:,}[/blue] tokens")
         if "embedding_model" in status["config"]:
-            model_name = status["config"]["embedding_model"]
-            if model_name == "ModernBERT":
-                # Get more specific model info from the indexer
-                if isinstance(indexer.embedding_function, ModernBERTEmbedding):
-                    if indexer.embedding_function.is_msmarco:
-                        model_name = "ModernBERT-msmarco (optimized for retrieval)"
-                    else:
-                        model_name = "ModernBERT-base (general purpose)"
-            console.print(f"Embedding Model: [blue]{model_name}[/blue]")
+            console.print(f"Embedding Model: [blue]{status['config']['embedding_model']}[/blue]")
 
     except Exception as e:
         console.print(f"❌ Error getting index status: {e}", style="red")

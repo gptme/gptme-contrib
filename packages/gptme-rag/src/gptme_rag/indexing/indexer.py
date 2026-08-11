@@ -16,10 +16,14 @@ from chromadb.api import ClientAPI
 from chromadb.config import Settings
 from chromadb.errors import NotFoundError
 
+from ..cache import SmartRAGCache, CacheKey, CacheEntry
+from ..embeddings import (
+    GenericSentenceTransformerEmbedding,
+    ModernBERTEmbedding,
+    OpenRouterEmbedding,
+)
 from .document import Document
 from .document_processor import DocumentProcessor
-from ..embeddings import ModernBERTEmbedding, GenericSentenceTransformerEmbedding
-from ..cache import SmartRAGCache, CacheKey, CacheEntry
 
 
 class ChromaDBFilter(Filter):
@@ -77,7 +81,9 @@ class Indexer:
     processor: DocumentProcessor
     is_persistent: bool = False
     persist_directory: Path | None
-    embedding_function: ModernBERTEmbedding | GenericSentenceTransformerEmbedding | None
+    embedding_function: (
+        ModernBERTEmbedding | GenericSentenceTransformerEmbedding | OpenRouterEmbedding | None
+    )
     cache: SmartRAGCache
 
     def __init__(
@@ -88,7 +94,7 @@ class Indexer:
         chunk_overlap: int | None = None,
         enable_persist: bool = False,  # Default to False due to multi-threading issues
         scoring_weights: dict | None = None,
-        embedding_function: str = "modernbert",  # Options: "modernbert", "minilm", "mpnet", "default"
+        embedding_function: str = "modernbert",
         device: str = "cpu",
         force_recreate: bool = False,  # Force recreation of collection
     ):
@@ -101,7 +107,8 @@ class Indexer:
             chunk_overlap: Overlap between chunks
             enable_persist: Whether to persist the index
             scoring_weights: Custom weights for scoring
-            embedding_function: Which embedding function to use ("modernbert" or "default")
+            embedding_function: Which embedding function to use
+                ("modernbert", "minilm", "mpnet", "openrouter", or "default")
             device: Device to run embeddings on ("cuda" or "cpu")
         """
         self.collection_name = collection_name
@@ -129,6 +136,17 @@ class Indexer:
             )
             default_chunk_size = 1000
             default_chunk_overlap = 200
+        elif embedding_function == "openrouter":
+            try:
+                self.embedding_function = OpenRouterEmbedding()
+            except ValueError:
+                logger.warning(
+                    "OpenRouter API key not configured; falling back to ModernBERT embeddings"
+                )
+                self.embedding_function = ModernBERTEmbedding(device=device)
+                if self.embedding_function.is_msmarco:
+                    default_chunk_size = 512
+                    default_chunk_overlap = 64
         else:
             self.embedding_function = None  # Use ChromaDB default
 
@@ -162,6 +180,8 @@ class Indexer:
             current_model = "modernbert"
         elif isinstance(self.embedding_function, GenericSentenceTransformerEmbedding):
             # Get the actual model name from GenericSentenceTransformerEmbedding
+            current_model = self.embedding_function.model_name
+        elif isinstance(self.embedding_function, OpenRouterEmbedding):
             current_model = self.embedding_function.model_name
         else:
             current_model = "default"
@@ -230,6 +250,8 @@ class Indexer:
         if isinstance(self.embedding_function, ModernBERTEmbedding):
             return "modernbert"
         elif isinstance(self.embedding_function, GenericSentenceTransformerEmbedding):
+            return self.embedding_function.model_name
+        elif isinstance(self.embedding_function, OpenRouterEmbedding):
             return self.embedding_function.model_name
         else:
             return "default"
@@ -758,7 +780,7 @@ class Indexer:
                     content="",
                     metadata=dict(meta),
                     doc_id="temp",
-                    source_path=source_path,  # type: ignore[arg-type]
+                    source_path=source_path,
                 )
 
                 # Use _matches_paths to check all patterns
@@ -1132,9 +1154,7 @@ class Indexer:
             "config": {
                 "chunk_size": self.processor.chunk_size,
                 "chunk_overlap": self.processor.chunk_overlap,
-                "embedding_model": "ModernBERT"
-                if isinstance(self.embedding_function, ModernBERTEmbedding)
-                else "default",
+                "embedding_model": self.embedding_model_name,
             },
         }
 
