@@ -630,7 +630,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository,baseRefName",
         ]
     )
     if not raw:
@@ -1372,6 +1372,220 @@ def fetch_unresolved_human_threads(
     }
 
 
+#: ``author_association`` values whose workflow runs GitHub can hold behind the
+#: "Approve and run workflows" button. A repo's default setting ("require
+#: approval for first-time contributors") gates exactly these; stricter
+#: settings gate more, which is why the generic message still lists pending
+#: approval as a possible cause.
+#:
+#: Observed: gptme-contrib#1232 (fork, FIRST_TIME_CONTRIBUTOR) sat at zero
+#: check runs for 36 days because nobody pressed the button, while #1240 —
+#: also from a fork, but by a MEMBER — ran automatically. Fork provenance
+#: alone therefore does not discriminate; the association does.
+UNAPPROVED_WORKFLOW_ASSOCIATIONS = frozenset(
+    {"FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE"}
+)
+
+
+def pr_author_association(repo: str, number: int) -> str:
+    """The PR author's ``author_association``, uppercased, or "" if unreadable.
+
+    ``gh pr view --json`` does not expose this field; only the REST pulls
+    endpoint does. Called only on the already-disqualifying path, so it adds no
+    request to the common case.
+    """
+    return (
+        run_gh(
+            ["api", f"repos/{repo}/pulls/{number}", "--jq", ".author_association"],
+            timeout=10,
+        )
+        .strip()
+        .upper()
+    )
+
+
+#: How many recently-merged PRs to sample when asking whether a repo gates
+#: PRs with checks. Large enough that one fluke PR (all jobs skipped by a
+#: paths filter) cannot flip the answer to "no CI"; small enough to stay a
+#: single API call.
+PR_CHECK_HISTORY_SAMPLE = 10
+
+
+def repo_has_pull_request_workflow_runs(repo: str) -> bool | None:
+    """Whether Actions has ever run a workflow on a ``pull_request`` event here.
+
+    Tri-state: ``True``/``False`` on a parseable answer, ``None`` on any error.
+
+    Used only to corroborate a *negative* history sample. "None of the last N
+    merged PRs reported checks" has two causes that the sample cannot tell
+    apart: the repo genuinely does not gate PRs, or the sample is
+    unrepresentative (CI added after those merges, or every sampled merge came
+    from a fork whose workflows were never approved). This endpoint separates
+    them — it counts runs across the repo's whole history, not just the sample.
+
+    Note the asymmetry with :func:`repo_gates_prs_with_checks`: counting
+    ``pull_request``-event *runs* is safe here where counting *workflows* was
+    not, because a push-only repo has workflows but zero PR runs. Verified:
+    ``ErikBjare/erikbjare.github.io`` (2 active workflows, push-triggered) → 0,
+    while ``gptme/gptme-contrib`` → 13664 and ``ErikBjare/bob`` → 1151.
+    """
+    raw = run_gh(
+        [
+            "api",
+            f"repos/{repo}/actions/runs?event=pull_request&per_page=1",
+            "--jq",
+            ".total_count",
+        ],
+        timeout=10,
+    )
+    if not raw:
+        return None
+    try:
+        return int(raw) > 0
+    except (ValueError, TypeError):
+        return None
+
+
+def repo_gates_prs_with_checks(repo: str, base_branch: str = "") -> bool | None:
+    """Whether pull requests in ``repo`` normally report check results.
+
+    Tri-state, and deliberately so:
+
+    * ``True``  — at least one of the last ``PR_CHECK_HISTORY_SAMPLE`` merged
+      PRs reported checks. PRs here *are* gated, so an empty check set on the
+      PR under evaluation is anomalous and must not waive the requirement.
+    * ``False`` — every sampled merged PR reported zero checks. Nothing gates
+      PRs in this repo, so there is no missing build to wait for.
+    * ``None``  — indeterminate: the API errored, returned something
+      unparseable, or the repo has no merged-PR history to judge from.
+
+    ``None`` must never be collapsed into ``False``: an API outage is exactly
+    when the caller needs to fail closed rather than waive missing checks.
+
+    **Why PR-check history and not "does the repo have workflows".** The
+    question this gate needs answered is *does this repo gate PRs with
+    checks*, and workflow presence answers neither direction of it:
+
+    * Counting active Actions workflows reports ``False`` for any repo gated
+      by Jenkins, Azure Pipelines, Travis, or any GitHub App status context —
+      waiving the requirement and reopening the very outage fail-open this
+      check exists to close, just for non-Actions CI.
+    * It reports ``True`` for a repo whose only workflows are ``push``- or
+      ``schedule``-triggered (a deploy-on-master job). Such a repo produces no
+      PR checks *by design*, so every PR would be permanently ineligible —
+      replacing a fail-open with a permanent block. ``ErikBjare/erikbjare.github.io``
+      is exactly this shape: two active workflows, zero checks on every
+      merged PR.
+
+    Sampling history sidesteps both. ``statusCheckRollup`` carries ``CheckRun``
+    *and* ``StatusContext`` entries (see :func:`checks_green`), so the probe is
+    provider-agnostic — it sees a Jenkins commit status the same as an Actions
+    job. It is also unaffected by an ongoing outage, because it reads what
+    already-merged PRs recorded rather than what is running now.
+
+    The sample is scoped to ``base_branch`` when known, because CI is often
+    branch-specific: a repo that gates ``master`` but not ``dev`` would
+    otherwise read as ungated whenever recent merge activity happened to be
+    concentrated on ``dev``.
+
+    A negative sample is never trusted on its own. "None of the sampled PRs
+    reported checks" is ambiguous, with three explanations that need telling
+    apart:
+
+    1. This *branch* is not gated, though the repo gates another one. Detected
+       by widening the sample to the whole repo: checks elsewhere but none here
+       means this branch is genuinely ungated → ``False``.
+    2. The repo genuinely gates nothing. Confirmed when
+       :func:`repo_has_pull_request_workflow_runs` also reports zero →
+       ``False``.
+    3. The sample is unrepresentative — CI added after those merges, or every
+       sampled merge came from a fork whose workflows were never approved. This
+       is what is left when neither of the above holds → ``None``, fail closed.
+
+    The widening in (1) is not optional: without it the branch-scoped sample and
+    the repo-wide corroboration would be asking about different populations, and
+    a repo that gates ``master`` but not ``dev`` would report indeterminate for
+    every ``dev`` PR forever — the permanent block this change already refused
+    once.
+
+    Known limits, both in the safe direction or self-healing:
+
+    * A repo that *removed* CI reads ``True`` until the sample rolls over.
+      That blocks self-merge — the conservative direction — and clears itself.
+    * A repo with no merged PRs at all is ``None`` (fail closed) and
+      self-heals after a single manual merge establishes history.
+    * A repo gated exclusively by non-Actions CI *and* with a silent sample
+      reads ``None`` rather than ``False``, since the corroborating endpoint
+      only knows about Actions. Fail-closed, so this costs a manual merge
+      rather than a waived requirement.
+    """
+    scoped = _sample_pr_check_history(repo, base_branch)
+    if scoped is not False:
+        # True (gated) or None (unusable sample) — both are final.
+        return scoped
+
+    # The sample is silent. Before believing it, work out *why*.
+    if base_branch:
+        # A branch-scoped silence has an extra innocent explanation the
+        # repo-wide corroboration below cannot see: the repo gates another
+        # branch but not this one. Widen the sample to tell the two apart —
+        # otherwise a repo that gates `master` but not `dev` would report
+        # indeterminate for every `dev` PR forever, which is the permanent
+        # block this PR already refused once.
+        repo_wide = _sample_pr_check_history(repo, "")
+        if repo_wide is None:
+            return None
+        if repo_wide:
+            # Checks elsewhere in the repo, none on this branch: this branch is
+            # genuinely not gated.
+            return False
+
+    # Silent everywhere we can see. Only call that "ungated" if Actions has
+    # never run on a pull_request here either; otherwise the sample is
+    # unrepresentative and the honest answer is "don't know" — fail closed.
+    if repo_has_pull_request_workflow_runs(repo) is False:
+        return False
+    return None
+
+
+def _sample_pr_check_history(repo: str, base_branch: str) -> bool | None:
+    """Did any of the last N merged PRs (optionally into ``base_branch``) report checks?
+
+    ``None`` means the sample is unusable — the query failed, the payload was
+    unparseable, or there is no merged-PR history to judge from.
+    """
+    raw = run_gh(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "merged",
+            *(["--base", base_branch] if base_branch else []),
+            "--limit",
+            str(PR_CHECK_HISTORY_SAMPLE),
+            "--json",
+            "number,statusCheckRollup",
+        ],
+        timeout=30,
+    )
+    if not raw:
+        return None
+    try:
+        merged_prs = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(merged_prs, list) or not merged_prs:
+        return None
+    for merged_pr in merged_prs:
+        if not isinstance(merged_pr, dict):
+            return None
+        if merged_pr.get("statusCheckRollup") or []:
+            return True
+    return False
+
+
 def checks_green(status_checks: list[dict[str, Any]]) -> bool:
     """Return True if all reported checks are success/skipped/neutral.
 
@@ -1871,9 +2085,47 @@ def evaluate_pr(
 
     status_checks = pr.get("statusCheckRollup", [])
     if not status_checks:
-        result.warnings.append(
-            "No CI checks configured; CI requirement satisfied without a green build"
-        )
+        # Distinguish "this repo does not gate PRs with checks" from "it does,
+        # and this PR's checks are missing". Only a definitive False — every
+        # recently-merged PR reported zero checks — may waive the requirement.
+        # None means we could not determine it, so fail closed: the likeliest
+        # cause of an indeterminate answer is the same outage that suppressed
+        # the checks in the first place.
+        gates_prs = repo_gates_prs_with_checks(repo, pr.get("baseRefName", ""))
+        if gates_prs is None:
+            result.reasons.append(
+                "CI checks not found and could not determine whether this repo gates PRs "
+                "with checks (GitHub API error, or no merged-PR history) — failing closed"
+            )
+        elif gates_prs:
+            # Name the un-approved-workflow case explicitly. It needs a specific
+            # operator action ("Approve and run workflows" on the PR page), and
+            # reporting it as "no CI configured" sends whoever reads this looking
+            # for a missing workflow file that is not missing. gptme-contrib#1232
+            # cost 36 days that way, and the un-run pre-commit job would have
+            # caught a real defect in it.
+            association = pr_author_association(repo, number)
+            if association in UNAPPROVED_WORKFLOW_ASSOCIATIONS and pr.get(
+                "isCrossRepository"
+            ):
+                result.reasons.append(
+                    "CI checks not found; this repo's PRs do report checks, and this one "
+                    f"is from a fork by a {association} author — GitHub is holding its "
+                    'workflow runs behind the "Approve and run workflows" button on the '
+                    "PR page. A maintainer has to press it; no workflow file is missing"
+                )
+            else:
+                result.reasons.append(
+                    "CI checks not found; recently-merged PRs in this repo did report checks, "
+                    "so an empty check set here is anomalous (possible GitHub outage, workflow "
+                    "runs pending maintainer approval, paths filter mismatch, or concurrency "
+                    "cancellation)"
+                )
+        else:
+            result.warnings.append(
+                "No CI gates PRs in this repo (recently-merged PRs reported no checks); "
+                "CI requirement satisfied without running checks"
+            )
     elif not checks_green(status_checks):
         result.reasons.append("CI is not fully green")
 
