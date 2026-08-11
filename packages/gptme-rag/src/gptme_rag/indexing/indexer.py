@@ -188,9 +188,11 @@ class Indexer:
         if embedding_function == "auto":
             try:
                 _auto_peeked_collection = self.client.get_collection(name=collection_name)
-                detected = (_auto_peeked_collection.metadata or {}).get("embedding_model", "modernbert")
-                if detected not in ("modernbert", "default", "unknown"):
-                    # The stored model is an OpenRouter model name; re-init to match.
+                detected = (_auto_peeked_collection.metadata or {}).get(
+                    "embedding_model", "modernbert"
+                )
+                if detected not in ("modernbert", "default", "unknown") and "/" in detected:
+                    # The stored model is an OpenRouter model name (org/model format); re-init to match.
                     try:
                         self.embedding_function = OpenRouterEmbedding(model_name=detected)
                     except ValueError:

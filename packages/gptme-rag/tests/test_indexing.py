@@ -310,9 +310,9 @@ def test_auto_embedding_mode_does_not_destroy_foreign_model_collection(tmp_path)
     )
 
     # Collection must still have the sentinel document — not been recreated
-    assert indexer.collection.count() == 1, (
-        "auto mode destroyed the collection indexed with a non-default embedding model"
-    )
+    assert (
+        indexer.collection.count() == 1
+    ), "auto mode destroyed the collection indexed with a non-default embedding model"
 
 
 def test_reset_collection_preserves_embedding_metadata(indexer):
