@@ -126,6 +126,9 @@ AI_REVIEW_CLEAN_SCORE = 5
 # check and be read as "a very bad review we can still tolerate", when it is
 # in fact a marker the rubric cannot have produced.
 AI_REVIEW_MIN_SCORE = 1
+# Only P0/P1 participate in the disposition recall guard. Lower severities do
+# not block self-merge, and the gate must never guess them into existence.
+AI_REVIEW_BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
 # Shortest marker SHA prefix accepted when matching against the PR head. The
 # reviewer writes 12 hex chars; this only guards against a truncated/garbage
 # marker whose 1-2 char "sha" would prefix-match almost any head.
@@ -1052,6 +1055,7 @@ def _ai_review_disposition_shortfall(
     *,
     marker: dict[str, Any] | None = None,
     score: int | None = None,
+    expected_author: str | None = None,
 ) -> str | None:
     """Why the AI-review path should not satisfy the gate, or None if it may.
 
@@ -1098,11 +1102,11 @@ def _ai_review_disposition_shortfall(
     Neither does a thread whose severity did not parse — crediting it against a
     claimed P0 would be guessing in the merge direction.
 
-    **Known residual, tracked separately.** Threads carry no head, so a P0/P1
-    disposed on an *earlier* head still counts for a same-severity finding
-    claimed now. Closing that needs the marker to publish the current pass's
-    finding fingerprints so disposition can be matched per finding rather than
-    per severity — a change to the reviewer, not to this gate.
+    When the marker publishes ``findings`` for the current head, the recall
+    guard upgrades from severity-count matching to per-fingerprint matching:
+    every current P0/P1 fingerprint must have a disposed thread whose root body
+    names that exact ``fp``. A missing ``findings`` key falls back to the older
+    severity-count guard so legacy markers keep working.
     """
     if review_data is None:
         return "could not read review thread state"
@@ -1111,8 +1115,10 @@ def _ai_review_disposition_shortfall(
         for fp in ((marker or {}).get("auto_resolved") or [])
         if isinstance(fp, str) and fp
     }
+    current_findings = (marker or {}).get("findings") or []
     _, threads = review_data
     disposed: dict[str, int] = {"P0": 0, "P1": 0}
+    disposed_fps: set[str] = set()
     for thread in threads:
         comments = thread.get("comments") or {}
         nodes = comments.get("nodes") or []
@@ -1132,7 +1138,7 @@ def _ai_review_disposition_shortfall(
         # this path exists to prevent, so an unreadable severity blocks and is
         # cleared the same way a P0/P1 is: resolved, with a reply.
         severity = m.group(1) if m else None
-        if severity is not None and severity not in ("P0", "P1"):
+        if severity is not None and severity not in AI_REVIEW_BLOCKING_SEVERITIES:
             continue  # surviving P2s never block
         label = (
             f"{severity} finding" if severity else "finding with unreadable severity"
@@ -1156,17 +1162,50 @@ def _ai_review_disposition_shortfall(
         #     a P0 the score reports would be guessing in the merge direction.
         if severity in disposed and not (fp and fp in auto_resolved):
             disposed[severity] += 1
+            if fp:
+                disposed_fps.add(fp)
 
-    # Recall guard, bound to what the score actually CLAIMS. `confidence_score`
-    # is arithmetic over the finding severities, so the score names its findings
-    # exactly: 1 = at least one P0, 2 = two or more P1, 3 = exactly one P1. The
-    # guard therefore demands a matching disposed thread *per claimed finding*.
-    # A single "did we see any P0/P1 thread" boolean could not tell those apart,
-    # and let one disposed P1 vouch for a different, unanchored P0 — the recall
-    # failure this path exists to prevent. Findings the reviewer could not
-    # anchor to a diff line ("Comments outside the diff" in the summary body)
-    # and a reviewer that silently stopped posting both land here, and both
-    # fail closed.
+    def _blocking_findings(marker_findings: Any) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        if not isinstance(marker_findings, list):
+            return out
+        for item in marker_findings:
+            if not isinstance(item, dict):
+                continue
+            fp = item.get("fp")
+            severity = item.get("severity")
+            if not isinstance(fp, str) or not fp:
+                continue
+            if not isinstance(severity, str):
+                continue
+            if severity not in AI_REVIEW_BLOCKING_SEVERITIES:
+                continue
+            out.append((fp, severity))
+        return out
+
+    blocking_findings = _blocking_findings(current_findings)
+    if blocking_findings:
+        missing = [
+            (fp, severity)
+            for fp, severity in blocking_findings
+            if fp not in disposed_fps
+        ]
+        if missing:
+            counts: dict[str, int] = {"P0": 0, "P1": 0}
+            for _, severity in missing:
+                counts[severity] += 1
+            parts = [
+                f"{counts[severity]} {severity}"
+                for severity in ("P0", "P1")
+                if counts[severity]
+            ]
+            return "current marker findings lack disposed threads for: " + ", ".join(
+                parts
+            )
+        return None
+
+    # Legacy fallback for markers that predate the `findings` key: bind the
+    # recall guard to what the score claims by severity/count only.
     required = {1: ("P0", 1), 2: ("P1", 2), 3: ("P1", 1)}.get(score or 0)
     if required:
         need_severity, need_count = required

@@ -62,6 +62,7 @@ def _marker(**overrides: Any) -> dict[str, Any]:
         "consensus": dict(FULL_CONSENSUS),
         "history": [],
         "suppressed": [],
+        "findings": [],
     }
     marker.update(overrides)
     return marker
@@ -610,10 +611,15 @@ def test_empty_summary_comment_fetch_is_absence_not_unknown(
 # disposed (resolved), and surviving P2s never block.
 
 
-def _finding_thread(severity: str, *, resolved: bool, total: int) -> dict[str, Any]:
+def _finding_thread(
+    severity: str, *, resolved: bool, total: int, fp: str | None = None
+) -> dict[str, Any]:
     """One AI finding thread with the reviewer's marker, severity, and replies."""
+    fp_line = f'<!-- bob-ai-review-fp {{"fp": "{fp}"}} -->\n' if fp else ""
     body = (
-        f"{smc._AI_REVIEW_FINDING_MARKER}\n🛑 **{severity}** — the hash ignores .state"
+        f"{smc._AI_REVIEW_FINDING_MARKER}\n"
+        f"{fp_line}"
+        f"🛑 **{severity}** — the hash ignores .state"
     )
     return {
         "isResolved": resolved,
@@ -832,7 +838,18 @@ def test_auto_resolved_thread_does_not_satisfy_the_recall_guard(
     fp = "abcdef123456"
     status = _status(
         gh_comments,
-        [_comment(_marker(score=2, auto_resolved=[fp]))],
+        [
+            _comment(
+                _marker(
+                    score=2,
+                    auto_resolved=[fp],
+                    findings=[
+                        {"fp": fp, "severity": "P1"},
+                        {"fp": "feedface5678", "severity": "P1"},
+                    ],
+                )
+            )
+        ],
         review_data=(
             [],
             [
@@ -846,7 +863,9 @@ def test_auto_resolved_thread_does_not_satisfy_the_recall_guard(
         ),
     )
     assert status["accepted"] is False
-    assert "disposed" in (status["detail"] or "")
+    assert "current marker findings lack disposed threads for: 2 P1" in (
+        status["detail"] or ""
+    )
 
 
 def test_refusal_detail_is_not_double_prefixed(gh_comments: Any) -> None:
@@ -854,8 +873,15 @@ def test_refusal_detail_is_not_double_prefixed(gh_comments: Any) -> None:
     Both prefixing produced `AI review AI review P1 finding is not resolved`."""
     status = _status(
         gh_comments,
-        [_comment(_marker(score=3))],
-        review_data=([], [_finding_thread("P1", resolved=False, total=1)]),
+        [
+            _comment(
+                _marker(score=3, findings=[{"fp": "cafe1234beef", "severity": "P1"}])
+            )
+        ],
+        review_data=(
+            [],
+            [_finding_thread("P1", resolved=False, total=1, fp="cafe1234beef")],
+        ),
     )
     detail = status["detail"] or ""
     assert detail.count("AI review") == 1, detail
@@ -877,33 +903,53 @@ def test_disposed_p1_does_not_vouch_for_an_unanchored_p0(gh_comments: Any) -> No
     unreviewed, which is exactly what the guard exists to stop."""
     status = _status(
         gh_comments,
-        [_comment(_marker(score=1))],
-        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
+        [
+            _comment(
+                _marker(score=1, findings=[{"fp": "c0ffee123abc", "severity": "P0"}])
+            )
+        ],
+        review_data=(
+            [],
+            [_finding_thread("P1", resolved=True, total=2, fp="deadbeef1234")],
+        ),
     )
     assert status["accepted"] is False
-    assert "1 P0 finding(s)" in (status["detail"] or "")
-    assert "only 0 disposed P0" in (status["detail"] or "")
+    assert "current marker findings lack disposed threads for: 1 P0" in (
+        status["detail"] or ""
+    )
 
 
 def test_two_p1_score_needs_two_disposed_p1_threads(gh_comments: Any) -> None:
     """A score of 2 means two or more P1s. One disposed P1 thread leaves the
     other unaccounted for, so the count has to match, not just the severity."""
+    marker = _marker(
+        score=2,
+        findings=[
+            {"fp": "a1b2c3d4e5f6", "severity": "P1"},
+            {"fp": "b1c2d3e4f5a6", "severity": "P1"},
+        ],
+    )
     one_disposed = _status(
         gh_comments,
-        [_comment(_marker(score=2))],
-        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
+        [_comment(marker)],
+        review_data=(
+            [],
+            [_finding_thread("P1", resolved=True, total=2, fp="a1b2c3d4e5f6")],
+        ),
     )
     assert one_disposed["accepted"] is False
-    assert "only 1 disposed P1" in (one_disposed["detail"] or "")
+    assert "current marker findings lack disposed threads for: 1 P1" in (
+        one_disposed["detail"] or ""
+    )
 
     both_disposed = _status(
         gh_comments,
-        [_comment(_marker(score=2))],
+        [_comment(marker)],
         review_data=(
             [],
             [
-                _finding_thread("P1", resolved=True, total=2),
-                _finding_thread("P1", resolved=True, total=2),
+                _finding_thread("P1", resolved=True, total=2, fp="a1b2c3d4e5f6"),
+                _finding_thread("P1", resolved=True, total=2, fp="b1c2d3e4f5a6"),
             ],
         ),
     )
@@ -915,8 +961,15 @@ def test_disposed_p0_satisfies_a_p0_score(gh_comments: Any) -> None:
     1 with its P0 replied to and resolved is disposed, and passes."""
     status = _status(
         gh_comments,
-        [_comment(_marker(score=1))],
-        review_data=([], [_finding_thread("P0", resolved=True, total=2)]),
+        [
+            _comment(
+                _marker(score=1, findings=[{"fp": "facefeed1234", "severity": "P0"}])
+            )
+        ],
+        review_data=(
+            [],
+            [_finding_thread("P0", resolved=True, total=2, fp="facefeed1234")],
+        ),
     )
     assert status["accepted"] is True
 
