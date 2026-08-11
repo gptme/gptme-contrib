@@ -496,6 +496,39 @@ def test_voice_postcall_digit_key_in_path_not_truncated() -> None:
     )
 
 
+def test_voice_postcall_letter_key_in_detail_is_separator() -> None:
+    """Regression: letter-starting key=value tokens in detail must terminate path capture.
+
+    The regex lookahead (?=\\s+[a-z][a-z0-9_]*=|\\s*$) treats letter-starting
+    identifiers as key separators.  This is the complementary case to
+    test_voice_postcall_digit_key_in_path_not_truncated: letter-starting keys
+    like 'event_type=' MUST stop the capture so the rendered grep -F uses only
+    the record path, not the subsequent key=value pair.  Changing the lookahead
+    from [a-z][a-z0-9_]*= to \\w+= (or removing it) would pass the digit-key
+    test while silently breaking this one.
+    """
+    params_with_event_type = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice-2026-01-01T12-00-00.wav event_type=terminal",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(
+        ItemPromptKind("voice_postcall"), params_with_event_type
+    )
+    assert "grep -F '/tmp/voice-2026-01-01T12-00-00.wav'" in rendered, (
+        "voice_postcall failed to stop path capture at letter-starting token 'event_type=' — "
+        "the regex lookahead (?=\\s+[a-z][a-z0-9_]*=|\\s*$) must treat letter-starting "
+        "identifiers as key separators"
+    )
+    assert "event_type" not in rendered.split("grep -F")[1].split("\n")[0], (
+        "letter-starting key 'event_type' leaked into the extracted record path "
+        "or the grep command line — path must stop before the detail token"
+    )
+    assert "__RECORD_PATH_MISSING__" not in rendered
+
+
 def test_voice_postcall_single_quote_in_record_path() -> None:
     """Regression: single quotes in the record path must be shell-escaped.
 

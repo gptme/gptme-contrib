@@ -601,6 +601,12 @@ class ItemPromptParams:
 
         Single quotes in the path are escaped for shell single-quoted context so
         the rendered grep -F '...' command is always syntactically valid.
+
+        Separator logic: letter-starting tokens (e.g. 'event_type=') stop the
+        capture; digit-starting substrings (e.g. '2026=') inside the path do
+        not.  Paths containing a space followed by a letter-starting 'word='
+        pattern are unsupported — by convention, voice-call paths use ISO
+        timestamps with hyphens and never contain such sequences.
         """
         m = re.search(r"\brecord=(.+?)(?=\s+[a-z][a-z0-9_]*=|\s*$)", self.detail)
         if not m:
