@@ -395,6 +395,10 @@ def test_voice_postcall_explicit_negative_branch() -> None:
         "printf (success path) must appear before 'NO TERMINAL ROW' (failure path); "
         "an inverted branch would silently put the failure message on the success path"
     )
+    assert "exit 1" in rendered, (
+        "voice_postcall negative branch must exit non-zero so status-aware callers "
+        "treat a missing terminal row as failure, not success"
+    )
 
 
 def test_voice_postcall_record_path_substituted() -> None:
@@ -442,6 +446,31 @@ def test_voice_postcall_positive_record_path() -> None:
     assert (
         "__RECORD_PATH_MISSING__" not in rendered
     ), "voice_postcall rendered the missing-path sentinel even though detail contained record="
+
+
+def test_voice_postcall_spaced_record_path() -> None:
+    """Regression: record paths containing spaces must not be truncated.
+
+    The old regex used \\S+ which stops at the first space, so
+    'record=/tmp/voice call 2026.wav' would extract only '/tmp/voice', causing
+    grep to match no lines (false NO TERMINAL ROW) or wrong lines (false pass).
+    The fix uses a lookahead that stops at the next key= token or end of string.
+    """
+    params_spaced = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice call 2026.wav",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(ItemPromptKind("voice_postcall"), params_spaced)
+    assert "grep -F '/tmp/voice call 2026.wav'" in rendered, (
+        "voice_postcall truncated a spaced record path — "
+        "the regex must capture until the next key= token or end of string"
+    )
+    assert (
+        "__RECORD_PATH_MISSING__" not in rendered
+    ), "voice_postcall rendered the missing-path sentinel for a spaced path"
 
 
 def test_every_expected_golden_exists() -> None:

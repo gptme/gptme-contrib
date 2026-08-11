@@ -602,7 +602,7 @@ class ItemPromptParams:
         Single quotes in the path are escaped for shell single-quoted context so
         the rendered grep -F '...' command is always syntactically valid.
         """
-        m = re.search(r"\brecord=(\S+)", self.detail)
+        m = re.search(r"\brecord=(.+?)(?=\s+\w+=|\s*$)", self.detail)
         if not m:
             return "__RECORD_PATH_MISSING__"
         return m.group(1).replace("'", "'\\''")
@@ -901,7 +901,7 @@ It is idempotent — re-running on a completed record is harmless.
 After the worker finishes, verify the trace ledger shows a terminal row for this record:
 ```bash
 rows=$(grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | grep -F '{record_path}' | tail -3)
-[ -n "$rows" ] && printf '%s\n' "$rows" || echo "NO TERMINAL ROW — verification FAILED"
+[ -n "$rows" ] && printf '%s\n' "$rows" || { echo "NO TERMINAL ROW — verification FAILED"; exit 1; }
 ```
 """
 
