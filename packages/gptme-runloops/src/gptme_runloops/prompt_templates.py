@@ -595,11 +595,17 @@ class ItemPromptParams:
     def _record_path(self) -> str:
         """Extract the record= path from detail for per-record TSV filtering.
 
-        Returns empty string when detail has no record= token, which causes
-        grep -F '' to match every line (unfiltered fallback).
+        Returns a sentinel that grep -F won't find when detail has no record=
+        token, so the verification command fails closed (NO TERMINAL ROW) rather
+        than matching every line with grep -F ''.
+
+        Single quotes in the path are escaped for shell single-quoted context so
+        the rendered grep -F '...' command is always syntactically valid.
         """
         m = re.search(r"\brecord=(\S+)", self.detail)
-        return m.group(1) if m else ""
+        if not m:
+            return "__RECORD_PATH_MISSING__"
+        return m.group(1).replace("'", "'\\''")
 
     def to_prompt_context(self) -> PromptContext:
         """The step-2 context for the greptile investigate arms."""

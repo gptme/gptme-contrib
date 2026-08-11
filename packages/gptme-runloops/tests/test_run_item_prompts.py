@@ -409,6 +409,39 @@ def test_voice_postcall_record_path_substituted() -> None:
         "{record_path} survived substitution in voice_postcall — "
         "likely ItemPromptParams._tokens() lost the 'record_path' key"
     )
+    # When detail has no record= token the sentinel must appear, not an empty
+    # grep -F '' that would match every line (false-positive fallback).
+    assert "__RECORD_PATH_MISSING__" in rendered, (
+        "voice_postcall with no record= token should render the sentinel "
+        "'__RECORD_PATH_MISSING__' so grep -F fails closed instead of matching all lines"
+    )
+
+
+def test_voice_postcall_positive_record_path() -> None:
+    """Regression: the record= path extracted from detail must reach the grep command.
+
+    Previously all voice_postcall tests used BOB_PARAMS whose detail has no
+    record= token, so the positive extraction branch (_record_path regex match)
+    was never exercised.  A broken regex or wrong capture group would pass the
+    suite while producing a wrong or empty path in production.
+    """
+    params_with_record = ItemPromptParams(
+        repo="gptme/gptme-contrib",
+        number=1234,
+        detail="greptile_needs_improvement record=/tmp/voice-2026-01-01T12-00-00.wav",
+        all_numbers=("1234",),
+        **BOB_IDENTITY,
+    )
+    rendered = render_item_investigate(
+        ItemPromptKind("voice_postcall"), params_with_record
+    )
+    assert "grep -F '/tmp/voice-2026-01-01T12-00-00.wav'" in rendered, (
+        "voice_postcall grep command does not contain the extracted record path — "
+        "check ItemPromptParams._record_path regex and _tokens() registration"
+    )
+    assert (
+        "__RECORD_PATH_MISSING__" not in rendered
+    ), "voice_postcall rendered the missing-path sentinel even though detail contained record="
 
 
 def test_every_expected_golden_exists() -> None:
