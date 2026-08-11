@@ -232,6 +232,10 @@ def test_non_numeric_range_limit_falls_back_to_the_default(tmp_path: Path) -> No
         ("https://github.com/Org/Repo.git", "https://github.com/org/repo"),
         ("git@github.com:Org/Repo.git", "ssh://git@GITHUB.com/org/repo"),
         ("https://github.com/org/repo.git/", "git@github.com:org/repo.git"),
+        # Explicit SSH port 22 (default) is still origin — the port must be stripped.
+        ("git@github.com:org/repo.git", "ssh://git@github.com:22/org/repo.git"),
+        # Non-standard port (e.g. corporate proxy or SSH-on-8443) also strips cleanly.
+        ("https://github.com/org/repo.git", "https://github.com:443/org/repo.git"),
     ],
 )
 def test_force_reset_guard_still_applies_to_a_remote_aliasing_origin(
