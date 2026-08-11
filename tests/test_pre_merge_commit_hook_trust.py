@@ -11,6 +11,10 @@ Fix: the hook inlines the brain-repo check without any in-repo delegation.
 Worst case for a spoofed origin URL is a blocked merge (false positive), not RCE.
 (ErikBjare/bob#1122 — four P0s on this file, all found by our own AI reviewer.)
 
+For clean merges, Git invokes pre-merge-commit before MERGE_HEAD exists. Hook
+invocation is the merge signal; checking MERGE_HEAD here silently bypasses the
+guard. MERGE_HEAD is only reliable for the pre-commit conflicted-merge fallback.
+
 The pre-commit hook carries a companion guard (Part 0.7) for the conflicted-merge
 path: git merge stops on conflicts, the user resolves them and runs `git commit`
 (or `git merge --continue`), which invokes pre-commit but NOT pre-merge-commit.
@@ -69,6 +73,43 @@ def _run_hook(repo: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _install_hooks(repo: Path) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.hooksPath", str(HOOK.parent)],
+        check=True,
+    )
+
+
+def _commit_file(repo: Path, relative_path: str, content: str, message: str) -> None:
+    path = repo / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    subprocess.run(["git", "-C", str(repo), "add", relative_path], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--no-verify", "-qm", message],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _make_clean_merge_fixture(tmp_path: Path) -> Path:
+    repo = _make_repo(tmp_path, "git@github.com:ErikBjare/bob.git")
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-b", "topic"],
+        check=True,
+        capture_output=True,
+    )
+    _commit_file(repo, "topic.txt", "topic\n", "topic")
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "master"],
+        check=True,
+        capture_output=True,
+    )
+    _commit_file(repo, "master.txt", "master\n", "master")
+    _install_hooks(repo)
+    return repo
+
+
 # ---------------------------------------------------------------------------
 # Non-bob repos are always a no-op.
 # ---------------------------------------------------------------------------
@@ -94,7 +135,7 @@ def test_non_bob_repo_is_noop(tmp_path: Path, origin: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Within the brain repo, the hook only fires on master with an active merge.
+# Within the brain repo, the hook only fires when invoked on master.
 # ---------------------------------------------------------------------------
 
 
@@ -130,12 +171,15 @@ def test_bob_repo_not_on_master_is_noop(tmp_path: Path) -> None:
     assert proc.returncode == 0
 
 
-def test_bob_repo_on_master_no_merge_head_is_noop(tmp_path: Path) -> None:
-    """Hook exits 0 on master when no merge is in progress."""
+def test_bob_repo_on_master_blocks_when_git_invokes_pre_merge_commit(
+    tmp_path: Path,
+) -> None:
+    """MERGE_HEAD is not available here; hook invocation is the merge signal."""
     repo = _make_repo(tmp_path, "https://github.com/ErikBjare/bob.git")
     assert not (repo / ".git" / "MERGE_HEAD").exists()
     proc = _run_hook(repo)
-    assert proc.returncode == 0
+    assert proc.returncode == 1
+    assert "Refusing" in proc.stderr or "🚫" in proc.stderr
 
 
 @pytest.mark.parametrize(
@@ -159,6 +203,90 @@ def test_bob_repo_merge_on_master_is_blocked(tmp_path: Path, origin: str) -> Non
         proc.returncode == 1
     ), f"merge was not blocked for origin={origin!r}\n{proc.stderr}"
     assert "Refusing" in proc.stderr or "🚫" in proc.stderr
+
+
+def test_real_git_merge_on_master_in_brain_repo_is_blocked(tmp_path: Path) -> None:
+    """A real clean git merge on master invokes pre-merge-commit and fails."""
+    repo = _make_clean_merge_fixture(tmp_path)
+    before = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"])
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "merge", "--no-ff", "topic", "-m", "merge topic"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    after = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"])
+    assert proc.returncode == 1, proc.stderr
+    assert after == before, "blocked merge still advanced HEAD"
+    assert "Refusing" in proc.stderr or "🚫" in proc.stderr, proc.stderr
+
+
+def test_real_git_fast_forward_on_master_in_brain_repo_is_allowed(
+    tmp_path: Path,
+) -> None:
+    """Fast-forward updates do not create merge commits, so the hook stays silent."""
+    repo = _make_repo(tmp_path, "git@github.com:ErikBjare/bob.git")
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-b", "topic"],
+        check=True,
+        capture_output=True,
+    )
+    _commit_file(repo, "topic.txt", "topic\n", "topic")
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "master"],
+        check=True,
+        capture_output=True,
+    )
+    _install_hooks(repo)
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "merge", "topic"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "Refusing" not in proc.stderr
+    assert "🚫" not in proc.stderr
+
+
+def test_real_git_merge_on_non_master_in_brain_repo_is_allowed(
+    tmp_path: Path,
+) -> None:
+    """The global hook does not block merge commits away from master."""
+    repo = _make_repo(tmp_path, "git@github.com:ErikBjare/bob.git")
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-b", "topic"],
+        check=True,
+        capture_output=True,
+    )
+    _commit_file(repo, "topic.txt", "topic\n", "topic")
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "master"],
+        check=True,
+        capture_output=True,
+    )
+    _commit_file(repo, "master.txt", "master\n", "master")
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-b", "integration"],
+        check=True,
+        capture_output=True,
+    )
+    _install_hooks(repo)
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "merge", "--no-ff", "topic", "-m", "merge topic"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "Refusing" not in proc.stderr
+    assert "🚫" not in proc.stderr
 
 
 # ---------------------------------------------------------------------------

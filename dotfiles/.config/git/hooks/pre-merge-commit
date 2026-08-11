@@ -28,9 +28,6 @@ esac
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 [ "$branch" = "master" ] || exit 0
 
-git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
-[ -f "$git_dir/MERGE_HEAD" ] || exit 0
-
 cat >&2 <<'EOF'
 🚫 Refusing to create a merge commit on master in the brain repo.
 
