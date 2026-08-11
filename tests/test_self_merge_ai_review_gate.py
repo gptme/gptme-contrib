@@ -1143,3 +1143,54 @@ def test_missing_findings_key_still_uses_the_legacy_score_guard(
         review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
     )
     assert status["accepted"] is True
+
+
+def test_disposed_p1_thread_does_not_satisfy_a_p0_findings_entry(
+    gh_comments: Any,
+) -> None:
+    """A fingerprint outlives a severity. The reviewer can re-raise the same
+    finding at a higher severity on a later head while the old, already-disposed
+    thread still renders the OLD severity — and matching on fingerprint alone
+    then credits a P0 entry to a disposed P1 thread. That is reachable exactly
+    when the re-raised P0 could not be anchored to a diff line, i.e. when this
+    guard is the only thing still checking."""
+    fp = "deadbeef1234"
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1, findings=[{"fp": fp, "severity": "P0"}]))],
+        review_data=(
+            [],
+            [
+                _finding_thread_body(
+                    "❌ **P1** — the hash ignores .state",
+                    fp=fp,
+                    resolved=True,
+                    total=2,
+                )
+            ],
+        ),
+    )
+    assert status["accepted"] is False
+    assert "1 P0" in (status["detail"] or "")
+
+
+def test_matching_severity_still_disposes(gh_comments: Any) -> None:
+    """Negative control: the same fingerprint with the severity the marker
+    actually claims disposes it, so the tightening costs nothing legitimate."""
+    fp = "deadbeef1234"
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1, findings=[{"fp": fp, "severity": "P0"}]))],
+        review_data=(
+            [],
+            [
+                _finding_thread_body(
+                    "🛑 **P0** — the hash ignores .state",
+                    fp=fp,
+                    resolved=True,
+                    total=2,
+                )
+            ],
+        ),
+    )
+    assert status["accepted"] is True

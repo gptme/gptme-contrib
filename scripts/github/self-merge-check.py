@@ -1129,7 +1129,7 @@ def _ai_review_disposition_shortfall(
     current_findings = (marker or {}).get("findings")
     _, threads = review_data
     disposed: dict[str, int] = {"P0": 0, "P1": 0}
-    disposed_fps: set[str] = set()
+    disposed_fps: set[tuple[str, str]] = set()
     for thread in threads:
         comments = thread.get("comments") or {}
         nodes = comments.get("nodes") or []
@@ -1186,7 +1186,15 @@ def _ai_review_disposition_shortfall(
         if severity in disposed and not (fp and fp in auto_resolved):
             disposed[severity] += 1
             if fp:
-                disposed_fps.add(fp)
+                # Keyed by (fp, severity), not fp alone. A fingerprint outlives
+                # a severity: the reviewer can re-raise the same finding at a
+                # higher severity on a later head, and the old thread still
+                # renders the OLD one. Matching on fp alone would let a
+                # disposed P1 thread satisfy a `findings` entry that now calls
+                # that same fingerprint a P0 — which is reachable exactly when
+                # the re-raised P0 could not be anchored, i.e. when the recall
+                # guard is the only thing left checking.
+                disposed_fps.add((fp, severity))
 
     def _blocking_findings(
         marker_findings: list[Any],
@@ -1229,7 +1237,7 @@ def _ai_review_disposition_shortfall(
         missing = [
             (fp, severity)
             for fp, severity in blocking_findings
-            if fp not in disposed_fps
+            if (fp, severity) not in disposed_fps
         ]
         if missing:
             counts: dict[str, int] = {"P0": 0, "P1": 0}
