@@ -591,6 +591,73 @@ def test_dark_branch_high_dark_score_dirty_ai_emits_needs_fix() -> None:
         ), f"no improvement item expected when AI verdict is dirty; got: {improvement_items}"
 
 
+def test_dark_branch_pending_ai_verdict_does_not_emit() -> None:
+    """Dark branch with 'pending' AI verdict (stale review SHA) must NOT emit.
+
+    Regression guard for P2 `06b3d169b8f6`: if a regression caused 'pending'
+    to be treated as 'dirty', the gate would emit greptile_needs_fix for PRs
+    whose AI review is for an older push — flooding the dispatcher.
+
+    'pending' is returned by ai_review_verdict when the reviewed SHA is not a
+    prefix of the current head SHA (i.e., the review is stale after a new push).
+    """
+    # Use a SHA that is NOT a prefix of TEST_HEAD_SHA so ai_review_verdict
+    # falls into the `*) echo "pending"` branch.
+    stale_sha = "00000000"
+    assert not TEST_HEAD_SHA.startswith(stale_sha)
+    fixture = {
+        "prs": [_pr()],
+        "comments": [_bob_ai_review_comment(stale_sha, score=4)],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        dark_items = [i for i in items if "Greptile dark" in (i.get("detail") or "")]
+        assert dark_items == [], (
+            f"dark branch must NOT emit for 'pending' AI verdict (stale review SHA); "
+            f"got: {dark_items}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+
+def test_dark_branch_none_ai_verdict_does_not_emit() -> None:
+    """Dark branch with 'none' AI verdict (no review marker) must NOT emit.
+
+    Regression guard for P2 `06b3d169b8f6`: if a regression caused 'none'
+    to be treated as 'dirty', the gate would emit greptile_needs_fix for PRs
+    that have never been reviewed by our AI reviewer.
+
+    'none' is returned by ai_review_verdict when no bob-ai-review marker
+    comment exists on the PR.
+    """
+    fixture = {
+        "prs": [_pr()],
+        # No bob-ai-review marker comment → ai_review_verdict returns "none".
+        "comments": [],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        dark_items = [i for i in items if "Greptile dark" in (i.get("detail") or "")]
+        assert dark_items == [], (
+            f"dark branch must NOT emit for 'none' AI verdict (no review marker); "
+            f"got: {dark_items}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+
 def test_dark_branch_cooldown_dirty_not_emitted() -> None:
     """Dark branch must respect cooldown: dirty AI on same head within cooldown → no emit.
 
