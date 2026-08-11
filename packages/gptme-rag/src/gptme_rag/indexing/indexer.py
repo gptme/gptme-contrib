@@ -185,22 +185,39 @@ class Indexer:
         # Also hold onto the peeked collection so we don't call get_collection again with
         # a mismatched embedding function (newer chromadb raises on that conflict).
         _auto_peeked_collection = None
+        reuse_auto_peeked_collection = False
         if embedding_function == "auto":
             try:
                 _auto_peeked_collection = self.client.get_collection(name=collection_name)
-                detected = (_auto_peeked_collection.metadata or {}).get(
-                    "embedding_model", "modernbert"
-                )
-                if detected not in ("modernbert", "default", "unknown") and "/" in detected:
+                metadata = _auto_peeked_collection.metadata or {}
+                detected = metadata.get("embedding_model", "modernbert")
+                detected_backend = metadata.get("embedding_backend")
+
+                if detected_backend == "modernbert" or detected == "modernbert":
+                    self.embedding_function = ModernBERTEmbedding(device=device)
+                elif detected_backend == "sentence-transformers" or (
+                    detected not in ("modernbert", "default", "unknown") and "/" not in detected
+                ):
+                    self.embedding_function = GenericSentenceTransformerEmbedding(
+                        detected, device=device
+                    )
+                elif detected_backend == "openrouter" or (
+                    detected not in ("modernbert", "default", "unknown") and "/" in detected
+                ):
                     # The stored model is an OpenRouter model name (org/model format); re-init to match.
                     try:
                         self.embedding_function = OpenRouterEmbedding(model_name=detected)
                     except ValueError:
+                        reuse_auto_peeked_collection = True
+                        self.embedding_function = None
                         logger.warning(
                             "Stored index uses OpenRouter model %r but OPENROUTER_API_KEY is not set; "
-                            "falling back to ModernBERT (search quality may be degraded)",
+                            "preserving the existing collection without rebinding embeddings",
                             detected,
                         )
+                else:
+                    self.embedding_function = None
+                    reuse_auto_peeked_collection = True
             except Exception:
                 pass  # No existing collection; keep ModernBERT default
 
@@ -215,10 +232,10 @@ class Indexer:
         else:
             current_model = "default"
 
-        if _auto_peeked_collection is not None:
+        if _auto_peeked_collection is not None and reuse_auto_peeked_collection:
             # Reuse the no-embedding-function collection handle from auto-detect;
-            # calling get_collection again with a mismatched embedding_function raises
-            # a conflict error in newer chromadb versions.
+            # only safe when the stored collection itself uses ChromaDB defaults or
+            # when we deliberately preserve a foreign collection without rebinding.
             self.collection = _auto_peeked_collection
             if force_recreate:
                 need_recreate = True
@@ -241,9 +258,20 @@ class Indexer:
                     need_recreate = True
 
             except (ValueError, Exception) as e:
-                # Collection doesn't exist or other error
-                logger.debug(f"Collection access error: {e}")
-                need_recreate = True
+                if embedding_function == "auto" and _auto_peeked_collection is not None:
+                    logger.warning(
+                        "Auto mode could not rebind collection %r with the detected embedding "
+                        "function (%s); preserving the existing collection instead of recreating it: %s",
+                        collection_name,
+                        current_model,
+                        e,
+                    )
+                    self.collection = _auto_peeked_collection
+                    need_recreate = False
+                else:
+                    # Collection doesn't exist or other error
+                    logger.debug(f"Collection access error: {e}")
+                    need_recreate = True
 
         if need_recreate:
             # Delete if exists
@@ -253,7 +281,11 @@ class Indexer:
                 pass
 
             # Create new collection
-            metadata = {"hnsw:space": "cosine", "embedding_model": current_model}
+            metadata = {
+                "hnsw:space": "cosine",
+                "embedding_model": current_model,
+                "embedding_backend": self.embedding_backend_name,
+            }
             logger.info(f"Creating new collection with {current_model} embeddings")
             self.collection = self.client.create_collection(
                 name=collection_name,
@@ -290,6 +322,18 @@ class Indexer:
             return self.embedding_function.model_name
         elif isinstance(self.embedding_function, OpenRouterEmbedding):
             return self.embedding_function.model_name
+        else:
+            return "default"
+
+    @property
+    def embedding_backend_name(self) -> str:
+        """Get the backend class for the current embedding function."""
+        if isinstance(self.embedding_function, ModernBERTEmbedding):
+            return "modernbert"
+        elif isinstance(self.embedding_function, GenericSentenceTransformerEmbedding):
+            return "sentence-transformers"
+        elif isinstance(self.embedding_function, OpenRouterEmbedding):
+            return "openrouter"
         else:
             return "default"
 
@@ -334,6 +378,7 @@ class Indexer:
             metadata={
                 "hnsw:space": "cosine",
                 "embedding_model": self.embedding_model_name,
+                "embedding_backend": self.embedding_backend_name,
             },
             embedding_function=self.embedding_function,
         )

@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+import gptme_rag.indexing.indexer as indexer_module
 from gptme_rag.indexing.document import Document
 from gptme_rag.indexing.indexer import Indexer
 
@@ -315,8 +316,94 @@ def test_auto_embedding_mode_does_not_destroy_foreign_model_collection(tmp_path)
     ), "auto mode destroyed the collection indexed with a non-default embedding model"
 
 
+def test_auto_embedding_mode_rebinds_sentence_transformer_collection(tmp_path, monkeypatch):
+    """Auto mode must reopen sentence-transformer collections with the matching embedder."""
+
+    class FakeModernBERTEmbedding:
+        is_msmarco = False
+
+        def __init__(self, model_name="modernbert", device="cpu"):
+            self.model_name = model_name
+
+        @staticmethod
+        def name() -> str:
+            return "fake-modernbert"
+
+        @staticmethod
+        def is_legacy() -> bool:
+            return False
+
+        def __call__(self, input):
+            return [[1.0] * 768 for _ in input]
+
+        def embed_query(self, input):
+            return self(input)
+
+        def embed_documents(self, input):
+            return self(input)
+
+    class FakeSentenceTransformerEmbedding:
+        is_msmarco = False
+
+        def __init__(self, model_name, device="cpu"):
+            self.model_name = model_name
+
+        @staticmethod
+        def name() -> str:
+            return "fake-sentence-transformer"
+
+        @staticmethod
+        def is_legacy() -> bool:
+            return False
+
+        def __call__(self, input):
+            return [[0.5] * 384 for _ in input]
+
+        def embed_query(self, input):
+            return self(input)
+
+        def embed_documents(self, input):
+            return self(input)
+
+    monkeypatch.setattr(indexer_module, "ModernBERTEmbedding", FakeModernBERTEmbedding)
+    monkeypatch.setattr(
+        indexer_module,
+        "GenericSentenceTransformerEmbedding",
+        FakeSentenceTransformerEmbedding,
+    )
+
+    persist_dir = tmp_path / "index"
+    source_indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="minilm",
+        collection_name="default",
+    )
+    source_indexer.add_document(
+        Document(
+            content="Sentence-transformer backed document",
+            metadata={"source": str(tmp_path / "minilm.txt")},
+            doc_id="minilm-doc",
+        )
+    )
+
+    reopened = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="auto",
+        collection_name="default",
+    )
+
+    results, _, _ = reopened.search("sentence-transformer")
+    assert reopened.collection.count() == 1
+    assert reopened.embedding_model_name == "all-MiniLM-L6-v2"
+    assert len(results) == 1
+    assert results[0].doc_id == "minilm-doc"
+
+
 def test_reset_collection_preserves_embedding_metadata(indexer):
     """reset_collection must recreate with the same embedding model metadata."""
     indexer.reset_collection()
     metadata = indexer.collection.metadata or {}
     assert metadata.get("embedding_model") == indexer.embedding_model_name
+    assert metadata.get("embedding_backend") == indexer.embedding_backend_name
