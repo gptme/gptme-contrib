@@ -1333,6 +1333,11 @@ class RunItemOutcome:
     ack_result_json: str
     rate_limited: bool = False
     counted_failure: bool = False
+    #: Worker was hard-killed at its time budget (exit 124). Deliberately NOT a
+    #: ``counted_failure`` — an infra timeout must not contaminate the quality
+    #: signal — but it is emphatically not a success either, so it is tracked
+    #: separately and subtracted from the ledger's ``successes``.
+    timed_out: bool = False
 
 
 def _find_arc(
@@ -1563,10 +1568,12 @@ def execute_plan(
 
     rate_limited = False
     counted_failure = False
+    timed_out = False
     if exit_code == 124:
         _log(
             f"WARN: Item {plan.index} timed out after {plan.timeout}s ({plan.time_desc})"
         )
+        timed_out = True
     elif exit_code != 0:
         _log(f"WARN: Item {plan.index} exited with code {exit_code}")
         counted_failure = True
@@ -1602,6 +1609,7 @@ def execute_plan(
         ack_result_json=ack_result_json,
         rate_limited=rate_limited,
         counted_failure=counted_failure,
+        timed_out=timed_out,
     )
 
 
@@ -2396,6 +2404,7 @@ def run_work_file(
 
         group_count = len(items)
         failures = 0
+        timeouts = 0
         rate_limited = False
         overall_exit = 0
         item_effects: list[str] = []
@@ -2474,6 +2483,8 @@ def run_work_file(
                 )
                 if item_outcome.counted_failure:
                     failures += 1
+                if item_outcome.timed_out:
+                    timeouts += 1
                 if item_outcome.rate_limited:
                     rate_limited = True
                 if item_outcome.exit_code != 0 and overall_exit == 0:
@@ -2489,14 +2500,24 @@ def run_work_file(
 
         promote_notification_states(config)
 
-        # NOTE(parity): successes = total - failures, exactly like the bash
+        # NOTE(parity): successes = total - failures, like the bash
         # (`_item_successes=$(( group_count - _item_failures ))`,
         # project-monitoring.sh:713-714) — so self-merged, claim-denied, and
         # rate-limit-skipped items count as "successes" here too. Inaccurate,
         # but the step-5 ledger A/B needs identical accounting on both paths;
         # fixing the metric is a post-cutover behavior change (both sides of
         # the A/B would otherwise diverge on every skip).
-        successes = group_count - failures
+        #
+        # EXCEPT timeouts. A worker hard-killed at its time budget (exit 124)
+        # sets neither `counted_failure` (deliberately: an infra kill must not
+        # contaminate the quality signal) nor, before this, anything else — so
+        # `group_count - failures` counted it as a SUCCESS. Measured on
+        # state/project-monitoring-dispatch.jsonl 2026-08-11: all 17 rows with
+        # exit_code 124 recorded successes=1, failures=0, outcome="failed". A
+        # row that is simultaneously a success and a failure makes every metric
+        # summing `successes` an over-count, and makes "succeeded" in this
+        # ledger unverifiable. A timeout is neither: subtract it from both.
+        successes = group_count - failures - timeouts
         duration = int(time.time()) - run_start
         # INVARIANT: the ledger's `outcome` is derived from `exit_code`,
         # `failures`, and the observable external `effect`

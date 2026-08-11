@@ -664,6 +664,32 @@ def test_run_work_file_propagates_session_exit_code(tmp_path) -> None:
     assert completed["failures"] == 0
 
 
+def test_timeout_is_not_counted_as_a_success(tmp_path) -> None:
+    """A hard-killed worker (exit 124) must not appear in `successes`.
+
+    Measured on state/project-monitoring-dispatch.jsonl 2026-08-11: all 17 rows
+    with exit_code 124 recorded successes=1, failures=0, outcome="failed" — a
+    row that is simultaneously a success and a failure. Every metric summing
+    `successes` over-counted by those rows.
+    """
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=124)
+
+    assert (
+        run_work_file(work_file, config, make_hooks(run_cmd=run_cmd), backend="codex")
+        == 124
+    )
+
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["successes"] == 0
+    assert completed["failures"] == 0  # still not a quality failure
+    assert completed["exit_code"] == 124
+    assert completed["outcome"] == "failed"
+
+
 def test_run_work_file_counts_failures(tmp_path) -> None:
     item = make_item(types=["notification"], number=0)
     work_file = _write_work_file(tmp_path, item)
