@@ -1056,8 +1056,8 @@ def count_subtasks(content: str) -> SubtaskCount:
     pending = len(re.findall(r"- (\[ \]|🏃)", content))
     # Strikethrough-form skips are already counted above (they use [x] / [ ]),
     # so move them out of completed/pending rather than double-counting.
-    struck_done = len(re.findall(r"- \[x\]\s*~~", content))
-    struck_pending = len(re.findall(r"- \[ \]\s*~~", content))
+    struck_done = len(re.findall(r"- \[x\]\s*~~.+?~~", content))
+    struck_pending = len(re.findall(r"- \[ \]\s*~~.+?~~", content))
     completed -= struck_done
     pending -= struck_pending
     skipped = (

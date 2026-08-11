@@ -261,10 +261,12 @@ class TestSetSubtaskToggleSkipped:
         )
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
-        # Pass only the prefix — a realistic short identifier
+        # Pass only the prefix — a realistic short identifier that exercises the
+        # partial-match path (the old position-based truncation clipped at the
+        # prefix boundary, so "Wire GitHub" as input exposed the bug).
         result = runner.invoke(
             cli,
-            ["edit", "test-toggle", "--set-subtask", "Wire GitHub issue indexing", "done"],
+            ["edit", "test-toggle", "--set-subtask", "Wire GitHub", "done"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output

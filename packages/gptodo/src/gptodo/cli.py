@@ -2299,9 +2299,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                                 if marker == "- [-]":
                                     new_line = re.sub(r"\s*\([^)]+\)\s*$", "", new_line).rstrip()
                                 lines[i] = new_line
+                                updated = True
                                 break
-                        updated = True
-                        break
+                        if updated:
+                            break
 
                 if not updated:
                     console.print(f"[red]Subtask not found: {subtask_text}[/]")
