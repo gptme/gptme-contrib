@@ -82,6 +82,32 @@ if [ "$merge_base" != "$origin_commit" ]; then
     echo ""
 fi
 
+# Auto-symlink node_modules in linked git worktrees to prevent --no-verify bypass.
+# Proper worktree detection via git-common-dir vs git-dir (works for all git versions).
+_gw_git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
+_gw_common_dir=$(git rev-parse --git-common-dir 2>/dev/null || true)
+if [ -n "$_gw_git_dir" ] && [ "$_gw_git_dir" != "$_gw_common_dir" ]; then
+    _gw_main_root=$(realpath "$_gw_common_dir/.." 2>/dev/null || true)
+    _gw_wt_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$_gw_main_root" ] && [ -n "$_gw_wt_root" ] && [ "$_gw_main_root" != "$_gw_wt_root" ]; then
+        while IFS= read -r -d '' _gw_base; do
+            _gw_rel="${_gw_base#"$_gw_main_root"/}"
+            _gw_target="$_gw_wt_root/$_gw_rel"
+            _gw_parent=$(dirname "$_gw_target")
+            [ -d "$_gw_parent" ] || continue
+            if [ ! -e "$_gw_target" ]; then
+                ln -s "$_gw_base" "$_gw_target"
+                echo "[git-worktree] Symlinked $_gw_rel -> $_gw_base"
+            elif [ -L "$_gw_target" ] && [ ! -d "$_gw_target" ]; then
+                rm "$_gw_target"
+                ln -s "$_gw_base" "$_gw_target"
+                echo "[git-worktree] Fixed broken symlink $_gw_rel -> $_gw_base"
+            fi
+        done < <(find "$_gw_main_root" -maxdepth 3 -type d -name node_modules \
+                 -not -path "*/node_modules/*" -print0 2>/dev/null)
+    fi
+fi
+
 # Git LFS support (don't fail hook if LFS has issues)
 command -v git-lfs >/dev/null 2>&1 && git lfs post-checkout "$@" 2>/dev/null || true
 
