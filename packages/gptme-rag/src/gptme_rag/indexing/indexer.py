@@ -192,7 +192,7 @@ class Indexer:
             try:
                 _auto_peeked_collection = self.client.get_collection(name=collection_name)
                 metadata = _auto_peeked_collection.metadata or {}
-                detected = metadata.get("embedding_model", "modernbert")
+                detected = metadata.get("embedding_model", "default")
                 detected_backend = metadata.get("embedding_backend")
 
                 if detected_backend == "modernbert" or detected == "modernbert":

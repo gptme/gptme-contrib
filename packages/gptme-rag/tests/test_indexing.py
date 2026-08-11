@@ -401,6 +401,46 @@ def test_auto_embedding_mode_rebinds_sentence_transformer_collection(tmp_path, m
     assert results[0].doc_id == "minilm-doc"
 
 
+def test_auto_embedding_mode_preserves_legacy_chromadb_default_collection(tmp_path):
+    """Auto mode must not corrupt a legacy collection that has no embedding_model metadata.
+
+    Regression test for P1 bug: metadata.get("embedding_model", "modernbert") defaulted
+    to 'modernbert' for metadata-free collections, so auto mode rebound to ModernBERT
+    (768-dim) and ChromaDB raised a dimension mismatch on any subsequent search.
+    Fix: default to 'default' so no-metadata collections fall through to the
+    reuse_auto_peeked_collection path (embedding_function=None).
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Simulate a legacy collection created before embedding_model metadata was introduced.
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={"hnsw:space": "cosine"},  # no embedding_model or embedding_backend
+    )
+    # ChromaDB default embeddings are 384-dim (all-MiniLM-L6-v2).
+    col.add(ids=["legacy-doc"], embeddings=[[0.1] * 384], documents=["legacy content"])
+    assert col.count() == 1
+
+    # Open with auto mode — must not remap to ModernBERT (768-dim)
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="auto",
+        collection_name="default",
+    )
+
+    # Collection must be intact and reachable
+    assert (
+        indexer.collection.count() == 1
+    ), "auto mode destroyed legacy no-metadata collection (dimension mismatch bug)"
+
+
 def test_reset_collection_preserves_embedding_metadata(indexer):
     """reset_collection must recreate with the same embedding model metadata."""
     indexer.reset_collection()
