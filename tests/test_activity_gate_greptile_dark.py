@@ -464,3 +464,63 @@ def test_empty_last_score_reraises_real_greptile_score() -> None:
             f"state file first field must be real Greptile score '4' after re-fetch; "
             f"got: {state_file.read_text()!r}"
         )
+
+
+def test_dark_branch_sub4_dark_score_emits_needs_fix() -> None:
+    """Dark branch with preserved dark_score < 4 must emit greptile_needs_fix, not improvement.
+
+    Regression guard for the P1 finding on 872a1d1a: when Greptile is dark but a
+    previous cycle recorded a real score < 4 (e.g. 3), the dark branch should
+    route to greptile_needs_fix, not greptile_needs_improvement, to match the
+    severity of the cached finding.
+
+    Scenario:
+    - Previous cycle: Greptile posted score 3/5 → state written as "3:ts:sha:dirty"
+    - Current cycle: Greptile score fetch returns empty (API hiccup or dark)
+    - Expected: greptile_needs_fix emitted (not greptile_needs_improvement)
+    """
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        # AI review is dirty (score=4, which maps to "dirty"); no Greptile comment.
+        "comments": [_bob_ai_review_comment(short_sha, score=4)],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Pre-seed with a real sub-4 Greptile score (3) for the same SHA, but
+        # old timestamp so the cache TTL is expired and we re-fetch (getting
+        # empty → dark branch).  dark_score should be preserved as "3".
+        import time
+
+        state_file = _state_file(state_dir)
+        old_ts = int(time.time()) - 7200  # 2 hours ago, past the 3600-s TTL
+        state_file.write_text(f"3:{old_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        # The dark branch emits one item with "Greptile dark" in the detail.
+        # check_own_pr_review_state may also emit a second item (it reads the
+        # preserved dark_score=3 from the state file) — that's expected and correct.
+        dark_items = [i for i in items if "Greptile dark" in (i.get("detail") or "")]
+        assert len(dark_items) == 1, (
+            f"expected one dark-branch greptile item; got {items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert dark_items[0]["type"] == "greptile_needs_fix", (
+            f"dark_score=3 (<4) must route to greptile_needs_fix, "
+            f"not greptile_needs_improvement; got: {dark_items[0]}"
+        )
+        # Verify no item wrongly uses the improvement lane for a sub-4 score.
+        improvement_items = [
+            i for i in items if i.get("type") == "greptile_needs_improvement"
+        ]
+        assert improvement_items == [], (
+            f"no item should use greptile_needs_improvement when dark_score=3 (<4); "
+            f"got: {improvement_items}"
+        )

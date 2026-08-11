@@ -1113,7 +1113,13 @@ check_greptile_scores() {
                     fi
                 fi
                 echo "${dark_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
-                emit_item "greptile_needs_improvement" "$repo" "$pr_number" "$pr_title" "$detail"
+                # Route based on preserved dark_score: a sub-4 cached score means
+                # significant findings — use greptile_needs_fix, not improvement.
+                local dark_item_type="greptile_needs_improvement"
+                if [[ "$dark_score" =~ ^[0-9]$ ]] && [ "$dark_score" -lt 4 ] 2>/dev/null; then
+                    dark_item_type="greptile_needs_fix"
+                fi
+                emit_item "$dark_item_type" "$repo" "$pr_number" "$pr_title" "$detail"
             else
                 # clean / pending / none — seed/update state, don't emit.
                 echo "${dark_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
