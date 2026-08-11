@@ -201,26 +201,31 @@ def test_ai_review_verdict_called_outside_ge5_branch() -> None:
 
 
 def test_no_score_state_write_uses_dark_score_field() -> None:
-    """State writes in the no-score branch must use ${dark_score} as the first field.
+    """State writes in the no-score branch must use an empty first field and ${dark_score} in field 5.
 
-    dark_score is empty when there is no previous real score (genuine dark
-    case) and equals last_score when the same SHA had a real score before
-    (transient API failure: P1 fix).  Writing a bare `:${fetched_at}` would
-    always lose a previously-cached real score on transient failures.
+    P3 fix: dark_score must NOT go in field 1. Putting a non-empty score in
+    field 1 causes the score-cache condition ([ -n "$last_score" ]) to trigger
+    on the next cycle, so the dark branch is skipped and ai_review_verdict is
+    never called fresh — a stale dirty verdict persists for up to fetch_cache_ttl.
+    Fix: field 1 = empty (cache always misses for dark PRs), field 5 = dark_score
+    (so check_merge_ready can still block sub-5 merges during outages).
     """
     body = _extract_function("check_greptile_scores")
     writes = re.findall(r'^\s*echo "([^"]*)" > "\$state_file"$', body, re.MULTILINE)
-    # The no-score branch writes start with "${dark_score}:${fetched_at}".
-    dark_writes = [w for w in writes if w.startswith("${dark_score}:${fetched_at}")]
+    # The no-score branch writes start with ":${fetched_at}" (empty first field).
+    dark_writes = [w for w in writes if w.startswith(":${fetched_at}")]
     assert dark_writes, (
         "expected at least one state write in the no-score branch starting with "
-        "'${dark_score}:${fetched_at}' (P1 fix: preserve or empty Greptile-score "
-        "field); found writes: " + str(writes)
+        "':${fetched_at}' (P3 fix: empty first field prevents score-cache hit; "
+        "dark_score goes in field 5); found writes: " + str(writes)
     )
     for w in dark_writes:
         assert (
             "${ai_verdict}" in w
         ), f"no-score branch write missing the verdict field: {w!r}"
+        assert (
+            "${dark_score}" in w
+        ), f"no-score branch write missing dark_score (expected in field 5): {w!r}"
 
 
 def test_dark_branch_calls_ai_review_verdict_unconditionally() -> None:
@@ -359,12 +364,13 @@ def test_no_greptile_score_clean_ai_review_does_not_emit() -> None:
 
 
 def test_dark_branch_preserves_last_score_on_same_sha() -> None:
-    """Dark branch preserves last_score when API returns empty and SHA matches (P1 fix).
+    """Dark branch preserves last_score in field 5 when API returns empty and SHA matches (P1/P3 fix).
 
     Scenario: previous cycle wrote a real Greptile score (4) but the TTL
-    expired and the API now returns empty (transient failure).  The state
-    file must keep the '4' in the first field so check_merge_ready does not
-    treat this PR as having no Greptile review and emit merge_ready.
+    expired and the API now returns empty (transient failure). The state file
+    must keep '4' in field 5 (NOT field 1) so:
+    - check_merge_ready does not treat this PR as having no Greptile review
+    - the score-cache cannot trigger on the next cycle (field 1 stays empty)
     """
     import time
 
@@ -390,13 +396,83 @@ def test_dark_branch_preserves_last_score_on_same_sha() -> None:
         result = _run_gate(tmp, fixture, state_dir=state_dir)
         assert result.returncode in (0, 1), result.stderr
 
-        # State file must preserve the real score '4', not overwrite with empty.
+        # P3: field 1 must be empty (not "4") — empty field 1 ensures the score-cache
+        # never triggers on subsequent dark cycles, keeping ai_review_verdict fresh.
+        # P1: the real score "4" must still appear in field 5 for check_merge_ready.
         written = state_file.read_text().strip()
         fields = written.split(":")
-        assert fields[0] == "4", (
-            f"P1 fix: state file first field must preserve previous Greptile "
+        assert fields[0] == "", (
+            f"P3 fix: state file first field must be empty in dark state "
+            f"(score cache must not hit on next cycle); "
+            f"got: {written!r}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert len(fields) >= 5 and fields[4] == "4", (
+            f"P1/P3 fix: state file field 5 must preserve previous Greptile "
             f"score '4' when API returns empty and SHA is unchanged; "
             f"got: {written!r}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+
+def test_dark_branch_preserved_score_does_not_cache_hit() -> None:
+    """Dark state with non-empty field 5 must NOT cause a score-cache hit next cycle.
+
+    Regression guard for P1 finding fp 20761efa5189: when the dark branch writes
+    dark_score in field 1 (old format), the next cycle's score-cache condition
+    ([ -n "$last_score" ] && SHA matches && timestamp fresh) fires → dark branch
+    is skipped → ai_review_verdict is never called → stale dirty verdict persists.
+
+    With the P3 fix: field 1 is always empty in dark states. The score-cache
+    condition cannot fire ([ -n "" ] is false) → dark branch always re-runs →
+    ai_review_verdict is called fresh on every cycle.
+
+    Scenario:
+    - State file pre-seeded as P3 dark format: ":ts:sha:dirty:4" (recent ts, within TTL)
+    - Greptile still dark; AI review findings are now RESOLVED (score=5 → "clean")
+    - Expected: no greptile item emitted (ai_review_verdict called fresh, returns clean)
+    - If the bug were present: score-cache hits on dark_score=4, non-dark path emits
+      greptile_needs_improvement (not greptile_needs_fix) from stale dirty verdict.
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        # No Greptile score comment (Greptile still dark).
+        # AI review findings resolved — score=5 → ai_review_verdict returns "clean".
+        "comments": [_bob_ai_review_comment(short_sha, score=5)],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Pre-seed with P3 dark state format: empty field 1, preserved score=4 in
+        # field 5, recent timestamp (well within fetch_cache_ttl=3600s).
+        state_file = _state_file(state_dir)
+        recent_ts = int(time.time()) - 60  # 60 s ago, within the 3600-s TTL
+        state_file.write_text(f":{recent_ts}:{TEST_HEAD_SHA}:dirty:4")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        # Fresh ai_review_verdict returns "clean" → no item emitted.
+        # If score-cache had triggered, we would have taken the non-dark path
+        # with score=4 and served the stale "dirty" verdict → greptile_needs_improvement.
+        items = _greptile_items(result)
+        dark_items = [i for i in items if "Greptile dark" in (i.get("detail") or "")]
+        assert dark_items == [], (
+            f"P3 fix: dark branch must NOT emit when ai_review_verdict returns 'clean' "
+            f"(score-cache must not hit on dark state, fresh verdict must be used); "
+            f"got: {dark_items}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        # Also verify no stale-verdict improvement item from the non-dark path.
+        improvement_items = [
+            i for i in items if i.get("type") == "greptile_needs_improvement"
+        ]
+        assert improvement_items == [], (
+            f"P3 fix: stale dirty verdict must not produce improvement item "
+            f"(score-cache must not fire for dark states); got: {improvement_items}"
         )
 
 

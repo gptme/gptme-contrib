@@ -1089,20 +1089,35 @@ check_greptile_scores() {
             local ai_verdict=""
             ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha")
             fetched_at="$now"
-            # P1 fix: preserve last_score when same SHA so a transient API
-            # failure (greptile_score empty due to network error or malformed
-            # comment) does not silently wipe a real previously-cached score.
-            # check_merge_ready reads the first field; an empty field is treated
-            # as "no Greptile review" and can emit merge_ready for a sub-5 PR.
+            # Field 1 is ALWAYS empty in dark-state writes (note the leading ":" below).
+            # This is intentional: if field 1 held a non-empty score, the cache-hit
+            # condition at line 1057 ([ -n "$last_score" ] && SHA matches && ts fresh)
+            # would fire next cycle, bypassing the dark branch and leaving
+            # ai_review_verdict uncalled until the 3600-s TTL expires — a stale verdict
+            # would persist even after findings are resolved.
+            # With field 1 empty: every cycle is a cache miss → dark branch re-runs →
+            # ai_review_verdict is called fresh.  Regression guard:
+            # test_dark_branch_preserved_score_does_not_cache_hit.
+            #
+            # A previously-cached real Greptile score (before Greptile went dark) is
+            # preserved in field 5 so check_merge_ready can still block sub-5 merges.
+            # State format for dark cycles: ":fetched_at:sha:verdict:preserved_score"
+            # check_merge_ready reads field 5 when field 1 is empty.
             local dark_score=""
-            if [ -n "$last_score" ] && [ "$last_sha" = "$head_sha" ]; then
-                dark_score="$last_score"
+            if [ "$last_sha" = "$head_sha" ]; then
+                if [ -n "$last_score" ]; then
+                    # Transitioning from a real Greptile state (non-empty field 1).
+                    dark_score="$last_score"
+                else
+                    # Already in a dark state (field 1 empty) — carry forward field 5.
+                    dark_score=$(echo "$last_state" | cut -d: -f5)
+                fi
             fi
             if [ "$ai_verdict" = "dirty" ]; then
                 local detail="our AI review has open findings (Greptile dark on this repo)"
                 # First time seeing this PR with no Greptile score — seed state, don't emit.
                 if [ -z "$last_state" ]; then
-                    echo "${dark_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                    echo ":${fetched_at}:${head_sha}:${ai_verdict}:${dark_score}" > "$state_file"
                     continue
                 fi
                 # Same head and same verdict — respect the cooldown before nagging.
@@ -1112,14 +1127,14 @@ check_greptile_scores() {
                         continue
                     fi
                 fi
-                echo "${dark_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                echo ":${fetched_at}:${head_sha}:${ai_verdict}:${dark_score}" > "$state_file"
                 # Always route dirty AI verdict to greptile_needs_fix, matching the
                 # non-dark path (which sets route_score=3 on dirty → always fix).
                 # dark_score does not change the severity when our AI says fix it.
                 emit_item "greptile_needs_fix" "$repo" "$pr_number" "$pr_title" "$detail"
             else
                 # clean / pending / none — seed/update state, don't emit.
-                echo "${dark_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
+                echo ":${fetched_at}:${head_sha}:${ai_verdict}:${dark_score}" > "$state_file"
             fi
             continue
         fi
@@ -1607,6 +1622,10 @@ check_merge_ready() {
         local greptile_score=""
         if [ -f "$greptile_state_file" ]; then
             greptile_score=$(cut -d: -f1 < "$greptile_state_file")
+            # Dark-state format: field 1 is empty, preserved score is in field 5.
+            if [ -z "$greptile_score" ]; then
+                greptile_score=$(cut -d: -f5 < "$greptile_state_file")
+            fi
             # Must be perfect score (>= 5) to be merge-ready
             if [ -n "$greptile_score" ] && [ "$greptile_score" -lt 5 ] 2>/dev/null; then
                 continue
