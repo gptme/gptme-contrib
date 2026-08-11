@@ -1030,11 +1030,11 @@ def count_subtasks(content: str) -> SubtaskCount:
     GFM does not render ``- [-]`` as a checkbox, which is why the strikethrough
     forms exist; all three are treated identically.
 
-    ``- [SKIP]`` is NOT a supported form. This docstring previously advertised
-    it as "Skipped task (not counted)" while no regex implemented it — and "not
-    counted" is precisely the laundering semantics rejected below. It is left
-    unimplemented deliberately: it renders no better than ``[-]`` on GitHub and
-    widens the parse surface past the three specified forms.
+    ``- [SKIP]`` is treated as skipped (same denominator rule) even though it
+    is not a recommended form. The docstring previously advertised it as "not
+    counted", which is precisely the laundering semantics rejected below. It is
+    recognised defensively so that old content using it is counted correctly,
+    but the three interchangeable forms above are the documented interface.
 
     THE DENOMINATOR RULE: skipped items stay in ``total``.
     ``total = completed + pending + skipped``. Simply ignoring the ``[-]``
@@ -1052,16 +1052,23 @@ def count_subtasks(content: str) -> SubtaskCount:
     Returns:
         SubtaskCount with completed, total, and skipped counts
     """
-    completed = len(re.findall(r"- (\[x\]|✅)", content))
-    pending = len(re.findall(r"- (\[ \]|🏃)", content))
+    # Strip bare-skip and [SKIP] lines before scanning for completed/pending
+    # markers so a title like "- [-] Use - [ ] thing (deferred: X)" does not
+    # produce a spurious pending count from the "- [ ]" inside the title.
+    content_without_skips = re.sub(
+        r"^\s*(?:>\s*)?- \[(?:-|SKIP)\].*$", "", content, flags=re.MULTILINE
+    )
+    completed = len(re.findall(r"- (\[x\]|✅)", content_without_skips))
+    pending = len(re.findall(r"- (\[ \]|🏃)", content_without_skips))
     # Strikethrough-form skips are already counted above (they use [x] / [ ]),
     # so move them out of completed/pending rather than double-counting.
-    struck_done = len(re.findall(r"- \[x\]\s*~~.+?~~", content))
-    struck_pending = len(re.findall(r"- \[ \]\s*~~.+?~~", content))
+    struck_done = len(re.findall(r"- \[x\]\s*~~.+?~~", content_without_skips))
+    struck_pending = len(re.findall(r"- \[ \]\s*~~.+?~~", content_without_skips))
     completed -= struck_done
     pending -= struck_pending
     skipped = (
         len(re.findall(r"^\s*(?:>\s*)?- \[-\]", content, re.MULTILINE))
+        + len(re.findall(r"^\s*(?:>\s*)?- \[SKIP\]", content, re.MULTILINE))
         + struck_done
         + struck_pending
     )

@@ -76,9 +76,26 @@ class TestSkippedCheckboxes:
         counts = count_subtasks("- [ ] Fix the ~~old~~ new thing\n")
         assert (counts.completed, counts.total, counts.skipped) == (0, 1, 0)
 
-    def test_skip_marker_word_form_is_not_supported(self):
-        """`- [SKIP]` was documented but never implemented; it stays that way."""
-        assert count_subtasks("- [SKIP] Content schedule established\n") == SubtaskCount(0, 0, 0)
+    def test_skip_marker_word_form_counts_as_skipped(self):
+        """`- [SKIP]` is recognised as skipped to close the denominator-laundering hole."""
+        assert count_subtasks("- [SKIP] Content schedule established\n") == SubtaskCount(0, 1, 1)
+
+    def test_skip_marker_word_form_with_completed(self):
+        """`- [SKIP]` stays in total alongside completed items."""
+        content = "- [SKIP] hard one\n- [x] easy one\n"
+        result = count_subtasks(content)
+        assert result.skipped == 1
+        assert result.completed == 1
+        assert result.total == 2
+
+    def test_bare_skip_title_with_checkbox_does_not_double_count(self):
+        """P2: a title like '- [-] Use - [ ] thing (deferred: X)' must not add
+        a spurious pending count from the '- [ ]' inside the title."""
+        content = "- [-] Use - [ ] thing (deferred: X)\n"
+        result = count_subtasks(content)
+        assert result.skipped == 1
+        assert result.pending == 0
+        assert result.total == 1
 
     def test_str_surfaces_skipped(self):
         assert str(count_subtasks("- [x] a\n- [-] b (skipped: X)\n")) == "(1/2, 1 skipped)"
@@ -303,3 +320,28 @@ class TestSetSubtaskToggleSkipped:
         assert "- [ ] Refer to - [ ] old checklist" in content
         # The original leading [x] must be gone
         assert "- [x] Refer to" not in content
+
+    def test_bare_skip_toggle_strips_nested_paren_reason(self, tmp_path: Path, monkeypatch):
+        """P2 regression: reason with nested parens must be fully stripped.
+
+        '- [-] Foo (deferred: see (issue #5))' — the old [^)]+ regex could not
+        consume the nested close-paren, so the annotation survived the toggle.
+        """
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "test-toggle.md"
+        task_file.write_text(self.TASK_TEMPLATE.format(line="- [-] Foo (deferred: see (issue #5))"))
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["edit", "test-toggle", "--set-subtask", "Foo", "done"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        content = task_file.read_text()
+        assert "- [x] Foo" in content
+        # The entire parenthetical (including the nested one) must be gone
+        assert "(deferred:" not in content
+        assert "(issue #5)" not in content
+        assert count_subtasks(content).skipped == 0

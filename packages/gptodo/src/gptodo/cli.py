@@ -2296,8 +2296,14 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                                 # parenthetical via regex — not a position-based
                                 # truncation — so partial-match subtask_text values
                                 # (prefixes of the full title) don't clip the title.
+                                # Pattern handles one level of nested parens, e.g.
+                                # "(deferred: see (issue #5))".
                                 if marker == "- [-]":
-                                    new_line = re.sub(r"\s*\([^)]+\)\s*$", "", new_line).rstrip()
+                                    new_line = re.sub(
+                                        r"\s*\([^)]*(?:\([^)]*\)[^)]*)*\)\s*$",
+                                        "",
+                                        new_line,
+                                    ).rstrip()
                                 lines[i] = new_line
                                 updated = True
                                 break
