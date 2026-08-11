@@ -120,6 +120,12 @@ DEFAULT_MIN_GREPTILE_SCORE = 5
 # can be lowered, and letting the same knob lower *this* floor would turn the
 # alternative path into the weakest link in the gate.
 AI_REVIEW_CLEAN_SCORE = 5
+# Lowest score the rubric can emit (`confidence_score`: 1 for any P0, up to 5
+# for nothing outstanding; abstain is `None`, not 0). Bounding the score at
+# BOTH ends matters: a `0` or a negative would sail past an upper-bound-only
+# check and be read as "a very bad review we can still tolerate", when it is
+# in fact a marker the rubric cannot have produced.
+AI_REVIEW_MIN_SCORE = 1
 # Shortest marker SHA prefix accepted when matching against the PR head. The
 # reviewer writes 12 hex chars; this only guards against a truncated/garbage
 # marker whose 1-2 char "sha" would prefix-match almost any head.
@@ -1076,23 +1082,27 @@ def _ai_review_disposition_shortfall(
     data) is treated as *unknown* and refuses, preserving the fail-closed
     property the Greptile fallback already has.
 
-    A final recall guard closes the one gap thread state cannot see: if the
-    marker itself reports a P0 or P1 on this head (``score <= 3``) yet there is
-    no P0/P1 finding thread to verify its disposition, we cannot prove it was
-    addressed. That happens with findings the reviewer could not anchor to a
-    diff line ("Comments outside the diff" in the summary body) and with a
-    reviewer that silently stopped posting. Failing open there would let a
-    genuine P0/P1 merge unreviewed — the exact recall failure this path exists
-    to prevent. Threads the reviewer itself retired (``auto_resolved``) do not
-    satisfy that guard: they are its own bookkeeping for findings that stopped
-    reproducing, so by construction they are not the P0/P1 the score reports.
+    A final recall guard closes the one gap thread state cannot see: findings
+    the reviewer could not anchor to a diff line ("Comments outside the diff"
+    in the summary body), and a reviewer that silently stopped posting. Both
+    leave a score that reports a P0/P1 with no thread to verify it was
+    addressed, and failing open there merges a genuine P0/P1 unreviewed.
 
-    **Known residual, tracked separately.** A P0/P1 thread disposed on an
-    *earlier* head stays resolved-and-replied forever and cannot be told apart
-    from one disposed on this head, so it can still satisfy the recall guard
-    for a *different*, unanchored P0/P1 the reviewer reports now. Closing that
-    needs the marker to publish the current pass's finding fingerprints, which
-    is a change to the reviewer, not to this gate.
+    The guard is bound to what the score *claims*, not to "some P0/P1 thread
+    exists". ``confidence_score`` is arithmetic over finding severities, so the
+    score names its findings exactly — 1 = at least one P0, 2 = two or more P1,
+    3 = exactly one P1 — and the guard demands a matching disposed thread per
+    claimed finding. Threads the reviewer itself retired (``auto_resolved``) do
+    not count toward it: they are its own bookkeeping for findings that stopped
+    reproducing, so by construction they are not the P0/P1 the score reports.
+    Neither does a thread whose severity did not parse — crediting it against a
+    claimed P0 would be guessing in the merge direction.
+
+    **Known residual, tracked separately.** Threads carry no head, so a P0/P1
+    disposed on an *earlier* head still counts for a same-severity finding
+    claimed now. Closing that needs the marker to publish the current pass's
+    finding fingerprints so disposition can be matched per finding rather than
+    per severity — a change to the reviewer, not to this gate.
     """
     if review_data is None:
         return "could not read review thread state"
@@ -1102,7 +1112,7 @@ def _ai_review_disposition_shortfall(
         if isinstance(fp, str) and fp
     }
     _, threads = review_data
-    saw_blocking_finding = False
+    disposed: dict[str, int] = {"P0": 0, "P1": 0}
     for thread in threads:
         comments = thread.get("comments") or {}
         nodes = comments.get("nodes") or []
@@ -1128,16 +1138,6 @@ def _ai_review_disposition_shortfall(
             f"{severity} finding" if severity else "finding with unreadable severity"
         )
         fp = _ai_review_fp_from_body(body)
-        # Only threads that could correspond to a CURRENT finding count toward
-        # the recall guard. A fingerprint in `auto_resolved` is the reviewer's
-        # own record that this finding stopped reproducing and it retired the
-        # thread as bookkeeping — by construction not a finding on this head,
-        # so letting it satisfy the guard would let the reviewer's bookkeeping
-        # stand in for a real disposition. (This does not over-block: if the
-        # score still claims a P0/P1, that finding is either open — refused
-        # above — or unanchored, which is precisely what the guard is for.)
-        if not (fp and fp in auto_resolved):
-            saw_blocking_finding = True
         if not thread.get("isResolved"):
             return f"{label} is not resolved"
         total = comments.get("totalCount")
@@ -1146,16 +1146,36 @@ def _ai_review_disposition_shortfall(
             if fp and fp in auto_resolved:
                 continue  # reviewer-retired because the fix stopped it reproducing
             return f"{label} resolved without a reply (not disposed)"
+        # Counted only here — after the thread proved disposed — and only for a
+        # severity we could actually read. Two exclusions, both fail-closed:
+        #   * `auto_resolved` is the reviewer's own record that this finding
+        #     stopped reproducing and it retired the thread as bookkeeping, so
+        #     by construction it is not a finding on this head and must not
+        #     stand in for a real disposition;
+        #   * an unreadable severity could be anything, so crediting it against
+        #     a P0 the score reports would be guessing in the merge direction.
+        if severity in disposed and not (fp and fp in auto_resolved):
+            disposed[severity] += 1
 
-    # Recall guard: the marker says a P0/P1 is on this head, but no P0/P1
-    # thread is present to confirm it was disposed (unanchored finding, or the
-    # reviewer stopped posting). Fail closed — a real P0/P1 must not merge on
-    # the strength of an empty thread list.
-    if score is not None and score <= 3 and not saw_blocking_finding:
-        return (
-            "reports a P0/P1 on this head but no finding thread "
-            "verifies its disposition"
-        )
+    # Recall guard, bound to what the score actually CLAIMS. `confidence_score`
+    # is arithmetic over the finding severities, so the score names its findings
+    # exactly: 1 = at least one P0, 2 = two or more P1, 3 = exactly one P1. The
+    # guard therefore demands a matching disposed thread *per claimed finding*.
+    # A single "did we see any P0/P1 thread" boolean could not tell those apart,
+    # and let one disposed P1 vouch for a different, unanchored P0 — the recall
+    # failure this path exists to prevent. Findings the reviewer could not
+    # anchor to a diff line ("Comments outside the diff" in the summary body)
+    # and a reviewer that silently stopped posting both land here, and both
+    # fail closed.
+    required = {1: ("P0", 1), 2: ("P1", 2), 3: ("P1", 1)}.get(score or 0)
+    if required:
+        need_severity, need_count = required
+        have = disposed[need_severity]
+        if have < need_count:
+            return (
+                f"reports {need_count} {need_severity} finding(s) on this head "
+                f"but only {have} disposed {need_severity} thread(s) verify it"
+            )
     return None
 
 
@@ -1455,15 +1475,22 @@ def fetch_ai_review_status(
                 f"AI review score is not an integer ({type(score).__name__}: {score!r})"
             ),
         }
-    # A score above the rubric (6, 7, 100) is corruption, not a better review —
-    # `confidence_score` emits 1-5 and nothing else, and `<` would wave it
-    # through while every other check (author, SHA, consensus) still passed.
-    # Unlike the old score floor this does NOT reject a 4/5: that is the
-    # sampling event the disposition check below is designed to tolerate.
-    if score > AI_REVIEW_CLEAN_SCORE:
+    # A score outside the rubric is corruption, not a review — `confidence_score`
+    # emits 1-5 and nothing else, and a bare `<` would wave it through while
+    # every other check (author, SHA, consensus) still passed. The bound is
+    # two-sided on purpose: dropping the old equality check for the upper bound
+    # alone would newly admit `0` and negatives, which read as "a very bad score
+    # the disposition check can still clear" rather than as the impossible
+    # markers they are. Unlike the old score floor this does NOT reject a 4/5 —
+    # that is the sampling event the disposition check below is designed to
+    # tolerate.
+    if not AI_REVIEW_MIN_SCORE <= score <= AI_REVIEW_CLEAN_SCORE:
         return {
             "accepted": False,
-            "detail": f"AI review score {score}/5 outside the rubric (max 5/5)",
+            "detail": (
+                f"AI review score {score}/5 outside the rubric "
+                f"({AI_REVIEW_MIN_SCORE}-{AI_REVIEW_CLEAN_SCORE})"
+            ),
         }
 
     # Disposition, not score. A score of 4 (surviving P2s) or even 3 (a P1 that

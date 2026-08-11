@@ -328,7 +328,7 @@ def test_p0p1_scores_are_rejected_when_no_thread_proves_disposition(
     reviewer that stopped posting), we cannot verify disposition — fail closed."""
     status = _status(gh_comments, [_comment(_marker(score=score))])
     assert status["accepted"] is False
-    assert "no finding thread" in (status["detail"] or "")
+    assert "disposed" in (status["detail"] or "")
 
 
 def test_p2_only_score_does_not_block(gh_comments: Any) -> None:
@@ -719,7 +719,7 @@ def test_unanchored_p0p1_fails_closed(gh_comments: Any) -> None:
         review_data=([], []),
     )
     assert status["accepted"] is False
-    assert "no finding thread" in (status["detail"] or "")
+    assert "disposed" in (status["detail"] or "")
 
 
 def test_unreadable_thread_state_fails_closed(gh_comments: Any) -> None:
@@ -846,7 +846,7 @@ def test_auto_resolved_thread_does_not_satisfy_the_recall_guard(
         ),
     )
     assert status["accepted"] is False
-    assert "no finding thread" in (status["detail"] or "")
+    assert "disposed" in (status["detail"] or "")
 
 
 def test_refusal_detail_is_not_double_prefixed(gh_comments: Any) -> None:
@@ -860,3 +860,99 @@ def test_refusal_detail_is_not_double_prefixed(gh_comments: Any) -> None:
     detail = status["detail"] or ""
     assert detail.count("AI review") == 1, detail
     assert detail == "AI review P1 finding is not resolved"
+
+
+# --- the recall guard must match the finding the SCORE claims ---------------
+#
+# `confidence_score` is arithmetic over the finding severities, so a score
+# names its findings exactly: 1 = any P0, 2 = 2+ P1, 3 = exactly one P1. A
+# single "did we see a P0/P1 thread" boolean let one disposed P1 vouch for a
+# different, unanchored P0.
+
+
+def test_disposed_p1_does_not_vouch_for_an_unanchored_p0(gh_comments: Any) -> None:
+    """A score of 1 means the reviewer found a P0 on this head. A resolved and
+    replied-to *P1* thread does not verify that P0 was addressed — if the P0
+    was unanchored ("Comments outside the diff"), accepting here merges it
+    unreviewed, which is exactly what the guard exists to stop."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1))],
+        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is False
+    assert "1 P0 finding(s)" in (status["detail"] or "")
+    assert "only 0 disposed P0" in (status["detail"] or "")
+
+
+def test_two_p1_score_needs_two_disposed_p1_threads(gh_comments: Any) -> None:
+    """A score of 2 means two or more P1s. One disposed P1 thread leaves the
+    other unaccounted for, so the count has to match, not just the severity."""
+    one_disposed = _status(
+        gh_comments,
+        [_comment(_marker(score=2))],
+        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
+    )
+    assert one_disposed["accepted"] is False
+    assert "only 1 disposed P1" in (one_disposed["detail"] or "")
+
+    both_disposed = _status(
+        gh_comments,
+        [_comment(_marker(score=2))],
+        review_data=(
+            [],
+            [
+                _finding_thread("P1", resolved=True, total=2),
+                _finding_thread("P1", resolved=True, total=2),
+            ],
+        ),
+    )
+    assert both_disposed["accepted"] is True
+
+
+def test_disposed_p0_satisfies_a_p0_score(gh_comments: Any) -> None:
+    """The guard is a correspondence check, not a ban on low scores: a score of
+    1 with its P0 replied to and resolved is disposed, and passes."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1))],
+        review_data=([], [_finding_thread("P0", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is True
+
+
+def test_unreadable_severity_thread_does_not_credit_a_claimed_p0(
+    gh_comments: Any,
+) -> None:
+    """A disposed thread whose severity did not parse could have been anything.
+    Crediting it against a P0 the score reports would be guessing in the merge
+    direction, so it clears its own block without vouching for the P0."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=1))],
+        review_data=(
+            [],
+            [_finding_thread_body("Security vulnerability", resolved=True, total=2)],
+        ),
+    )
+    assert status["accepted"] is False
+    assert "only 0 disposed P0" in (status["detail"] or "")
+
+
+# --- score corruption is bounded at BOTH ends -------------------------------
+
+
+@pytest.mark.parametrize("score", [0, -1, -5])
+def test_scores_below_the_rubric_are_rejected(gh_comments: Any, score: int) -> None:
+    """`confidence_score` emits 1-5; abstain is `None`, never 0. Replacing the
+    old `score != 5` equality with an upper bound alone would newly admit 0 and
+    negatives, which then read as "a bad score the disposition check can clear"
+    rather than as the impossible markers they are — and with one disposed
+    P0/P1 thread present they would have been accepted."""
+    status = _status(
+        gh_comments,
+        [_comment(_marker(score=score))],
+        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
+    )
+    assert status["accepted"] is False
+    assert "outside the rubric" in (status["detail"] or "")
