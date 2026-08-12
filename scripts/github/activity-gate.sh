@@ -1049,8 +1049,12 @@ check_greptile_scores() {
         # a re-review only occurs after new commits (→ head_sha changes, invalidates
         # cache) or a manual @greptileai trigger (greptile-helper.sh's 15-min guard
         # ensures any such review completes within the 30-min TTL).
+        #
+        # Require a non-empty last_score: if the previous cycle wrote an empty first
+        # field (Greptile dark), we must re-fetch so a real score posted by Greptile
+        # during the TTL window is not silently ignored.
         local greptile_score=""
-        if [ -n "$last_state" ] && [ "$last_sha" = "$head_sha" ] \
+        if [ -n "$last_state" ] && [ -n "$last_score" ] && [ "$last_sha" = "$head_sha" ] \
                 && [ $(( now - last_timestamp )) -lt "$fetch_cache_ttl" ]; then
             greptile_score="$last_score"
         else
@@ -1070,9 +1074,70 @@ check_greptile_scores() {
                 ' 2>/dev/null | tail -1 || true)
         fi
 
-        # No Greptile review or no score found — skip
-        # Guard against both empty string and literal "null" from jq
-        [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ] && continue
+        # No Greptile review or no score found — Greptile may be dark on this
+        # repo (billing outage, initial indexing, etc.). Rather than skipping,
+        # consult our own AI reviewer: if it has open findings, emit
+        # greptile_needs_fix so the fix loop can still dispatch.
+        # The state file records an empty first field so later cycles that DO
+        # get a real Greptile score are not confused by a poisoned cache.
+        if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
+            # P2 fix: always call ai_review_verdict — the previous cache used
+            # last_timestamp (old state epoch), so a stale dirty verdict could
+            # persist for up to fetch_cache_ttl even after all findings are
+            # resolved.  We already made one API call to re-fetch Greptile
+            # comments; paying for a second to get a fresh AI verdict is correct.
+            local ai_verdict=""
+            ai_verdict=$(ai_review_verdict "$repo" "$pr_number" "$head_sha") || ai_verdict="none"
+            fetched_at="$now"
+            # Field 1 is ALWAYS empty in dark-state writes (note the leading ":" below).
+            # This is intentional: if field 1 held a non-empty score, the cache-hit
+            # condition at line 1057 ([ -n "$last_score" ] && SHA matches && ts fresh)
+            # would fire next cycle, bypassing the dark branch and leaving
+            # ai_review_verdict uncalled until the 3600-s TTL expires — a stale verdict
+            # would persist even after findings are resolved.
+            # With field 1 empty: every cycle is a cache miss → dark branch re-runs →
+            # ai_review_verdict is called fresh.  Regression guard:
+            # test_dark_branch_preserved_score_does_not_cache_hit.
+            #
+            # A previously-cached real Greptile score (before Greptile went dark) is
+            # preserved in field 5 so check_merge_ready can still block sub-5 merges.
+            # State format for dark cycles: ":fetched_at:sha:verdict:preserved_score"
+            # check_merge_ready reads field 5 when field 1 is empty.
+            local dark_score=""
+            if [ "$last_sha" = "$head_sha" ]; then
+                if [ -n "$last_score" ]; then
+                    # Transitioning from a real Greptile state (non-empty field 1).
+                    dark_score="$last_score"
+                else
+                    # Already in a dark state (field 1 empty) — carry forward field 5.
+                    dark_score=$(echo "$last_state" | cut -d: -f5)
+                fi
+            fi
+            if [ "$ai_verdict" = "dirty" ]; then
+                local detail="our AI review has open findings (Greptile dark on this repo)"
+                # First time seeing this PR with no Greptile score — seed state, don't emit.
+                if [ -z "$last_state" ]; then
+                    echo ":${fetched_at}:${head_sha}:${ai_verdict}:${dark_score}" > "$state_file"
+                    continue
+                fi
+                # Same head and same verdict — respect the cooldown before nagging.
+                if [ "$head_sha" = "$last_sha" ] && [ "$ai_verdict" = "$last_verdict" ]; then
+                    local elapsed=$(( now - last_timestamp ))
+                    if [ "$elapsed" -lt "$cooldown_seconds" ]; then
+                        continue
+                    fi
+                fi
+                echo ":${fetched_at}:${head_sha}:${ai_verdict}:${dark_score}" > "$state_file"
+                # Always route dirty AI verdict to greptile_needs_fix, matching the
+                # non-dark path (which sets route_score=3 on dirty → always fix).
+                # dark_score does not change the severity when our AI says fix it.
+                emit_item "greptile_needs_fix" "$repo" "$pr_number" "$pr_title" "$detail"
+            else
+                # clean / pending / none — seed/update state, don't emit.
+                echo ":${fetched_at}:${head_sha}:${ai_verdict}:${dark_score}" > "$state_file"
+            fi
+            continue
+        fi
 
         # Guard: score must be a single decimal digit [0-9]. Non-digit values
         # (e.g. "}" from a failed jq capture whose tail -1 picks up the closing
@@ -1218,12 +1283,25 @@ check_own_pr_review_state() {
         esac
 
         # Read Greptile score and reviewed SHA from state file written by check_greptile_scores
-        # Format: score:timestamp:sha
+        # Normal format: score:timestamp:sha
+        # Dark-state format: :timestamp:sha:verdict:dark_score (field 1 empty, preserved score in field 5)
         local greptile_state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
         local greptile_score="" greptile_reviewed_sha=""
         if [ -f "$greptile_state_file" ]; then
             greptile_score=$(cut -d: -f1 < "$greptile_state_file")
             greptile_reviewed_sha=$(cut -d: -f3 < "$greptile_state_file")
+            # Dark-state format: field 1 is empty, preserved score is in field 5.
+            if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
+                greptile_score=$(cut -d: -f5 < "$greptile_state_file")
+                # Dark state: if AI verdict (field 4) is dirty, check_greptile_scores
+                # already emitted greptile_needs_fix for this PR.  Emitting
+                # greptile_needs_improvement here too would double-dispatch.
+                local dark_ai_verdict=""
+                dark_ai_verdict=$(cut -d: -f4 < "$greptile_state_file")
+                if [ "$dark_ai_verdict" = "dirty" ]; then
+                    continue
+                fi
+            fi
         fi
 
         # No Greptile review on file yet — skip
@@ -1557,6 +1635,10 @@ check_merge_ready() {
         local greptile_score=""
         if [ -f "$greptile_state_file" ]; then
             greptile_score=$(cut -d: -f1 < "$greptile_state_file")
+            # Dark-state format: field 1 is empty, preserved score is in field 5.
+            if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
+                greptile_score=$(cut -d: -f5 < "$greptile_state_file")
+            fi
             # Must be perfect score (>= 5) to be merge-ready
             if [ -n "$greptile_score" ] && [ "$greptile_score" -lt 5 ] 2>/dev/null; then
                 continue
