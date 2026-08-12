@@ -2402,15 +2402,16 @@ def evaluate_pr(
     if pr.get("state") != "OPEN":
         result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
 
-    if "labels" not in pr:
-        # Labels field absent from payload — cannot verify hold state; fail closed.
+    if not isinstance(pr.get("labels"), list):
+        # Labels field absent or null — cannot verify hold state; fail closed.
+        # A present-but-null value is treated identically to a missing key:
+        # a cache shim or malformed payload returning labels=null must not
+        # accidentally pass the hold check.
         result.reasons.append(
             "PR labels missing from payload; cannot verify operator hold"
         )
     else:
-        pr_label_names = {
-            lbl.get("name", "").lower() for lbl in (pr.get("labels") or [])
-        }
+        pr_label_names = {lbl.get("name", "").lower() for lbl in pr["labels"]}
         matched_hold = pr_label_names & _HOLD_LABELS
         if matched_hold:
             result.reasons.append(

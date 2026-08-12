@@ -330,8 +330,13 @@ def test_evaluate_pr_no_hold_label_is_eligible() -> None:
     assert not any("Operator hold" in r for r in result.reasons)
 
 
-def test_evaluate_pr_null_labels_does_not_crash() -> None:
-    """Labels key present but null (e.g. from a cache shim) must not raise TypeError."""
+def test_evaluate_pr_null_labels_fails_closed() -> None:
+    """Labels key present but null must fail closed — same as a missing key.
+
+    A cache shim or malformed payload returning labels=null must not accidentally
+    pass the hold check. Null is unverifiable, so we block like we do for a
+    missing key rather than treating it as 'no hold labels present'.
+    """
     pr_data = _make_clean_pr_data(labels=None)
     with (
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
@@ -356,8 +361,8 @@ def test_evaluate_pr_null_labels_does_not_crash() -> None:
             999,
             workspace_repos=["gptme/gptme-contrib"],
         )
-    assert result.eligible
-    assert not any("Operator hold" in r for r in result.reasons)
+    assert not result.eligible
+    assert any("labels missing" in r for r in result.reasons)
 
 
 def test_evaluate_pr_missing_labels_key_blocks_merge() -> None:
