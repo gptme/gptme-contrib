@@ -90,6 +90,43 @@ if [ "${ALLOW_GIT_IDENTITY:-0}" != "1" ]; then
     fi
 fi
 
+# --- Part 0.7: Block merge commits in the brain repo (conflicted-merge path) ---
+# pre-merge-commit fires only when git auto-merges cleanly; a conflicted merge
+# finalized via 'git commit' or 'git merge --continue' invokes pre-commit
+# instead. MERGE_HEAD is still present at that point, so we guard here.
+_merge_git_dir="$(git rev-parse --git-dir 2>/dev/null || true)"
+if [ -n "$_merge_git_dir" ] && [ -f "$_merge_git_dir/MERGE_HEAD" ]; then
+    _merge_origin="$(git config --get remote.origin.url 2>/dev/null || true)"
+    _merge_origin_lower="$(printf '%s' "$_merge_origin" | tr '[:upper:]' '[:lower:]')"
+    _merge_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    case "$_merge_origin_lower" in
+        # Same host-anchored pattern as pre-merge-commit: require github.com to be
+        # the actual hostname, not a path component (evil.com/github.com/... must not match).
+        *://github.com/erikbjare/bob|*://github.com/erikbjare/bob.git|*://github.com/erikbjare/bob/|*://github.com/erikbjare/bob.git/|*@github.com[/:]erikbjare/bob|*@github.com[/:]erikbjare/bob.git|*@github.com[/:]erikbjare/bob/|*@github.com[/:]erikbjare/bob.git/)
+            if [ "$_merge_branch" = "master" ]; then
+                cat >&2 <<'MERGE_EOF'
+🚫 Refusing to create a merge commit on master in the brain repo.
+
+origin rejects merge commits on master (repo ruleset), so this commit could
+never be pushed — it would only jam every session's push path until someone
+squashed the backlog, losing per-commit history for the whole window.
+
+Recover, then use the off-tree path:
+
+    git merge --abort
+    git-safe-push-master
+
+git-safe-push-master reconciles with origin OFF-TREE (never touches this
+working tree), so it is safe to run while sibling sessions are mid-edit. If you
+were only trying to get origin's commits locally: run it first — once your
+local commits are published, a plain pull fast-forwards with no merge commit.
+MERGE_EOF
+                exit 1
+            fi
+            ;;
+    esac
+fi
+
 # --- Part 1: Prevent master commits (allowlist approach) ---
 # By default, master/main commits are blocked in ALL repos.
 # Only repos matching ALLOWED_PATTERNS or detected as agent workspaces are allowed.

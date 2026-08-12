@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Prevent merge commits on master in the Bob brain repo (ErikBjare/bob).
+#
+# core.hooksPath is set globally, so this hook fires in EVERY repository on
+# this machine. The original design delegated to a repo-local guard script after
+# verifying the guard's blob against refs/remotes/origin/master. But every
+# possible trust anchor inside .git/ is attacker-controlled in a crafted
+# directory: set remote.origin.url to a trusted org, point
+# refs/remotes/origin/master at your own commit containing a malicious guard,
+# and trusted_blob == work_blob passes. exec "$guard" then runs the payload.
+# No in-repo blob check can close this gap. (Four P0s on this file —
+# ErikBjare/bob#1122.)
+#
+# Fix: inline the guard logic here. No delegation to repo-local code. The
+# origin_url check still reads from .git/config (repo-controlled), but since we
+# exec nothing from the repo, the worst outcome of a spoofed URL is a blocked
+# merge (false positive) — not code execution.
+set -uo pipefail
+
+# Only guard the brain repo — other repos legitimately allow merges on master.
+origin_url="$(git config --get remote.origin.url 2>/dev/null || true)"
+origin_url_lower="$(printf '%s' "$origin_url" | tr '[:upper:]' '[:lower:]')"
+case "$origin_url_lower" in
+    # Anchor github.com as the actual host, not a path component.
+    # *://github.com/ covers https://, git://, and URL-style SSH (ssh://user@github.com/).
+    # *@github.com[/:] covers SCP-style SSH (git@github.com:...) and URL-style with user.
+    # Without this anchoring, https://evil.com/github.com/erikbjare/bob would match.
+    *://github.com/erikbjare/bob|*://github.com/erikbjare/bob.git|*://github.com/erikbjare/bob/|*://github.com/erikbjare/bob.git/|*@github.com[/:]erikbjare/bob|*@github.com[/:]erikbjare/bob.git|*@github.com[/:]erikbjare/bob/|*@github.com[/:]erikbjare/bob.git/) ;;
+    *) exit 0 ;;
+esac
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+[ "$branch" = "master" ] || exit 0
+
+cat >&2 <<'EOF'
+🚫 Refusing to create a merge commit on master in the brain repo.
+
+origin rejects merge commits on master (repo ruleset), so this commit could
+never be pushed — it would only jam every session's push path until someone
+squashed the backlog, losing per-commit history for the whole window.
+
+Recover, then use the off-tree path:
+
+    git merge --abort
+    git-safe-push-master
+
+git-safe-push-master reconciles with origin OFF-TREE (never touches this
+working tree), so it is safe to run while sibling sessions are mid-edit. If you
+were only trying to get origin's commits locally: run it first — once your
+local commits are published, a plain pull fast-forwards with no merge commit.
+EOF
+exit 1
