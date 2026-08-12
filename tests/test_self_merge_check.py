@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -287,7 +288,7 @@ _HOLD_PATCH_CONTEXT = (
 )
 
 
-def _evaluate_with_hold_labels(labels: list[dict[str, str]]) -> object:
+def _evaluate_with_hold_labels(labels: list[dict[str, str]]) -> Any:
     pr_data = _make_clean_pr_data(labels=labels)
     with (
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
