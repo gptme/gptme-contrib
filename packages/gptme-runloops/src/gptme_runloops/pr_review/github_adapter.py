@@ -231,9 +231,11 @@ def _build_summary_comment_body(
         f"{count} {sev}"
         for sev, count in sorted(
             n_by_severity.items(),
-            key=lambda x: ["critical", "high", "medium", "low", "info"].index(x[0])
-            if x[0] in ["critical", "high", "medium", "low", "info"]
-            else 99,
+            key=lambda x: (
+                ["critical", "high", "medium", "low", "info"].index(x[0])
+                if x[0] in ["critical", "high", "medium", "low", "info"]
+                else 99
+            ),
         )
     )
 

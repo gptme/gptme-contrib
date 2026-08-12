@@ -406,6 +406,7 @@ class TestBuildFullLedgerEntry:
         "note",
         "successes",
         "failures",
+        "timeouts",
         "duration_seconds",
     }
     # Added by the outcome-verification invariant: the recorded outcome is

@@ -2551,7 +2551,9 @@ def run_work_file(
             exit_code=overall_exit,
             effect=dispatch_effect,
         )
-        _log(f"Items: {group_count} total, {successes} succeeded, {failures} failed, {timeouts} timed out")
+        _log(
+            f"Items: {group_count} total, {successes} succeeded, {failures} failed, {timeouts} timed out"
+        )
 
         if hooks.post_run is not None:
             env = os.environ.copy()

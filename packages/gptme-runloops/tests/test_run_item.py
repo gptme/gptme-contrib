@@ -686,7 +686,9 @@ def test_timeout_is_not_counted_as_a_success(tmp_path) -> None:
     completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
     assert completed["successes"] == 0
     assert completed["failures"] == 0  # still not a quality failure
-    assert completed["timeouts"] == 1  # timed-out item is persisted so the row is self-describing
+    assert (
+        completed["timeouts"] == 1
+    )  # timed-out item is persisted so the row is self-describing
     assert completed["exit_code"] == 124
     assert completed["outcome"] == "failed"
 
