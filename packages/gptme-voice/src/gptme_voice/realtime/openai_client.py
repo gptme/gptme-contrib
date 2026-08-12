@@ -307,14 +307,19 @@ class OpenAIRealtimeClient:
 
             except (ValueError, TypeError):
                 # Cannot introspect (e.g. built-in / C-extension callable).
-                # Wrap conservatively: assume 1-arg so the call site can still
-                # pass (transcript, item_id) without breaking the callback.
+                # Try 2-arg first so a non-introspectable 2-arg callback
+                # (e.g. a C-extension that expects both transcript and item_id)
+                # still receives item_id.  Fall back to 1-arg on TypeError so
+                # a non-introspectable 1-arg callback works unchanged.
                 _cb1 = on_user_transcript
 
                 def on_user_transcript(  # noqa: F811
                     text: str, item_id: str | None = None, _cb: Any = _cb1
                 ) -> None:
-                    _cb(text)
+                    try:
+                        _cb(text, item_id)
+                    except TypeError:
+                        _cb(text)
 
         self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call

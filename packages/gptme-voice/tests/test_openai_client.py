@@ -986,3 +986,40 @@ def test_non_introspectable_callback_is_wrapped_conservatively() -> None:
     assert received == [
         "hello"
     ], "Non-introspectable 1-arg callback should work via conservative wrap"
+
+
+def test_non_introspectable_two_arg_callback_receives_item_id() -> None:
+    """A non-introspectable 2-arg callback must receive both (text, item_id).
+
+    When inspect.signature raises (e.g. for a C-extension callable) the
+    conservative wrapper must try calling with 2 args first.  A 2-arg
+    non-introspectable callback that expects item_id would otherwise receive
+    only the transcript text and raise TypeError at runtime.
+    """
+    import asyncio
+    import inspect
+    import unittest.mock
+
+    received: list[tuple] = []
+    inner = lambda text, item_id: received.append((text, item_id))  # noqa: E731
+
+    original_sig = inspect.signature
+
+    def patched_signature(obj, **kwargs):
+        if obj is inner:
+            raise ValueError("cannot introspect")
+        return original_sig(obj, **kwargs)
+
+    with unittest.mock.patch("inspect.signature", side_effect=patched_signature):
+        client = OpenAIRealtimeClient(
+            api_key="test-key",
+            on_user_transcript=inner,
+        )
+
+    async def _run() -> None:
+        await client._call_callback(client.on_user_transcript, "hello", "item-001")
+
+    asyncio.run(_run())
+    assert received == [
+        ("hello", "item-001")
+    ], "Non-introspectable 2-arg callback should receive both text and item_id"
