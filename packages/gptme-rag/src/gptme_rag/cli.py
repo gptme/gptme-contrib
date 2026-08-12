@@ -387,8 +387,11 @@ def search(
     """Search the index and assemble context."""
     paths = [path.resolve() for path in paths]
 
-    # Hide ChromaDB output during initialization and search
-    with console.status("Initializing..."):
+    # Hide ChromaDB/progress output during initialization and search.
+    # In json mode: skip Rich status (avoids stream mixing that pollutes json output)
+    # and redirect stderr too (suppresses model-loading progress bars like "Loading weights").
+    status_ctx = contextlib.nullcontext() if output_json else console.status("Initializing...")
+    with status_ctx:
         # Parse custom weights if provided
         scoring_weights = None
         if weights:
@@ -401,8 +404,14 @@ def search(
                 console.print(f"❌ Error parsing weights: {e}", style="red")
                 return
 
-        # Redirect stdout to suppress ChromaDB output (using context manager for safety)
-        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+        # Redirect stdout to suppress ChromaDB output.
+        # In json mode, also redirect stderr to suppress model-loading progress bars
+        # (sentence-transformers "Loading weights" tqdm can leak into json output).
+        with (
+            open(os.devnull, "w") as devnull,
+            contextlib.redirect_stdout(devnull),
+            contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext(),
+        ):
             # Initialize indexer with explicit arguments
             # Always use ModernBERT by default for better results
             indexer = Indexer(
