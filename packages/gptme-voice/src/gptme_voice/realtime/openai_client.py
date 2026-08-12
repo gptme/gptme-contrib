@@ -258,7 +258,7 @@ class OpenAIRealtimeClient:
         on_audio_end: Callable[[], None] | None = None,
         on_transcript: Callable[[str], None] | None = None,
         on_ai_transcript: Callable[[str], None] | None = None,
-        on_user_transcript: Callable[[str], None] | None = None,
+        on_user_transcript: Callable[[str, str | None], None] | None = None,
         on_function_call: Callable[[str, dict], Any] | None = None,
         on_speech_started: Callable[[], None] | None = None,
         hold_initial_response: bool = False,
@@ -828,10 +828,13 @@ class OpenAIRealtimeClient:
         # User speech transcript
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = event.get("transcript", "")
+            item_id = event.get("item_id")
             if transcript:
                 logger.info(f"User: {transcript}")
                 if self.on_user_transcript:
-                    await self._call_callback(self.on_user_transcript, transcript)
+                    await self._call_callback(
+                        self.on_user_transcript, transcript, item_id
+                    )
 
         # VAD events
         elif event_type == "input_audio_buffer.speech_started":
