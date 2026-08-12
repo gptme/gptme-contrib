@@ -306,7 +306,16 @@ class OpenAIRealtimeClient:
                         _cb(text)
 
             except (ValueError, TypeError):
-                pass
+                # Cannot introspect (e.g. built-in / C-extension callable).
+                # Wrap conservatively: assume 1-arg so the call site can still
+                # pass (transcript, item_id) without breaking the callback.
+                _cb1 = on_user_transcript
+
+                def on_user_transcript(  # noqa: F811
+                    text: str, item_id: str | None = None, _cb: Any = _cb1
+                ) -> None:
+                    _cb(text)
+
         self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call
         self.on_speech_started = on_speech_started

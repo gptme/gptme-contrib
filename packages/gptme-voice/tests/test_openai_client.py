@@ -945,3 +945,44 @@ def test_two_arg_on_user_transcript_callback_receives_item_id() -> None:
     assert received == [
         ("hello", "item-001")
     ], "2-arg callback should receive both args"
+
+
+def test_non_introspectable_callback_is_wrapped_conservatively() -> None:
+    """A non-introspectable callback (e.g. C-extension) must not TypeError when item_id is passed.
+
+    When inspect.signature raises ValueError/TypeError (as it does for many built-ins
+    and C-extension callables), the backward-compat wrapper must still wrap the callback
+    conservatively, not skip wrapping. Previously, the except branch did 'pass', leaving
+    the original 1-arg callback unwrapped, which caused TypeError on the 2-arg call site.
+    """
+    import asyncio
+
+    # Simulate a non-introspectable callable by patching inspect.signature to raise.
+    import inspect
+    import unittest.mock
+
+    received: list[str] = []
+    inner = lambda text: received.append(text)  # noqa: E731
+
+    # Temporarily make inspect.signature raise for our callback.
+    original_sig = inspect.signature
+
+    def patched_signature(obj, **kwargs):
+        if obj is inner:
+            raise ValueError("cannot introspect")
+        return original_sig(obj, **kwargs)
+
+    with unittest.mock.patch("inspect.signature", side_effect=patched_signature):
+        client = OpenAIRealtimeClient(
+            api_key="test-key",
+            on_user_transcript=inner,
+        )
+
+    # Must not raise TypeError when called with (text, item_id).
+    async def _run() -> None:
+        await client._call_callback(client.on_user_transcript, "hello", "item-001")
+
+    asyncio.run(_run())
+    assert received == [
+        "hello"
+    ], "Non-introspectable 1-arg callback should work via conservative wrap"
