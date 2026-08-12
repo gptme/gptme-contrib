@@ -41,7 +41,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple, cast
 
 import frontmatter
 from rich.console import Console
@@ -127,8 +127,9 @@ def find_lesson_files(lessons_dir: Path) -> Dict[str, Tuple[str, str, List[str]]
                 post = frontmatter.load(f)
 
                 # Extract keywords from frontmatter if present
-                if "match" in post.metadata and "keywords" in post.metadata["match"]:
-                    keywords = post.metadata["match"]["keywords"]
+                metadata = cast(dict[str, Any], post.metadata)
+                if "match" in metadata and "keywords" in metadata["match"]:
+                    keywords = metadata["match"]["keywords"]
 
                 # Extract title from first heading in content
                 match = re.search(r"^# (.+)$", post.content, re.MULTILINE)
