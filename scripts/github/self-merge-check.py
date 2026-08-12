@@ -2442,7 +2442,7 @@ def evaluate_pr(
             if not isinstance(name, str):
                 has_malformed_labels = True
                 continue
-            pr_label_names.add(name.lower())
+            pr_label_names.add(name.strip().lower())
 
         if has_malformed_labels:
             result.reasons.append(

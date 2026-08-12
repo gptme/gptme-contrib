@@ -328,6 +328,22 @@ def test_evaluate_pr_blocks_operator_hold_label_case_insensitive(
     assert any("Operator hold" in r for r in result.reasons)
 
 
+@pytest.mark.parametrize("label_name", ["do-not-merge ", " hold", " on-hold "])
+def test_evaluate_pr_blocks_operator_hold_label_with_whitespace(
+    label_name: str,
+) -> None:
+    """Hold label matching must strip surrounding whitespace.
+
+    GitHub labels can be applied with accidental leading/trailing spaces when
+    created or renamed via the UI or API. A 'do-not-merge ' (trailing space)
+    label should still block the merge — the .strip() call in the detection
+    logic is the guard; this test pins that contract.
+    """
+    result = _evaluate_with_hold_labels([{"name": label_name}])
+    assert not result.eligible
+    assert any("Operator hold" in r for r in result.reasons)
+
+
 def test_evaluate_pr_no_hold_label_is_eligible() -> None:
     result = _evaluate_with_hold_labels([{"name": "enhancement"}, {"name": "ci"}])
     assert result.eligible
