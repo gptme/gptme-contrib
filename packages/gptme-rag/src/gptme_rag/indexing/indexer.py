@@ -491,6 +491,12 @@ class Indexer:
 
     def add_document(self, document: Document) -> None:
         """Add a single document to the index."""
+        if self._stored_model_name is not None:
+            raise RuntimeError(
+                f"Cannot add documents: the stored embedding model {self._stored_model_name!r} could "
+                "not be loaded (API key missing or model weights unavailable).  "
+                "Re-index with a model that is available, or provide the required credentials."
+            )
         document = self._generate_doc_id(document)
         assert document.doc_id is not None
 

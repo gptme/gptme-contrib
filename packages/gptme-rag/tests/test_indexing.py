@@ -708,3 +708,63 @@ def test_auto_mode_search_raises_clear_error_when_sentence_transformer_fails(tmp
     # search() must raise a clear RuntimeError, not a ChromaDB dimension-mismatch (P1).
     with pytest.raises(RuntimeError, match="all-mpnet-base-v2"):
         indexer.search("test query")
+
+
+def test_auto_mode_add_document_raises_clear_error_when_stored_model_failed(tmp_path):
+    """add_document() must raise RuntimeError when the stored model could not be loaded.
+
+    Regression test for P1: when auto-mode sets embedding_function=None because
+    the stored model (e.g. OpenRouter without API key) could not be re-loaded,
+    calling add_document would pass embedding_function=None to ChromaDB, causing
+    it to use default 384-dim MiniLM — resulting in a cryptic dimension-mismatch
+    error against 3072-dim stored vectors instead of a clear user-facing message.
+    """
+    import os
+
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "openai/text-embedding-3-large",
+            "embedding_backend": "openrouter",
+        },
+    )
+    col.add(
+        ids=["or-doc"],
+        embeddings=[[0.1] * 3072],
+        documents=["an openrouter-indexed document"],
+    )
+    assert col.count() == 1
+    del client
+
+    env_backup = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        indexer = Indexer(
+            persist_directory=persist_dir,
+            enable_persist=True,
+            embedding_function="auto",
+            collection_name="default",
+        )
+        # Collection must be preserved (P0 regression check).
+        assert indexer.collection.count() == 1
+        # add_document must raise a clear RuntimeError, not a cryptic ChromaDB
+        # dimension-mismatch (P1).
+        from gptme_rag.indexing.document import Document
+
+        with pytest.raises(RuntimeError, match="openai/text-embedding-3-large"):
+            indexer.add_document(
+                Document(content="new doc", metadata={"source": "test.txt"})
+            )
+        # Collection must still be intact after the failed add attempt.
+        assert indexer.collection.count() == 1
+    finally:
+        if env_backup is not None:
+            os.environ["OPENROUTER_API_KEY"] = env_backup
