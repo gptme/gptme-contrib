@@ -344,6 +344,19 @@ def test_evaluate_pr_no_hold_label_is_eligible() -> None:
     assert not any("Operator hold" in r for r in result.reasons)
 
 
+def test_evaluate_pr_malformed_label_elements_do_not_crash() -> None:
+    """Non-dict elements and null name values in the labels list must not crash evaluate_pr.
+
+    A cache shim or API change could return labels as a mixed list.
+    Non-dict entries are skipped; none of their names can match _HOLD_LABELS, so
+    the result is eligible (no hold detected, no crash).
+    """
+    # Mix of non-dict elements and a dict with name=None — none are hold labels
+    result = _evaluate_with_hold_labels(["hold", None, {"name": None}, {"name": "ci"}])
+    assert result.eligible
+    assert not any("Operator hold" in r for r in result.reasons)
+
+
 def test_evaluate_pr_null_labels_fails_closed() -> None:
     """Labels key present but null must fail closed — same as a missing key.
 

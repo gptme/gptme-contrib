@@ -2411,7 +2411,11 @@ def evaluate_pr(
             "PR labels missing from payload; cannot verify operator hold"
         )
     else:
-        pr_label_names = {lbl.get("name", "").lower() for lbl in pr["labels"]}
+        pr_label_names = {
+            (lbl.get("name") or "").lower()
+            for lbl in pr["labels"]
+            if isinstance(lbl, dict)
+        }
         matched_hold = pr_label_names & _HOLD_LABELS
         if matched_hold:
             result.reasons.append(
