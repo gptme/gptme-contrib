@@ -329,6 +329,36 @@ def test_evaluate_pr_no_hold_label_is_eligible() -> None:
     assert not any("Operator hold" in r for r in result.reasons)
 
 
+def test_evaluate_pr_null_labels_does_not_crash() -> None:
+    """Labels key present but null (e.g. from a cache shim) must not raise TypeError."""
+    pr_data = _make_clean_pr_data(labels=None)
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=None),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+    assert result.eligible
+    assert not any("Operator hold" in r for r in result.reasons)
+
+
 def test_fetch_greptile_status_paginates_review_threads() -> None:
     first_page = {
         "data": {

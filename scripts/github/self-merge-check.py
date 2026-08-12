@@ -2402,7 +2402,7 @@ def evaluate_pr(
     if pr.get("state") != "OPEN":
         result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
 
-    pr_label_names = {lbl.get("name", "").lower() for lbl in pr.get("labels", [])}
+    pr_label_names = {lbl.get("name", "").lower() for lbl in (pr.get("labels") or [])}
     matched_hold = pr_label_names & _HOLD_LABELS
     if matched_hold:
         result.reasons.append(
