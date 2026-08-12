@@ -763,6 +763,12 @@ def test_auto_mode_add_document_raises_clear_error_when_stored_model_failed(tmp_
             indexer.add_document(Document(content="new doc", metadata={"source": "test.txt"}))
         # Collection must still be intact after the failed add attempt.
         assert indexer.collection.count() == 1
+
+        # add_documents (batch path via _add_documents) must also raise a clear
+        # RuntimeError, not a cryptic ChromaDB dimension-mismatch (P1 extension).
+        with pytest.raises(RuntimeError, match="openai/text-embedding-3-large"):
+            indexer.add_documents([Document(content="new doc", metadata={"source": "test.txt"})])
+        assert indexer.collection.count() == 1
     finally:
         if env_backup is not None:
             os.environ["OPENROUTER_API_KEY"] = env_backup

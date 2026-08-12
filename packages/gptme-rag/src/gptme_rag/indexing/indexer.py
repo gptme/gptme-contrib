@@ -44,6 +44,8 @@ _SENTENCE_TRANSFORMER_NAMESPACES = frozenset(
         "mixedbread-ai/",  # e.g. mxbai-embed-large-v1
         "Alibaba-NLP/",  # e.g. gte-large-en-v1.5
         "hkunlp/",  # e.g. instructor-xl, instructor-base
+        "jinaai/",  # e.g. jina-embeddings-v2-base-en, jina-embeddings-v3
+        "nomic-ai/",  # e.g. nomic-embed-text-v1, nomic-embed-text-v1.5
     }
 )
 
@@ -564,6 +566,12 @@ class Indexer:
             yield len(batch)
 
     def _add_documents(self, documents: list[Document]) -> None:
+        if self._stored_model_name is not None:
+            raise RuntimeError(
+                f"Cannot add documents: the stored embedding model {self._stored_model_name!r} could "
+                "not be loaded (API key missing or model weights unavailable).  "
+                "Re-index with a model that is available, or provide the required credentials."
+            )
         try:
             contents = []
             metadatas = []
