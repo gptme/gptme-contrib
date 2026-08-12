@@ -1852,3 +1852,25 @@ def test_asr_prefix_collision_without_item_id_collapses() -> None:
     # The second utterance starts with the first, so the heuristic collapses them.
     assert len(transcript) == 1
     assert transcript[0].text == "Hello Bob, what's the plan?"
+
+
+def test_asr_no_id_event_does_not_replace_id_anchored_entry() -> None:
+    """An event with item_id=None must NOT replace a stored entry that has an item_id.
+
+    Mixed-provider scenario: the stored entry was anchored to item_id="item-001"
+    by an earlier event.  A subsequent event arrives without an item_id (e.g. the
+    provider stopped emitting it) but its text happens to start with the stored
+    text.  The prefix heuristic must NOT fire here because the stored entry is
+    already associated with a specific utterance — a no-id event is inherently
+    ambiguous and should start a new entry.
+    """
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello", item_id="item-001")
+    # No item_id on the second call — text extends the first but comes from a
+    # different (unknown) utterance; must append rather than replace.
+    _append_transcript_turn(transcript, "user", "Hello Bob, what's the plan?")
+    assert len(transcript) == 2
+    assert transcript[0].text == "Hello"
+    assert transcript[0].item_id == "item-001"
+    assert transcript[1].text == "Hello Bob, what's the plan?"
+    assert transcript[1].item_id is None
