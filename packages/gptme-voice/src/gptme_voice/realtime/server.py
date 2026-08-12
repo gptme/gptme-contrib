@@ -856,7 +856,11 @@ class VoiceServer:
             try:
                 payload = json.loads(path.read_text())
                 transcript = [
-                    TranscriptTurn(role=item["role"], text=item["text"])
+                    TranscriptTurn(
+                        role=item["role"],
+                        text=item["text"],
+                        item_id=item.get("item_id"),
+                    )
                     for item in payload.get("transcript", [])
                     if item.get("role") and item.get("text")
                 ]
