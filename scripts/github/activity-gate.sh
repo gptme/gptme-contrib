@@ -1623,7 +1623,7 @@ check_merge_ready() {
         if [ -f "$greptile_state_file" ]; then
             greptile_score=$(cut -d: -f1 < "$greptile_state_file")
             # Dark-state format: field 1 is empty, preserved score is in field 5.
-            if [ -z "$greptile_score" ]; then
+            if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
                 greptile_score=$(cut -d: -f5 < "$greptile_state_file")
             fi
             # Must be perfect score (>= 5) to be merge-ready

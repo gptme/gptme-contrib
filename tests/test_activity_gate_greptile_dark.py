@@ -38,6 +38,7 @@ FAKE_GH = r'''#!/usr/bin/env python3
 from pathlib import Path
 import json
 import os
+import re
 import subprocess as sp
 import sys
 
@@ -79,6 +80,19 @@ if endpoint == "notifications":
 # issues/{n}/comments — serve the fixture comments list and apply jq.
 if "/issues/" in endpoint and endpoint.endswith("/comments"):
     data = json.dumps(fixture.get("comments", []))
+    if jq_expr:
+        r = sp.run(["jq", "-r", jq_expr], input=data, capture_output=True, text=True)
+        sys.stdout.write(r.stdout)
+    else:
+        print(data)
+    sys.exit(0)
+
+# Bare repo endpoint (repos/OWNER/REPO) — return push=true for bot_can_merge.
+# This allows check_merge_ready to proceed to emit_item rather than posting a
+# maintainer-waiting comment and continuing, which would mask whether the
+# Greptile score gate is actually blocking the emit.
+if re.match(r'^repos/[^/]+/[^/]+$', endpoint):
+    data = json.dumps({"permissions": {"push": True, "maintain": True, "admin": True}})
     if jq_expr:
         r = sp.run(["jq", "-r", jq_expr], input=data, capture_output=True, text=True)
         sys.stdout.write(r.stdout)
@@ -845,3 +859,63 @@ def test_check_merge_ready_field5_fallback_before_emit() -> None:
         f"field-5 fallback (pos {fallback_pos}) must appear before emit_item merge_ready "
         f"(pos {emit_pos}) in check_merge_ready — the score check fires before the emit"
     )
+
+
+def test_check_merge_ready_dark_state_preserved_score_blocks_merge_ready() -> None:
+    """Dark-state preserved sub-5 score in field 5 must block merge_ready emission.
+
+    Regression guard for P2 fp `a7e77115fd15`: the static test
+    test_check_merge_ready_field5_fallback_before_emit checks code ordering but
+    cannot catch a regression that removes the field-5 read while preserving ordering
+    (e.g. reading field 1 unconditionally). Without the fallback, a dark-state file
+    ':ts:sha:clean:3' would leave greptile_score="" (field 1 empty, field 5 unread),
+    the merge floor check would pass ("" is not < 5), and a PR that genuinely scored
+    3/5 before the Greptile outage would emit merge_ready.
+
+    Scenario:
+    - PR is CLEAN/MERGEABLE (CI passed, no conflicts)
+    - Greptile state file is dark-state format: ':ts:sha:clean:3' (preserved score=3)
+    - FAKE_GH returns push=true for the repo permissions endpoint so bot_can_merge
+      returns true — making the test sensitive to the greptile score gate (if the
+      gate were absent, the emit would proceed and the assertion would fail)
+    - Expected: no merge_ready item emitted (preserved score 3 < 5 blocks it)
+    """
+    import time
+
+    pr_clean = dict(_pr(), mergeStateStatus="CLEAN")
+    fixture = {
+        "prs": [pr_clean],
+        "comments": [],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Seed dark-state greptile file with preserved score 3 in field 5.
+        repo_safe = TEST_REPO.replace("/", "-")
+        greptile_state_file = state_dir / f"{repo_safe}-pr-{TEST_PR}-greptile.state"
+        recent_ts = int(time.time()) - 60  # within TTL — won't be re-fetched
+        greptile_state_file.write_text(f":{recent_ts}:{TEST_HEAD_SHA}:clean:3")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        merge_ready_items = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "merge_ready":
+                merge_ready_items.append(obj)
+
+        assert merge_ready_items == [], (
+            f"dark-state preserved score 3 must block merge_ready; "
+            f"got: {merge_ready_items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
