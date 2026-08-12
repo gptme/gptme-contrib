@@ -451,8 +451,12 @@ def _append_transcript_turn(
     utterance happens to begin with the same text as the previous one.
 
     When item_id is absent (fallback): replace if the new text is a prefix-extension of
-    the last same-role entry.  Providers that do not expose item_id in the event still
-    benefit from deduplication; the false-positive risk is inherent to the heuristic.
+    the last same-role entry AND the last entry also has no item_id.  Providers that do
+    not expose item_id in the event still benefit from deduplication; the false-positive
+    risk (two distinct utterances sharing a prefix, both without item_id) is inherent
+    to the heuristic but is significantly narrowed by requiring both sides to be
+    id-less — an entry already anchored to an item_id can never be silently replaced
+    by a no-id event.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -463,8 +467,15 @@ def _append_transcript_turn(
         and (
             # Exact match by item_id (preferred — no false positives)
             (item_id is not None and transcript[-1].item_id == item_id)
-            # Prefix heuristic fallback when item_id is unavailable
-            or (item_id is None and cleaned.startswith(transcript[-1].text))
+            # Prefix heuristic fallback: only when BOTH the current event and the
+            # stored entry have no item_id.  If the stored entry has item_id="A"
+            # and a new event arrives with item_id=None, the new event is a
+            # different utterance even if its text happens to extend the prior one.
+            or (
+                item_id is None
+                and transcript[-1].item_id is None
+                and cleaned.startswith(transcript[-1].text)
+            )
         )
     )
     if is_continuation:
