@@ -324,13 +324,44 @@ class OpenAIRealtimeClient:
                         # TypeErrors via traceback depth because C-extension
                         # callbacks produce no Python frames even for internal
                         # errors (tb_next is always None).  Instead, try the
-                        # 1-arg call: if _cb also rejects 1 arg, the original
-                        # failure was internal — re-raise it so callers see the
-                        # real error rather than a confusing arity message.
+                        # 1-arg call and inspect which error is the real one:
+                        #
+                        # - 2-arg callback: original_exc is internal, fallback
+                        #   raises arity ("missing N arg" / "but 1 was given").
+                        # - 1-arg callback: original_exc is arity, fallback
+                        #   raises the real internal error.
+                        #
+                        # Python's "too few args" messages consistently contain
+                        # "missing" or "but 1 was given" — use that to tell
+                        # which failure is the real one.
                         try:
                             _cb(text)
-                        except TypeError:
-                            raise original_exc from None
+                        except TypeError as fallback_exc:
+                            _fm = str(fallback_exc)
+                            if "missing" in _fm or "but 1 was given" in _fm:
+                                # fallback is arity noise → _cb is ≥2-arg →
+                                # original_exc is the real internal error
+                                raise original_exc from None
+                            # fallback is the real internal error from a 1-arg
+                            # callback — surface it instead of the arity error
+                            raise fallback_exc from original_exc
+                        else:
+                            # _cb(text) succeeded without raising.  Two cases:
+                            #   a) original_exc was an arity error ("but 2
+                            #      were given") → _cb is 1-arg, fallback correct.
+                            #   b) original_exc was an internal TypeError from a
+                            #      2-arg callback that also accepts 1 arg — in this
+                            #      case we would silently call it with incomplete
+                            #      data and swallow the real error (P2 masking path,
+                            #      fp=6b93c880806c).
+                            # Distinguish by checking original_exc's message: Python
+                            # "too many positional arguments" errors consistently
+                            # contain "but 2 were given".  Anything else is internal.
+                            _om = str(original_exc)
+                            if "but 2 were given" not in _om:
+                                # Internal TypeError — surface it so the caller
+                                # sees the real failure, not incomplete data.
+                                raise original_exc from None
 
         self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call
