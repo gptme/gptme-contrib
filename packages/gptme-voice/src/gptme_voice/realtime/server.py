@@ -436,9 +436,25 @@ def _build_standup_call_instructions(brief_text: str) -> str:
 def _append_transcript_turn(
     transcript: list[TranscriptTurn], role: str, text: str
 ) -> None:
-    """Append a cleaned turn to the transcript if it contains useful text."""
+    """Add a transcript turn, replacing the last entry when it is a partial of the same utterance.
+
+    Some ASR providers (e.g. xAI/Grok) fire the completed event multiple times
+    for the same utterance, each time with the full accumulated text so far.
+    When the new text is a prefix-extension of the last same-role entry we
+    replace in-place rather than appending, so the transcript entry count equals
+    the utterance count.  A genuinely new utterance (different role last, or
+    text that does not extend the previous) always appends as a new entry.
+    """
     cleaned = text.strip()
-    if cleaned:
+    if not cleaned:
+        return
+    if (
+        transcript
+        and transcript[-1].role == role
+        and cleaned.startswith(transcript[-1].text)
+    ):
+        transcript[-1] = TranscriptTurn(role=role, text=cleaned)
+    else:
         transcript.append(TranscriptTurn(role=role, text=cleaned))
 
 

@@ -17,6 +17,7 @@ from gptme_voice.realtime.server import (
     SessionBootstrap,
     TranscriptTurn,
     VoiceServer,
+    _append_transcript_turn,
     _assistant_committed_hangup,
     _build_caller_instructions,
     _build_fresh_call_greeting_instructions,
@@ -1763,3 +1764,51 @@ def test_prepend_activity_digest_includes_guidance_and_content() -> None:
 def test_prepend_activity_digest_tells_model_to_skip_subagent() -> None:
     result = _prepend_activity_digest("## Recent sessions\n", "instructions")
     assert "subagent" in result.lower()
+
+
+# ── ASR partial deduplication ──────────────────────────────────────────────
+
+
+def test_asr_partials_collapse_to_one_entry() -> None:
+    """4 growing ASR partials for a single utterance must produce exactly 1 entry."""
+    transcript: list[TranscriptTurn] = []
+    partials = [
+        "Hello Bob",
+        "Hello Bob, what's up?",
+        "Hello Bob, what's up? I wanted to brainstorm",
+        "Hello Bob, what's up? I wanted to brainstorm some ideas.",
+    ]
+    for p in partials:
+        _append_transcript_turn(transcript, "user", p)
+
+    assert len(transcript) == 1
+    assert transcript[0].text == partials[-1]
+
+
+def test_asr_duplicate_partial_does_not_add_entry() -> None:
+    """Sending the same text twice must not add a second entry."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello")
+    _append_transcript_turn(transcript, "user", "Hello")
+    assert len(transcript) == 1
+
+
+def test_asr_new_utterance_after_role_switch_appends() -> None:
+    """After an assistant turn, the next user turn must be a new entry."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello Bob")
+    _append_transcript_turn(transcript, "assistant", "Hi there")
+    _append_transcript_turn(transcript, "user", "What time is it?")
+
+    assert len(transcript) == 3
+    assert transcript[0] == TranscriptTurn(role="user", text="Hello Bob")
+    assert transcript[1] == TranscriptTurn(role="assistant", text="Hi there")
+    assert transcript[2] == TranscriptTurn(role="user", text="What time is it?")
+
+
+def test_asr_shorter_text_starts_new_entry() -> None:
+    """A user utterance shorter than the previous does not collapse into it."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello Bob, how are you doing today?")
+    _append_transcript_turn(transcript, "user", "Goodbye")
+    assert len(transcript) == 2
