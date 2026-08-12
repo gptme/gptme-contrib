@@ -1837,3 +1837,18 @@ def test_asr_same_item_id_replaces() -> None:
     assert len(transcript) == 1
     assert transcript[0].text == "Hello, I'd like to order"
     assert transcript[0].item_id == "item-001"
+
+
+def test_asr_prefix_collision_without_item_id_collapses() -> None:
+    """Without item_id, a new utterance extending the previous text IS collapsed.
+
+    This is the known false-positive risk of the prefix heuristic used when the
+    provider does not expose item_id.  Providers that do send item_id (e.g. xAI)
+    are immune because the item_id branch fires first and prevents false collapse.
+    """
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello")
+    _append_transcript_turn(transcript, "user", "Hello Bob, what's the plan?")
+    # The second utterance starts with the first, so the heuristic collapses them.
+    assert len(transcript) == 1
+    assert transcript[0].text == "Hello Bob, what's the plan?"
