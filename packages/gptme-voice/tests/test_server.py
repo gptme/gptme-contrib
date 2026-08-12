@@ -1839,6 +1839,26 @@ def test_asr_same_item_id_replaces() -> None:
     assert transcript[0].item_id == "item-001"
 
 
+def test_asr_same_item_id_shorter_text_is_ignored() -> None:
+    """A shorter retransmission for the same item_id must not truncate stored text.
+
+    Some providers retransmit a completed event for the same item_id with a
+    corrected (shorter) transcript.  The stored longer text must be preserved;
+    the shorter version is silently ignored rather than appended as a new entry
+    or allowed to overwrite the longer partial.
+    """
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(
+        transcript, "user", "Hello, I'd like to order a pizza", item_id="item-001"
+    )
+    # Provider retransmits a shorter version for the same item — must be ignored.
+    _append_transcript_turn(transcript, "user", "Hello, I'd", item_id="item-001")
+    assert len(transcript) == 1, "shorter retransmission must not create a new entry"
+    assert (
+        transcript[0].text == "Hello, I'd like to order a pizza"
+    ), "longer stored text must not be truncated"
+
+
 def test_asr_prefix_collision_without_item_id_collapses() -> None:
     """Without item_id, a new utterance extending the previous text IS collapsed.
 
