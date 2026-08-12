@@ -321,10 +321,14 @@ class OpenAIRealtimeClient:
                     except TypeError as exc:
                         # Fall back to 1-arg only for arity TypeErrors (the
                         # callback cannot accept a second positional argument).
-                        # An internal TypeError from within the callback body
-                        # (e.g. invalid data) should propagate so callers see
-                        # the real error instead of a misleading arity message.
-                        if "argument" not in str(exc):
+                        # Distinguish via traceback depth: an arity TypeError is
+                        # raised by Python's argument-binding mechanism *before*
+                        # entering _cb's frame, so exc.__traceback__.tb_next is
+                        # None.  A TypeError raised *inside* _cb's body enters
+                        # the function first, so tb_next is not None — propagate
+                        # it so callers see the real error.
+                        tb = exc.__traceback__
+                        if tb is not None and tb.tb_next is not None:
                             raise
                         _cb(text)
 
