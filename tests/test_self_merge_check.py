@@ -324,6 +324,20 @@ def test_evaluate_pr_blocks_operator_hold_label(label_name: str) -> None:
     assert label_name in " ".join(result.reasons)
 
 
+@pytest.mark.parametrize("label_name", ["Do-Not-Merge", "HOLD", "On-Hold"])
+def test_evaluate_pr_blocks_operator_hold_label_case_insensitive(
+    label_name: str,
+) -> None:
+    """Hold label matching must be case-insensitive.
+
+    Labels applied via the GitHub UI use the label's stored name, but a future
+    rename (e.g. 'hold' → 'Hold') must not silently bypass the gate.
+    """
+    result = _evaluate_with_hold_labels([{"name": label_name}])
+    assert not result.eligible
+    assert any("Operator hold" in r for r in result.reasons)
+
+
 def test_evaluate_pr_no_hold_label_is_eligible() -> None:
     result = _evaluate_with_hold_labels([{"name": "enhancement"}, {"name": "ci"}])
     assert result.eligible
