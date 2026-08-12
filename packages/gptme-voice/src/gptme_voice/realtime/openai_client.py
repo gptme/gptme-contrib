@@ -318,19 +318,19 @@ class OpenAIRealtimeClient:
                 ) -> None:
                     try:
                         _cb(text, item_id)
-                    except TypeError as exc:
-                        # Fall back to 1-arg only for arity TypeErrors (the
-                        # callback cannot accept a second positional argument).
-                        # Distinguish via traceback depth: an arity TypeError is
-                        # raised by Python's argument-binding mechanism *before*
-                        # entering _cb's frame, so exc.__traceback__.tb_next is
-                        # None.  A TypeError raised *inside* _cb's body enters
-                        # the function first, so tb_next is not None — propagate
-                        # it so callers see the real error.
-                        tb = exc.__traceback__
-                        if tb is not None and tb.tb_next is not None:
-                            raise
-                        _cb(text)
+                    except TypeError as original_exc:
+                        # Fall back to 1-arg for arity TypeErrors.  We cannot
+                        # reliably distinguish arity errors from internal
+                        # TypeErrors via traceback depth because C-extension
+                        # callbacks produce no Python frames even for internal
+                        # errors (tb_next is always None).  Instead, try the
+                        # 1-arg call: if _cb also rejects 1 arg, the original
+                        # failure was internal — re-raise it so callers see the
+                        # real error rather than a confusing arity message.
+                        try:
+                            _cb(text)
+                        except TypeError:
+                            raise original_exc from None
 
         self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call
