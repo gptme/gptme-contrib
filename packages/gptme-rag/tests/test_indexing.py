@@ -760,9 +760,7 @@ def test_auto_mode_add_document_raises_clear_error_when_stored_model_failed(tmp_
         from gptme_rag.indexing.document import Document
 
         with pytest.raises(RuntimeError, match="openai/text-embedding-3-large"):
-            indexer.add_document(
-                Document(content="new doc", metadata={"source": "test.txt"})
-            )
+            indexer.add_document(Document(content="new doc", metadata={"source": "test.txt"}))
         # Collection must still be intact after the failed add attempt.
         assert indexer.collection.count() == 1
     finally:
