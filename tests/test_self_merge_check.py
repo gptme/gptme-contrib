@@ -289,7 +289,7 @@ _HOLD_PATCH_CONTEXT = (
 )
 
 
-def _evaluate_with_hold_labels(labels: list[dict[str, str]]) -> Any:
+def _evaluate_with_hold_labels(labels: list[object]) -> Any:
     pr_data = _make_clean_pr_data(labels=labels)
     with (
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
