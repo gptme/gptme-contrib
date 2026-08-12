@@ -258,7 +258,9 @@ class OpenAIRealtimeClient:
         on_audio_end: Callable[[], None] | None = None,
         on_transcript: Callable[[str], None] | None = None,
         on_ai_transcript: Callable[[str], None] | None = None,
-        on_user_transcript: Callable[[str, str | None], None] | None = None,
+        on_user_transcript: Callable[[str], None]
+        | Callable[[str, str | None], None]
+        | None = None,
         on_function_call: Callable[[str, dict], Any] | None = None,
         on_speech_started: Callable[[], None] | None = None,
         hold_initial_response: bool = False,
@@ -274,6 +276,37 @@ class OpenAIRealtimeClient:
         self.on_audio_end = on_audio_end
         self.on_transcript = on_transcript
         self.on_ai_transcript = on_ai_transcript
+        # Backward-compat: wrap a legacy 1-arg callback so the call site can
+        # always pass (transcript, item_id) without breaking callers that only
+        # declared one positional parameter.
+        if on_user_transcript is not None:
+            import inspect
+
+            try:
+                sig = inspect.signature(on_user_transcript)
+                n_pos = sum(
+                    1
+                    for p in sig.parameters.values()
+                    if p.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                )
+                has_var = any(
+                    p.kind == inspect.Parameter.VAR_POSITIONAL
+                    for p in sig.parameters.values()
+                )
+                if not has_var and n_pos < 2:
+                    _cb1 = on_user_transcript
+
+                    def on_user_transcript(  # noqa: F811
+                        text: str, item_id: str | None = None, _cb: Any = _cb1
+                    ) -> None:
+                        _cb(text)
+
+            except (ValueError, TypeError):
+                pass
         self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call
         self.on_speech_started = on_speech_started
