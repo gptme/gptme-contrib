@@ -18,7 +18,7 @@ class TimeHorizon(str, Enum):
     NEAR = "near"  # < 2 years
     MEDIUM = "medium"  # 2-10 years
     LONG = "long"  # 10+ years
-    UNDEFINED = "undefined"
+    UNDEFINED = "undefined"  # user said "unsure" — treated as not-yet-answered
 
 
 class GoalType(str, Enum):
@@ -47,7 +47,18 @@ class CountryContext(str, Enum):
     US = "us"
     EU = "eu"
     OTHER = "other"
-    UNSPECIFIED = "unspecified"
+    UNSPECIFIED = (
+        "unspecified"  # user said "prefer not to say" — treated as not-yet-answered
+    )
+
+
+# Sentinel enum values meaning "user said unsure / prefer not to say".
+# These are non-None, but should NOT satisfy a missing-axis check — a user
+# answering "I don't know" for time_horizon stores UNDEFINED, which must still
+# be treated as not-yet-answered so the LLM can probe further.
+_UNANSWERED_SENTINELS: frozenset[object] = frozenset(
+    [TimeHorizon.UNDEFINED, CountryContext.UNSPECIFIED]
+)
 
 
 @dataclass
@@ -64,13 +75,21 @@ class QuestionContext:
     raw_answers: dict[str, str] = field(default_factory=dict)
 
     def missing_axes_for(self, question_type: str) -> list[str]:
-        """Return axes still needed for the given question type, in priority order."""
+        """Return axes still needed for the given question type, in priority order.
+
+        An axis is considered missing if its value is None OR is a sentinel meaning
+        "user didn't know" (e.g. TimeHorizon.UNDEFINED, CountryContext.UNSPECIFIED).
+        Treating sentinels as present would cause the LLM to generate advice for an
+        unknown time horizon — e.g. recommending equities to someone who said "unsure"
+        about their horizon, which could be near-term.
+        """
         required = REQUIRED_AXES.get(question_type, REQUIRED_AXES["default"])
         missing = []
         for axis in AXIS_PRIORITY_ORDER:
             if axis not in required:
                 continue
-            if getattr(self, axis, None) is None:
+            val = getattr(self, axis, None)
+            if val is None or val in _UNANSWERED_SENTINELS:
                 missing.append(axis)
         return missing
 
@@ -167,11 +186,26 @@ def generate_calibrated_prompt(user_question: str, ctx: QuestionContext) -> str:
     missing = ctx.missing_axes_for(question_type)
 
     missing_questions = [f"- {AXIS_QUESTIONS[a]}" for a in missing[:2]]
-    missing_str = (
-        "\n".join(missing_questions)
-        if missing_questions
-        else "None — proceed with advice"
-    )
+
+    if missing_questions:
+        # Still gathering context — tell the LLM exactly what to ask next.
+        questions_block = (
+            "NEXT CLARIFYING QUESTIONS TO ASK (ask these before giving advice):\n"
+            + "\n".join(missing_questions)
+        )
+        action_instruction = (
+            "Ask the 1-2 questions listed above. Do NOT give investment advice yet."
+        )
+    else:
+        # All required context has been gathered — tell the LLM to proceed.
+        # We do NOT use a non-empty placeholder here; that would cause the LLM to
+        # treat "None — proceed with advice" as a question and defer advice anyway.
+        questions_block = (
+            "NEXT CLARIFYING QUESTIONS: (none — all required context gathered)"
+        )
+        action_instruction = (
+            "All required context has been gathered. Give concrete advice now."
+        )
 
     prompt = f"""You are a financial planning assistant. Before giving advice, you ask specific
 clarifying questions to understand the user's situation. You ask no more than 2 questions at a time.
@@ -182,12 +216,11 @@ USER'S ORIGINAL QUESTION:
 CONTEXT GATHERED SO FAR:
 {context_str}
 
-NEXT CLARIFYING QUESTIONS TO ASK (ask these before giving advice):
-{missing_str}
+{questions_block}
 
-RULES:
-- If "NEXT CLARIFYING QUESTIONS" is non-empty, ask those questions first. Do not give advice yet.
-- If no questions remain, give concrete advice using this structure:
+ACTION: {action_instruction}
+
+ADVICE STRUCTURE (use when all context is gathered):
   1. Summary of their situation (2 sentences, referencing their specific context)
   2. Recommendation with rationale (tied to their time horizon, goals, risk tolerance)
   3. What to do first (one concrete action)

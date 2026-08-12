@@ -44,6 +44,33 @@ class TestQuestionContext:
         )
         assert ctx.is_ready_to_advise("should_i_invest")
 
+    def test_undefined_time_horizon_still_counts_as_missing(self):
+        """TimeHorizon.UNDEFINED must not satisfy the time_horizon axis (P1 fix).
+
+        A user who answers "I don't know" gets UNDEFINED stored, but the system
+        must keep asking — advising with unknown horizon risks recommending equities
+        to someone who actually needs money in 6 months.
+        """
+        ctx = QuestionContext(time_horizon=TimeHorizon.UNDEFINED)
+        missing = ctx.missing_axes_for("should_i_invest")
+        assert "time_horizon" in missing, "UNDEFINED should still be treated as missing"
+        assert not ctx.is_ready_to_advise("should_i_invest")
+
+    def test_unspecified_country_still_counts_as_missing(self):
+        """CountryContext.UNSPECIFIED must not satisfy the country_context axis (P1 fix)."""
+        ctx = QuestionContext(
+            time_horizon=TimeHorizon.LONG,
+            goal_type=GoalType.RETIREMENT,
+            risk_tolerance=RiskTolerance.MODERATE,
+            country_context=CountryContext.UNSPECIFIED,
+            has_high_interest_debt=False,
+        )
+        missing = ctx.missing_axes_for("portfolio_allocation")
+        assert (
+            "country_context" in missing
+        ), "UNSPECIFIED should still be treated as missing"
+        assert not ctx.is_ready_to_advise("portfolio_allocation")
+
     def test_should_interrupt_with_debt_advice(self):
         """Test debt interrupt detection."""
         ctx_no_debt = QuestionContext(has_high_interest_debt=False)
@@ -132,7 +159,7 @@ class TestGenerateCalibratedPrompt:
     """Test prompt generation."""
 
     def test_prompt_with_full_context(self):
-        """Test prompt generation with complete context."""
+        """Test prompt generation with complete context — should instruct LLM to give advice."""
         ctx = QuestionContext(
             time_horizon=TimeHorizon.LONG,
             goal_type=GoalType.WEALTH_GROWTH,
@@ -144,8 +171,12 @@ class TestGenerateCalibratedPrompt:
         prompt = generate_calibrated_prompt("Should I invest in index funds?", ctx)
         assert "index funds" in prompt.lower()
         assert "long" in prompt.lower()
-        assert "NEXT CLARIFYING QUESTIONS" in prompt
-        assert "None — proceed with advice" in prompt
+        # When all context is gathered the ACTION must say "give advice now",
+        # NOT defer with a non-empty questions placeholder (P1 fix).
+        assert "all required context gathered" in prompt.lower()
+        assert "give concrete advice now" in prompt.lower()
+        # Must NOT contain a non-empty questions block that could trigger deferral.
+        assert "Do NOT give investment advice yet" not in prompt
 
     def test_prompt_with_partial_context(self):
         """Test prompt generation with incomplete context."""
