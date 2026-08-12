@@ -164,6 +164,7 @@ def test_evaluate_pr_blocks_changes_requested() -> None:
         "isDraft": False,
         "state": "OPEN",
         "reviewDecision": "CHANGES_REQUESTED",
+        "labels": [],
     }
 
     with (
@@ -874,6 +875,7 @@ def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
         "isDraft": False,
         "state": "OPEN",
         "reviewDecision": None,
+        "labels": [],
     }
 
     with (
@@ -917,6 +919,7 @@ def _eligible_pr_data() -> dict:
         "isDraft": False,
         "state": "OPEN",
         "reviewDecision": None,
+        "labels": [],
     }
 
 

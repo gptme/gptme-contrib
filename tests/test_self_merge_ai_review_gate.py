@@ -437,6 +437,7 @@ def _pr_payload() -> dict[str, Any]:
         "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
         "reviewDecision": None,
         "files": [{"path": "docs/review-tools.md"}],
+        "labels": [],
     }
 
 
