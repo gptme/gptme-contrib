@@ -118,7 +118,7 @@ class SearchOutputFormatter:
 
     def print_document_header(self, i: int, source: str):
         """Print document header in summary view."""
-        self.console.print(f"\n[cyan]{i+1}. {source}[/cyan]")
+        self.console.print(f"\n[cyan]{i + 1}. {source}[/cyan]")
 
     def print_preview(self, doc: Document):
         """Print document preview in summary view."""
@@ -405,48 +405,52 @@ def search(
                 return
 
         # Redirect stdout to suppress ChromaDB/model-loading noise that would
-        # corrupt stdout consumers.  Do NOT redirect stderr — non-fatal warnings
-        # from ChromaDB, sentence-transformers, or tqdm must remain visible so
-        # callers can diagnose partial failures (missing model, fallback used, etc.).
-        with (
-            open(os.devnull, "w") as devnull,
-            contextlib.redirect_stdout(devnull),
-        ):
-            # Initialize indexer with explicit arguments
-            # Always use ModernBERT by default for better results
-            indexer = Indexer(
-                persist_directory=persist_dir,
-                enable_persist=True,
-                scoring_weights=scoring_weights,
-                embedding_function=(
-                    "modernbert" if embedding_function is None else embedding_function
-                ),
-                device=device or "cpu",
+        # corrupt stdout consumers.  In json mode, also redirect stderr:
+        # tqdm "Loading weights" progress bars go to stderr, and Click 8.4+
+        # CliRunner mixes stderr into result.output (mix_stderr parameter was
+        # removed), which would corrupt JSON output for callers.
+        # In non-json mode, keep stderr visible so callers can diagnose
+        # partial failures (missing model, fallback used, etc.).
+        with open(os.devnull, "w") as devnull:
+            stderr_ctx = (
+                contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext()
             )
-            assembler = ContextAssembler(max_tokens=max_tokens)
-
-            # Combine paths and filters for search
-            search_paths = list(paths)
-            if filter:
-                # If no paths were specified but filters are present,
-                # search from root and apply filters
-                if not paths:
-                    search_paths = [Path(".")]
-                logger.debug(f"Using path filters: {filter}")
-
-            explanations: list | None = None
-            if explain:
-                documents, distances, explanations = indexer.search(
-                    query,
-                    n_results=n_results,
-                    paths=search_paths,
-                    path_filters=filter,
-                    explain=True,
+            with contextlib.redirect_stdout(devnull), stderr_ctx:
+                # Initialize indexer with explicit arguments
+                # Always use ModernBERT by default for better results
+                indexer = Indexer(
+                    persist_directory=persist_dir,
+                    enable_persist=True,
+                    scoring_weights=scoring_weights,
+                    embedding_function=(
+                        "modernbert" if embedding_function is None else embedding_function
+                    ),
+                    device=device or "cpu",
                 )
-            else:
-                documents, distances, _ = indexer.search(
-                    query, n_results=n_results, paths=search_paths, path_filters=filter
-                )
+                assembler = ContextAssembler(max_tokens=max_tokens)
+
+                # Combine paths and filters for search
+                search_paths = list(paths)
+                if filter:
+                    # If no paths were specified but filters are present,
+                    # search from root and apply filters
+                    if not paths:
+                        search_paths = [Path(".")]
+                    logger.debug(f"Using path filters: {filter}")
+
+                explanations: list | None = None
+                if explain:
+                    documents, distances, explanations = indexer.search(
+                        query,
+                        n_results=n_results,
+                        paths=search_paths,
+                        path_filters=filter,
+                        explain=True,
+                    )
+                else:
+                    documents, distances, _ = indexer.search(
+                        query, n_results=n_results, paths=search_paths, path_filters=filter
+                    )
 
     if not documents:
         if output_json:
