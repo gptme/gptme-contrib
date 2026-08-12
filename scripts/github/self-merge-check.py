@@ -2411,11 +2411,23 @@ def evaluate_pr(
             "PR labels missing from payload; cannot verify operator hold"
         )
     else:
-        pr_label_names = {
-            (lbl.get("name") or "").lower()
-            for lbl in pr["labels"]
-            if isinstance(lbl, dict)
-        }
+        pr_label_names = set()
+        has_malformed_labels = False
+        for lbl in pr["labels"]:
+            if not isinstance(lbl, dict):
+                has_malformed_labels = True
+                continue
+            name = lbl.get("name")
+            if not isinstance(name, str):
+                has_malformed_labels = True
+                continue
+            pr_label_names.add(name.lower())
+
+        if has_malformed_labels:
+            result.reasons.append(
+                "PR labels contain unparseable entries; cannot verify operator hold"
+            )
+
         matched_hold = pr_label_names & _HOLD_LABELS
         if matched_hold:
             result.reasons.append(

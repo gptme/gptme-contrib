@@ -345,16 +345,16 @@ def test_evaluate_pr_no_hold_label_is_eligible() -> None:
 
 
 def test_evaluate_pr_malformed_label_elements_do_not_crash() -> None:
-    """Non-dict elements and null name values in the labels list must not crash evaluate_pr.
+    """Non-dict elements and null name values in the labels list must fail closed (block merge).
 
     A cache shim or API change could return labels as a mixed list.
-    Non-dict entries are skipped; none of their names can match _HOLD_LABELS, so
-    the result is eligible (no hold detected, no crash).
+    Non-dict entries and non-string name values are unverifiable, so we block the merge
+    rather than silently skip them (fail-closed security posture to prevent hold bypass).
     """
-    # Mix of non-dict elements and a dict with name=None — none are hold labels
+    # Mix of non-dict elements and a dict with name=None — all are unverifiable
     result = _evaluate_with_hold_labels(["hold", None, {"name": None}, {"name": "ci"}])
-    assert result.eligible
-    assert not any("Operator hold" in r for r in result.reasons)
+    assert not result.eligible
+    assert any("unparseable" in r.lower() for r in result.reasons)
 
 
 def test_evaluate_pr_null_labels_fails_closed() -> None:
