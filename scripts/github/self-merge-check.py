@@ -1395,6 +1395,17 @@ def _consensus_shortfall(consensus: Any) -> str | None:
         )
     if applied < asked:
         return f"consensus agreement clamped to {applied} (requested {asked})"
+    # A marker that claims a stronger agreement bar than was requested is
+    # incoherent: if the reviewer was asked for min_agreement=2, a marker
+    # carrying min_agreement=3 is inflating the bar without authorization.
+    # A corrupted or foreign marker could carry this and would otherwise slip
+    # through both the clamping guard (applied == asked would satisfy it) and
+    # the pass-count guard below.  Both directions of drift must be rejected.
+    if applied > asked:
+        return (
+            f"consensus agreement threshold {applied} exceeds requested agreement "
+            f"{asked}"
+        )
     # An agreement threshold higher than the requested pass count is internally
     # impossible: you cannot have 5 agreeing passes when only 3 were requested.
     # This is not emitted by our reviewer (it clamps threshold ≤ requested), but

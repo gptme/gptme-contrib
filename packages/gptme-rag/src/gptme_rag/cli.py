@@ -404,13 +404,13 @@ def search(
                 console.print(f"❌ Error parsing weights: {e}", style="red")
                 return
 
-        # Redirect stdout to suppress ChromaDB output.
-        # In json mode, also redirect stderr to suppress model-loading progress bars
-        # (sentence-transformers "Loading weights" tqdm can leak into json output).
+        # Redirect stdout to suppress ChromaDB/model-loading noise that would
+        # corrupt stdout consumers.  Do NOT redirect stderr — non-fatal warnings
+        # from ChromaDB, sentence-transformers, or tqdm must remain visible so
+        # callers can diagnose partial failures (missing model, fallback used, etc.).
         with (
             open(os.devnull, "w") as devnull,
             contextlib.redirect_stdout(devnull),
-            contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext(),
         ):
             # Initialize indexer with explicit arguments
             # Always use ModernBERT by default for better results
