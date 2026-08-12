@@ -281,7 +281,11 @@ def show(task_id):
     if task.requires:
         table.add_row("Requires", ", ".join(task.requires))
     if task.subtasks.total > 0:
-        table.add_row("Subtasks", f"{task.subtasks.completed}/{task.subtasks.total} completed")
+        skipped_note = f", {task.subtasks.skipped} skipped" if task.subtasks.skipped else ""
+        table.add_row(
+            "Subtasks",
+            f"{task.subtasks.completed}/{task.subtasks.total} completed{skipped_note}",
+        )
     if task.issues:
         table.add_row("Issues", ", ".join(task.issues))
     if task.success_criterion:
@@ -2260,15 +2264,51 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                 # Parse markdown body to find and update subtask
                 lines = post.content.split("\n")
                 updated = False
+                # "- [-]" is the intentionally-skipped marker; recognize it here
+                # so an already-skipped item can still be toggled back to
+                # done/todo. Setting an item *to* skipped is not exposed via the
+                # CLI: a skip must carry a reason, and there is no flag to pass
+                # one — write the line by hand (see TASKS.md, Checkbox
+                # Semantics).
+                import re
+
+                markers = ("- [ ]", "- [x]", "- [-]")
                 for i, line in enumerate(lines):
                     # Check if this line is a subtask checkbox with matching text
-                    if subtask_text in line and ("- [ ]" in line or "- [x]" in line):
-                        if state == "done":
-                            lines[i] = line.replace("- [ ]", "- [x]")
-                        else:  # state == "todo"
-                            lines[i] = line.replace("- [x]", "- [ ]")
-                        updated = True
-                        break
+                    if subtask_text in line and any(m in line for m in markers):
+                        target = "- [x]" if state == "done" else "- [ ]"
+                        for marker in markers:
+                            # Anchor to line start (after optional whitespace/blockquote)
+                            # so prose occurrences like "- [x] See - [ ] item" don't
+                            # steal the slot before the actual leading checkbox is found.
+                            if re.match(rf"^\s*(?:>\s*)?{re.escape(marker)}", line):
+                                new_line = line.replace(marker, target, 1)
+                                # Strikethrough forms (- [ ] ~~text~~ or - [x] ~~text~~)
+                                # must have their ~~ markup stripped when toggling back
+                                # to done/todo; otherwise count_subtasks re-classifies
+                                # the result as skipped and the toggle is a silent no-op.
+                                new_line = re.sub(
+                                    r"([ \t]*- \[[x ]\])\s*~~(.+?)~~.*$",
+                                    r"\1 \2",
+                                    new_line,
+                                )
+                                # For the bare [-] form, strip the trailing reason
+                                # parenthetical via regex — not a position-based
+                                # truncation — so partial-match subtask_text values
+                                # (prefixes of the full title) don't clip the title.
+                                # Pattern handles one level of nested parens, e.g.
+                                # "(deferred: see (issue #5))".
+                                if marker == "- [-]":
+                                    new_line = re.sub(
+                                        r"\s*\([^)]*(?:\([^)]*\)[^)]*)*\)\s*$",
+                                        "",
+                                        new_line,
+                                    ).rstrip()
+                                lines[i] = new_line
+                                updated = True
+                                break
+                        if updated:
+                            break
 
                 if not updated:
                     console.print(f"[red]Subtask not found: {subtask_text}[/]")

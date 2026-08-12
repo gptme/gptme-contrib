@@ -147,4 +147,4 @@ def test_status_json_includes_serialized_task_fields(tmp_path: Path, monkeypatch
     assert task["state"] == "active"
     assert task["priority"] == "high"
     assert task["tags"] == ["infra", "tooling"]
-    assert task["subtasks"] == {"completed": 0, "total": 0}
+    assert task["subtasks"] == {"completed": 0, "total": 0, "skipped": 0}
