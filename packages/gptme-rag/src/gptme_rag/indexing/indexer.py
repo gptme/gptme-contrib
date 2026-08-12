@@ -46,6 +46,11 @@ _SENTENCE_TRANSFORMER_NAMESPACES = frozenset(
         "hkunlp/",  # e.g. instructor-xl, instructor-base
         "jinaai/",  # e.g. jina-embeddings-v2-base-en, jina-embeddings-v3
         "nomic-ai/",  # e.g. nomic-embed-text-v1, nomic-embed-text-v1.5
+        "Snowflake/",  # e.g. snowflake-arctic-embed-l, snowflake-arctic-embed-m (capital S as on HF)
+        "Salesforce/",  # e.g. SFR-Embedding-Mistral, SFR-Embedding-2_R
+        "WhereIsAI/",  # e.g. UAE-Large-V1
+        "TaylorAI/",  # e.g. bge-micro-v2, gte-tiny
+        "princeton-nlp/",  # e.g. sup-simcse-roberta-large
     }
 )
 
@@ -714,6 +719,16 @@ class Indexer:
         if self.embedding_function is not None:
             query_embeddings = cast(QueryEmbeddings, self.embedding_function(["Lorem ipsum"]))
             search_results = self.collection.query(query_embeddings=query_embeddings, n_results=3)
+        elif self._stored_model_name is not None:
+            # The stored embedding model could not be re-loaded (missing API key / weights).
+            # Falling through to query_texts here would use ChromaDB's default 384-dim MiniLM,
+            # which mismatches stored vectors of a different dimension and produces a cryptic
+            # InvalidDimensionException.  Report the problem and skip the test search.
+            print(
+                f"  Skipping test search: stored embedding model {self._stored_model_name!r} "
+                "could not be loaded (API key missing or model weights unavailable)."
+            )
+            return
         else:
             search_results = self.collection.query(query_texts=["Lorem ipsum"], n_results=3)
         print("\nRaw search results:")

@@ -772,3 +772,97 @@ def test_auto_mode_add_document_raises_clear_error_when_stored_model_failed(tmp_
     finally:
         if env_backup is not None:
             os.environ["OPENROUTER_API_KEY"] = env_backup
+
+
+def test_auto_mode_rebinds_openrouter_collection_when_api_key_present(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """auto mode must construct OpenRouterEmbedding and successfully search when
+    an API key is available and the stored collection uses the openrouter backend.
+
+    This is the key-present path — the counterpart to
+    test_auto_mode_search_raises_clear_error_when_openrouter_key_absent.
+    A regression in model-name threading or metadata handling in the auto-detect
+    path would go undetected without this test.
+    """
+    import json
+    import urllib.request
+
+    import chromadb
+    from chromadb.config import Settings
+
+    from gptme_rag.embeddings import OpenRouterEmbedding
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Simulate a collection indexed with OpenRouter (3072-dim vectors).
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    stored_model = "openai/text-embedding-3-large"
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": stored_model,
+            "embedding_backend": "openrouter",
+        },
+    )
+    col.add(
+        ids=["or-doc"],
+        embeddings=[[0.1] * 3072],
+        documents=["an openrouter-indexed document"],
+    )
+    assert col.count() == 1
+    del client
+
+    # Fake HTTP layer so no real API call is made.
+    class _FakeResponse:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+    def fake_urlopen(request: urllib.request.Request, timeout: int):
+        payload = json.loads(request.data.decode("utf-8"))  # type: ignore[union-attr]
+        return _FakeResponse(
+            {
+                "data": [
+                    {"index": i, "embedding": [0.1] * 3072} for i in range(len(payload["input"]))
+                ],
+                "usage": {"total_tokens": 10, "cost": 0.001},
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="auto",
+        collection_name="default",
+    )
+
+    # The auto-detect path must have constructed an OpenRouterEmbedding, not fallen
+    # back to a local embedder or left embedding_function=None.
+    assert isinstance(
+        indexer.embedding_function, OpenRouterEmbedding
+    ), f"Expected OpenRouterEmbedding, got {type(indexer.embedding_function)}"
+
+    # The rebind must have used the stored model name, not the default.
+    assert indexer.embedding_function.model_name == stored_model  # type: ignore[union-attr]
+
+    # The stored collection is preserved.
+    assert indexer.collection.count() == 1
+
+    # search() must succeed (return results) without raising.
+    results = indexer.search("test query", n_results=1)
+    assert len(results) >= 1, "Expected at least one search result"

@@ -240,6 +240,11 @@ class OpenRouterEmbedding(EmbeddingFunction):
                     raise RuntimeError(f"OpenRouter embeddings error: {data['error']}")
 
                 rows = sorted(data["data"], key=lambda row: row["index"])
+                if len(rows) != len(texts):
+                    raise RuntimeError(
+                        f"OpenRouter embeddings API returned {len(rows)} vectors for "
+                        f"{len(texts)} input texts — malformed or partial response."
+                    )
                 usage = data.get("usage") or {}
                 self.stats["requests"] += 1
                 self.stats["api_texts"] += len(texts)
@@ -253,6 +258,10 @@ class OpenRouterEmbedding(EmbeddingFunction):
                     raise RuntimeError(f"OpenRouter embeddings HTTP {exc.code}: {body}") from exc
                 logger.warning("OpenRouter embeddings HTTP %s; retrying", exc.code)
                 time.sleep(min(60, 2**attempt) + 0.5 * attempt)
+            except RuntimeError:
+                # RuntimeErrors are permanent (e.g. bad model name, API-level error,
+                # or count mismatch above) — do not retry.
+                raise
             except Exception as exc:
                 last_error = exc
                 logger.warning("OpenRouter embeddings request failed; retrying: %r", exc)
