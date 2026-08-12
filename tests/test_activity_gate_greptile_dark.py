@@ -480,13 +480,21 @@ def test_dark_branch_preserved_score_does_not_cache_hit() -> None:
             f"(score-cache must not hit on dark state, fresh verdict must be used); "
             f"got: {dark_items}\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        # Also verify no stale-verdict improvement item from the non-dark path.
-        improvement_items = [
-            i for i in items if i.get("type") == "greptile_needs_improvement"
+        # Verify no stale-verdict item from check_greptile_scores's score-cache path.
+        # Items from that path have "Greptile score:" in their detail string.
+        # Note: check_own_pr_review_state now correctly emits an item for the
+        # preserved score=4 read from field 5 — those have "own-PR review:" in
+        # detail and are NOT a cache-hit regression.
+        cache_path_items = [
+            i
+            for i in items
+            if i.get("type") in ("greptile_needs_improvement", "greptile_needs_fix")
+            and "Greptile score:" in (i.get("detail") or "")
         ]
-        assert improvement_items == [], (
-            f"P3 fix: stale dirty verdict must not produce improvement item "
-            f"(score-cache must not fire for dark states); got: {improvement_items}"
+        assert cache_path_items == [], (
+            f"P3 fix: score-cache must not produce items for dark states "
+            f"(detail would contain 'Greptile score:'); "
+            f"got: {cache_path_items}\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
 
@@ -917,5 +925,95 @@ def test_check_merge_ready_dark_state_preserved_score_blocks_merge_ready() -> No
         assert merge_ready_items == [], (
             f"dark-state preserved score 3 must block merge_ready; "
             f"got: {merge_ready_items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+
+def test_check_own_pr_review_state_field5_fallback_before_emit() -> None:
+    """check_own_pr_review_state must read preserved score from field 5 before emitting.
+
+    Regression guard for P1 fp `d9bed4563cc8`: the dark-state format leaves
+    field 1 empty and stores the preserved Greptile score in field 5. If
+    check_own_pr_review_state does not have the fallback to read field 5, a dark-state
+    PR with a preserved sub-5 score is silently skipped — the empty field 1 hits the
+    'no Greptile review on file yet' guard and the PR never gets dispatched for a fix.
+
+    Static check: the fallback (`cut -d: -f5`) must appear in check_own_pr_review_state
+    before the `emit_item` call.
+    """
+    src = GATE.read_text()
+    func_start = src.index("check_own_pr_review_state() {")
+    func_end = src.index("\n}\n", func_start)
+    func_body = src[func_start:func_end]
+
+    assert "cut -d: -f5" in func_body, (
+        "check_own_pr_review_state must read preserved score from field 5 of the dark-state "
+        "file (dark-state format: ':fetched_at:sha:verdict:preserved_score'). "
+        "The fallback 'cut -d: -f5' was not found in the function body."
+    )
+    assert (
+        "emit_item" in func_body
+    ), "emit_item not found in check_own_pr_review_state (test precondition)"
+
+    fallback_pos = func_body.index("cut -d: -f5")
+    emit_pos = func_body.index("emit_item")
+    assert fallback_pos < emit_pos, (
+        f"field-5 fallback (pos {fallback_pos}) must appear before emit_item "
+        f"(pos {emit_pos}) in check_own_pr_review_state — score must be read before emit"
+    )
+
+
+def test_check_own_pr_review_state_dark_state_preserved_score_emits_needs_fix() -> None:
+    """Dark-state preserved sub-4 score in field 5 must trigger greptile_needs_fix emission.
+
+    Regression guard for P1 fp `d9bed4563cc8`: when Greptile is dark and the state
+    file uses the dark format (':ts:sha:clean:3'), check_own_pr_review_state was
+    reading only field 1 (empty), hitting the 'no Greptile review' skip guard, and
+    silently dropping the PR. The fix reads field 5 as a fallback, matching
+    check_merge_ready.
+
+    Scenario:
+    - PR is BLOCKED/MERGEABLE (normal open PR state)
+    - AI verdict is clean (check_greptile_scores emits nothing, only own-pr-review acts)
+    - Greptile state file is dark-state: ':ts:sha:clean:3' (preserved score=3, field 5)
+    - Expected: greptile_needs_fix emitted (score 3 < 4)
+    """
+    import time
+
+    pr = dict(_pr(), mergeStateStatus="BLOCKED")
+    fixture = {
+        "prs": [pr],
+        "comments": [_bob_ai_review_comment(TEST_HEAD_SHA, score=4)],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Seed dark-state greptile file with preserved score 3 in field 5.
+        repo_safe = TEST_REPO.replace("/", "-")
+        greptile_state_file = state_dir / f"{repo_safe}-pr-{TEST_PR}-greptile.state"
+        recent_ts = int(time.time()) - 60
+        greptile_state_file.write_text(f":{recent_ts}:{TEST_HEAD_SHA}:clean:3")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        greptile_fix_items = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "greptile_needs_fix":
+                greptile_fix_items.append(obj)
+
+        assert greptile_fix_items, (
+            f"dark-state preserved score 3 must trigger greptile_needs_fix from "
+            f"check_own_pr_review_state; got nothing.\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )

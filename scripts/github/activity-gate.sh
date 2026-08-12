@@ -1283,12 +1283,17 @@ check_own_pr_review_state() {
         esac
 
         # Read Greptile score and reviewed SHA from state file written by check_greptile_scores
-        # Format: score:timestamp:sha
+        # Normal format: score:timestamp:sha
+        # Dark-state format: :timestamp:sha:verdict:dark_score (field 1 empty, preserved score in field 5)
         local greptile_state_file="$STATE_DIR/${repo_safe}-pr-${pr_number}-greptile.state"
         local greptile_score="" greptile_reviewed_sha=""
         if [ -f "$greptile_state_file" ]; then
             greptile_score=$(cut -d: -f1 < "$greptile_state_file")
             greptile_reviewed_sha=$(cut -d: -f3 < "$greptile_state_file")
+            # Dark-state format: field 1 is empty, preserved score is in field 5.
+            if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
+                greptile_score=$(cut -d: -f5 < "$greptile_state_file")
+            fi
         fi
 
         # No Greptile review on file yet — skip
