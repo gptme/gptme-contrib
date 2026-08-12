@@ -196,7 +196,7 @@ def test_evaluate_pr_blocks_changes_requested() -> None:
 
 def _make_clean_pr_data(**overrides: object) -> dict[str, object]:
     """Minimal PR data that passes all other checks. Override fields to test specific gates."""
-    data = {
+    data: dict[str, object] = {
         "author": {"login": "TimeToBuildBob"},
         "title": "Test PR",
         "url": "https://github.com/gptme/gptme-contrib/pull/999",
@@ -207,6 +207,7 @@ def _make_clean_pr_data(**overrides: object) -> dict[str, object]:
         "reviewDecision": None,
         "headRefOid": "abc123",
         "mergeStateStatus": "CLEAN",
+        "labels": [],
     }
     data.update(overrides)
     return data
@@ -274,6 +275,57 @@ def test_evaluate_pr_clean_merge_state_passes_gate() -> None:
 
     assert result.eligible
     assert not any("merge conflicts" in r for r in result.reasons)
+
+
+_HOLD_PATCH_CONTEXT = (
+    patch.object,
+    patch.object,
+    patch.object,
+    patch.object,
+    patch.object,
+    patch.object,
+)
+
+
+def _evaluate_with_hold_labels(labels: list[dict[str, str]]) -> object:
+    pr_data = _make_clean_pr_data(labels=labels)
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=None),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+    ):
+        return self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+
+@pytest.mark.parametrize("label_name", ["do-not-merge", "hold", "on-hold"])
+def test_evaluate_pr_blocks_operator_hold_label(label_name: str) -> None:
+    result = _evaluate_with_hold_labels([{"name": label_name}])
+    assert not result.eligible
+    assert any("Operator hold" in r for r in result.reasons)
+    assert label_name in " ".join(result.reasons)
+
+
+def test_evaluate_pr_no_hold_label_is_eligible() -> None:
+    result = _evaluate_with_hold_labels([{"name": "enhancement"}, {"name": "ci"}])
+    assert result.eligible
+    assert not any("Operator hold" in r for r in result.reasons)
 
 
 def test_fetch_greptile_status_paginates_review_threads() -> None:

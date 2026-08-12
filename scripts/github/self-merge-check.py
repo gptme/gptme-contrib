@@ -129,6 +129,9 @@ AI_REVIEW_MIN_SCORE = 1
 # Only P0/P1 participate in the disposition recall guard. Lower severities do
 # not block self-merge, and the gate must never guess them into existence.
 AI_REVIEW_BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
+# GitHub labels that record an operator hold. An exact case-insensitive match
+# on any of these makes the PR permanently ineligible until the label is removed.
+_HOLD_LABELS = frozenset({"do-not-merge", "hold", "on-hold"})
 # Shortest marker SHA prefix accepted when matching against the PR head. The
 # reviewer writes 12 hex chars; this only guards against a truncated/garbage
 # marker whose 1-2 char "sha" would prefix-match almost any head.
@@ -639,7 +642,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository,baseRefName",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository,baseRefName,labels",
         ]
     )
     if not raw:
@@ -2398,6 +2401,13 @@ def evaluate_pr(
 
     if pr.get("state") != "OPEN":
         result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
+
+    pr_label_names = {lbl.get("name", "").lower() for lbl in pr.get("labels", [])}
+    matched_hold = pr_label_names & _HOLD_LABELS
+    if matched_hold:
+        result.reasons.append(
+            f"Operator hold: {', '.join(sorted(matched_hold))} label — remove label to unblock"
+        )
 
     merge_state = pr.get("mergeStateStatus", "")
     if merge_state == "DIRTY":
