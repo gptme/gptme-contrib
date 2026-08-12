@@ -198,8 +198,8 @@ IMPORTANT EARLY-EXIT RULES:
   high-yield savings accounts, money market funds, or short-term bonds instead.
 - If has_high_interest_debt = true: Recommend paying off that debt FIRST before investing.
   (Paying off 20%+ APR debt is a guaranteed 20% return — better than any index fund.)
-- If goal_type = "emergency_fund" and has_emergency_fund = false: Recommend building emergency
-  fund first (3-6 months expenses in a HYSA) before any investing.
+- If has_emergency_fund = false: Recommend building emergency fund first
+  (3-6 months expenses in a HYSA) before any investing.
 
 Do not give generic advice. Every recommendation must be traceable to the gathered context."""
 

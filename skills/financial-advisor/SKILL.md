@@ -31,7 +31,9 @@ The skill defines:
 ### Example Usage
 
 ```python
-from skills.financial_advisor import (
+import sys
+sys.path.insert(0, "skills/financial-advisor")  # adjust to your repo root
+from calibration import (
     QuestionContext,
     TimeHorizon,
     GoalType,
