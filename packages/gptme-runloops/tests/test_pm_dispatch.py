@@ -172,6 +172,7 @@ class TestClassifyLane:
         """Verify all expected slow-lane types are in the set."""
         expected = {
             "pr_update",
+            "pr_never_checked",
             "ci_failure",
             "master_ci_failure",
             "merge_conflict",
@@ -183,6 +184,9 @@ class TestClassifyLane:
 
     def test_greptile_convergence_adjudication_is_slow(self):
         assert classify_lane(["greptile_convergence_adjudication"]) == "slow"
+
+    def test_pr_never_checked_is_slow(self):
+        assert classify_lane(["pr_never_checked"]) == "slow"
 
 
 class TestClassifyItemWorkTypeGreptileConvergence:
@@ -1461,6 +1465,40 @@ class TestClassifyItemWorkType:
     def test_automated_review_no_repo(self):
         # No repo → original pr-review behavior
         assert classify_item_work_type(["pr_update"]) == "pr-review"
+
+    def test_pr_never_checked_routes_to_pr_review(self):
+        assert classify_item_work_type(["pr_never_checked"]) == "pr-review"
+
+    def test_pr_never_checked_not_automated_review_in_allowlisted_repo(
+        self, monkeypatch
+    ):
+        # Approving a held workflow run requires a human click — never automated-pr-review
+        monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud")
+        assert (
+            classify_item_work_type(["pr_never_checked"], repo="gptme/gptme-cloud")
+            == "pr-review"
+        )
+
+    def test_pr_update_still_routes_to_automated_review_in_allowlisted_repo(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud")
+        assert (
+            classify_item_work_type(["pr_update"], repo="gptme/gptme-cloud")
+            == "automated-pr-review"
+        )
+
+    def test_combined_pr_never_checked_and_pr_update_not_automated_review(
+        self, monkeypatch
+    ):
+        # Even with pr_update present, pr_never_checked must block automated-pr-review
+        monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-cloud")
+        assert (
+            classify_item_work_type(
+                ["pr_never_checked", "pr_update"], repo="gptme/gptme-cloud"
+            )
+            == "pr-review"
+        )
 
 
 # --- _bandit_observation_count and _resolve_model_with_bandit ---
