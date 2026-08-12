@@ -895,3 +895,53 @@ def test_connect_emits_g711_ulaw_audio_format_when_passthrough_enabled() -> None
         session = session_update["session"]
         assert session["input_audio_format"] == "g711_ulaw"
         assert session["output_audio_format"] == "g711_ulaw"
+
+
+# ── on_user_transcript backward-compat ─────────────────────────────────────
+
+
+def test_one_arg_on_user_transcript_callback_is_wrapped_for_backward_compat() -> None:
+    """A 1-arg on_user_transcript callback must not raise TypeError when item_id is passed.
+
+    Prior to the backward-compat wrapper, any external caller who registered a
+    `lambda text: ...` callback received a TypeError when the client started passing
+    the optional item_id as a second positional argument.
+    """
+    received: list[str] = []
+
+    # Register a legacy 1-arg callback (simulates an external caller who hasn't updated).
+    client = OpenAIRealtimeClient(
+        api_key="test-key",
+        on_user_transcript=lambda text: received.append(text),
+    )
+
+    # Simulate the client calling the callback with 2 args (transcript + item_id).
+    import asyncio
+
+    async def _run() -> None:
+        await client._call_callback(client.on_user_transcript, "hello", "item-001")
+
+    asyncio.run(_run())
+    assert received == [
+        "hello"
+    ], "1-arg callback should receive transcript and ignore item_id"
+
+
+def test_two_arg_on_user_transcript_callback_receives_item_id() -> None:
+    """A 2-arg on_user_transcript callback receives both transcript and item_id."""
+    received: list[tuple] = []
+
+    client = OpenAIRealtimeClient(
+        api_key="test-key",
+        on_user_transcript=lambda text, item_id=None: received.append((text, item_id)),
+    )
+
+    import asyncio
+
+    async def _run() -> None:
+        await client._call_callback(client.on_user_transcript, "hello", "item-001")
+
+    asyncio.run(_run())
+    assert received == [
+        ("hello", "item-001")
+    ], "2-arg callback should receive both args"
