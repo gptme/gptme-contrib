@@ -161,6 +161,20 @@ class TestClassifyQuestion:
         """Test classification of generic investment questions."""
         assert classify_question("Should I invest in index funds?") == "should_i_invest"
 
+    def test_classify_etf_question_not_how_much(self):
+        """'How much should I invest in ETFs?' must route to specific_investment, not how_much_to_save.
+
+        The question contains 'how much' (a how_much_to_save keyword) AND 'etf'
+        (a specific_investment keyword). Without the specific_investment check being
+        evaluated first, it routes to how_much_to_save and asks about amount_context
+        instead of risk_tolerance and time_horizon (P2 regression guard).
+        """
+        result = classify_question("How much should I invest in ETFs?")
+        assert result == "specific_investment", (
+            f"Expected specific_investment, got {result!r}. "
+            "The 'how much' check must not shadow ETF investment questions."
+        )
+
 
 class TestNextQuestions:
     """Test question ordering logic."""
@@ -184,6 +198,24 @@ class TestNextQuestions:
         ctx = QuestionContext()
         questions = next_questions(ctx, "should_i_invest", max_questions=1)
         assert len(questions) == 1
+
+    def test_next_questions_empty_when_debt_interrupt(self):
+        """next_questions must return [] when high-interest debt is flagged.
+
+        A caller driving a clarifying-question loop via next_questions must not
+        keep asking about time_horizon / goal_type when the debt interrupt should
+        fire.  Returning [] signals the caller to show the debt-payoff message
+        instead of asking further questions (P1 regression guard).
+        """
+        ctx = QuestionContext(has_high_interest_debt=True)
+        # Even with missing required axes (time_horizon, goal_type), must return [].
+        assert ctx.should_interrupt_with_debt_advice()
+        assert ctx.missing_axes_for("should_i_invest")  # sanity: axes ARE missing
+        questions = next_questions(ctx, "should_i_invest")
+        assert questions == [], (
+            "next_questions must return [] when debt interrupt is active, "
+            "not a list of clarifying questions"
+        )
 
 
 class TestGenerateCalibratedPrompt:

@@ -171,6 +171,16 @@ def classify_question(user_question: str) -> str:
         ]
     ):
         return "portfolio_allocation"
+    # Check specific-instrument keywords first so "How much should I invest in ETFs?"
+    # routes to specific_investment rather than how_much_to_save.  The "how much"
+    # branch is intentionally broad; without this guard it swallows questions that
+    # also contain ETF/stock/bond identifiers, routing them to a path that collects
+    # amount_context instead of risk_tolerance and time_horizon.
+    if (
+        any(kw in q for kw in ["specific", "stock", "etf", "bond", "reit"])
+        and "should" in q
+    ):
+        return "specific_investment"
     # Check savings-amount keywords before emergency keywords so that "How much should I
     # save for a rainy day?" routes to how_much_to_save (which gathers amount_context)
     # rather than emergency_fund (which only gathers has_emergency_fund).
@@ -178,18 +188,21 @@ def classify_question(user_question: str) -> str:
         return "how_much_to_save"
     if any(kw in q for kw in ["emergency", "rainy day", "safety net"]):
         return "emergency_fund"
-    if (
-        any(kw in q for kw in ["specific", "stock", "etf", "bond", "reit"])
-        and "should" in q
-    ):
-        return "specific_investment"
     return "should_i_invest"
 
 
 def next_questions(
     ctx: QuestionContext, question_type: str, max_questions: int = 2
 ) -> list[str]:
-    """Return the next questions to ask, up to max_questions."""
+    """Return the next questions to ask, up to max_questions.
+
+    Returns an empty list when the debt-interrupt early-exit should fire — the
+    caller must handle that case (e.g. by routing to generate_calibrated_prompt
+    or by showing the debt-payoff message directly) rather than asking further
+    clarifying questions.
+    """
+    if ctx.should_interrupt_with_debt_advice():
+        return []
     missing = ctx.missing_axes_for(question_type)
     return [AXIS_QUESTIONS[axis] for axis in missing[:max_questions]]
 
