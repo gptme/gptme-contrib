@@ -658,7 +658,9 @@ def test_disconnect_drains_late_transcript_events_without_sending_late_audio() -
             )
             client = OpenAIRealtimeClient(
                 api_key="test-key",
-                on_user_transcript=user_transcripts.append,
+                on_user_transcript=lambda text, _item_id=None: user_transcripts.append(
+                    text
+                ),
                 on_audio=audio_chunks.append,
             )
             await client.connect()
