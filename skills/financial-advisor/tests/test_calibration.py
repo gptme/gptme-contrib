@@ -121,8 +121,14 @@ class TestClassifyQuestion:
             classify_question("How should I allocate my portfolio?")
             == "portfolio_allocation"
         )
+        # "balance" alone is excluded (too broad — matches "account balance", "balance budget").
+        # Portfolio-specific phrasings must still classify correctly.
         assert (
-            classify_question("What's the best balance for my investments?")
+            classify_question("How should I rebalance my portfolio?")
+            == "portfolio_allocation"
+        )
+        assert (
+            classify_question("What's the best way to balance my portfolio?")
             == "portfolio_allocation"
         )
 
@@ -242,6 +248,26 @@ class TestGenerateCalibratedPrompt:
         )
         prompt = generate_calibrated_prompt("Should I invest?", ctx)
         assert "EARLY-EXIT RULES" in prompt
+        assert "debt" in prompt.lower()
+
+    def test_prompt_debt_interrupt_fires_with_missing_axes(self):
+        """High-interest debt must interrupt even when other required axes are missing.
+
+        This is the P1 regression guard: should_interrupt_with_debt_advice() must
+        be called in generate_calibrated_prompt so a user with high-interest debt
+        gets immediate payoff advice — not a question about time horizon first.
+        """
+        # Only has_high_interest_debt is set; time_horizon and goal_type are missing.
+        ctx = QuestionContext(has_high_interest_debt=True)
+        assert ctx.should_interrupt_with_debt_advice()
+        assert not ctx.is_ready_to_advise("should_i_invest")
+
+        prompt = generate_calibrated_prompt("Should I invest my savings?", ctx)
+        # Must NOT ask clarifying questions despite missing axes.
+        assert "Do NOT give investment advice yet" not in prompt
+        assert "Ask the 1-2 questions listed above" not in prompt
+        # Must INTERRUPT with debt advice.
+        assert "INTERRUPT" in prompt or "pay" in prompt.lower()
         assert "debt" in prompt.lower()
 
     def test_early_exit_rules_only_for_gathered_axes(self):

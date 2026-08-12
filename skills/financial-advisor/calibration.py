@@ -156,8 +156,19 @@ AXIS_QUESTIONS: dict[str, str] = {
 def classify_question(user_question: str) -> str:
     """Classify a user question into a question type."""
     q = user_question.lower()
+    # Note: "balance" alone is intentionally excluded — it is too broad and matches
+    # "account balance" or "balance my budget", causing misclassification.
+    # "rebalance" is included because it is unambiguously portfolio-related.
     if any(
-        kw in q for kw in ["portfolio", "allocation", "balance", "split", "distribute"]
+        kw in q
+        for kw in [
+            "portfolio",
+            "allocation",
+            "rebalance",
+            "balance my portfolio",
+            "split",
+            "distribute",
+        ]
     ):
         return "portfolio_allocation"
     # Check savings-amount keywords before emergency keywords so that "How much should I
@@ -194,7 +205,20 @@ def generate_calibrated_prompt(user_question: str, ctx: QuestionContext) -> str:
 
     missing_questions = [f"- {AXIS_QUESTIONS[a]}" for a in missing[:2]]
 
-    if missing_questions:
+    # High-interest debt is an early-exit interrupt: the debt-payoff advice ("pay off
+    # 20%+ APR first") is always correct and takes priority over gathering more context.
+    # A user who reports high-interest debt must receive that guidance IMMEDIATELY —
+    # asking further questions about time horizon or risk tolerance first degrades the
+    # skill's core value proposition and contradicts the stated early-exit behaviour.
+    if ctx.should_interrupt_with_debt_advice():
+        questions_block = "NEXT CLARIFYING QUESTIONS: (none — high-interest debt interrupt takes priority)"
+        action_instruction = (
+            "INTERRUPT: The user has high-interest debt. "
+            "Advise them to pay it off FIRST before any investing. "
+            "Do NOT ask further clarifying questions. "
+            "(Paying off 20%+ APR debt is a guaranteed 20%+ return — better than any index fund.)"
+        )
+    elif missing_questions:
         # Still gathering context — tell the LLM exactly what to ask next.
         questions_block = (
             "NEXT CLARIFYING QUESTIONS TO ASK (ask these before giving advice):\n"
