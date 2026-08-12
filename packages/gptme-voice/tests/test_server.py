@@ -1812,3 +1812,28 @@ def test_asr_shorter_text_starts_new_entry() -> None:
     _append_transcript_turn(transcript, "user", "Hello Bob, how are you doing today?")
     _append_transcript_turn(transcript, "user", "Goodbye")
     assert len(transcript) == 2
+
+
+def test_asr_prefix_collision_with_item_id_appends() -> None:
+    """A new utterance that starts with the previous text must NOT collapse when item_ids differ."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello", item_id="item-001")
+    _append_transcript_turn(
+        transcript, "user", "Hello, I'd like to order a pizza", item_id="item-002"
+    )
+    assert len(transcript) == 2
+    assert transcript[0].text == "Hello"
+    assert transcript[1].text == "Hello, I'd like to order a pizza"
+
+
+def test_asr_same_item_id_replaces() -> None:
+    """Multiple events with the same item_id replace rather than append."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello", item_id="item-001")
+    _append_transcript_turn(transcript, "user", "Hello, I'd like", item_id="item-001")
+    _append_transcript_turn(
+        transcript, "user", "Hello, I'd like to order", item_id="item-001"
+    )
+    assert len(transcript) == 1
+    assert transcript[0].text == "Hello, I'd like to order"
+    assert transcript[0].item_id == "item-001"

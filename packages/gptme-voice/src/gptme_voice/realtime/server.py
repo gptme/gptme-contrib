@@ -147,6 +147,7 @@ _ASSISTANT_HANGUP_DISQUALIFIERS_RE = re.compile(
 class TranscriptTurn:
     role: str
     text: str
+    item_id: str | None = None
 
 
 @dataclass
@@ -434,28 +435,42 @@ def _build_standup_call_instructions(brief_text: str) -> str:
 
 
 def _append_transcript_turn(
-    transcript: list[TranscriptTurn], role: str, text: str
+    transcript: list[TranscriptTurn],
+    role: str,
+    text: str,
+    *,
+    item_id: str | None = None,
 ) -> None:
     """Add a transcript turn, replacing the last entry when it is a partial of the same utterance.
 
     Some ASR providers (e.g. xAI/Grok) fire the completed event multiple times
     for the same utterance, each time with the full accumulated text so far.
-    When the new text is a prefix-extension of the last same-role entry we
-    replace in-place rather than appending, so the transcript entry count equals
-    the utterance count.  A genuinely new utterance (different role last, or
-    text that does not extend the previous) always appends as a new entry.
+
+    When item_id is provided (preferred): replace if and only if the last same-role entry
+    carries the same item_id.  This is exact and avoids the false-positive where a new
+    utterance happens to begin with the same text as the previous one.
+
+    When item_id is absent (fallback): replace if the new text is a prefix-extension of
+    the last same-role entry.  Providers that do not expose item_id in the event still
+    benefit from deduplication; the false-positive risk is inherent to the heuristic.
     """
     cleaned = text.strip()
     if not cleaned:
         return
-    if (
+    is_continuation = (
         transcript
         and transcript[-1].role == role
-        and cleaned.startswith(transcript[-1].text)
-    ):
-        transcript[-1] = TranscriptTurn(role=role, text=cleaned)
+        and (
+            # Exact match by item_id (preferred — no false positives)
+            (item_id is not None and transcript[-1].item_id == item_id)
+            # Prefix heuristic fallback when item_id is unavailable
+            or (item_id is None and cleaned.startswith(transcript[-1].text))
+        )
+    )
+    if is_continuation:
+        transcript[-1] = TranscriptTurn(role=role, text=cleaned, item_id=item_id)
     else:
-        transcript.append(TranscriptTurn(role=role, text=cleaned))
+        transcript.append(TranscriptTurn(role=role, text=cleaned, item_id=item_id))
 
 
 def _normalize_transcript_text(text: str) -> str:
@@ -1895,8 +1910,8 @@ class VoiceServer:
                     f"assistant said: {text[:120]}",
                 )
 
-        def _on_user_transcript(text: str) -> None:
-            _append_transcript_turn(transcript, "user", text)
+        def _on_user_transcript(text: str, item_id: str | None = None) -> None:
+            _append_transcript_turn(transcript, "user", text, item_id=item_id)
 
         return _on_ai_transcript, _on_user_transcript, _on_hangup
 
