@@ -39,7 +39,7 @@ def populated_index(tmp_path):
 
 def test_search_json_output_structure(populated_index):
     """JSON output has the required top-level keys."""
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(
         cli,
         [
@@ -61,7 +61,7 @@ def test_search_json_output_structure(populated_index):
 
 def test_search_json_output_query_echoed(populated_index):
     """The query is echoed back in JSON output."""
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(
         cli,
         [
@@ -80,7 +80,7 @@ def test_search_json_output_query_echoed(populated_index):
 
 def test_search_json_output_result_fields(populated_index):
     """Each result has source, relevance, content, and metadata fields."""
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(
         cli,
         [
@@ -109,7 +109,7 @@ def test_search_json_output_result_fields(populated_index):
 
 def test_search_json_output_context_info(populated_index):
     """Context info block includes total_tokens, included_results, and truncated."""
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(
         cli,
         [
@@ -143,7 +143,7 @@ def test_search_json_no_results(tmp_path):
         persist_directory=tmp_path / "empty",
         enable_persist=True,
     )
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(
         cli,
         [
@@ -196,7 +196,7 @@ def test_search_json_format_flag_warns(populated_index):
 
 def test_search_json_output_is_valid_json(populated_index):
     """Output is valid JSON (no rich markup, no extra text)."""
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(
         cli,
         [
@@ -216,7 +216,7 @@ def test_search_json_output_is_valid_json(populated_index):
 
 def test_search_json_expand_truncated_consistency(populated_index):
     """When --expand is used, truncated is always False (all results are returned)."""
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     for expand_mode in ("adjacent", "file"):
         result = runner.invoke(
             cli,
@@ -268,7 +268,7 @@ def test_search_json_truncated_on_dedup(tmp_path):
         ),
     ]
     indexer.add_documents(docs)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(
         cli,
         [
@@ -304,7 +304,7 @@ def test_search_json_truncated_on_dedup(tmp_path):
 
 def test_search_human_format_is_default(populated_index):
     """Default output is human-readable (not JSON)."""
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(
         cli,
         ["search", "Python", "--persist-dir", str(populated_index)],
