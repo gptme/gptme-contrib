@@ -219,6 +219,30 @@ class TestGenerateCalibratedPrompt:
         assert "EARLY-EXIT RULES" in prompt
         assert "debt" in prompt.lower()
 
+    def test_early_exit_rules_only_for_gathered_axes(self):
+        """Early-exit rules must only appear for axes that are present in context.
+
+        For should_i_invest, has_emergency_fund is not required. When we are ready
+        to advise without it, the emergency-fund rule must NOT be in the prompt —
+        the LLM cannot evaluate a condition for a value it was never given.
+        """
+        ctx = QuestionContext(
+            time_horizon=TimeHorizon.LONG,
+            goal_type=GoalType.WEALTH_GROWTH,
+            has_high_interest_debt=False,
+            # has_emergency_fund deliberately not set — not required for this type
+        )
+        assert ctx.is_ready_to_advise("should_i_invest")
+        prompt = generate_calibrated_prompt("Should I invest?", ctx)
+        # Emergency fund rule must not appear — axis was never gathered
+        assert "emergency fund" not in prompt.lower(), (
+            "Emergency-fund early-exit rule appeared in prompt even though "
+            "has_emergency_fund was never gathered for this question type"
+        )
+        # Time horizon and debt rules ARE present because those axes were gathered
+        assert "near" in prompt.lower()
+        assert "debt" in prompt.lower()
+
 
 class TestIntegrationScenarios:
     """Integration tests for realistic scenarios."""

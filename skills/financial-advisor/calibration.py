@@ -207,6 +207,34 @@ def generate_calibrated_prompt(user_question: str, ctx: QuestionContext) -> str:
             "All required context has been gathered. Give concrete advice now."
         )
 
+    # Build early-exit rules only for axes that are actually in the gathered context.
+    # Unconditional rules cause the LLM to receive conditions it cannot evaluate —
+    # e.g. `has_emergency_fund = false` appears in the prompt even when that axis
+    # was never gathered (it is not required for `should_i_invest` questions), so
+    # the LLM is told "give advice now" with an unfalsifiable rule still active.
+    ctx_dict = ctx.to_dict()
+    early_exit_lines = []
+    if "time_horizon" in ctx_dict:
+        early_exit_lines.append(
+            '- If time_horizon = "near" (< 2 years): Do NOT recommend stock market investments.'
+            " Recommend high-yield savings accounts, money market funds, or short-term bonds instead."
+        )
+    if "has_high_interest_debt" in ctx_dict:
+        early_exit_lines.append(
+            "- If has_high_interest_debt = true: Recommend paying off that debt FIRST before investing."
+            " (Paying off 20%+ APR debt is a guaranteed 20% return — better than any index fund.)"
+        )
+    if "has_emergency_fund" in ctx_dict:
+        early_exit_lines.append(
+            "- If has_emergency_fund = false: Recommend building emergency fund first"
+            " (3-6 months expenses in a HYSA) before any investing."
+        )
+    early_exit_section = (
+        "IMPORTANT EARLY-EXIT RULES:\n" + "\n".join(early_exit_lines)
+        if early_exit_lines
+        else "IMPORTANT EARLY-EXIT RULES: (none — no conditional axes gathered yet)"
+    )
+
     prompt = f"""You are a financial planning assistant. Before giving advice, you ask specific
 clarifying questions to understand the user's situation. You ask no more than 2 questions at a time.
 
@@ -226,13 +254,7 @@ ADVICE STRUCTURE (use when all context is gathered):
   3. What to do first (one concrete action)
   4. One key risk or caveat
 
-IMPORTANT EARLY-EXIT RULES:
-- If time_horizon = "near" (< 2 years): Do NOT recommend stock market investments. Recommend
-  high-yield savings accounts, money market funds, or short-term bonds instead.
-- If has_high_interest_debt = true: Recommend paying off that debt FIRST before investing.
-  (Paying off 20%+ APR debt is a guaranteed 20% return — better than any index fund.)
-- If has_emergency_fund = false: Recommend building emergency fund first
-  (3-6 months expenses in a HYSA) before any investing.
+{early_exit_section}
 
 Do not give generic advice. Every recommendation must be traceable to the gathered context."""
 
