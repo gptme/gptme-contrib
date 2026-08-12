@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: change this to a more appropriate location
 default_persist_dir = Path.home() / ".cache" / "gptme" / "rag"
-EMBEDDING_FUNCTION_CHOICES = ["modernbert", "minilm", "mpnet", "openrouter", "default"]
+EMBEDDING_FUNCTION_CHOICES = ["auto", "modernbert", "minilm", "mpnet", "openrouter", "default"]
 
 
 class ChunkMerger:
@@ -160,8 +160,8 @@ def cli(verbose: bool):
 @click.option(
     "--embedding-function",
     type=click.Choice(EMBEDDING_FUNCTION_CHOICES),
-    default="modernbert",
-    help="Embedding function to use",
+    default="auto",
+    help="Embedding function to use. 'auto' (default) preserves the embedding model of an existing collection.",
 )
 @click.option(
     "--device",
@@ -202,7 +202,7 @@ def index(
         return
 
     try:
-        if embedding_function and not force_recreate:
+        if embedding_function and embedding_function != "auto" and not force_recreate:
             console.print(
                 "[yellow]Warning:[/yellow] Changing embedding model may require recreating the collection. "
                 "Use --force-recreate if you encounter dimension mismatch errors.",

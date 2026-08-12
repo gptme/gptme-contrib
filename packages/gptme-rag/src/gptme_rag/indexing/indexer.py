@@ -191,6 +191,12 @@ class Indexer:
         if embedding_function == "auto":
             try:
                 _auto_peeked_collection = self.client.get_collection(name=collection_name)
+            except Exception:
+                pass  # No existing collection; keep ModernBERT default
+            else:
+                # Collection exists — detect its backend and rebind the embedding function.
+                # This block intentionally propagates model-loading errors rather than
+                # silently falling back to ModernBERT (which would cause a dimension mismatch).
                 metadata = _auto_peeked_collection.metadata or {}
                 detected = metadata.get("embedding_model", "default")
                 detected_backend = metadata.get("embedding_backend")
@@ -200,9 +206,18 @@ class Indexer:
                 elif detected_backend == "sentence-transformers" or (
                     detected not in ("modernbert", "default", "unknown") and "/" not in detected
                 ):
-                    self.embedding_function = GenericSentenceTransformerEmbedding(
-                        detected, device=device
-                    )
+                    try:
+                        self.embedding_function = GenericSentenceTransformerEmbedding(
+                            detected, device=device
+                        )
+                    except Exception:
+                        reuse_auto_peeked_collection = True
+                        self.embedding_function = None
+                        logger.warning(
+                            "Stored index uses sentence-transformer model %r but it could not be "
+                            "loaded; preserving the existing collection without rebinding embeddings",
+                            detected,
+                        )
                 elif detected_backend == "openrouter" or (
                     detected not in ("modernbert", "default", "unknown") and "/" in detected
                 ):
@@ -220,8 +235,6 @@ class Indexer:
                 else:
                     self.embedding_function = None
                     reuse_auto_peeked_collection = True
-            except Exception:
-                pass  # No existing collection; keep ModernBERT default
 
         need_recreate = False
         if isinstance(self.embedding_function, ModernBERTEmbedding):

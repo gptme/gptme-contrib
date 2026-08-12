@@ -441,6 +441,55 @@ def test_auto_embedding_mode_preserves_legacy_chromadb_default_collection(tmp_pa
     ), "auto mode destroyed legacy no-metadata collection (dimension mismatch bug)"
 
 
+def test_auto_embedding_mode_preserves_collection_when_sentence_transformer_fails_to_load(
+    tmp_path, monkeypatch
+):
+    """Auto mode must not delete a sentence-transformer collection when the model can't load.
+
+    Regression test for P0 bug: if GenericSentenceTransformerEmbedding raised (e.g., model
+    download failure, missing weights), the exception propagated out of the Indexer constructor,
+    crashing the command. Fix: wrap in try/except and fall back to reuse_auto_peeked_collection,
+    preserving the collection without rebinding (same pattern as the OpenRouter API-key fallback).
+    """
+    import chromadb as _chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Create a persisted collection tagged as sentence-transformers backend.
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = _chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "all-MiniLM-L6-v2",
+            "embedding_backend": "sentence-transformers",
+        },
+    )
+    col.add(ids=["st-doc"], embeddings=[[0.5] * 384], documents=["sentence-transformer content"])
+    assert col.count() == 1
+    del client
+
+    # Simulate a model-load failure (e.g., missing download or corrupt weights).
+    def _raise(*args, **kwargs):
+        raise RuntimeError("Model weights not found")
+
+    monkeypatch.setattr(indexer_module, "GenericSentenceTransformerEmbedding", _raise)
+
+    # Opening with auto mode must NOT crash or delete the collection.
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="auto",
+        collection_name="default",
+    )
+    assert (
+        indexer.collection.count() == 1
+    ), "auto mode deleted sentence-transformer collection when the model failed to load"
+
+
 def test_reset_collection_preserves_embedding_metadata(indexer):
     """reset_collection must recreate with the same embedding model metadata."""
     indexer.reset_collection()
