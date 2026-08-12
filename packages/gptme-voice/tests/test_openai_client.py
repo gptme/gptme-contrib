@@ -1066,14 +1066,15 @@ def test_non_introspectable_callback_internal_typeerror_with_argument_in_message
 ):
     """Internal TypeErrors whose message contains 'argument' must still propagate.
 
-    The old heuristic used ``"argument" not in str(exc)`` to detect arity errors.
-    A TypeError raised inside the callback body with a message like
-    ``"bad argument type"`` would be misclassified as an arity error and silently
-    rerouted to a 1-arg fallback call — masking the real failure.
+    The old string-heuristic (``"argument" not in str(exc)``) was superseded by
+    traceback-depth detection, which was itself superseded by the try-both
+    approach because traceback depth is unreliable for C-extension callbacks
+    (they produce no Python frames, so tb_next is None even for internal errors).
 
-    The correct fix is traceback-depth detection: arity errors are raised before
-    Python enters the callback's frame (tb.tb_next is None); internal errors have
-    at least one extra frame (tb.tb_next is not None).
+    With the try-both approach, if _cb(text, item_id) raises an internal
+    TypeError, _cb(text) raises an arity TypeError (1 arg, 2 expected), and we
+    re-raise the original internal error — so callers see the real cause
+    regardless of whether 'argument' appears in the message.
     """
     import asyncio
     import inspect
