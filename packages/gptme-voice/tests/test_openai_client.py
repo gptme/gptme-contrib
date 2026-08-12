@@ -1102,3 +1102,98 @@ def test_non_introspectable_callback_internal_typeerror_with_argument_in_message
             await client._call_callback(client.on_user_transcript, "hello", "item-001")
 
     asyncio.run(_run())
+
+
+def test_non_introspectable_one_arg_callback_internal_typeerror_propagates() -> None:
+    """A 1-arg non-introspectable callback that raises internally must surface its error.
+
+    The try-both approach calls _cb(text, item_id) first (arity TypeError for a
+    1-arg callback) then falls back to _cb(text).  If _cb(text) raises an internal
+    TypeError, the wrapper must re-raise THAT error — not the arity TypeError from
+    the first call — so callers see the real cause, not a confusing argument-count
+    message.
+
+    Regression for finding fp=92222357dcc1: the inner ``except TypeError:`` was
+    re-raising ``original_exc`` (the arity error) unconditionally, masking the
+    internal error from the 1-arg path.
+    """
+    import asyncio
+    import inspect
+    import unittest.mock
+
+    def inner_1arg(text: str) -> None:
+        # 1-arg callback that raises an internal TypeError (not arity-related)
+        raise TypeError("internal error from 1-arg callback")
+
+    original_sig = inspect.signature
+
+    def patched_signature(obj, **kwargs):
+        if obj is inner_1arg:
+            raise ValueError("cannot introspect")
+        return original_sig(obj, **kwargs)
+
+    with unittest.mock.patch("inspect.signature", side_effect=patched_signature):
+        client = OpenAIRealtimeClient(
+            api_key="test-key",
+            on_user_transcript=inner_1arg,
+        )
+
+    async def _run() -> None:
+        with pytest.raises(TypeError, match="internal error from 1-arg callback"):
+            await client._call_callback(client.on_user_transcript, "hello", "item-001")
+
+    asyncio.run(_run())
+
+
+def test_non_introspectable_two_arg_internal_typeerror_propagates_when_fallback_would_succeed() -> (
+    None
+):
+    """Internal TypeError from 2-arg non-introspectable callback must propagate even if 1-arg fallback succeeds.
+
+    P2 masking path (fp=1f239ab3a764): a non-introspectable callback that
+    - raises TypeError *internally* when called with 2 args (not an arity error), AND
+    - would succeed when called with 1 arg (item_id has a default),
+    must NOT silently run with incomplete data. The original TypeError must surface.
+
+    Before the fix: the except-TypeError branch tried _cb(text) and if that
+    succeeded, original_exc was swallowed — the callback ran with item_id missing
+    and no error surfaced.
+
+    After the fix: an else clause checks whether original_exc looks like a Python
+    "too many positional arguments" arity error. If not, it re-raises it.
+    """
+    import asyncio
+    import inspect
+    import unittest.mock
+
+    calls: list[tuple[str, str | None]] = []
+
+    def inner(text: str, item_id: str | None = None) -> None:
+        if item_id is None:
+            # Internal TypeError — not an arity error.
+            raise TypeError("item_id must not be None")
+        calls.append((text, item_id))
+
+    original_sig = inspect.signature
+
+    def patched_signature(obj, **kwargs):
+        if obj is inner:
+            raise ValueError("cannot introspect")
+        return original_sig(obj, **kwargs)
+
+    with unittest.mock.patch("inspect.signature", side_effect=patched_signature):
+        client = OpenAIRealtimeClient(
+            api_key="test-key",
+            on_user_transcript=inner,
+        )
+
+    async def _run() -> None:
+        # item_id=None triggers an internal TypeError in the callback; the
+        # 1-arg fallback _cb(text) would succeed (item_id has a default), but
+        # the original error must propagate rather than be silently discarded.
+        with pytest.raises(TypeError, match="item_id must not be None"):
+            await client._call_callback(client.on_user_transcript, "hello", None)
+
+    asyncio.run(_run())
+    # Callback must NOT have run with incomplete data.
+    assert calls == []
