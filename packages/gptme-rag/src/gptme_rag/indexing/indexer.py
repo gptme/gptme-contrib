@@ -237,7 +237,9 @@ class Indexer:
                     reuse_auto_peeked_collection = True
 
         need_recreate = False
-        if isinstance(self.embedding_function, ModernBERTEmbedding):
+        if self.embedding_function is None:
+            current_model = "default"
+        elif isinstance(self.embedding_function, ModernBERTEmbedding):
             current_model = "modernbert"
         elif isinstance(self.embedding_function, GenericSentenceTransformerEmbedding):
             # Get the actual model name from GenericSentenceTransformerEmbedding
