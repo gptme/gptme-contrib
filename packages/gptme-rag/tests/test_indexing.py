@@ -473,10 +473,13 @@ def test_auto_embedding_mode_preserves_collection_when_sentence_transformer_fail
     del client
 
     # Simulate a model-load failure (e.g., missing download or corrupt weights).
-    def _raise(*args, **kwargs):
-        raise RuntimeError("Model weights not found")
+    # Must be a class (not a plain function) so isinstance() checks in the indexer
+    # receive a valid type and return False rather than raising TypeError.
+    class _Raise:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("Model weights not found")
 
-    monkeypatch.setattr(indexer_module, "GenericSentenceTransformerEmbedding", _raise)
+    monkeypatch.setattr(indexer_module, "GenericSentenceTransformerEmbedding", _Raise)
 
     # Opening with auto mode must NOT crash or delete the collection.
     indexer = Indexer(
@@ -490,9 +493,170 @@ def test_auto_embedding_mode_preserves_collection_when_sentence_transformer_fail
     ), "auto mode deleted sentence-transformer collection when the model failed to load"
 
 
+def test_auto_embedding_mode_sentence_transformer_namespace_not_misrouted_to_openrouter(tmp_path):
+    """Auto mode must not route 'sentence-transformers/<model>' to the OpenRouter backend.
+
+    Regression test for P1 bug: the slash heuristic used 'org/model' as a signal
+    for OpenRouter model names.  Legacy collections indexed with a model from the
+    'sentence-transformers/' HuggingFace namespace (e.g. paraphrase-MiniLM-L6-v2)
+    have a '/' in their stored embedding_model but no embedding_backend metadata.
+    The old heuristic treated any '/'-containing name as OpenRouter, which (without
+    an API key) fell back to ModernBERT (768-dim) and caused dimension mismatches.
+    Fix: _looks_like_openrouter_model() now excludes known sentence-transformer
+    namespaces from the OpenRouter routing path.
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    # Legacy collection: has a namespaced ST model name but NO embedding_backend.
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "sentence-transformers/paraphrase-MiniLM-L6-v2",
+            # intentionally no "embedding_backend" key — this is the legacy format
+        },
+    )
+    col.add(ids=["para-doc"], embeddings=[[0.3] * 384], documents=["paraphrase doc"])
+    assert col.count() == 1
+    del client
+
+    # Without OPENROUTER_API_KEY, misrouting to OpenRouter would cause a ValueError
+    # in OpenRouterEmbedding.__init__ and then fall through to ModernBERT (768-dim),
+    # causing a dimension mismatch on any later query against the 384-dim collection.
+    # The correct path: treat 'sentence-transformers/*' as sentence-transformers,
+    # not OpenRouter, so the collection is preserved (even if the model can't load).
+    import os
+
+    env_backup = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        indexer = Indexer(
+            persist_directory=persist_dir,
+            enable_persist=True,
+            embedding_function="auto",
+            collection_name="default",
+        )
+        assert (
+            indexer.collection.count() == 1
+        ), "auto mode destroyed legacy sentence-transformers/ namespace collection (slash misrouting bug)"
+    finally:
+        if env_backup is not None:
+            os.environ["OPENROUTER_API_KEY"] = env_backup
+
+
 def test_reset_collection_preserves_embedding_metadata(indexer):
     """reset_collection must recreate with the same embedding model metadata."""
     indexer.reset_collection()
     metadata = indexer.collection.metadata or {}
     assert metadata.get("embedding_model") == indexer.embedding_model_name
     assert metadata.get("embedding_backend") == indexer.embedding_backend_name
+
+
+def test_auto_mode_search_raises_clear_error_when_openrouter_key_absent(tmp_path):
+    """search() must raise RuntimeError with a clear message, not a cryptic ChromaDB
+    dimension-mismatch, when the stored OpenRouter model could not be re-loaded.
+
+    Regression test for P1: embedding_function=None with a non-default stored model
+    caused search() to fall through to query_texts (ChromaDB default 384-dim MiniLM),
+    which mismatched the stored OpenRouter 3072-dim vectors.
+    """
+    import os
+
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "openai/text-embedding-3-large",
+            "embedding_backend": "openrouter",
+        },
+    )
+    col.add(
+        ids=["or-doc"],
+        embeddings=[[0.1] * 3072],
+        documents=["an openrouter-indexed document"],
+    )
+    assert col.count() == 1
+    del client
+
+    env_backup = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        indexer = Indexer(
+            persist_directory=persist_dir,
+            enable_persist=True,
+            embedding_function="auto",
+            collection_name="default",
+        )
+        # Collection must be preserved (P0 regression check).
+        assert indexer.collection.count() == 1
+        # The embedding_model_name should reflect the actual stored model, not "default" (P2).
+        assert indexer.embedding_model_name == "openai/text-embedding-3-large"
+        # search() must raise a clear RuntimeError, not a cryptic ChromaDB error (P1).
+        with pytest.raises(RuntimeError, match="openai/text-embedding-3-large"):
+            indexer.search("test query")
+    finally:
+        if env_backup is not None:
+            os.environ["OPENROUTER_API_KEY"] = env_backup
+
+
+def test_auto_mode_search_raises_clear_error_when_sentence_transformer_fails(tmp_path, monkeypatch):
+    """search() must raise RuntimeError with a clear message when the stored
+    sentence-transformer model could not be re-loaded.
+
+    Regression test for P1: same as OpenRouter case but for sentence-transformer backend.
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "all-mpnet-base-v2",
+            "embedding_backend": "sentence-transformers",
+        },
+    )
+    col.add(
+        ids=["st-doc"],
+        embeddings=[[0.2] * 768],
+        documents=["an mpnet-indexed document"],
+    )
+    assert col.count() == 1
+    del client
+
+    class _Raise:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("Model weights not found")
+
+    monkeypatch.setattr(indexer_module, "GenericSentenceTransformerEmbedding", _Raise)
+
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="auto",
+        collection_name="default",
+    )
+    # Collection must be preserved.
+    assert indexer.collection.count() == 1
+    # embedding_model_name should reflect the stored model name, not "default" (P2).
+    assert indexer.embedding_model_name == "all-mpnet-base-v2"
+    # search() must raise a clear RuntimeError, not a ChromaDB dimension-mismatch (P1).
+    with pytest.raises(RuntimeError, match="all-mpnet-base-v2"):
+        indexer.search("test query")

@@ -26,6 +26,26 @@ from .document import Document
 from .document_processor import DocumentProcessor
 
 
+# HuggingFace namespaces that are used for sentence-transformer models.
+# Model names in these namespaces contain a slash but are NOT OpenRouter model names.
+# Only "sentence-transformers/" is included here; other ST-compatible HF namespaces
+# (BAAI/, thenlper/, intfloat/) would also have embedding_backend metadata when
+# indexed with this PR's updated code, so they don't need the fallback heuristic.
+_SENTENCE_TRANSFORMER_NAMESPACES = frozenset({"sentence-transformers/"})
+
+
+def _looks_like_openrouter_model(model_name: str) -> bool:
+    """Heuristic: OpenRouter model names follow 'org/model' format.
+
+    Returns False for known sentence-transformer HuggingFace namespaces so that
+    legacy collections (without embedding_backend metadata) are not misrouted to
+    the OpenRouter backend when their stored model name contains a slash.
+    """
+    if "/" not in model_name:
+        return False
+    return not any(model_name.startswith(ns) for ns in _SENTENCE_TRANSFORMER_NAMESPACES)
+
+
 class ChromaDBFilter(Filter):
     """Filter out expected ChromaDB warnings about existing IDs."""
 
@@ -117,19 +137,30 @@ class Indexer:
             device: Device to run embeddings on ("cuda" or "cpu")
         """
         self.collection_name = collection_name
+        # Populated by auto-detect when the stored model cannot be re-loaded
+        # (API key absent for OpenRouter, weights missing for sentence-transformers).
+        # Kept separate from embedding_function so None stays unambiguous:
+        # None+_stored_model_name=None => chroma-default; None+_stored_model_name=X => load failed.
+        self._stored_model_name: str | None = None
 
         # Set default chunk sizes based on model type
         default_chunk_size = 1000
         default_chunk_overlap = 200
 
-        # Initialize embedding function
-        # "auto" is deferred until after client init (needs to peek at stored metadata)
-        if embedding_function in ("auto", "modernbert"):
+        # Initialize embedding function.
+        # "auto" is fully deferred: we peek at the stored collection metadata below
+        # (after client init) and rebind the right backend then.  We do NOT
+        # load ModernBERT here for "auto" because the collection may not need it
+        # (e.g. it was indexed with OpenRouter), and SentenceTransformer loads a
+        # ~80 MB model on construction — wasted and potentially broken offline.
+        if embedding_function == "modernbert":
             self.embedding_function = ModernBERTEmbedding(device=device)
             # Adjust defaults for msmarco model
             if self.embedding_function.is_msmarco:
                 default_chunk_size = 512
                 default_chunk_overlap = 64
+        elif embedding_function == "auto":
+            self.embedding_function = None  # set in auto-detect block below
         elif embedding_function == "minilm":
             self.embedding_function = GenericSentenceTransformerEmbedding(
                 "all-MiniLM-L6-v2", device=device
@@ -192,7 +223,13 @@ class Indexer:
             try:
                 _auto_peeked_collection = self.client.get_collection(name=collection_name)
             except Exception:
-                pass  # No existing collection; keep ModernBERT default
+                # No existing collection — fall back to ModernBERT for new index creation.
+                # Only happens here (deferred from the eager-init block above) so that
+                # status/search/watch on non-ModernBERT collections never load the model.
+                self.embedding_function = ModernBERTEmbedding(device=device)
+                if self.embedding_function.is_msmarco and chunk_size is None:
+                    self.chunk_size = 512
+                    self.chunk_overlap = 64 if chunk_overlap is None else self.chunk_overlap
             else:
                 # Collection exists — detect its backend and rebind the embedding function.
                 # This block intentionally propagates model-loading errors rather than
@@ -203,8 +240,13 @@ class Indexer:
 
                 if detected_backend == "modernbert" or detected == "modernbert":
                     self.embedding_function = ModernBERTEmbedding(device=device)
+                    if self.embedding_function.is_msmarco and chunk_size is None:
+                        self.chunk_size = 512
+                        self.chunk_overlap = 64 if chunk_overlap is None else self.chunk_overlap
                 elif detected_backend == "sentence-transformers" or (
-                    detected not in ("modernbert", "default", "unknown") and "/" not in detected
+                    detected_backend is None
+                    and detected not in ("modernbert", "default", "unknown")
+                    and not _looks_like_openrouter_model(detected)
                 ):
                     try:
                         self.embedding_function = GenericSentenceTransformerEmbedding(
@@ -213,13 +255,16 @@ class Indexer:
                     except Exception:
                         reuse_auto_peeked_collection = True
                         self.embedding_function = None
+                        self._stored_model_name = detected
                         logger.warning(
                             "Stored index uses sentence-transformer model %r but it could not be "
                             "loaded; preserving the existing collection without rebinding embeddings",
                             detected,
                         )
                 elif detected_backend == "openrouter" or (
-                    detected not in ("modernbert", "default", "unknown") and "/" in detected
+                    detected_backend is None
+                    and detected not in ("modernbert", "default", "unknown")
+                    and _looks_like_openrouter_model(detected)
                 ):
                     # The stored model is an OpenRouter model name (org/model format); re-init to match.
                     try:
@@ -227,6 +272,7 @@ class Indexer:
                     except ValueError:
                         reuse_auto_peeked_collection = True
                         self.embedding_function = None
+                        self._stored_model_name = detected
                         logger.warning(
                             "Stored index uses OpenRouter model %r but OPENROUTER_API_KEY is not set; "
                             "preserving the existing collection without rebinding embeddings",
@@ -332,13 +378,22 @@ class Indexer:
 
     @property
     def embedding_model_name(self) -> str:
-        """Get the name of the current embedding model."""
+        """Get the name of the current embedding model.
+
+        When auto-detect preserved a collection whose embedder could not be re-loaded
+        (API key absent, weights missing), embedding_function is None but
+        _stored_model_name records what the collection actually uses.  Return that
+        stored name so status and cache-key reflect reality instead of "default".
+        """
         if isinstance(self.embedding_function, ModernBERTEmbedding):
             return "modernbert"
         elif isinstance(self.embedding_function, GenericSentenceTransformerEmbedding):
             return self.embedding_function.model_name
         elif isinstance(self.embedding_function, OpenRouterEmbedding):
             return self.embedding_function.model_name
+        elif self._stored_model_name is not None:
+            # Load failed; report the actual stored model, not "default".
+            return self._stored_model_name
         else:
             return "default"
 
@@ -904,12 +959,26 @@ class Indexer:
         # loads via get_collection() with no ef to avoid chromadb conflicts;
         # falling back to query_texts in that case lets chromadb use its default
         # 384-dim MiniLM, which mismatches 768-dim ModernBERT stored vectors).
+        #
+        # When _stored_model_name is set, embedding_function is None because the
+        # stored model could not be re-loaded (missing API key / weights).  In
+        # that case we must NOT fall through to query_texts: ChromaDB would embed
+        # with its default MiniLM (384-dim) against stored vectors of a different
+        # dimension (e.g. 3072 for OpenRouter or 768 for sentence-transformers),
+        # producing a cryptic dimension-mismatch error.  Raise early with a clear
+        # message instead.
         if self.embedding_function is not None:
             query_embeddings = cast(QueryEmbeddings, self.embedding_function([query]))
             results = self.collection.query(
                 query_embeddings=query_embeddings,
                 n_results=query_n_results,
                 where=search_where or None,  # chromadb 1.x rejects empty dict
+            )
+        elif self._stored_model_name is not None:
+            raise RuntimeError(
+                f"Cannot search: the stored embedding model {self._stored_model_name!r} could "
+                "not be loaded (API key missing or model weights unavailable).  "
+                "Re-index with a model that is available, or provide the required credentials."
             )
         else:
             results = self.collection.query(
