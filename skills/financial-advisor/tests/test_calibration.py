@@ -71,6 +71,25 @@ class TestQuestionContext:
         ), "UNSPECIFIED should still be treated as missing"
         assert not ctx.is_ready_to_advise("portfolio_allocation")
 
+    def test_unspecified_amount_context_still_counts_as_missing(self):
+        """amount_context='unspecified' must not satisfy the amount_context axis (P1 fix).
+
+        A user who says 'prefer not to say' to the amount question stores the plain
+        string "unspecified" in amount_context.  Without "unspecified" in
+        _UNANSWERED_SENTINELS, missing_axes_for would count amount_context as gathered
+        and skip further probing, producing advice with no knowledge of the amount.
+        """
+        ctx = QuestionContext(
+            goal_type=GoalType.WEALTH_GROWTH,
+            time_horizon=TimeHorizon.LONG,
+            amount_context="unspecified",  # user said "prefer not to say"
+        )
+        missing = ctx.missing_axes_for("how_much_to_save")
+        assert (
+            "amount_context" in missing
+        ), '"unspecified" amount_context should still be treated as missing'
+        assert not ctx.is_ready_to_advise("how_much_to_save")
+
     def test_should_interrupt_with_debt_advice(self):
         """Test debt interrupt detection."""
         ctx_no_debt = QuestionContext(has_high_interest_debt=False)
@@ -116,6 +135,12 @@ class TestClassifyQuestion:
         """Test classification of saving amount questions."""
         assert (
             classify_question("How much should I save each month?")
+            == "how_much_to_save"
+        )
+        # Ambiguous: contains "rainy day" (emergency keyword) AND "how much" (saving keyword).
+        # Must resolve to how_much_to_save because the question is about saving *amount*.
+        assert (
+            classify_question("How much should I save for a rainy day?")
             == "how_much_to_save"
         )
 

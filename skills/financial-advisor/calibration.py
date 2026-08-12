@@ -52,12 +52,16 @@ class CountryContext(str, Enum):
     )
 
 
-# Sentinel enum values meaning "user said unsure / prefer not to say".
+# Sentinel values meaning "user said unsure / prefer not to say".
 # These are non-None, but should NOT satisfy a missing-axis check — a user
 # answering "I don't know" for time_horizon stores UNDEFINED, which must still
 # be treated as not-yet-answered so the LLM can probe further.
+#
+# The plain string "unspecified" covers amount_context (a str field, not an Enum),
+# which stores that literal when the user picks "prefer not to say". Without it,
+# missing_axes_for would count amount_context as gathered and skip the probe.
 _UNANSWERED_SENTINELS: frozenset[object] = frozenset(
-    [TimeHorizon.UNDEFINED, CountryContext.UNSPECIFIED]
+    [TimeHorizon.UNDEFINED, CountryContext.UNSPECIFIED, "unspecified"]
 )
 
 
@@ -156,10 +160,13 @@ def classify_question(user_question: str) -> str:
         kw in q for kw in ["portfolio", "allocation", "balance", "split", "distribute"]
     ):
         return "portfolio_allocation"
-    if any(kw in q for kw in ["emergency", "rainy day", "safety net"]):
-        return "emergency_fund"
+    # Check savings-amount keywords before emergency keywords so that "How much should I
+    # save for a rainy day?" routes to how_much_to_save (which gathers amount_context)
+    # rather than emergency_fund (which only gathers has_emergency_fund).
     if any(kw in q for kw in ["how much", "save", "saving"]):
         return "how_much_to_save"
+    if any(kw in q for kw in ["emergency", "rainy day", "safety net"]):
+        return "emergency_fund"
     if (
         any(kw in q for kw in ["specific", "stock", "etf", "bond", "reit"])
         and "should" in q
