@@ -70,9 +70,9 @@ def test_indexer_add_documents(indexer, test_docs):
     # Search for ML-related content
     ml_results, ml_distances, _ = indexer.search("machine learning")
     assert len(ml_results) > 0, "No results found for 'machine learning'"
-    assert any("machine learning" in doc.content.lower() for doc in ml_results), (
-        f"Expected 'machine learning' in results: {[doc.content for doc in ml_results]}"
-    )
+    assert any(
+        "machine learning" in doc.content.lower() for doc in ml_results
+    ), f"Expected 'machine learning' in results: {[doc.content for doc in ml_results]}"
     assert len(ml_distances) > 0, "No distances returned"
 
 
@@ -311,9 +311,9 @@ def test_auto_embedding_mode_does_not_destroy_foreign_model_collection(tmp_path)
     )
 
     # Collection must still have the sentinel document — not been recreated
-    assert indexer.collection.count() == 1, (
-        "auto mode destroyed the collection indexed with a non-default embedding model"
-    )
+    assert (
+        indexer.collection.count() == 1
+    ), "auto mode destroyed the collection indexed with a non-default embedding model"
 
 
 def test_auto_embedding_mode_rebinds_sentence_transformer_collection(tmp_path, monkeypatch):
@@ -436,9 +436,9 @@ def test_auto_embedding_mode_preserves_legacy_chromadb_default_collection(tmp_pa
     )
 
     # Collection must be intact and reachable
-    assert indexer.collection.count() == 1, (
-        "auto mode destroyed legacy no-metadata collection (dimension mismatch bug)"
-    )
+    assert (
+        indexer.collection.count() == 1
+    ), "auto mode destroyed legacy no-metadata collection (dimension mismatch bug)"
 
 
 def test_auto_embedding_mode_preserves_collection_when_sentence_transformer_fails_to_load(
@@ -488,9 +488,9 @@ def test_auto_embedding_mode_preserves_collection_when_sentence_transformer_fail
         embedding_function="auto",
         collection_name="default",
     )
-    assert indexer.collection.count() == 1, (
-        "auto mode deleted sentence-transformer collection when the model failed to load"
-    )
+    assert (
+        indexer.collection.count() == 1
+    ), "auto mode deleted sentence-transformer collection when the model failed to load"
 
 
 def test_auto_embedding_mode_sentence_transformer_namespace_not_misrouted_to_openrouter(tmp_path):
@@ -541,9 +541,9 @@ def test_auto_embedding_mode_sentence_transformer_namespace_not_misrouted_to_ope
             embedding_function="auto",
             collection_name="default",
         )
-        assert indexer.collection.count() == 1, (
-            "auto mode destroyed legacy sentence-transformers/ namespace collection (slash misrouting bug)"
-        )
+        assert (
+            indexer.collection.count() == 1
+        ), "auto mode destroyed legacy sentence-transformers/ namespace collection (slash misrouting bug)"
     finally:
         if env_backup is not None:
             os.environ["OPENROUTER_API_KEY"] = env_backup
@@ -589,9 +589,9 @@ def test_auto_embedding_mode_baai_namespace_not_misrouted_to_openrouter(tmp_path
             embedding_function="auto",
             collection_name="default",
         )
-        assert indexer.collection.count() == 1, (
-            "auto mode destroyed legacy BAAI/ namespace collection (incomplete namespace list)"
-        )
+        assert (
+            indexer.collection.count() == 1
+        ), "auto mode destroyed legacy BAAI/ namespace collection (incomplete namespace list)"
     finally:
         if env_backup is not None:
             os.environ["OPENROUTER_API_KEY"] = env_backup
@@ -688,17 +688,17 @@ def test_auto_mode_unknown_namespace_hf_model_tried_as_st_first(tmp_path, monkey
             collection_name="default",
         )
         # The collection must still be intact — not destroyed.
-        assert indexer.collection.count() == 1, (
-            "auto mode destroyed unknown-namespace HF model collection"
-        )
+        assert (
+            indexer.collection.count() == 1
+        ), "auto mode destroyed unknown-namespace HF model collection"
         # ST must have been tried first.
-        assert st_attempts == [unknown_ns_model], (
-            f"Expected ST to be tried first for unknown namespace; st_attempts={st_attempts}"
-        )
+        assert st_attempts == [
+            unknown_ns_model
+        ], f"Expected ST to be tried first for unknown namespace; st_attempts={st_attempts}"
         # OR must NOT have been attempted (ST succeeded).
-        assert or_attempts == [], (
-            f"OR should not be attempted when ST succeeds; or_attempts={or_attempts}"
-        )
+        assert (
+            or_attempts == []
+        ), f"OR should not be attempted when ST succeeds; or_attempts={or_attempts}"
     finally:
         os.environ.pop("OPENROUTER_API_KEY", None)
         if env_backup is not None:
@@ -961,9 +961,9 @@ def test_auto_mode_rebinds_openrouter_collection_when_api_key_present(
 
     # The auto-detect path must have constructed an OpenRouterEmbedding, not fallen
     # back to a local embedder or left embedding_function=None.
-    assert isinstance(indexer.embedding_function, OpenRouterEmbedding), (
-        f"Expected OpenRouterEmbedding, got {type(indexer.embedding_function)}"
-    )
+    assert isinstance(
+        indexer.embedding_function, OpenRouterEmbedding
+    ), f"Expected OpenRouterEmbedding, got {type(indexer.embedding_function)}"
 
     # The rebind must have used the stored model name, not the default.
     assert indexer.embedding_function.model_name == stored_model  # type: ignore[union-attr]
@@ -1082,6 +1082,6 @@ def test_search_explicit_embedding_function_does_not_wipe_mismatched_collection(
     )
 
     # Collection must still exist and contain the original document.
-    assert indexer.collection.count() == 1, (
-        "Collection was destroyed by allow_recreate=False indexer — data loss regression"
-    )
+    assert (
+        indexer.collection.count() == 1
+    ), "Collection was destroyed by allow_recreate=False indexer — data loss regression"
