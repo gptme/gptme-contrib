@@ -1059,3 +1059,45 @@ def test_non_introspectable_callback_internal_typeerror_propagates() -> None:
             await client._call_callback(client.on_user_transcript, "hello", "item-001")
 
     asyncio.run(_run())
+
+
+def test_non_introspectable_callback_internal_typeerror_with_argument_in_message_propagates() -> (
+    None
+):
+    """Internal TypeErrors whose message contains 'argument' must still propagate.
+
+    The old heuristic used ``"argument" not in str(exc)`` to detect arity errors.
+    A TypeError raised inside the callback body with a message like
+    ``"bad argument type"`` would be misclassified as an arity error and silently
+    rerouted to a 1-arg fallback call — masking the real failure.
+
+    The correct fix is traceback-depth detection: arity errors are raised before
+    Python enters the callback's frame (tb.tb_next is None); internal errors have
+    at least one extra frame (tb.tb_next is not None).
+    """
+    import asyncio
+    import inspect
+    import unittest.mock
+
+    def inner(text: str, item_id: str | None) -> None:
+        # Internal TypeError whose message CONTAINS "argument" — must propagate.
+        raise TypeError("bad argument type for this operation")
+
+    original_sig = inspect.signature
+
+    def patched_signature(obj, **kwargs):
+        if obj is inner:
+            raise ValueError("cannot introspect")
+        return original_sig(obj, **kwargs)
+
+    with unittest.mock.patch("inspect.signature", side_effect=patched_signature):
+        client = OpenAIRealtimeClient(
+            api_key="test-key",
+            on_user_transcript=inner,
+        )
+
+    async def _run() -> None:
+        with pytest.raises(TypeError, match="bad argument type for this operation"):
+            await client._call_callback(client.on_user_transcript, "hello", "item-001")
+
+    asyncio.run(_run())
