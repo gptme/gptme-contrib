@@ -1077,7 +1077,7 @@ check_greptile_scores() {
         # No Greptile review or no score found — Greptile may be dark on this
         # repo (billing outage, initial indexing, etc.). Rather than skipping,
         # consult our own AI reviewer: if it has open findings, emit
-        # greptile_needs_improvement so the fix loop can still dispatch.
+        # greptile_needs_fix so the fix loop can still dispatch.
         # The state file records an empty first field so later cycles that DO
         # get a real Greptile score are not confused by a poisoned cache.
         if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
