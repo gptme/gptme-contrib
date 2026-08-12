@@ -165,6 +165,25 @@ if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
             fi
         fi
 
+        # Safety check: if origin's pushurl points to a different repository than
+        # its fetchurl, the fetch below would update the reflog for the fetch-URL
+        # target, not for where the push actually lands. A force-reset on the push
+        # target would be invisible to the reflog check. Fail closed rather than
+        # silently running a guard that cannot see the real endpoint.
+        _ofetch_url="$(git remote get-url origin 2>/dev/null || true)"
+        _opush_url="$(git remote get-url --push origin 2>/dev/null || true)"
+        if [ -n "$_ofetch_url" ] && [ -n "$_opush_url" ]; then
+            _ofetch_id="$(_canonical_remote_url "$_ofetch_url")"
+            _opush_id="$(_canonical_remote_url "$_opush_url")"
+            if [ -n "$_ofetch_id" ] && [ -n "$_opush_id" ] && [ "$_ofetch_id" != "$_opush_id" ]; then
+                echo "ERROR: origin.pushurl points to a different repository than origin.url." >&2
+                echo "       The force-reset guard cannot verify the correct reflog endpoint." >&2
+                echo "       Use one URL for both fetch and push, or bypass with:" >&2
+                echo "         ALLOW_FORCE_RESET_PUSH=1 git push" >&2
+                exit 1
+            fi
+        fi
+
         # Fetch to get the latest remote state (updates reflog).
         git fetch origin "$_remote_branch" --quiet 2>/dev/null || true
 

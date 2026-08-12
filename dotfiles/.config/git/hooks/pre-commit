@@ -100,7 +100,9 @@ if [ -n "$_merge_git_dir" ] && [ -f "$_merge_git_dir/MERGE_HEAD" ]; then
     _merge_origin_lower="$(printf '%s' "$_merge_origin" | tr '[:upper:]' '[:lower:]')"
     _merge_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     case "$_merge_origin_lower" in
-        *github.com[/:]erikbjare/bob|*github.com[/:]erikbjare/bob.git|*github.com[/:]erikbjare/bob/|*github.com[/:]erikbjare/bob.git/)
+        # Same host-anchored pattern as pre-merge-commit: require github.com to be
+        # the actual hostname, not a path component (evil.com/github.com/... must not match).
+        *://github.com/erikbjare/bob|*://github.com/erikbjare/bob.git|*://github.com/erikbjare/bob/|*://github.com/erikbjare/bob.git/|*@github.com[/:]erikbjare/bob|*@github.com[/:]erikbjare/bob.git|*@github.com[/:]erikbjare/bob/|*@github.com[/:]erikbjare/bob.git/)
             if [ "$_merge_branch" = "master" ]; then
                 cat >&2 <<'MERGE_EOF'
 🚫 Refusing to create a merge commit on master in the brain repo.

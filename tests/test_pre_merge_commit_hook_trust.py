@@ -125,6 +125,10 @@ def _make_clean_merge_fixture(tmp_path: Path) -> Path:
         # P1: non-GitHub host with matching path must NOT trigger the guard
         "https://gitlab.com/ErikBjare/bob.git",
         "git@gitlab.com:ErikBjare/bob.git",
+        # P2: github.com appearing as a PATH COMPONENT (not the host) must not match.
+        # Without host-anchoring, *github.com[/:]erikbjare/bob matched this URL.
+        "https://evil.com/github.com/erikbjare/bob",
+        "https://evil.com/github.com/erikbjare/bob.git",
         None,  # no origin at all
     ],
 )
@@ -143,12 +147,17 @@ def test_non_bob_repo_is_noop(tmp_path: Path, origin: str | None) -> None:
 
 
 def test_non_bob_repo_with_active_merge_is_noop(tmp_path: Path) -> None:
-    """Hook exits 0 for repos whose names merely contain 'bob' as a substring."""
+    """Hook exits 0 for repos whose names merely contain 'bob' as a substring,
+    and for repos where github.com/erikbjare/bob appears as a path component
+    rather than the actual remote host."""
     for i, origin in enumerate(
         (
             "https://github.com/ErikBjare/bob-clone.git",
             "https://github.com/ErikBjare/bob-backup.git",
             "git@github.com:ErikBjare/bob2.git",
+            # P2 regression: github.com in the URL path, not the host.
+            "https://evil.com/github.com/erikbjare/bob",
+            "https://evil.com/github.com/erikbjare/bob.git",
         )
     ):
         sub = tmp_path / str(i)

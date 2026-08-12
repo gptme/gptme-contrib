@@ -331,3 +331,60 @@ def test_force_reset_guard_applies_when_the_remote_cannot_be_resolved(
         "git@example.com:o/x.git",
     )
     assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
+
+
+def test_force_reset_guard_fails_closed_when_origin_pushurl_differs(
+    tmp_path: Path,
+) -> None:
+    """Guard exits 1 when origin.pushurl points somewhere different from origin.url.
+
+    git fetch origin reads from the fetch URL and updates refs/remotes/origin/...
+    for that endpoint. If origin.pushurl is a different repository, a force-reset
+    on the push target is invisible to the reflog check — the guard would fail open.
+    The fix: fail closed rather than silently using a stale reflog snapshot.
+    """
+    repo = _init(tmp_path)
+    _git(repo, "remote", "set-url", "origin", "https://github.com/org/fetch-repo.git")
+    _git(
+        repo,
+        "remote",
+        "set-url",
+        "--push",
+        "origin",
+        "https://github.com/org/push-repo.git",
+    )
+    head = _commit(repo, "README")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        "origin",
+        "https://github.com/org/push-repo.git",
+    )
+    assert (
+        proc.returncode == 1
+    ), f"expected exit 1 (fail closed), got {proc.returncode}\n{proc.stderr}"
+    assert "pushurl" in proc.stderr or "push" in proc.stderr.lower(), proc.stderr
+
+
+def test_force_reset_guard_runs_when_origin_pushurl_matches_fetchurl(
+    tmp_path: Path,
+) -> None:
+    """Guard still applies when pushurl and fetchurl resolve to the same repository.
+
+    A common configuration is an explicit pushurl that is just an alternate
+    spelling of the same repo (e.g. SSH push URL vs HTTPS fetch URL). The guard
+    must still run in this case — skipping it would defeat the protection for
+    normal single-remote setups that configure both spellings.
+    """
+    repo, head = _repo_with_force_reset_reflog(tmp_path)
+    # Same repo, different URL spellings — canonically identical.
+    _git(repo, "remote", "set-url", "origin", "https://github.com/org/repo.git")
+    _git(repo, "remote", "set-url", "--push", "origin", "git@github.com:org/repo.git")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/master {head} refs/heads/master {head}\n",
+        "origin",
+        "git@github.com:org/repo.git",
+    )
+    assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
+    assert proc.returncode == 1

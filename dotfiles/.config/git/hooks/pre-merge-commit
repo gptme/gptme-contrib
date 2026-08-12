@@ -21,7 +21,11 @@ set -uo pipefail
 origin_url="$(git config --get remote.origin.url 2>/dev/null || true)"
 origin_url_lower="$(printf '%s' "$origin_url" | tr '[:upper:]' '[:lower:]')"
 case "$origin_url_lower" in
-    *github.com[/:]erikbjare/bob|*github.com[/:]erikbjare/bob.git|*github.com[/:]erikbjare/bob/|*github.com[/:]erikbjare/bob.git/) ;;
+    # Anchor github.com as the actual host, not a path component.
+    # *://github.com/ covers https://, git://, and URL-style SSH (ssh://user@github.com/).
+    # *@github.com[/:] covers SCP-style SSH (git@github.com:...) and URL-style with user.
+    # Without this anchoring, https://evil.com/github.com/erikbjare/bob would match.
+    *://github.com/erikbjare/bob|*://github.com/erikbjare/bob.git|*://github.com/erikbjare/bob/|*://github.com/erikbjare/bob.git/|*@github.com[/:]erikbjare/bob|*@github.com[/:]erikbjare/bob.git|*@github.com[/:]erikbjare/bob/|*@github.com[/:]erikbjare/bob.git/) ;;
     *) exit 0 ;;
 esac
 
