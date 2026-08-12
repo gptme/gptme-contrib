@@ -144,3 +144,35 @@ def test_openrouter_embedding_raises_on_oversized_text(tmp_path: Path):
 
     with pytest.raises(ValueError, match="too large"):
         embedding([oversized])
+
+
+def test_openrouter_embedding_non_contiguous_indices_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """_embed_batch must raise RuntimeError if the API returns non-contiguous indices.
+
+    A response with correct count but duplicated/out-of-range indices (e.g., [0, 0]
+    instead of [0, 1]) would silently assign embeddings to the wrong texts after
+    sorting. Validate that [r['index'] for r in rows] == list(range(len(texts))).
+    """
+
+    def fake_urlopen(request: urllib.request.Request, timeout: int):
+        # Return two embeddings but with duplicate index 0 instead of [0, 1]
+        return _FakeResponse(
+            {
+                "data": [
+                    {"index": 0, "embedding": [1.0, 0.0]},
+                    {"index": 0, "embedding": [0.0, 1.0]},  # duplicate index — malformed
+                ],
+                "usage": {},
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    embedding = OpenRouterEmbedding(
+        api_key="test-key",
+        cache_path=tmp_path / "embeddings.sqlite",
+    )
+
+    with pytest.raises(RuntimeError, match="non-contiguous indices"):
+        embedding(["first text", "second text"])

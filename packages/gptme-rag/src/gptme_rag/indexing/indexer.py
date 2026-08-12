@@ -145,6 +145,7 @@ class Indexer:
         embedding_function: str = "auto",
         device: str = "cpu",
         force_recreate: bool = False,  # Force recreation of collection
+        allow_recreate: bool = True,  # If False, never delete an existing collection (safe for read-only commands)
     ):
         """Initialize the indexer.
 
@@ -161,6 +162,10 @@ class Indexer:
                 uses that, preventing silent data loss when a collection was indexed with
                 a different embedding model than the default.
             device: Device to run embeddings on ("cuda" or "cpu")
+            allow_recreate: Whether the indexer is allowed to delete and recreate the
+                collection on a model mismatch. Set to False for read-only commands
+                (search, status) to prevent accidental data loss when an explicit
+                --embedding-function differs from the stored model.
         """
         self.collection_name = collection_name
         # Populated by auto-detect when the stored model cannot be re-loaded
@@ -265,10 +270,19 @@ class Indexer:
                 detected_backend = metadata.get("embedding_backend")
 
                 if detected_backend == "modernbert" or detected == "modernbert":
-                    self.embedding_function = ModernBERTEmbedding(device=device)
-                    if self.embedding_function.is_msmarco and chunk_size is None:
-                        self.chunk_size = 512
-                        self.chunk_overlap = 64 if chunk_overlap is None else self.chunk_overlap
+                    try:
+                        self.embedding_function = ModernBERTEmbedding(device=device)
+                        if self.embedding_function.is_msmarco and chunk_size is None:
+                            self.chunk_size = 512
+                            self.chunk_overlap = 64 if chunk_overlap is None else self.chunk_overlap
+                    except Exception:
+                        reuse_auto_peeked_collection = True
+                        self.embedding_function = None
+                        self._stored_model_name = "modernbert"
+                        logger.warning(
+                            "Stored index uses ModernBERT model but it could not be loaded; "
+                            "preserving the existing collection without rebinding embeddings"
+                        )
                 elif detected_backend == "sentence-transformers" or (
                     detected_backend is None
                     and detected not in ("modernbert", "default", "unknown")
@@ -293,17 +307,39 @@ class Indexer:
                     and _looks_like_openrouter_model(detected)
                 ):
                     # The stored model is an OpenRouter model name (org/model format); re-init to match.
-                    try:
-                        self.embedding_function = OpenRouterEmbedding(model_name=detected)
-                    except ValueError:
-                        reuse_auto_peeked_collection = True
-                        self.embedding_function = None
-                        self._stored_model_name = detected
-                        logger.warning(
-                            "Stored index uses OpenRouter model %r but OPENROUTER_API_KEY is not set; "
-                            "preserving the existing collection without rebinding embeddings",
-                            detected,
-                        )
+                    #
+                    # For legacy collections (detected_backend is None), the heuristic
+                    # _looks_like_openrouter_model() can misfire on HuggingFace models whose
+                    # namespace is not in _SENTENCE_TRANSFORMER_NAMESPACES (e.g. joe32140/...).
+                    # To be conservative, attempt to load such models as a sentence-transformer
+                    # first; only fall through to the OpenRouter path if ST fails.
+                    # When detected_backend is "openrouter" (explicit metadata), skip ST.
+                    _loaded_via_st = False
+                    if detected_backend is None:
+                        try:
+                            self.embedding_function = GenericSentenceTransformerEmbedding(
+                                detected, device=device
+                            )
+                            _loaded_via_st = True
+                            logger.debug(
+                                "Legacy collection: loaded %r as sentence-transformer "
+                                "(heuristic initially suggested OpenRouter)",
+                                detected,
+                            )
+                        except Exception:
+                            pass  # ST failed; fall through to OpenRouter below
+                    if not _loaded_via_st:
+                        try:
+                            self.embedding_function = OpenRouterEmbedding(model_name=detected)
+                        except ValueError:
+                            reuse_auto_peeked_collection = True
+                            self.embedding_function = None
+                            self._stored_model_name = detected
+                            logger.warning(
+                                "Stored index uses OpenRouter model %r but OPENROUTER_API_KEY is not set; "
+                                "preserving the existing collection without rebinding embeddings",
+                                detected,
+                            )
                 else:
                     self.embedding_function = None
                     reuse_auto_peeked_collection = True
@@ -341,10 +377,23 @@ class Indexer:
                 stored_model = metadata.get("embedding_model", "unknown")
 
                 if stored_model != current_model or force_recreate:
-                    logger.info(
-                        f"Model mismatch (stored: {stored_model}, current: {current_model}) or force recreate"
-                    )
-                    need_recreate = True
+                    if not allow_recreate and not force_recreate:
+                        # Read-only callers (search, status) must never wipe the index.
+                        # Warn loudly and keep the existing collection as-is.
+                        logger.warning(
+                            "Embedding model mismatch (stored: %r, requested: %r) but recreation "
+                            "is disabled for this command; using the existing collection unchanged. "
+                            "Re-index with --force-recreate to switch models.",
+                            stored_model,
+                            current_model,
+                        )
+                        self.collection = self.client.get_collection(name=collection_name)
+                        need_recreate = False
+                    else:
+                        logger.info(
+                            f"Model mismatch (stored: {stored_model}, current: {current_model}) or force recreate"
+                        )
+                        need_recreate = True
 
             except (ValueError, Exception) as e:
                 if embedding_function == "auto" and _auto_peeked_collection is not None:
@@ -357,6 +406,26 @@ class Indexer:
                     )
                     self.collection = _auto_peeked_collection
                     need_recreate = False
+                elif not allow_recreate:
+                    # Read-only callers (search, status) must never wipe the index.
+                    # ChromaDB raised because of an EF conflict — try to get the
+                    # collection without binding an EF (metadata-only handle) and
+                    # keep it unchanged.
+                    logger.warning(
+                        "Collection %r could not be opened with the requested embedding "
+                        "function (%r); recreation disabled — reusing existing collection "
+                        "unchanged (re-index with --force-recreate to switch models). Error: %s",
+                        collection_name,
+                        current_model,
+                        e,
+                    )
+                    try:
+                        self.collection = self.client.get_collection(name=collection_name)
+                    except Exception:
+                        # Collection truly doesn't exist yet — create it normally.
+                        need_recreate = True
+                    else:
+                        need_recreate = False
                 else:
                     # Collection doesn't exist or other error
                     logger.debug(f"Collection access error: {e}")

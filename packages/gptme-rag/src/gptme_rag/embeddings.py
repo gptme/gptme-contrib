@@ -245,6 +245,13 @@ class OpenRouterEmbedding(EmbeddingFunction):
                         f"OpenRouter embeddings API returned {len(rows)} vectors for "
                         f"{len(texts)} input texts — malformed or partial response."
                     )
+                actual_indices = [row["index"] for row in rows]
+                if actual_indices != list(range(len(texts))):
+                    raise RuntimeError(
+                        f"OpenRouter embeddings API returned non-contiguous indices {actual_indices!r}; "
+                        f"expected {list(range(len(texts)))} — malformed response, embeddings "
+                        "would be assigned to the wrong texts."
+                    )
                 usage = data.get("usage") or {}
                 self.stats["requests"] += 1
                 self.stats["api_texts"] += len(texts)

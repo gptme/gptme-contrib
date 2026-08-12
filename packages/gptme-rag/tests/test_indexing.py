@@ -70,9 +70,9 @@ def test_indexer_add_documents(indexer, test_docs):
     # Search for ML-related content
     ml_results, ml_distances, _ = indexer.search("machine learning")
     assert len(ml_results) > 0, "No results found for 'machine learning'"
-    assert any(
-        "machine learning" in doc.content.lower() for doc in ml_results
-    ), f"Expected 'machine learning' in results: {[doc.content for doc in ml_results]}"
+    assert any("machine learning" in doc.content.lower() for doc in ml_results), (
+        f"Expected 'machine learning' in results: {[doc.content for doc in ml_results]}"
+    )
     assert len(ml_distances) > 0, "No distances returned"
 
 
@@ -311,9 +311,9 @@ def test_auto_embedding_mode_does_not_destroy_foreign_model_collection(tmp_path)
     )
 
     # Collection must still have the sentinel document — not been recreated
-    assert (
-        indexer.collection.count() == 1
-    ), "auto mode destroyed the collection indexed with a non-default embedding model"
+    assert indexer.collection.count() == 1, (
+        "auto mode destroyed the collection indexed with a non-default embedding model"
+    )
 
 
 def test_auto_embedding_mode_rebinds_sentence_transformer_collection(tmp_path, monkeypatch):
@@ -436,9 +436,9 @@ def test_auto_embedding_mode_preserves_legacy_chromadb_default_collection(tmp_pa
     )
 
     # Collection must be intact and reachable
-    assert (
-        indexer.collection.count() == 1
-    ), "auto mode destroyed legacy no-metadata collection (dimension mismatch bug)"
+    assert indexer.collection.count() == 1, (
+        "auto mode destroyed legacy no-metadata collection (dimension mismatch bug)"
+    )
 
 
 def test_auto_embedding_mode_preserves_collection_when_sentence_transformer_fails_to_load(
@@ -488,9 +488,9 @@ def test_auto_embedding_mode_preserves_collection_when_sentence_transformer_fail
         embedding_function="auto",
         collection_name="default",
     )
-    assert (
-        indexer.collection.count() == 1
-    ), "auto mode deleted sentence-transformer collection when the model failed to load"
+    assert indexer.collection.count() == 1, (
+        "auto mode deleted sentence-transformer collection when the model failed to load"
+    )
 
 
 def test_auto_embedding_mode_sentence_transformer_namespace_not_misrouted_to_openrouter(tmp_path):
@@ -541,9 +541,9 @@ def test_auto_embedding_mode_sentence_transformer_namespace_not_misrouted_to_ope
             embedding_function="auto",
             collection_name="default",
         )
-        assert (
-            indexer.collection.count() == 1
-        ), "auto mode destroyed legacy sentence-transformers/ namespace collection (slash misrouting bug)"
+        assert indexer.collection.count() == 1, (
+            "auto mode destroyed legacy sentence-transformers/ namespace collection (slash misrouting bug)"
+        )
     finally:
         if env_backup is not None:
             os.environ["OPENROUTER_API_KEY"] = env_backup
@@ -589,10 +589,118 @@ def test_auto_embedding_mode_baai_namespace_not_misrouted_to_openrouter(tmp_path
             embedding_function="auto",
             collection_name="default",
         )
-        assert (
-            indexer.collection.count() == 1
-        ), "auto mode destroyed legacy BAAI/ namespace collection (incomplete namespace list)"
+        assert indexer.collection.count() == 1, (
+            "auto mode destroyed legacy BAAI/ namespace collection (incomplete namespace list)"
+        )
     finally:
+        if env_backup is not None:
+            os.environ["OPENROUTER_API_KEY"] = env_backup
+
+
+def test_auto_mode_unknown_namespace_hf_model_tried_as_st_first(tmp_path, monkeypatch):
+    """Auto mode must try to load unknown-namespace models as ST before routing to OR.
+
+    Regression test for P1 heuristic incompleteness: _looks_like_openrouter_model()
+    returns True for any 'org/model' name not in _SENTENCE_TRANSFORMER_NAMESPACES.
+    A legacy collection indexed with e.g. 'joe32140/ModernBERT-base-msmarco' (a real
+    HF model whose namespace is not in the allow-list) would previously be misrouted
+    to the OpenRouter backend — causing a cryptic dimension-mismatch when an API key
+    is set but the model doesn't exist on OpenRouter.
+
+    Fix: for legacy collections (no embedding_backend metadata), the auto-detect path
+    now tries GenericSentenceTransformerEmbedding first; OpenRouter is only attempted
+    when ST raises.
+    """
+    import os
+
+    import chromadb
+    from chromadb.config import Settings
+
+    import gptme_rag.indexing.indexer as indexer_module
+
+    # Unknown namespace — not in _SENTENCE_TRANSFORMER_NAMESPACES but IS a real HF model.
+    unknown_ns_model = "joe32140/ModernBERT-base-msmarco"
+
+    # Track which backends were attempted.
+    st_attempts: list[str] = []
+    or_attempts: list[str] = []
+    _RealST = indexer_module.GenericSentenceTransformerEmbedding
+    _RealOR = indexer_module.OpenRouterEmbedding
+
+    class TrackingST:
+        model_name = unknown_ns_model
+        is_msmarco = False
+
+        def __init__(self, model_name, device="cpu"):
+            st_attempts.append(model_name)
+            self.model_name = model_name
+
+        def __call__(self, input):
+            return [[0.25] * 384 for _ in input]
+
+        def embed_query(self, input):
+            return self(input)
+
+        def embed_documents(self, input):
+            return self(input)
+
+        @staticmethod
+        def name():
+            return "tracking-st"
+
+        @staticmethod
+        def is_legacy():
+            return False
+
+    class TrackingOR:
+        def __init__(self, model_name=None, **kwargs):
+            or_attempts.append(model_name)
+            raise ValueError("Tracking OR: intentionally unavailable")
+
+    monkeypatch.setattr(indexer_module, "GenericSentenceTransformerEmbedding", TrackingST)
+    monkeypatch.setattr(indexer_module, "OpenRouterEmbedding", TrackingOR)
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": unknown_ns_model,
+            # intentionally no "embedding_backend" — legacy format
+        },
+    )
+    col.add(ids=["doc"], embeddings=[[0.25] * 384], documents=["some doc"])
+    assert col.count() == 1
+    del client
+
+    env_backup = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        # Open with auto mode — with an API key set to confirm the OR path is NOT taken first.
+        os.environ["OPENROUTER_API_KEY"] = "test-key"
+        indexer = Indexer(
+            persist_directory=persist_dir,
+            enable_persist=True,
+            embedding_function="auto",
+            collection_name="default",
+        )
+        # The collection must still be intact — not destroyed.
+        assert indexer.collection.count() == 1, (
+            "auto mode destroyed unknown-namespace HF model collection"
+        )
+        # ST must have been tried first.
+        assert st_attempts == [unknown_ns_model], (
+            f"Expected ST to be tried first for unknown namespace; st_attempts={st_attempts}"
+        )
+        # OR must NOT have been attempted (ST succeeded).
+        assert or_attempts == [], (
+            f"OR should not be attempted when ST succeeds; or_attempts={or_attempts}"
+        )
+    finally:
+        os.environ.pop("OPENROUTER_API_KEY", None)
         if env_backup is not None:
             os.environ["OPENROUTER_API_KEY"] = env_backup
 
@@ -853,9 +961,9 @@ def test_auto_mode_rebinds_openrouter_collection_when_api_key_present(
 
     # The auto-detect path must have constructed an OpenRouterEmbedding, not fallen
     # back to a local embedder or left embedding_function=None.
-    assert isinstance(
-        indexer.embedding_function, OpenRouterEmbedding
-    ), f"Expected OpenRouterEmbedding, got {type(indexer.embedding_function)}"
+    assert isinstance(indexer.embedding_function, OpenRouterEmbedding), (
+        f"Expected OpenRouterEmbedding, got {type(indexer.embedding_function)}"
+    )
 
     # The rebind must have used the stored model name, not the default.
     assert indexer.embedding_function.model_name == stored_model  # type: ignore[union-attr]
@@ -866,3 +974,114 @@ def test_auto_mode_rebinds_openrouter_collection_when_api_key_present(
     # search() must succeed (return results) without raising.
     results = indexer.search("test query", n_results=1)
     assert len(results) >= 1, "Expected at least one search result"
+
+
+def test_auto_mode_modernbert_load_failure_preserves_collection(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """auto mode must preserve a modernbert collection when the model cannot be loaded.
+
+    Regression test for P1 bug: the 'modernbert' auto-detect branch created
+    ModernBERTEmbedding without try/except. If the model weights are missing or
+    unavailable, the constructor raised and the command (search, status) crashed
+    instead of falling back gracefully. The fix wraps the call in try/except,
+    sets _stored_model_name, and preserves the existing collection.
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Simulate a collection stored with the modernbert backend.
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "modernbert",
+            "embedding_backend": "modernbert",
+        },
+    )
+    col.add(ids=["mb-doc"], embeddings=[[0.1] * 768], documents=["a modernbert doc"])
+    assert col.count() == 1
+    del client
+
+    # Monkey-patch ModernBERTEmbedding to simulate a load failure.
+    # Must be a class (not a bare function) so isinstance() calls in the indexer
+    # still work when checking if embedding_function is an instance of this type.
+    import gptme_rag.indexing.indexer as indexer_mod
+
+    class _FailingModernBERT:
+        def __new__(cls, *args, **kwargs):  # type: ignore[misc]
+            raise RuntimeError("simulated model load failure: weights unavailable")
+
+    monkeypatch.setattr(indexer_mod, "ModernBERTEmbedding", _FailingModernBERT)
+
+    # Must not raise — collection should be preserved.
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="auto",
+        collection_name="default",
+    )
+
+    # load-failed sentinel state
+    assert indexer.embedding_function is None
+    assert indexer._stored_model_name == "modernbert"
+
+    # The collection must still contain the original document.
+    assert indexer.collection.count() == 1
+
+    # search() should raise a clear RuntimeError, not a ChromaDB dimension error.
+    with pytest.raises(RuntimeError, match="modernbert"):
+        indexer.search("test query", n_results=1)
+
+
+def test_search_explicit_embedding_function_does_not_wipe_mismatched_collection(
+    tmp_path,
+):
+    """search must never delete a collection when --embedding-function mismatches the stored model.
+
+    Regression test for P1 bug: the search command passed the user's explicit
+    --embedding-function directly to Indexer. When it differed from the stored model,
+    Indexer set need_recreate=True and deleted the collection — turning a read-only
+    operation into silent data loss. The fix adds allow_recreate=False for the search
+    Indexer; on mismatch a warning is logged and the collection is kept unchanged.
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Simulate a collection stored with minilm (384-dim).
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "minilm",
+            "embedding_backend": "sentence-transformers",
+        },
+    )
+    col.add(ids=["doc-1"], embeddings=[[0.1] * 384], documents=["a minilm doc"])
+    assert col.count() == 1
+    del client
+
+    # Requesting 'modernbert' (768-dim) with allow_recreate=False must NOT destroy
+    # the existing minilm collection.
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="modernbert",
+        collection_name="default",
+        allow_recreate=False,
+    )
+
+    # Collection must still exist and contain the original document.
+    assert indexer.collection.count() == 1, (
+        "Collection was destroyed by allow_recreate=False indexer — data loss regression"
+    )

@@ -423,13 +423,18 @@ def search(
             )
             try:
                 with contextlib.redirect_stdout(devnull), stderr_ctx:
-                    # Initialize indexer with explicit arguments
+                    # Initialize indexer with explicit arguments.
+                    # allow_recreate=False: search is read-only — passing an explicit
+                    # --embedding-function that differs from the stored model must never
+                    # silently delete the collection (data loss). A warning is emitted
+                    # instead and the existing collection is kept unchanged.
                     indexer = Indexer(
                         persist_directory=persist_dir,
                         enable_persist=True,
                         scoring_weights=scoring_weights,
                         embedding_function=embedding_function or "auto",
                         device=device or "cpu",
+                        allow_recreate=False,
                     )
                     assembler = ContextAssembler(max_tokens=max_tokens)
 
