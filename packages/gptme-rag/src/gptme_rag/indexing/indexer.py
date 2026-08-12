@@ -26,20 +26,39 @@ from .document import Document
 from .document_processor import DocumentProcessor
 
 
-# HuggingFace namespaces that are used for sentence-transformer models.
+# HuggingFace namespaces used for sentence-transformer / embedding models.
 # Model names in these namespaces contain a slash but are NOT OpenRouter model names.
-# Only "sentence-transformers/" is included here; other ST-compatible HF namespaces
-# (BAAI/, thenlper/, intfloat/) would also have embedding_backend metadata when
-# indexed with this PR's updated code, so they don't need the fallback heuristic.
-_SENTENCE_TRANSFORMER_NAMESPACES = frozenset({"sentence-transformers/"})
+# Used by _looks_like_openrouter_model() as a fallback heuristic for legacy
+# collections that were indexed before the embedding_backend metadata field was
+# introduced (all new collections carry that field and bypass this heuristic).
+#
+# Includes the most common HF embedding model families so that legacy collections
+# with BAAI/bge-*, intfloat/e5-*, thenlper/gte-*, etc. are not misrouted to the
+# OpenRouter backend when OPENROUTER_API_KEY happens to be set.
+_SENTENCE_TRANSFORMER_NAMESPACES = frozenset(
+    {
+        "sentence-transformers/",  # e.g. all-MiniLM-L6-v2, paraphrase-multilingual-*
+        "BAAI/",  # e.g. bge-large-en-v1.5, bge-m3
+        "intfloat/",  # e.g. e5-large-v2, multilingual-e5-large
+        "thenlper/",  # e.g. gte-base, gte-large
+        "mixedbread-ai/",  # e.g. mxbai-embed-large-v1
+        "Alibaba-NLP/",  # e.g. gte-large-en-v1.5
+        "hkunlp/",  # e.g. instructor-xl, instructor-base
+    }
+)
 
 
 def _looks_like_openrouter_model(model_name: str) -> bool:
     """Heuristic: OpenRouter model names follow 'org/model' format.
 
-    Returns False for known sentence-transformer HuggingFace namespaces so that
-    legacy collections (without embedding_backend metadata) are not misrouted to
-    the OpenRouter backend when their stored model name contains a slash.
+    Returns False for known sentence-transformer / HuggingFace embedding namespaces
+    so that legacy collections (without embedding_backend metadata) are not misrouted
+    to the OpenRouter backend when their stored model name contains a slash.
+
+    This heuristic is only exercised for legacy collections (pre-PR code) that
+    lack the ``embedding_backend`` metadata field. New collections set that field
+    on every index run, so the auto-detect path picks the correct backend without
+    needing this heuristic.
     """
     if "/" not in model_name:
         return False

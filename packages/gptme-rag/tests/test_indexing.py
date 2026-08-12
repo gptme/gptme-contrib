@@ -549,6 +549,54 @@ def test_auto_embedding_mode_sentence_transformer_namespace_not_misrouted_to_ope
             os.environ["OPENROUTER_API_KEY"] = env_backup
 
 
+def test_auto_embedding_mode_baai_namespace_not_misrouted_to_openrouter(tmp_path):
+    """Auto mode must not route 'BAAI/<model>' to the OpenRouter backend.
+
+    Regression test for the incomplete namespace list: the initial fix only excluded
+    'sentence-transformers/' but left BAAI/, intfloat/, thenlper/ etc. exposed.
+    Legacy collections indexed with e.g. 'BAAI/bge-large-en-v1.5' would be misrouted
+    to OpenRouter (slash heuristic), causing cryptic errors when the API key is absent.
+    Fix: _SENTENCE_TRANSFORMER_NAMESPACES now includes BAAI/ and other common HF
+    embedding namespaces.
+    """
+    import os
+
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "BAAI/bge-large-en-v1.5",
+            # intentionally no "embedding_backend" key — legacy format before this PR
+        },
+    )
+    col.add(ids=["bge-doc"], embeddings=[[0.1] * 1024], documents=["bge document"])
+    assert col.count() == 1
+    del client
+
+    env_backup = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        indexer = Indexer(
+            persist_directory=persist_dir,
+            enable_persist=True,
+            embedding_function="auto",
+            collection_name="default",
+        )
+        assert (
+            indexer.collection.count() == 1
+        ), "auto mode destroyed legacy BAAI/ namespace collection (incomplete namespace list)"
+    finally:
+        if env_backup is not None:
+            os.environ["OPENROUTER_API_KEY"] = env_backup
+
+
 def test_reset_collection_preserves_embedding_metadata(indexer):
     """reset_collection must recreate with the same embedding model metadata."""
     indexer.reset_collection()
