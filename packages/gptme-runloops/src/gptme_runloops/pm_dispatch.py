@@ -279,6 +279,7 @@ def build_full_ledger_entry(
     note: str | None = None,
     successes: str | int | None = None,
     failures: str | int | None = None,
+    timeouts: str | int | None = None,
     duration_seconds: str | int | None = None,
     exit_code: str | int | None = None,
     effect: str | None = None,
@@ -290,7 +291,7 @@ def build_full_ledger_entry(
     Mirrors the on-disk schema produced by the bash
     ``append_dispatch_ledger()`` function:
     ``timestamp/phase/lane/dispatch_id/unit/item_count/item_refs/types/items``
-    plus optional ``running_units/cap/note/successes/failures/duration_seconds``
+    plus optional ``running_units/cap/note/successes/failures/timeouts/duration_seconds``
     and the derived pair ``exit_code``/``outcome`` (see
     :func:`derive_dispatch_outcome`).
 
@@ -347,6 +348,7 @@ def build_full_ledger_entry(
         "note": note or None,
         "successes": _maybe_int(successes),
         "failures": _maybe_int(failures),
+        "timeouts": _maybe_int(timeouts),
         "duration_seconds": _maybe_int(duration_seconds),
         "exit_code": _maybe_int(exit_code),
         "effect": (effect or None) if phase in TERMINAL_LEDGER_PHASES else None,

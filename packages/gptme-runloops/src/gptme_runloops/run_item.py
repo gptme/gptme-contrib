@@ -2137,6 +2137,7 @@ def _append_ledger(
     *,
     successes: int | None = None,
     failures: int | None = None,
+    timeouts: int | None = None,
     duration_seconds: int | None = None,
     exit_code: int | None = None,
     effect: str | None = None,
@@ -2152,6 +2153,7 @@ def _append_ledger(
             note=note or None,
             successes=successes,
             failures=failures,
+            timeouts=timeouts,
             duration_seconds=duration_seconds,
             exit_code=exit_code,
             effect=effect,
@@ -2544,11 +2546,12 @@ def run_work_file(
             "transient_completed",
             successes=successes,
             failures=failures,
+            timeouts=timeouts,
             duration_seconds=duration,
             exit_code=overall_exit,
             effect=dispatch_effect,
         )
-        _log(f"Items: {group_count} total, {successes} succeeded, {failures} failed")
+        _log(f"Items: {group_count} total, {successes} succeeded, {failures} failed, {timeouts} timed out")
 
         if hooks.post_run is not None:
             env = os.environ.copy()
