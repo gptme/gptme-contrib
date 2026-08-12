@@ -457,8 +457,14 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
         return "greptile-convergence"
     if "merge_conflict" in types_set:
         return "merge-conflict"
-    if "pr_update" in types_set:
-        if repo and repo in _automated_pr_review_allowlist():
+    if types_set & {"pr_update", "pr_never_checked"}:
+        # pr_never_checked never routes to automated-pr-review: approving a held
+        # workflow run requires a human click, which an automated review pass cannot do.
+        if (
+            "pr_update" in types_set
+            and repo
+            and repo in _automated_pr_review_allowlist()
+        ):
             return "automated-pr-review"
         return "pr-review"
     if "assigned" in types_set:
