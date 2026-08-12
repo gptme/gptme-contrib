@@ -663,6 +663,20 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             f"Try GH_API_CACHE_TTL=0 to bypass the cache."
         )
 
+    # Validate that the 'labels' field was returned by gh. We explicitly request
+    # it in the --json fields list, so a missing field indicates a gh CLI version
+    # that predates labels-in-JSON support, or a cache shim stripping the field.
+    # Raise early here (consistent with the number-mismatch check above) so
+    # callers see an explicit diagnostic rather than a silent eligibility block
+    # deep in evaluate_pr.
+    if "labels" not in pr:
+        raise RuntimeError(
+            f"fetch_pr for {repo}#{number}: 'labels' field absent from gh response. "
+            "The field was explicitly requested via --json; this usually means an old "
+            "gh CLI version (<2.27) or a cache shim is stripping the field. "
+            "Upgrade gh or set GH_API_CACHE_TTL=0 to bypass the cache."
+        )
+
     pr["files"] = _fetch_pr_files(repo, number)
     return pr
 
@@ -2404,11 +2418,18 @@ def evaluate_pr(
 
     if not isinstance(pr.get("labels"), list):
         # Labels field absent or null — cannot verify hold state; fail closed.
+        # Under normal operation this branch should not be reached: fetch_pr
+        # explicitly requests labels via --json and raises RuntimeError when the
+        # field is absent. If evaluate_pr is called with a hand-crafted or
+        # cached payload that omits labels, we block rather than silently pass.
         # A present-but-null value is treated identically to a missing key:
         # a cache shim or malformed payload returning labels=null must not
         # accidentally pass the hold check.
+        # To diagnose: check that gh CLI supports the labels JSON field
+        # (gh pr view --json labels), or set GH_API_CACHE_TTL=0 to bypass cache.
         result.reasons.append(
-            "PR labels missing from payload; cannot verify operator hold"
+            "PR labels missing or null in payload; cannot verify operator hold "
+            "(ensure gh CLI ≥2.27 or set GH_API_CACHE_TTL=0 to bypass cache)"
         )
     else:
         pr_label_names = set()

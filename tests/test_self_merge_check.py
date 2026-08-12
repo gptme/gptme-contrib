@@ -279,16 +279,6 @@ def test_evaluate_pr_clean_merge_state_passes_gate() -> None:
     assert not any("merge conflicts" in r for r in result.reasons)
 
 
-_HOLD_PATCH_CONTEXT = (
-    patch.object,
-    patch.object,
-    patch.object,
-    patch.object,
-    patch.object,
-    patch.object,
-)
-
-
 def _evaluate_with_hold_labels(labels: list[object]) -> Any:
     pr_data = _make_clean_pr_data(labels=labels)
     with (
@@ -744,6 +734,7 @@ def test_fetch_pr_uses_paginated_rest_files_api() -> None:
         "isDraft": False,
         "state": "OPEN",
         "reviewDecision": None,
+        "labels": [],
     }
     files_output = "\n".join(
         [json.dumps({"path": f"tests/test_{i}.py"}) for i in range(105)]
@@ -1708,6 +1699,41 @@ def test_fetch_pr_raises_on_missing_number() -> None:
         patch.object(self_merge_check, "_fetch_pr_files", return_value=[]),
     ):
         with pytest.raises(RuntimeError, match="PR data mismatch.*1257.*None"):
+            self_merge_check.fetch_pr("gptme/gptme-contrib", 1257)
+
+
+def test_fetch_pr_raises_on_missing_labels_field() -> None:
+    """fetch_pr must raise RuntimeError when the gh response omits the 'labels' field.
+
+    The field is explicitly requested via --json, so its absence means an old gh
+    CLI version (<2.27) or a cache shim stripping the field. We raise at fetch
+    time so callers get an explicit diagnostic instead of a silent eligibility
+    block deep in evaluate_pr.
+
+    This is the same fail-explicit pattern used for number-mismatch above.
+    """
+    payload_missing_labels = json.dumps(
+        {
+            "number": 1257,
+            "title": "test PR",
+            "url": "https://github.com/gptme/gptme-contrib/pull/1257",
+            "author": {"login": "TimeToBuildBob"},
+            "statusCheckRollup": [],
+            "isDraft": False,
+            "state": "OPEN",
+            "reviewDecision": None,
+            "headRefOid": "abc123",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "master",
+            # 'labels' key intentionally absent — simulates old gh CLI or cache shim
+        }
+    )
+
+    with (
+        patch.object(self_merge_check, "run_gh", return_value=payload_missing_labels),
+        patch.object(self_merge_check, "_fetch_pr_files", return_value=[]),
+    ):
+        with pytest.raises(RuntimeError, match="labels.*field absent from gh response"):
             self_merge_check.fetch_pr("gptme/gptme-contrib", 1257)
 
 
