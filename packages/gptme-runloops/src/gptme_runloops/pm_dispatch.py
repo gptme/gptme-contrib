@@ -29,6 +29,7 @@ from typing import Any, Callable, cast
 # else (notifications, assigned issues).
 SLOW_LANE_TYPES: set[str] = {
     "pr_update",
+    "pr_never_checked",
     "ci_failure",
     "master_ci_failure",
     "merge_conflict",
@@ -462,6 +463,7 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
         # workflow run requires a human click, which an automated review pass cannot do.
         if (
             "pr_update" in types_set
+            and "pr_never_checked" not in types_set
             and repo
             and repo in _automated_pr_review_allowlist()
         ):
