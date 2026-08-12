@@ -1017,3 +1017,78 @@ def test_check_own_pr_review_state_dark_state_preserved_score_emits_needs_fix() 
             f"check_own_pr_review_state; got nothing.\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
+
+
+def test_dark_state_dirty_verdict_no_double_dispatch() -> None:
+    """Dark state with dirty AI verdict must NOT emit greptile_needs_improvement.
+
+    Regression guard for P1 fp `eb4e7594dfb4`: when Greptile is dark and the
+    preserved dark_score in field 5 is 4, check_greptile_scores emits
+    greptile_needs_fix (AI verdict dirty), then check_own_pr_review_state runs,
+    reads field 5 = 4, and was also emitting greptile_needs_improvement — a
+    double-dispatch that spawned both a fix session and an improvement session.
+
+    The fix: in check_own_pr_review_state, when field 1 is empty (dark state),
+    read field 4 (AI verdict); if it is "dirty", skip — check_greptile_scores
+    already handled it.
+
+    Scenario:
+    - Greptile dark (no score comment)
+    - AI review comment at score 3 → "dirty" verdict
+    - State file pre-seeded as dark format: ':ts:sha:dirty:4' (preserved score=4)
+    - Expected: exactly ONE greptile_needs_fix item total (from check_greptile_scores)
+    - Bug behaviour: also emits greptile_needs_improvement from check_own_pr_review_state
+    """
+    import time
+
+    pr = dict(_pr(), mergeStateStatus="BLOCKED")
+    fixture = {
+        "prs": [pr],
+        # Score 3 → ai_review_verdict returns "dirty"
+        "comments": [_bob_ai_review_comment(TEST_HEAD_SHA, score=3)],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        # Pre-seed greptile state with dirty verdict and preserved score=4 in field 5.
+        repo_safe = TEST_REPO.replace("/", "-")
+        greptile_state_file = state_dir / f"{repo_safe}-pr-{TEST_PR}-greptile.state"
+        # Use old-enough timestamp so cooldown (3600s) is NOT in effect — we want
+        # check_greptile_scores to emit this cycle.
+        old_ts = int(time.time()) - 7200
+        greptile_state_file.write_text(f":{old_ts}:{TEST_HEAD_SHA}:dirty:4")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        all_items = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type", "").startswith("greptile_"):
+                all_items.append(obj)
+
+        improvement_items = [
+            i for i in all_items if i.get("type") == "greptile_needs_improvement"
+        ]
+        assert improvement_items == [], (
+            f"P1 fix: check_own_pr_review_state must not emit greptile_needs_improvement "
+            f"when dark-state AI verdict is dirty (double-dispatch prevention); "
+            f"got: {improvement_items}\nall greptile items: {all_items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        fix_items = [i for i in all_items if i.get("type") == "greptile_needs_fix"]
+        assert fix_items, (
+            f"P1 fix: greptile_needs_fix must still be emitted by check_greptile_scores "
+            f"when AI verdict is dirty (dark state); "
+            f"got no fix items\nall greptile items: {all_items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )

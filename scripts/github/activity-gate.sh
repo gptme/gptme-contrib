@@ -1293,6 +1293,14 @@ check_own_pr_review_state() {
             # Dark-state format: field 1 is empty, preserved score is in field 5.
             if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
                 greptile_score=$(cut -d: -f5 < "$greptile_state_file")
+                # Dark state: if AI verdict (field 4) is dirty, check_greptile_scores
+                # already emitted greptile_needs_fix for this PR.  Emitting
+                # greptile_needs_improvement here too would double-dispatch.
+                local dark_ai_verdict=""
+                dark_ai_verdict=$(cut -d: -f4 < "$greptile_state_file")
+                if [ "$dark_ai_verdict" = "dirty" ]; then
+                    continue
+                fi
             fi
         fi
 
