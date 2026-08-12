@@ -415,42 +415,51 @@ def search(
             stderr_ctx = (
                 contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext()
             )
-            with contextlib.redirect_stdout(devnull), stderr_ctx:
-                # Initialize indexer with explicit arguments
-                # Always use ModernBERT by default for better results
-                indexer = Indexer(
-                    persist_directory=persist_dir,
-                    enable_persist=True,
-                    scoring_weights=scoring_weights,
-                    embedding_function=(
-                        "modernbert" if embedding_function is None else embedding_function
-                    ),
-                    device=device or "cpu",
-                )
-                assembler = ContextAssembler(max_tokens=max_tokens)
-
-                # Combine paths and filters for search
-                search_paths = list(paths)
-                if filter:
-                    # If no paths were specified but filters are present,
-                    # search from root and apply filters
-                    if not paths:
-                        search_paths = [Path(".")]
-                    logger.debug(f"Using path filters: {filter}")
-
-                explanations: list | None = None
-                if explain:
-                    documents, distances, explanations = indexer.search(
-                        query,
-                        n_results=n_results,
-                        paths=search_paths,
-                        path_filters=filter,
-                        explain=True,
+            try:
+                with contextlib.redirect_stdout(devnull), stderr_ctx:
+                    # Initialize indexer with explicit arguments
+                    # Always use ModernBERT by default for better results
+                    indexer = Indexer(
+                        persist_directory=persist_dir,
+                        enable_persist=True,
+                        scoring_weights=scoring_weights,
+                        embedding_function=(
+                            "modernbert" if embedding_function is None else embedding_function
+                        ),
+                        device=device or "cpu",
                     )
-                else:
-                    documents, distances, _ = indexer.search(
-                        query, n_results=n_results, paths=search_paths, path_filters=filter
-                    )
+                    assembler = ContextAssembler(max_tokens=max_tokens)
+
+                    # Combine paths and filters for search
+                    search_paths = list(paths)
+                    if filter:
+                        # If no paths were specified but filters are present,
+                        # search from root and apply filters
+                        if not paths:
+                            search_paths = [Path(".")]
+                        logger.debug(f"Using path filters: {filter}")
+
+                    explanations: list | None = None
+                    if explain:
+                        documents, distances, explanations = indexer.search(
+                            query,
+                            n_results=n_results,
+                            paths=search_paths,
+                            path_filters=filter,
+                            explain=True,
+                        )
+                    else:
+                        documents, distances, _ = indexer.search(
+                            query, n_results=n_results, paths=search_paths, path_filters=filter
+                        )
+            except Exception as e:
+                # In json mode stderr is redirected to /dev/null, so an unhandled
+                # exception would produce a silent failure with no output on stdout
+                # and no traceback visible.  Emit a JSON error object so callers
+                # get a diagnosable response instead of empty stdout + non-zero exit.
+                if output_json:
+                    print(json.dumps({"error": str(e), "query": query}))
+                raise
 
     if not documents:
         if output_json:

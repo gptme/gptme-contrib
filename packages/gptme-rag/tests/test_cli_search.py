@@ -318,3 +318,40 @@ def test_search_human_format_is_default(populated_index):
     except json.JSONDecodeError:
         is_json = False
     assert not is_json, "Default output should be human-readable, not JSON"
+
+
+def test_search_json_emits_error_object_on_init_failure(tmp_path):
+    """In --json mode, an Indexer init failure produces a JSON error object on stdout.
+
+    Regression guard for the silent-failure bug: before the fix, exceptions inside
+    the redirect_stderr(devnull) block would propagate with no stdout output,
+    leaving callers with an empty stdout and a non-zero exit code and no way to
+    diagnose the failure.
+    """
+    from unittest.mock import patch as mock_patch
+
+    runner = CliRunner()
+    with mock_patch(
+        "gptme_rag.cli.Indexer",
+        side_effect=RuntimeError("model weights not found"),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test query",
+                "--persist-dir",
+                str(tmp_path / "index"),
+                "--json",
+            ],
+        )
+
+    # Must exit non-zero (exception re-raised after emitting JSON)
+    assert result.exit_code != 0, "Expected non-zero exit on Indexer failure"
+
+    # Output must be non-empty and valid JSON with an 'error' key
+    assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
+    data = json.loads(result.output.strip())
+    assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
+    assert "model weights not found" in data["error"]
+    assert data.get("query") == "test query"
