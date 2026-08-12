@@ -1194,3 +1194,44 @@ def test_matching_severity_still_disposes(gh_comments: Any) -> None:
         ),
     )
     assert status["accepted"] is True
+
+
+# --- P2 deferred fixes (raised on #1393, landed separately) ---
+
+
+def test_agreement_threshold_exceeding_requested_passes_is_rejected(
+    gh_comments: Any,
+) -> None:
+    """min_agreement > requested is internally impossible and must be rejected.
+
+    FULL_CONSENSUS has requested=3; a marker with min_agreement=5 passes the
+    clamping guard (applied == asked, so not clamped) while being semantically
+    incoherent — 5 agreeing passes cannot arise from 3 requested passes.  Our
+    reviewer clamps the threshold to ≤ requested, so this is only reachable via
+    a corrupted or foreign marker; the author check already blocks foreign
+    markers, but internal consistency must be rejected uniformly.
+    """
+    consensus = dict(FULL_CONSENSUS, min_agreement=5, min_agreement_requested=5)
+    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is False
+    assert "exceeds requested pass count" in (status["detail"] or "")
+
+
+def test_marker_lookup_failure_is_surfaced_as_distinct_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient API failure must not silently look like 'no marker posted'.
+
+    The old code called ``_fetch_ai_review_marker``, which collapsed
+    ``MARKER_LOOKUP_FAILED`` to ``None``.  So a timeout or rate-limited call
+    looked identical to a PR our reviewer never posted on — both produced
+    ``{"accepted": False, "detail": None}`` and the gate said "Greptile review
+    not found" with nothing explaining why the AI fallback did not apply.
+    """
+    monkeypatch.setattr(smc, "run_gh_checked", lambda *a, **k: None)
+    monkeypatch.setattr(smc, "run_gh", lambda *a, **k: "")
+    status = smc.fetch_ai_review_status(
+        "gptme/gptme-contrib", 1382, head_sha=HEAD_SHA, expected_author=AUTHOR
+    )
+    assert status["accepted"] is False
+    assert "lookup failed" in (status["detail"] or "")
