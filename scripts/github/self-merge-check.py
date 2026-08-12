@@ -2402,12 +2402,20 @@ def evaluate_pr(
     if pr.get("state") != "OPEN":
         result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
 
-    pr_label_names = {lbl.get("name", "").lower() for lbl in (pr.get("labels") or [])}
-    matched_hold = pr_label_names & _HOLD_LABELS
-    if matched_hold:
+    if "labels" not in pr:
+        # Labels field absent from payload — cannot verify hold state; fail closed.
         result.reasons.append(
-            f"Operator hold: {', '.join(sorted(matched_hold))} label — remove label to unblock"
+            "PR labels missing from payload; cannot verify operator hold"
         )
+    else:
+        pr_label_names = {
+            lbl.get("name", "").lower() for lbl in (pr.get("labels") or [])
+        }
+        matched_hold = pr_label_names & _HOLD_LABELS
+        if matched_hold:
+            result.reasons.append(
+                f"Operator hold: {', '.join(sorted(matched_hold))} label — remove label to unblock"
+            )
 
     merge_state = pr.get("mergeStateStatus", "")
     if merge_state == "DIRTY":
