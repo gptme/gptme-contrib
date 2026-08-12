@@ -1874,3 +1874,26 @@ def test_asr_no_id_event_does_not_replace_id_anchored_entry() -> None:
     assert transcript[0].item_id == "item-001"
     assert transcript[1].text == "Hello Bob, what's the plan?"
     assert transcript[1].item_id is None
+
+
+def test_assistant_turns_with_shared_prefix_are_not_collapsed() -> None:
+    """Assistant final transcripts must NEVER be collapsed by the prefix heuristic.
+
+    The deduplication logic exists for ASR partials (user role only).  If the
+    assistant says "Sure" in one response and "Sure, let me check" in the next,
+    the second must NOT replace the first — that would silently drop the earlier
+    assistant turn from the conversation history used for resume context and
+    post-call analysis.
+
+    This is enforced by passing allow_continuation=False in _on_ai_transcript.
+    """
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "assistant", "Sure", allow_continuation=False)
+    _append_transcript_turn(
+        transcript, "assistant", "Sure, let me check", allow_continuation=False
+    )
+    assert (
+        len(transcript) == 2
+    ), "Two distinct assistant turns must remain separate even when the second starts with the first"
+    assert transcript[0].text == "Sure"
+    assert transcript[1].text == "Sure, let me check"

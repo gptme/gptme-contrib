@@ -440,6 +440,7 @@ def _append_transcript_turn(
     text: str,
     *,
     item_id: str | None = None,
+    allow_continuation: bool = True,
 ) -> None:
     """Add a transcript turn, replacing the last entry when it is a partial of the same utterance.
 
@@ -457,11 +458,15 @@ def _append_transcript_turn(
     to the heuristic but is significantly narrowed by requiring both sides to be
     id-less — an entry already anchored to an item_id can never be silently replaced
     by a no-id event.
+
+    Set allow_continuation=False (e.g. for assistant turns) to always append as a new
+    entry, preventing the prefix heuristic from treating two distinct final transcripts
+    as continuations of the same utterance.
     """
     cleaned = text.strip()
     if not cleaned:
         return
-    is_continuation = (
+    is_continuation = allow_continuation and (
         transcript
         and transcript[-1].role == role
         and (
@@ -1910,7 +1915,9 @@ class VoiceServer:
             _request_hangup("tool", reason)
 
         async def _on_ai_transcript(text: str) -> None:
-            _append_transcript_turn(transcript, "assistant", text)
+            _append_transcript_turn(
+                transcript, "assistant", text, allow_continuation=False
+            )
             if _should_trigger_hangup_transcript_fallback(transcript, text):
                 logger.warning(
                     "Assistant committed to hanging up without tool; scheduling transcript fallback: %s",
