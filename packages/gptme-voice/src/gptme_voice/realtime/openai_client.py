@@ -318,7 +318,14 @@ class OpenAIRealtimeClient:
                 ) -> None:
                     try:
                         _cb(text, item_id)
-                    except TypeError:
+                    except TypeError as exc:
+                        # Fall back to 1-arg only for arity TypeErrors (the
+                        # callback cannot accept a second positional argument).
+                        # An internal TypeError from within the callback body
+                        # (e.g. invalid data) should propagate so callers see
+                        # the real error instead of a misleading arity message.
+                        if "argument" not in str(exc):
+                            raise
                         _cb(text)
 
         self.on_user_transcript = on_user_transcript

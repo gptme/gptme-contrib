@@ -466,23 +466,34 @@ def _append_transcript_turn(
     cleaned = text.strip()
     if not cleaned:
         return
+
+    # Fast path: exact item_id match (authoritative provider correlation key).
+    # Replace only when the new text is at least as long as the stored one —
+    # a shorter retransmission (e.g. a provider-side correction) is silently
+    # ignored so we never truncate a longer partial already in the transcript.
+    if (
+        allow_continuation
+        and item_id is not None
+        and transcript
+        and transcript[-1].role == role
+        and transcript[-1].item_id == item_id
+    ):
+        if len(cleaned) >= len(transcript[-1].text):
+            transcript[-1] = TranscriptTurn(role=role, text=cleaned, item_id=item_id)
+        return  # same item_id — never append a second entry regardless
+
+    # Prefix heuristic fallback: only when BOTH the current event and the
+    # stored entry have no item_id.  If the stored entry has item_id="A"
+    # and a new event arrives with item_id=None, the new event is a
+    # different utterance even if its text happens to extend the prior one.
     is_continuation = allow_continuation and (
         transcript
         and transcript[-1].role == role
-        and (
-            # Exact match by item_id (preferred — no false positives)
-            (item_id is not None and transcript[-1].item_id == item_id)
-            # Prefix heuristic fallback: only when BOTH the current event and the
-            # stored entry have no item_id.  If the stored entry has item_id="A"
-            # and a new event arrives with item_id=None, the new event is a
-            # different utterance even if its text happens to extend the prior one.
-            or (
-                item_id is None
-                and transcript[-1].item_id is None
-                and cleaned.startswith(transcript[-1].text)
-            )
-        )
+        and item_id is None
+        and transcript[-1].item_id is None
+        and cleaned.startswith(transcript[-1].text)
     )
+
     if is_continuation:
         transcript[-1] = TranscriptTurn(role=role, text=cleaned, item_id=item_id)
     else:

@@ -1023,3 +1023,39 @@ def test_non_introspectable_two_arg_callback_receives_item_id() -> None:
     assert received == [
         ("hello", "item-001")
     ], "Non-introspectable 2-arg callback should receive both text and item_id"
+
+
+def test_non_introspectable_callback_internal_typeerror_propagates() -> None:
+    """An internal TypeError from within a non-introspectable callback must propagate.
+
+    The conservative wrapper catches arity TypeErrors to fall back to 1-arg, but
+    a TypeError raised *inside* the callback body (e.g. from invalid data) must NOT
+    be swallowed and silently rerouted to the 1-arg path — that would mask the real
+    error and produce a confusing 'missing argument' error instead.
+    """
+    import asyncio
+    import inspect
+    import unittest.mock
+
+    def inner(text: str, item_id: str | None) -> None:
+        # Internal TypeError, not an arity error — must propagate
+        raise TypeError("expected str, got int")
+
+    original_sig = inspect.signature
+
+    def patched_signature(obj, **kwargs):
+        if obj is inner:
+            raise ValueError("cannot introspect")
+        return original_sig(obj, **kwargs)
+
+    with unittest.mock.patch("inspect.signature", side_effect=patched_signature):
+        client = OpenAIRealtimeClient(
+            api_key="test-key",
+            on_user_transcript=inner,
+        )
+
+    async def _run() -> None:
+        with pytest.raises(TypeError, match="expected str, got int"):
+            await client._call_callback(client.on_user_transcript, "hello", "item-001")
+
+    asyncio.run(_run())
