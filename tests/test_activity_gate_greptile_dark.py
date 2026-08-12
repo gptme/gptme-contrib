@@ -983,7 +983,14 @@ def test_check_own_pr_review_state_dark_state_preserved_score_emits_needs_fix() 
     pr = dict(_pr(), mergeStateStatus="BLOCKED")
     fixture = {
         "prs": [pr],
-        "comments": [_bob_ai_review_comment(TEST_HEAD_SHA, score=4)],
+        # score=5 → ai_review_verdict returns "clean" → check_greptile_scores emits
+        # nothing (dark branch, clean verdict) → check_own_pr_review_state must
+        # exercise its own field-5 fallback to emit greptile_needs_fix.
+        # score=4 (the old value) caused ai_review_verdict to return "dirty", which
+        # made check_greptile_scores emit greptile_needs_fix and then suppress
+        # check_own_pr_review_state via double-dispatch guard — the fallback was
+        # never reached and the test was passing for the wrong reason.
+        "comments": [_bob_ai_review_comment(TEST_HEAD_SHA, score=5)],
     }
 
     with tempfile.TemporaryDirectory() as tmp_str:
