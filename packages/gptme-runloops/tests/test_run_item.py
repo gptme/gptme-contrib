@@ -36,6 +36,7 @@ from gptme_runloops.merge_lifecycle import (
     run_merge_lifecycle,
 )
 from gptme_runloops.run_item import (
+    THREAD_DELIVERABLE_TYPES,
     ArcInfo,
     RunItem,
     RunItemConfig,
@@ -1432,12 +1433,21 @@ def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     assert latency_calls[0]["outcome"] == "handled"
 
 
+@pytest.mark.parametrize("item_type", sorted(THREAD_DELIVERABLE_TYPES))
 def test_post_session_thread_deliverable_item_still_runs_delivery_check(
     tmp_path,
+    item_type: str,
 ) -> None:
-    """Regression guard: the type gate must not disable checks for real threads."""
+    """Regression guard: the delivery check must run for every thread-deliverable type.
+
+    THREAD_DELIVERABLE_TYPES lists all eight thread-bearing item types. If any of
+    them is accidentally removed from the set, the delivery post-condition would
+    silently stop running for those items. This parametrized test ensures each type
+    in the set actually triggers the check — a future accidental removal will
+    fail exactly here.
+    """
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
-        tmp_path, types=("assigned_issue",)
+        tmp_path, types=(item_type,)
     )
     hooks.wait_merge_gate = None
     hooks.arc_manager = None
@@ -1447,7 +1457,10 @@ def test_post_session_thread_deliverable_item_still_runs_delivery_check(
         '"fallback_reply_posted": false}',
     )
     run_post_session(plan, item, outcome, config, hooks)
-    assert run_cmd.find("/fake/check-delivery.py") != []
+    assert run_cmd.find("/fake/check-delivery.py") != [], (
+        f"delivery check was NOT called for thread-deliverable type {item_type!r} "
+        f"— was it accidentally removed from THREAD_DELIVERABLE_TYPES?"
+    )
     assert latency_calls[0]["outcome"] == "orphan_no_delivery"
 
 
