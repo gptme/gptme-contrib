@@ -98,7 +98,14 @@ class QuestionContext:
             if axis not in required:
                 continue
             val = getattr(self, axis, None)
-            if val is None or val in _UNANSWERED_SENTINELS:
+            # Also treat empty/whitespace strings as not-yet-answered: a user who
+            # submits an empty answer should not satisfy the axis check and cause
+            # the LLM to proceed with advice as if context was gathered.
+            if (
+                val is None
+                or val in _UNANSWERED_SENTINELS
+                or (isinstance(val, str) and not val.strip())
+            ):
                 missing.append(axis)
         return missing
 
@@ -107,8 +114,14 @@ class QuestionContext:
         return len(self.missing_axes_for(question_type)) == 0
 
     def should_interrupt_with_debt_advice(self) -> bool:
-        """Check if high-interest debt should interrupt and take priority."""
-        return self.has_high_interest_debt is True
+        """Check if high-interest debt should interrupt and take priority.
+
+        Handles both bool True and the string "true" so callers that reconstruct
+        QuestionContext from a JSON payload (where booleans become strings) still
+        trigger the interrupt correctly.
+        """
+        hid = self.has_high_interest_debt
+        return hid is True or (isinstance(hid, str) and hid.lower() == "true")
 
     def to_dict(self) -> dict:
         """Convert context to serializable dict."""
@@ -164,6 +177,10 @@ def classify_question(user_question: str) -> str:
     # Note: "balance" alone is intentionally excluded — it is too broad and matches
     # "account balance" or "balance my budget", causing misclassification.
     # "rebalance" is included because it is unambiguously portfolio-related.
+    # Similarly, bare "split" and "distribute" are excluded: "split my paycheck" or
+    # "split rent with roommates" are budgeting questions, not portfolio questions.
+    # Only the qualified phrases "split my portfolio" and "distribute my assets" are
+    # specific enough to warrant portfolio_allocation routing.
     if any(
         kw in q
         for kw in [
@@ -171,8 +188,9 @@ def classify_question(user_question: str) -> str:
             "allocation",
             "rebalance",
             "balance my portfolio",
-            "split",
-            "distribute",
+            "split my portfolio",
+            "distribute my assets",
+            "distribute across",
         ]
     ):
         return "portfolio_allocation"

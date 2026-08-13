@@ -410,3 +410,70 @@ class TestIntegrationScenarios:
         questions = next_questions(ctx, "should_i_invest")
         assert len(questions) > 0
         assert AXIS_QUESTIONS["time_horizon"] in questions
+
+
+class TestRobustnessFixes:
+    """Regression guards for P1/P2 robustness fixes."""
+
+    def test_empty_string_axis_treated_as_missing(self):
+        """Empty string for amount_context must not satisfy the missing-axis check.
+
+        A user who submits an empty answer stores "" in the field. Without this guard,
+        missing_axes_for would count amount_context as gathered and skip collecting it,
+        causing the LLM to proceed with advice without knowing the amount.
+        """
+        ctx = QuestionContext(
+            goal_type=GoalType.RETIREMENT,
+            time_horizon=TimeHorizon.LONG,
+            amount_context="",  # empty answer — not answered
+        )
+        missing = ctx.missing_axes_for("how_much_to_save")
+        assert "amount_context" in missing
+
+    def test_whitespace_only_string_axis_treated_as_missing(self):
+        """Whitespace-only amount_context must not satisfy the missing-axis check."""
+        ctx = QuestionContext(
+            goal_type=GoalType.RETIREMENT,
+            time_horizon=TimeHorizon.LONG,
+            amount_context="   ",
+        )
+        missing = ctx.missing_axes_for("how_much_to_save")
+        assert "amount_context" in missing
+
+    def test_debt_interrupt_fires_for_string_true(self):
+        """should_interrupt_with_debt_advice() must handle string 'true'.
+
+        A caller reconstructing QuestionContext from a JSON payload may set
+        has_high_interest_debt to the string 'true' instead of bool True.
+        The interrupt must still fire in that case.
+        """
+        ctx = QuestionContext()
+        ctx.has_high_interest_debt = "true"  # type: ignore[assignment]
+        assert ctx.should_interrupt_with_debt_advice()
+
+    def test_debt_interrupt_does_not_fire_for_string_false(self):
+        """should_interrupt_with_debt_advice() must not fire for string 'false'."""
+        ctx = QuestionContext()
+        ctx.has_high_interest_debt = "false"  # type: ignore[assignment]
+        assert not ctx.should_interrupt_with_debt_advice()
+
+    def test_classify_split_paycheck_is_not_portfolio(self):
+        """'split my paycheck' must NOT route to portfolio_allocation.
+
+        The bare keyword 'split' was too broad — paycheck/rent/bill splitting
+        questions are budgeting, not portfolio allocation.
+        """
+        qt = classify_question("How should I split my paycheck?")
+        assert qt != "portfolio_allocation"
+
+    def test_classify_distribute_rent_is_not_portfolio(self):
+        """'split rent with roommates' must NOT route to portfolio_allocation."""
+        qt = classify_question("How should I split rent with roommates?")
+        assert qt != "portfolio_allocation"
+
+    def test_classify_split_my_portfolio_is_portfolio(self):
+        """'split my portfolio' IS a portfolio allocation question."""
+        qt = classify_question(
+            "How should I split my portfolio between stocks and bonds?"
+        )
+        assert qt == "portfolio_allocation"
