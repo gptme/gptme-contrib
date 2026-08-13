@@ -116,8 +116,36 @@ class FakeIO:
             ["Greptile score 3/5 below floor 5/5"],
             SelfMergeBlockClass.SCORE_BELOW_FLOOR,
         ),
-        # Priority: not-found wins even when other blockers are present —
-        # the bash greps the FULL joined reasons text in a fixed order.
+        # The AI-review fallback ran and returned a sub-floor score. The gate
+        # appends that detail to the not-found reason; the AI score is the real
+        # blocker, so it beats the not-found prefix. Exact string observed on
+        # gptme/gptme-contrib#1419.
+        (
+            ["Greptile review not found; AI review score 3/5 below 5/5"],
+            SelfMergeBlockClass.AI_REVIEW_BELOW_FLOOR,
+        ),
+        # The other AI-review refusals carry no actionable finding set, so they
+        # keep the bash's not-found routing.
+        (
+            ["Greptile review not found; AI reviewer abstained (no score)"],
+            SelfMergeBlockClass.NO_GREPTILE_REVIEW,
+        ),
+        (
+            [
+                "Greptile review not found; AI review is stale "
+                "(reviewed abc123, head def456)"
+            ],
+            SelfMergeBlockClass.NO_GREPTILE_REVIEW,
+        ),
+        (
+            ["Greptile review not found; AI review score 6/5 outside the rubric, 5/5"],
+            SelfMergeBlockClass.NO_GREPTILE_REVIEW,
+        ),
+        # Priority: not-found beats score-below-floor and generic blockers,
+        # but unresolved threads beat not-found (new behaviour — see classifier
+        # docstring). The bash treated not-found as the top priority; this PR
+        # deliberately deviates so thread-clearing happens before Greptile
+        # is triggered.
         (
             ["CI is not fully green", "Greptile review not found"],
             SelfMergeBlockClass.NO_GREPTILE_REVIEW,
@@ -126,6 +154,16 @@ class FakeIO:
             ["Greptile review not found", "Greptile score 3/5 below floor 5/5"],
             SelfMergeBlockClass.NO_GREPTILE_REVIEW,
         ),
+        # Priority: unresolved threads BEAT not-found (deviation from bash).
+        # A thread-clearing session runs first; the next dispatch triggers
+        # Greptile once the threads are gone.
+        (
+            [
+                "Greptile has 1 unresolved review thread(s)",
+                "Greptile review not found",
+            ],
+            SelfMergeBlockClass.UNRESOLVED_THREADS,
+        ),
         # Priority: unresolved threads beat the score floor.
         (
             [
@@ -133,6 +171,30 @@ class FakeIO:
                 "Greptile score 3/5 below floor 5/5",
             ],
             SelfMergeBlockClass.UNRESOLVED_THREADS,
+        ),
+        # Priority: unresolved threads also beat the AI-review-below-floor
+        # block. A session that clears threads first avoids the failure mode
+        # where only AI findings are addressed while open threads continue to
+        # block the gate.
+        (
+            [
+                "Greptile has 1 unresolved review thread(s)",
+                "Greptile review not found; AI review score 3/5 below 5/5",
+            ],
+            SelfMergeBlockClass.UNRESOLVED_THREADS,
+        ),
+        # A contradictory reason where score == floor should NOT route to
+        # AI_REVIEW_BELOW_FLOOR (cross-multiplication: 5*5 < 5*5 is false).
+        # This guards against regex-only matching without numeric verification.
+        (
+            ["Greptile review not found; AI review score 5/5 below 5/5"],
+            SelfMergeBlockClass.NO_GREPTILE_REVIEW,
+        ),
+        # A zero-denominator reason should NOT match AI_REVIEW_BELOW_FLOOR —
+        # the regex rejects /0 denominators up front (they are malformed).
+        (
+            ["AI review score 3/0 below 5/0"],
+            SelfMergeBlockClass.OTHER,
         ),
         # NOTE(parity): the HUMAN-thread reason does NOT match the
         # "unresolved review thread" grep — the word "human" breaks the
@@ -196,6 +258,25 @@ def test_phase_a_gating_by_types() -> None:
     assert not self_merge_gate_applicable(
         make_item(types=("pr_update",)), gate_available=False
     )
+
+
+def test_phase_a_ai_review_below_floor_routes_to_fix_session() -> None:
+    """Regression: gptme/gptme-contrib#1419 no-op dispatch loop.
+
+    A merge_ready item whose only gate reason is the not-found prefix plus a
+    sub-floor AI score used to route to TRIGGER_REVIEW, which cannot clear the
+    block — the item burned a full dispatch and landed ``effect: none`` every
+    cycle until its retry budget was exhausted.
+    """
+    decision = decide_self_merge_gate(
+        make_item(types=("merge_ready",)),
+        SelfMergeCheckResult(
+            eligible=False,
+            reasons=("Greptile review not found; AI review score 3/5 below 5/5",),
+        ),
+    )
+    assert decision.action is MergeLifecycleAction.FIX_FINDINGS
+    assert decision.instructions is InstructionKind.AI_REVIEW_FIX
 
 
 def test_phase_a_not_applicable_decision() -> None:

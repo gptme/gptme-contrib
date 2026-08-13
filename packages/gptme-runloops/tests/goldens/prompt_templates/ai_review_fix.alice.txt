@@ -1,0 +1,54 @@
+### Also: Self-Hosted AI Review Is Below the Clean Score
+
+The self-merge gate is blocking ErikBjare/alice#7 because our own AI reviewer
+scored this head below the clean score. This is NOT a Greptile problem —
+triggering a Greptile review will not clear it, and a fresh 5/5 from Greptile
+still leaves this PR unmergeable. The score is driven by the reviewer's own
+findings, so the only way forward is to address them.
+
+```bash
+gh pr view 7 --repo ErikBjare/alice --comments
+gh api repos/ErikBjare/alice/pulls/7/comments \
+  --jq '.[] | {id, path, line, body: (.body | split("\n")[0:5] | join(" "))}'
+gh pr checks 7 --repo ErikBjare/alice
+```
+
+Steps:
+1. Read the AI review summary comment on the PR — the score-driving findings are
+   in its BODY, not only in the inline threads.
+2. Fix every finding that is a real defect. Push the fixes.
+
+**Closing the loop — required, and NOT the same thing as a PR comment.**
+
+An inline finding lives on a *review thread*. Posting to the PR conversation
+(`issues/7/comments`) does not touch it: the thread stays open, and the
+self-merge gate counts unresolved threads. Every finding you address needs a
+reply **on its own thread**, and then a resolution.
+
+- **Fixed in code** — reply on the thread with the fix SHA, then let the
+  reviewer resolve it. Re-running the review verifies the finding no longer
+  reproduces and resolves the thread itself; that is evidence-based and
+  stronger than resolving by hand.
+  ```bash
+  # root comment ids: gh api repos/ErikBjare/alice/pulls/7/comments --jq '.[] | {id, path, line}'
+  gh api repos/ErikBjare/alice/pulls/7/comments/COMMENT_ID/replies -f body="Fixed in SHA — ..."
+  ```
+- **False positive, won't-fix, or an accepted trade-off** — no code change will
+  ever settle it, so reply AND resolve in one step. A reasoned rejection with
+  code citations IS a resolution; it is not a reason to leave the thread open.
+  ```bash
+  python3 /srv/agents/alice/workspace/scripts/github/ai-review-dispose.py ErikBjare/alice 7 --list
+  python3 /srv/agents/alice/workspace/scripts/github/ai-review-dispose.py ErikBjare/alice 7 \
+      --fingerprint FP --reason rejected --reply-file /tmp/why.md
+  ```
+  It is idempotent (a second run is a no-op) and can only ever touch threads our
+  own reviewer opened — never a human's.
+
+⚠️ Never resolve a human's review thread. Burying a person's comment is far
+worse than leaving a thread open.
+
+3. A fresh review runs against the new head; the gate re-evaluates from there.
+
+Do NOT loop chasing a clean score. Address the findings once. If the score still
+does not clear after they are genuinely handled, stop and leave it for human
+review — the gate correctly blocks below-floor merges.
