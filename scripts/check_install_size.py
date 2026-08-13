@@ -30,9 +30,40 @@ DEFAULT_BUDGETS = {
     "other": 500,  # MB, catch-all default
 }
 
+# Keywords in dependency lists that indicate an ML package (ml-optional budget)
+_ML_DEP_KEYWORDS = ("torch", "tensorflow", "jax", "onnx", "transformers", "numpy")
+
+
+def _infer_package_category(config: dict) -> str:
+    """Infer the budget category from pyproject.toml dependency lists.
+
+    Returns one of: 'pure-python', 'ml-optional', 'other'.
+    """
+    deps: list[str] = config.get("project", {}).get("dependencies", [])
+    optional_groups = config.get("project", {}).get("optional-dependencies", {})
+    all_deps = deps + [d for group in optional_groups.values() for d in group]
+
+    lowered = " ".join(all_deps).lower()
+    if any(kw in lowered for kw in _ML_DEP_KEYWORDS):
+        return "ml-optional"
+
+    # No compiled deps heuristic: packages with no dependencies or only
+    # pure-Python ones (no binary wheels) get the tighter 100MB limit.
+    # We treat "no dependencies" as pure-Python to catch accidental bloat early.
+    if not all_deps:
+        return "pure-python"
+
+    return "other"
+
 
 def get_package_budget(pyproject_path: Path) -> int:
-    """Extract max_install_mb from package pyproject.toml."""
+    """Extract max_install_mb from package pyproject.toml.
+
+    Falls back to a category-inferred default when max_install_mb is not set:
+      - packages with ML deps (torch, tensorflow, …) → 2000MB
+      - packages with no declared dependencies → 100MB (pure-Python)
+      - everything else → 500MB
+    """
     if not pyproject_path.exists():
         return DEFAULT_BUDGETS["other"]
 
@@ -40,7 +71,10 @@ def get_package_budget(pyproject_path: Path) -> int:
         with open(pyproject_path, "rb") as f:
             config = tomllib.load(f)
         budget = config.get("tool", {}).get("gptme-contrib", {}).get("max_install_mb")
-        return budget if budget is not None else DEFAULT_BUDGETS["other"]
+        if budget is not None:
+            return int(budget)
+        category = _infer_package_category(config)
+        return DEFAULT_BUDGETS[category]
     except Exception:
         return DEFAULT_BUDGETS["other"]
 
@@ -66,6 +100,7 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                 ["uv", "venv", str(venv_path)],
                 check=True,
                 capture_output=True,
+                timeout=60,
             )
 
             python_exe = venv_path / "bin" / "python"
@@ -90,6 +125,7 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                 cwd=package_path.parent.parent,
                 capture_output=True,
                 text=True,
+                timeout=300,
             )
 
             if result.returncode != 0:
@@ -112,6 +148,9 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
             size_mb = total_size / (1024 * 1024)
             return size_mb
 
+        except subprocess.TimeoutExpired:
+            print(f"❌ Installation timed out for {package_name}")
+            return None
         except Exception as e:
             print(f"❌ Error checking {package_name}: {e}")
             return None

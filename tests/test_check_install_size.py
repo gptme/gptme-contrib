@@ -1,8 +1,10 @@
 """Tests for the install size checker script."""
 
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # Add scripts directory to path for imports
 REPO_ROOT = Path(__file__).parent.parent
@@ -45,7 +47,7 @@ max_install_mb = 750
 
 
 def test_get_package_budget_missing_tool_section():
-    """Test that pyproject without [tool.gptme-contrib] returns default."""
+    """Test that pyproject without [tool.gptme-contrib] uses inferred default."""
     import check_install_size
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -57,5 +59,155 @@ name = "test"
 """
         )
 
+        # No dependencies → inferred as pure-python
+        budget = check_install_size.get_package_budget(pyproject_path)
+        assert budget == check_install_size.DEFAULT_BUDGETS["pure-python"]
+
+
+def test_get_package_budget_infers_ml_category():
+    """Test that torch in deps triggers the ml-optional budget."""
+    import check_install_size
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pyproject_path = Path(tmpdir) / "pyproject.toml"
+        pyproject_path.write_text(
+            """
+[project]
+name = "ml-pkg"
+dependencies = ["torch>=2.0"]
+"""
+        )
+
+        budget = check_install_size.get_package_budget(pyproject_path)
+        assert budget == check_install_size.DEFAULT_BUDGETS["ml-optional"]
+
+
+def test_get_package_budget_infers_other_category():
+    """Test that non-ML dependencies fall back to the 'other' budget."""
+    import check_install_size
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pyproject_path = Path(tmpdir) / "pyproject.toml"
+        pyproject_path.write_text(
+            """
+[project]
+name = "some-pkg"
+dependencies = ["requests>=2.0", "click>=8.0"]
+"""
+        )
+
         budget = check_install_size.get_package_budget(pyproject_path)
         assert budget == check_install_size.DEFAULT_BUDGETS["other"]
+
+
+def _make_fake_venv(venv_path: Path, file_size_bytes: int) -> None:
+    """Write a single regular file into a fake venv directory."""
+    venv_path.mkdir(parents=True)
+    fake_lib = venv_path / "lib" / "fake_pkg.py"
+    fake_lib.parent.mkdir(parents=True)
+    fake_lib.write_bytes(b"x" * file_size_bytes)
+
+
+def test_measure_install_size_success():
+    """measure_install_size returns MB when install succeeds."""
+    import check_install_size
+
+    file_size = 10 * 1024 * 1024  # 10 MB
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        if "venv" in cmd:
+            # Materialise a fake venv at the path uv would create
+            venv_path = Path(cmd[-1])
+            _make_fake_venv(venv_path, file_size)
+            (venv_path / "bin").mkdir(exist_ok=True)
+            (venv_path / "bin" / "python").touch()
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_path = Path(tmpdir) / "mypkg"
+            package_path.mkdir()
+            size = check_install_size.measure_install_size(package_path, "mypkg")
+
+    assert size is not None
+    assert 9.0 < size < 11.0  # ~10 MB
+
+
+def test_measure_install_size_install_failure():
+    """measure_install_size returns None when uv pip install fails."""
+    import check_install_size
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        if "venv" in cmd:
+            result.returncode = 0
+            venv_path = Path(cmd[-1])
+            venv_path.mkdir(parents=True)
+            (venv_path / "bin").mkdir()
+            (venv_path / "bin" / "python").touch()
+        else:
+            result.returncode = 1
+            result.stderr = "ERROR: package not found"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_path = Path(tmpdir) / "mypkg"
+            package_path.mkdir()
+            size = check_install_size.measure_install_size(package_path, "mypkg")
+
+    assert size is None
+
+
+def test_measure_install_size_timeout():
+    """measure_install_size returns None on timeout."""
+    import check_install_size
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 0))
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_path = Path(tmpdir) / "mypkg"
+            package_path.mkdir()
+            size = check_install_size.measure_install_size(package_path, "mypkg")
+
+    assert size is None
+
+
+def test_check_packages_pass_and_fail():
+    """check_packages returns True for passing packages and False when over budget."""
+    import check_install_size
+
+    # Stub measure_install_size to return fixed sizes
+    sizes = {"passing": 50.0, "failing": 600.0}
+
+    def fake_measure(package_path, package_name):
+        return sizes.get(package_name)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+
+        for name in ("passing", "failing"):
+            pkg_dir = packages_dir / name
+            pkg_dir.mkdir(parents=True)
+            # Budget: 100MB for both; failing will exceed it
+            (pkg_dir / "pyproject.toml").write_text(
+                "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+            )
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result_pass = check_install_size.check_packages(
+                packages_dir, verbose=False, only="passing"
+            )
+            result_fail = check_install_size.check_packages(
+                packages_dir, verbose=False, only="failing"
+            )
+
+    assert result_pass is True
+    assert result_fail is False

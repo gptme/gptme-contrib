@@ -23,6 +23,8 @@ jobs:
         filters: |
           packages:
             - 'packages/**'
+            - 'scripts/**'
+            - 'tests/**'
             - 'pyproject.toml'
             - 'uv.lock'
             - 'Makefile'
