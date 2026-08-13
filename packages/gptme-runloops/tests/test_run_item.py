@@ -1494,6 +1494,37 @@ def test_post_session_agent_msg_reply_skips_delivery_check(tmp_path) -> None:
     )
 
 
+def test_post_session_notification_zero_number_skips_delivery_check(tmp_path) -> None:
+    """A notification item with number=0 must not trigger the delivery check.
+
+    `notification` items in THREAD_DELIVERABLE_TYPES normally have real issue
+    numbers. But synthetic notifications (e.g. agent-bus pings) carry number=0
+    as a sentinel — there is no GitHub thread to check. Querying
+    `issues/0/comments` 404s, returns `orphan_no_delivery`, and triggers
+    rollback → re-dispatch forever, the same loop fixed for master_ci_failure
+    and agent_msg_reply. The number!=0 gate closes this third symptom class.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("notification",)
+    )
+    # Override the default number=1234 with the sentinel value
+    item = make_item(types=["notification"], number=0)
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # If the check DID run it would report an orphan, as it does in production.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert (
+        run_cmd.find("/fake/check-delivery.py") == []
+    ), "delivery check must not run for notification items with number=0"
+    assert effect == "unknown", (
+        f"notification with number=0 must score effect='unknown', not {effect!r}; "
+        "EFFECT_NONE would incorrectly fire the no-effect WARN."
+    )
+
+
 @pytest.mark.parametrize("item_type", sorted(THREAD_DELIVERABLE_TYPES))
 def test_post_session_thread_deliverable_item_still_runs_delivery_check(
     tmp_path,

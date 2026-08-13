@@ -1855,6 +1855,7 @@ def run_post_session(
     if (
         item.repo
         and item.number is not None
+        and item.number != 0  # 0 is a sentinel for items with no real GitHub thread
         and hooks.delivery_check is not None
         and THREAD_DELIVERABLE_TYPES & set(item.types)
     ):
