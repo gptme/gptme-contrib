@@ -1421,16 +1421,28 @@ def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     Its `number` is a workflow run id, not an issue number, so the check would
     query issues/{run_id}/comments, 404, find no comment, and return
     orphan_no_delivery -> rollback -> re-dispatch forever (ErikBjare/bob#1144).
+
+    The fix must also promote state (not roll back): verify the pending state
+    file is copied to the real state dir so the item doesn't re-enter the queue.
     """
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
         tmp_path, types=("master_ci_failure",)
     )
     hooks.wait_merge_gate = None
     hooks.arc_manager = None
+    # Seed a pending state file so promote_item_state has something observable to do.
+    config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
+    sentinel.write_text("promoted")
     run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
     run_post_session(plan, item, outcome, config, hooks)
     assert run_cmd.find("/fake/check-delivery.py") == []
     assert latency_calls[0]["outcome"] == "handled"
+    # State must be promoted, not rolled back — otherwise the item re-enters the queue.
+    assert (config.state_dir / sentinel.name).exists(), (
+        "promote_item_state was not called — state was not promoted from pending; "
+        "item would re-enter the dispatch queue"
+    )
 
 
 @pytest.mark.parametrize("item_type", sorted(THREAD_DELIVERABLE_TYPES))
