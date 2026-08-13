@@ -17,6 +17,7 @@ if _plugin_src not in sys.path:
 
 # Now imports can happen at module level (path setup required first)
 from gptme_lsp.hooks import register  # noqa: E402
+from gptme_lsp.lsp_client import TextEdit, WorkspaceEdit  # noqa: E402
 from gptme_lsp.tools import tool  # noqa: E402
 from gptme_lsp.tools.lsp_tool import _get_workspace, execute  # noqa: E402
 
@@ -86,6 +87,39 @@ def test_execute_unknown_action():
 
     assert result is not None
     assert "Unknown action" in result.content
+
+
+def test_execute_rename_previews_workspace_edit(tmp_path):
+    """Test rename action formats LSP workspace edit previews."""
+    test_file = tmp_path / "module.py"
+    test_file.write_text("def old_name():\n    return old_name()\n")
+    edit = TextEdit(
+        file=test_file,
+        start_line=1,
+        start_column=5,
+        end_line=1,
+        end_column=13,
+        new_text="new_name",
+    )
+
+    with patch("gptme_lsp.tools.lsp_tool._get_workspace", return_value=tmp_path):
+        with patch(
+            "gptme_lsp.tools.lsp_tool._get_lsp_rename",
+            return_value=WorkspaceEdit([edit]),
+        ) as mock_rename:
+            result = execute(
+                code="",
+                args=["rename", f"{test_file}:1:5", "new_name"],
+                kwargs={},
+                confirm=lambda x: True,
+            )
+
+    assert result is not None
+    assert "Rename to 'new_name'" in result.content
+    assert "1 edit(s) in 1 file(s)" in result.content
+    assert "**module.py**" in result.content
+    assert "Line 1:5-1:13" in result.content
+    mock_rename.assert_called_once_with(test_file, 1, 5, "new_name", tmp_path)
 
 
 def test_execute_diagnostics_missing_file(tmp_path):
