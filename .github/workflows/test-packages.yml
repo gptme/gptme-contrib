@@ -197,3 +197,24 @@ jobs:
       - name: Run typecheck
         run: |
           make typecheck-packages
+
+  # Check install sizes don't exceed budgets (prevents silent regressions like #1416)
+  install-size:
+    needs: changes
+    # Always run on push to master; on PRs, only when package code changed
+    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run install-size check
+        run: |
+          python3 scripts/check_install_size.py --verbose
