@@ -466,10 +466,10 @@ Steps:
 1. Read the AI review summary comment on the PR — the score-driving findings are
    in its BODY, not only in the inline threads.
 2. Fix every finding that is a real defect. Push the fixes.
-3. Reply to each inline thread with the fixing commit, then resolve it.
-4. For findings you are deliberately not fixing, reply with a concrete,
-   checkable reason — do not resolve silently.
-5. A fresh review runs against the new head; the gate re-evaluates from there.
+
+{close_the_loop}
+
+3. A fresh review runs against the new head; the gate re-evaluates from there.
 
 Do NOT loop chasing a clean score. Address the findings once. If the score still
 does not clear after they are genuinely handled, stop and leave it for human
@@ -477,7 +477,10 @@ review — the gate correctly blocks below-floor merges.
 """
 
 _VARIANTS: dict[InstructionKind, tuple[str, Mapping[str, str]]] = {
-    InstructionKind.AI_REVIEW_FIX: (_AI_REVIEW_FIX_SKELETON, {}),
+    InstructionKind.AI_REVIEW_FIX: (
+        _AI_REVIEW_FIX_SKELETON,
+        {"close_the_loop": _CLOSE_THE_LOOP},
+    ),
     InstructionKind.GREPTILE_CONVERGENCE: (_CONVERGENCE_SKELETON, {}),
     InstructionKind.LOCAL_GREPTILE_FIX: (_FIX_SKELETON, _LOCAL_FIX_SECTIONS),
     InstructionKind.CROSS_REPO_GREPTILE_REFRESH: (
