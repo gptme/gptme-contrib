@@ -3045,8 +3045,10 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
     Use --pool all to see every pool; --pool frontier for frontier sessions only.
 
     Examples:
-        gptodo next                     # top ready task (unchanged)
-        gptodo next --limit 5           # next 5, in unblocking order
+
+    \b
+        gptodo next                       # top ready task (unchanged)
+        gptodo next --limit 5             # next 5, in unblocking order
         gptodo next -n 5 --order unblock  # critical path first
     """
     console = Console()
