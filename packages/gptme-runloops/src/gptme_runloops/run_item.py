@@ -435,6 +435,37 @@ class RunItemHooks:
 
 _SLUG_TRANS = str.maketrans("/# :", "----")
 
+#: Item types whose deliverable IS a comment on a GitHub issue/PR thread, so
+#: the delivery post-condition can meaningfully check for one (worker.sh:453).
+#: Types outside this set — ``agent_msg_reply`` above all — have no thread to
+#: reply to and carry a synthesized ``number`` of 0, so running the check on
+#: them queries a nonexistent issue, always returns ``orphan_no_delivery``, and
+#: drives the dispatch to ``effect=none`` → ``outcome=no_effect`` → retry-budget
+#: exhaustion. Measured on Bob's dispatch ledger 2026-08-13: every ``number: 0``
+#: row was ``agent_msg_reply``, and the two that reached the ported executor
+#: both recorded ``no_effect`` despite the reply actually being delivered.
+THREAD_DELIVERABLE_TYPES: frozenset[str] = frozenset(
+    {
+        "assigned_issue",
+        "pr_update",
+        "ci_failure",
+        "merge_ready",
+        "greptile_needs_improvement",
+        "greptile_needs_fix",
+        "merge_conflict",
+        "notification",
+    }
+)
+
+
+def is_thread_deliverable(types: Sequence[str]) -> bool:
+    """Whether any of ``types`` delivers via a GitHub thread comment.
+
+    Bash parity: ``echo "$item_types" | grep -qwE "assigned_issue|pr_update|..."``
+    (project-monitoring-worker.sh:453-455).
+    """
+    return any(t in THREAD_DELIVERABLE_TYPES for t in types)
+
 
 def item_slug(repo: str, number_str: str, index: int) -> str:
     """``printf '%s_%s_%s' repo number idx | tr '/# :' '----'`` (p-m.sh:590)."""
@@ -1819,7 +1850,12 @@ def run_post_session(
     delivery_verified = False  # True only when the check exited 0 with parseable output
     needs_fallback = "false"
     fallback_posted = "false"
-    if item.repo and item.number is not None and hooks.delivery_check is not None:
+    if (
+        item.repo
+        and item.number is not None
+        and is_thread_deliverable(item.types)
+        and hooks.delivery_check is not None
+    ):
         try:
             try:
                 proc = hooks.run_cmd(

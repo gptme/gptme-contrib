@@ -1427,6 +1427,49 @@ def test_post_session_gate_exit_2_warns_no_helper(tmp_path) -> None:
     assert gate_rows[0]["gate_exit_code"] == 2
 
 
+def test_post_session_skips_delivery_check_for_non_thread_item_types(
+    tmp_path,
+) -> None:
+    """An ``agent_msg_reply`` item has no GitHub thread — never check delivery.
+
+    Bob's PM ledger, 2026-08-13: every ``number: 0`` dispatch row was an
+    ``agent_msg_reply`` (peer-agent message; the number is synthesized because
+    there is no issue). The bash worker gates the delivery post-condition on an
+    item-type allowlist (worker.sh:453); this port gated only on
+    ``repo and number is not None``, so it ran ``check-pm-delivery.py --number 0``
+    against a nonexistent issue. That always reports ``orphan_no_delivery`` →
+    ``effect=none`` → ``outcome=no_effect``, which drove
+    ``pm_dispatch_recovery.py`` to exhaust the retry budget and file a bogus
+    "PM cannot drive ErikBjare/bob#0" stuck task — while the reply had in fact
+    been delivered.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _latency = _post_session_fixture(
+        tmp_path, types=("agent_msg_reply",)
+    )
+    # If the check DID run it would report an orphan, as it did in production.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert not run_cmd.find(
+        "check-delivery"
+    ), "delivery check must not run for item types with no GitHub thread"
+    assert effect != "none", f"non-thread item wrongly scored no-effect: {effect!r}"
+
+
+def test_post_session_still_checks_delivery_for_thread_item_types(tmp_path) -> None:
+    """Guard the other side: the type gate must not silence real PR items."""
+    config, item, plan, outcome, hooks, run_cmd, _latency = _post_session_fixture(
+        tmp_path, types=("pr_update",)
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert run_cmd.find("check-delivery"), "pr_update items must still be checked"
+    assert effect == "none"
+
+
 def test_post_session_crashed_delivery_check_does_not_claim_observed_effect(
     tmp_path,
 ) -> None:
