@@ -236,6 +236,7 @@ def _evaluate(*comment_bodies: str) -> Any:
         # left behind by an older one.
         "headRefOid": "c096e25e50f8",
         "mergeStateStatus": "CLEAN",
+        "labels": [],
     }
     with (
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
@@ -312,6 +313,7 @@ def test_unverifiable_greptile_state_refuses_the_ai_fallback() -> None:
         # left behind by an older one.
         "headRefOid": "c096e25e50f8",
         "mergeStateStatus": "CLEAN",
+        "labels": [],
     }
     with (
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),

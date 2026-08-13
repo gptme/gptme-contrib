@@ -391,6 +391,7 @@ def _evaluate_with(
         "comments": [],
         "isCrossRepository": is_cross_repository,
         "baseRefName": "master",
+        "labels": [],
     }
     monkeypatch.setattr(smc, "fetch_pr", lambda *a, **k: pr)
     real_run_gh = smc.run_gh

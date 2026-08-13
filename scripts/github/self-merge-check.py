@@ -129,6 +129,9 @@ AI_REVIEW_MIN_SCORE = 1
 # Only P0/P1 participate in the disposition recall guard. Lower severities do
 # not block self-merge, and the gate must never guess them into existence.
 AI_REVIEW_BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
+# GitHub labels that record an operator hold. An exact case-insensitive match
+# on any of these makes the PR permanently ineligible until the label is removed.
+_HOLD_LABELS = frozenset({"do-not-merge", "hold", "on-hold"})
 # Shortest marker SHA prefix accepted when matching against the PR head. The
 # reviewer writes 12 hex chars; this only guards against a truncated/garbage
 # marker whose 1-2 char "sha" would prefix-match almost any head.
@@ -639,7 +642,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository,baseRefName",
+            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository,baseRefName,labels",
         ]
     )
     if not raw:
@@ -658,6 +661,20 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             f"PR data mismatch for {repo}#{number}: gh returned data for #{returned_number!r}. "
             f"Possible cache key collision in gh wrapper or malformed payload. "
             f"Try GH_API_CACHE_TTL=0 to bypass the cache."
+        )
+
+    # Validate that the 'labels' field was returned by gh. We explicitly request
+    # it in the --json fields list, so a missing field indicates a gh CLI version
+    # that predates labels-in-JSON support, or a cache shim stripping the field.
+    # Raise early here (consistent with the number-mismatch check above) so
+    # callers see an explicit diagnostic rather than a silent eligibility block
+    # deep in evaluate_pr.
+    if "labels" not in pr:
+        raise RuntimeError(
+            f"fetch_pr for {repo}#{number}: 'labels' field absent from gh response. "
+            "The field was explicitly requested via --json; this usually means an old "
+            "gh CLI version (<2.27) or a cache shim is stripping the field. "
+            "Upgrade gh or set GH_API_CACHE_TTL=0 to bypass the cache."
         )
 
     pr["files"] = _fetch_pr_files(repo, number)
@@ -2409,6 +2426,45 @@ def evaluate_pr(
 
     if pr.get("state") != "OPEN":
         result.reasons.append(f"PR state is {pr.get('state')}, not OPEN")
+
+    if not isinstance(pr.get("labels"), list):
+        # Labels field absent or null — cannot verify hold state; fail closed.
+        # Under normal operation this branch should not be reached: fetch_pr
+        # explicitly requests labels via --json and raises RuntimeError when the
+        # field is absent. If evaluate_pr is called with a hand-crafted or
+        # cached payload that omits labels, we block rather than silently pass.
+        # A present-but-null value is treated identically to a missing key:
+        # a cache shim or malformed payload returning labels=null must not
+        # accidentally pass the hold check.
+        # To diagnose: check that gh CLI supports the labels JSON field
+        # (gh pr view --json labels), or set GH_API_CACHE_TTL=0 to bypass cache.
+        result.reasons.append(
+            "PR labels missing or null in payload; cannot verify operator hold "
+            "(ensure gh CLI ≥2.27 or set GH_API_CACHE_TTL=0 to bypass cache)"
+        )
+    else:
+        pr_label_names = set()
+        has_malformed_labels = False
+        for lbl in pr["labels"]:
+            if not isinstance(lbl, dict):
+                has_malformed_labels = True
+                continue
+            name = lbl.get("name")
+            if not isinstance(name, str):
+                has_malformed_labels = True
+                continue
+            pr_label_names.add(name.strip().lower())
+
+        if has_malformed_labels:
+            result.reasons.append(
+                "PR labels contain unparseable entries; cannot verify operator hold"
+            )
+
+        matched_hold = pr_label_names & _HOLD_LABELS
+        if matched_hold:
+            result.reasons.append(
+                f"Operator hold: {', '.join(sorted(matched_hold))} label — remove label to unblock"
+            )
 
     merge_state = pr.get("mergeStateStatus", "")
     if merge_state == "DIRTY":
