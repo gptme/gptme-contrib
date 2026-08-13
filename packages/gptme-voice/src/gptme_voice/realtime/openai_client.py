@@ -303,7 +303,7 @@ class OpenAIRealtimeClient:
                     def on_user_transcript(  # noqa: F811
                         text: str, item_id: str | None = None, _cb: Any = _cb1
                     ) -> None:
-                        _cb(text)
+                        return _cb(text)  # propagate coroutine for async callbacks
 
             except (ValueError, TypeError):
                 # Cannot introspect (e.g. built-in / C-extension callable).

@@ -927,6 +927,34 @@ def test_one_arg_on_user_transcript_callback_is_wrapped_for_backward_compat() ->
     ], "1-arg callback should receive transcript and ignore item_id"
 
 
+def test_async_one_arg_on_user_transcript_callback_is_awaited() -> None:
+    """An async 1-arg on_user_transcript callback must be awaited, not dropped.
+
+    The backward-compat wrapper must return _cb(text) so that _call_callback can
+    detect the coroutine and await it.  Without 'return', the wrapper returns None,
+    _call_callback sees no coroutine, and the async callback body never runs.
+    """
+    received: list[str] = []
+
+    async def async_callback(text: str) -> None:
+        received.append(text)
+
+    client = OpenAIRealtimeClient(
+        api_key="test-key",
+        on_user_transcript=async_callback,
+    )
+
+    import asyncio
+
+    async def _run() -> None:
+        await client._call_callback(client.on_user_transcript, "hello", "item-001")
+
+    asyncio.run(_run())
+    assert received == [
+        "hello"
+    ], "async 1-arg callback must be awaited; received was empty (coroutine dropped)"
+
+
 def test_two_arg_on_user_transcript_callback_receives_item_id() -> None:
     """A 2-arg on_user_transcript callback receives both transcript and item_id."""
     received: list[tuple] = []
