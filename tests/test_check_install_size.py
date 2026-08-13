@@ -113,8 +113,10 @@ def test_measure_install_size_success():
     import check_install_size
 
     file_size = 10 * 1024 * 1024  # 10 MB
+    seen_commands = []
 
     def fake_run(cmd, **kwargs):
+        seen_commands.append(cmd)
         result = MagicMock()
         result.returncode = 0
         result.stderr = ""
@@ -143,6 +145,12 @@ def test_measure_install_size_success():
 
     assert size is not None
     assert 9.0 < size < 11.0  # ~10 MB
+    export_cmd = next(cmd for cmd in seen_commands if "export" in cmd)
+    install_cmd = next(cmd for cmd in seen_commands if "install" in cmd)
+    assert "--emit-index-url" not in export_cmd
+    assert export_cmd[-2:] == ["--index-strategy", "unsafe-best-match"]
+    assert "--index-strategy" in install_cmd
+    assert "unsafe-best-match" in install_cmd
 
 
 def test_measure_install_size_export_fallback():
@@ -150,8 +158,10 @@ def test_measure_install_size_export_fallback():
     import check_install_size
 
     file_size = 5 * 1024 * 1024  # 5 MB
+    seen_commands = []
 
     def fake_run(cmd, **kwargs):
+        seen_commands.append(cmd)
         result = MagicMock()
         result.stderr = ""
         if "venv" in cmd:
@@ -182,6 +192,9 @@ def test_measure_install_size_export_fallback():
 
     assert size is not None
     assert 4.0 < size < 6.0  # ~5 MB
+    install_cmd = next(cmd for cmd in seen_commands if "install" in cmd)
+    assert "--index-strategy" in install_cmd
+    assert "unsafe-best-match" in install_cmd
 
 
 def test_measure_install_size_install_failure():

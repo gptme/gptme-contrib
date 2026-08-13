@@ -110,8 +110,9 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
 
             # Try to export workspace-locked requirements. uv export reads uv.lock,
             # which includes [tool.uv.index] overrides (e.g. CPU-only torch index).
-            # --no-hashes produces a plain requirements.txt; --emit-index-url
-            # injects the index URLs so uv pip resolves from the correct source.
+            # unsafe-best-match is required because PyTorch's CPU index mirrors
+            # some non-torch packages with older versions; first-index would make
+            # normal PyPI releases invisible once that mirror has any match.
             export_result = subprocess.run(
                 [
                     "uv",
@@ -122,7 +123,8 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     package_name,
                     "--no-dev",
                     "--no-hashes",
-                    "--emit-index-url",
+                    "--index-strategy",
+                    "unsafe-best-match",
                 ],
                 cwd=package_path.parent.parent,
                 capture_output=True,
@@ -150,6 +152,8 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     "install",
                     "--python",
                     str(python_exe),
+                    "--index-strategy",
+                    "unsafe-best-match",
                     "--quiet",
                     "-r",
                     str(req_file),
@@ -172,6 +176,8 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     "install",
                     "--python",
                     str(python_exe),
+                    "--index-strategy",
+                    "unsafe-best-match",
                     "--quiet",
                     str(package_path),
                 ]
