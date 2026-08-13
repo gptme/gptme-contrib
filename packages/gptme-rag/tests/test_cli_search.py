@@ -318,3 +318,202 @@ def test_search_human_format_is_default(populated_index):
     except json.JSONDecodeError:
         is_json = False
     assert not is_json, "Default output should be human-readable, not JSON"
+
+
+def test_search_json_emits_error_object_on_init_failure(tmp_path):
+    """In --json mode, an Indexer init failure produces a JSON error object on stdout.
+
+    Regression guard for the silent-failure bug: before the fix, exceptions inside
+    the redirect_stderr(devnull) block would propagate with no stdout output,
+    leaving callers with an empty stdout and a non-zero exit code and no way to
+    diagnose the failure.
+    """
+    from unittest.mock import patch as mock_patch
+
+    runner = CliRunner()
+    with mock_patch(
+        "gptme_rag.cli.Indexer",
+        side_effect=RuntimeError("model weights not found"),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test query",
+                "--persist-dir",
+                str(tmp_path / "index"),
+                "--json",
+            ],
+        )
+
+    # Must exit non-zero (exception re-raised after emitting JSON)
+    assert result.exit_code != 0, "Expected non-zero exit on Indexer failure"
+
+    # Output must be non-empty and valid JSON with an 'error' key
+    assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
+    data = json.loads(result.output.strip())
+    assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
+    assert "model weights not found" in data["error"]
+    assert data.get("query") == "test query"
+
+
+def test_search_json_emits_error_object_on_search_failure(tmp_path):
+    """In --json mode, a search failure also produces a JSON error object.
+
+    Regression guard for failures after Indexer initialization succeeds: the
+    search() call itself must stay inside the exception-to-JSON wrapper.
+    """
+    from unittest.mock import Mock, patch as mock_patch
+
+    failing_indexer = Mock()
+    failing_indexer.search.side_effect = RuntimeError("vector store unavailable")
+
+    runner = CliRunner()
+    with mock_patch("gptme_rag.cli.Indexer", return_value=failing_indexer):
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test query",
+                "--persist-dir",
+                str(tmp_path / "index"),
+                "--json",
+            ],
+        )
+
+    assert result.exit_code != 0, "Expected non-zero exit on search failure"
+    assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
+
+    data = json.loads(result.output.strip())
+    assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
+    assert "vector store unavailable" in data["error"]
+    assert data.get("query") == "test query"
+
+
+def test_search_json_emits_error_object_on_invalid_weights(tmp_path):
+    """In --json mode, invalid --weights JSON produces a JSON error object on stdout.
+
+    Regression guard: before the fix, the error went to console (stderr/devnull in
+    json mode) and the function returned with exit 0 and empty stdout.  JSON consumers
+    could not distinguish this from a successful empty-result response.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "search",
+            "test query",
+            "--persist-dir",
+            str(tmp_path / "index"),
+            "--json",
+            "--weights",
+            "not-valid-json{{{",
+        ],
+    )
+
+    # Must exit cleanly (weights error is a user error, not a crash)
+    # stdout must be non-empty and valid JSON with an 'error' key
+    assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
+    data = json.loads(result.output.strip())
+    assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
+    assert (
+        "weights" in data["error"].lower() or "json" in data["error"].lower()
+    ), f"Expected error to mention weights/JSON, got: {data['error']}"
+
+
+def test_search_json_emits_error_object_on_get_expanded_content_failure(tmp_path):
+    """In --json mode, a get_expanded_content failure produces a JSON error object.
+
+    Regression guard: before the fix, the formatting loop (after the main try/except)
+    could raise without emitting anything to stdout.  JSON consumers received empty
+    stdout plus a non-zero exit code with no way to diagnose the failure.
+    """
+    from unittest.mock import Mock, patch as mock_patch
+
+    from gptme_rag.indexing.document import Document
+
+    fake_doc = Document(content="hello world", metadata={"source": "test.txt"}, doc_id="doc1")
+    mock_indexer = Mock()
+    mock_indexer.search.return_value = ([fake_doc], [0.9], None)
+
+    mock_assembler = Mock()
+    assembled = Mock()
+    assembled.documents = [fake_doc]
+    assembled.truncated = False
+    assembled.total_tokens = 10
+    mock_assembler.assemble_context.return_value = assembled
+    mock_assembler.count_tokens.return_value = 5
+
+    runner = CliRunner()
+    with (
+        mock_patch("gptme_rag.cli.Indexer", return_value=mock_indexer),
+        mock_patch("gptme_rag.cli.ContextAssembler", return_value=mock_assembler),
+        mock_patch(
+            "gptme_rag.cli.ChunkMerger.get_adjacent_chunks",
+            side_effect=RuntimeError("corrupted index entry"),
+        ),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test query",
+                "--persist-dir",
+                str(tmp_path / "index"),
+                "--json",
+                "--expand",
+                "adjacent",
+            ],
+        )
+
+    assert result.exit_code != 0, "Expected non-zero exit on get_expanded_content failure"
+    assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
+    data = json.loads(result.output.strip())
+    assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
+    assert "corrupted index entry" in data["error"]
+    assert data.get("query") == "test query"
+
+
+def test_search_json_emits_error_object_on_assemble_context_failure(tmp_path):
+    """In --json mode, an assemble_context failure also produces a JSON error object.
+
+    Regression guard for failures after Indexer.search() succeeds: assemble_context
+    runs inside the same try/except block, so its exceptions must also be caught
+    and emitted as JSON rather than silently discarded.
+    """
+    from unittest.mock import Mock, patch as mock_patch
+
+    from gptme_rag.indexing.document import Document
+
+    fake_doc = Document(content="hello world", metadata={"source": "test.txt"}, doc_id="doc1")
+
+    failing_assembler = Mock()
+    failing_assembler.assemble_context.side_effect = RuntimeError("assembler index error")
+
+    # Indexer succeeds and returns a document; ContextAssembler fails on assemble_context
+    mock_indexer = Mock()
+    mock_indexer.search.return_value = ([fake_doc], [0.9], None)
+
+    runner = CliRunner()
+    with (
+        mock_patch("gptme_rag.cli.Indexer", return_value=mock_indexer),
+        mock_patch("gptme_rag.cli.ContextAssembler", return_value=failing_assembler),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test query",
+                "--persist-dir",
+                str(tmp_path / "index"),
+                "--json",
+            ],
+        )
+
+    assert result.exit_code != 0, "Expected non-zero exit on assemble_context failure"
+    assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
+
+    data = json.loads(result.output.strip())
+    assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
+    assert "assembler index error" in data["error"]
+    assert data.get("query") == "test query"

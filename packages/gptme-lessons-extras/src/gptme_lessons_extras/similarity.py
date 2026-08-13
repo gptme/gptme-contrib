@@ -29,7 +29,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple, cast
 
 import frontmatter
 
@@ -96,8 +96,9 @@ def extract_keywords(lesson_path: Path) -> Set[str]:
     try:
         with open(lesson_path) as f:
             post = frontmatter.load(f)
-            if "match" in post.metadata and "keywords" in post.metadata["match"]:
-                return set(post.metadata["match"]["keywords"])
+            metadata = cast(dict[str, Any], post.metadata)
+            if "match" in metadata and "keywords" in metadata["match"]:
+                return set(metadata["match"]["keywords"])
     except Exception:
         pass
     return set()

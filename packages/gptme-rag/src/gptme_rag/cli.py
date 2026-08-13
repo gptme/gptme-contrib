@@ -118,7 +118,7 @@ class SearchOutputFormatter:
 
     def print_document_header(self, i: int, source: str):
         """Print document header in summary view."""
-        self.console.print(f"\n[cyan]{i+1}. {source}[/cyan]")
+        self.console.print(f"\n[cyan]{i + 1}. {source}[/cyan]")
 
     def print_preview(self, doc: Document):
         """Print document preview in summary view."""
@@ -387,57 +387,91 @@ def search(
     """Search the index and assemble context."""
     paths = [path.resolve() for path in paths]
 
-    # Hide ChromaDB output during initialization and search
-    with console.status("Initializing..."):
+    # Hide ChromaDB/progress output during initialization and search.
+    # In json mode: skip Rich status (avoids stream mixing that pollutes json output)
+    # and redirect stderr too (suppresses model-loading progress bars like "Loading weights").
+    status_ctx = contextlib.nullcontext() if output_json else console.status("Initializing...")
+    with status_ctx:
         # Parse custom weights if provided
         scoring_weights = None
         if weights:
             try:
                 scoring_weights = json.loads(weights)
             except json.JSONDecodeError as e:
-                console.print(f"❌ Invalid weights JSON: {e}", style="red")
+                if output_json:
+                    print(json.dumps({"error": f"Invalid weights JSON: {e}", "query": query}))
+                else:
+                    console.print(f"❌ Invalid weights JSON: {e}", style="red")
                 return
             except Exception as e:
-                console.print(f"❌ Error parsing weights: {e}", style="red")
+                if output_json:
+                    print(json.dumps({"error": f"Error parsing weights: {e}", "query": query}))
+                else:
+                    console.print(f"❌ Error parsing weights: {e}", style="red")
                 return
 
-        # Redirect stdout to suppress ChromaDB output (using context manager for safety)
-        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
-            # Initialize indexer with explicit arguments
-            # Always use ModernBERT by default for better results
-            indexer = Indexer(
-                persist_directory=persist_dir,
-                enable_persist=True,
-                scoring_weights=scoring_weights,
-                embedding_function=(
-                    "modernbert" if embedding_function is None else embedding_function
-                ),
-                device=device or "cpu",
+        # Redirect stdout to suppress ChromaDB/model-loading noise that would
+        # corrupt stdout consumers.  In json mode, also redirect stderr:
+        # tqdm "Loading weights" progress bars go to stderr, and Click 8.4+
+        # CliRunner mixes stderr into result.output (mix_stderr parameter was
+        # removed), which would corrupt JSON output for callers.
+        # In non-json mode, keep stderr visible so callers can diagnose
+        # partial failures (missing model, fallback used, etc.).
+        with open(os.devnull, "w") as devnull:
+            stderr_ctx = (
+                contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext()
             )
-            assembler = ContextAssembler(max_tokens=max_tokens)
+            try:
+                with contextlib.redirect_stdout(devnull), stderr_ctx:
+                    # Initialize indexer with explicit arguments
+                    # Always use ModernBERT by default for better results
+                    indexer = Indexer(
+                        persist_directory=persist_dir,
+                        enable_persist=True,
+                        scoring_weights=scoring_weights,
+                        embedding_function=(
+                            "modernbert" if embedding_function is None else embedding_function
+                        ),
+                        device=device or "cpu",
+                    )
+                    assembler = ContextAssembler(max_tokens=max_tokens)
 
-            # Combine paths and filters for search
-            search_paths = list(paths)
-            if filter:
-                # If no paths were specified but filters are present,
-                # search from root and apply filters
-                if not paths:
-                    search_paths = [Path(".")]
-                logger.debug(f"Using path filters: {filter}")
+                    # Combine paths and filters for search
+                    search_paths = list(paths)
+                    if filter:
+                        # If no paths were specified but filters are present,
+                        # search from root and apply filters
+                        if not paths:
+                            search_paths = [Path(".")]
+                        logger.debug(f"Using path filters: {filter}")
 
-            explanations: list | None = None
-            if explain:
-                documents, distances, explanations = indexer.search(
-                    query,
-                    n_results=n_results,
-                    paths=search_paths,
-                    path_filters=filter,
-                    explain=True,
-                )
-            else:
-                documents, distances, _ = indexer.search(
-                    query, n_results=n_results, paths=search_paths, path_filters=filter
-                )
+                    explanations: list | None = None
+                    if explain:
+                        documents, distances, explanations = indexer.search(
+                            query,
+                            n_results=n_results,
+                            paths=search_paths,
+                            path_filters=filter,
+                            explain=True,
+                        )
+                    else:
+                        documents, distances, _ = indexer.search(
+                            query, n_results=n_results, paths=search_paths, path_filters=filter
+                        )
+
+                    # Assemble context window (must be inside try/except to catch errors in json mode)
+                    if documents:
+                        context = assembler.assemble_context(documents, user_query=query)
+                    else:
+                        context = None
+            except Exception as e:
+                # In json mode stderr is redirected to /dev/null, so an unhandled
+                # exception would produce a silent failure with no output on stdout
+                # and no traceback visible.  Emit a JSON error object so callers
+                # get a diagnosable response instead of empty stdout + non-zero exit.
+                if output_json:
+                    print(json.dumps({"error": str(e), "query": query}))
+                raise
 
     if not documents:
         if output_json:
@@ -464,9 +498,6 @@ def search(
     logger.debug(f"Found {len(documents)} documents")
     for doc in documents:
         logger.debug(f"Document: {doc.doc_id}, source: {doc.metadata.get('source')}")
-
-    # Assemble context window
-    context = assembler.assemble_context(documents, user_query=query)
 
     def get_expanded_content(doc: Document, expand: str, indexer: Indexer) -> str:
         """Get content based on expansion mode.
@@ -517,26 +548,37 @@ def search(
                 file=sys.stderr,
             )
         results = []
-        for i, doc in enumerate(documents):
-            relevance = max(0.0, min(1.0, float(1 - distances[i]))) if distances else None
-            content = get_expanded_content(doc, expand, indexer)
-            result: dict = {
-                "source": doc.metadata.get("source", "unknown"),
-                "relevance": relevance,
-                "content": content,
-                "metadata": {
-                    k: v
-                    for k, v in doc.metadata.items()
-                    if k not in ("source",)  # already top-level
-                },
-            }
-            if explain and explanations:
-                result["explanation"] = explanations[i]
-            results.append(result)
+        try:
+            for i, doc in enumerate(documents):
+                relevance = max(0.0, min(1.0, float(1 - distances[i]))) if distances else None
+                content = get_expanded_content(doc, expand, indexer)
+                result: dict = {
+                    "source": doc.metadata.get("source", "unknown"),
+                    "relevance": relevance,
+                    "content": content,
+                    "metadata": {
+                        k: v
+                        for k, v in doc.metadata.items()
+                        if k not in ("source",)  # already top-level
+                    },
+                }
+                if explain and explanations:
+                    result["explanation"] = explanations[i]
+                results.append(result)
+        except Exception as e:
+            # get_expanded_content() can raise (e.g. ChunkMerger on a corrupted
+            # index entry). In JSON mode the caller expects a JSON error object
+            # on stdout — emit one before re-raising.
+            print(json.dumps({"error": str(e), "query": query}))
+            raise
         # Always compute total_tokens from raw content for consistent semantics.
         # context.total_tokens adds XML formatting overhead and query tokens that
         # are not part of the returned content — use raw content counts instead.
         total_tokens = sum(assembler.count_tokens(r["content"]) for r in results)
+        # context is always set here: the `if not documents: return` guard above
+        # ensures we only reach this point with non-empty documents, so the
+        # `if documents: context = assembler.assemble_context(...)` branch always ran.
+        assert context is not None
         # results_in_context: how many of the returned results fit in the assembled
         # context window. When expand=="none" and truncated, this is less than
         # total_results; when expanding, all results are returned.

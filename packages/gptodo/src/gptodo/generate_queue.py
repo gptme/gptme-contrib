@@ -27,7 +27,7 @@ from datetime import date, datetime, timezone
 
 from gptodo.utils import parse_wait
 from pathlib import Path
-from typing import List
+from typing import List, cast
 
 import click
 
@@ -252,7 +252,7 @@ class QueueGenerator:
 
                 # Filter by priority (high or urgent only) - skip if filtering by user
                 # When filtering by user, include all priorities to show their full queue
-                priority = post.metadata.get("priority", "medium")
+                priority = cast(str, post.metadata.get("priority", "medium"))
                 if not self.user and priority not in ("high", "urgent"):
                     continue
 
@@ -426,7 +426,7 @@ class QueueGenerator:
                 continue
             try:
                 post = frontmatter.load(task_file)
-                all_task_states[task_file.stem] = post.metadata.get("state", "new")
+                all_task_states[task_file.stem] = cast(str, post.metadata.get("state", "new"))
             except Exception:
                 continue
 
@@ -438,7 +438,7 @@ class QueueGenerator:
             for task_file in archive_dir.glob("*.md"):
                 try:
                     post = frontmatter.load(task_file)
-                    all_task_states[task_file.stem] = post.metadata.get("state", "done")
+                    all_task_states[task_file.stem] = cast(str, post.metadata.get("state", "done"))
                 except Exception:
                     continue
 

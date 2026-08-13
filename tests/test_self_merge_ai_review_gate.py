@@ -1217,6 +1217,25 @@ def test_agreement_threshold_exceeding_requested_passes_is_rejected(
     assert "exceeds requested pass count" in (status["detail"] or "")
 
 
+def test_agreement_threshold_exceeding_requested_agreement_is_rejected(
+    gh_comments: Any,
+) -> None:
+    """min_agreement > min_agreement_requested inflates the bar without authorization.
+
+    FULL_CONSENSUS has requested=3 and min_agreement_requested=2.  A marker
+    with min_agreement=3 passes the existing clamping guard (applied == asked
+    is False because 3 > 2, i.e. it wasn't clamped *down*) and also passes the
+    pass-count guard (3 is not > 3).  But it is claiming stronger consensus than
+    was ever requested — a corrupted marker could use this to appear to meet a
+    higher bar than the review was calibrated for, potentially letting a
+    degraded review pass as if it had stronger evidence.
+    """
+    consensus = dict(FULL_CONSENSUS, min_agreement=3, min_agreement_requested=2)
+    status = _status(gh_comments, [_comment(_marker(consensus=consensus))])
+    assert status["accepted"] is False
+    assert "exceeds requested agreement" in (status["detail"] or "")
+
+
 def test_marker_lookup_failure_is_surfaced_as_distinct_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
