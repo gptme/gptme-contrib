@@ -122,6 +122,15 @@ def simulate_sequence(
     attribution: Dict[str, tuple[str, int]] = {}
     ever_ready: set[str] = set()
 
+    # Unblocking power is computed once, against the *original* graph, for two
+    # reasons. Correctness: "how much downstream work does this unlock" is a
+    # property of the real graph, and the single-pick `next` computes it exactly
+    # this way — so step 1 cannot drift from current behaviour. Cost:
+    # compute_unblocking_power is O(V*E), and recomputing it per step made a
+    # 500-deep chain at --limit 100 take 11s instead of 0.2s.
+    power = compute_unblocking_power(build_dependency_graph(list(all_tasks)))
+    sort_key = _sort_key_unblock(power) if order == "unblock" else _sort_key_priority(power)
+
     # Hard iteration bound: each successful step removes exactly one candidate,
     # and we break when nothing is ready. The bound is belt-and-braces so a
     # dependency cycle (or any future readiness bug) can never spin forever.
@@ -142,12 +151,7 @@ def simulate_sequence(
         if not ready:
             break
 
-        # Recompute unblocking power against the *simulated* graph so that
-        # already-picked tasks stop inflating the scores of their blockers.
-        sim_list = [sim_tasks[t.name] for t in all_tasks if t.name in sim_tasks]
-        power = compute_unblocking_power(build_dependency_graph(sim_list))
-        key = _sort_key_unblock(power) if order == "unblock" else _sort_key_priority(power)
-        ready.sort(key=key)
+        ready.sort(key=sort_key)
 
         chosen = ready[0]
         position = len(picked) + 1
