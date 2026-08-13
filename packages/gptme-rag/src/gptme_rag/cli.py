@@ -562,6 +562,10 @@ def search(
         # context.total_tokens adds XML formatting overhead and query tokens that
         # are not part of the returned content — use raw content counts instead.
         total_tokens = sum(assembler.count_tokens(r["content"]) for r in results)
+        # context is always set here: the `if not documents: return` guard above
+        # ensures we only reach this point with non-empty documents, so the
+        # `if documents: context = assembler.assemble_context(...)` branch always ran.
+        assert context is not None
         # results_in_context: how many of the returned results fit in the assembled
         # context window. When expand=="none" and truncated, this is less than
         # total_results; when expanding, all results are returned.
