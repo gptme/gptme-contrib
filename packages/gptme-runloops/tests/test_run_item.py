@@ -1435,13 +1435,22 @@ def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     sentinel = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
     sentinel.write_text("promoted")
     run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
-    run_post_session(plan, item, outcome, config, hooks)
+    effect = run_post_session(plan, item, outcome, config, hooks)
     assert run_cmd.find("/fake/check-delivery.py") == []
     assert latency_calls[0]["outcome"] == "handled"
     # State must be promoted, not rolled back — otherwise the item re-enters the queue.
     assert (config.state_dir / sentinel.name).exists(), (
         "promote_item_state was not called — state was not promoted from pending; "
         "item would re-enter the dispatch queue"
+    )
+    # For non-thread items the delivery check never runs, so no delivery signal
+    # is observed and the record has no PR state diff. EFFECT_UNKNOWN is the
+    # correct and expected outcome — not EFFECT_NONE (which would fire the
+    # "no observable effect" WARN and implies we *know* nothing happened).
+    assert effect == "unknown", (
+        f"master_ci_failure must score effect='unknown', not {effect!r}; "
+        "EFFECT_NONE would incorrectly trigger the no-effect WARN for a "
+        "repo-level item that is expected to do nothing thread-observable."
     )
 
 
@@ -1474,7 +1483,15 @@ def test_post_session_agent_msg_reply_skips_delivery_check(tmp_path) -> None:
     assert (
         run_cmd.find("/fake/check-delivery.py") == []
     ), "delivery check must not run for item types with no GitHub thread"
-    assert effect != "none", f"non-thread item wrongly scored no-effect: {effect!r}"
+    # Skipping the delivery check means no delivery signal is verified.  The
+    # record also carries no PR state diff (number=0 is not a real issue).
+    # EFFECT_UNKNOWN is correct: we have no mechanism to observe whether
+    # anything happened, so we must not claim EFFECT_NONE ("nothing happened").
+    assert effect == "unknown", (
+        f"agent_msg_reply must score effect='unknown', not {effect!r}; "
+        "EFFECT_NONE would incorrectly fire the no-effect WARN and mark the "
+        "item as a delivery failure when the reply may have been delivered."
+    )
 
 
 @pytest.mark.parametrize("item_type", sorted(THREAD_DELIVERABLE_TYPES))

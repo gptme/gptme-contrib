@@ -2078,10 +2078,12 @@ def run_post_session(
         if record_file.is_file():
             pr_state_after = read_record_pr_state_after(record_file)
         if (
-            not pr_state_after
-            and item.repo
-            and item.number is not None
-            and THREAD_DELIVERABLE_TYPES & set(item.types)
+            not pr_state_after and item.repo and item.number is not None
+            # No THREAD_DELIVERABLE_TYPES filter here: arc auto-close must run
+            # for any item type that carries an arc_id and a plausible PR number.
+            # For non-PR numbers (workflow run ids, synthesized 0 for
+            # agent_msg_reply) `gh pr view` fails naturally and pr_state_after
+            # stays empty — no type filter needed.
         ):
             try:
                 proc = hooks.run_cmd(
