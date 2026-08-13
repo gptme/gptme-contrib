@@ -1085,3 +1085,14 @@ def test_search_explicit_embedding_function_does_not_wipe_mismatched_collection(
     assert (
         indexer.collection.count() == 1
     ), "Collection was destroyed by allow_recreate=False indexer — data loss regression"
+
+    # P1 regression: search() must raise a clear RuntimeError, NOT a cryptic ChromaDB
+    # InvalidDimensionException.  Before the fix, self.embedding_function was left set to
+    # the mismatched ModernBERT (768-dim) model, so search() would call
+    # embedding_function([query]) → 768-dim vector → ChromaDB dimension mismatch against
+    # the 384-dim stored vectors.  After the fix, embedding_function is nulled out and
+    # _stored_model_name is set, routing search() to the existing clear-error path.
+    import pytest
+
+    with pytest.raises(RuntimeError, match="stored embedding model"):
+        indexer.search("test query")

@@ -388,6 +388,12 @@ class Indexer:
                             current_model,
                         )
                         self.collection = self.client.get_collection(name=collection_name)
+                        # Null out the mismatched embedding function so search() does not
+                        # use it and produce a cryptic ChromaDB InvalidDimensionException.
+                        # Setting _stored_model_name routes search() to the existing
+                        # clear-error path ("cannot search: stored model could not be loaded").
+                        self.embedding_function = None
+                        self._stored_model_name = stored_model
                         need_recreate = False
                     else:
                         logger.info(
@@ -425,6 +431,15 @@ class Indexer:
                         # Collection truly doesn't exist yet — create it normally.
                         need_recreate = True
                     else:
+                        # Null out the mismatched embedding function so search() does not
+                        # use it and produce a cryptic ChromaDB InvalidDimensionException.
+                        # Read the stored model name from metadata so search() can raise a
+                        # clear RuntimeError instead.
+                        _meta = self.collection.metadata or {}
+                        _stored = _meta.get("embedding_model")
+                        self.embedding_function = None
+                        if _stored:
+                            self._stored_model_name = _stored
                         need_recreate = False
                 else:
                     # Collection doesn't exist or other error
