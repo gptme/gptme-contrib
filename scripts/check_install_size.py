@@ -163,8 +163,6 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     "--index-strategy",
                     "unsafe-best-match",
                     "--quiet",
-                    "--index-strategy",
-                    "unsafe-best-match",
                     "-r",
                     str(req_file),
                     str(package_path),
@@ -189,8 +187,6 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     "--index-strategy",
                     "unsafe-best-match",
                     "--quiet",
-                    "--index-strategy",
-                    "unsafe-best-match",
                     str(package_path),
                 ]
 
