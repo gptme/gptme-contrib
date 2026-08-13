@@ -147,6 +147,7 @@ _ASSISTANT_HANGUP_DISQUALIFIERS_RE = re.compile(
 class TranscriptTurn:
     role: str
     text: str
+    item_id: str | None = None
 
 
 @dataclass
@@ -434,12 +435,69 @@ def _build_standup_call_instructions(brief_text: str) -> str:
 
 
 def _append_transcript_turn(
-    transcript: list[TranscriptTurn], role: str, text: str
+    transcript: list[TranscriptTurn],
+    role: str,
+    text: str,
+    *,
+    item_id: str | None = None,
+    allow_continuation: bool = True,
 ) -> None:
-    """Append a cleaned turn to the transcript if it contains useful text."""
+    """Add a transcript turn, replacing the last entry when it is a partial of the same utterance.
+
+    Some ASR providers (e.g. xAI/Grok) fire the completed event multiple times
+    for the same utterance, each time with the full accumulated text so far.
+
+    When item_id is provided (preferred): replace if and only if the last same-role entry
+    carries the same item_id.  This is exact and avoids the false-positive where a new
+    utterance happens to begin with the same text as the previous one.
+
+    When item_id is absent (fallback): replace if the new text is a prefix-extension of
+    the last same-role entry AND the last entry also has no item_id.  Providers that do
+    not expose item_id in the event still benefit from deduplication; the false-positive
+    risk (two distinct utterances sharing a prefix, both without item_id) is inherent
+    to the heuristic but is significantly narrowed by requiring both sides to be
+    id-less — an entry already anchored to an item_id can never be silently replaced
+    by a no-id event.
+
+    Set allow_continuation=False (e.g. for assistant turns) to always append as a new
+    entry, preventing the prefix heuristic from treating two distinct final transcripts
+    as continuations of the same utterance.
+    """
     cleaned = text.strip()
-    if cleaned:
-        transcript.append(TranscriptTurn(role=role, text=cleaned))
+    if not cleaned:
+        return
+
+    # Fast path: exact item_id match (authoritative provider correlation key).
+    # Replace only when the new text is at least as long as the stored one —
+    # a shorter retransmission (e.g. a provider-side correction) is silently
+    # ignored so we never truncate a longer partial already in the transcript.
+    if (
+        allow_continuation
+        and item_id is not None
+        and transcript
+        and transcript[-1].role == role
+        and transcript[-1].item_id == item_id
+    ):
+        if len(cleaned) >= len(transcript[-1].text):
+            transcript[-1] = TranscriptTurn(role=role, text=cleaned, item_id=item_id)
+        return  # same item_id — never append a second entry regardless
+
+    # Prefix heuristic fallback: only when BOTH the current event and the
+    # stored entry have no item_id.  If the stored entry has item_id="A"
+    # and a new event arrives with item_id=None, the new event is a
+    # different utterance even if its text happens to extend the prior one.
+    is_continuation = allow_continuation and (
+        transcript
+        and transcript[-1].role == role
+        and item_id is None
+        and transcript[-1].item_id is None
+        and cleaned.startswith(transcript[-1].text)
+    )
+
+    if is_continuation:
+        transcript[-1] = TranscriptTurn(role=role, text=cleaned, item_id=item_id)
+    else:
+        transcript.append(TranscriptTurn(role=role, text=cleaned, item_id=item_id))
 
 
 def _normalize_transcript_text(text: str) -> str:
@@ -809,7 +867,11 @@ class VoiceServer:
             try:
                 payload = json.loads(path.read_text())
                 transcript = [
-                    TranscriptTurn(role=item["role"], text=item["text"])
+                    TranscriptTurn(
+                        role=item["role"],
+                        text=item["text"],
+                        item_id=item.get("item_id"),
+                    )
                     for item in payload.get("transcript", [])
                     if item.get("role") and item.get("text")
                 ]
@@ -1868,7 +1930,9 @@ class VoiceServer:
             _request_hangup("tool", reason)
 
         async def _on_ai_transcript(text: str) -> None:
-            _append_transcript_turn(transcript, "assistant", text)
+            _append_transcript_turn(
+                transcript, "assistant", text, allow_continuation=False
+            )
             if _should_trigger_hangup_transcript_fallback(transcript, text):
                 logger.warning(
                     "Assistant committed to hanging up without tool; scheduling transcript fallback: %s",
@@ -1879,8 +1943,8 @@ class VoiceServer:
                     f"assistant said: {text[:120]}",
                 )
 
-        def _on_user_transcript(text: str) -> None:
-            _append_transcript_turn(transcript, "user", text)
+        def _on_user_transcript(text: str, item_id: str | None = None) -> None:
+            _append_transcript_turn(transcript, "user", text, item_id=item_id)
 
         return _on_ai_transcript, _on_user_transcript, _on_hangup
 

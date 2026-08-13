@@ -17,6 +17,7 @@ from gptme_voice.realtime.server import (
     SessionBootstrap,
     TranscriptTurn,
     VoiceServer,
+    _append_transcript_turn,
     _assistant_committed_hangup,
     _build_caller_instructions,
     _build_fresh_call_greeting_instructions,
@@ -1763,3 +1764,156 @@ def test_prepend_activity_digest_includes_guidance_and_content() -> None:
 def test_prepend_activity_digest_tells_model_to_skip_subagent() -> None:
     result = _prepend_activity_digest("## Recent sessions\n", "instructions")
     assert "subagent" in result.lower()
+
+
+# ── ASR partial deduplication ──────────────────────────────────────────────
+
+
+def test_asr_partials_collapse_to_one_entry() -> None:
+    """4 growing ASR partials for a single utterance must produce exactly 1 entry."""
+    transcript: list[TranscriptTurn] = []
+    partials = [
+        "Hello Bob",
+        "Hello Bob, what's up?",
+        "Hello Bob, what's up? I wanted to brainstorm",
+        "Hello Bob, what's up? I wanted to brainstorm some ideas.",
+    ]
+    for p in partials:
+        _append_transcript_turn(transcript, "user", p)
+
+    assert len(transcript) == 1
+    assert transcript[0].text == partials[-1]
+
+
+def test_asr_duplicate_partial_does_not_add_entry() -> None:
+    """Sending the same text twice must not add a second entry."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello")
+    _append_transcript_turn(transcript, "user", "Hello")
+    assert len(transcript) == 1
+
+
+def test_asr_new_utterance_after_role_switch_appends() -> None:
+    """After an assistant turn, the next user turn must be a new entry."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello Bob")
+    _append_transcript_turn(transcript, "assistant", "Hi there")
+    _append_transcript_turn(transcript, "user", "What time is it?")
+
+    assert len(transcript) == 3
+    assert transcript[0] == TranscriptTurn(role="user", text="Hello Bob")
+    assert transcript[1] == TranscriptTurn(role="assistant", text="Hi there")
+    assert transcript[2] == TranscriptTurn(role="user", text="What time is it?")
+
+
+def test_asr_shorter_text_starts_new_entry() -> None:
+    """A user utterance shorter than the previous does not collapse into it."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello Bob, how are you doing today?")
+    _append_transcript_turn(transcript, "user", "Goodbye")
+    assert len(transcript) == 2
+
+
+def test_asr_prefix_collision_with_item_id_appends() -> None:
+    """A new utterance that starts with the previous text must NOT collapse when item_ids differ."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello", item_id="item-001")
+    _append_transcript_turn(
+        transcript, "user", "Hello, I'd like to order a pizza", item_id="item-002"
+    )
+    assert len(transcript) == 2
+    assert transcript[0].text == "Hello"
+    assert transcript[1].text == "Hello, I'd like to order a pizza"
+
+
+def test_asr_same_item_id_replaces() -> None:
+    """Multiple events with the same item_id replace rather than append."""
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello", item_id="item-001")
+    _append_transcript_turn(transcript, "user", "Hello, I'd like", item_id="item-001")
+    _append_transcript_turn(
+        transcript, "user", "Hello, I'd like to order", item_id="item-001"
+    )
+    assert len(transcript) == 1
+    assert transcript[0].text == "Hello, I'd like to order"
+    assert transcript[0].item_id == "item-001"
+
+
+def test_asr_same_item_id_shorter_text_is_ignored() -> None:
+    """A shorter retransmission for the same item_id must not truncate stored text.
+
+    Some providers retransmit a completed event for the same item_id with a
+    corrected (shorter) transcript.  The stored longer text must be preserved;
+    the shorter version is silently ignored rather than appended as a new entry
+    or allowed to overwrite the longer partial.
+    """
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(
+        transcript, "user", "Hello, I'd like to order a pizza", item_id="item-001"
+    )
+    # Provider retransmits a shorter version for the same item — must be ignored.
+    _append_transcript_turn(transcript, "user", "Hello, I'd", item_id="item-001")
+    assert len(transcript) == 1, "shorter retransmission must not create a new entry"
+    assert (
+        transcript[0].text == "Hello, I'd like to order a pizza"
+    ), "longer stored text must not be truncated"
+
+
+def test_asr_prefix_collision_without_item_id_collapses() -> None:
+    """Without item_id, a new utterance extending the previous text IS collapsed.
+
+    This is the known false-positive risk of the prefix heuristic used when the
+    provider does not expose item_id.  Providers that do send item_id (e.g. xAI)
+    are immune because the item_id branch fires first and prevents false collapse.
+    """
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello")
+    _append_transcript_turn(transcript, "user", "Hello Bob, what's the plan?")
+    # The second utterance starts with the first, so the heuristic collapses them.
+    assert len(transcript) == 1
+    assert transcript[0].text == "Hello Bob, what's the plan?"
+
+
+def test_asr_no_id_event_does_not_replace_id_anchored_entry() -> None:
+    """An event with item_id=None must NOT replace a stored entry that has an item_id.
+
+    Mixed-provider scenario: the stored entry was anchored to item_id="item-001"
+    by an earlier event.  A subsequent event arrives without an item_id (e.g. the
+    provider stopped emitting it) but its text happens to start with the stored
+    text.  The prefix heuristic must NOT fire here because the stored entry is
+    already associated with a specific utterance — a no-id event is inherently
+    ambiguous and should start a new entry.
+    """
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "user", "Hello", item_id="item-001")
+    # No item_id on the second call — text extends the first but comes from a
+    # different (unknown) utterance; must append rather than replace.
+    _append_transcript_turn(transcript, "user", "Hello Bob, what's the plan?")
+    assert len(transcript) == 2
+    assert transcript[0].text == "Hello"
+    assert transcript[0].item_id == "item-001"
+    assert transcript[1].text == "Hello Bob, what's the plan?"
+    assert transcript[1].item_id is None
+
+
+def test_assistant_turns_with_shared_prefix_are_not_collapsed() -> None:
+    """Assistant final transcripts must NEVER be collapsed by the prefix heuristic.
+
+    The deduplication logic exists for ASR partials (user role only).  If the
+    assistant says "Sure" in one response and "Sure, let me check" in the next,
+    the second must NOT replace the first — that would silently drop the earlier
+    assistant turn from the conversation history used for resume context and
+    post-call analysis.
+
+    This is enforced by passing allow_continuation=False in _on_ai_transcript.
+    """
+    transcript: list[TranscriptTurn] = []
+    _append_transcript_turn(transcript, "assistant", "Sure", allow_continuation=False)
+    _append_transcript_turn(
+        transcript, "assistant", "Sure, let me check", allow_continuation=False
+    )
+    assert (
+        len(transcript) == 2
+    ), "Two distinct assistant turns must remain separate even when the second starts with the first"
+    assert transcript[0].text == "Sure"
+    assert transcript[1].text == "Sure, let me check"

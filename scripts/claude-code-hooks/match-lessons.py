@@ -1551,6 +1551,101 @@ def log_trajectory_match(
         pass  # Never fail the hook for logging
 
 
+def _get_lesson_events_file(session_id: str) -> Path:
+    """Get the path to the lesson events JSONL file for this session.
+
+    Location: /tmp/cc-session-{id}-lessons.jsonl
+    Format: append-only, one JSON event per line
+    """
+    tmpdir = Path(os.environ.get("TMPDIR", "/tmp"))
+    # Sanitize session_id for filesystem safety
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
+    return tmpdir / f"cc-session-{safe_id}-lessons.jsonl"
+
+
+def _log_lesson_events(
+    session_id: str,
+    event_type: str,
+    matches: list[dict],
+    predicted: list[dict],
+    already_injected: set[str],
+) -> None:
+    """Log structured lesson injection events for efficacy measurement.
+
+    Appends to /tmp/cc-session-{id}-lessons.jsonl with:
+    - lesson_name: human-readable lesson title
+    - lesson_file: path to .md file
+    - match_type: keyword, pattern, skill_name, descriptor, semantic, or predicted
+    - injection_point: UserPromptSubmit or PreToolUse (hook name)
+    - sequence_order: ordinal position in this injection (1, 2, 3, ...)
+    - timestamp_inject: ISO8601 UTC timestamp when lesson was matched
+
+    Never fails the hook for logging failures.
+    """
+    events_to_log = []
+
+    # Log keyword/pattern/semantic matches
+    for i, lesson in enumerate(matches, start=1):
+        if lesson["path"] in already_injected:
+            continue
+
+        # Determine match_type from matched_by field
+        matched_by = lesson.get("matched_by", [])
+        match_type = "unknown"
+        if matched_by:
+            first_match = matched_by[0].lower()
+            if "skill:" in first_match:
+                match_type = "skill_name"
+            elif "pattern:" in first_match:
+                match_type = "pattern"
+            elif "bm25:" in first_match:
+                match_type = "semantic"
+            elif "descriptor:" in first_match:
+                match_type = "descriptor"
+            else:
+                # Default to keyword for simple matches
+                match_type = "keyword"
+
+        events_to_log.append(
+            {
+                "lesson_name": lesson.get("title", ""),
+                "lesson_file": lesson.get("path", ""),
+                "match_type": match_type,
+                "injection_point": event_type,
+                "sequence_order": i,
+                "timestamp_inject": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
+
+    # Log predicted lessons
+    for i, lesson in enumerate(predicted, start=len(matches) + 1):
+        if lesson["path"] in already_injected:
+            continue
+
+        events_to_log.append(
+            {
+                "lesson_name": lesson.get("title", ""),
+                "lesson_file": lesson.get("path", ""),
+                "match_type": "predicted",
+                "injection_point": event_type,
+                "sequence_order": i,
+                "timestamp_inject": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
+
+    if not events_to_log:
+        return
+
+    # Append events to the session's lesson events file
+    try:
+        events_file = _get_lesson_events_file(session_id)
+        with open(events_file, "a", encoding="utf-8") as f:
+            for event in events_to_log:
+                f.write(json.dumps(event) + "\n")
+    except Exception:
+        pass  # Never fail the hook for logging
+
+
 def main():
     # Read hook input from stdin
     try:
@@ -1650,6 +1745,9 @@ def main():
     matches, predicted = _apply_lesson_dropout_multi(
         matches, predicted, session_id, workspace
     )
+
+    # --- Log structured lesson events for efficacy measurement (Phase 1a) ---
+    _log_lesson_events(session_id, event_type, matches, predicted, already_injected)
 
     context = format_lessons(matches, already_injected, predicted)
 

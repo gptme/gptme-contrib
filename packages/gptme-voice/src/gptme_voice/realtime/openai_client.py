@@ -258,7 +258,9 @@ class OpenAIRealtimeClient:
         on_audio_end: Callable[[], None] | None = None,
         on_transcript: Callable[[str], None] | None = None,
         on_ai_transcript: Callable[[str], None] | None = None,
-        on_user_transcript: Callable[[str], None] | None = None,
+        on_user_transcript: Callable[[str], None]
+        | Callable[[str, str | None], None]
+        | None = None,
         on_function_call: Callable[[str, dict], Any] | None = None,
         on_speech_started: Callable[[], None] | None = None,
         hold_initial_response: bool = False,
@@ -274,6 +276,93 @@ class OpenAIRealtimeClient:
         self.on_audio_end = on_audio_end
         self.on_transcript = on_transcript
         self.on_ai_transcript = on_ai_transcript
+        # Backward-compat: wrap a legacy 1-arg callback so the call site can
+        # always pass (transcript, item_id) without breaking callers that only
+        # declared one positional parameter.
+        if on_user_transcript is not None:
+            import inspect
+
+            try:
+                sig = inspect.signature(on_user_transcript)
+                n_pos = sum(
+                    1
+                    for p in sig.parameters.values()
+                    if p.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                )
+                has_var = any(
+                    p.kind == inspect.Parameter.VAR_POSITIONAL
+                    for p in sig.parameters.values()
+                )
+                if not has_var and n_pos < 2:
+                    _cb1 = on_user_transcript
+
+                    def on_user_transcript(  # noqa: F811
+                        text: str, item_id: str | None = None, _cb: Any = _cb1
+                    ) -> None:
+                        return _cb(text)  # propagate coroutine for async callbacks
+
+            except (ValueError, TypeError):
+                # Cannot introspect (e.g. built-in / C-extension callable).
+                # Try 2-arg first so a non-introspectable 2-arg callback
+                # (e.g. a C-extension that expects both transcript and item_id)
+                # still receives item_id.  Fall back to 1-arg on TypeError so
+                # a non-introspectable 1-arg callback works unchanged.
+                _cb1 = on_user_transcript
+
+                def on_user_transcript(  # noqa: F811
+                    text: str, item_id: str | None = None, _cb: Any = _cb1
+                ) -> None:
+                    try:
+                        _cb(text, item_id)
+                    except TypeError as original_exc:
+                        # Fall back to 1-arg for arity TypeErrors.  We cannot
+                        # reliably distinguish arity errors from internal
+                        # TypeErrors via traceback depth because C-extension
+                        # callbacks produce no Python frames even for internal
+                        # errors (tb_next is always None).  Instead, try the
+                        # 1-arg call and inspect which error is the real one:
+                        #
+                        # - 2-arg callback: original_exc is internal, fallback
+                        #   raises arity ("missing N arg" / "but 1 was given").
+                        # - 1-arg callback: original_exc is arity, fallback
+                        #   raises the real internal error.
+                        #
+                        # Python's "too few args" messages consistently contain
+                        # "missing" or "but 1 was given" — use that to tell
+                        # which failure is the real one.
+                        try:
+                            _cb(text)
+                        except TypeError as fallback_exc:
+                            _fm = str(fallback_exc)
+                            if "missing" in _fm or "but 1 was given" in _fm:
+                                # fallback is arity noise → _cb is ≥2-arg →
+                                # original_exc is the real internal error
+                                raise original_exc from None
+                            # fallback is the real internal error from a 1-arg
+                            # callback — surface it instead of the arity error
+                            raise fallback_exc from original_exc
+                        else:
+                            # _cb(text) succeeded without raising.  Two cases:
+                            #   a) original_exc was an arity error ("but 2
+                            #      were given") → _cb is 1-arg, fallback correct.
+                            #   b) original_exc was an internal TypeError from a
+                            #      2-arg callback that also accepts 1 arg — in this
+                            #      case we would silently call it with incomplete
+                            #      data and swallow the real error (P2 masking path,
+                            #      fp=6b93c880806c).
+                            # Distinguish by checking original_exc's message: Python
+                            # "too many positional arguments" errors consistently
+                            # contain "but 2 were given".  Anything else is internal.
+                            _om = str(original_exc)
+                            if "but 2 were given" not in _om:
+                                # Internal TypeError — surface it so the caller
+                                # sees the real failure, not incomplete data.
+                                raise original_exc from None
+
         self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call
         self.on_speech_started = on_speech_started
@@ -828,10 +917,13 @@ class OpenAIRealtimeClient:
         # User speech transcript
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = event.get("transcript", "")
+            item_id = event.get("item_id")
             if transcript:
                 logger.info(f"User: {transcript}")
                 if self.on_user_transcript:
-                    await self._call_callback(self.on_user_transcript, transcript)
+                    await self._call_callback(
+                        self.on_user_transcript, transcript, item_id
+                    )
 
         # VAD events
         elif event_type == "input_audio_buffer.speech_started":
