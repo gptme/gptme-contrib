@@ -360,12 +360,18 @@ def classify_self_merge_reasons(reasons: Sequence[str]) -> SelfMergeBlockClass:
     set, so those keep the bash's TRIGGER_REVIEW behavior.
     """
     text = "\n".join(reasons)
+    # Unresolved threads are checked before the AI score so that a mixed
+    # blocker (AI score below floor + unresolved threads) routes to
+    # UNRESOLVED_THREADS first. The worker clears threads in one cycle; the
+    # next dispatch re-evaluates and, if the AI score still blocks, routes
+    # to AI_REVIEW_BELOW_FLOOR. This avoids a session that only addresses AI
+    # findings while leaving open threads that independently prevent merging.
+    if "unresolved review thread" in text:
+        return SelfMergeBlockClass.UNRESOLVED_THREADS
     if AI_REVIEW_BELOW_FLOOR_RE.search(text):
         return SelfMergeBlockClass.AI_REVIEW_BELOW_FLOOR
     if "Greptile review not found" in text:
         return SelfMergeBlockClass.NO_GREPTILE_REVIEW
-    if "unresolved review thread" in text:
-        return SelfMergeBlockClass.UNRESOLVED_THREADS
     # lib.sh:563 — grep -qE "Greptile score [0-9]/5 below floor"
     if re.search(r"Greptile score [0-9]/5 below floor", text):
         return SelfMergeBlockClass.SCORE_BELOW_FLOOR

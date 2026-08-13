@@ -159,6 +159,17 @@ class FakeIO:
             ],
             SelfMergeBlockClass.UNRESOLVED_THREADS,
         ),
+        # Priority: unresolved threads also beat the AI-review-below-floor
+        # block. A session that clears threads first avoids the failure mode
+        # where only AI findings are addressed while open threads continue to
+        # block the gate.
+        (
+            [
+                "Greptile has 1 unresolved review thread(s)",
+                "Greptile review not found; AI review score 3/5 below 5/5",
+            ],
+            SelfMergeBlockClass.UNRESOLVED_THREADS,
+        ),
         # NOTE(parity): the HUMAN-thread reason does NOT match the
         # "unresolved review thread" grep — the word "human" breaks the
         # substring — so human-only blocks route to OTHER (proceed with a
