@@ -1445,6 +1445,38 @@ def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     )
 
 
+def test_post_session_agent_msg_reply_skips_delivery_check(tmp_path) -> None:
+    """An `agent_msg_reply` item has no GitHub thread at all — never check delivery.
+
+    Second symptom class of the same missing gate (the first is
+    master_ci_failure above). Bob's PM ledger, 2026-08-13: every `number: 0`
+    dispatch row was an `agent_msg_reply` (peer-agent message; the number is
+    synthesized because there is no issue). The unguarded check ran
+    `check-pm-delivery.py --number 0` against a nonexistent issue, which always
+    reports `orphan_no_delivery` -> `effect=none` -> `outcome=no_effect`. That
+    drove `pm_dispatch_recovery.py` to exhaust the retry budget and file a bogus
+    "PM cannot drive ErikBjare/bob#0" stuck task — while the reply had in fact
+    been delivered.
+
+    Asserts on the returned effect (not just that the check was skipped), so a
+    regression that skips the check but still scores the item no-effect fails here.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _latency = _post_session_fixture(
+        tmp_path, types=("agent_msg_reply",)
+    )
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # If the check DID run it would report an orphan, as it did in production.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert (
+        run_cmd.find("/fake/check-delivery.py") == []
+    ), "delivery check must not run for item types with no GitHub thread"
+    assert effect != "none", f"non-thread item wrongly scored no-effect: {effect!r}"
+
+
 @pytest.mark.parametrize("item_type", sorted(THREAD_DELIVERABLE_TYPES))
 def test_post_session_thread_deliverable_item_still_runs_delivery_check(
     tmp_path,

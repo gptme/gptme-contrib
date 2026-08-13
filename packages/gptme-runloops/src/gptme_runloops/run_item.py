@@ -137,13 +137,22 @@ PR_STATE_TYPES: frozenset[str] = frozenset({"pr_update", "merge_ready"})
 # session reply on the thread?" is a meaningful post-condition
 # (worker.sh:453 — `grep -qwE "assigned_issue|pr_update|ci_failure|..."`).
 #
-# Repo-level types are deliberately absent. `master_ci_failure` carries a
-# workflow *run id* as `number` (e.g. 31681387507), not an issue number, so
-# `issues/{number}/comments` 404s, no comment is ever found, and the check
-# returns `orphan_no_delivery` → rollback → re-dispatch, forever. The PM prompt
-# tells those sessions to "exit cleanly without inventing a thread reply"
-# (runs/github/project-monitoring.sh), so the post-condition was punishing
-# sessions for obeying their own instructions.
+# Types with no thread are deliberately absent. Two distinct symptom classes,
+# both traced to this one missing gate:
+#
+# 1. `master_ci_failure` carries a workflow *run id* as `number`
+#    (e.g. 31681387507), not an issue number, so `issues/{number}/comments`
+#    404s, no comment is ever found, and the check returns
+#    `orphan_no_delivery` → rollback → re-dispatch, forever. The PM prompt
+#    tells those sessions to "exit cleanly without inventing a thread reply"
+#    (runs/github/project-monitoring.sh), so the post-condition was punishing
+#    sessions for obeying their own instructions.
+# 2. `agent_msg_reply` (peer-agent message) has no issue at all and carries a
+#    synthesized `number` of 0. Measured on Bob's dispatch ledger 2026-08-13:
+#    every `number: 0` row was `agent_msg_reply`, and the two that reached the
+#    ported executor both recorded `no_effect` despite the reply actually
+#    being delivered — which drove `pm_dispatch_recovery.py` to exhaust the
+#    retry budget and file a bogus "PM cannot drive ErikBjare/bob#0" stuck task.
 THREAD_DELIVERABLE_TYPES: frozenset[str] = frozenset(
     {
         "assigned_issue",
