@@ -158,6 +158,13 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     # to search all declared indexes and pick the best version match.
                     # This fixes "certifi==2026.7.22 not found" when PyPI has it but the
                     # torch wheel index is searched first (gptme-contrib#1418 regression).
+                    #
+                    # Security: unsafe-best-match widens the search to all declared
+                    # indexes. All indexes here are injected by --emit-index-url from the
+                    # workspace lockfile and pyproject.toml [tool.uv.index] entries —
+                    # project-controlled configuration already trusted at lock time. The
+                    # residual risk is bounded to a compromised project config, the same
+                    # threat model as trusting the lockfile itself.
                     "--index-strategy",
                     "unsafe-best-match",
                     "-r",

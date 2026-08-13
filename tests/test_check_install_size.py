@@ -233,6 +233,11 @@ def test_measure_install_size_index_strategy_flag():
     found on a secondary index (e.g. certifi on PyPI after the PyTorch wheel
     index) cause 'unsatisfiable requirements' errors when --emit-index-url
     injects a non-PyPI index that contains the package at a different version.
+
+    Note: this test verifies command *construction* — that the flag is passed to
+    uv. It cannot exercise uv's real index-resolution logic because subprocess is
+    mocked. The companion test below verifies the flag is absent on the PyPI
+    fallback path, confirming the flag is conditional on the lock-export branch.
     """
     import check_install_size
 
@@ -280,6 +285,61 @@ def test_measure_install_size_index_strategy_flag():
     assert (
         install_cmd[idx + 1] == "unsafe-best-match"
     ), f"Expected 'unsafe-best-match', got {install_cmd[idx + 1]!r}"
+
+
+def test_measure_install_size_pypi_fallback_no_index_strategy():
+    """PyPI fallback path does NOT include --index-strategy in the install command.
+
+    When the workspace lock export fails (e.g. package not in uv.lock), the
+    install falls back to a plain PyPI install without injected index URLs.
+    In that case --index-strategy must be absent: it is only safe to widen the
+    index search when --emit-index-url has explicitly declared trusted sources.
+
+    This is the complement to test_measure_install_size_index_strategy_flag:
+    together they show the flag is conditional on the lock-export branch, not
+    hardcoded on every install invocation.
+    """
+    import check_install_size
+
+    captured_cmds: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmds.append(list(cmd))
+        result = MagicMock()
+        result.stderr = ""
+        if "venv" in cmd:
+            venv_path = Path(cmd[-1])
+            _make_fake_venv(venv_path, 1024)
+            (venv_path / "bin").mkdir(exist_ok=True)
+            (venv_path / "bin" / "python").touch()
+            result.returncode = 0
+            result.stdout = ""
+        elif "export" in cmd:
+            # Simulate a failed lock export (package not in uv.lock).
+            # This triggers the PyPI fallback path in measure_install_size.
+            result.returncode = 1
+            result.stdout = ""
+        elif "du" in cmd:
+            result.returncode = 0
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        else:
+            result.returncode = 0
+            result.stdout = ""
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_path = Path(tmpdir) / "mypkg"
+            package_path.mkdir()
+            check_install_size.measure_install_size(package_path, "mypkg")
+
+    install_cmds = [cmd for cmd in captured_cmds if "pip" in cmd and "install" in cmd]
+    assert install_cmds, "No pip install command was captured"
+    install_cmd = install_cmds[0]
+
+    assert (
+        "--index-strategy" not in install_cmd
+    ), f"--index-strategy must not appear in PyPI fallback install cmd: {install_cmd}"
 
 
 def test_check_packages_pass_and_fail():
