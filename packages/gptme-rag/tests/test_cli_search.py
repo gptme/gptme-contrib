@@ -388,3 +388,48 @@ def test_search_json_emits_error_object_on_search_failure(tmp_path):
     assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
     assert "vector store unavailable" in data["error"]
     assert data.get("query") == "test query"
+
+
+def test_search_json_emits_error_object_on_assemble_context_failure(tmp_path):
+    """In --json mode, an assemble_context failure also produces a JSON error object.
+
+    Regression guard for failures after Indexer.search() succeeds: assemble_context
+    runs inside the same try/except block, so its exceptions must also be caught
+    and emitted as JSON rather than silently discarded.
+    """
+    from unittest.mock import Mock, patch as mock_patch
+
+    from gptme_rag.indexing.document import Document
+
+    fake_doc = Document(content="hello world", metadata={"source": "test.txt"}, doc_id="doc1")
+
+    failing_assembler = Mock()
+    failing_assembler.assemble_context.side_effect = RuntimeError("assembler index error")
+
+    # Indexer succeeds and returns a document; ContextAssembler fails on assemble_context
+    mock_indexer = Mock()
+    mock_indexer.search.return_value = ([fake_doc], [0.9], None)
+
+    runner = CliRunner()
+    with (
+        mock_patch("gptme_rag.cli.Indexer", return_value=mock_indexer),
+        mock_patch("gptme_rag.cli.ContextAssembler", return_value=failing_assembler),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test query",
+                "--persist-dir",
+                str(tmp_path / "index"),
+                "--json",
+            ],
+        )
+
+    assert result.exit_code != 0, "Expected non-zero exit on assemble_context failure"
+    assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
+
+    data = json.loads(result.output.strip())
+    assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
+    assert "assembler index error" in data["error"]
+    assert data.get("query") == "test query"
