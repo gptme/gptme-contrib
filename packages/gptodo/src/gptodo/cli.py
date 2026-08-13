@@ -94,8 +94,10 @@ from gptodo.subagent import (
     spawn_agent,
 )
 
-# Import unblocking functionality with fan-in support
+# Import greedy sequential ("what's next, then next") simulation
 from gptodo.sequence import SequenceStep, shortfall_note, simulate_sequence
+
+# Import unblocking functionality with fan-in support
 from gptodo.unblock import auto_unblock_with_fan_in
 
 # Import utilities directly from utils
@@ -3215,15 +3217,18 @@ def _render_next_sequence(
 
     for step in steps:
         task = step.task
+        # Escape task names: they come from filenames, which may legally contain
+        # square brackets that rich would otherwise parse as markup.
         if step.unblocked_by is None:
             why = "[dim](already ready)[/]"
         else:
-            why = f"unblocked by #{step.unblocked_by_position} {step.unblocked_by}"
+            blocker = markup_escape(step.unblocked_by)
+            why = f"unblocked by #{step.unblocked_by_position} {blocker}"
         table.add_row(
             f"#{step.position}",
             str(name_to_enum_id.get(task.name, "?")),
             task.priority or "none",
-            task.name,
+            markup_escape(task.name),
             why,
         )
 
