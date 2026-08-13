@@ -113,6 +113,14 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
             # unsafe-best-match is required because PyTorch's CPU index mirrors
             # some non-torch packages with older versions; first-index would make
             # normal PyPI releases invisible once that mirror has any match.
+            #
+            # Note: we do NOT pass --emit-index-url here. Index URLs are not needed
+            # in the generated requirements.txt because the subsequent uv pip install
+            # runs with cwd=package_path.parent.parent (the workspace root), so uv
+            # reads [tool.uv.index] from the workspace pyproject.toml directly and
+            # applies the same pytorch-cpu index override without being told via
+            # requirements-file headers. CI confirms: gptme-rag installs at ~1200MB
+            # (CPU torch), not ~5GB (CUDA build from plain PyPI).
             export_result = subprocess.run(
                 [
                     "uv",
@@ -182,6 +190,8 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     str(package_path),
                 ]
 
+            # cwd=workspace root so uv reads [tool.uv.index] (pytorch-cpu) from
+            # pyproject.toml, making --emit-index-url on the export unnecessary.
             result = subprocess.run(
                 install_cmd,
                 cwd=package_path.parent.parent,
