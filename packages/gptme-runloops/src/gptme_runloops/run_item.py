@@ -2077,7 +2077,12 @@ def run_post_session(
         pr_state_after = ""
         if record_file.is_file():
             pr_state_after = read_record_pr_state_after(record_file)
-        if not pr_state_after and item.repo and item.number is not None:
+        if (
+            not pr_state_after
+            and item.repo
+            and item.number is not None
+            and THREAD_DELIVERABLE_TYPES & set(item.types)
+        ):
             try:
                 proc = hooks.run_cmd(
                     [
