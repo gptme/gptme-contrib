@@ -226,6 +226,62 @@ def test_measure_install_size_timeout():
     assert size is None
 
 
+def test_measure_install_size_index_strategy_flag():
+    """Lock-export path includes --index-strategy unsafe-best-match in install command.
+
+    Regression guard for gptme-contrib#1418: without this flag, pinned packages
+    found on a secondary index (e.g. certifi on PyPI after the PyTorch wheel
+    index) cause 'unsatisfiable requirements' errors when --emit-index-url
+    injects a non-PyPI index that contains the package at a different version.
+    """
+    import check_install_size
+
+    captured_cmds: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmds.append(list(cmd))
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        if "venv" in cmd:
+            venv_path = Path(cmd[-1])
+            _make_fake_venv(venv_path, 1024)
+            (venv_path / "bin").mkdir(exist_ok=True)
+            (venv_path / "bin" / "python").touch()
+            result.stdout = ""
+        elif "export" in cmd:
+            # Simulate successful lock export with a non-PyPI index URL injected,
+            # which is what triggers the 'pinned version not found on first index'
+            # failure without the unsafe-best-match strategy.
+            result.stdout = (
+                "--index-url https://download.pytorch.org/whl/cpu\npkg==1.0.0\n"
+            )
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        else:
+            result.stdout = ""
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_path = Path(tmpdir) / "mypkg"
+            package_path.mkdir()
+            check_install_size.measure_install_size(package_path, "mypkg")
+
+    # Find the pip install invocation (not venv/export/du)
+    install_cmds = [cmd for cmd in captured_cmds if "pip" in cmd and "install" in cmd]
+    assert install_cmds, "No pip install command was captured"
+    install_cmd = install_cmds[0]
+
+    assert (
+        "--index-strategy" in install_cmd
+    ), f"--index-strategy missing from lock-export install cmd: {install_cmd}"
+    idx = install_cmd.index("--index-strategy")
+    assert (
+        install_cmd[idx + 1] == "unsafe-best-match"
+    ), f"Expected 'unsafe-best-match', got {install_cmd[idx + 1]!r}"
+
+
 def test_check_packages_pass_and_fail():
     """check_packages returns True for passing packages and False when over budget."""
     import check_install_size
