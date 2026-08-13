@@ -432,6 +432,46 @@ def test_reported_state_is_real_not_simulated(tmp_path: Path, monkeypatch) -> No
     assert "done" not in states.values()
 
 
+def test_fan_in_attribution(tmp_path: Path, monkeypatch) -> None:
+    """Fan-in task (C requires both A and B) is attributed to the last dependency.
+
+    Attribution semantics: ``unblocked_by`` is the *final gate* — the last
+    dependency whose simulated completion made the fan-in task newly ready.
+
+    In this fixture fan-a (high) and fan-b (medium) are both ready initially.
+    Priority ordering picks fan-a first, then fan-b. After fan-b completes
+    (step 2), fan-c — which requires both — becomes newly ready and is
+    attributed to fan-b (the last pick that opened the door).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "fan-a", state="todo", created="2026-03-28T00:00:00", priority="high")
+    write_task(tasks_dir, "fan-b", state="todo", created="2026-03-28T01:00:00", priority="medium")
+    write_task(
+        tasks_dir,
+        "fan-c",
+        state="backlog",
+        created="2026-03-28T02:00:00",
+        priority="low",
+        requires=["fan-a", "fan-b"],
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["next", "--json", "--limit", "3"])
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    seq = payload["sequence"]
+    names = [s["task"]["name"] for s in seq]
+
+    assert names == ["fan-a", "fan-b", "fan-c"], f"unexpected order: {names}"
+
+    fan_c_step = next(s for s in seq if s["task"]["name"] == "fan-c")
+    # fan-b is the final gate (picked second, at which point fan-c becomes ready)
+    assert fan_c_step["unblocked_by"] == "fan-b"
+    assert fan_c_step["unblocked_by_position"] == 2
+
+
 def test_simulation_does_not_write_to_task_files(tmp_path: Path, monkeypatch) -> None:
     """The cascade is simulated in memory — task files must be untouched."""
     tasks_dir = _chain_fixture(tmp_path)

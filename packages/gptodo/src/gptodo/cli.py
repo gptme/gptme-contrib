@@ -3135,7 +3135,9 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
 
     # Sort tasks. Default ("priority"): priority (high first), then unblocking
     # power (high first), then age (oldest first). "unblock" leads with power.
-    if order == "unblock":
+    # Gate: --order is ignored when limit == 1, preserving the byte-identical
+    # contract for `next --json` and `next --json --limit 1` callers.
+    if order == "unblock" and limit > 1:
         ready_tasks.sort(key=lambda t: (-power.get(t.name, 0), -t.priority_rank, t.created))
     else:
         ready_tasks.sort(key=lambda t: (-t.priority_rank, -power.get(t.name, 0), t.created))

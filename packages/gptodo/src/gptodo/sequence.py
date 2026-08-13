@@ -35,8 +35,14 @@ class SequenceStep:
 
     task: TaskInfo
     position: int
-    #: Name of the earlier step whose (simulated) completion made this ready,
+    #: Name of the step whose (simulated) completion made this task newly ready,
     #: or None if it was already ready at the start.
+    #:
+    #: **Fan-in tasks** (requiring multiple dependencies): this is the *last*
+    #: dependency to complete — the "final gate." Prior deps were already done
+    #: in earlier steps; this pick was the one that opened the door. This
+    #: matches how the single-pick ``next`` models readiness: a task is either
+    #: ready or it isn't, and the relevant event is when it first becomes ready.
     unblocked_by: Optional[str] = None
     #: 1-based position of that earlier step, or None.
     unblocked_by_position: Optional[int] = None

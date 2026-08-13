@@ -101,9 +101,10 @@ the simulation instead of hanging it.
 
 `--limit 1` (and omitting the flag) produce byte-identical output to the
 previous behaviour, including the `--json` shape — autonomous sessions calling
-`gptodo next --json` are unaffected. In multi-task mode the JSON gains
-`sequence`, `order`, `requested`, `reachable`, `complete`, and `note` keys
-alongside the unchanged `next_task` / `alternatives`.
+`gptodo next --json` are unaffected. The `--order` flag is also ignored when
+`--limit 1` (it only changes sequencing within a multi-task cascade). In
+multi-task mode the JSON gains `sequence`, `order`, `requested`, `reachable`,
+`complete`, and `note` keys alongside the unchanged `next_task` / `alternatives`.
 
 ### Machine-Readable Output (`--json`)
 
