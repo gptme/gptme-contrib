@@ -226,7 +226,7 @@ class OpenRouterEmbedding(EmbeddingFunction):
 
     @staticmethod
     def _approx_tokens(text: str) -> int:
-        return max(1, len(text) // 3)
+        return max(1, len(text) // 2)
 
     def _make_batches(self, items: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
         batches: list[list[tuple[int, str]]] = []
