@@ -183,6 +183,13 @@ class FakeIO:
             ],
             SelfMergeBlockClass.UNRESOLVED_THREADS,
         ),
+        # A contradictory reason where score == floor should NOT route to
+        # AI_REVIEW_BELOW_FLOOR (cross-multiplication: 5*5 < 5*5 is false).
+        # This guards against regex-only matching without numeric verification.
+        (
+            ["Greptile review not found; AI review score 5/5 below 5/5"],
+            SelfMergeBlockClass.NO_GREPTILE_REVIEW,
+        ),
         # NOTE(parity): the HUMAN-thread reason does NOT match the
         # "unresolved review thread" grep — the word "human" breaks the
         # substring — so human-only blocks route to OTHER (proceed with a

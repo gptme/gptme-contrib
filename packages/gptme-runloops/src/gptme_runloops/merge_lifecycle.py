@@ -87,9 +87,10 @@ GREPTILE_SCORE_RE = re.compile(r"Score[*:]*\s*([0-9])/5")
 # (``fetch_ai_review_status``): "AI review score 3/5 below 5/5".
 # Deliberately does NOT match "outside the rubric," — a corrupted marker is
 # not a finding set a fix session can address.
-AI_REVIEW_BELOW_FLOOR_RE = re.compile(
-    r"AI review score [0-9]+/[0-9]+ below [0-9]+/[0-9]+"
-)
+# Captures (score_n, score_d, floor_n, floor_d) so the check can verify
+# score_n/score_d < floor_n/floor_d numerically (cross-multiply to avoid
+# float division): score_n * floor_d < floor_n * score_d.
+AI_REVIEW_BELOW_FLOOR_RE = re.compile(r"AI review score (\d+)/(\d+) below (\d+)/(\d+)")
 
 
 # --- Decision types ---
@@ -368,7 +369,8 @@ def classify_self_merge_reasons(reasons: Sequence[str]) -> SelfMergeBlockClass:
     # findings while leaving open threads that independently prevent merging.
     if "unresolved review thread" in text:
         return SelfMergeBlockClass.UNRESOLVED_THREADS
-    if AI_REVIEW_BELOW_FLOOR_RE.search(text):
+    m = AI_REVIEW_BELOW_FLOOR_RE.search(text)
+    if m and int(m.group(1)) * int(m.group(4)) < int(m.group(3)) * int(m.group(2)):
         return SelfMergeBlockClass.AI_REVIEW_BELOW_FLOOR
     if "Greptile review not found" in text:
         return SelfMergeBlockClass.NO_GREPTILE_REVIEW
