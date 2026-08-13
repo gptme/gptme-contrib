@@ -31,7 +31,7 @@ DEFAULT_BUDGETS = {
 }
 
 # Keywords in dependency lists that indicate an ML package (ml-optional budget)
-_ML_DEP_KEYWORDS = ("torch", "tensorflow", "jax", "onnx", "transformers", "numpy")
+_ML_DEP_KEYWORDS = ("torch", "tensorflow", "jax", "onnx", "transformers")
 
 
 def _infer_package_category(config: dict) -> str:

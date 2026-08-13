@@ -217,6 +217,10 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Run script tests
+        run: |
+          uv run --with pytest pytest tests/test_check_install_size.py -v
+
       - name: Run install-size check
         run: |
           python3 scripts/check_install_size.py --verbose
