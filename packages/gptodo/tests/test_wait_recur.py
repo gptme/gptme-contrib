@@ -99,6 +99,12 @@ def test_is_valid_recur_value_rejects_garbage() -> None:
 def test_advance_wait_from_future_date() -> None:
     future = date.today() + timedelta(days=3)
     result = advance_wait(future, "7d")
+    assert result == date.today() + timedelta(days=7)
+
+
+def test_advance_wait_calendar_recur_from_future_date_consumes_slot() -> None:
+    future = date.today() + timedelta(days=3)
+    result = advance_wait(future, "weekly")
     assert result == future + timedelta(days=7)
 
 
@@ -284,12 +290,68 @@ def test_edit_done_with_subday_recur_stores_datetime(
     post = fm.load(tasks_dir / "frequent-check.md")
     assert post.metadata["state"] == "todo"
     wait_val = str(post.metadata["wait"])
-    assert (
-        "T" in wait_val or " " in wait_val
-    ), f"sub-24h recur should store a datetime string with time component, got: {wait_val!r}"
+    assert "T" in wait_val or " " in wait_val, (
+        f"sub-24h recur should store a datetime string with time component, got: {wait_val!r}"
+    )
     # Verify it's actually in the future
     next_dt = datetime.fromisoformat(wait_val.replace(" ", "T"))
     assert next_dt > datetime.now(), "next wait must be in the future"
+
+
+def test_edit_done_with_future_interval_recur_reanchors_from_today(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    future_wait = (date.today() + timedelta(days=3)).isoformat()
+    write_task(
+        tasks_dir,
+        "daily-mining",
+        state="todo",
+        created="2026-01-01",
+        wait=future_wait,
+        recur="1d",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "daily-mining", "--set", "state", "done"])
+
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "daily-mining.md")
+    assert post.metadata["state"] == "todo"
+    assert date.fromisoformat(str(post.metadata["wait"])) == date.today() + timedelta(days=1)
+
+
+def test_edit_done_with_future_calendar_recur_consumes_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    future_wait = (date.today() + timedelta(days=3)).isoformat()
+    write_task(
+        tasks_dir,
+        "weekly-review",
+        state="todo",
+        created="2026-01-01",
+        wait=future_wait,
+        recur="weekly",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "weekly-review.md")
+    assert post.metadata["state"] == "todo"
+    assert date.fromisoformat(str(post.metadata["wait"])) == (date.today() + timedelta(days=10))
 
 
 def test_edit_done_without_recur_stays_done(

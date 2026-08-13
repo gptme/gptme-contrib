@@ -884,6 +884,13 @@ def is_valid_recur_value(recur: str) -> bool:
     return parse_recur_interval(recur) is not None or is_cron_recur_expression(recur)
 
 
+def is_calendar_anchored_recur(recur: str) -> bool:
+    """Return True for recur: values whose next scheduled slot should be consumed early."""
+    if not recur:
+        return False
+    return recur.strip().lower() in {"weekly", "monthly"}
+
+
 def advance_wait(current_wait: date | datetime | None, recur: str) -> date | datetime:
     """Compute the next wait: value after completing a recurring task.
 
@@ -893,13 +900,21 @@ def advance_wait(current_wait: date | datetime | None, recur: str) -> date | dat
     - Day+ intervals with a datetime current_wait: return datetime, preserving precision.
     - Day+ intervals with a date or None current_wait: return date (simpler, no TZ issues).
     - Lapsed tasks (current_wait in the past) re-schedule from now, not the stale date.
+    - Early extra runs of interval recurrences (Nd / Nh) re-anchor from now; early
+      calendar-style runs ("weekly", "monthly") consume the upcoming scheduled slot.
     """
     interval = parse_recur_interval(recur)
+    calendar_anchored = is_calendar_anchored_recur(recur)
 
     if isinstance(current_wait, datetime):
         # Match tz-awareness to avoid TypeError when current_wait is tz-aware
         now = datetime.now(tz=current_wait.tzinfo)
-        base = now if current_wait < now else current_wait
+        if current_wait < now:
+            base = now
+        elif calendar_anchored:
+            base = current_wait
+        else:
+            base = now
         return (now + timedelta(days=7)) if interval is None else (base + interval)
 
     # Date-only or None path
@@ -910,7 +925,12 @@ def advance_wait(current_wait: date | datetime | None, recur: str) -> date | dat
     # Sub-day interval: date arithmetic silently drops hours; return datetime instead
     if interval.days == 0:
         return now + interval
-    date_base = max(current_wait or today, today)
+    if current_wait is None or current_wait <= today:
+        date_base = today
+    elif calendar_anchored:
+        date_base = current_wait
+    else:
+        date_base = today
     return date_base + timedelta(days=interval.days)
 
 
