@@ -25,6 +25,11 @@ Regenerate the goldens from a checkout of the brain repo with::
     printf '%s' "$INVESTIGATE" > greptile_needs_improvement.bob.txt
     # ...and again with the second parameter set (see CONTEXTS below).
 
+``ai_review_fix`` is the one kind with **no bash source**: the bash never
+routed the AI-review-below-floor block to a fix session, so there is nothing
+to capture. Its goldens are generated from :func:`render_instruction` itself
+and serve only as drift locks, not as parity proofs.
+
 Newline conventions locked in here (see the module docstring):
 
 - fix-instruction kinds render the heredoc's stdout **with** its trailing

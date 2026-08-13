@@ -441,7 +441,43 @@ Recommendation shape:
 Stop at maintainer judgment. Merge-ready does not mean auto-merge.
 """
 
+# No bash equivalent: the bash never routed the AI-review-below-floor block to a
+# fix session at all (see `classify_self_merge_reasons`), so there was nothing to
+# port. Deliberately says nothing about Greptile — the blocker here is the
+# self-hosted reviewer's own findings, and pointing the session at Greptile is
+# what made these items no-op in the first place.
+_AI_REVIEW_FIX_SKELETON = """\
+### Also: Self-Hosted AI Review Is Below the Clean Score
+
+The self-merge gate is blocking {repo}#{number} because our own AI reviewer
+scored this head below the clean score. This is NOT a Greptile problem —
+triggering a Greptile review will not clear it, and a fresh 5/5 from Greptile
+still leaves this PR unmergeable. The score is driven by the reviewer's own
+findings, so the only way forward is to address them.
+
+```bash
+gh pr view {number} --repo {repo} --comments
+gh api repos/{repo}/pulls/{number}/comments \\
+  --jq '.[] | {id, path, line, body: (.body | split("\\n")[0:5] | join(" "))}'
+gh pr checks {number} --repo {repo}
+```
+
+Steps:
+1. Read the AI review summary comment on the PR — the score-driving findings are
+   in its BODY, not only in the inline threads.
+2. Fix every finding that is a real defect. Push the fixes.
+3. Reply to each inline thread with the fixing commit, then resolve it.
+4. For findings you are deliberately not fixing, reply with a concrete,
+   checkable reason — do not resolve silently.
+5. A fresh review runs against the new head; the gate re-evaluates from there.
+
+Do NOT loop chasing a clean score. Address the findings once. If the score still
+does not clear after they are genuinely handled, stop and leave it for human
+review — the gate correctly blocks below-floor merges.
+"""
+
 _VARIANTS: dict[InstructionKind, tuple[str, Mapping[str, str]]] = {
+    InstructionKind.AI_REVIEW_FIX: (_AI_REVIEW_FIX_SKELETON, {}),
     InstructionKind.GREPTILE_CONVERGENCE: (_CONVERGENCE_SKELETON, {}),
     InstructionKind.LOCAL_GREPTILE_FIX: (_FIX_SKELETON, _LOCAL_FIX_SECTIONS),
     InstructionKind.CROSS_REPO_GREPTILE_REFRESH: (

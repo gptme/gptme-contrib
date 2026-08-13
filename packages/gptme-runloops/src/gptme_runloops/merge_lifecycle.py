@@ -82,6 +82,15 @@ CROSS_REPO_REVIEW_TYPE = "pr_update"
 # jq: capture("Score[*:]*\\s*(?<n>[0-9])/5") (first match wins).
 GREPTILE_SCORE_RE = re.compile(r"Score[*:]*\s*([0-9])/5")
 
+# Sub-floor score from the self-hosted AI reviewer, as appended to the
+# "Greptile review not found" gate reason by ``self-merge-check.py``
+# (``fetch_ai_review_status``): "AI review score 3/5 below 5/5".
+# Deliberately does NOT match "outside the rubric," — a corrupted marker is
+# not a finding set a fix session can address.
+AI_REVIEW_BELOW_FLOOR_RE = re.compile(
+    r"AI review score [0-9]+/[0-9]+ below [0-9]+/[0-9]+"
+)
+
 
 # --- Decision types ---
 
@@ -115,6 +124,7 @@ class InstructionKind(Enum):
     """
 
     LOCAL_GREPTILE_FIX = "local_greptile_fix"  # lib.sh:425-470
+    AI_REVIEW_FIX = "ai_review_fix"  # no bash equivalent — see classifier note
     CROSS_REPO_GREPTILE_REFRESH = "cross_repo_greptile_refresh"  # lib.sh:474-517
     GREPTILE_NEEDS_FIX = "greptile_needs_fix"  # lib.sh:886-912
     GREPTILE_NEEDS_IMPROVEMENT = "greptile_needs_improvement"  # lib.sh:913-932
@@ -217,6 +227,7 @@ class SelfMergeBlockClass(Enum):
     NO_GREPTILE_REVIEW = "no_greptile_review"
     UNRESOLVED_THREADS = "unresolved_threads"
     SCORE_BELOW_FLOOR = "score_below_floor"
+    AI_REVIEW_BELOW_FLOOR = "ai_review_below_floor"
     OTHER = "other"
 
 
@@ -331,8 +342,26 @@ def classify_self_merge_reasons(reasons: Sequence[str]) -> SelfMergeBlockClass:
     unresolved human threads classifies as OTHER: the session still runs
     (and the worker prompt tells it to answer every human comment) but no
     Greptile fix instructions are injected. Preserved as-is.
+
+    Deviation from the bash (deliberate): when the AI-review fallback ran and
+    returned a *sub-floor score*, the gate appends that detail to the
+    "Greptile review not found" reason
+    (``"Greptile review not found; AI review score 3/5 below 5/5"``). The bash
+    matches the prefix and routes to TRIGGER_REVIEW only, so the actual
+    blocker — findings the self-hosted reviewer already posted — never reaches
+    a fix session. The item then burns a full dispatch and lands
+    ``effect: none`` every cycle until the retry budget is exhausted
+    (observed on gptme/gptme-contrib#1419). Triggering Greptile cannot clear
+    this block: even a fresh 5/5 Greptile review leaves the AI score below the
+    floor. So the AI-score case is checked first and routed to a fix session.
+
+    Only a sub-floor *score* routes here. "abstained", "stale", "not an
+    integer", and "outside the rubric" mean there is no actionable finding
+    set, so those keep the bash's TRIGGER_REVIEW behavior.
     """
     text = "\n".join(reasons)
+    if AI_REVIEW_BELOW_FLOOR_RE.search(text):
+        return SelfMergeBlockClass.AI_REVIEW_BELOW_FLOOR
     if "Greptile review not found" in text:
         return SelfMergeBlockClass.NO_GREPTILE_REVIEW
     if "unresolved review thread" in text:
@@ -375,6 +404,15 @@ def decide_self_merge_gate(
             "self-merge gate reports eligible",
         )
     block = classify_self_merge_reasons(check.reasons)
+    if block is SelfMergeBlockClass.AI_REVIEW_BELOW_FLOOR:
+        # The self-hosted reviewer already posted findings; a Greptile trigger
+        # cannot clear this block. Dispatch a session pointed at those findings.
+        return LifecycleDecision(
+            MergeLifecycleAction.FIX_FINDINGS,
+            "self-hosted AI review is below the clean score — spawn LLM "
+            "session to address its findings and get a re-review",
+            instructions=InstructionKind.AI_REVIEW_FIX,
+        )
     if block is SelfMergeBlockClass.NO_GREPTILE_REVIEW:
         # lib.sh:551-559 — trigger via helper, then proceed with the session
         # for any other updates (no fix instructions injected).
