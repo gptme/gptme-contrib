@@ -10,17 +10,17 @@ This prevents silent regressions like the torch CUDA bloat (5.2GB) discovered
 in gptme-contrib#1416.
 """
 
-import json
+import argparse
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ImportError:
+else:
     import tomli as tomllib
 
 
@@ -45,38 +45,49 @@ def get_package_budget(pyproject_path: Path) -> int:
         return DEFAULT_BUDGETS["other"]
 
 
-def measure_install_size(package_path: Path, package_name: str) -> Optional[int]:
+def measure_install_size(package_path: Path, package_name: str) -> float | None:
     """Install package in a temp venv and measure disk usage.
+
+    Uses `uv`, not stdlib venv + pip, so the workspace's [tool.uv.sources] and
+    [tool.uv.index] settings apply. Plain pip ignores both, which would measure
+    a dependency set the project never actually installs — including the
+    CPU-only torch index pin from #1416.
 
     Returns:
         Size in MB, or None if installation failed.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
         venv_path = tmpdir / "venv"
 
         try:
-            # Create venv
+            # Create venv with uv
             subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_path)],
+                ["uv", "venv", str(venv_path)],
                 check=True,
                 capture_output=True,
             )
 
-            # Get pip executable from venv
-            pip_exe = venv_path / "bin" / "pip"
-            if not pip_exe.exists():
+            python_exe = venv_path / "bin" / "python"
+            if not python_exe.exists():
                 print(f"❌ Failed to create venv for {package_name}")
                 return None
 
-            # Install package
+            # Install with uv from the repo root so workspace sources/index
+            # config resolve the same way they do for a real install.
             result = subprocess.run(
                 [
-                    str(pip_exe),
+                    "uv",
+                    "pip",
                     "install",
+                    "--python",
+                    str(python_exe),
+                    "--index-strategy",
+                    "unsafe-best-match",
                     "--quiet",
                     str(package_path),
                 ],
+                cwd=package_path.parent.parent,
                 capture_output=True,
                 text=True,
             )
@@ -86,14 +97,17 @@ def measure_install_size(package_path: Path, package_name: str) -> Optional[int]
                 print(result.stderr)
                 return None
 
-            # Measure venv size
+            # Measure venv size. lstat, not is_file(follow_symlinks=False):
+            # that kwarg is 3.13+, and every venv has symlinks, so on 3.12 it
+            # raised TypeError and the whole measurement returned None.
             total_size = 0
             for entry in venv_path.rglob("*"):
                 try:
-                    if entry.is_file(follow_symlinks=False):
-                        total_size += entry.stat().st_size
+                    entry_stat = entry.lstat()
                 except OSError:
-                    pass
+                    continue
+                if stat.S_ISREG(entry_stat.st_mode):
+                    total_size += entry_stat.st_size
 
             size_mb = total_size / (1024 * 1024)
             return size_mb
@@ -103,8 +117,14 @@ def measure_install_size(package_path: Path, package_name: str) -> Optional[int]
             return None
 
 
-def check_packages(packages_dir: Path, verbose: bool = False) -> bool:
+def check_packages(
+    packages_dir: Path, verbose: bool = False, only: str | None = None
+) -> bool:
     """Check all packages in packages/ directory.
+
+    Args:
+        only: If set, check just this one package (measuring every package
+            builds a venv each, so local runs want a single target).
 
     Returns:
         True if all packages pass, False if any exceed their budget.
@@ -115,6 +135,11 @@ def check_packages(packages_dir: Path, verbose: bool = False) -> bool:
     package_paths = sorted(
         [p for p in packages_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
     )
+    if only:
+        package_paths = [p for p in package_paths if p.name == only]
+        if not package_paths:
+            print(f"❌ No package named {only!r} in {packages_dir}")
+            return False
 
     for package_path in package_paths:
         # Skip symlinks (they point to gptme-contrib submodule)
@@ -149,15 +174,24 @@ def check_packages(packages_dir: Path, verbose: bool = False) -> bool:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--package", help="Check only this package (default: all packages)"
+    )
+    args = parser.parse_args()
+
     repo_root = Path(__file__).parent.parent
     packages_dir = repo_root / "packages"
 
-    verbose = "--verbose" in sys.argv or "-v" in sys.argv
+    if shutil.which("uv") is None:
+        print("❌ uv not found on PATH — required to resolve workspace sources")
+        sys.exit(1)
 
     print("Checking package install sizes...")
     print()
 
-    if check_packages(packages_dir, verbose):
+    if check_packages(packages_dir, args.verbose, args.package):
         print()
         print("✓ All packages within budget")
         sys.exit(0)
