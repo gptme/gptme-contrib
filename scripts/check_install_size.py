@@ -82,10 +82,12 @@ def get_package_budget(pyproject_path: Path) -> int:
 def measure_install_size(package_path: Path, package_name: str) -> float | None:
     """Install package in a temp venv and measure disk usage.
 
-    Uses `uv`, not stdlib venv + pip, so the workspace's [tool.uv.sources] and
-    [tool.uv.index] settings apply. Plain pip ignores both, which would measure
-    a dependency set the project never actually installs — including the
-    CPU-only torch index pin from #1416.
+    Uses ``uv pip install``, which runs in pip-compatibility mode. This means
+    workspace-level ``[tool.uv.sources]`` and ``[tool.uv.index]`` settings are
+    NOT applied — dependencies resolve from PyPI by default. The measurement
+    may therefore overestimate size for packages that pin to a non-default index
+    (e.g. CPU-only torch), but will never underestimate. Budgets for such
+    packages should be set with the worst-case PyPI resolution in mind.
 
     Returns:
         Size in MB, or None if installation failed.
@@ -108,8 +110,14 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                 print(f"❌ Failed to create venv for {package_name}")
                 return None
 
-            # Install with uv from the repo root so workspace sources/index
-            # config resolve the same way they do for a real install.
+            # Install using uv pip install from the repo root.
+            # Note: uv pip install runs in pip-compatibility mode and does NOT
+            # read the workspace's [tool.uv.sources] or [tool.uv.index] settings
+            # (those are respected only by uv project commands like uv sync/add).
+            # Packages with workspace-level index pins (e.g. a CPU-only torch
+            # index) will be resolved from the default PyPI index instead.
+            # This makes the measurement conservative: it may overestimate size
+            # for index-pinned packages, but will never underestimate.
             result = subprocess.run(
                 [
                     "uv",

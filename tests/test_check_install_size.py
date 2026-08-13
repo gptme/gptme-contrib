@@ -211,3 +211,97 @@ def test_check_packages_pass_and_fail():
 
     assert result_pass is True
     assert result_fail is False
+
+
+def test_check_packages_none_size_fails():
+    """check_packages returns False when measure_install_size returns None."""
+    import check_install_size
+
+    def fake_measure(package_path, package_name):
+        return None  # simulates install failure
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+        pkg_dir = packages_dir / "broken"
+        pkg_dir.mkdir(parents=True)
+        (pkg_dir / "pyproject.toml").write_text(
+            "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+        )
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result = check_install_size.check_packages(
+                packages_dir, verbose=False, only="broken"
+            )
+
+    assert result is False
+
+
+def test_check_packages_skips_symlinks():
+    """check_packages silently skips symlinked package directories."""
+    import check_install_size
+
+    call_count = {"n": 0}
+
+    def fake_measure(package_path, package_name):
+        call_count["n"] += 1
+        return 10.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+        packages_dir.mkdir()
+
+        # Real package
+        real_pkg = packages_dir / "real"
+        real_pkg.mkdir()
+        (real_pkg / "pyproject.toml").write_text(
+            "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+        )
+
+        # Symlinked package — should be skipped, not measured
+        target = Path(tmpdir) / "external"
+        target.mkdir()
+        (packages_dir / "linked").symlink_to(target)
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result = check_install_size.check_packages(packages_dir, verbose=True)
+
+    assert result is True
+    assert call_count["n"] == 1, "symlinked package should not be measured"
+
+
+def test_check_packages_skips_no_pyproject():
+    """check_packages skips packages without a pyproject.toml."""
+    import check_install_size
+
+    call_count = {"n": 0}
+
+    def fake_measure(package_path, package_name):
+        call_count["n"] += 1
+        return 10.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+        packages_dir.mkdir()
+
+        # Package with pyproject.toml — should be measured
+        with_toml = packages_dir / "has_toml"
+        with_toml.mkdir()
+        (with_toml / "pyproject.toml").write_text(
+            "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+        )
+
+        # Package directory without pyproject.toml — should be skipped
+        no_toml = packages_dir / "no_toml"
+        no_toml.mkdir()
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result = check_install_size.check_packages(packages_dir, verbose=True)
+
+    assert result is True
+    assert call_count["n"] == 1, "package without pyproject.toml should not be measured"
