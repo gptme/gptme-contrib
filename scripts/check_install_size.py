@@ -186,12 +186,12 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
 
             # Measure venv disk usage with du. Using `du -sb` (bytes) is more
             # correct than summing individual file sizes: it counts each hard-linked
-            # inode once, and the apparent-size flag (-A) additionally includes the
+            # inode once, and the -b flag includes apparent-size which counts the
             # referenced size of symlinks that point outside the venv (e.g. GPU
             # library symlinks). This avoids the lstat/S_ISREG under-count problem
             # that skips symlinks entirely.
             du_result = subprocess.run(
-                ["du", "-sAb", str(venv_path)],
+                ["du", "-sb", str(venv_path)],
                 capture_output=True,
                 text=True,
                 check=True,
