@@ -82,3 +82,8 @@ ignore_missing_imports = true
 markers = [
     "slow: tests that load the embedding model and build a real index (~30s)",
 ]
+
+[tool.gptme-contrib]
+# gptme-rag pulls torch+CUDA (~5GB) until gptme/gptme-contrib#1416 (CPU-torch pin) lands.
+# Reduce to ~1000 MB after #1416 is merged.
+max_install_mb = 6000

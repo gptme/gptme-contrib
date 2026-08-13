@@ -4,8 +4,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
 # Add scripts directory to path for imports
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
