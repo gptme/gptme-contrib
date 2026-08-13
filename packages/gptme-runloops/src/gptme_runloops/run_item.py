@@ -133,6 +133,30 @@ from gptme_runloops.worker_records import (
 # steps (worker.sh:72,379,555 — `grep -qwE "pr_update|merge_ready"`).
 PR_STATE_TYPES: frozenset[str] = frozenset({"pr_update", "merge_ready"})
 
+# Item types whose `number` addresses a real issue/PR thread, so "did the
+# session reply on the thread?" is a meaningful post-condition
+# (worker.sh:453 — `grep -qwE "assigned_issue|pr_update|ci_failure|..."`).
+#
+# Repo-level types are deliberately absent. `master_ci_failure` carries a
+# workflow *run id* as `number` (e.g. 31681387507), not an issue number, so
+# `issues/{number}/comments` 404s, no comment is ever found, and the check
+# returns `orphan_no_delivery` → rollback → re-dispatch, forever. The PM prompt
+# tells those sessions to "exit cleanly without inventing a thread reply"
+# (runs/github/project-monitoring.sh), so the post-condition was punishing
+# sessions for obeying their own instructions.
+THREAD_DELIVERABLE_TYPES: frozenset[str] = frozenset(
+    {
+        "assigned_issue",
+        "pr_update",
+        "ci_failure",
+        "merge_ready",
+        "greptile_needs_improvement",
+        "greptile_needs_fix",
+        "merge_conflict",
+        "notification",
+    }
+)
+
 # CC stream-json trajectory floor (worker.sh:205) and grok floor (worker.sh:218).
 CC_TRAJECTORY_MIN_BYTES = 5000
 GROK_TRAJECTORY_MIN_BYTES = 1000
@@ -1819,7 +1843,12 @@ def run_post_session(
     delivery_verified = False  # True only when the check exited 0 with parseable output
     needs_fallback = "false"
     fallback_posted = "false"
-    if item.repo and item.number is not None and hooks.delivery_check is not None:
+    if (
+        item.repo
+        and item.number is not None
+        and hooks.delivery_check is not None
+        and THREAD_DELIVERABLE_TYPES & set(item.types)
+    ):
         try:
             try:
                 proc = hooks.run_cmd(

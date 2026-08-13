@@ -1414,6 +1414,43 @@ def test_post_session_missing_delivery_hook_skips_check(tmp_path) -> None:
     assert latency_calls[0]["outcome"] == "handled"
 
 
+def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
+    """master_ci_failure has no thread, so the reply post-condition must not run.
+
+    Its `number` is a workflow run id, not an issue number, so the check would
+    query issues/{run_id}/comments, 404, find no comment, and return
+    orphan_no_delivery -> rollback -> re-dispatch forever (ErikBjare/bob#1144).
+    """
+    config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
+        tmp_path, types=("master_ci_failure",)
+    )
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+    run_post_session(plan, item, outcome, config, hooks)
+    assert run_cmd.find("/fake/check-delivery.py") == []
+    assert latency_calls[0]["outcome"] == "handled"
+
+
+def test_post_session_thread_deliverable_item_still_runs_delivery_check(
+    tmp_path,
+) -> None:
+    """Regression guard: the type gate must not disable checks for real threads."""
+    config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
+        tmp_path, types=("assigned_issue",)
+    )
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout='{"outcome": "orphan_no_delivery", "needs_fallback_reply": true, '
+        '"fallback_reply_posted": false}',
+    )
+    run_post_session(plan, item, outcome, config, hooks)
+    assert run_cmd.find("/fake/check-delivery.py") != []
+    assert latency_calls[0]["outcome"] == "orphan_no_delivery"
+
+
 def test_post_session_gate_exit_2_warns_no_helper(tmp_path) -> None:
     config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
     run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
