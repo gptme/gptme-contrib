@@ -46,6 +46,7 @@ from gptme_runloops.run_item import (
     derive_lock_paths,
     derive_session_id,
     execute_plan,
+    has_github_thread,
     issue_coordination_key,
     item_slug,
     plan_item,
@@ -1160,10 +1161,10 @@ def test_trajectory_codex_snapshot_diff_newest_wins(tmp_path) -> None:
 # --- Post-session composition (worker.sh order, fake collaborators) ---
 
 
-def _post_session_fixture(tmp_path, *, exit_code=0, types=("pr_update",)):
+def _post_session_fixture(tmp_path, *, exit_code=0, types=("pr_update",), number=1234):
     config = make_config(tmp_path)
     config.resolved("records_dir", "records").mkdir(parents=True, exist_ok=True)
-    item = make_item(types=list(types))
+    item = make_item(types=list(types), number=number, all_numbers=[str(number)])
     run_cmd = FakeRunCmd()
 
     def fake_post_session(**kwargs):
@@ -1412,6 +1413,68 @@ def test_post_session_missing_delivery_hook_skips_check(tmp_path) -> None:
     run_post_session(plan, item, outcome, config, hooks)
     # Delivery defaults to handled when the script is absent (bash [ -f ] guard)
     assert latency_calls[0]["outcome"] == "handled"
+
+
+@pytest.mark.parametrize(
+    "number,expected",
+    [
+        (1234, True),
+        ("1234", True),
+        (" 1234 ", True),
+        (0, False),  # the synthetic agent_msg_reply number
+        ("0", False),
+        (None, False),
+        ("", False),
+        ("unknown", False),
+        (-1, False),
+    ],
+)
+def test_has_github_thread_rejects_synthetic_numbers(number, expected) -> None:
+    """Only a positive item number names a real GitHub issue/PR thread.
+
+    ``agent_msg_reply`` items are emitted with a hardcoded ``number: 0``
+    because the agent-message bus has no issue behind it.
+    """
+    assert has_github_thread(make_item(number=number)) is expected
+
+
+def test_has_github_thread_requires_repo() -> None:
+    assert has_github_thread(make_item(repo="", number=1234)) is False
+
+
+def test_post_session_skips_github_checks_for_synthetic_agent_msg_item(
+    tmp_path,
+) -> None:
+    """An ``agent_msg_reply`` item must not run the GitHub-thread
+    post-conditions against the phantom ``ErikBjare/bob#0``.
+
+    Regression for the 2026-08-13 loop: the delivery check 404s on
+    ``issues/0/comments`` and returns ``orphan_no_delivery``, which made PM
+    (a) try to POST a fallback comment to an issue that does not exist,
+    (b) roll the item back and re-dispatch it every cycle, and
+    (c) record ``effect=none``, so ``pm_dispatch_recovery`` escalated a
+    ``pm-stuck-erikbjare-bob-0`` task at ``priority: high``.
+
+    A missing thread makes the check unanswerable, not failed — so it must be
+    skipped and the item's state promoted normally.
+    """
+    config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
+        tmp_path, types=("agent_msg_reply",), number=0
+    )
+    # Would report orphan_no_delivery if it were (wrongly) consulted.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert run_cmd.find("/fake/check-delivery.py") == []
+    # No GitHub PR-state fetch for a thread that does not exist
+    assert [c for c in run_cmd.find("gh") if "pr" in c["argv"]] == []
+    # Not treated as a failed delivery => no rollback, no fallback POST
+    assert latency_calls[0]["outcome"] == "handled"
+    record = json.loads(Path(plan.record_file).read_text())
+    assert not record.get("pr_state_after")
 
 
 def test_post_session_gate_exit_2_warns_no_helper(tmp_path) -> None:

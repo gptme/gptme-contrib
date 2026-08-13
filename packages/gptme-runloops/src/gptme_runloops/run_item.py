@@ -709,6 +709,35 @@ def resolve_slot_key(config: RunItemConfig, item: RunItem, fallback: str = "") -
     return f"{item.repo}#{item.number}"
 
 
+def has_github_thread(item: RunItem) -> bool:
+    """Whether this item names a real GitHub issue/PR thread.
+
+    Not every PM work item is a GitHub thread. The gate synthesises items for
+    off-GitHub work — ``agent_msg_reply`` is emitted with a hardcoded
+    ``number: 0`` (project-monitoring-gate.sh) because the agent-message bus has
+    no issue behind it. ``number is not None`` accepts that ``0`` and sends the
+    GitHub-thread post-conditions at ``ErikBjare/bob#0``, which does not exist.
+
+    The 2026-08-13 failure loop that motivated this: the delivery check 404s on
+    ``issues/0/comments``, so it reports ``orphan_no_delivery`` for a reply that
+    *was* delivered (over the agent-msg bus); ``--post-fallback-reply`` then
+    tries to POST a comment to the phantom issue; the item is rolled back and
+    re-dispatched; the effect signal reads ``none``; and after two re-arms
+    ``pm_dispatch_recovery`` files a ``pm-stuck-erikbjare-bob-0`` escalation
+    task at ``priority: high``. Every agent message from Gordon/Alice/Sven ran
+    this loop.
+
+    A missing thread makes these checks unanswerable, not failed — so callers
+    must skip them rather than read the 404 as a negative result.
+    """
+    if not item.repo or item.number is None:
+        return False
+    try:
+        return int(str(item.number).strip()) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def resolve_cooldown_dir(config: RunItemConfig) -> Path | None:
     """The dispatch cooldown dir, or None when unset.
 
@@ -1819,7 +1848,7 @@ def run_post_session(
     delivery_verified = False  # True only when the check exited 0 with parseable output
     needs_fallback = "false"
     fallback_posted = "false"
-    if item.repo and item.number is not None and hooks.delivery_check is not None:
+    if has_github_thread(item) and hooks.delivery_check is not None:
         try:
             try:
                 proc = hooks.run_cmd(
@@ -2039,7 +2068,7 @@ def run_post_session(
         pr_state_after = ""
         if record_file.is_file():
             pr_state_after = read_record_pr_state_after(record_file)
-        if not pr_state_after and item.repo and item.number is not None:
+        if not pr_state_after and has_github_thread(item):
             try:
                 proc = hooks.run_cmd(
                     [
