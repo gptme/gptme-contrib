@@ -355,3 +355,36 @@ def test_search_json_emits_error_object_on_init_failure(tmp_path):
     assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
     assert "model weights not found" in data["error"]
     assert data.get("query") == "test query"
+
+
+def test_search_json_emits_error_object_on_search_failure(tmp_path):
+    """In --json mode, a search failure also produces a JSON error object.
+
+    Regression guard for failures after Indexer initialization succeeds: the
+    search() call itself must stay inside the exception-to-JSON wrapper.
+    """
+    from unittest.mock import Mock, patch as mock_patch
+
+    failing_indexer = Mock()
+    failing_indexer.search.side_effect = RuntimeError("vector store unavailable")
+
+    runner = CliRunner()
+    with mock_patch("gptme_rag.cli.Indexer", return_value=failing_indexer):
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test query",
+                "--persist-dir",
+                str(tmp_path / "index"),
+                "--json",
+            ],
+        )
+
+    assert result.exit_code != 0, "Expected non-zero exit on search failure"
+    assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
+
+    data = json.loads(result.output.strip())
+    assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
+    assert "vector store unavailable" in data["error"]
+    assert data.get("query") == "test query"
