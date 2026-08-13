@@ -398,10 +398,16 @@ def search(
             try:
                 scoring_weights = json.loads(weights)
             except json.JSONDecodeError as e:
-                console.print(f"❌ Invalid weights JSON: {e}", style="red")
+                if output_json:
+                    print(json.dumps({"error": f"Invalid weights JSON: {e}", "query": query}))
+                else:
+                    console.print(f"❌ Invalid weights JSON: {e}", style="red")
                 return
             except Exception as e:
-                console.print(f"❌ Error parsing weights: {e}", style="red")
+                if output_json:
+                    print(json.dumps({"error": f"Error parsing weights: {e}", "query": query}))
+                else:
+                    console.print(f"❌ Error parsing weights: {e}", style="red")
                 return
 
         # Redirect stdout to suppress ChromaDB/model-loading noise that would
@@ -542,22 +548,29 @@ def search(
                 file=sys.stderr,
             )
         results = []
-        for i, doc in enumerate(documents):
-            relevance = max(0.0, min(1.0, float(1 - distances[i]))) if distances else None
-            content = get_expanded_content(doc, expand, indexer)
-            result: dict = {
-                "source": doc.metadata.get("source", "unknown"),
-                "relevance": relevance,
-                "content": content,
-                "metadata": {
-                    k: v
-                    for k, v in doc.metadata.items()
-                    if k not in ("source",)  # already top-level
-                },
-            }
-            if explain and explanations:
-                result["explanation"] = explanations[i]
-            results.append(result)
+        try:
+            for i, doc in enumerate(documents):
+                relevance = max(0.0, min(1.0, float(1 - distances[i]))) if distances else None
+                content = get_expanded_content(doc, expand, indexer)
+                result: dict = {
+                    "source": doc.metadata.get("source", "unknown"),
+                    "relevance": relevance,
+                    "content": content,
+                    "metadata": {
+                        k: v
+                        for k, v in doc.metadata.items()
+                        if k not in ("source",)  # already top-level
+                    },
+                }
+                if explain and explanations:
+                    result["explanation"] = explanations[i]
+                results.append(result)
+        except Exception as e:
+            # get_expanded_content() can raise (e.g. ChunkMerger on a corrupted
+            # index entry). In JSON mode the caller expects a JSON error object
+            # on stdout — emit one before re-raising.
+            print(json.dumps({"error": str(e), "query": query}))
+            raise
         # Always compute total_tokens from raw content for consistent semantics.
         # context.total_tokens adds XML formatting overhead and query tokens that
         # are not part of the returned content — use raw content counts instead.
