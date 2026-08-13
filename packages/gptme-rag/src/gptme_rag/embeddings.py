@@ -76,9 +76,10 @@ def _default_openrouter_cache_path() -> Path:
 class _SQLiteEmbeddingCache:
     """Small SQLite cache keyed by embedding model and content hash.
 
-    Bounded by ``max_rows``: when the table exceeds that count after an insert
-    batch, the oldest entries (by ``accessed_at``) are pruned to keep the file
-    from growing without bound.
+    Bounded by ``max_rows``: before each insert batch, the oldest entries (by
+    ``accessed_at``) are pruned to make room so that freshly inserted rows are
+    never evicted.  If the batch itself exceeds ``max_rows``, it is truncated to
+    the last ``max_rows`` items before the prune/insert step.
     """
 
     DEFAULT_MAX_ROWS = 100_000  # ~3-4 GB at 3072-dim float32; safe default
@@ -132,24 +133,31 @@ class _SQLiteEmbeddingCache:
     def put_many(self, model: str, items: list[tuple[str, list[float]]]) -> None:
         if not items:
             return
+        # If the batch itself exceeds max_rows, keep only the last max_rows items.
+        if len(items) > self.max_rows:
+            items = items[-self.max_rows :]
 
         now = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
         with self.lock:
-            self.conn.executemany(
-                f"INSERT OR REPLACE INTO embeddings "
-                f"(model, content_hash, embedding_json, accessed_at) VALUES (?, ?, ?, ({now}))",
-                [(model, content_hash, json.dumps(vector)) for content_hash, vector in items],
-            )
-            # Prune oldest entries when we exceed the row cap.
+            # Prune BEFORE inserting so freshly inserted rows always survive.
+            # All rows in an executemany batch get the same accessed_at timestamp,
+            # so a post-insert prune has no tiebreaker and can arbitrarily evict
+            # just-inserted entries.  Pre-emptively free (len(items)) slots instead.
             row_count = self.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-            if row_count > self.max_rows:
-                excess = row_count - self.max_rows
+            target = self.max_rows - len(items)
+            if row_count > target:
+                excess = row_count - target
                 self.conn.execute(
                     "DELETE FROM embeddings WHERE (model, content_hash) IN ("
                     "  SELECT model, content_hash FROM embeddings ORDER BY accessed_at ASC LIMIT ?"
                     ")",
                     (excess,),
                 )
+            self.conn.executemany(
+                f"INSERT OR REPLACE INTO embeddings "
+                f"(model, content_hash, embedding_json, accessed_at) VALUES (?, ?, ?, ({now}))",
+                [(model, content_hash, json.dumps(vector)) for content_hash, vector in items],
+            )
             self.conn.commit()
 
 

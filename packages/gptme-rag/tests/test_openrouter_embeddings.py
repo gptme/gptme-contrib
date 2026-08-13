@@ -201,9 +201,63 @@ def test_sqlite_cache_prunes_oldest_entries_when_over_max_rows(tmp_path: Path):
     cache.put_many(model, [(h_extra, [99.0])])
 
     row_count = cache.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-    assert (
-        row_count <= max_rows
-    ), f"Cache should not exceed max_rows={max_rows} after prune, got {row_count}"
+    assert row_count <= max_rows, (
+        f"Cache should not exceed max_rows={max_rows} after prune, got {row_count}"
+    )
     # The freshly-inserted entry must survive (it was just written).
     hit = cache.get_many(model, [h_extra])
     assert h_extra in hit, "Freshly inserted entry was pruned — recency ordering is wrong"
+
+
+def test_sqlite_cache_batch_insert_preserves_all_new_items(tmp_path: Path):
+    """put_many must never prune items from the batch it is currently inserting.
+
+    Regression: with a post-insert prune and all batch rows sharing the same
+    ``accessed_at`` timestamp (executemany evaluates the SQL expression once),
+    ORDER BY accessed_at ASC has no tiebreaker and can arbitrarily delete
+    freshly-inserted entries.
+    """
+    from gptme_rag.embeddings import _SQLiteEmbeddingCache
+
+    cache_path = tmp_path / "cache.sqlite"
+    max_rows = 5
+    cache = _SQLiteEmbeddingCache(path=cache_path, max_rows=max_rows)
+
+    model = "test-model"
+    # Fill the cache to capacity with old entries.
+    for i in range(max_rows):
+        h = _SQLiteEmbeddingCache.content_hash(f"old-{i}")
+        cache.put_many(model, [(h, [float(i)])])
+
+    # Insert a batch of 3 new items — all share the same accessed_at timestamp.
+    # With a post-insert prune and no tiebreaker, any of these could be evicted.
+    batch = [(_SQLiteEmbeddingCache.content_hash(f"new-{i}"), [float(100 + i)]) for i in range(3)]
+    batch_hashes = {h for h, _ in batch}
+    cache.put_many(model, batch)
+
+    row_count = cache.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    assert row_count <= max_rows, f"Cache exceeded max_rows={max_rows}: {row_count}"
+
+    hits = cache.get_many(model, list(batch_hashes))
+    missing = batch_hashes - set(hits.keys())
+    assert not missing, f"Freshly inserted items were pruned: {missing}"
+
+
+def test_sqlite_cache_oversized_batch_capped_to_max_rows(tmp_path: Path):
+    """A single put_many batch larger than max_rows must not exceed the cap."""
+    from gptme_rag.embeddings import _SQLiteEmbeddingCache
+
+    cache_path = tmp_path / "cache.sqlite"
+    max_rows = 5
+    cache = _SQLiteEmbeddingCache(path=cache_path, max_rows=max_rows)
+
+    model = "test-model"
+    # 2*max_rows items in one shot — previously, all got the same timestamp so
+    # the prune arbitrarily deleted half of the just-inserted rows.
+    batch = [
+        (_SQLiteEmbeddingCache.content_hash(f"doc-{i}"), [float(i)]) for i in range(max_rows * 2)
+    ]
+    cache.put_many(model, batch)
+
+    row_count = cache.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    assert row_count == max_rows, f"Expected exactly {max_rows} rows, got {row_count}"
