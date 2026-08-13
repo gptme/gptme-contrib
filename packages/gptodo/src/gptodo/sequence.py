@@ -99,7 +99,8 @@ def simulate_sequence(
             filters apply at every step, not just the first pick.
         tasks_dict: Full name -> task lookup used for dependency resolution
             (must include tasks outside ``candidates``, e.g. already-done deps).
-        all_tasks: Full task list, used to rebuild the dependency graph.
+        all_tasks: Full task list, used to build the dependency graph that
+            unblocking-power scoring is computed from.
         limit: Maximum number of tasks to pick.
         order: "priority" (default) or "unblock".
         issue_cache: Optional URL-state cache for URL-based `requires`.
