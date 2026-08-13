@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Iterator
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -28,6 +29,69 @@ DEFAULT_BUDGETS = {
     "ml-optional": 2000,  # MB, for packages with optional ML deps
     "other": 500,  # MB, catch-all default
 }
+
+
+class CheckResult:
+    """Result of check_packages.
+
+    Evaluates as ``bool`` for backward-compatible ``if not check_packages(...)``
+    checks (returns ``all_pass``).  Also supports tuple-unpacking as
+    ``(all_pass, pre_measurement_failures, budget_overages)`` so callers that
+    already unpack the tuple continue to work unchanged.
+
+    Prefer attribute access for new code:
+    - ``result.all_pass`` — overall pass/fail
+    - ``result.config_errors`` — packages with invalid budget config
+    - ``result.install_failures`` — packages that failed to install
+    - ``result.budget_overages`` — packages that exceeded their size budget
+    - ``result.pre_measurement_failures`` — config_errors + install_failures (combined)
+    """
+
+    def __init__(
+        self,
+        all_pass: bool,
+        config_errors: int,
+        install_failures: int,
+        budget_overages: int,
+    ) -> None:
+        self.all_pass = all_pass
+        self.config_errors = config_errors
+        self.install_failures = install_failures
+        self.budget_overages = budget_overages
+
+    @property
+    def pre_measurement_failures(self) -> int:
+        return self.config_errors + self.install_failures
+
+    def __bool__(self) -> bool:
+        return self.all_pass
+
+    def __iter__(self) -> Iterator:
+        """Yield (all_pass, pre_measurement_failures, budget_overages) for tuple unpacking."""
+        yield self.all_pass
+        yield self.pre_measurement_failures
+        yield self.budget_overages
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, tuple):
+            return tuple(self) == other
+        if isinstance(other, CheckResult):
+            return (
+                self.all_pass == other.all_pass
+                and self.config_errors == other.config_errors
+                and self.install_failures == other.install_failures
+                and self.budget_overages == other.budget_overages
+            )
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return (
+            f"CheckResult(all_pass={self.all_pass!r}, "
+            f"config_errors={self.config_errors!r}, "
+            f"install_failures={self.install_failures!r}, "
+            f"budget_overages={self.budget_overages!r})"
+        )
+
 
 # Keywords in dependency lists that indicate an ML package (ml-optional budget)
 _ML_DEP_KEYWORDS = ("torch", "tensorflow", "jax", "onnx", "transformers")
@@ -230,25 +294,35 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
             return None
 
 
-def print_failure_summary(pre_measurement_failures: int, budget_overages: int) -> None:
-    """Print only the failure classes that actually occurred."""
-    # Keep this wording broad and honest. The per-package lines already carry the
-    # specific reason (bad config, install error, timeout, etc.), while the old
-    # summary incorrectly claimed every failure was a budget overage.
-    if pre_measurement_failures > 0:
-        plural = "package" if pre_measurement_failures == 1 else "packages"
+def print_failure_summary(result: CheckResult) -> None:
+    """Print only the failure classes that actually occurred.
+
+    Uses precise labels for each class so the summary directs developers to the
+    right place:
+    - config errors → check pyproject.toml
+    - install failures → check the install command / environment
+    - budget overages → trim dependencies or raise the budget
+    """
+    if result.config_errors > 0:
+        plural = "package" if result.config_errors == 1 else "packages"
         print(
-            f"✗ {pre_measurement_failures} {plural} failed before size measurement "
+            f"✗ {result.config_errors} {plural} had invalid budget configuration in pyproject.toml "
             f"(see per-package output above)"
         )
-    if budget_overages > 0:
-        plural = "package" if budget_overages == 1 else "packages"
-        print(f"✗ {budget_overages} {plural} exceeded their install-size budget")
+    if result.install_failures > 0:
+        plural = "package" if result.install_failures == 1 else "packages"
+        print(
+            f"✗ {result.install_failures} {plural} failed to install "
+            f"(see per-package output above)"
+        )
+    if result.budget_overages > 0:
+        plural = "package" if result.budget_overages == 1 else "packages"
+        print(f"✗ {result.budget_overages} {plural} exceeded their install-size budget")
 
 
 def check_packages(
     packages_dir: Path, verbose: bool = False, only: str | None = None
-) -> tuple[bool, int, int]:
+) -> CheckResult:
     """Check all packages in packages/ directory.
 
     Args:
@@ -256,11 +330,12 @@ def check_packages(
             builds a venv each, so local runs want a single target).
 
     Returns:
-        Tuple of (all_pass, pre_measurement_failures, budget_overages).
-        all_pass is True if both pre_measurement_failures and budget_overages are 0.
+        :class:`CheckResult` with counts for each failure class.
+        Evaluates as ``bool`` for backward-compatible ``if not check_packages(...)`` use.
     """
     all_pass = True
-    pre_measurement_failures = 0
+    config_errors = 0
+    install_failures = 0
     budget_overages = 0
     packages_dir = packages_dir.resolve()
 
@@ -271,7 +346,7 @@ def check_packages(
         package_paths = [p for p in package_paths if p.name == only]
         if not package_paths:
             print(f"❌ No package named {only!r} in {packages_dir}")
-            return False, 0, 0
+            return CheckResult(False, 0, 0, 0)
 
     for package_path in package_paths:
         # Skip symlinks (they point to gptme-contrib submodule)
@@ -291,7 +366,7 @@ def check_packages(
         except (ValueError, TypeError) as e:
             print(f"✗ {package_path.name:40} bad max_install_mb in pyproject.toml: {e}")
             all_pass = False
-            pre_measurement_failures += 1
+            config_errors += 1
             continue
 
         # Read the canonical distribution name from pyproject.toml [project] name.
@@ -309,7 +384,7 @@ def check_packages(
         if size_mb is None:
             print(f"✗ {package_path.name:40} installation failed")
             all_pass = False
-            pre_measurement_failures += 1
+            install_failures += 1
             continue
 
         status = "✓" if size_mb <= budget_mb else "✗"
@@ -322,7 +397,7 @@ def check_packages(
             all_pass = False
             budget_overages += 1
 
-    return all_pass, pre_measurement_failures, budget_overages
+    return CheckResult(all_pass, config_errors, install_failures, budget_overages)
 
 
 if __name__ == "__main__":
@@ -343,15 +418,13 @@ if __name__ == "__main__":
     print("Checking package install sizes...")
     print()
 
-    all_pass, pre_measurement_failures, budget_overages = check_packages(
-        packages_dir, args.verbose, args.package
-    )
+    result = check_packages(packages_dir, args.verbose, args.package)
 
-    if all_pass:
+    if result:
         print()
         print("✓ All packages within budget")
         sys.exit(0)
     else:
         print()
-        print_failure_summary(pre_measurement_failures, budget_overages)
+        print_failure_summary(result)
         sys.exit(1)

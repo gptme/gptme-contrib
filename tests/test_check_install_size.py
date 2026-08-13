@@ -407,13 +407,17 @@ def test_check_packages_skips_no_pyproject():
 
 
 def test_print_failure_summary_lists_only_present_classes(capsys):
-    """Failure summary should name pre-measurement failures and budget overages separately."""
+    """Failure summary should name config errors, install failures, and budget overages separately."""
     import check_install_size
 
-    check_install_size.print_failure_summary(2, 1)
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=2, install_failures=1, budget_overages=1
+    )
+    check_install_size.print_failure_summary(result)
 
     out = capsys.readouterr().out
-    assert "2 packages failed before size measurement" in out
+    assert "2 packages had invalid budget configuration" in out
+    assert "1 package failed to install" in out
     assert "1 package exceeded their install-size budget" in out
 
 
@@ -421,8 +425,56 @@ def test_print_failure_summary_omits_zero_count_classes(capsys):
     """Zero-count failure classes should not print a misleading summary line."""
     import check_install_size
 
-    check_install_size.print_failure_summary(0, 1)
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=0, install_failures=0, budget_overages=1
+    )
+    check_install_size.print_failure_summary(result)
 
     out = capsys.readouterr().out
-    assert "failed before size measurement" not in out
+    assert "invalid budget configuration" not in out
+    assert "failed to install" not in out
     assert "1 package exceeded their install-size budget" in out
+
+
+def test_check_result_bool_semantics():
+    """CheckResult.__bool__ returns all_pass so 'if not result' works for failed checks."""
+    import check_install_size
+
+    passing = check_install_size.CheckResult(True, 0, 0, 0)
+    failing = check_install_size.CheckResult(False, 1, 0, 0)
+
+    assert bool(passing) is True
+    assert bool(failing) is False
+    # Crucially: a failing tuple is always truthy; CheckResult is not
+    assert not failing
+
+
+def test_check_result_distinguishes_config_errors_from_install_failures(capsys):
+    """Config errors and install failures should produce distinct summary lines."""
+    import check_install_size
+
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=1, install_failures=2, budget_overages=0
+    )
+    check_install_size.print_failure_summary(result)
+
+    out = capsys.readouterr().out
+    # Config error → directs to pyproject.toml, not install command
+    assert "invalid budget configuration" in out
+    # Install failure → directs to install command
+    assert "2 packages failed to install" in out
+    # No budget overage line
+    assert "exceeded their install-size budget" not in out
+
+
+def test_check_result_tuple_unpacking_backward_compat():
+    """Tuple-unpacking as (all_pass, pre_measurement_failures, budget_overages) still works."""
+    import check_install_size
+
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=1, install_failures=2, budget_overages=3
+    )
+    all_pass, pre_measurement_failures, budget_overages = result
+    assert all_pass is False
+    assert pre_measurement_failures == 3  # config_errors + install_failures
+    assert budget_overages == 3
