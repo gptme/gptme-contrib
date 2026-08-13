@@ -94,6 +94,9 @@ from gptodo.subagent import (
     spawn_agent,
 )
 
+# Import greedy sequential ("what's next, then next") simulation
+from gptodo.sequence import SequenceStep, shortfall_note, simulate_sequence
+
 # Import unblocking functionality with fan-in support
 from gptodo.unblock import auto_unblock_with_fan_in
 
@@ -3002,16 +3005,51 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     default=None,
     help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
 )
-def next_(output_json, use_cache, pool_filter, exclude_pool):
+@click.option(
+    "--limit",
+    "-n",
+    default=1,
+    type=click.IntRange(min=1),
+    help=(
+        "Show the next N tasks as a simulated sequence, not just the top one. "
+        "Each pick is 'completed' in memory, so tasks that only become "
+        "unblocked partway down the list still appear. Default: 1."
+    ),
+)
+@click.option(
+    "--order",
+    type=click.Choice(["priority", "unblock"]),
+    default="priority",
+    help=(
+        "priority (default): greedy by the normal next-task ordering — "
+        "literally 'what's next, then next'. "
+        "unblock: at each step take the task that unblocks the most downstream "
+        "work — surfaces the critical path rather than the priority path."
+    ),
+)
+def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
     """Show the highest priority ready (unblocked) task.
 
     Picks from new or active tasks that have no dependencies
     or whose dependencies are all completed.
 
+    With --limit N, simulates working the queue sequentially: after each pick
+    the task is treated as done (in memory only — task files are never
+    written), the ready set is recomputed, and newly unblocked tasks become
+    eligible. This surfaces work that `gptodo ready` cannot show, because
+    `ready` only ever lists what is unblocked *right now*.
+
     Use --json for machine-readable output in autonomous workflows.
     Use --use-cache to also check URL-based 'requires' against cached issue states.
     Use --pool to filter by work pool; default hides non-default pools (e.g. frontier).
     Use --pool all to see every pool; --pool frontier for frontier sessions only.
+
+    Examples:
+
+    \b
+        gptodo next                       # top ready task (unchanged)
+        gptodo next --limit 5             # next 5, in unblocking order
+        gptodo next -n 5 --order unblock  # critical path first
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -3095,31 +3133,120 @@ def next_(output_json, use_cache, pool_filter, exclude_pool):
     nodes = build_dependency_graph(all_tasks)
     power = compute_unblocking_power(nodes)
 
-    # Sort tasks: priority (high first), then unblocking power (high first), then age (oldest first)
-    ready_tasks.sort(
-        key=lambda t: (
-            -t.priority_rank,
-            -power.get(t.name, 0),
-            t.created,
-        )
-    )
+    # Sort tasks. Default ("priority"): priority (high first), then unblocking
+    # power (high first), then age (oldest first). "unblock" leads with power.
+    # Gate: --order is ignored when limit == 1, preserving the byte-identical
+    # contract for `next --json` and `next --json --limit 1` callers.
+    if order == "unblock" and limit > 1:
+        ready_tasks.sort(key=lambda t: (-power.get(t.name, 0), -t.priority_rank, t.created))
+    else:
+        ready_tasks.sort(key=lambda t: (-t.priority_rank, -power.get(t.name, 0), t.created))
 
     # Get the highest priority ready task
     next_task = ready_tasks[0]
 
+    # Multi-task mode: simulate working the queue sequentially so tasks that are
+    # only unblocked partway down the list still show up. In-memory only.
+    steps: list[SequenceStep] = []
+    note: str | None = None
+    if limit > 1:
+        steps = simulate_sequence(
+            candidates=workable_tasks,
+            tasks_dict=tasks_dict,
+            all_tasks=all_tasks,
+            limit=limit,
+            order=order,
+            issue_cache=issue_cache,
+        )
+        note = shortfall_note(len(steps), limit)
+
     # JSON output for machine consumption
     if output_json:
-        result = {
+        result: Dict[str, Any] = {
             "next_task": task_to_dict(next_task),
             "alternatives": [task_to_dict(t) for t in ready_tasks[1:4]],  # Top 3 alternatives
         }
+        if limit > 1:
+            # Extra keys only in multi-task mode, so `next --json` and
+            # `next --json --limit 1` stay byte-identical for existing callers.
+            result["order"] = order
+            result["requested"] = limit
+            result["reachable"] = len(steps)
+            result["complete"] = note is None
+            result["note"] = note
+            result["sequence"] = [step.to_dict() for step in steps]
         print(json.dumps(result, indent=2))
+        return
+
+    if limit > 1:
+        _render_next_sequence(console, steps, all_tasks, order, note)
         return
 
     # Show task using same format as show command
     console.print(f"\n[bold blue]🏃 Next Task:[/] (Priority: {next_task.priority or 'none'})")
     # Call show command directly instead of using callback
     show(next_task.name)
+
+
+def _render_next_sequence(
+    console: Console,
+    steps: list[SequenceStep],
+    all_tasks: list[TaskInfo],
+    order: str,
+    note: str | None,
+) -> None:
+    """Render the simulated sequence, stating why each task is in it."""
+    tasks_by_date = sorted(all_tasks, key=lambda t: t.created)
+    name_to_enum_id = {task.name: i for i, task in enumerate(tasks_by_date, 1)}
+
+    order_label = (
+        "priority — what's next, then next"
+        if order == "priority"
+        else "unblock — critical path first"
+    )
+    plural = "task" if len(steps) == 1 else "tasks"
+    console.print(
+        f"\n[bold blue]🏃 Next {len(steps)} {plural}[/] [dim](order: {order_label})[/]",
+        highlight=False,
+    )
+
+    table = Table()
+    table.add_column("#", style="bold", justify="right", no_wrap=True)
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Priority", style="yellow")
+    # overflow="fold": task names must stay copy-pasteable into `gptodo show`,
+    # so wrap them rather than truncating with an ellipsis.
+    table.add_column("Task", style="white", overflow="fold")
+    table.add_column("Why", style="green", overflow="fold")
+
+    for step in steps:
+        task = step.task
+        # Escape task names: they come from filenames, which may legally contain
+        # square brackets that rich would otherwise parse as markup.
+        if step.unblocked_by is None:
+            why = "[dim](already ready)[/]"
+        else:
+            blocker = markup_escape(step.unblocked_by)
+            why = f"unblocked by #{step.unblocked_by_position} {blocker}"
+        table.add_row(
+            f"#{step.position}",
+            str(name_to_enum_id.get(task.name, "?")),
+            task.priority or "none",
+            markup_escape(task.name),
+            why,
+        )
+
+    console.print(table)
+
+    if note:
+        # highlight=False: rich's number highlighter would otherwise splice ANSI
+        # codes into "1 of 5", making the message hard to read and to grep.
+        console.print(f"\n[yellow]⚠ {note}.[/]", highlight=False)
+
+    console.print(
+        "\n[dim]Simulated: each task is treated as done to reveal the next one. "
+        "No task files were modified.[/]"
+    )
 
 
 @cli.command("stale")

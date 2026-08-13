@@ -66,6 +66,46 @@ gptodo expire --days 60          # tighter window
 gptodo expire --state backlog    # only reap backlog
 ```
 
+### Sequential Planning (`next --limit`)
+
+`gptodo ready` and a bare `gptodo next` answer a **parallel** question: what is
+unblocked *right now*. If task A unblocks task B, B is invisible to both until
+A is actually completed — so a deep queue can look one task shallow.
+
+`gptodo next --limit N` answers the **sequential** question instead. It greedily
+simulates completing each pick (in memory — task files are never written),
+recomputes the ready set, and lets newly unblocked tasks join the list:
+
+```bash
+gptodo next                       # top ready task (unchanged)
+gptodo next --limit 5             # next 5, in unblocking order
+gptodo next -n 5 --order unblock  # critical path first
+gptodo next --limit 5 --json      # ordered array with attribution
+```
+
+Every item past the first states *why* it is there — `unblocked by #3
+<task>`, or `(already ready)` if it needed nothing.
+
+Two orderings:
+
+| `--order` | Behaviour |
+|-----------|-----------|
+| `priority` (default) | Greedy by the normal `next` ordering — literally "what's next, then next". |
+| `unblock` | At each step take the task that unblocks the most downstream work — surfaces the **critical path** rather than the priority path. |
+
+If fewer than N tasks are reachable, that is stated explicitly (`only 3 of 5
+reachable — nothing further is unblocked by this sequence`) rather than
+silently returning a short list. `--pool` / `--exclude-pool` / `--use-cache`
+apply at every step, not just the first pick, and dependency cycles terminate
+the simulation instead of hanging it.
+
+`--limit 1` (and omitting the flag) produce byte-identical output to the
+previous behaviour, including the `--json` shape — autonomous sessions calling
+`gptodo next --json` are unaffected. The `--order` flag is also ignored when
+`--limit 1` (it only changes sequencing within a multi-task cascade). In
+multi-task mode the JSON gains `sequence`, `order`, `requested`, `reachable`,
+`complete`, and `note` keys alongside the unchanged `next_task` / `alternatives`.
+
 ### Machine-Readable Output (`--json`)
 
 Scripts should parse `--json` rather than grep the rendered human output (the
