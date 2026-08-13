@@ -174,7 +174,7 @@ def _get_lsp_diagnostics(file: Path, workspace: Path | None = None) -> str | Non
     if info_count:
         summary.append(f"{info_count} info")
 
-        header = f"Found {', '.join(summary)}:\n\n" if summary else ""
+    header = f"Found {', '.join(summary)}:\n\n" if summary else ""
     return header + "\n".join(lines)
 
 

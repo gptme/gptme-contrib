@@ -213,3 +213,79 @@ def test_lsp_command_returns_generator():
     messages = list(result)
     assert len(messages) == 1
     assert "LSP Status" in messages[0].content
+
+
+def test_initialize_includes_workspace_folders():
+    """Regression: initialize must send workspaceFolders for full-workspace indexing.
+
+    Without workspaceFolders, pyright runs in open-files-only mode and rename/
+    references silently under-report cross-file edits (only the target file is
+    indexed instead of the whole project).
+    """
+    from gptme_lsp.lsp_client import LSPServer
+
+    server = LSPServer(
+        name="test",
+        command=["true"],
+        workspace=Path("/tmp/workspace-folders-test"),
+    )
+    sent = {}
+
+    def fake_send_request(method, params):
+        sent[method] = params
+        # Return a truthy result so _initialize proceeds
+        return {"capabilities": {}}
+
+    with patch.object(server, "_send_request", side_effect=fake_send_request):
+        server._initialize()
+
+    init_params = sent.get("initialize", {})
+    assert "workspaceFolders" in init_params
+    folders = init_params["workspaceFolders"]
+    assert isinstance(folders, list) and len(folders) == 1
+    assert folders[0]["uri"] == Path("/tmp/workspace-folders-test").as_uri()
+    assert folders[0]["name"] == "workspace-folders-test"
+
+
+def test_diagnostics_formats_without_info(tmp_path):
+    """Regression: diagnostics must not crash when no info-level diagnostics exist.
+
+    The `header` variable was previously nested inside `if info_count:`, so when a
+    file had only errors/warnings (info_count == 0) it was never assigned and the
+    formatter raised UnboundLocalError.
+    """
+    from gptme_lsp.lsp_client import Diagnostic
+    from gptme_lsp.tools import lsp_tool
+
+    test_file = tmp_path / "module.py"
+    test_file.write_text("def foo():\n    pass\n")
+
+    diagnostics = [
+        Diagnostic(
+            file=test_file,
+            line=1,
+            column=1,
+            severity="error",
+            message="expected expression",
+        ),
+        Diagnostic(
+            file=test_file,
+            line=2,
+            column=5,
+            severity="warning",
+            message="unused variable",
+        ),
+    ]
+    fake_server = MagicMock()
+    fake_server.get_diagnostics.return_value = diagnostics
+
+    with (
+        patch.object(lsp_tool, "_get_or_start_server", return_value=fake_server),
+        patch.object(lsp_tool, "_get_workspace", return_value=tmp_path),
+    ):
+        result = lsp_tool._get_lsp_diagnostics(test_file, tmp_path)
+
+    assert result is not None
+    assert "Found 1 error(s), 1 warning(s)" in result
+    assert "Line 1: expected expression" in result
+    assert "Line 2: unused variable" in result
