@@ -414,6 +414,24 @@ def test_waiting_task_never_enters_the_cascade(tmp_path: Path, monkeypatch) -> N
     assert [s["task"]["name"] for s in payload["sequence"]] == ["root2"]
 
 
+def test_reported_state_is_real_not_simulated(tmp_path: Path, monkeypatch) -> None:
+    """Each step reports the task's actual state, not the simulated 'done'.
+
+    The simulation marks picks as done to reveal what they unblock; leaking that
+    into the output would tell the reader the work is already finished.
+    """
+    _chain_fixture(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["next", "--json", "--limit", "3"])
+    assert result.exit_code == 0, result.output
+    states = {s["task"]["name"]: s["task"]["state"] for s in _payload(result.output)["sequence"]}
+
+    assert states == {"chain-a": "todo", "chain-b": "backlog", "chain-c": "backlog"}
+    assert "done" not in states.values()
+
+
 def test_simulation_does_not_write_to_task_files(tmp_path: Path, monkeypatch) -> None:
     """The cascade is simulated in memory — task files must be untouched."""
     tasks_dir = _chain_fixture(tmp_path)
