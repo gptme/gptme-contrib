@@ -727,7 +727,12 @@ def watch(
 ):
     """Watch directory for changes and update index automatically."""
     try:
-        # Initialize indexer with explicit arguments
+        # Initialize indexer with explicit arguments.
+        # allow_recreate=False when an explicit embedding function is given:
+        # watch is a long-running daemon — silently deleting the entire collection
+        # because the stored model differs from the requested model would cause
+        # permanent data loss. A warning is emitted instead and the existing
+        # collection is kept unchanged, matching the protection already in search.
         indexer = Indexer(
             persist_directory=persist_dir,
             enable_persist=True,
@@ -735,6 +740,7 @@ def watch(
             device=device or "cpu",
             chunk_size=chunk_size,  # Now optional in Indexer
             chunk_overlap=chunk_overlap,  # Now optional in Indexer
+            allow_recreate=embedding_function is None or embedding_function == "auto",
         )
 
         # Initial indexing

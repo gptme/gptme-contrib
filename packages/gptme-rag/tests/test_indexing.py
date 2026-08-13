@@ -1096,3 +1096,53 @@ def test_search_explicit_embedding_function_does_not_wipe_mismatched_collection(
 
     with pytest.raises(RuntimeError, match="stored embedding model"):
         indexer.search("test query")
+
+
+def test_watch_explicit_embedding_function_does_not_wipe_mismatched_collection(
+    tmp_path,
+):
+    """watch must not delete a collection when --embedding-function mismatches the stored model.
+
+    Regression test for P1: the watch command did not pass allow_recreate=False when
+    constructing the Indexer (unlike search). When an explicit --embedding-function differed
+    from the stored model, Indexer set need_recreate=True and silently deleted the entire
+    collection — making watch a destructive daemon-like command instead of a safe watcher.
+
+    The fix passes allow_recreate=False when an explicit embedding function is given,
+    matching the protection already in the search command.
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Simulate a collection stored with minilm (384-dim).
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "minilm",
+            "embedding_backend": "sentence-transformers",
+        },
+    )
+    col.add(ids=["doc-1"], embeddings=[[0.1] * 384], documents=["a minilm doc"])
+    assert col.count() == 1
+    del client
+
+    # Constructing with 'modernbert' (768-dim) and allow_recreate=False (what watch now does
+    # when an explicit --embedding-function is given) must NOT destroy the minilm collection.
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="modernbert",
+        collection_name="default",
+        allow_recreate=False,
+    )
+
+    # Collection must still exist and contain the original document.
+    assert (
+        indexer.collection.count() == 1
+    ), "Collection was destroyed — watch command data-loss regression"
