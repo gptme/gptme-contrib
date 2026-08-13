@@ -29,6 +29,16 @@ default_persist_dir = Path.home() / ".cache" / "gptme" / "rag"
 EMBEDDING_FUNCTION_CHOICES = ["auto", "modernbert", "minilm", "mpnet", "openrouter", "default"]
 
 
+class _JsonWarningCaptureHandler(logging.Handler):
+    def __init__(self, messages: list[str]):
+        super().__init__(level=logging.WARNING)
+        self.messages = messages
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(self.format(record))
+
+
 class ChunkMerger:
     @staticmethod
     def find_best_overlap(text1: str, text2: str) -> int:
@@ -391,6 +401,10 @@ def search(
     # In json mode: skip Rich status (avoids stream mixing that pollutes json output)
     # and redirect stderr too (suppresses model-loading progress bars like "Loading weights").
     status_ctx = contextlib.nullcontext() if output_json else console.status("Initializing...")
+    captured_warnings: list[str] = []
+    warning_handler = _JsonWarningCaptureHandler(captured_warnings) if output_json else None
+    if warning_handler is not None:
+        logging.getLogger().addHandler(warning_handler)
     with status_ctx:
         # Parse custom weights if provided
         scoring_weights = None
@@ -417,78 +431,88 @@ def search(
         # removed), which would corrupt JSON output for callers.
         # In non-json mode, keep stderr visible so callers can diagnose
         # partial failures (missing model, fallback used, etc.).
-        with open(os.devnull, "w") as devnull:
-            stderr_ctx = (
-                contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext()
-            )
-            try:
-                with contextlib.redirect_stdout(devnull), stderr_ctx:
-                    # Initialize indexer with explicit arguments.
-                    # allow_recreate=False: search is read-only — passing an explicit
-                    # --embedding-function that differs from the stored model must never
-                    # silently delete the collection (data loss). A warning is emitted
-                    # instead and the existing collection is kept unchanged.
-                    indexer = Indexer(
-                        persist_directory=persist_dir,
-                        enable_persist=True,
-                        scoring_weights=scoring_weights,
-                        embedding_function=embedding_function or "auto",
-                        device=device or "cpu",
-                        allow_recreate=False,
-                    )
-                    assembler = ContextAssembler(max_tokens=max_tokens)
-
-                    # Combine paths and filters for search
-                    search_paths = list(paths)
-                    if filter:
-                        # If no paths were specified but filters are present,
-                        # search from root and apply filters
-                        if not paths:
-                            search_paths = [Path(".")]
-                        logger.debug(f"Using path filters: {filter}")
-
-                    explanations: list | None = None
-                    if explain:
-                        documents, distances, explanations = indexer.search(
-                            query,
-                            n_results=n_results,
-                            paths=search_paths,
-                            path_filters=filter,
-                            explain=True,
+        try:
+            with open(os.devnull, "w") as devnull:
+                stderr_ctx = (
+                    contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext()
+                )
+                try:
+                    with contextlib.redirect_stdout(devnull), stderr_ctx:
+                        # Initialize indexer with explicit arguments.
+                        # allow_recreate=False: search is read-only — passing an explicit
+                        # --embedding-function that differs from the stored model must never
+                        # silently delete the collection (data loss). A warning is emitted
+                        # instead and the existing collection is kept unchanged.
+                        indexer = Indexer(
+                            persist_directory=persist_dir,
+                            enable_persist=True,
+                            scoring_weights=scoring_weights,
+                            embedding_function=embedding_function or "auto",
+                            device=device or "cpu",
+                            allow_recreate=False,
                         )
-                    else:
-                        documents, distances, _ = indexer.search(
-                            query, n_results=n_results, paths=search_paths, path_filters=filter
-                        )
+                        assembler = ContextAssembler(max_tokens=max_tokens)
 
-                    # Assemble context window (must be inside try/except to catch errors in json mode)
-                    if documents:
-                        context = assembler.assemble_context(documents, user_query=query)
-                    else:
-                        context = None
-            except Exception as e:
-                # In json mode stderr is redirected to /dev/null, so an unhandled
-                # exception would produce a silent failure with no output on stdout
-                # and no traceback visible.  Emit a JSON error object so callers
-                # get a diagnosable response instead of empty stdout + non-zero exit.
-                if output_json:
-                    print(json.dumps({"error": str(e), "query": query}))
-                raise
+                        # Combine paths and filters for search
+                        search_paths = list(paths)
+                        if filter:
+                            # If no paths were specified but filters are present,
+                            # search from root and apply filters
+                            if not paths:
+                                search_paths = [Path(".")]
+                            logger.debug(f"Using path filters: {filter}")
+
+                        explanations: list | None = None
+                        if explain:
+                            documents, distances, explanations = indexer.search(
+                                query,
+                                n_results=n_results,
+                                paths=search_paths,
+                                path_filters=filter,
+                                explain=True,
+                            )
+                        else:
+                            documents, distances, _ = indexer.search(
+                                query, n_results=n_results, paths=search_paths, path_filters=filter
+                            )
+
+                        # Assemble context window (must be inside try/except to catch errors in json mode)
+                        if documents:
+                            context = assembler.assemble_context(documents, user_query=query)
+                        else:
+                            context = None
+                except Exception as e:
+                    # In json mode stderr is redirected to /dev/null, so an unhandled
+                    # exception would produce a silent failure with no output on stdout
+                    # and no traceback visible.  Emit a JSON error object so callers
+                    # get a diagnosable response instead of empty stdout + non-zero exit.
+                    if output_json:
+                        error_output: dict[str, object] = {"error": str(e), "query": query}
+                        if captured_warnings:
+                            error_output["warnings"] = captured_warnings
+                        print(json.dumps(error_output))
+                    raise
+        finally:
+            if warning_handler is not None:
+                logging.getLogger().removeHandler(warning_handler)
 
     if not documents:
         if output_json:
+            empty_output: dict[str, object] = {
+                "query": query,
+                "results": [],
+                "total_results": 0,
+                "context": {
+                    "total_tokens": 0,
+                    "truncated": False,
+                    "results_in_context": 0,
+                },
+            }
+            if captured_warnings:
+                empty_output["warnings"] = captured_warnings
             print(
                 json.dumps(
-                    {
-                        "query": query,
-                        "results": [],
-                        "total_results": 0,
-                        "context": {
-                            "total_tokens": 0,
-                            "truncated": False,
-                            "results_in_context": 0,
-                        },
-                    },
+                    empty_output,
                     indent=2,
                 )
             )
@@ -595,7 +619,7 @@ def search(
             if expand == "none"
             else False
         )
-        output = {
+        output: dict[str, object] = {
             "query": query,
             "total_results": len(results),
             "results": results,
@@ -605,6 +629,8 @@ def search(
                 "results_in_context": results_in_context,
             },
         }
+        if captured_warnings:
+            output["warnings"] = captured_warnings
         print(json.dumps(output, indent=2, default=str))
         return
 
