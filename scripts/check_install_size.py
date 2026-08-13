@@ -151,6 +151,15 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     "--python",
                     str(python_exe),
                     "--quiet",
+                    # --emit-index-url injects extra index URLs (e.g. the PyTorch CPU
+                    # wheel index for packages that need torch). uv's default strategy
+                    # stops at the first index that *has* the package, even when that
+                    # index doesn't carry the pinned version. unsafe-best-match tells uv
+                    # to search all declared indexes and pick the best version match.
+                    # This fixes "certifi==2026.7.22 not found" when PyPI has it but the
+                    # torch wheel index is searched first (gptme-contrib#1418 regression).
+                    "--index-strategy",
+                    "unsafe-best-match",
                     "-r",
                     str(req_file),
                     str(package_path),
