@@ -83,7 +83,4 @@ markers = [
 ]
 
 [tool.gptme-contrib]
-# gptme-rag installs sentence-transformers which pulls torch+CUDA (~7.3GB from PyPI)
-# until gptme/gptme-contrib#1416 (CPU-torch pin) lands. Reduce to ~1000 MB after
-# #1416 is merged and the measured size confirmed.
-max_install_mb = 8000
+max_install_mb = 1450
