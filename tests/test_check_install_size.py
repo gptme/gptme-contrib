@@ -240,7 +240,7 @@ def test_measure_install_size_timeout():
 
 
 def test_check_packages_pass_and_fail():
-    """check_packages returns True for passing packages and False when over budget."""
+    """check_packages reports budget overages separately from clean passes."""
     import check_install_size
 
     # Stub measure_install_size to return fixed sizes
@@ -270,12 +270,12 @@ def test_check_packages_pass_and_fail():
                 packages_dir, verbose=False, only="failing"
             )
 
-    assert result_pass is True
-    assert result_fail is False
+    assert result_pass == (True, 0, 0)
+    assert result_fail == (False, 0, 1)
 
 
 def test_check_packages_none_size_fails():
-    """check_packages returns False when measure_install_size returns None."""
+    """check_packages counts install failures before size measurement."""
     import check_install_size
 
     def fake_measure(package_path, package_name):
@@ -296,7 +296,7 @@ def test_check_packages_none_size_fails():
                 packages_dir, verbose=False, only="broken"
             )
 
-    assert result is False
+    assert result == (False, 1, 0)
 
 
 def test_check_packages_skips_symlinks():
@@ -330,7 +330,7 @@ def test_check_packages_skips_symlinks():
         ):
             result = check_install_size.check_packages(packages_dir, verbose=True)
 
-    assert result is True
+    assert result == (True, 0, 0)
     assert call_count["n"] == 1, "symlinked package should not be measured"
 
 
@@ -366,8 +366,9 @@ def test_check_packages_bad_budget_does_not_crash():
         ):
             result = check_install_size.check_packages(packages_dir, verbose=False)
 
-    # Script must not crash; result is False (one package failed) but good_pkg was measured
-    assert result is False
+    # Script must not crash; one package failed before size measurement and good_pkg
+    # was still measured.
+    assert result == (False, 1, 0)
     assert call_count["n"] == 1, "good package should still be measured"
 
 
@@ -401,5 +402,27 @@ def test_check_packages_skips_no_pyproject():
         ):
             result = check_install_size.check_packages(packages_dir, verbose=True)
 
-    assert result is True
+    assert result == (True, 0, 0)
     assert call_count["n"] == 1, "package without pyproject.toml should not be measured"
+
+
+def test_print_failure_summary_lists_only_present_classes(capsys):
+    """Failure summary should name pre-measurement failures and budget overages separately."""
+    import check_install_size
+
+    check_install_size.print_failure_summary(2, 1)
+
+    out = capsys.readouterr().out
+    assert "2 packages failed before size measurement" in out
+    assert "1 package exceeded their install-size budget" in out
+
+
+def test_print_failure_summary_omits_zero_count_classes(capsys):
+    """Zero-count failure classes should not print a misleading summary line."""
+    import check_install_size
+
+    check_install_size.print_failure_summary(0, 1)
+
+    out = capsys.readouterr().out
+    assert "failed before size measurement" not in out
+    assert "1 package exceeded their install-size budget" in out
