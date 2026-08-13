@@ -90,7 +90,11 @@ GREPTILE_SCORE_RE = re.compile(r"Score[*:]*\s*([0-9])/5")
 # Captures (score_n, score_d, floor_n, floor_d) so the check can verify
 # score_n/score_d < floor_n/floor_d numerically (cross-multiply to avoid
 # float division): score_n * floor_d < floor_n * score_d.
-AI_REVIEW_BELOW_FLOOR_RE = re.compile(r"AI review score (\d+)/(\d+) below (\d+)/(\d+)")
+# Denominators use [1-9]\d* to reject zero-denominator strings up front
+# (a score like "3/0" is malformed and should not match).
+AI_REVIEW_BELOW_FLOOR_RE = re.compile(
+    r"AI review score (\d+)/([1-9]\d*) below (\d+)/([1-9]\d*)"
+)
 
 
 # --- Decision types ---

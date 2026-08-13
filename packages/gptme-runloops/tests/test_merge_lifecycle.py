@@ -190,6 +190,12 @@ class FakeIO:
             ["Greptile review not found; AI review score 5/5 below 5/5"],
             SelfMergeBlockClass.NO_GREPTILE_REVIEW,
         ),
+        # A zero-denominator reason should NOT match AI_REVIEW_BELOW_FLOOR —
+        # the regex rejects /0 denominators up front (they are malformed).
+        (
+            ["AI review score 3/0 below 5/0"],
+            SelfMergeBlockClass.OTHER,
+        ),
         # NOTE(parity): the HUMAN-thread reason does NOT match the
         # "unresolved review thread" grep — the word "human" breaks the
         # substring — so human-only blocks route to OTHER (proceed with a
