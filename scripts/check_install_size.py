@@ -12,7 +12,6 @@ in gptme-contrib#1416.
 
 import argparse
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -132,9 +131,19 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
             )
 
             if export_result.returncode == 0 and export_result.stdout.strip():
-                # Install from workspace-locked requirements
+                # Filter out git+ URL lines before installing. The lock pins workspace
+                # git deps (e.g. gptme) to a specific commit SHA, but installing the
+                # package source alongside that requirements file causes a conflict:
+                # the package's pyproject.toml (read via workspace sources) references
+                # the same dep at @master. Dropping git+ lines lets uv resolve those
+                # deps from the package's own declarations + workspace sources.
+                req_lines = [
+                    line
+                    for line in export_result.stdout.splitlines()
+                    if " @ git+" not in line and not line.strip().startswith("git+")
+                ]
                 req_file = tmpdir / "requirements.txt"
-                req_file.write_text(export_result.stdout)
+                req_file.write_text("\n".join(req_lines) + "\n")
                 install_cmd = [
                     "uv",
                     "pip",
@@ -158,8 +167,6 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     "install",
                     "--python",
                     str(python_exe),
-                    "--index-strategy",
-                    "unsafe-best-match",
                     "--quiet",
                     str(package_path),
                 ]
@@ -177,19 +184,19 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                 print(result.stderr)
                 return None
 
-            # Measure venv size. lstat, not is_file(follow_symlinks=False):
-            # that kwarg is 3.13+, and every venv has symlinks, so on 3.12 it
-            # raised TypeError and the whole measurement returned None.
-            total_size = 0
-            for entry in venv_path.rglob("*"):
-                try:
-                    entry_stat = entry.lstat()
-                except OSError:
-                    continue
-                if stat.S_ISREG(entry_stat.st_mode):
-                    total_size += entry_stat.st_size
-
-            size_mb = total_size / (1024 * 1024)
+            # Measure venv disk usage with du. Using `du -sb` (bytes) is more
+            # correct than summing individual file sizes: it counts each hard-linked
+            # inode once, and the apparent-size flag (-A) additionally includes the
+            # referenced size of symlinks that point outside the venv (e.g. GPU
+            # library symlinks). This avoids the lstat/S_ISREG under-count problem
+            # that skips symlinks entirely.
+            du_result = subprocess.run(
+                ["du", "-sAb", str(venv_path)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            size_mb = int(du_result.stdout.split()[0]) / (1024 * 1024)
             return size_mb
 
         except subprocess.TimeoutExpired:
@@ -237,7 +244,12 @@ def check_packages(
                 print(f"⊘ {package_path.name:40} (no pyproject.toml)")
             continue
 
-        budget_mb = get_package_budget(pyproject_path)
+        try:
+            budget_mb = get_package_budget(pyproject_path)
+        except (ValueError, TypeError) as e:
+            print(f"✗ {package_path.name:40} bad max_install_mb in pyproject.toml: {e}")
+            all_pass = False
+            continue
         size_mb = measure_install_size(package_path, package_path.name)
 
         if size_mb is None:

@@ -128,6 +128,9 @@ def test_measure_install_size_success():
         elif "export" in cmd:
             # Simulate successful lock export; content triggers the lock-export path
             result.stdout = "pkg==1.0.0\n"
+        elif "du" in cmd:
+            # du -sAb returns "{bytes}\t{path}"
+            result.stdout = f"{file_size}\t{cmd[-1]}\n"
         else:
             result.stdout = ""
         return result
@@ -162,6 +165,9 @@ def test_measure_install_size_export_fallback():
             # Simulate lock export failure (package not in lock yet)
             result.returncode = 1
             result.stdout = ""
+        elif "du" in cmd:
+            result.returncode = 0
+            result.stdout = f"{file_size}\t{cmd[-1]}\n"
         else:
             # Direct pip install falls back and succeeds
             result.returncode = 0
@@ -313,6 +319,43 @@ def test_check_packages_skips_symlinks():
 
     assert result is True
     assert call_count["n"] == 1, "symlinked package should not be measured"
+
+
+def test_check_packages_bad_budget_does_not_crash():
+    """check_packages handles malformed max_install_mb without crashing the whole run."""
+    import check_install_size
+
+    call_count = {"n": 0}
+
+    def fake_measure(package_path, package_name):
+        call_count["n"] += 1
+        return 10.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+
+        # Good package
+        good = packages_dir / "good_pkg"
+        good.mkdir(parents=True)
+        (good / "pyproject.toml").write_text(
+            "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+        )
+
+        # Malformed budget (string instead of int)
+        bad = packages_dir / "bad_budget"
+        bad.mkdir(parents=True)
+        (bad / "pyproject.toml").write_text(
+            '[tool.gptme-contrib]\nmax_install_mb = "large"\n'
+        )
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result = check_install_size.check_packages(packages_dir, verbose=False)
+
+    # Script must not crash; result is False (one package failed) but good_pkg was measured
+    assert result is False
+    assert call_count["n"] == 1, "good package should still be measured"
 
 
 def test_check_packages_skips_no_pyproject():
