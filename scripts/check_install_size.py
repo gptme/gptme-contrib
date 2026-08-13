@@ -157,9 +157,14 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                 ]
             else:
                 # Package not in workspace lock; fall back to direct PyPI install.
+                # This path ignores [tool.uv.index] and [tool.uv.sources] workspace
+                # overrides, so measurements may overestimate for packages with custom
+                # index pins (e.g. CPU-only torch). Run `uv lock` after adding the
+                # package to get accurate measurements from the workspace lock.
                 if export_result.returncode != 0:
                     print(
-                        f"⚠ Lock export failed for {package_name}, using PyPI fallback"
+                        f"⚠ Lock export failed for {package_name}; using PyPI fallback "
+                        f"(may overestimate — add to uv.lock for accurate measurement)"
                     )
                 install_cmd = [
                     "uv",
@@ -184,12 +189,14 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                 print(result.stderr)
                 return None
 
-            # Measure venv disk usage with du. Using `du -sb` (bytes) is more
-            # correct than summing individual file sizes: it counts each hard-linked
-            # inode once, and the -b flag includes apparent-size which counts the
-            # referenced size of symlinks that point outside the venv (e.g. GPU
-            # library symlinks). This avoids the lstat/S_ISREG under-count problem
-            # that skips symlinks entirely.
+            # Measure venv disk usage with `du -sb` (bytes). du counts each
+            # hard-linked inode once, which matters when uv hard-links cached
+            # wheels into venvs. Note: -b uses lstat() for symlinks, reporting
+            # the path length (a few bytes) rather than the target file size.
+            # In practice this is fine: pip packages don't install large
+            # external files as symlinks, and the Python interpreter symlink
+            # (bin/python) is intentionally not counted since the interpreter
+            # is not part of the package's dependency footprint.
             du_result = subprocess.run(
                 ["du", "-sb", str(venv_path)],
                 capture_output=True,
@@ -250,7 +257,18 @@ def check_packages(
             print(f"✗ {package_path.name:40} bad max_install_mb in pyproject.toml: {e}")
             all_pass = False
             continue
-        size_mb = measure_install_size(package_path, package_path.name)
+
+        # Read the canonical distribution name from pyproject.toml [project] name.
+        # Directory names and distribution names can diverge (e.g. hyphens vs
+        # underscores), and `uv export --package` requires the registered name.
+        try:
+            with open(pyproject_path, "rb") as _f:
+                _pkg_meta = tomllib.load(_f)
+            package_name = _pkg_meta.get("project", {}).get("name") or package_path.name
+        except Exception:
+            package_name = package_path.name
+
+        size_mb = measure_install_size(package_path, package_name)
 
         if size_mb is None:
             print(f"✗ {package_path.name:40} installation failed")
