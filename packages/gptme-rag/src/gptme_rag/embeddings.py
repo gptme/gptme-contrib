@@ -74,20 +74,36 @@ def _default_openrouter_cache_path() -> Path:
 
 
 class _SQLiteEmbeddingCache:
-    """Small SQLite cache keyed by embedding model and content hash."""
+    """Small SQLite cache keyed by embedding model and content hash.
 
-    def __init__(self, path: Path):
+    Bounded by ``max_rows``: when the table exceeds that count after an insert
+    batch, the oldest entries (by ``accessed_at``) are pruned to keep the file
+    from growing without bound.
+    """
+
+    DEFAULT_MAX_ROWS = 100_000  # ~3-4 GB at 3072-dim float32; safe default
+
+    def __init__(self, path: Path, max_rows: int = DEFAULT_MAX_ROWS):
         path = path.expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.max_rows = max_rows
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS embeddings ("
             "model TEXT NOT NULL, "
             "content_hash TEXT NOT NULL, "
             "embedding_json TEXT NOT NULL, "
+            "accessed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
             "PRIMARY KEY (model, content_hash)"
             ")"
         )
+        # Migrate existing caches that lack the accessed_at column.
+        try:
+            self.conn.execute(
+                "ALTER TABLE embeddings ADD COLUMN accessed_at TEXT NOT NULL DEFAULT '2000-01-01T00:00:00.000Z'"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self.conn.commit()
         self.lock = threading.Lock()
 
@@ -117,12 +133,23 @@ class _SQLiteEmbeddingCache:
         if not items:
             return
 
+        now = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
         with self.lock:
             self.conn.executemany(
-                "INSERT OR REPLACE INTO embeddings "
-                "(model, content_hash, embedding_json) VALUES (?, ?, ?)",
+                f"INSERT OR REPLACE INTO embeddings "
+                f"(model, content_hash, embedding_json, accessed_at) VALUES (?, ?, ?, ({now}))",
                 [(model, content_hash, json.dumps(vector)) for content_hash, vector in items],
             )
+            # Prune oldest entries when we exceed the row cap.
+            row_count = self.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            if row_count > self.max_rows:
+                excess = row_count - self.max_rows
+                self.conn.execute(
+                    "DELETE FROM embeddings WHERE (model, content_hash) IN ("
+                    "  SELECT model, content_hash FROM embeddings ORDER BY accessed_at ASC LIMIT ?"
+                    ")",
+                    (excess,),
+                )
             self.conn.commit()
 
 

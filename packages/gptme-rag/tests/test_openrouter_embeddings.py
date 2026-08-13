@@ -176,3 +176,34 @@ def test_openrouter_embedding_non_contiguous_indices_raises(
 
     with pytest.raises(RuntimeError, match="non-contiguous indices"):
         embedding(["first text", "second text"])
+
+
+def test_sqlite_cache_prunes_oldest_entries_when_over_max_rows(tmp_path: Path):
+    """_SQLiteEmbeddingCache must not grow without bound: prune oldest entries past max_rows."""
+    from gptme_rag.embeddings import _SQLiteEmbeddingCache
+
+    cache_path = tmp_path / "cache.sqlite"
+    max_rows = 5
+    cache = _SQLiteEmbeddingCache(path=cache_path, max_rows=max_rows)
+
+    # Insert max_rows entries, then one more batch that triggers pruning.
+    model = "test-model"
+    for i in range(max_rows):
+        h = _SQLiteEmbeddingCache.content_hash(f"doc-{i}")
+        cache.put_many(model, [(h, [float(i)])])
+
+    # Count should be exactly max_rows now.
+    row_count = cache.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    assert row_count == max_rows, f"Expected {max_rows} rows, got {row_count}"
+
+    # Insert one more — this triggers a prune.
+    h_extra = _SQLiteEmbeddingCache.content_hash("doc-extra")
+    cache.put_many(model, [(h_extra, [99.0])])
+
+    row_count = cache.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    assert (
+        row_count <= max_rows
+    ), f"Cache should not exceed max_rows={max_rows} after prune, got {row_count}"
+    # The freshly-inserted entry must survive (it was just written).
+    hit = cache.get_many(model, [h_extra])
+    assert h_extra in hit, "Freshly inserted entry was pruned — recency ordering is wrong"
