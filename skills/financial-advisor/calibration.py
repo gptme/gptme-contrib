@@ -204,13 +204,17 @@ def classify_question(user_question: str) -> str:
         and "should" in q
     ):
         return "specific_investment"
-    # Check savings-amount keywords before emergency keywords so that "How much should I
-    # save for a rainy day?" routes to how_much_to_save (which gathers amount_context)
-    # rather than emergency_fund (which only gathers has_emergency_fund).
-    if any(kw in q for kw in ["how much", "save", "saving"]):
+    # "how much" is an unambiguous amount-query signal — check it first so that
+    # "How much should I save for a rainy day?" correctly routes to how_much_to_save.
+    # Generic "save"/"saving" (without "how much") is weaker: "Should I save for a
+    # rainy day?" must route to emergency_fund, not how_much_to_save — the user is
+    # asking whether to build one, not how large it should be.
+    if "how much" in q:
         return "how_much_to_save"
     if any(kw in q for kw in ["emergency", "rainy day", "safety net"]):
         return "emergency_fund"
+    if any(kw in q for kw in ["save", "saving"]):
+        return "how_much_to_save"
     return "should_i_invest"
 
 
@@ -302,11 +306,17 @@ def generate_calibrated_prompt(user_question: str, ctx: QuestionContext) -> str:
         else "IMPORTANT EARLY-EXIT RULES: (none — no conditional axes gathered yet)"
     )
 
+    # Delimit user_question with XML tags so the LLM treats the content as data,
+    # not as additional instructions.  Python f-strings evaluate only the expression
+    # inside {}, not the content of the resolved string, so there is no shell/code
+    # injection risk here — the tags add prompt-injection hardening at the LLM layer.
     prompt = f"""You are a financial planning assistant. Before giving advice, you ask specific
 clarifying questions to understand the user's situation. You ask no more than 2 questions at a time.
 
 USER'S ORIGINAL QUESTION:
+<user_question>
 {user_question}
+</user_question>
 
 CONTEXT GATHERED SO FAR:
 {context_str}

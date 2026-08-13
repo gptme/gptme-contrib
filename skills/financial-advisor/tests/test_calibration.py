@@ -181,6 +181,21 @@ class TestClassifyQuestion:
             == "how_much_to_save"
         )
 
+    def test_classify_save_for_rainy_day_without_how_much(self):
+        """'Should I save for a rainy day?' without 'how much' must route to emergency_fund.
+
+        Generic 'save'/'saving' must yield to emergency-fund signal words when
+        'how much' is absent.  The user is asking whether to build a fund, not
+        how large it should be — routing to how_much_to_save would ask for
+        amount_context instead of has_emergency_fund, producing bad sequencing.
+        (P1 regression guard — AI reviewer finding fp=ad79a6203196.)
+        """
+        result = classify_question("Should I save for a rainy day?")
+        assert result == "emergency_fund", (
+            f"Expected emergency_fund, got {result!r}. "
+            "Bare 'save' must not shadow 'rainy day' emergency-fund signal."
+        )
+
     def test_classify_specific_investment_question(self):
         """Test classification of specific investment questions."""
         assert classify_question("Should I buy this ETF?") == "specific_investment"
@@ -332,6 +347,25 @@ class TestGenerateCalibratedPrompt:
         # Must INTERRUPT with debt advice.
         assert "INTERRUPT" in prompt or "pay" in prompt.lower()
         assert "debt" in prompt.lower()
+
+    def test_prompt_user_question_with_curly_braces(self):
+        """user_question containing curly braces must not crash generate_calibrated_prompt.
+
+        Python f-strings evaluate only the expression inside {}, not the *content*
+        of the resolved string.  A user_question like '{1+1}' or '{__import__("os")}'
+        is substituted as a literal string — no code execution occurs.  This test
+        guards against regressions if the template method is ever changed.
+        (P0 security finding fp=e1f8314c3265 — false positive, but regression-guarded.)
+        """
+        ctx = QuestionContext()
+        # Should not raise, and the braces must appear literally in the prompt.
+        prompt = generate_calibrated_prompt("{1+1}", ctx)
+        assert (
+            "{1+1}" in prompt
+        ), "Curly braces in user_question must be passed through literally"
+        # Confirm the XML delimiters are present (prompt-injection hardening).
+        assert "<user_question>" in prompt
+        assert "</user_question>" in prompt
 
     def test_early_exit_rules_only_for_gathered_axes(self):
         """Early-exit rules must only appear for axes that are present in context.
