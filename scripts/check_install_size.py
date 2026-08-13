@@ -67,16 +67,13 @@ def get_package_budget(pyproject_path: Path) -> int:
     if not pyproject_path.exists():
         return DEFAULT_BUDGETS["other"]
 
-    try:
-        with open(pyproject_path, "rb") as f:
-            config = tomllib.load(f)
-        budget = config.get("tool", {}).get("gptme-contrib", {}).get("max_install_mb")
-        if budget is not None:
-            return int(budget)
-        category = _infer_package_category(config)
-        return DEFAULT_BUDGETS[category]
-    except Exception:
-        return DEFAULT_BUDGETS["other"]
+    with open(pyproject_path, "rb") as f:
+        config = tomllib.load(f)
+    budget = config.get("tool", {}).get("gptme-contrib", {}).get("max_install_mb")
+    if budget is not None:
+        return int(budget)
+    category = _infer_package_category(config)
+    return DEFAULT_BUDGETS[category]
 
 
 def measure_install_size(package_path: Path, package_name: str) -> float | None:
