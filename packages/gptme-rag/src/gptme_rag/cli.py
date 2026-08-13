@@ -452,6 +452,12 @@ def search(
                         documents, distances, _ = indexer.search(
                             query, n_results=n_results, paths=search_paths, path_filters=filter
                         )
+
+                    # Assemble context window (must be inside try/except to catch errors in json mode)
+                    if documents:
+                        context = assembler.assemble_context(documents, user_query=query)
+                    else:
+                        context = None
             except Exception as e:
                 # In json mode stderr is redirected to /dev/null, so an unhandled
                 # exception would produce a silent failure with no output on stdout
@@ -486,9 +492,6 @@ def search(
     logger.debug(f"Found {len(documents)} documents")
     for doc in documents:
         logger.debug(f"Document: {doc.doc_id}, source: {doc.metadata.get('source')}")
-
-    # Assemble context window
-    context = assembler.assemble_context(documents, user_query=query)
 
     def get_expanded_content(doc: Document, expand: str, indexer: Indexer) -> str:
         """Get content based on expansion mode.
