@@ -141,8 +141,11 @@ class FakeIO:
             ["Greptile review not found; AI review score 6/5 outside the rubric, 5/5"],
             SelfMergeBlockClass.NO_GREPTILE_REVIEW,
         ),
-        # Priority: not-found wins even when other blockers are present —
-        # the bash greps the FULL joined reasons text in a fixed order.
+        # Priority: not-found beats score-below-floor and generic blockers,
+        # but unresolved threads beat not-found (new behaviour — see classifier
+        # docstring). The bash treated not-found as the top priority; this PR
+        # deliberately deviates so thread-clearing happens before Greptile
+        # is triggered.
         (
             ["CI is not fully green", "Greptile review not found"],
             SelfMergeBlockClass.NO_GREPTILE_REVIEW,
@@ -150,6 +153,16 @@ class FakeIO:
         (
             ["Greptile review not found", "Greptile score 3/5 below floor 5/5"],
             SelfMergeBlockClass.NO_GREPTILE_REVIEW,
+        ),
+        # Priority: unresolved threads BEAT not-found (deviation from bash).
+        # A thread-clearing session runs first; the next dispatch triggers
+        # Greptile once the threads are gone.
+        (
+            [
+                "Greptile has 1 unresolved review thread(s)",
+                "Greptile review not found",
+            ],
+            SelfMergeBlockClass.UNRESOLVED_THREADS,
         ),
         # Priority: unresolved threads beat the score floor.
         (
