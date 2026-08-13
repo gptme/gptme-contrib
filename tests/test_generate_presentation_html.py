@@ -141,3 +141,46 @@ def test_validate_presentation_rejects_duplicate_slide_ids():
 
     with pytest.raises(ValueError, match="duplicate slide id"):
         generator.validate_presentation(deck)
+
+
+def test_slide_counter_uses_textcontent_not_value():
+    """counter.value does not update <output> text; must use textContent."""
+    html = generator.render_html(_sample_deck())
+    assert "counter.textContent" in html
+    assert "counter.value" not in html
+
+
+def test_theme_rejects_css_injection():
+    """Theme values must be safe CSS colours; arbitrary strings must be rejected."""
+    deck = _sample_deck()
+    deck["metadata"]["theme"]["accent"] = (
+        "red; } body { background: url(http://evil.com) } /*"
+    )
+
+    with pytest.raises(ValueError, match="unsafe CSS value"):
+        generator.render_html(deck)
+
+
+def test_theme_accepts_valid_color_formats():
+    """Hex, rgb(), hsl(), and named colours should all be accepted."""
+    for color in ("#abc", "#0F766E", "#0f766e80", "rgb(0,0,0)", "white", "transparent"):
+        deck = _sample_deck()
+        deck["metadata"]["theme"]["accent"] = color
+        html = generator.render_html(deck)
+        assert "<!DOCTYPE html>" in html
+
+
+def test_validate_presentation_rejects_gallery_image_without_src():
+    """Gallery images that are not objects with 'src' must be rejected at validation time."""
+    deck = _sample_deck()
+    deck["slides"].append(
+        {
+            "id": "gallery-slide",
+            "type": "gallery",
+            "title": "Photos",
+            "images": [{"alt": "no src here"}],
+        }
+    )
+
+    with pytest.raises(ValueError, match="'src'"):
+        generator.validate_presentation(deck)

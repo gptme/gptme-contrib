@@ -6,8 +6,18 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 from pathlib import Path
 from typing import Any, cast
+
+_CSS_COLOR_RE = re.compile(
+    r"^("
+    r"#[0-9a-fA-F]{3,8}"  # hex: #RGB #RRGGBB #RRGGBBAA
+    r"|rgba?\(\s*\d+%?\s*,\s*\d+%?\s*,\s*\d+%?(\s*,\s*[\d.]+)?\s*\)"  # rgb/rgba
+    r"|hsl\(\s*\d+\s*,\s*\d+%\s*,\s*\d+%\s*\)"  # hsl
+    r"|[a-zA-Z]{2,30}"  # named colors (white, black, transparent, etc.)
+    r")$"
+)
 
 SUPPORTED_SLIDE_TYPES = {
     "title-slide",
@@ -78,6 +88,12 @@ def validate_presentation(deck: dict[str, Any]) -> None:
             raise ValueError(f"slide {slide_id} of type image requires image")
         if slide_type == "gallery" and "images" not in slide:
             raise ValueError(f"slide {slide_id} of type gallery requires images")
+        if slide_type == "gallery":
+            for img_index, img in enumerate(slide.get("images", []), start=1):
+                if not isinstance(img, dict) or "src" not in img:
+                    raise ValueError(
+                        f"slide {slide_id} image {img_index} must be an object with a 'src' field"
+                    )
 
         for animation in slide.get("animations", []):
             animation_type = (
@@ -131,7 +147,17 @@ def render_html(deck: dict[str, Any]) -> str:
 def _theme(deck: dict[str, Any]) -> dict[str, str]:
     metadata = deck.get("metadata", {})
     custom = metadata.get("theme", {}) if isinstance(metadata, dict) else {}
-    return {**DEFAULT_THEME, **{k: v for k, v in custom.items() if k in DEFAULT_THEME}}
+    merged = {}
+    for k, v in custom.items():
+        if k not in DEFAULT_THEME:
+            continue
+        if not isinstance(v, str) or not _CSS_COLOR_RE.match(v.strip()):
+            raise ValueError(
+                f"theme.{k} contains an unsafe CSS value: {v!r}. "
+                "Use a hex colour (#rrggbb), rgb/rgba(), hsl(), or a named colour."
+            )
+        merged[k] = v.strip()
+    return {**DEFAULT_THEME, **merged}
 
 
 def _render_slide(slide: dict[str, Any], index: int, total: int) -> str:
@@ -455,7 +481,7 @@ def _javascript() -> str:
       slides.forEach((slide, slideIndex) => {
         slide.classList.toggle('active', slideIndex === current);
       });
-      counter.value = `${current + 1} / ${slides.length}`;
+      counter.textContent = `${current + 1} / ${slides.length}`;
       prepareAnimations(slides[current]);
     }
 
