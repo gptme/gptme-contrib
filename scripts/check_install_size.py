@@ -236,7 +236,7 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
 
 def check_packages(
     packages_dir: Path, verbose: bool = False, only: str | None = None
-) -> bool:
+) -> tuple[bool, int, int]:
     """Check all packages in packages/ directory.
 
     Args:
@@ -244,9 +244,12 @@ def check_packages(
             builds a venv each, so local runs want a single target).
 
     Returns:
-        True if all packages pass, False if any exceed their budget.
+        Tuple of (all_pass, resolution_failures, budget_overages).
+        all_pass is True if both resolution_failures and budget_overages are 0.
     """
     all_pass = True
+    resolution_failures = 0
+    budget_overages = 0
     packages_dir = packages_dir.resolve()
 
     package_paths = sorted(
@@ -256,7 +259,7 @@ def check_packages(
         package_paths = [p for p in package_paths if p.name == only]
         if not package_paths:
             print(f"❌ No package named {only!r} in {packages_dir}")
-            return False
+            return False, 0, 0
 
     for package_path in package_paths:
         # Skip symlinks (they point to gptme-contrib submodule)
@@ -276,6 +279,7 @@ def check_packages(
         except (ValueError, TypeError) as e:
             print(f"✗ {package_path.name:40} bad max_install_mb in pyproject.toml: {e}")
             all_pass = False
+            resolution_failures += 1
             continue
 
         # Read the canonical distribution name from pyproject.toml [project] name.
@@ -293,6 +297,7 @@ def check_packages(
         if size_mb is None:
             print(f"✗ {package_path.name:40} installation failed")
             all_pass = False
+            resolution_failures += 1
             continue
 
         status = "✓" if size_mb <= budget_mb else "✗"
@@ -303,8 +308,9 @@ def check_packages(
 
         if size_mb > budget_mb:
             all_pass = False
+            budget_overages += 1
 
-    return all_pass
+    return all_pass, resolution_failures, budget_overages
 
 
 if __name__ == "__main__":
@@ -325,11 +331,24 @@ if __name__ == "__main__":
     print("Checking package install sizes...")
     print()
 
-    if check_packages(packages_dir, args.verbose, args.package):
+    all_pass, resolution_failures, budget_overages = check_packages(
+        packages_dir, args.verbose, args.package
+    )
+
+    if all_pass:
         print()
         print("✓ All packages within budget")
         sys.exit(0)
     else:
         print()
-        print("✗ One or more packages exceeded budget")
+        # Report each failure class separately, only if it occurred
+        if resolution_failures > 0:
+            plural = "package" if resolution_failures == 1 else "packages"
+            print(
+                f"✗ {resolution_failures} {plural} failed to resolve dependencies "
+                f"(see per-package output above)"
+            )
+        if budget_overages > 0:
+            plural = "package" if budget_overages == 1 else "packages"
+            print(f"✗ {budget_overages} {plural} exceeded their install-size budget")
         sys.exit(1)
