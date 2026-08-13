@@ -109,7 +109,7 @@ def _make_fake_venv(venv_path: Path, file_size_bytes: int) -> None:
 
 
 def test_measure_install_size_success():
-    """measure_install_size returns MB when install succeeds."""
+    """measure_install_size returns MB when install succeeds (lock-export path)."""
     import check_install_size
 
     file_size = 10 * 1024 * 1024  # 10 MB
@@ -124,6 +124,12 @@ def test_measure_install_size_success():
             _make_fake_venv(venv_path, file_size)
             (venv_path / "bin").mkdir(exist_ok=True)
             (venv_path / "bin" / "python").touch()
+            result.stdout = ""
+        elif "export" in cmd:
+            # Simulate successful lock export; content triggers the lock-export path
+            result.stdout = "pkg==1.0.0\n"
+        else:
+            result.stdout = ""
         return result
 
     with patch.object(subprocess, "run", side_effect=fake_run):
@@ -134,6 +140,42 @@ def test_measure_install_size_success():
 
     assert size is not None
     assert 9.0 < size < 11.0  # ~10 MB
+
+
+def test_measure_install_size_export_fallback():
+    """measure_install_size falls back to direct install when lock export fails."""
+    import check_install_size
+
+    file_size = 5 * 1024 * 1024  # 5 MB
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.stderr = ""
+        if "venv" in cmd:
+            result.returncode = 0
+            venv_path = Path(cmd[-1])
+            _make_fake_venv(venv_path, file_size)
+            (venv_path / "bin").mkdir(exist_ok=True)
+            (venv_path / "bin" / "python").touch()
+            result.stdout = ""
+        elif "export" in cmd:
+            # Simulate lock export failure (package not in lock yet)
+            result.returncode = 1
+            result.stdout = ""
+        else:
+            # Direct pip install falls back and succeeds
+            result.returncode = 0
+            result.stdout = ""
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_path = Path(tmpdir) / "mypkg"
+            package_path.mkdir()
+            size = check_install_size.measure_install_size(package_path, "mypkg")
+
+    assert size is not None
+    assert 4.0 < size < 6.0  # ~5 MB
 
 
 def test_measure_install_size_install_failure():

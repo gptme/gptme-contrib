@@ -79,12 +79,14 @@ def get_package_budget(pyproject_path: Path) -> int:
 def measure_install_size(package_path: Path, package_name: str) -> float | None:
     """Install package in a temp venv and measure disk usage.
 
-    Uses ``uv pip install``, which runs in pip-compatibility mode. This means
-    workspace-level ``[tool.uv.sources]`` and ``[tool.uv.index]`` settings are
-    NOT applied — dependencies resolve from PyPI by default. The measurement
-    may therefore overestimate size for packages that pin to a non-default index
-    (e.g. CPU-only torch), but will never underestimate. Budgets for such
-    packages should be set with the worst-case PyPI resolution in mind.
+    First tries to export workspace-locked requirements via ``uv export --package``.
+    This reads ``uv.lock`` and respects workspace-level ``[tool.uv.sources]`` and
+    ``[tool.uv.index]`` settings (e.g. a CPU-only torch index), making the
+    measurement consistent with what ``uv sync`` would actually install.
+
+    Falls back to a direct ``uv pip install`` when the package is not yet in the
+    workspace lock (e.g. a brand-new package being added). That fallback resolves
+    from PyPI and may overestimate size for index-pinned packages.
 
     Returns:
         Size in MB, or None if installation failed.
@@ -107,16 +109,50 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                 print(f"❌ Failed to create venv for {package_name}")
                 return None
 
-            # Install using uv pip install from the repo root.
-            # Note: uv pip install runs in pip-compatibility mode and does NOT
-            # read the workspace's [tool.uv.sources] or [tool.uv.index] settings
-            # (those are respected only by uv project commands like uv sync/add).
-            # Packages with workspace-level index pins (e.g. a CPU-only torch
-            # index) will be resolved from the default PyPI index instead.
-            # This makes the measurement conservative: it may overestimate size
-            # for index-pinned packages, but will never underestimate.
-            result = subprocess.run(
+            # Try to export workspace-locked requirements. uv export reads uv.lock,
+            # which includes [tool.uv.index] overrides (e.g. CPU-only torch index).
+            # --no-hashes produces a plain requirements.txt; --emit-index-url
+            # injects the index URLs so uv pip resolves from the correct source.
+            export_result = subprocess.run(
                 [
+                    "uv",
+                    "export",
+                    "--format",
+                    "requirements-txt",
+                    "--package",
+                    package_name,
+                    "--no-dev",
+                    "--no-hashes",
+                    "--emit-index-url",
+                ],
+                cwd=package_path.parent.parent,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if export_result.returncode == 0 and export_result.stdout.strip():
+                # Install from workspace-locked requirements
+                req_file = tmpdir / "requirements.txt"
+                req_file.write_text(export_result.stdout)
+                install_cmd = [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    str(python_exe),
+                    "--quiet",
+                    "-r",
+                    str(req_file),
+                    str(package_path),
+                ]
+            else:
+                # Package not in workspace lock; fall back to direct PyPI install.
+                if export_result.returncode != 0:
+                    print(
+                        f"⚠ Lock export failed for {package_name}, using PyPI fallback"
+                    )
+                install_cmd = [
                     "uv",
                     "pip",
                     "install",
@@ -126,7 +162,10 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
                     "unsafe-best-match",
                     "--quiet",
                     str(package_path),
-                ],
+                ]
+
+            result = subprocess.run(
+                install_cmd,
                 cwd=package_path.parent.parent,
                 capture_output=True,
                 text=True,
@@ -202,6 +241,7 @@ def check_packages(
         size_mb = measure_install_size(package_path, package_path.name)
 
         if size_mb is None:
+            print(f"✗ {package_path.name:40} installation failed")
             all_pass = False
             continue
 
