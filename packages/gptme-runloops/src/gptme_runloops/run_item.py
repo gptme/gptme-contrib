@@ -1855,7 +1855,13 @@ def run_post_session(
     if (
         item.repo
         and item.number is not None
-        and item.number != 0  # 0 is a sentinel for items with no real GitHub thread
+        # 0 is a sentinel for items with no real GitHub thread. Compared via
+        # `number_str` because `number` is an `int | str | None` union taken
+        # verbatim from the grouped JSON (`from_grouped_json`) — a sentinel
+        # arriving as the string "0" must be excluded exactly as the int is,
+        # or the check queries `issues/0/comments`, 404s, and reports
+        # `orphan_no_delivery`, re-creating the re-dispatch loop this gates.
+        and item.number_str != "0"
         and hooks.delivery_check is not None
         and THREAD_DELIVERABLE_TYPES & set(item.types)
     ):

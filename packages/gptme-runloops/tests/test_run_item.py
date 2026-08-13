@@ -1525,6 +1525,39 @@ def test_post_session_notification_zero_number_skips_delivery_check(tmp_path) ->
     )
 
 
+def test_post_session_string_zero_number_skips_delivery_check(tmp_path) -> None:
+    """A grouped item carrying ``"number": "0"`` as a *string* must skip too.
+
+    ``RunItem.number`` is typed ``int | str | None`` and
+    ``from_grouped_json`` takes the JSON value verbatim — no coercion. A
+    sentinel that arrives as the string ``"0"`` is therefore just as real as
+    the int ``0``, and an identity-shaped guard (``number != 0``) lets it
+    through: the delivery check queries ``issues/0/comments``, 404s, reports
+    ``orphan_no_delivery``, and drives the rollback → re-dispatch loop this
+    gate exists to eliminate.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("notification",)
+    )
+    # Built through `from_grouped_json`, so `number` really is the str "0".
+    item = make_item(types=["notification"], number="0")
+    assert item.number == "0", "fixture must exercise the str sentinel, not the int"
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # If the check DID run it would report an orphan, as it does in production.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert (
+        run_cmd.find("/fake/check-delivery.py") == []
+    ), 'delivery check must not run for items with number="0" (string sentinel)'
+    assert effect == "unknown", (
+        f"notification with number=\"0\" must score effect='unknown', not {effect!r}; "
+        "EFFECT_NONE would incorrectly fire the no-effect WARN."
+    )
+
+
 @pytest.mark.parametrize("item_type", sorted(THREAD_DELIVERABLE_TYPES))
 def test_post_session_thread_deliverable_item_still_runs_delivery_check(
     tmp_path,
