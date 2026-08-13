@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://timetobuildbob.com/schemas/presentation.v1.schema.json",
+  "title": "Agentic Presentation v1",
+  "description": "Structured slide-deck format for Bob's single-file HTML presentation generator.",
+  "type": "object",
+  "required": ["title", "slides"],
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "author": {"type": "string"},
+        "date": {"type": "string"},
+        "theme": {"$ref": "#/definitions/theme"}
+      }
+    },
+    "slides": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/definitions/slide"}
+    }
+  },
+  "definitions": {
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "background": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+        "surface": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+        "foreground": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+        "muted": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+        "accent": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+        "secondary": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"}
+      }
+    },
+    "animation": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["fade-in", "slide-in", "line-reveal", "zoom", "spin"]
+        },
+        "target": {
+          "type": "string",
+          "description": "Optional element role to animate, for example title, body, code, image, or gallery."
+        },
+        "duration": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 450
+        },
+        "delay": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "stagger": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 80
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "required": ["src", "alt"],
+      "additionalProperties": false,
+      "properties": {
+        "src": {"type": "string", "minLength": 1},
+        "alt": {"type": "string"},
+        "caption": {"type": "string"}
+      }
+    },
+    "slide": {
+      "type": "object",
+      "required": ["id", "type", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["title-slide", "content", "code-reveal", "code-and-text", "image", "gallery"]
+        },
+        "title": {"type": "string", "minLength": 1},
+        "subtitle": {"type": "string"},
+        "body": {"type": "string"},
+        "bullets": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "code": {"type": "string"},
+        "language": {"type": "string"},
+        "image": {"$ref": "#/definitions/image"},
+        "images": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/image"}
+        },
+        "animations": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/animation"}
+        },
+        "notes": {
+          "type": "string",
+          "description": "Speaker notes for agents and humans; not rendered by default."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "code-reveal"}}},
+          "then": {"required": ["code"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "code-and-text"}}},
+          "then": {"required": ["body", "code"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "image"}}},
+          "then": {"required": ["image"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "gallery"}}},
+          "then": {"required": ["images"]}
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "title": "Agentic Presentations",
+  "metadata": {
+    "author": "Bob",
+    "date": "2026-08-13",
+    "theme": {
+      "name": "workbench",
+      "background": "#111418",
+      "surface": "#F7F4EF",
+      "foreground": "#14171A",
+      "muted": "#5E6872",
+      "accent": "#0F766E",
+      "secondary": "#C2410C"
+    }
+  },
+  "slides": [
+    {
+      "id": "intro",
+      "type": "title-slide",
+      "title": "Agentic Presentations",
+      "subtitle": "Structured decks that render as one offline HTML file.",
+      "animations": [
+        {"type": "fade-in", "duration": 500, "delay": 0}
+      ]
+    },
+    {
+      "id": "why-json",
+      "type": "content",
+      "title": "Why a schema first",
+      "body": "Agents are good at structured output when the contract is explicit.",
+      "bullets": [
+        "Decks can be validated before rendering",
+        "The renderer stays small and deterministic",
+        "Future skills can target one stable format"
+      ],
+      "animations": [
+        {"type": "slide-in", "target": "body", "duration": 450, "delay": 80}
+      ]
+    },
+    {
+      "id": "code",
+      "type": "code-reveal",
+      "title": "Generator shape",
+      "language": "python",
+      "code": "deck = load_presentation(path)\nhtml = render_html(deck)\noutput.write_text(html)",
+      "animations": [
+        {"type": "line-reveal", "target": "code", "duration": 220, "stagger": 90}
+      ]
+    },
+    {
+      "id": "deployment",
+      "type": "content",
+      "title": "Deployment boundary",
+      "body": "The generated output has no build step and no runtime network dependency.",
+      "bullets": [
+        "Open the file locally",
+        "Drop it on GitHub Pages or Vercel",
+        "Archive it as a durable artifact"
+      ],
+      "animations": [
+        {"type": "fade-in", "target": "body", "duration": 350, "delay": 0}
+      ]
+    },
+    {
+      "id": "next",
+      "type": "content",
+      "title": "Next increment",
+      "body": "After the MVP proves rendering, the agent skill can generate decks from notes.",
+      "bullets": [
+        "Markdown-to-JSON planning",
+        "Browser visual checks",
+        "Optional code playgrounds in Phase 2"
+      ],
+      "animations": [
+        {"type": "slide-in", "duration": 450, "delay": 0}
+      ]
+    }
+  ]
+}
