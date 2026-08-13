@@ -60,8 +60,13 @@ class CountryContext(str, Enum):
 # The plain string "unspecified" covers amount_context (a str field, not an Enum),
 # which stores that literal when the user picks "prefer not to say". Without it,
 # missing_axes_for would count amount_context as gathered and skip the probe.
+#
+# Both enum members AND their .value strings are included: to_dict() serializes
+# to strings, and a caller reconstructing from JSON gets plain strings. Although
+# str, Enum equality makes the check work without the strings, including them
+# explicitly avoids dependence on that subtlety and guards future refactors.
 _UNANSWERED_SENTINELS: frozenset[object] = frozenset(
-    [TimeHorizon.UNDEFINED, CountryContext.UNSPECIFIED, "unspecified"]
+    [TimeHorizon.UNDEFINED, CountryContext.UNSPECIFIED, "undefined", "unspecified"]
 )
 
 

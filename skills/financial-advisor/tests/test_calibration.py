@@ -111,6 +111,37 @@ class TestQuestionContext:
         assert d["has_high_interest_debt"] is False
         assert "raw_answers" not in d  # raw_answers should be filtered out
 
+    def test_sentinel_strings_count_as_missing_after_json_round_trip(self):
+        """Plain string sentinels (from JSON deserialization) must still count as missing.
+
+        to_dict() serializes enum values to .value strings. A caller that reconstructs
+        QuestionContext from a saved JSON dict gets plain strings, not enum members.
+        The missing_axes_for check must treat "undefined" and "unspecified" as missing
+        just like their enum equivalents TimeHorizon.UNDEFINED / CountryContext.UNSPECIFIED.
+        """
+        # Simulate QuestionContext reconstructed from a JSON payload:
+        # ctx.time_horizon = "undefined" (string, not TimeHorizon.UNDEFINED enum)
+        ctx_from_json = QuestionContext(
+            time_horizon="undefined",  # type: ignore[arg-type]  # plain str from JSON
+            goal_type=GoalType.WEALTH_GROWTH,
+        )
+        missing = ctx_from_json.missing_axes_for("should_i_invest")
+        assert (
+            "time_horizon" in missing
+        ), "plain string 'undefined' must count as missing (Greptile P1 guard)"
+
+        ctx_country_str = QuestionContext(
+            time_horizon=TimeHorizon.LONG,
+            goal_type=GoalType.RETIREMENT,
+            risk_tolerance=RiskTolerance.MODERATE,
+            country_context="unspecified",  # type: ignore[arg-type]  # plain str
+            has_high_interest_debt=False,
+        )
+        missing_alloc = ctx_country_str.missing_axes_for("portfolio_allocation")
+        assert (
+            "country_context" in missing_alloc
+        ), "plain string 'unspecified' must count as missing (Greptile P1 guard)"
+
 
 class TestClassifyQuestion:
     """Test question classification logic."""
