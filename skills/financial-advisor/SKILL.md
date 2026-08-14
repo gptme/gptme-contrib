@@ -25,7 +25,7 @@ The skill defines:
 `calibration.py` exports:
 - `QuestionContext`: Dataclass tracking gathered context
 - `classify_question()`: Classify a user question into a type
-- `next_questions()`: Return the next 1-2 clarifying questions to ask
+- `next_questions()`: Return the next 1-2 clarifying questions, or `None` if the debt-interrupt should fire, or `[]` if all required axes are gathered
 - `generate_calibrated_prompt()`: Generate a structured LLM prompt incorporating gathered context
 
 ### Example Usage
@@ -46,16 +46,27 @@ from calibration import (
 ctx = QuestionContext()
 question_type = classify_question("Should I invest in index funds?")
 
-# Get the next questions to ask
+# Get the next questions to ask.
+# Returns:
+#   None       → high-interest debt interrupt: show payoff advice now
+#   []         → all required context gathered: proceed to generate_calibrated_prompt
+#   [str, ...] → questions remaining: ask the first one
 next_qs = next_questions(ctx, question_type)
-# → ["When do you need this money?", "What is this money for?"]
+if next_qs is None:
+    # Debt interrupt — give payoff advice instead of investment advice
+    print("You have high-interest debt. Pay it off before investing.")
+elif next_qs:
+    # More clarifying questions needed
+    print(next_qs[0])  # → "When do you need this money?"
+else:
+    # All axes gathered — generate calibrated prompt
+    prompt = generate_calibrated_prompt("Should I invest in index funds?", ctx)
 
-# Simulate gathering context
+# Full example: gather context then generate prompt
 ctx.time_horizon = TimeHorizon.LONG
 ctx.goal_type = GoalType.WEALTH_GROWTH
 ctx.has_high_interest_debt = False
-
-# Generate a calibrated prompt for the LLM
+ctx.has_emergency_fund = True
 prompt = generate_calibrated_prompt("Should I invest in index funds?", ctx)
 ```
 
