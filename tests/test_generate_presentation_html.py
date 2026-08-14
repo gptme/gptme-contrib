@@ -321,3 +321,50 @@ def test_body_and_bullets_share_single_data_role_body_container():
     # Each slide has at most one body container; content slide has exactly one
     content_slides = [s for s in deck["slides"] if s.get("type") == "content"]
     assert len(body_roles) == len(content_slides)
+
+
+def test_animation_payload_preserves_explicit_empty_list():
+    """A slide with `"animations": []` must produce an empty payload, not the default fade-in.
+
+    Previously, `slide.get("animations") or [default]` treated [] as falsy,
+    so an explicit no-animation intent was silently overridden.
+    """
+    deck = _sample_deck()
+    deck["slides"][0]["animations"] = []  # author explicitly disables animations
+    html = generator.render_html(deck)
+    # The first slide's data-animations attribute must be empty JSON array
+    import re
+
+    match = re.search(r"data-animations='([^']*)'", html)
+    assert match is not None
+    first_payload = json.loads(match.group(1))
+    assert (
+        first_payload == []
+    ), "Empty animations list must not be replaced by the default fade-in"
+
+
+def test_validate_presentation_rejects_non_integer_duration():
+    """A string duration produces invalid CSS `--duration: abcms`; must fail at validate time."""
+    deck = _sample_deck()
+    deck["slides"][0]["animations"] = [{"type": "fade-in", "duration": "abc"}]
+
+    with pytest.raises(ValueError, match="'duration' must be a non-negative integer"):
+        generator.validate_presentation(deck)
+
+
+def test_validate_presentation_rejects_negative_delay():
+    """A negative delay is semantically invalid (CSS ignores it); must be caught early."""
+    deck = _sample_deck()
+    deck["slides"][0]["animations"] = [{"type": "fade-in", "delay": -10}]
+
+    with pytest.raises(ValueError, match="'delay' must be a non-negative integer"):
+        generator.validate_presentation(deck)
+
+
+def test_validate_presentation_rejects_non_integer_stagger():
+    """A float stagger produces a fractional ms that is valid CSS but likely unintended."""
+    deck = _sample_deck()
+    deck["slides"][0]["animations"] = [{"type": "line-reveal", "stagger": 1.5}]
+
+    with pytest.raises(ValueError, match="'stagger' must be a non-negative integer"):
+        generator.validate_presentation(deck)

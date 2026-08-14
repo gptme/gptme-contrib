@@ -126,6 +126,14 @@ def validate_presentation(deck: dict[str, Any]) -> None:
                         f"slide {slide_id} animation target {target!r} must contain "
                         "only lowercase letters, digits, and hyphens"
                     )
+            if isinstance(animation, dict):
+                for field in ("duration", "delay", "stagger"):
+                    value = animation.get(field)
+                    if value is not None and (not isinstance(value, int) or value < 0):
+                        raise ValueError(
+                            f"slide {slide_id} animation '{field}' must be a "
+                            f"non-negative integer, got {value!r}"
+                        )
 
         # Type-check slide fields so hand-written or schema-bypassed decks fail
         # early with a clear error rather than crashing inside a render function.
@@ -299,7 +307,13 @@ def _render_gallery(images: list[dict[str, Any]]) -> str:
 
 
 def _animation_payload(slide: dict[str, Any]) -> str:
-    animations = slide.get("animations") or [{"type": "fade-in", "duration": 350}]
+    # Use explicit key check so `"animations": []` (author intent: no animation)
+    # is preserved as an empty list instead of being replaced by the default.
+    animations = (
+        slide["animations"]
+        if "animations" in slide
+        else [{"type": "fade-in", "duration": 350}]
+    )
     normalized = []
     for animation in animations:
         item = dict(animation)
