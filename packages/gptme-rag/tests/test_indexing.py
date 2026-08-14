@@ -1211,3 +1211,144 @@ def test_index_openrouter_fallback_does_not_destroy_existing_openrouter_collecti
     assert (
         verify_col.count() == 1
     ), "Collection was destroyed by OpenRouter fallback — data loss regression"
+
+
+def test_openrouter_fallback_guard_uses_looks_like_openrouter_not_bare_slash(tmp_path):
+    """The OpenRouter fallback guard must use _looks_like_openrouter_model(), not 'if "/" in model'.
+
+    Regression test for P1: when --embedding-function openrouter is passed without an API key
+    and the collection stores a sentence-transformer model name containing a slash
+    (e.g. 'sentence-transformers/all-MiniLM-L6-v2' or 'BAAI/bge-large-en-v1.5'),
+    the bare 'if "/" in _stored_for_guard' guard raised a misleading ValueError claiming
+    the collection was indexed with OpenRouter.  The user was told to set OPENROUTER_API_KEY
+    even though the collection was sentence-transformer-backed and no API key is needed.
+
+    After the fix, the Indexer constructor must NOT raise a ValueError mentioning
+    OPENROUTER_API_KEY for sentence-transformer collections.  Recreating the collection
+    with the ModernBERT fallback is legitimate here (the user asked for openrouter, which
+    fell back to modernbert — re-indexing with modernbert is the correct outcome).
+    """
+    import os
+
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Simulate a collection previously indexed with a sentence-transformer model whose
+    # name contains a slash — the pattern that falsely triggered the OpenRouter guard.
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+            "embedding_backend": "sentence-transformers",
+        },
+    )
+    col.add(ids=["doc-1"], embeddings=[[0.1] * 384], documents=["a sentence-transformer doc"])
+    assert col.count() == 1
+    del client
+
+    # Remove the API key so OpenRouterEmbedding.__init__ triggers the ModernBERT fallback.
+    env_backup = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        # The Indexer constructor must NOT raise ValueError mentioning OPENROUTER_API_KEY.
+        # The ST collection has a slashed model name, but it is NOT an OpenRouter collection.
+        # The guard should use _looks_like_openrouter_model() and let this proceed (the
+        # collection may be legitimately re-indexed with the ModernBERT fallback).
+        raised_openrouter_error = False
+        try:
+            Indexer(
+                persist_directory=persist_dir,
+                enable_persist=True,
+                embedding_function="openrouter",
+                collection_name="default",
+                allow_recreate=True,
+            )
+        except ValueError as e:
+            if "OPENROUTER_API_KEY" in str(e):
+                raised_openrouter_error = True
+
+        assert not raised_openrouter_error, (
+            "P1 regression: the OpenRouter fallback guard falsely raised ValueError about "
+            "OPENROUTER_API_KEY for a sentence-transformer collection (model name contains '/' "
+            "but is NOT an OpenRouter model).  Use _looks_like_openrouter_model() instead of "
+            "'if \"/\" in stored_model'."
+        )
+    finally:
+        if env_backup is not None:
+            os.environ["OPENROUTER_API_KEY"] = env_backup
+
+
+def test_index_directory_raises_before_deleting_when_stored_model_unavailable(tmp_path):
+    """index_directory must raise before deleting documents if the stored model can't load.
+
+    Regression test for P0: index_directory deleted existing documents for each source
+    before calling add_documents.  When the Indexer was constructed in auto mode with a
+    collection whose stored embedding model couldn't be loaded (_stored_model_name set),
+    add_documents raised RuntimeError AFTER the documents were already deleted — leaving
+    the index permanently empty.
+
+    The fix: check _stored_model_name at the top of index_directory and raise before
+    any deletions.
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    doc_dir = tmp_path / "docs"
+    doc_dir.mkdir()
+    (doc_dir / "test.txt").write_text("hello world")
+
+    # Create a collection with an OpenRouter model that cannot be loaded (no API key).
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "openai/text-embedding-3-large",
+            "embedding_backend": "openrouter",
+        },
+    )
+    # Pre-seed a document so we can verify it survives.
+    col.add(ids=["existing-doc"], embeddings=[[0.1] * 1536], documents=["existing content"])
+    assert col.count() == 1
+    del client
+
+    import os
+
+    env_backup = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        # Construct in auto mode so _stored_model_name gets set (model can't load).
+        # Use allow_recreate=False so the collection is preserved in auto mode.
+        indexer = Indexer(
+            persist_directory=persist_dir,
+            enable_persist=True,
+            embedding_function="auto",
+            collection_name="default",
+            allow_recreate=False,
+        )
+        # _stored_model_name must be set (model load failed).
+        assert (
+            indexer._stored_model_name is not None
+        ), "Expected _stored_model_name to be set when OpenRouter key absent"
+
+        # index_directory must raise BEFORE deleting any documents.
+        with pytest.raises(RuntimeError, match="stored embedding model"):
+            indexer.index_directory(doc_dir)
+    finally:
+        if env_backup is not None:
+            os.environ["OPENROUTER_API_KEY"] = env_backup
+
+    # Verify the original document is still there — not deleted by the failed index_directory.
+    verify_settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    verify_client = chromadb.PersistentClient(path=str(persist_dir), settings=verify_settings)
+    verify_col = verify_client.get_collection(name="default")
+    assert (
+        verify_col.count() == 1
+    ), "P0 regression: index_directory deleted documents before raising — data loss!"

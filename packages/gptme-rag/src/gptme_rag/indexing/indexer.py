@@ -382,7 +382,7 @@ class Indexer:
                 try:
                     _peek = self.client.get_collection(name=collection_name)
                     _stored_for_guard = (_peek.metadata or {}).get("embedding_model", "unknown")
-                    if "/" in _stored_for_guard:
+                    if _looks_like_openrouter_model(_stored_for_guard):
                         raise ValueError(
                             f"OPENROUTER_API_KEY is not set, but collection {collection_name!r} "
                             f"was indexed with OpenRouter model {_stored_for_guard!r}. "
@@ -426,7 +426,11 @@ class Indexer:
                         self.embedding_function = None
                         self._stored_model_name = stored_model
                         need_recreate = False
-                    elif _openrouter_fallback and not force_recreate and "/" in stored_model:
+                    elif (
+                        _openrouter_fallback
+                        and not force_recreate
+                        and _looks_like_openrouter_model(stored_model)
+                    ):
                         # OPENROUTER_API_KEY is missing, so we fell back to ModernBERT,
                         # but the existing collection was indexed with an OpenRouter model.
                         # Silently recreating would destroy the user's data — raise a clear
@@ -818,6 +822,16 @@ class Indexer:
             {str(source) for doc in documents if (source := doc.metadata.get("source"))}
         )
         n_files = len(sources)
+
+        # Guard: if the stored embedding model could not be loaded, raise before
+        # deleting any documents — otherwise the delete succeeds but the subsequent
+        # add_documents call fails, leaving the index permanently empty.
+        if self._stored_model_name is not None:
+            raise RuntimeError(
+                f"Cannot index directory: the stored embedding model {self._stored_model_name!r} could "
+                "not be loaded (API key missing or model weights unavailable).  "
+                "Re-index with a model that is available, or provide the required credentials."
+            )
 
         for source in sources:
             self.delete_documents({"source": source})
