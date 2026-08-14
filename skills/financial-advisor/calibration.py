@@ -7,6 +7,7 @@ advice by gathering context in the right order before generating recommendations
 
 from __future__ import annotations
 
+import html
 import json
 from dataclasses import dataclass, field
 from enum import Enum
@@ -309,13 +310,16 @@ def generate_calibrated_prompt(user_question: str, ctx: QuestionContext) -> str:
     # Delimit user_question with XML tags so the LLM treats the content as data,
     # not as additional instructions.  Python f-strings evaluate only the expression
     # inside {}, not the content of the resolved string, so there is no shell/code
-    # injection risk here — the tags add prompt-injection hardening at the LLM layer.
+    # injection risk from f-string evaluation.  However, the content must still be
+    # XML-escaped so that a question containing '</user_question>' cannot break out
+    # of the tag boundary (classic XML-injection / prompt-injection vector).
+    escaped_question = html.escape(user_question)
     prompt = f"""You are a financial planning assistant. Before giving advice, you ask specific
 clarifying questions to understand the user's situation. You ask no more than 2 questions at a time.
 
 USER'S ORIGINAL QUESTION:
 <user_question>
-{user_question}
+{escaped_question}
 </user_question>
 
 CONTEXT GATHERED SO FAR:
