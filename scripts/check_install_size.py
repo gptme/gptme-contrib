@@ -73,6 +73,8 @@ class CheckResult:
         yield self.budget_overages
 
     def __eq__(self, other: object) -> bool:
+        if isinstance(other, bool):
+            return self.all_pass == other
         if isinstance(other, tuple):
             return tuple(self) == other
         if isinstance(other, CheckResult):
