@@ -221,16 +221,23 @@ def classify_question(user_question: str) -> str:
 
 def next_questions(
     ctx: QuestionContext, question_type: str, max_questions: int = 2
-) -> list[str]:
+) -> list[str] | None:
     """Return the next questions to ask, up to max_questions.
 
-    Returns an empty list when the debt-interrupt early-exit should fire — the
-    caller must handle that case (e.g. by routing to generate_calibrated_prompt
-    or by showing the debt-payoff message directly) rather than asking further
-    clarifying questions.
+    Returns ``None`` when the high-interest debt interrupt should fire.
+    Callers must test for ``None`` before checking for an empty list:
+
+    - ``None``   → debt interrupt: show payoff advice, stop asking questions.
+    - ``[]``     → all required axes gathered: proceed to generate_calibrated_prompt.
+    - non-empty  → questions remaining: ask the next one(s) in the returned list.
+
+    Returning ``None`` (not ``[]``) for the interrupt makes the two
+    "stop-asking" cases distinguishable, so callers cannot accidentally
+    skip the debt-payoff branch and give investment advice to a user who
+    should pay off high-interest debt first.
     """
     if ctx.should_interrupt_with_debt_advice():
-        return []
+        return None
     missing = ctx.missing_axes_for(question_type)
     return [AXIS_QUESTIONS[axis] for axis in missing[:max_questions]]
 

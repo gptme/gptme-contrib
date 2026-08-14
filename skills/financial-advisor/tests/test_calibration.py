@@ -229,6 +229,7 @@ class TestNextQuestions:
         """Test that we get prioritized questions with empty context."""
         ctx = QuestionContext()
         questions = next_questions(ctx, "should_i_invest", max_questions=2)
+        assert questions is not None  # no debt interrupt
         assert len(questions) <= 2
         assert AXIS_QUESTIONS["time_horizon"] in questions
 
@@ -236,6 +237,7 @@ class TestNextQuestions:
         """Test that questions follow AXIS_PRIORITY_ORDER."""
         ctx = QuestionContext(time_horizon=TimeHorizon.LONG)
         questions = next_questions(ctx, "should_i_invest")
+        assert questions is not None  # no debt interrupt
         # Should ask goal_type next (after time_horizon)
         assert AXIS_QUESTIONS["goal_type"] in questions
 
@@ -243,25 +245,56 @@ class TestNextQuestions:
         """Test that max_questions is respected."""
         ctx = QuestionContext()
         questions = next_questions(ctx, "should_i_invest", max_questions=1)
+        assert questions is not None  # no debt interrupt
         assert len(questions) == 1
 
-    def test_next_questions_empty_when_debt_interrupt(self):
-        """next_questions must return [] when high-interest debt is flagged.
+    def test_next_questions_none_when_debt_interrupt(self):
+        """next_questions must return None when high-interest debt is flagged.
 
-        A caller driving a clarifying-question loop via next_questions must not
-        keep asking about time_horizon / goal_type when the debt interrupt should
-        fire.  Returning [] signals the caller to show the debt-payoff message
-        instead of asking further questions (P1 regression guard).
+        Returning None (not []) disambiguates the debt-interrupt early-exit
+        from "all axes gathered" (both previously returned []).  A caller must
+        be able to distinguish:
+          - None  → debt interrupt fires, show payoff advice immediately
+          - []    → all axes gathered, proceed to generate_calibrated_prompt
+        Returning [] for the interrupt would allow callers to skip the
+        debt-payoff branch and give investment advice to a user who should
+        pay off high-interest debt first (P1 regression guard).
         """
         ctx = QuestionContext(has_high_interest_debt=True)
-        # Even with missing required axes (time_horizon, goal_type), must return [].
+        # Even with missing required axes (time_horizon, goal_type), must return None.
         assert ctx.should_interrupt_with_debt_advice()
         assert ctx.missing_axes_for("should_i_invest")  # sanity: axes ARE missing
         questions = next_questions(ctx, "should_i_invest")
-        assert questions == [], (
-            "next_questions must return [] when debt interrupt is active, "
-            "not a list of clarifying questions"
+        assert questions is None, (
+            "next_questions must return None when debt interrupt is active, "
+            "not [] (which is indistinguishable from 'all axes gathered')"
         )
+
+    def test_next_questions_empty_list_when_all_axes_gathered(self):
+        """next_questions must return [] (not None) when all axes are present.
+
+        Distinguishes "all context gathered, proceed to advise" from
+        "debt interrupt, stop asking" — the two cases that were previously
+        both returning [] (P1 regression guard).
+        """
+        ctx = QuestionContext(
+            time_horizon=TimeHorizon.LONG,
+            goal_type=GoalType.WEALTH_GROWTH,
+            has_high_interest_debt=False,
+            has_emergency_fund=True,
+            risk_tolerance=RiskTolerance.MODERATE,
+            country_context=CountryContext.UK,
+        )
+        # Sanity: interrupt must NOT fire and no axes should be missing.
+        assert not ctx.should_interrupt_with_debt_advice()
+        assert ctx.missing_axes_for("should_i_invest") == []
+        questions = next_questions(ctx, "should_i_invest")
+        assert (
+            questions == []
+        ), "next_questions must return [] (not None) when all axes are gathered"
+        assert (
+            questions is not None
+        ), "next_questions must NOT return None when interrupt does not fire"
 
 
 class TestGenerateCalibratedPrompt:
@@ -463,6 +496,7 @@ class TestIntegrationScenarios:
         missing = ctx.missing_axes_for("should_i_invest")
         assert len(missing) > 0
         questions = next_questions(ctx, "should_i_invest")
+        assert questions is not None  # no debt interrupt
         assert len(questions) > 0
         assert AXIS_QUESTIONS["time_horizon"] in questions
 
