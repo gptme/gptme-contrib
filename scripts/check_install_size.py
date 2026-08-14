@@ -54,6 +54,13 @@ class CheckResult:
         install_failures: int,
         budget_overages: int,
     ) -> None:
+        for _name, _val in (
+            ("config_errors", config_errors),
+            ("install_failures", install_failures),
+            ("budget_overages", budget_overages),
+        ):
+            if _val < 0:
+                raise ValueError(f"{_name} must be non-negative, got {_val!r}")
         self.all_pass = all_pass
         self.config_errors = config_errors
         self.install_failures = install_failures
@@ -314,7 +321,18 @@ def print_failure_summary(result: CheckResult) -> None:
     - config errors → check pyproject.toml
     - install failures → check the install command / environment
     - budget overages → trim dependencies or raise the budget
+
+    When all counts are zero (e.g. the ``--package`` filter matched nothing),
+    the per-package error was already printed by :func:`check_packages`; emit a
+    brief final line so the failure is never silent.
     """
+    if (
+        result.config_errors == 0
+        and result.install_failures == 0
+        and result.budget_overages == 0
+    ):
+        print("✗ No packages were checked (see output above for details)")
+        return
     if result.config_errors > 0:
         plural = "package" if result.config_errors == 1 else "packages"
         print(

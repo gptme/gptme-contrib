@@ -547,3 +547,35 @@ def test_check_result_is_hashable():
     assert r3 in result_set  # r3 equals r1 → same hash, same set membership
     assert r2 not in {r1}
     assert isinstance(hash(r1), int)
+
+
+def test_check_result_rejects_negative_counts():
+    """CheckResult.__init__ raises ValueError for negative counter arguments."""
+    import check_install_size
+    import pytest
+
+    with pytest.raises(ValueError, match="config_errors"):
+        check_install_size.CheckResult(False, -1, 0, 0)
+    with pytest.raises(ValueError, match="install_failures"):
+        check_install_size.CheckResult(False, 0, -1, 0)
+    with pytest.raises(ValueError, match="budget_overages"):
+        check_install_size.CheckResult(False, 0, 0, -1)
+
+
+def test_print_failure_summary_no_match_fallback(capsys):
+    """When all counts are zero (no-match filter), print_failure_summary emits a brief line."""
+    import check_install_size
+
+    # This is the CheckResult returned when --package filter matches nothing
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=0, install_failures=0, budget_overages=0
+    )
+    check_install_size.print_failure_summary(result)
+
+    out = capsys.readouterr().out
+    # Must not be silent — emit at least one line so the CI failure is explained
+    assert out.strip()
+    # Must not claim a specific failure class that didn't occur
+    assert "invalid budget configuration" not in out
+    assert "failed to install" not in out
+    assert "exceeded" not in out
