@@ -778,7 +778,11 @@ def watch(
                 # If the embedding function is mismatched and the stored model failed to load,
                 # log a warning and skip indexing. The watcher will still run and can ingest
                 # changes once a compatible embedding function is provided.
-                if "Cannot add documents" in str(e) or "stored model" in str(e):
+                if (
+                    "Cannot add documents" in str(e)
+                    or "Cannot index directory" in str(e)
+                    or "stored embedding model" in str(e)
+                ):
                     console.print(f"⚠️  Warning: {e}", style="yellow")
                     console.print(
                         "Continuing to watch for changes, but indexing is skipped until a compatible "

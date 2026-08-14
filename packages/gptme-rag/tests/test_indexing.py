@@ -1352,3 +1352,76 @@ def test_index_directory_raises_before_deleting_when_stored_model_unavailable(tm
     assert (
         verify_col.count() == 1
     ), "P0 regression: index_directory deleted documents before raising — data loss!"
+
+
+def test_watch_exception_filter_catches_cannot_index_directory_error(
+    tmp_path,
+):
+    """watch must catch RuntimeError from index_directory when stored model cannot load.
+
+    Regression test for P1: cli.py:781 checked for "Cannot add documents" and "stored model"
+    but index_directory raises "Cannot index directory: the stored embedding model ...",
+    which matches neither — so the error propagated and crashed the watch command
+    instead of logging a warning and continuing to watch.
+
+    The fix adds "Cannot index directory" and "stored embedding model" to the filter.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from click.testing import CliRunner
+
+    from gptme_rag.cli import cli
+
+    test_dir = tmp_path / "docs"
+    test_dir.mkdir()
+    (test_dir / "file.txt").write_text("hello")
+
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+
+    # The error that index_directory actually raises when _stored_model_name is set.
+    cant_index_msg = (
+        "Cannot index directory: the stored embedding model "
+        "'openai/text-embedding-3-large' could not be loaded "
+        "(API key missing or model weights unavailable)."
+    )
+
+    with (
+        patch("gptme_rag.cli.Indexer") as MockIndexer,
+        patch("gptme_rag.cli.FileWatcher") as MockFileWatcher,
+        # signal.pause() blocks forever — raise KeyboardInterrupt to exit the watch loop.
+        patch("gptme_rag.cli.signal") as mock_signal,
+    ):
+        mock_indexer = MagicMock()
+        MockIndexer.return_value = mock_indexer
+        # index_directory raises the error that was slipping through the old filter.
+        mock_indexer.index_directory.side_effect = RuntimeError(cant_index_msg)
+
+        # FileWatcher context manager — signal.pause() inside it raises KeyboardInterrupt.
+        mock_watcher = MagicMock()
+        mock_watcher.__enter__ = MagicMock(return_value=mock_watcher)
+        mock_watcher.__exit__ = MagicMock(return_value=False)
+        MockFileWatcher.return_value = mock_watcher
+        mock_signal.pause.side_effect = KeyboardInterrupt
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "watch",
+                str(test_dir),
+                "--persist-dir",
+                str(index_dir),
+            ],
+        )
+
+    # Before the fix: exit_code != 0 because RuntimeError propagated from index_directory.
+    # After the fix: exit_code == 0 — the filter catches it, logs a warning, and watch
+    # continues (then exits cleanly via the KeyboardInterrupt from signal.pause).
+    assert result.exit_code == 0, (
+        f"watch crashed with exit_code={result.exit_code} instead of logging a warning.\n"
+        f"Output:\n{result.output}"
+    )
+    assert (
+        "Warning" in result.output or "warning" in result.output.lower()
+    ), f"Expected a warning in output but got:\n{result.output}"
