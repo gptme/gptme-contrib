@@ -178,6 +178,12 @@ class Indexer:
         default_chunk_size = 1000
         default_chunk_overlap = 200
 
+        # Set to True when --embedding-function openrouter was requested but no API key
+        # is configured.  The fallback to ModernBERT is safe for fresh indexes, but must
+        # NOT silently destroy an existing collection that was indexed with OpenRouter.
+        # Initialized here so the mismatch guard below can safely reference it.
+        _openrouter_fallback = False
+
         # Initialize embedding function.
         # "auto" is fully deferred: we peek at the stored collection metadata below
         # (after client init) and rebind the right backend then.  We do NOT
@@ -211,6 +217,7 @@ class Indexer:
                 logger.warning(
                     "OpenRouter API key not configured; falling back to ModernBERT embeddings"
                 )
+                _openrouter_fallback = True
                 self.embedding_function = ModernBERTEmbedding(device=device)
                 if self.embedding_function.is_msmarco:
                     default_chunk_size = 512
@@ -365,6 +372,30 @@ class Indexer:
             if force_recreate:
                 need_recreate = True
         else:
+            # Pre-flight guard: when the OpenRouter key is missing and we fell back to
+            # ModernBERT, check whether an existing collection was indexed with an OpenRouter
+            # model BEFORE attempting to open it with ModernBERT.  The subsequent
+            # get_collection() call below would either raise on the EF conflict or silently
+            # set need_recreate=True — both paths can destroy the user's OpenRouter index.
+            # We peek here (no EF → no conflict) so we can raise a clear error instead.
+            if _openrouter_fallback and not force_recreate:
+                try:
+                    _peek = self.client.get_collection(name=collection_name)
+                    _stored_for_guard = (_peek.metadata or {}).get("embedding_model", "unknown")
+                    if "/" in _stored_for_guard:
+                        raise ValueError(
+                            f"OPENROUTER_API_KEY is not set, but collection {collection_name!r} "
+                            f"was indexed with OpenRouter model {_stored_for_guard!r}. "
+                            f"Set OPENROUTER_API_KEY and retry, or use --force-recreate to "
+                            f"rebuild the index with ModernBERT (this will delete the existing "
+                            f"OpenRouter index)."
+                        )
+                except ValueError:
+                    raise  # propagate our data-loss guard
+                except Exception:
+                    pass  # collection doesn't exist yet — creating fresh is safe
+
+            _guard_raised = False  # sentinel for re-raise of inner guard (belt+suspenders)
             try:
                 # Try to get existing collection
                 self.collection = self.client.get_collection(
@@ -395,6 +426,21 @@ class Indexer:
                         self.embedding_function = None
                         self._stored_model_name = stored_model
                         need_recreate = False
+                    elif _openrouter_fallback and not force_recreate and "/" in stored_model:
+                        # OPENROUTER_API_KEY is missing, so we fell back to ModernBERT,
+                        # but the existing collection was indexed with an OpenRouter model.
+                        # Silently recreating would destroy the user's data — raise a clear
+                        # error explaining what happened and how to resolve it.
+                        # Note: _guard_raised ensures the broad except below re-raises this
+                        # intentional error rather than treating it as a ChromaDB failure.
+                        _guard_raised = True
+                        raise ValueError(
+                            f"OPENROUTER_API_KEY is not set, but collection {collection_name!r} "
+                            f"was indexed with OpenRouter model {stored_model!r}. "
+                            f"Set OPENROUTER_API_KEY and retry, or use --force-recreate to "
+                            f"rebuild the index with ModernBERT (this will delete the existing "
+                            f"OpenRouter index)."
+                        )
                     else:
                         logger.info(
                             f"Model mismatch (stored: {stored_model}, current: {current_model}) or force recreate"
@@ -402,6 +448,10 @@ class Indexer:
                         need_recreate = True
 
             except (ValueError, Exception) as e:
+                if _guard_raised:
+                    # This is our intentional data-loss guard, not a ChromaDB failure —
+                    # propagate it without attempting collection creation.
+                    raise
                 if embedding_function == "auto" and _auto_peeked_collection is not None:
                     logger.warning(
                         "Auto mode could not rebind collection %r with the detected embedding "

@@ -1146,3 +1146,68 @@ def test_watch_explicit_embedding_function_does_not_wipe_mismatched_collection(
     assert (
         indexer.collection.count() == 1
     ), "Collection was destroyed — watch command data-loss regression"
+
+
+def test_index_openrouter_fallback_does_not_destroy_existing_openrouter_collection(
+    tmp_path,
+):
+    """index must raise a clear error instead of silently destroying an OpenRouter collection.
+
+    Regression test for P1: when --embedding-function openrouter is passed but
+    OPENROUTER_API_KEY is not set, the Indexer fell back to ModernBERT. With the
+    default allow_recreate=True (used by the index command), the mismatch between the
+    stored OpenRouter model name and the ModernBERT fallback set need_recreate=True,
+    causing the collection to be silently deleted and rebuilt with ModernBERT — destroying
+    the user's OpenRouter-indexed data.
+
+    The fix: when the OpenRouter fallback fires and the existing collection stores an
+    OpenRouter-style model name (containing "/"), raise a clear ValueError instead of
+    proceeding with recreation.
+    """
+    import os
+
+    import chromadb
+    from chromadb.config import Settings
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+
+    # Simulate a collection previously indexed with OpenRouter (1536-dim vectors).
+    settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+    col = client.create_collection(
+        name="default",
+        metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": "openai/text-embedding-3-large",
+            "embedding_backend": "openrouter",
+        },
+    )
+    col.add(ids=["doc-1"], embeddings=[[0.1] * 1536], documents=["an openrouter doc"])
+    assert col.count() == 1
+    del client
+
+    # Remove the API key so OpenRouterEmbedding.__init__ raises ValueError.
+    env_backup = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        # The index command passes allow_recreate=True (the default).  Without the fix
+        # this would silently destroy the collection.  With the fix it raises ValueError.
+        with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+            Indexer(
+                persist_directory=persist_dir,
+                enable_persist=True,
+                embedding_function="openrouter",
+                collection_name="default",
+                allow_recreate=True,
+            )
+    finally:
+        if env_backup is not None:
+            os.environ["OPENROUTER_API_KEY"] = env_backup
+
+    # Verify the collection was NOT destroyed.
+    verify_settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
+    verify_client = chromadb.PersistentClient(path=str(persist_dir), settings=verify_settings)
+    verify_col = verify_client.get_collection(name="default")
+    assert (
+        verify_col.count() == 1
+    ), "Collection was destroyed by OpenRouter fallback — data loss regression"
