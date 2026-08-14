@@ -117,6 +117,44 @@ def validate_presentation(deck: dict[str, Any]) -> None:
                 raise ValueError(
                     f"slide {slide_id} has unsupported animation: {animation_type}"
                 )
+            if isinstance(animation, dict) and "target" in animation:
+                target = animation["target"]
+                if not isinstance(target, str) or not re.fullmatch(
+                    r"[a-z][a-z0-9-]*", target
+                ):
+                    raise ValueError(
+                        f"slide {slide_id} animation target {target!r} must contain "
+                        "only lowercase letters, digits, and hyphens"
+                    )
+
+        # Type-check slide fields so hand-written or schema-bypassed decks fail
+        # early with a clear error rather than crashing inside a render function.
+        if slide_type in ("content", "code-and-text"):
+            bullets = slide.get("bullets")
+            if bullets is not None and not isinstance(bullets, list):
+                raise ValueError(
+                    f"slide {slide_id} 'bullets' must be a list, "
+                    f"got {type(bullets).__name__}"
+                )
+            body = slide.get("body")
+            if body is not None and not isinstance(body, str):
+                raise ValueError(
+                    f"slide {slide_id} 'body' must be a string, "
+                    f"got {type(body).__name__}"
+                )
+        if slide_type in ("code-reveal", "code-and-text"):
+            code = slide.get("code")
+            if code is not None and not isinstance(code, str):
+                raise ValueError(
+                    f"slide {slide_id} 'code' must be a string, "
+                    f"got {type(code).__name__}"
+                )
+            language = slide.get("language")
+            if language is not None and not isinstance(language, str):
+                raise ValueError(
+                    f"slide {slide_id} 'language' must be a string, "
+                    f"got {type(language).__name__}"
+                )
 
 
 def render_html(deck: dict[str, Any]) -> str:
@@ -473,7 +511,11 @@ def _javascript() -> str:
 
     function selectedTarget(slide, target) {
       if (!target) return slide.querySelector('.slide-inner');
-      return slide.querySelector(`[data-role="${target}"]`) || slide.querySelector('.slide-inner');
+      try {
+        return slide.querySelector(`[data-role="${target}"]`) || slide.querySelector('.slide-inner');
+      } catch (e) {
+        return slide.querySelector('.slide-inner');
+      }
     }
 
     function prepareAnimations(slide) {

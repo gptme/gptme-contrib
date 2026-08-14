@@ -29,8 +29,8 @@
   "definitions": {
     "cssColor": {
       "type": "string",
-      "description": "A CSS colour value: 3–8 digit hex, rgb/rgba(), hsl(), or a named colour. Validated by the generator at render time.",
-      "pattern": "^(#[0-9A-Fa-f]{3,8}|rgba?\\(.*\\)|hsl\\(.*\\)|[a-zA-Z]{2,30})$"
+      "description": "A CSS colour value accepted by the generator: 3–8 digit hex, comma-separated rgb/rgba(), comma-separated hsl(), or a CSS named colour. Space-separated modern syntax (e.g. rgb(0 0 0)) is not supported.",
+      "pattern": "^(#[0-9A-Fa-f]{3,8}|rgba?\\(\\s*\\d+%?\\s*,\\s*\\d+%?\\s*,\\s*\\d+%?(\\s*,\\s*[\\d.]+)?\\s*\\)|hsl\\(\\s*\\d+\\s*,\\s*\\d+%\\s*,\\s*\\d+%\\s*\\)|[a-zA-Z]{2,30})$"
     },
     "theme": {
       "type": "object",
@@ -57,7 +57,8 @@
         },
         "target": {
           "type": "string",
-          "description": "Optional element role to animate, for example title, body, code, image, or gallery."
+          "description": "Optional element role to animate, for example title, body, code, image, or gallery. Must be a simple identifier: lowercase letters, digits, and hyphens only.",
+          "pattern": "^[a-z][a-z0-9-]*$"
         },
         "duration": {
           "type": "integer",

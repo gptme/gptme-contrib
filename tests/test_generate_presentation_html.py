@@ -253,6 +253,59 @@ def test_line_by_line_reveal_alias_normalises_to_line_reveal():
     assert "animate-line-by-line-reveal" not in html
 
 
+def test_schema_rejects_space_separated_rgb():
+    """Schema cssColor must reject modern space-separated rgb(0 0 0) — generator rejects it too."""
+    schema = json.loads(SCHEMA.read_text())
+    deck = _sample_deck()
+    deck["metadata"]["theme"]["accent"] = "rgb(0 0 0)"
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(deck, schema)
+
+
+def test_validate_presentation_rejects_invalid_animation_target():
+    """Animation targets with quotes/brackets make querySelector throw; must be caught early."""
+    deck = _sample_deck()
+    deck["slides"][1]["animations"] = [{"type": "fade-in", "target": 'body"'}]
+
+    with pytest.raises(ValueError, match="animation target"):
+        generator.validate_presentation(deck)
+
+
+def test_validate_presentation_rejects_string_bullets():
+    """A string 'bullets' iterates characters instead of items — must be caught at validate time."""
+    deck = _sample_deck()
+    deck["slides"][1]["bullets"] = "not a list"
+
+    with pytest.raises(ValueError, match="'bullets' must be a list"):
+        generator.validate_presentation(deck)
+
+
+def test_validate_presentation_rejects_non_string_body():
+    """A non-string 'body' must be caught at validate time before reaching _escape()."""
+    deck = _sample_deck()
+    deck["slides"][1]["body"] = 42
+
+    with pytest.raises(ValueError, match="'body' must be a string"):
+        generator.validate_presentation(deck)
+
+
+def test_validate_presentation_rejects_non_string_code():
+    """A non-string 'code' on a code-reveal slide must be caught at validate time."""
+    deck = _sample_deck()
+    deck["slides"][2]["code"] = ["not", "a", "string"]
+
+    with pytest.raises(ValueError, match="'code' must be a string"):
+        generator.validate_presentation(deck)
+
+
+def test_javascript_selectedtarget_has_try_catch():
+    """selectedTarget must wrap querySelector in try/catch so a malformed target can't halt JS."""
+    html = generator.render_html(_sample_deck())
+    assert "try {" in html
+    assert "catch (e)" in html
+
+
 def test_body_and_bullets_share_single_data_role_body_container():
     """Both body text and bullets must be in one container with data-role='body'.
 
