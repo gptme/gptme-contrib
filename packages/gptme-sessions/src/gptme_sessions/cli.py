@@ -2987,7 +2987,10 @@ def search(
         harness_label = f"[{r.harness}]"
         click.echo(f"  {r.display_date}  {harness_label}  {r.session_id}  ({r.hit_count} hit(s))")
         if r.summary and not no_snippets:
-            click.echo(f"    {r.summary}")
+            # Strip terminal control characters to prevent ANSI injection from
+            # untrusted session file content (e.g. crafted escape sequences).
+            safe_summary = re.sub(r"[\x00-\x1f\x7f]", "", r.summary)
+            click.echo(f"    {safe_summary}")
         if not no_snippets:
             for s in r.snippets:
                 role_label = s.role.upper()[:4]

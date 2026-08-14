@@ -105,8 +105,13 @@ def _extract_summary(messages: list) -> str | None:
             content = (msg.content or "").strip()
             if len(content) < SUMMARY_MIN_LEN:
                 continue
-            # Take first non-empty line
-            first_line = next((ln.strip() for ln in content.splitlines() if ln.strip()), content)
+            # Take the first non-empty line that is itself substantial enough to
+            # be a meaningful summary.  A short opener like "Hi" followed by a
+            # long body would otherwise produce a useless one-word summary.
+            lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+            first_line = next((ln for ln in lines if len(ln) >= SUMMARY_MIN_LEN), None)
+            if first_line is None:
+                continue
             if len(first_line) > SUMMARY_MAX_LEN:
                 return first_line[:SUMMARY_MAX_LEN] + "…"
             return first_line

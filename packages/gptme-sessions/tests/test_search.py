@@ -153,6 +153,20 @@ class TestExtractSummary:
         result = _extract_summary(msgs)
         assert result == "First meaningful line here with enough chars"
 
+    def test_skips_short_first_line_falls_back_to_substantial_line(self):
+        # "Hi" is shorter than SUMMARY_MIN_LEN; the summary should come from the
+        # next substantial line rather than returning the terse opener.
+        long_body = "Implement the session search feature with full-text indexing"
+        msgs = [self._msg("user", f"Hi\n{long_body}")]
+        result = _extract_summary(msgs)
+        assert result is not None
+        assert result == long_body
+
+    def test_returns_none_when_all_lines_too_short(self):
+        # Total content >= SUMMARY_MIN_LEN but every individual line is short.
+        msgs = [self._msg("user", "ok\nyes\nno\nhi\nok")]
+        assert _extract_summary(msgs) is None
+
     def test_prefers_user_over_assistant(self):
         msgs = [
             self._msg("assistant", "Here is a detailed assistant response that is long"),
@@ -466,6 +480,24 @@ class TestSearchCLI:
         assert len(data) == 1
         assert data[0]["hit_count"] == 1
         assert "snippets" in data[0]
+        assert "summary" in data[0]
+
+    def test_search_shows_summary_in_text_output(self, tmp_path: Path):
+        """Summary line should appear in text output when the session has one."""
+        session = _gptme_session(
+            tmp_path,
+            [("user", "Fix the broken auth middleware so tokens are validated correctly")],
+        )
+        runner = CliRunner()
+        with (
+            patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            result = runner.invoke(cli, ["search", "auth"])
+        assert result.exit_code == 0
+        assert "Fix the broken auth middleware" in result.output
 
     def test_search_no_snippets_flag(self, tmp_path: Path):
         session = _gptme_session(tmp_path, [("assistant", "target found here")])
