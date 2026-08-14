@@ -174,6 +174,38 @@ def test_theme_accepts_valid_color_formats():
         jsonschema.validate(deck, schema)
 
 
+def test_validate_presentation_rejects_image_slide_without_src():
+    """Image slides whose 'image' value lacks 'src' must be rejected at validation time."""
+    deck = _sample_deck()
+    deck["slides"].append(
+        {
+            "id": "img-no-src",
+            "type": "image",
+            "title": "Photo",
+            "image": {"alt": "no src here"},
+        }
+    )
+
+    with pytest.raises(ValueError, match="'src'"):
+        generator.validate_presentation(deck)
+
+
+def test_validate_presentation_rejects_image_slide_with_empty_src():
+    """Image slides with an empty 'src' must be rejected (schema minLength: 1)."""
+    deck = _sample_deck()
+    deck["slides"].append(
+        {
+            "id": "img-empty-src",
+            "type": "image",
+            "title": "Photo",
+            "image": {"src": "", "alt": "empty src"},
+        }
+    )
+
+    with pytest.raises(ValueError, match="non-empty"):
+        generator.validate_presentation(deck)
+
+
 def test_validate_presentation_rejects_gallery_image_without_src():
     """Gallery images that are not objects with 'src' must be rejected at validation time."""
     deck = _sample_deck()

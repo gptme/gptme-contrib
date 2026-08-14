@@ -86,6 +86,16 @@ def validate_presentation(deck: dict[str, Any]) -> None:
             )
         if slide_type == "image" and "image" not in slide:
             raise ValueError(f"slide {slide_id} of type image requires image")
+        if slide_type == "image" and "image" in slide:
+            img = slide["image"]
+            if not isinstance(img, dict) or "src" not in img:
+                raise ValueError(
+                    f"slide {slide_id} image must be an object with a 'src' field"
+                )
+            if not isinstance(img["src"], str) or not img["src"]:
+                raise ValueError(
+                    f"slide {slide_id} image 'src' must be a non-empty string"
+                )
         if slide_type == "gallery" and "images" not in slide:
             raise ValueError(f"slide {slide_id} of type gallery requires images")
         if slide_type == "gallery":
