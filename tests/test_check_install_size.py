@@ -478,3 +478,72 @@ def test_check_result_tuple_unpacking_backward_compat():
     assert all_pass is False
     assert pre_measurement_failures == 3  # config_errors + install_failures
     assert budget_overages == 3
+
+
+def test_check_packages_mixed_failures(capsys):
+    """check_packages counts config errors and install failures independently.
+
+    A malformed budget config must not spill into install_failures and vice versa.
+    Both counters must accumulate separately so print_failure_summary can direct
+    developers to the right place (pyproject.toml vs the install command).
+    """
+    import check_install_size
+
+    def fake_measure(package_path, package_name):
+        # Only called for the package with a valid budget; simulates install failure
+        return None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+
+        # Package with malformed max_install_mb → config_errors += 1
+        bad_budget = packages_dir / "bad_budget"
+        bad_budget.mkdir(parents=True)
+        (bad_budget / "pyproject.toml").write_text(
+            '[tool.gptme-contrib]\nmax_install_mb = "not-a-number"\n'
+        )
+
+        # Package with valid budget but install returns None → install_failures += 1
+        broken_install = packages_dir / "broken_install"
+        broken_install.mkdir(parents=True)
+        (broken_install / "pyproject.toml").write_text(
+            "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+        )
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result = check_install_size.check_packages(packages_dir, verbose=False)
+
+    # Both failure classes must be counted independently
+    assert result.all_pass is False
+    assert result.config_errors == 1
+    assert result.install_failures == 1
+    assert result.budget_overages == 0
+    assert result.pre_measurement_failures == 2  # config_errors + install_failures
+    assert result == (
+        False,
+        2,
+        0,
+    )  # tuple: (all_pass, pre_measurement_failures, budget_overages)
+
+    # print_failure_summary must emit a distinct line for each class
+    check_install_size.print_failure_summary(result)
+    out = capsys.readouterr().out
+    assert "invalid budget configuration" in out
+    assert "failed to install" in out
+
+
+def test_check_result_is_hashable():
+    """CheckResult defines __hash__ so instances can be used in sets and as dict keys."""
+    import check_install_size
+
+    r1 = check_install_size.CheckResult(True, 0, 0, 0)
+    r2 = check_install_size.CheckResult(False, 1, 0, 0)
+    r3 = check_install_size.CheckResult(True, 0, 0, 0)
+
+    # Must not raise TypeError
+    result_set = {r1, r2}
+    assert r3 in result_set  # r3 equals r1 → same hash, same set membership
+    assert r2 not in {r1}
+    assert isinstance(hash(r1), int)

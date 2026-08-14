@@ -86,6 +86,16 @@ class CheckResult:
             )
         return NotImplemented
 
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.all_pass,
+                self.config_errors,
+                self.install_failures,
+                self.budget_overages,
+            )
+        )
+
     def __repr__(self) -> str:
         return (
             f"CheckResult(all_pass={self.all_pass!r}, "
