@@ -512,6 +512,27 @@ class TestSearchCLI:
         assert result.exit_code == 0
         assert "target found here" not in result.output
 
+    def test_search_no_snippets_still_shows_summary(self, tmp_path: Path):
+        """Summary is a session description, not a snippet; --no-snippets must not hide it."""
+        user_msg = "Please fix the broken authentication middleware in the login flow."
+        session = _gptme_session(
+            tmp_path,
+            [("user", user_msg), ("assistant", "target match is here in the response")],
+        )
+        runner = CliRunner()
+        with (
+            patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            result = runner.invoke(cli, ["search", "target", "--no-snippets"])
+        assert result.exit_code == 0
+        # The snippet text must be hidden
+        assert "target match is here in the response" not in result.output
+        # But the summary (first user message) must still appear
+        assert "Please fix the broken authentication middleware" in result.output
+
     def test_search_harness_choice(self, tmp_path: Path):
         runner = CliRunner()
         with (
