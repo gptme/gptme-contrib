@@ -27,17 +27,22 @@
     }
   },
   "definitions": {
+    "cssColor": {
+      "type": "string",
+      "description": "A CSS colour value: 3–8 digit hex, rgb/rgba(), hsl(), or a named colour. Validated by the generator at render time.",
+      "pattern": "^(#[0-9A-Fa-f]{3,8}|rgba?\\(.*\\)|hsl\\(.*\\)|[a-zA-Z]{2,30})$"
+    },
     "theme": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "name": {"type": "string"},
-        "background": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
-        "surface": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
-        "foreground": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
-        "muted": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
-        "accent": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
-        "secondary": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"}
+        "background": {"$ref": "#/definitions/cssColor"},
+        "surface": {"$ref": "#/definitions/cssColor"},
+        "foreground": {"$ref": "#/definitions/cssColor"},
+        "muted": {"$ref": "#/definitions/cssColor"},
+        "accent": {"$ref": "#/definitions/cssColor"},
+        "secondary": {"$ref": "#/definitions/cssColor"}
       }
     },
     "animation": {
@@ -47,7 +52,8 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["fade-in", "slide-in", "line-reveal", "zoom", "spin"]
+          "description": "\"line-by-line-reveal\" is a supported alias that the generator normalises to \"line-reveal\" at render time.",
+          "enum": ["fade-in", "slide-in", "line-reveal", "line-by-line-reveal", "zoom", "spin"]
         },
         "target": {
           "type": "string",

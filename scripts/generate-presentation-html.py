@@ -94,6 +94,10 @@ def validate_presentation(deck: dict[str, Any]) -> None:
                     raise ValueError(
                         f"slide {slide_id} image {img_index} must be an object with a 'src' field"
                     )
+                if not isinstance(img["src"], str) or not img["src"]:
+                    raise ValueError(
+                        f"slide {slide_id} image {img_index} 'src' must be a non-empty string"
+                    )
 
         for animation in slide.get("animations", []):
             animation_type = (
@@ -207,12 +211,17 @@ def _render_body_and_bullets(slide: dict[str, Any]) -> str:
             f'            <li class="reveal-line">{_escape(item)}</li>'
             for item in bullets
         )
-        bullet_html = f"""          <ul class="bullets" data-role="body">
+        bullet_html = f"""          <ul class="bullets">
 {items}
           </ul>"""
-    body_html = f'<p class="body" data-role="body">{body}</p>' if body else ""
-    return f"""{body_html}
-{bullet_html}"""
+    body_html = f'<p class="body">{body}</p>' if body else ""
+    # Wrap in a single container so data-role="body" is unambiguous — if both
+    # <p> and <ul> carried the role, querySelector would return only the first
+    # element and animations targeting "body" would silently skip the list.
+    return f"""<div class="body-container" data-role="body">
+{body_html}
+{bullet_html}
+        </div>"""
 
 
 def _render_code(slide: dict[str, Any]) -> str:
