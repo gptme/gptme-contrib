@@ -143,7 +143,7 @@ def test_measure_install_size_success():
             package_path.mkdir()
             size = check_install_size.measure_install_size(package_path, "mypkg")
 
-    assert size is not None
+    assert isinstance(size, float), f"expected float, got {size!r}"
     assert 9.0 < size < 11.0  # ~10 MB
     export_cmd = next(cmd for cmd in seen_commands if "export" in cmd)
     install_cmd = next(cmd for cmd in seen_commands if "install" in cmd)
@@ -190,7 +190,7 @@ def test_measure_install_size_export_fallback():
             package_path.mkdir()
             size = check_install_size.measure_install_size(package_path, "mypkg")
 
-    assert size is not None
+    assert isinstance(size, float), f"expected float, got {size!r}"
     assert 4.0 < size < 6.0  # ~5 MB
     install_cmd = next(cmd for cmd in seen_commands if "install" in cmd)
     assert "--index-strategy" in install_cmd
@@ -560,6 +560,102 @@ def test_check_result_rejects_negative_counts():
         check_install_size.CheckResult(False, 0, -1, 0)
     with pytest.raises(ValueError, match="budget_overages"):
         check_install_size.CheckResult(False, 0, 0, -1)
+    with pytest.raises(ValueError, match="resolution_failures"):
+        check_install_size.CheckResult(False, 0, 0, 0, resolution_failures=-1)
+
+
+def test_is_resolution_failure_detects_uv_error():
+    """_is_resolution_failure should recognise uv's 'no solution found' output."""
+    import check_install_size
+
+    assert check_install_size._is_resolution_failure(
+        "error: No solution found when resolving dependencies:\n  Because pkg>=1.0 requires ..."
+    )
+    assert check_install_size._is_resolution_failure(
+        "× No solution found when resolving\n  | Because ..."
+    )
+    # Generic install errors that are NOT resolution failures
+    assert not check_install_size._is_resolution_failure("ERROR: package not found")
+    assert not check_install_size._is_resolution_failure("timeout")
+    assert not check_install_size._is_resolution_failure("")
+
+
+def test_measure_install_size_resolution_failure():
+    """measure_install_size returns 'resolution_failure' when uv cannot resolve deps."""
+    import check_install_size
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        if "venv" in cmd:
+            result.returncode = 0
+            venv_path = Path(cmd[-1])
+            venv_path.mkdir(parents=True)
+            (venv_path / "bin").mkdir()
+            (venv_path / "bin" / "python").touch()
+        else:
+            result.returncode = 1
+            result.stderr = (
+                "error: No solution found when resolving dependencies:\n"
+                "  Because pkg>=2.0 is not available and ..."
+            )
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_path = Path(tmpdir) / "mypkg"
+            package_path.mkdir()
+            size = check_install_size.measure_install_size(package_path, "mypkg")
+
+    assert size == "resolution_failure"
+
+
+def test_check_packages_resolution_failure_counted_separately():
+    """check_packages counts resolution failures in resolution_failures, not install_failures."""
+    import check_install_size
+
+    def fake_measure(package_path, package_name):
+        return "resolution_failure"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+        pkg_dir = packages_dir / "broken_resolve"
+        pkg_dir.mkdir(parents=True)
+        (pkg_dir / "pyproject.toml").write_text(
+            "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+        )
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result = check_install_size.check_packages(
+                packages_dir, verbose=False, only="broken_resolve"
+            )
+
+    assert result.all_pass is False
+    assert result.resolution_failures == 1
+    assert result.install_failures == 0
+    assert result.budget_overages == 0
+    # tuple backward compat: pre_measurement_failures includes resolution_failures
+    assert result == (False, 1, 0)
+
+
+def test_print_failure_summary_resolution_failure(capsys):
+    """Resolution failures print 'failed to resolve dependencies', not 'failed to install'."""
+    import check_install_size
+
+    result = check_install_size.CheckResult(
+        all_pass=False,
+        config_errors=0,
+        install_failures=0,
+        budget_overages=0,
+        resolution_failures=2,
+    )
+    check_install_size.print_failure_summary(result)
+
+    out = capsys.readouterr().out
+    assert "2 packages failed to resolve dependencies" in out
+    assert "failed to install" not in out
+    assert "exceeded their install-size budget" not in out
 
 
 def test_print_failure_summary_no_match_fallback(capsys):

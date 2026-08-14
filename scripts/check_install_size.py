@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -42,9 +42,10 @@ class CheckResult:
     Prefer attribute access for new code:
     - ``result.all_pass`` — overall pass/fail
     - ``result.config_errors`` — packages with invalid budget config
-    - ``result.install_failures`` — packages that failed to install
+    - ``result.resolution_failures`` — packages whose dependencies could not be resolved
+    - ``result.install_failures`` — packages that failed to install (after resolution)
     - ``result.budget_overages`` — packages that exceeded their size budget
-    - ``result.pre_measurement_failures`` — config_errors + install_failures (combined)
+    - ``result.pre_measurement_failures`` — config_errors + resolution_failures + install_failures (combined)
     """
 
     def __init__(
@@ -53,9 +54,11 @@ class CheckResult:
         config_errors: int,
         install_failures: int,
         budget_overages: int,
+        resolution_failures: int = 0,
     ) -> None:
         for _name, _val in (
             ("config_errors", config_errors),
+            ("resolution_failures", resolution_failures),
             ("install_failures", install_failures),
             ("budget_overages", budget_overages),
         ):
@@ -63,12 +66,13 @@ class CheckResult:
                 raise ValueError(f"{_name} must be non-negative, got {_val!r}")
         self.all_pass = all_pass
         self.config_errors = config_errors
+        self.resolution_failures = resolution_failures
         self.install_failures = install_failures
         self.budget_overages = budget_overages
 
     @property
     def pre_measurement_failures(self) -> int:
-        return self.config_errors + self.install_failures
+        return self.config_errors + self.resolution_failures + self.install_failures
 
     def __bool__(self) -> bool:
         return self.all_pass
@@ -88,6 +92,7 @@ class CheckResult:
             return (
                 self.all_pass == other.all_pass
                 and self.config_errors == other.config_errors
+                and self.resolution_failures == other.resolution_failures
                 and self.install_failures == other.install_failures
                 and self.budget_overages == other.budget_overages
             )
@@ -98,6 +103,7 @@ class CheckResult:
             (
                 self.all_pass,
                 self.config_errors,
+                self.resolution_failures,
                 self.install_failures,
                 self.budget_overages,
             )
@@ -107,6 +113,7 @@ class CheckResult:
         return (
             f"CheckResult(all_pass={self.all_pass!r}, "
             f"config_errors={self.config_errors!r}, "
+            f"resolution_failures={self.resolution_failures!r}, "
             f"install_failures={self.install_failures!r}, "
             f"budget_overages={self.budget_overages!r})"
         )
@@ -158,7 +165,21 @@ def get_package_budget(pyproject_path: Path) -> int:
     return DEFAULT_BUDGETS[category]
 
 
-def measure_install_size(package_path: Path, package_name: str) -> float | None:
+def _is_resolution_failure(stderr: str) -> bool:
+    """Return True when uv stderr indicates a dependency resolution failure.
+
+    uv prints 'No solution found when resolving' for unsatisfiable constraints.
+    Distinguishing these from generic install errors (network errors, permission
+    failures, etc.) lets CI output say "failed to resolve" instead of the
+    misleading "failed to install" when the index or lock is broken.
+    """
+    lower = stderr.lower()
+    return "no solution found" in lower or ("resolv" in lower and "error" in lower)
+
+
+def measure_install_size(
+    package_path: Path, package_name: str
+) -> float | Literal["resolution_failure"] | None:
     """Install package in a temp venv and measure disk usage.
 
     First tries to export workspace-locked requirements via ``uv export --package``.
@@ -171,7 +192,9 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
     from PyPI and may overestimate size for index-pinned packages.
 
     Returns:
-        Size in MB, or None if installation failed.
+        Size in MB on success, ``"resolution_failure"`` when uv cannot resolve
+        dependencies, or ``None`` for other install errors (timeout, venv
+        creation failure, network error, etc.).
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
@@ -286,6 +309,8 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
             if result.returncode != 0:
                 print(f"❌ Installation failed for {package_name}")
                 print(result.stderr)
+                if _is_resolution_failure(result.stderr):
+                    return "resolution_failure"
                 return None
 
             # Measure venv disk usage with `du -sb` (bytes). du counts each
@@ -319,6 +344,7 @@ def print_failure_summary(result: CheckResult) -> None:
     Uses precise labels for each class so the summary directs developers to the
     right place:
     - config errors → check pyproject.toml
+    - resolution failures → check the dependency constraints / index configuration
     - install failures → check the install command / environment
     - budget overages → trim dependencies or raise the budget
 
@@ -328,6 +354,7 @@ def print_failure_summary(result: CheckResult) -> None:
     """
     if (
         result.config_errors == 0
+        and result.resolution_failures == 0
         and result.install_failures == 0
         and result.budget_overages == 0
     ):
@@ -337,6 +364,12 @@ def print_failure_summary(result: CheckResult) -> None:
         plural = "package" if result.config_errors == 1 else "packages"
         print(
             f"✗ {result.config_errors} {plural} had invalid budget configuration in pyproject.toml "
+            f"(see per-package output above)"
+        )
+    if result.resolution_failures > 0:
+        plural = "package" if result.resolution_failures == 1 else "packages"
+        print(
+            f"✗ {result.resolution_failures} {plural} failed to resolve dependencies "
             f"(see per-package output above)"
         )
     if result.install_failures > 0:
@@ -365,6 +398,7 @@ def check_packages(
     """
     all_pass = True
     config_errors = 0
+    resolution_failures = 0
     install_failures = 0
     budget_overages = 0
     packages_dir = packages_dir.resolve()
@@ -411,6 +445,12 @@ def check_packages(
 
         size_mb = measure_install_size(package_path, package_name)
 
+        if size_mb == "resolution_failure":
+            print(f"✗ {package_path.name:40} failed to resolve dependencies")
+            all_pass = False
+            resolution_failures += 1
+            continue
+
         if size_mb is None:
             print(f"✗ {package_path.name:40} installation failed")
             all_pass = False
@@ -427,7 +467,13 @@ def check_packages(
             all_pass = False
             budget_overages += 1
 
-    return CheckResult(all_pass, config_errors, install_failures, budget_overages)
+    return CheckResult(
+        all_pass,
+        config_errors,
+        install_failures,
+        budget_overages,
+        resolution_failures=resolution_failures,
+    )
 
 
 if __name__ == "__main__":
