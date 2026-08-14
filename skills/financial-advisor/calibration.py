@@ -122,7 +122,7 @@ class QuestionContext:
         trigger the interrupt correctly.
         """
         hid = self.has_high_interest_debt
-        return hid is True or (isinstance(hid, str) and hid.lower() == "true")
+        return hid is True or (isinstance(hid, str) and hid.strip().lower() == "true")
 
     def to_dict(self) -> dict:
         """Convert context to serializable dict."""
@@ -244,9 +244,17 @@ def next_questions(
 
 def generate_calibrated_prompt(user_question: str, ctx: QuestionContext) -> str:
     """Generate a calibrated prompt incorporating gathered context."""
-    context_str = (
-        json.dumps(ctx.to_dict(), indent=2) if ctx.to_dict() else "None gathered yet"
-    )
+    ctx_raw = ctx.to_dict()
+    if ctx_raw:
+        # HTML-escape each string value so a context field containing
+        # '</user_question>' or similar markup cannot break out of its
+        # prose block and inject LLM instructions.
+        escaped_ctx = {
+            k: html.escape(v) if isinstance(v, str) else v for k, v in ctx_raw.items()
+        }
+        context_str = json.dumps(escaped_ctx, indent=2)
+    else:
+        context_str = "None gathered yet"
 
     question_type = classify_question(user_question)
     missing = ctx.missing_axes_for(question_type)
