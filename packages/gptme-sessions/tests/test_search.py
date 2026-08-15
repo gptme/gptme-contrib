@@ -11,7 +11,9 @@ from click.testing import CliRunner
 
 from gptme_sessions.cli import cli
 from gptme_sessions.search import (
+    SUMMARY_MAX_LEN,
     SearchResult,
+    _extract_summary,
     _make_snippet,
     _search_path,
     search_sessions,
@@ -104,6 +106,91 @@ class TestSearchResult:
     def test_display_date_without_timestamp(self):
         r = SearchResult(session_id="abc", harness="gptme", path="/x", hit_count=1, started_at=None)
         assert r.display_date == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _extract_summary
+# ---------------------------------------------------------------------------
+
+
+class TestExtractSummary:
+    def _msg(self, role: str, content: str) -> NormalizedMessage:
+        return NormalizedMessage(role=role, content=content)
+
+    def test_returns_first_user_message(self):
+        msgs = [self._msg("user", "Fix the broken auth middleware in gptme")]
+        assert _extract_summary(msgs) == "Fix the broken auth middleware in gptme"
+
+    def test_skips_messages_shorter_than_min_len(self):
+        msgs = [
+            self._msg("user", "ok"),  # too short
+            self._msg("assistant", "Here is a detailed response that is long enough"),
+        ]
+        result = _extract_summary(msgs)
+        assert result is not None
+        assert "Here is a detailed response" in result
+
+    def test_truncates_long_first_line(self):
+        long_line = "X" * (SUMMARY_MAX_LEN + 50)
+        msgs = [self._msg("user", long_line)]
+        result = _extract_summary(msgs)
+        assert result is not None
+        assert len(result) <= SUMMARY_MAX_LEN + 1  # +1 for the ellipsis char
+        assert result.endswith("…")
+
+    def test_returns_none_for_empty_messages(self):
+        assert _extract_summary([]) is None
+
+    def test_returns_none_when_all_too_short(self):
+        msgs = [
+            self._msg("user", "hi"),
+            self._msg("assistant", "ok"),
+        ]
+        assert _extract_summary(msgs) is None
+
+    def test_uses_first_line_of_multiline(self):
+        msgs = [self._msg("user", "First meaningful line here with enough chars\nSecond line")]
+        result = _extract_summary(msgs)
+        assert result == "First meaningful line here with enough chars"
+
+    def test_skips_short_first_line_falls_back_to_substantial_line(self):
+        # "Hi" is shorter than SUMMARY_MIN_LEN; the summary should come from the
+        # next substantial line rather than returning the terse opener.
+        long_body = "Implement the session search feature with full-text indexing"
+        msgs = [self._msg("user", f"Hi\n{long_body}")]
+        result = _extract_summary(msgs)
+        assert result is not None
+        assert result == long_body
+
+    def test_returns_none_when_all_lines_too_short(self):
+        # Total content >= SUMMARY_MIN_LEN but every individual line is short.
+        msgs = [self._msg("user", "ok\nyes\nno\nhi\nok")]
+        assert _extract_summary(msgs) is None
+
+    def test_prefers_user_over_assistant(self):
+        msgs = [
+            self._msg("assistant", "Here is a detailed assistant response that is long"),
+            self._msg("user", "Fix the auth middleware so it validates tokens correctly"),
+        ]
+        # user is checked first regardless of message order
+        result = _extract_summary(msgs)
+        assert result is not None
+        assert "Fix the auth" in result
+
+    def test_search_result_summary_populated(self, tmp_path: Path):
+        import re
+
+        session = _gptme_session(
+            tmp_path,
+            [
+                ("user", "Implement session search with full-text indexing"),
+                ("assistant", "I will implement that now."),
+                ("user", "target keyword appears here"),
+            ],
+        )
+        result = _search_path(session, re.compile("target keyword"))
+        assert result is not None
+        assert result.summary == "Implement session search with full-text indexing"
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +480,24 @@ class TestSearchCLI:
         assert len(data) == 1
         assert data[0]["hit_count"] == 1
         assert "snippets" in data[0]
+        assert "summary" in data[0]
+
+    def test_search_shows_summary_in_text_output(self, tmp_path: Path):
+        """Summary line should appear in text output when the session has one."""
+        session = _gptme_session(
+            tmp_path,
+            [("user", "Fix the broken auth middleware so tokens are validated correctly")],
+        )
+        runner = CliRunner()
+        with (
+            patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            result = runner.invoke(cli, ["search", "auth"])
+        assert result.exit_code == 0
+        assert "Fix the broken auth middleware" in result.output
 
     def test_search_no_snippets_flag(self, tmp_path: Path):
         session = _gptme_session(tmp_path, [("assistant", "target found here")])
@@ -406,6 +511,27 @@ class TestSearchCLI:
             result = runner.invoke(cli, ["search", "target", "--no-snippets"])
         assert result.exit_code == 0
         assert "target found here" not in result.output
+
+    def test_search_no_snippets_still_shows_summary(self, tmp_path: Path):
+        """Summary is a session description, not a snippet; --no-snippets must not hide it."""
+        user_msg = "Please fix the broken authentication middleware in the login flow."
+        session = _gptme_session(
+            tmp_path,
+            [("user", user_msg), ("assistant", "target match is here in the response")],
+        )
+        runner = CliRunner()
+        with (
+            patch("gptme_sessions.search.discover_gptme_sessions", return_value=[session]),
+            patch("gptme_sessions.search.discover_cc_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_codex_sessions", return_value=[]),
+            patch("gptme_sessions.search.discover_copilot_sessions", return_value=[]),
+        ):
+            result = runner.invoke(cli, ["search", "target", "--no-snippets"])
+        assert result.exit_code == 0
+        # The snippet text must be hidden
+        assert "target match is here in the response" not in result.output
+        # But the summary (first user message) must still appear
+        assert "Please fix the broken authentication middleware" in result.output
 
     def test_search_harness_choice(self, tmp_path: Path):
         runner = CliRunner()

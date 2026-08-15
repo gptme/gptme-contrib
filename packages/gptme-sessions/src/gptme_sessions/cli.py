@@ -2968,6 +2968,7 @@ def search(
                         "path": r.path,
                         "hit_count": r.hit_count,
                         "started_at": r.started_at.isoformat() if r.started_at else None,
+                        "summary": r.summary,
                         "snippets": [dataclasses.asdict(s) for s in r.snippets],
                     }
                     for r in results
@@ -2985,6 +2986,13 @@ def search(
     for r in results:
         harness_label = f"[{r.harness}]"
         click.echo(f"  {r.display_date}  {harness_label}  {r.session_id}  ({r.hit_count} hit(s))")
+        if r.summary:
+            # Strip terminal control characters to prevent ANSI injection from
+            # untrusted session file content (e.g. crafted escape sequences).
+            # Summary is shown regardless of --no-snippets; it is a concise
+            # session description, not a text excerpt around the search match.
+            safe_summary = re.sub(r"[\x00-\x1f\x7f]", "", r.summary)
+            click.echo(f"    {safe_summary}")
         if not no_snippets:
             for s in r.snippets:
                 role_label = s.role.upper()[:4]

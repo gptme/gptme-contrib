@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 SNIPPET_CONTEXT = 120  # chars of surrounding text to include around each match
 MAX_SNIPPETS_PER_SESSION = 3
+SUMMARY_MAX_LEN = 120  # chars for the session summary line
+SUMMARY_MIN_LEN = 20  # min chars to treat a message as a useful summary
 
 
 @dataclass
@@ -46,6 +48,7 @@ class SearchResult:
     hit_count: int
     started_at: datetime | None
     snippets: list[Snippet] = field(default_factory=list)
+    summary: str | None = None  # first substantial user/assistant message
 
     @property
     def display_date(self) -> str:
@@ -86,6 +89,33 @@ def _message_mentions_file(msg, file_pattern: re.Pattern) -> bool:
         (msg.content and file_pattern.search(msg.content))
         or (msg.tool_input and _value_mentions_file(msg.tool_input, file_pattern))
     )
+
+
+def _extract_summary(messages: list) -> str | None:
+    """Extract a short summary from the first substantial user or assistant message.
+
+    Skips system messages and very short messages (e.g. role markers). Returns
+    the first line of the first qualifying message, truncated to SUMMARY_MAX_LEN.
+    Prefers user messages since they typically state the task intent.
+    """
+    for role in ("user", "assistant"):
+        for msg in messages:
+            if msg.role != role:
+                continue
+            content = (msg.content or "").strip()
+            if len(content) < SUMMARY_MIN_LEN:
+                continue
+            # Take the first non-empty line that is itself substantial enough to
+            # be a meaningful summary.  A short opener like "Hi" followed by a
+            # long body would otherwise produce a useless one-word summary.
+            lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+            first_line = next((ln for ln in lines if len(ln) >= SUMMARY_MIN_LEN), None)
+            if first_line is None:
+                continue
+            if len(first_line) > SUMMARY_MAX_LEN:
+                return first_line[:SUMMARY_MAX_LEN] + "…"
+            return first_line
+    return None
 
 
 def _search_path(
@@ -130,6 +160,8 @@ def _search_path(
         except (ValueError, AttributeError):
             pass
 
+    summary = _extract_summary(transcript.messages)
+
     return SearchResult(
         session_id=transcript.session_id,
         harness=transcript.harness,
@@ -137,6 +169,7 @@ def _search_path(
         hit_count=total_hits,
         started_at=started_at,
         snippets=snippets,
+        summary=summary,
     )
 
 
