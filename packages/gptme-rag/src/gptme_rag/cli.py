@@ -498,12 +498,11 @@ def search(
                     raise
         finally:
             logging.getLogger().removeHandler(warning_handler)
-
-    if not output_json:
-        # stdout was redirected to /dev/null above, taking RichHandler's output
-        # with it. Re-emit after the status display stops so warnings remain visible.
-        for message in captured_warnings:
-            console.print(f"⚠️  {message}", style="yellow", markup=False)
+            if not output_json:
+                # stdout was redirected to /dev/null above, taking RichHandler's
+                # output with it. Re-emit before propagating any search failure.
+                for message in captured_warnings:
+                    console.print(f"⚠️  {message}", style="yellow", markup=False)
 
     if not documents:
         if output_json:

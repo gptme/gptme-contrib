@@ -624,3 +624,29 @@ def test_search_non_json_surfaces_warning_to_human(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert warning in result.output
+
+
+def test_search_non_json_surfaces_warning_before_failure(tmp_path):
+    """A captured warning must remain visible when search later fails."""
+    from unittest.mock import patch as mock_patch
+
+    warning = "Embedding model mismatch; continuing with stored model"
+
+    class FailingIndexer:
+        def __init__(self, *args, **kwargs):
+            logging.getLogger("gptme_rag.indexing.indexer").warning(warning)
+
+        def search(self, *args, **kwargs):
+            raise RuntimeError("embedding dimension mismatch")
+
+    runner = CliRunner()
+    with mock_patch("gptme_rag.cli.Indexer", FailingIndexer):
+        result = runner.invoke(
+            cli,
+            ["search", "test query", "--persist-dir", str(tmp_path / "index")],
+        )
+
+    assert result.exit_code != 0
+    assert warning in result.output
+    assert isinstance(result.exception, RuntimeError)
+    assert str(result.exception) == "embedding dimension mismatch"
