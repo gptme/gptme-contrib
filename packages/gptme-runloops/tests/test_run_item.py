@@ -36,6 +36,7 @@ from gptme_runloops.merge_lifecycle import (
     run_merge_lifecycle,
 )
 from gptme_runloops.run_item import (
+    THREAD_DELIVERABLE_TYPES,
     ArcInfo,
     RunItem,
     RunItemConfig,
@@ -1412,6 +1413,180 @@ def test_post_session_missing_delivery_hook_skips_check(tmp_path) -> None:
     run_post_session(plan, item, outcome, config, hooks)
     # Delivery defaults to handled when the script is absent (bash [ -f ] guard)
     assert latency_calls[0]["outcome"] == "handled"
+
+
+def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
+    """master_ci_failure has no thread, so the reply post-condition must not run.
+
+    Its `number` is a workflow run id, not an issue number, so the check would
+    query issues/{run_id}/comments, 404, find no comment, and return
+    orphan_no_delivery -> rollback -> re-dispatch forever (ErikBjare/bob#1144).
+
+    The fix must also promote state (not roll back): verify the pending state
+    file is copied to the real state dir so the item doesn't re-enter the queue.
+    """
+    config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
+        tmp_path, types=("master_ci_failure",)
+    )
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # Seed a pending state file so promote_item_state has something observable to do.
+    config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
+    sentinel.write_text("promoted")
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+    effect = run_post_session(plan, item, outcome, config, hooks)
+    assert run_cmd.find("/fake/check-delivery.py") == []
+    assert latency_calls[0]["outcome"] == "handled"
+    # State must be promoted, not rolled back — otherwise the item re-enters the queue.
+    assert (config.state_dir / sentinel.name).exists(), (
+        "promote_item_state was not called — state was not promoted from pending; "
+        "item would re-enter the dispatch queue"
+    )
+    # For non-thread items the delivery check never runs, so no delivery signal
+    # is observed and the record has no PR state diff. EFFECT_UNKNOWN is the
+    # correct and expected outcome — not EFFECT_NONE (which would fire the
+    # "no observable effect" WARN and implies we *know* nothing happened).
+    assert effect == "unknown", (
+        f"master_ci_failure must score effect='unknown', not {effect!r}; "
+        "EFFECT_NONE would incorrectly trigger the no-effect WARN for a "
+        "repo-level item that is expected to do nothing thread-observable."
+    )
+
+
+def test_post_session_agent_msg_reply_skips_delivery_check(tmp_path) -> None:
+    """An `agent_msg_reply` item has no GitHub thread at all — never check delivery.
+
+    Second symptom class of the same missing gate (the first is
+    master_ci_failure above). Bob's PM ledger, 2026-08-13: every `number: 0`
+    dispatch row was an `agent_msg_reply` (peer-agent message; the number is
+    synthesized because there is no issue). The unguarded check ran
+    `check-pm-delivery.py --number 0` against a nonexistent issue, which always
+    reports `orphan_no_delivery` -> `effect=none` -> `outcome=no_effect`. That
+    drove `pm_dispatch_recovery.py` to exhaust the retry budget and file a bogus
+    "PM cannot drive ErikBjare/bob#0" stuck task — while the reply had in fact
+    been delivered.
+
+    Asserts on the returned effect (not just that the check was skipped), so a
+    regression that skips the check but still scores the item no-effect fails here.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _latency = _post_session_fixture(
+        tmp_path, types=("agent_msg_reply",)
+    )
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # If the check DID run it would report an orphan, as it did in production.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert (
+        run_cmd.find("/fake/check-delivery.py") == []
+    ), "delivery check must not run for item types with no GitHub thread"
+    # Skipping the delivery check means no delivery signal is verified.  The
+    # record also carries no PR state diff (number=0 is not a real issue).
+    # EFFECT_UNKNOWN is correct: we have no mechanism to observe whether
+    # anything happened, so we must not claim EFFECT_NONE ("nothing happened").
+    assert effect == "unknown", (
+        f"agent_msg_reply must score effect='unknown', not {effect!r}; "
+        "EFFECT_NONE would incorrectly fire the no-effect WARN and mark the "
+        "item as a delivery failure when the reply may have been delivered."
+    )
+
+
+def test_post_session_notification_zero_number_skips_delivery_check(tmp_path) -> None:
+    """A notification item with number=0 must not trigger the delivery check.
+
+    `notification` items in THREAD_DELIVERABLE_TYPES normally have real issue
+    numbers. But synthetic notifications (e.g. agent-bus pings) carry number=0
+    as a sentinel — there is no GitHub thread to check. Querying
+    `issues/0/comments` 404s, returns `orphan_no_delivery`, and triggers
+    rollback → re-dispatch forever, the same loop fixed for master_ci_failure
+    and agent_msg_reply. The number!=0 gate closes this third symptom class.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("notification",)
+    )
+    # Override the default number=1234 with the sentinel value
+    item = make_item(types=["notification"], number=0)
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # If the check DID run it would report an orphan, as it does in production.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert (
+        run_cmd.find("/fake/check-delivery.py") == []
+    ), "delivery check must not run for notification items with number=0"
+    assert effect == "unknown", (
+        f"notification with number=0 must score effect='unknown', not {effect!r}; "
+        "EFFECT_NONE would incorrectly fire the no-effect WARN."
+    )
+
+
+def test_post_session_string_zero_number_skips_delivery_check(tmp_path) -> None:
+    """A grouped item carrying ``"number": "0"`` as a *string* must skip too.
+
+    ``RunItem.number`` is typed ``int | str | None`` and
+    ``from_grouped_json`` takes the JSON value verbatim — no coercion. A
+    sentinel that arrives as the string ``"0"`` is therefore just as real as
+    the int ``0``, and an identity-shaped guard (``number != 0``) lets it
+    through: the delivery check queries ``issues/0/comments``, 404s, reports
+    ``orphan_no_delivery``, and drives the rollback → re-dispatch loop this
+    gate exists to eliminate.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("notification",)
+    )
+    # Built through `from_grouped_json`, so `number` really is the str "0".
+    item = make_item(types=["notification"], number="0")
+    assert item.number == "0", "fixture must exercise the str sentinel, not the int"
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # If the check DID run it would report an orphan, as it does in production.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert (
+        run_cmd.find("/fake/check-delivery.py") == []
+    ), 'delivery check must not run for items with number="0" (string sentinel)'
+    assert effect == "unknown", (
+        f"notification with number=\"0\" must score effect='unknown', not {effect!r}; "
+        "EFFECT_NONE would incorrectly fire the no-effect WARN."
+    )
+
+
+@pytest.mark.parametrize("item_type", sorted(THREAD_DELIVERABLE_TYPES))
+def test_post_session_thread_deliverable_item_still_runs_delivery_check(
+    tmp_path,
+    item_type: str,
+) -> None:
+    """Regression guard: the delivery check must run for every thread-deliverable type.
+
+    THREAD_DELIVERABLE_TYPES lists all eight thread-bearing item types. If any of
+    them is accidentally removed from the set, the delivery post-condition would
+    silently stop running for those items. This parametrized test ensures each type
+    in the set actually triggers the check — a future accidental removal will
+    fail exactly here.
+    """
+    config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
+        tmp_path, types=(item_type,)
+    )
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout='{"outcome": "orphan_no_delivery", "needs_fallback_reply": true, '
+        '"fallback_reply_posted": false}',
+    )
+    run_post_session(plan, item, outcome, config, hooks)
+    assert run_cmd.find("/fake/check-delivery.py") != [], (
+        f"delivery check was NOT called for thread-deliverable type {item_type!r} "
+        f"— was it accidentally removed from THREAD_DELIVERABLE_TYPES?"
+    )
+    assert latency_calls[0]["outcome"] == "orphan_no_delivery"
 
 
 def test_post_session_gate_exit_2_warns_no_helper(tmp_path) -> None:

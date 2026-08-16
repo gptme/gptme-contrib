@@ -133,6 +133,39 @@ from gptme_runloops.worker_records import (
 # steps (worker.sh:72,379,555 — `grep -qwE "pr_update|merge_ready"`).
 PR_STATE_TYPES: frozenset[str] = frozenset({"pr_update", "merge_ready"})
 
+# Item types whose `number` addresses a real issue/PR thread, so "did the
+# session reply on the thread?" is a meaningful post-condition
+# (worker.sh:453 — `grep -qwE "assigned_issue|pr_update|ci_failure|..."`).
+#
+# Types with no thread are deliberately absent. Two distinct symptom classes,
+# both traced to this one missing gate:
+#
+# 1. `master_ci_failure` carries a workflow *run id* as `number`
+#    (e.g. 31681387507), not an issue number, so `issues/{number}/comments`
+#    404s, no comment is ever found, and the check returns
+#    `orphan_no_delivery` → rollback → re-dispatch, forever. The PM prompt
+#    tells those sessions to "exit cleanly without inventing a thread reply"
+#    (runs/github/project-monitoring.sh), so the post-condition was punishing
+#    sessions for obeying their own instructions.
+# 2. `agent_msg_reply` (peer-agent message) has no issue at all and carries a
+#    synthesized `number` of 0. Measured on Bob's dispatch ledger 2026-08-13:
+#    every `number: 0` row was `agent_msg_reply`, and the two that reached the
+#    ported executor both recorded `no_effect` despite the reply actually
+#    being delivered — which drove `pm_dispatch_recovery.py` to exhaust the
+#    retry budget and file a bogus "PM cannot drive ErikBjare/bob#0" stuck task.
+THREAD_DELIVERABLE_TYPES: frozenset[str] = frozenset(
+    {
+        "assigned_issue",
+        "pr_update",
+        "ci_failure",
+        "merge_ready",
+        "greptile_needs_improvement",
+        "greptile_needs_fix",
+        "merge_conflict",
+        "notification",
+    }
+)
+
 # CC stream-json trajectory floor (worker.sh:205) and grok floor (worker.sh:218).
 CC_TRAJECTORY_MIN_BYTES = 5000
 GROK_TRAJECTORY_MIN_BYTES = 1000
@@ -1819,7 +1852,19 @@ def run_post_session(
     delivery_verified = False  # True only when the check exited 0 with parseable output
     needs_fallback = "false"
     fallback_posted = "false"
-    if item.repo and item.number is not None and hooks.delivery_check is not None:
+    if (
+        item.repo
+        and item.number is not None
+        # 0 is a sentinel for items with no real GitHub thread. Compared via
+        # `number_str` because `number` is an `int | str | None` union taken
+        # verbatim from the grouped JSON (`from_grouped_json`) — a sentinel
+        # arriving as the string "0" must be excluded exactly as the int is,
+        # or the check queries `issues/0/comments`, 404s, and reports
+        # `orphan_no_delivery`, re-creating the re-dispatch loop this gates.
+        and item.number_str != "0"
+        and hooks.delivery_check is not None
+        and THREAD_DELIVERABLE_TYPES & set(item.types)
+    ):
         try:
             try:
                 proc = hooks.run_cmd(
@@ -2039,7 +2084,14 @@ def run_post_session(
         pr_state_after = ""
         if record_file.is_file():
             pr_state_after = read_record_pr_state_after(record_file)
-        if not pr_state_after and item.repo and item.number is not None:
+        if (
+            not pr_state_after and item.repo and item.number is not None
+            # No THREAD_DELIVERABLE_TYPES filter here: arc auto-close must run
+            # for any item type that carries an arc_id and a plausible PR number.
+            # For non-PR numbers (workflow run ids, synthesized 0 for
+            # agent_msg_reply) `gh pr view` fails naturally and pr_state_after
+            # stays empty — no type filter needed.
+        ):
             try:
                 proc = hooks.run_cmd(
                     [
