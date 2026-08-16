@@ -964,9 +964,9 @@ def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
 
     # Explicit opt-out → warning, but PR is still eligible
     assert any("cross-repo restriction" in w for w in result.warnings)
-    assert result.eligible, (
-        f"Explicit opt-out should not disqualify; reasons: {result.reasons}"
-    )
+    assert (
+        result.eligible
+    ), f"Explicit opt-out should not disqualify; reasons: {result.reasons}"
 
 
 def _eligible_pr_data() -> dict:
