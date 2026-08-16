@@ -48,6 +48,17 @@ VALID_STATES = {
 VALID_PRIORITIES = ["low", "medium", "high"]
 VALID_TASK_TYPES = ["project", "action"]
 
+# Synonym map: agent-intuitive guesses → canonical GTD values
+TASK_TYPE_SYNONYMS = {
+    "research": "action",
+    "investigation": "action",
+    "chore": "action",
+    "bug": "action",
+    "decision": "action",
+    "task": "action",
+    "epic": "project",
+}
+
 
 def validate_timestamp(ts: str | datetime | date) -> str | None:
     """Validate an ISO 8601 timestamp or datetime/date object.
@@ -114,8 +125,13 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
     if "task_type" in metadata:
         task_type = metadata["task_type"]
         if task_type not in VALID_TASK_TYPES:
+            suggestion = ""
+            task_type_lower = str(task_type).lower()
+            if task_type_lower in TASK_TYPE_SYNONYMS:
+                canonical = TASK_TYPE_SYNONYMS[task_type_lower]
+                suggestion = f" — did you mean `task_type: {canonical}`?"
             errors.append(
-                f"Invalid task_type: {task_type}. Must be one of: {', '.join(VALID_TASK_TYPES)}"
+                f"Invalid task_type: {task_type}. Must be one of: {', '.join(VALID_TASK_TYPES)}{suggestion}. See tasks/templates/default.md for examples."
             )
 
     if "tags" in metadata:
