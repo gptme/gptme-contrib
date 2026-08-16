@@ -519,6 +519,9 @@ class Indexer:
                 metadata=metadata,
                 embedding_function=self.embedding_function,
             )
+            # The unavailable model belonged to the collection we just replaced.
+            # Keep the guard only while preserving that old collection.
+            self._stored_model_name = None
 
         # Initialize cache with 5-minute TTL and 100MB memory limit
         self.cache = SmartRAGCache(ttl_seconds=300, max_memory_bytes=100 * 1024 * 1024)
