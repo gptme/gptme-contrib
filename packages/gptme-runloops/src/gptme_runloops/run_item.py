@@ -520,7 +520,7 @@ def timeout_tier(
         or instruction_kind == "GREPTILE_CONVERGENCE"
     ):
         return config.adjudication_timeout, config.adjudication_time_desc
-    if "pr_update" in types and has_greptile_fix:
+    if "greptile_needs_fix" in types or ("pr_update" in types and has_greptile_fix):
         return config.greptile_fix_timeout, config.greptile_fix_time_desc
     return config.default_timeout, config.default_time_desc
 

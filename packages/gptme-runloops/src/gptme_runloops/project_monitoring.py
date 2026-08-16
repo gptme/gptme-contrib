@@ -90,16 +90,13 @@ class ProjectMonitoringRun(BaseRunLoop):
         # Cache discovered work between has_work() and generate_prompt()
         self._discovered_work: list[WorkItem] = []
 
-    # Per-item timeout in seconds, mirroring project-monitoring.sh tiers.
-    # Assigned issues need the most time (research + PR + response).
-    # PR updates, CI failures, and greptile review cycles need a mid-tier (fix + re-review cycle).
-    # Simple notifications need the least.
+    # Per-item timeout in seconds for work produced by this legacy discovery loop.
+    # The slot-based executor uses run_item.timeout_tier() for dispatcher-derived
+    # work such as Greptile fixes and convergence adjudication.
     _ITEM_TIMEOUTS: dict[str, int] = {
         "assigned_issue": 1500,  # ~25 min: deep research + PR work + response
-        "greptile_convergence_adjudication": 1500,  # ~25 min: classify findings, fix one blocking issue, recommend
         "pr_update": 1200,  # ~20 min: fix + re-review cycle
         "ci_failure": 1200,  # ~20 min: investigate + fix
-        "greptile_needs_fix": 1200,  # ~20 min: fix + re-review cycle
         "notification": 600,  # ~10 min: simple processing
         "linear_notification_retry": 600,  # ~10 min: retry a failed Linear notification delivery
     }
@@ -109,10 +106,10 @@ class ProjectMonitoringRun(BaseRunLoop):
     def _compute_timeout(self, items: list["WorkItem"]) -> int:
         """Compute session timeout by summing per-item budgets, capped at _MAX_TIMEOUT.
 
-        Mirrors the complexity-based timeout tiers in project-monitoring.sh:
-          - assigned_issue / greptile_convergence_adjudication → 1500s (deep work)
-          - pr_update / ci_failure / greptile_needs_fix → 1200s (fix + re-review)
-          - notification / linear_notification_retry → 600s (simple)
+        Budgets the item types emitted by :meth:`discover_work`:
+          - assigned_issue → 1500s (deep work)
+          - pr_update / ci_failure → 1200s (fix work)
+          - notification / linear_notification_retry → 600s (simple work)
 
         Args:
             items: Discovered work items.

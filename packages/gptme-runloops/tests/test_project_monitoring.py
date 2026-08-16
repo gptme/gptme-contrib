@@ -67,30 +67,20 @@ def test_compute_timeout_single_pr_update(workspace):
     assert run._compute_timeout(items) == 1200
 
 
-@pytest.mark.parametrize(
-    ("item_type", "expected_timeout"),
-    [
-        ("greptile_convergence_adjudication", 1500),
-        ("greptile_needs_fix", 1200),
-        ("linear_notification_retry", 600),
-    ],
-)
-def test_compute_timeout_synced_item_types(
-    workspace, item_type: str, expected_timeout: int
-):
-    """Item types synced from the shell dispatcher retain their timeout tier."""
+def test_compute_timeout_linear_notification_retry(workspace):
+    """Linear retries emitted by discovery use the simple-work tier."""
     run = ProjectMonitoringRun(workspace)
     items = [
         WorkItem(
             repo="r/r",
-            item_type=item_type,
+            item_type="linear_notification_retry",
             number=1,
             title="t",
             url="u",
             details="d",
         )
     ]
-    assert run._compute_timeout(items) == expected_timeout
+    assert run._compute_timeout(items) == 600
 
 
 def test_compute_timeout_single_notification(workspace):
