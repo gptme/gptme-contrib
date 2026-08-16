@@ -72,6 +72,34 @@ class TestQuestionContext:
         ), "UNSPECIFIED should still be treated as missing"
         assert not ctx.is_ready_to_advise("portfolio_allocation")
 
+    def test_unsure_goal_and_risk_still_count_as_missing(self):
+        """Explicit uncertainty must not make goal or risk axes complete."""
+        ctx = QuestionContext(
+            time_horizon=TimeHorizon.LONG,
+            goal_type=GoalType.UNSURE,
+            risk_tolerance=RiskTolerance.UNSURE,
+            country_context=CountryContext.US,
+            has_high_interest_debt=False,
+        )
+        missing = ctx.missing_axes_for("portfolio_allocation")
+        assert "goal_type" in missing
+        assert "risk_tolerance" in missing
+        assert not ctx.is_ready_to_advise("portfolio_allocation")
+
+    def test_unsure_goal_and_risk_strings_count_as_missing(self):
+        """JSON-round-tripped uncertainty strings remain unanswered."""
+        ctx = QuestionContext(
+            time_horizon=TimeHorizon.LONG,
+            goal_type="unsure",  # type: ignore[arg-type]
+            risk_tolerance="unsure",  # type: ignore[arg-type]
+            country_context=CountryContext.US,
+            has_high_interest_debt=False,
+        )
+        missing = ctx.missing_axes_for("portfolio_allocation")
+        assert "goal_type" in missing
+        assert "risk_tolerance" in missing
+        assert not ctx.is_ready_to_advise("portfolio_allocation")
+
     def test_unspecified_amount_context_still_counts_as_missing(self):
         """amount_context='unspecified' must not satisfy the amount_context axis (P1 fix).
 

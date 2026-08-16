@@ -31,6 +31,7 @@ class GoalType(str, Enum):
     EMERGENCY_FUND = "emergency_fund"
     WEALTH_GROWTH = "wealth_growth"
     OTHER = "other"
+    UNSURE = "unsure"  # user cannot identify a goal yet
 
 
 class RiskTolerance(str, Enum):
@@ -39,6 +40,7 @@ class RiskTolerance(str, Enum):
     CONSERVATIVE = "conservative"
     MODERATE = "moderate"
     AGGRESSIVE = "aggressive"
+    UNSURE = "unsure"  # user cannot assess their risk tolerance yet
 
 
 class CountryContext(str, Enum):
@@ -67,7 +69,15 @@ class CountryContext(str, Enum):
 # str, Enum equality makes the check work without the strings, including them
 # explicitly avoids dependence on that subtlety and guards future refactors.
 _UNANSWERED_SENTINELS: frozenset[object] = frozenset(
-    [TimeHorizon.UNDEFINED, CountryContext.UNSPECIFIED, "undefined", "unspecified"]
+    [
+        TimeHorizon.UNDEFINED,
+        GoalType.UNSURE,
+        RiskTolerance.UNSURE,
+        CountryContext.UNSPECIFIED,
+        "undefined",
+        "unspecified",
+        "unsure",
+    ]
 )
 
 
