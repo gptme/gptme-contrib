@@ -908,6 +908,20 @@ def test_secret_bearing_file_formats_are_sensitive(path: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "packages/example/env.py",
+        "skills/example/env.json",
+    ],
+)
+def test_env_named_modules_are_not_sensitive(path: str) -> None:
+    assert not self_merge_check.is_sensitive_path(path)
+    assert self_merge_check.is_allowed_file(path)
+    category, reasons = self_merge_check.classify_category([path])
+    assert category is not None, reasons
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "scripts/session-bandit.py",
         "scripts/session-bandit-v2.py",
         "scripts/session_bandit.py",

@@ -2196,7 +2196,10 @@ def is_sensitive_path(path: str) -> bool:
     if (
         ".ssh" in components[:-1]
         or name in SENSITIVE_PRIVATE_KEY_FILENAMES
-        or "env" in name.split(".")
+        or name == ".env"
+        or name.startswith(".env.")
+        or name.endswith(".env")
+        or ".env." in name
         or name.endswith(SENSITIVE_FILE_SUFFIXES)
     ):
         return True
