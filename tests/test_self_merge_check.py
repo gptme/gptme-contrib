@@ -884,6 +884,8 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
     [
         "skills/example/.env",
         "skills/example/.env.local",
+        "skills/example/prod.env",
+        "skills/example/config.env",
         "skills/example/certificate.PEM",
         "skills/example/private.key",
         "skills/example/identity.p12",
@@ -962,9 +964,9 @@ def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
 
     # Explicit opt-out → warning, but PR is still eligible
     assert any("cross-repo restriction" in w for w in result.warnings)
-    assert (
-        result.eligible
-    ), f"Explicit opt-out should not disqualify; reasons: {result.reasons}"
+    assert result.eligible, (
+        f"Explicit opt-out should not disqualify; reasons: {result.reasons}"
+    )
 
 
 def _eligible_pr_data() -> dict:
