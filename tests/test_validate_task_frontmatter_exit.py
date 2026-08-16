@@ -100,3 +100,38 @@ def test_no_files_exits_clean() -> None:
     """precommit can pass empty file lists; should be a no-op."""
     result = _run([])
     assert result.returncode == 0
+
+
+def test_task_type_synonym_suggests_canonical(tmp_path: Path) -> None:
+    """A known synonym like 'research' should fail with a 'did you mean' suggestion."""
+    f = _make_task(
+        tmp_path,
+        "---\nstate: active\ncreated: 2026-03-02\ntask_type: research\n---\n# Task\n",
+    )
+    result = _run([str(f)])
+    assert result.returncode != 0, "validator must reject synonym task_type values"
+    # rich may wrap long lines; collapse whitespace before matching
+    output = " ".join((result.stdout + result.stderr).split())
+    assert (
+        "did you mean `task_type: action`" in output
+    ), f"expected canonical suggestion in output — got: {output!r}"
+    assert (
+        "tasks/templates/default.md" in output
+    ), f"expected template pointer in output — got: {output!r}"
+
+
+def test_task_type_unknown_value_no_suggestion(tmp_path: Path) -> None:
+    """An unknown task_type with no synonym should fail without a 'did you mean' hint."""
+    f = _make_task(
+        tmp_path,
+        "---\nstate: active\ncreated: 2026-03-02\ntask_type: bogus\n---\n# Task\n",
+    )
+    result = _run([str(f)])
+    assert result.returncode != 0, "validator must reject unknown task_type values"
+    output = result.stdout + result.stderr
+    assert (
+        "did you mean" not in output
+    ), f"unknown task_type should not produce a suggestion — got: {output!r}"
+    assert (
+        "tasks/templates/default.md" in output
+    ), f"expected template pointer even for unknown values — got: {output!r}"
