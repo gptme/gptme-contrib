@@ -882,6 +882,25 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
 @pytest.mark.parametrize(
     "path",
     [
+        "skills/example/.env",
+        "skills/example/.env.local",
+        "skills/example/certificate.PEM",
+        "skills/example/private.key",
+        "skills/example/identity.p12",
+        "skills/example/identity.pfx",
+    ],
+)
+def test_secret_bearing_file_formats_are_sensitive(path: str) -> None:
+    assert self_merge_check.is_sensitive_path(path)
+    assert not self_merge_check.is_allowed_file(path)
+    category, reasons = self_merge_check.classify_category([path])
+    assert category is None
+    assert any("sensitive" in reason.lower() for reason in reasons)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "scripts/session-bandit.py",
         "scripts/session-bandit-v2.py",
         "scripts/session_bandit.py",

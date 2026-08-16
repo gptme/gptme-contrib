@@ -272,6 +272,12 @@ SENSITIVE_PATH_PARTS = (
     "kube",
     "k8s",
 )
+# Secret-bearing file formats do not necessarily have a sensitive keyword in
+# their name (for example ``skills/foo/.env`` or ``certificate.pem``). Keep
+# these extensions out of every wholesale self-merge category.
+SENSITIVE_FILENAMES = frozenset({".env"})
+SENSITIVE_FILENAME_PREFIXES = (".env.",)
+SENSITIVE_FILE_SUFFIXES = (".key", ".p12", ".pem", ".pfx")
 INTERNAL_TOOLING_PREFIXES = (
     "scripts/",
     "packages/",
@@ -2180,6 +2186,13 @@ def is_repo_allowlisted_path(
 def is_sensitive_path(path: str) -> bool:
     normalized = path.lower().replace("\\", "/")
     if normalized.startswith(tuple(p.lower() for p in SENSITIVE_PATH_PREFIXES)):
+        return True
+    name = normalized.rsplit("/", 1)[-1]
+    if (
+        name in SENSITIVE_FILENAMES
+        or name.startswith(SENSITIVE_FILENAME_PREFIXES)
+        or name.endswith(SENSITIVE_FILE_SUFFIXES)
+    ):
         return True
     # Use the original (pre-lowercase) path to preserve camelCase boundaries for
     # detection; e.g. "authToken.py" → "auth_token" catches the "auth" rule.
