@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from calibration import (
     AXIS_QUESTIONS,
+    REQUIRED_AXES,
     CountryContext,
     GoalType,
     QuestionContext,
@@ -207,19 +208,11 @@ class TestClassifyQuestion:
         """Test classification of generic investment questions."""
         assert classify_question("Should I invest in index funds?") == "should_i_invest"
 
-    def test_classify_etf_question_not_how_much(self):
-        """'How much should I invest in ETFs?' must route to specific_investment, not how_much_to_save.
-
-        The question contains 'how much' (a how_much_to_save keyword) AND 'etf'
-        (a specific_investment keyword). Without the specific_investment check being
-        evaluated first, it routes to how_much_to_save and asks about amount_context
-        instead of risk_tolerance and time_horizon (P2 regression guard).
-        """
+    def test_classify_etf_amount_question_collects_amount_context(self):
+        """An ETF amount question must retain its explicit amount dimension."""
         result = classify_question("How much should I invest in ETFs?")
-        assert result == "specific_investment", (
-            f"Expected specific_investment, got {result!r}. "
-            "The 'how much' check must not shadow ETF investment questions."
-        )
+        assert result == "specific_investment"
+        assert "amount_context" in REQUIRED_AXES[result]
 
 
 class TestNextQuestions:

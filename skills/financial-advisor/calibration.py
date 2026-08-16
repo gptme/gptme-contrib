@@ -154,7 +154,12 @@ REQUIRED_AXES: dict[str, list[str]] = {
         "country_context",
         "has_high_interest_debt",
     ],
-    "specific_investment": ["time_horizon", "risk_tolerance", "has_high_interest_debt"],
+    "specific_investment": [
+        "time_horizon",
+        "risk_tolerance",
+        "has_high_interest_debt",
+        "amount_context",
+    ],
     "how_much_to_save": ["goal_type", "time_horizon", "amount_context"],
     "emergency_fund": ["has_emergency_fund"],
     "default": ["time_horizon", "goal_type", "has_high_interest_debt"],
