@@ -867,6 +867,11 @@ def _classify_tweet_post_error(error: Exception) -> str:
     if any(marker in message for marker in _PERMANENT_403_MARKERS):
         return "permanent"
 
+    # Reply-specific permanent failures (e.g. "Reply to this conversation is not
+    # allowed because you have not been mentioned") are also non-retryable.
+    if any(marker in message for marker in _PERMANENT_REPLY_FAILURE_MARKERS):
+        return "permanent"
+
     return "other"
 
 
