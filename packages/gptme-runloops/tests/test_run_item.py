@@ -213,6 +213,7 @@ def test_predict_cc_trajectory_path() -> None:
         (["assigned_issue"], False, (1500, "~20 minutes")),
         # assigned_issue wins over the greptile-fix tier (bash if/elif order)
         (["assigned_issue", "pr_update"], True, (1500, "~20 minutes")),
+        (["greptile_needs_fix"], True, (2700, "~35 minutes")),
         (["notification"], False, (900, "~10 minutes")),
         (["merge_ready"], True, (900, "~10 minutes")),
     ],

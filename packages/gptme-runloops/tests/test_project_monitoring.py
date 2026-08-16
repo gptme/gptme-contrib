@@ -67,6 +67,22 @@ def test_compute_timeout_single_pr_update(workspace):
     assert run._compute_timeout(items) == 1200
 
 
+def test_compute_timeout_linear_notification_retry(workspace):
+    """Linear retries emitted by discovery use the simple-work tier."""
+    run = ProjectMonitoringRun(workspace)
+    items = [
+        WorkItem(
+            repo="r/r",
+            item_type="linear_notification_retry",
+            number=1,
+            title="t",
+            url="u",
+            details="d",
+        )
+    ]
+    assert run._compute_timeout(items) == 600
+
+
 def test_compute_timeout_single_notification(workspace):
     """Notifications use the shortest budget."""
     run = ProjectMonitoringRun(workspace)
