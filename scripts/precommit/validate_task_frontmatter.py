@@ -132,8 +132,13 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
                 suggestion = f" — did you mean `task_type: {canonical}`?"
             elif task_type_lower in VALID_TASK_TYPES:
                 suggestion = f" — did you mean `task_type: {task_type_lower}`?"
+            template_hint = (
+                " See tasks/templates/default.md for examples."
+                if type_name == "tasks"
+                else ""
+            )
             errors.append(
-                f"Invalid task_type: {task_type}. Must be one of: {', '.join(VALID_TASK_TYPES)}{suggestion}. See tasks/templates/default.md for examples."
+                f"Invalid task_type: {task_type}. Must be one of: {', '.join(VALID_TASK_TYPES)}{suggestion}.{template_hint}"
             )
 
     if "tags" in metadata:

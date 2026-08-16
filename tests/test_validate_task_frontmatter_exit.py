@@ -149,3 +149,19 @@ def test_task_type_wrong_case_suggests_lowercase(tmp_path: Path) -> None:
     assert (
         "did you mean `task_type: action`" in output
     ), f"expected lowercase canonical suggestion — got: {output!r}"
+
+
+def test_task_type_no_template_hint_for_tweets(tmp_path: Path) -> None:
+    """When --type tweets, invalid task_type must NOT point at tasks/templates/default.md."""
+    f = tmp_path / "test-tweet.yml"
+    f.write_text(
+        "---\nstate: approved\ncreated: 2026-03-02\ntask_type: research\n---\n"
+    )
+    result = _run(["--type", "tweets", str(f)])
+    assert (
+        result.returncode != 0
+    ), "validator must reject invalid task_type for tweets too"
+    output = result.stdout + result.stderr
+    assert (
+        "tasks/templates/default.md" not in output
+    ), f"tweet validation must not reference tasks template — got: {output!r}"
