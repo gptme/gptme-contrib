@@ -96,10 +96,12 @@ class ProjectMonitoringRun(BaseRunLoop):
     # Simple notifications need the least.
     _ITEM_TIMEOUTS: dict[str, int] = {
         "assigned_issue": 1500,  # ~25 min: deep research + PR work + response
+        "greptile_convergence_adjudication": 1500,  # ~25 min: classify findings, fix one blocking issue, recommend
         "pr_update": 1200,  # ~20 min: fix + re-review cycle
         "ci_failure": 1200,  # ~20 min: investigate + fix
-        "greptile_needs_fix": 1200,  # ~20 min: fix + re-review cycle (added 2026-08-16)
+        "greptile_needs_fix": 1200,  # ~20 min: fix + re-review cycle
         "notification": 600,  # ~10 min: simple processing
+        "linear_notification_retry": 600,  # ~10 min: retry a failed Linear notification delivery
     }
     _DEFAULT_ITEM_TIMEOUT = 900  # ~15 min for unknown types
     _MAX_TIMEOUT = 3600  # 60 min cap regardless of item count
@@ -108,9 +110,9 @@ class ProjectMonitoringRun(BaseRunLoop):
         """Compute session timeout by summing per-item budgets, capped at _MAX_TIMEOUT.
 
         Mirrors the complexity-based timeout tiers in project-monitoring.sh:
-          - assigned_issue → 1500s (research + PR work)
-          - pr_update / ci_failure → 1200s (fix + re-review)
-          - notification → 600s (simple)
+          - assigned_issue / greptile_convergence_adjudication → 1500s (deep work)
+          - pr_update / ci_failure / greptile_needs_fix → 1200s (fix + re-review)
+          - notification / linear_notification_retry → 600s (simple)
 
         Args:
             items: Discovered work items.
