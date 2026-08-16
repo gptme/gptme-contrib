@@ -849,9 +849,12 @@ def _classify_tweet_post_error(error: Exception) -> str:
             or "usagecapped" in api_error_type.lower()
         ):
             return "cap"
-        # Got a non-cap structured type — the API explicitly says this is a
-        # content rejection or other permanent error.
-        return "permanent"
+        # Non-cap structured type: the X API uses non-specific types (including
+        # "about:blank") for many conditions — some of which are transient (e.g.
+        # temporary account restrictions, permission changes). We cannot reliably
+        # classify an unknown type as "permanent", so return "other" and leave the
+        # tweet queued rather than silently quarantining it.
+        return "other"
 
     # No structured response body. Fall back to substring matching.
     # Cap markers (e.g. "spend cap") could theoretically appear in user tweet

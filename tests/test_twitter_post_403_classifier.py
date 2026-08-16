@@ -186,11 +186,12 @@ class TestClassifyTweetPostError:
         err = Exception("403 Forbidden: policy violation")
         assert workflow_module._classify_tweet_post_error(err) == "other"
 
-    def test_typed_tweepy_forbidden_uses_structured_type(self, workflow_module):
-        # When the tweepy response body carries the X API v2 `type` field, the
-        # classifier must use it as the primary discriminator. A non-cap type
-        # ("about:blank" is the standard fallback for non-specific rejections)
-        # confirms this is a permanent content rejection, not a billing cap.
+    def test_typed_tweepy_forbidden_unknown_type_is_other(self, workflow_module):
+        # When the tweepy response body carries a non-specific X API v2 `type`
+        # field ("about:blank" is the generic fallback used for many conditions,
+        # including transient ones), we return "other" rather than quarantining.
+        # Transient account restrictions and permission changes can produce this
+        # type — silently quarantining them would cause silent data loss.
         try:
             from tweepy.errors import Forbidden
         except Exception:  # pragma: no cover - tweepy not installed in bare env
@@ -202,11 +203,34 @@ class TestClassifyTweetPostError:
             reason = "Forbidden"
 
             def json(self) -> dict[str, object]:
-                # X API v2 problem schema with non-cap type
+                # X API v2 problem schema with non-specific "about:blank" type
                 return {"type": "about:blank", "title": "Forbidden", "status": 403}
 
         err = Forbidden(_FakeResponse())
-        assert workflow_module._classify_tweet_post_error(err) == "permanent"
+        assert workflow_module._classify_tweet_post_error(err) == "other"
+
+    def test_structured_transient_type_is_other(self, workflow_module):
+        # A structured 403 whose type signals a potentially-transient condition
+        # (e.g. temporary account restriction) must NOT be quarantined.
+        try:
+            from tweepy.errors import Forbidden
+        except Exception:  # pragma: no cover
+            pytest.skip("tweepy not installed")
+
+        class _FakeTransientResponse:
+            status_code = 403
+            status = "Forbidden"
+            reason = "Forbidden"
+
+            def json(self) -> dict[str, object]:
+                return {
+                    "type": "https://api.twitter.com/2/problems/temporarily-restricted",
+                    "title": "Temporarily Restricted",
+                    "status": 403,
+                }
+
+        err = Forbidden(_FakeTransientResponse())
+        assert workflow_module._classify_tweet_post_error(err) == "other"
 
     def test_structured_usage_capped_type_is_cap(self, workflow_module):
         # P1 fix: the X API v2 returns a specific `type` URL for spend-cap 403s.
@@ -233,11 +257,13 @@ class TestClassifyTweetPostError:
         err = Forbidden(_FakeCapResponse())
         assert workflow_module._classify_tweet_post_error(err) == "cap"
 
-    def test_structured_noncap_type_with_cap_text_is_permanent(self, workflow_module):
-        # P1 key test: a 403 whose stringified message contains "spend cap" (e.g.
-        # the API error body might quote user content in some edge case) must NOT be
-        # classified as a billing cap when the structured `type` field says otherwise.
-        # The structured path takes priority over substring matching.
+    def test_structured_noncap_type_with_cap_text_is_not_cap(self, workflow_module):
+        # P1 anti-spoofing test: a 403 whose error body contains "spend cap" text
+        # (e.g. embedded tweet content or API detail referencing billing) but whose
+        # `type` field is NOT "usage-capped" must NOT be classified as a billing cap.
+        # The structured-type check short-circuits before substring matching, so
+        # a spoofed tweet with "monthly spend cap" in its body cannot impersonate
+        # a real billing cap. We return "other" (not "cap") for unknown types.
         try:
             from tweepy.errors import Forbidden
         except Exception:  # pragma: no cover
@@ -258,8 +284,8 @@ class TestClassifyTweetPostError:
                 }
 
         err = Forbidden(_FakeContentRejection())
-        # Despite "spend cap" appearing in str(err), the structured type wins.
-        assert workflow_module._classify_tweet_post_error(err) == "permanent"
+        # "about:blank" is not "usage-capped" → "other", not "cap" (anti-spoofing).
+        assert workflow_module._classify_tweet_post_error(err) == "other"
 
     def test_http_403_prefix_classified_other(self, workflow_module):
         # An unstructured "HTTP 403: ..." with no known-permanent markers is
