@@ -376,3 +376,14 @@ def test_validate_presentation_rejects_non_integer_stagger():
 
     with pytest.raises(ValueError, match="'stagger' must be a non-negative integer"):
         generator.validate_presentation(deck)
+
+
+def test_javascript_preserves_zero_animation_timings():
+    """Explicit zero timings must not be replaced by JavaScript defaults."""
+    javascript = generator._javascript()
+
+    assert "animation.duration ?? 450" in javascript
+    assert "animation.delay ?? 0" in javascript
+    assert "animation.stagger ?? 80" in javascript
+    assert "animation.duration || 450" not in javascript
+    assert "animation.stagger || 80" not in javascript

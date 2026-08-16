@@ -546,9 +546,9 @@ def _javascript() -> str:
       animations.forEach((animation) => {
         const target = selectedTarget(slide, animation.target);
         target.classList.add(`animate-${animation.type}`);
-        target.style.setProperty('--duration', `${animation.duration || 450}ms`);
-        target.style.setProperty('--delay', `${animation.delay || 0}ms`);
-        target.style.setProperty('--stagger', `${animation.stagger || 80}ms`);
+        target.style.setProperty('--duration', `${animation.duration ?? 450}ms`);
+        target.style.setProperty('--delay', `${animation.delay ?? 0}ms`);
+        target.style.setProperty('--stagger', `${animation.stagger ?? 80}ms`);
       });
       requestAnimationFrame(() => {
         animations.forEach((animation) => {
