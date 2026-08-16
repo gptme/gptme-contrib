@@ -16,7 +16,6 @@ from rich.syntax import Syntax
 from tqdm import tqdm
 
 from .benchmark import RagBenchmark
-from .embeddings import ModernBERTEmbedding
 from .indexing.document import Document
 from .indexing.indexer import Indexer
 from .indexing.watcher import FileWatcher
@@ -27,6 +26,17 @@ logger = logging.getLogger(__name__)
 
 # TODO: change this to a more appropriate location
 default_persist_dir = Path.home() / ".cache" / "gptme" / "rag"
+EMBEDDING_FUNCTION_CHOICES = ["auto", "modernbert", "minilm", "mpnet", "openrouter", "default"]
+
+
+class _JsonWarningCaptureHandler(logging.Handler):
+    def __init__(self, messages: list[str]):
+        super().__init__(level=logging.WARNING)
+        self.messages = messages
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(self.format(record))
 
 
 class ChunkMerger:
@@ -159,9 +169,9 @@ def cli(verbose: bool):
 )
 @click.option(
     "--embedding-function",
-    type=click.Choice(["modernbert", "default"]),
-    default="modernbert",
-    help="Embedding function to use (modernbert or default)",
+    type=click.Choice(EMBEDDING_FUNCTION_CHOICES),
+    default="auto",
+    help="Embedding function to use. 'auto' (default) preserves the embedding model of an existing collection.",
 )
 @click.option(
     "--device",
@@ -202,7 +212,7 @@ def index(
         return
 
     try:
-        if embedding_function and not force_recreate:
+        if embedding_function and embedding_function != "auto" and not force_recreate:
             console.print(
                 "[yellow]Warning:[/yellow] Changing embedding model may require recreating the collection. "
                 "Use --force-recreate if you encounter dimension mismatch errors.",
@@ -346,8 +356,8 @@ def index(
 )
 @click.option(
     "--embedding-function",
-    type=click.Choice(["modernbert", "default"]),
-    help="Embedding function to use (modernbert or default)",
+    type=click.Choice(EMBEDDING_FUNCTION_CHOICES),
+    help="Embedding function to use",
 )
 @click.option(
     "--device",
@@ -391,6 +401,10 @@ def search(
     # In json mode: skip Rich status (avoids stream mixing that pollutes json output)
     # and redirect stderr too (suppresses model-loading progress bars like "Loading weights").
     status_ctx = contextlib.nullcontext() if output_json else console.status("Initializing...")
+    captured_warnings: list[str] = []
+    warning_handler = _JsonWarningCaptureHandler(captured_warnings) if output_json else None
+    if warning_handler is not None:
+        logging.getLogger().addHandler(warning_handler)
     with status_ctx:
         # Parse custom weights if provided
         scoring_weights = None
@@ -417,76 +431,88 @@ def search(
         # removed), which would corrupt JSON output for callers.
         # In non-json mode, keep stderr visible so callers can diagnose
         # partial failures (missing model, fallback used, etc.).
-        with open(os.devnull, "w") as devnull:
-            stderr_ctx = (
-                contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext()
-            )
-            try:
-                with contextlib.redirect_stdout(devnull), stderr_ctx:
-                    # Initialize indexer with explicit arguments
-                    # Always use ModernBERT by default for better results
-                    indexer = Indexer(
-                        persist_directory=persist_dir,
-                        enable_persist=True,
-                        scoring_weights=scoring_weights,
-                        embedding_function=(
-                            "modernbert" if embedding_function is None else embedding_function
-                        ),
-                        device=device or "cpu",
-                    )
-                    assembler = ContextAssembler(max_tokens=max_tokens)
-
-                    # Combine paths and filters for search
-                    search_paths = list(paths)
-                    if filter:
-                        # If no paths were specified but filters are present,
-                        # search from root and apply filters
-                        if not paths:
-                            search_paths = [Path(".")]
-                        logger.debug(f"Using path filters: {filter}")
-
-                    explanations: list | None = None
-                    if explain:
-                        documents, distances, explanations = indexer.search(
-                            query,
-                            n_results=n_results,
-                            paths=search_paths,
-                            path_filters=filter,
-                            explain=True,
+        try:
+            with open(os.devnull, "w") as devnull:
+                stderr_ctx = (
+                    contextlib.redirect_stderr(devnull) if output_json else contextlib.nullcontext()
+                )
+                try:
+                    with contextlib.redirect_stdout(devnull), stderr_ctx:
+                        # Initialize indexer with explicit arguments.
+                        # allow_recreate=False: search is read-only — passing an explicit
+                        # --embedding-function that differs from the stored model must never
+                        # silently delete the collection (data loss). A warning is emitted
+                        # instead and the existing collection is kept unchanged.
+                        indexer = Indexer(
+                            persist_directory=persist_dir,
+                            enable_persist=True,
+                            scoring_weights=scoring_weights,
+                            embedding_function=embedding_function or "auto",
+                            device=device or "cpu",
+                            allow_recreate=False,
                         )
-                    else:
-                        documents, distances, _ = indexer.search(
-                            query, n_results=n_results, paths=search_paths, path_filters=filter
-                        )
+                        assembler = ContextAssembler(max_tokens=max_tokens)
 
-                    # Assemble context window (must be inside try/except to catch errors in json mode)
-                    if documents:
-                        context = assembler.assemble_context(documents, user_query=query)
-                    else:
-                        context = None
-            except Exception as e:
-                # In json mode stderr is redirected to /dev/null, so an unhandled
-                # exception would produce a silent failure with no output on stdout
-                # and no traceback visible.  Emit a JSON error object so callers
-                # get a diagnosable response instead of empty stdout + non-zero exit.
-                if output_json:
-                    print(json.dumps({"error": str(e), "query": query}))
-                raise
+                        # Combine paths and filters for search
+                        search_paths = list(paths)
+                        if filter:
+                            # If no paths were specified but filters are present,
+                            # search from root and apply filters
+                            if not paths:
+                                search_paths = [Path(".")]
+                            logger.debug(f"Using path filters: {filter}")
+
+                        explanations: list | None = None
+                        if explain:
+                            documents, distances, explanations = indexer.search(
+                                query,
+                                n_results=n_results,
+                                paths=search_paths,
+                                path_filters=filter,
+                                explain=True,
+                            )
+                        else:
+                            documents, distances, _ = indexer.search(
+                                query, n_results=n_results, paths=search_paths, path_filters=filter
+                            )
+
+                        # Assemble context window (must be inside try/except to catch errors in json mode)
+                        if documents:
+                            context = assembler.assemble_context(documents, user_query=query)
+                        else:
+                            context = None
+                except Exception as e:
+                    # In json mode stderr is redirected to /dev/null, so an unhandled
+                    # exception would produce a silent failure with no output on stdout
+                    # and no traceback visible.  Emit a JSON error object so callers
+                    # get a diagnosable response instead of empty stdout + non-zero exit.
+                    if output_json:
+                        error_output: dict[str, object] = {"error": str(e), "query": query}
+                        if captured_warnings:
+                            error_output["warnings"] = captured_warnings
+                        print(json.dumps(error_output))
+                    raise
+        finally:
+            if warning_handler is not None:
+                logging.getLogger().removeHandler(warning_handler)
 
     if not documents:
         if output_json:
+            empty_output: dict[str, object] = {
+                "query": query,
+                "results": [],
+                "total_results": 0,
+                "context": {
+                    "total_tokens": 0,
+                    "truncated": False,
+                    "results_in_context": 0,
+                },
+            }
+            if captured_warnings:
+                empty_output["warnings"] = captured_warnings
             print(
                 json.dumps(
-                    {
-                        "query": query,
-                        "results": [],
-                        "total_results": 0,
-                        "context": {
-                            "total_tokens": 0,
-                            "truncated": False,
-                            "results_in_context": 0,
-                        },
-                    },
+                    empty_output,
                     indent=2,
                 )
             )
@@ -593,7 +619,7 @@ def search(
             if expand == "none"
             else False
         )
-        output = {
+        output: dict[str, object] = {
             "query": query,
             "total_results": len(results),
             "results": results,
@@ -603,6 +629,8 @@ def search(
                 "results_in_context": results_in_context,
             },
         }
+        if captured_warnings:
+            output["warnings"] = captured_warnings
         print(json.dumps(output, indent=2, default=str))
         return
 
@@ -693,8 +721,8 @@ def search(
 )
 @click.option(
     "--embedding-function",
-    type=click.Choice(["modernbert", "default"]),
-    help="Embedding function to use (modernbert or default)",
+    type=click.Choice(EMBEDDING_FUNCTION_CHOICES),
+    help="Embedding function to use",
 )
 @click.option(
     "--device",
@@ -725,20 +753,44 @@ def watch(
 ):
     """Watch directory for changes and update index automatically."""
     try:
-        # Initialize indexer with explicit arguments
+        # Initialize indexer with explicit arguments.
+        # allow_recreate=False when an explicit embedding function is given:
+        # watch is a long-running daemon — silently deleting the entire collection
+        # because the stored model differs from the requested model would cause
+        # permanent data loss. A warning is emitted instead and the existing
+        # collection is kept unchanged, matching the protection already in search.
         indexer = Indexer(
             persist_directory=persist_dir,
             enable_persist=True,
-            embedding_function=("modernbert" if embedding_function is None else embedding_function),
+            embedding_function=embedding_function or "auto",
             device=device or "cpu",
             chunk_size=chunk_size,  # Now optional in Indexer
             chunk_overlap=chunk_overlap,  # Now optional in Indexer
+            allow_recreate=embedding_function is None or embedding_function == "auto",
         )
 
         # Initial indexing
         console.print(f"Performing initial indexing of {directory}")
         with console.status("Indexing..."):
-            indexer.index_directory(directory, pattern)
+            try:
+                indexer.index_directory(directory, pattern)
+            except RuntimeError as e:
+                # If the embedding function is mismatched and the stored model failed to load,
+                # log a warning and skip indexing. The watcher will still run and can ingest
+                # changes once a compatible embedding function is provided.
+                if (
+                    "Cannot add documents" in str(e)
+                    or "Cannot index directory" in str(e)
+                    or "stored embedding model" in str(e)
+                ):
+                    console.print(f"⚠️  Warning: {e}", style="yellow")
+                    console.print(
+                        "Continuing to watch for changes, but indexing is skipped until a compatible "
+                        "embedding function is provided.",
+                        style="yellow",
+                    )
+                else:
+                    raise
 
         console.print("Starting file watcher...")
 
@@ -831,15 +883,7 @@ def status():
         console.print(f"Chunk Size: [blue]{status['config']['chunk_size']:,}[/blue] tokens")
         console.print(f"Chunk Overlap: [blue]{status['config']['chunk_overlap']:,}[/blue] tokens")
         if "embedding_model" in status["config"]:
-            model_name = status["config"]["embedding_model"]
-            if model_name == "ModernBERT":
-                # Get more specific model info from the indexer
-                if isinstance(indexer.embedding_function, ModernBERTEmbedding):
-                    if indexer.embedding_function.is_msmarco:
-                        model_name = "ModernBERT-msmarco (optimized for retrieval)"
-                    else:
-                        model_name = "ModernBERT-base (general purpose)"
-            console.print(f"Embedding Model: [blue]{model_name}[/blue]")
+            console.print(f"Embedding Model: [blue]{status['config']['embedding_model']}[/blue]")
 
     except Exception as e:
         console.print(f"❌ Error getting index status: {e}", style="red")

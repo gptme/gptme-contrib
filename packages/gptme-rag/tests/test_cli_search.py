@@ -1,6 +1,7 @@
 """Tests for the CLI search command, focusing on --json flag."""
 
 import json
+import logging
 import subprocess
 import sys
 
@@ -517,3 +518,48 @@ def test_search_json_emits_error_object_on_assemble_context_failure(tmp_path):
     assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
     assert "assembler index error" in data["error"]
     assert data.get("query") == "test query"
+
+
+def test_search_json_surfaces_warning_only_degraded_path(tmp_path):
+    """Warnings emitted inside the json-mode redirect block are kept in JSON output."""
+    from unittest.mock import Mock, patch as mock_patch
+
+    fake_doc = Document(content="hello world", metadata={"source": "test.txt"}, doc_id="doc1")
+
+    mock_indexer = Mock()
+    mock_indexer.search.return_value = ([fake_doc], [0.1], None)
+
+    assembled = Mock()
+    assembled.documents = [fake_doc]
+    assembled.truncated = False
+    mock_assembler = Mock()
+    mock_assembler.assemble_context.return_value = assembled
+    mock_assembler.count_tokens.return_value = 2
+
+    def make_indexer(*args, **kwargs):
+        logging.getLogger("gptme_rag.indexing.indexer").warning(
+            "Embedding model mismatch; continuing with stored embedding function"
+        )
+        return mock_indexer
+
+    runner = CliRunner()
+    with (
+        mock_patch("gptme_rag.cli.Indexer", side_effect=make_indexer),
+        mock_patch("gptme_rag.cli.ContextAssembler", return_value=mock_assembler),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test query",
+                "--persist-dir",
+                str(tmp_path / "index"),
+                "--json",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["warnings"] == [
+        "Embedding model mismatch; continuing with stored embedding function"
+    ]

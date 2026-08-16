@@ -11,7 +11,7 @@ This is the **vector search** complement to [`gptme-wisdom`](https://github.com/
 ## Features
 
 - 📚 Document indexing with ChromaDB (vector storage, semantic search, persistence)
-- 🔍 Semantic search with sentence-transformers embeddings
+- 🔍 Semantic search with sentence-transformers or OpenRouter API embeddings
 - 📄 Smart document processing (streaming, chunking, reconstruction)
 - 👀 File watching and auto-indexing
 - 🔌 MCP server for agent integration (`gptme-rag mcp`)
@@ -23,12 +23,20 @@ This is the **vector search** complement to [`gptme-wisdom`](https://github.com/
 # Index your documents
 gptme-rag index /path/to/documents
 
+# Index with API embeddings instead of local CPU embeddings
+OPENROUTER_API_KEY=... gptme-rag index /path/to/documents --embedding-function openrouter
+
 # Search with semantic relevance
 gptme-rag search "your query"
 
 # Start MCP server (for agent tool integration)
 gptme-rag mcp --persist-dir /path/to/index
 ```
+
+OpenRouter embedding model defaults to `openai/text-embedding-3-large` and can be
+overridden with `OPENROUTER_EMBEDDING_MODEL`. If `--embedding-function
+openrouter` is requested without an API key, `gptme-rag` falls back to the local
+ModernBERT embedding backend.
 
 ## Development
 

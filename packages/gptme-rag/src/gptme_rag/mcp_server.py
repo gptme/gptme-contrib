@@ -48,8 +48,7 @@ def build_server(persist_dir: Path | None = None) -> Any:
         from mcp.server.fastmcp import FastMCP
     except ImportError as e:  # pragma: no cover - exercised only when extra missing
         raise ImportError(
-            "MCP server requires the optional `mcp` extra. "
-            "Install with: pip install gptme-rag[mcp]"
+            "MCP server requires the optional `mcp` extra. Install with: pip install gptme-rag[mcp]"
         ) from e
 
     from gptme_rag.indexing.indexer import Indexer
