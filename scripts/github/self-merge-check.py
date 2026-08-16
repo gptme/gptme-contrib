@@ -10,8 +10,8 @@ Policy summary:
   unresolved threads, OR a high-confidence review from the agent's own
   self-hosted AI reviewer (see "Accepting our own review" below)
 - PR must be authored by the authenticated user
-- Changed files must fall into a low-risk category (tests, docs, lessons, internal
-  tooling, task metadata)
+- Changed files must fall into a low-risk category (tests, docs, lessons, skills,
+  internal tooling, task metadata)
 - Sensitive/security/infra paths immediately disqualify the PR
 
 The workspace repo (the repo where the agent's brain lives) is detected automatically.
@@ -281,6 +281,14 @@ TASK_METADATA_PREFIXES = (
     "journal/",
 )
 LESSON_PREFIXES = ("lessons/",)
+# Skills are, by this repo's own definition, "enhanced lessons that bundle
+# workflows, scripts, and utilities" (skills/README.md). The prose half
+# (SKILL.md) was already self-mergeable via is_doc_file, so restricting this
+# category to markdown would change no verdict at all — the only files it can
+# newly admit are a skill's bundled helpers. Those carry the same risk profile
+# as packages/** (already allowed wholesale by is_internal_tooling) and are
+# screened by exactly the same is_sensitive_path scan, which runs first.
+SKILL_PREFIXES = ("skills/",)
 # Dependency lockfiles: always auto-generated; low risk, mandatory companion to new packages.
 LOCKFILES = {
     "uv.lock",
@@ -302,7 +310,12 @@ BOT_CONFIG_FILES = {
     ".pre-commit-config.yaml",
     "Makefile",
 }
-BOT_CONFIG_PREFIXES = (".github/",)
+# Any ``.github`` directory COMPONENT, at any depth — not just the repo root.
+# Anchoring this to the root let CI/bot config shapes ride in unreviewed under
+# any wholesale-allowed content directory (skills/, packages/, …) as
+# ``skills/x/.github/workflows/ci.yml``. Bot config requires human review
+# wherever it sits, so this fails closed.
+BOT_CONFIG_DIR_SEGMENTS = frozenset({".github"})
 SELF_MERGE_ALLOWED_PATHS_ENV = "SELF_MERGE_ALLOWED_PATHS"
 SELF_MERGE_ACCEPT_AI_REVIEW_ENV = "SELF_MERGE_ACCEPT_AI_REVIEW"
 GATE_HELPER_ENV = "GH_RATE_LIMIT_HELPER"
@@ -2051,6 +2064,20 @@ def is_lesson_file(path: str) -> bool:
     return path.startswith(LESSON_PREFIXES)
 
 
+def is_skill_file(path: str) -> bool:
+    """Whether a changed path belongs to a bundled agent skill.
+
+    Prefix-anchored at the repository root, mirroring is_lesson_file: a skill
+    lives at ``skills/<name>/``. Substring matching would wrongly admit
+    unrelated code such as ``src/skills_registry/loader.py``.
+
+    Deliberately NOT extension-filtered — see SKILL_PREFIXES for why. Note that
+    is_internal_tooling does not cover these: it is anchored to ``scripts/`` and
+    ``packages/`` at the root, so even ``skills/foo/scripts/bar.py`` misses it.
+    """
+    return path.replace("\\", "/").removeprefix("./").startswith(SKILL_PREFIXES)
+
+
 def is_lockfile(path: str) -> bool:
     """Return True for dependency lockfiles (auto-generated, low-risk).
 
@@ -2063,7 +2090,10 @@ def is_lockfile(path: str) -> bool:
 
 
 def is_bot_config(path: str) -> bool:
-    return path in BOT_CONFIG_FILES or path.startswith(BOT_CONFIG_PREFIXES)
+    normalized = path.replace("\\", "/").removeprefix("./")
+    if normalized in BOT_CONFIG_FILES:
+        return True
+    return any(part in BOT_CONFIG_DIR_SEGMENTS for part in normalized.split("/")[:-1])
 
 
 def _parse_repo_path_allowlist(value: str | None) -> dict[str, list[str]]:
@@ -2190,6 +2220,7 @@ def is_allowed_file(
     return (
         is_test_file(path)
         or is_lesson_file(path)
+        or is_skill_file(path)
         or is_task_metadata(path)
         or is_internal_tooling(path)
         or is_lockfile(path)
@@ -2238,6 +2269,8 @@ def classify_category(
         return "test-only", reasons
     if all(is_lesson_file(path) for path in paths):
         return "lesson-updates", reasons
+    if all(is_skill_file(path) for path in paths):
+        return "skill-updates", reasons
     if all(is_task_metadata(path) for path in paths):
         return "task-journal-metadata", reasons
     if all(is_internal_tooling(path) for path in paths):
@@ -2258,6 +2291,8 @@ def classify_category(
             categories.append("tests")
         if any(is_lesson_file(path) for path in paths):
             categories.append("lessons")
+        if any(is_skill_file(path) for path in paths):
+            categories.append("skills")
         if any(is_task_metadata(path) for path in paths):
             categories.append("task-metadata")
         if any(is_internal_tooling(path) for path in paths):
