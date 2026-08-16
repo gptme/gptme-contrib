@@ -253,3 +253,28 @@ def test_validate_presentation_accepts_valid_slide_id_patterns():
         deck = _sample_deck()
         deck["slides"][0]["id"] = valid_id
         generator.validate_presentation(deck)  # must not raise
+
+
+def test_validate_presentation_rejects_non_list_animations():
+    # animations: null or a non-list value must raise a clear ValueError,
+    # not an unhandled TypeError from iterating over None/int.
+    for bad_value in (None, 5, "fade-in", {"type": "fade-in"}):
+        deck = _sample_deck()
+        deck["slides"][0]["animations"] = bad_value
+        if bad_value is None:
+            # null is allowed (treated as absent); validate must not crash
+            generator.validate_presentation(deck)
+        else:
+            with pytest.raises(ValueError, match="animations must be an array"):
+                generator.validate_presentation(deck)
+
+
+def test_validate_presentation_rejects_non_list_bullets():
+    # bullets: 5 or a dict must raise a clear ValueError during validation,
+    # not a TypeError crash inside _render_body_and_bullets.
+    for bad_value in (5, "bullet text", {"item": "x"}):
+        deck = _sample_deck()
+        # Use the content slide (index 1) which supports bullets
+        deck["slides"][1]["bullets"] = bad_value
+        with pytest.raises(ValueError, match="bullets must be an array"):
+            generator.validate_presentation(deck)

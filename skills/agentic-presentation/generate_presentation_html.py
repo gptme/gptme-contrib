@@ -93,6 +93,10 @@ def validate_presentation(deck: Any) -> None:
             raise ValueError(
                 f"slide {slide_id} of type code-and-text requires body and code"
             )
+        if slide_type in ("content", "code-and-text"):
+            bullets = slide.get("bullets")
+            if bullets is not None and not isinstance(bullets, list):
+                raise ValueError(f"slide {slide_id} bullets must be an array")
         if slide_type == "image":
             _validate_image(slide.get("image"), f"slide {slide_id} image")
         if slide_type == "gallery":
@@ -102,7 +106,10 @@ def validate_presentation(deck: Any) -> None:
             for image_index, image in enumerate(images, start=1):
                 _validate_image(image, f"slide {slide_id} image {image_index}")
 
-        for animation in slide.get("animations", []):
+        anims = slide.get("animations")
+        if anims is not None and not isinstance(anims, list):
+            raise ValueError(f"slide {slide_id} animations must be an array")
+        for animation in anims or []:
             animation_type = (
                 animation.get("type") if isinstance(animation, dict) else None
             )
