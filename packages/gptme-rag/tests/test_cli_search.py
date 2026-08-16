@@ -563,3 +563,44 @@ def test_search_json_surfaces_warning_only_degraded_path(tmp_path):
     assert data["warnings"] == [
         "Embedding model mismatch; continuing with stored embedding function"
     ]
+
+
+def test_search_non_json_surfaces_warning_to_human(tmp_path):
+    """Non-json search must still show degradation warnings.
+
+    stdout is redirected to /dev/null during init/search in *both* modes, and
+    RichHandler logs to stdout — so without an explicit re-emit the warning is
+    swallowed and a human sees a healthy-looking result set.
+    """
+    from unittest.mock import Mock, patch as mock_patch
+
+    fake_doc = Document(content="hello world", metadata={"source": "test.txt"}, doc_id="doc1")
+
+    mock_indexer = Mock()
+    mock_indexer.search.return_value = ([fake_doc], [0.1], None)
+
+    assembled = Mock()
+    assembled.documents = [fake_doc]
+    assembled.truncated = False
+    mock_assembler = Mock()
+    mock_assembler.assemble_context.return_value = assembled
+    mock_assembler.count_tokens.return_value = 2
+
+    def make_indexer(*args, **kwargs):
+        logging.getLogger("gptme_rag.indexing.indexer").warning(
+            "Embedding model mismatch; continuing with stored embedding function"
+        )
+        return mock_indexer
+
+    runner = CliRunner()
+    with (
+        mock_patch("gptme_rag.cli.Indexer", side_effect=make_indexer),
+        mock_patch("gptme_rag.cli.ContextAssembler", return_value=mock_assembler),
+    ):
+        result = runner.invoke(
+            cli,
+            ["search", "test query", "--persist-dir", str(tmp_path / "index")],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Embedding model mismatch" in result.output
