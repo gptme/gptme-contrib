@@ -13,7 +13,6 @@ import argparse
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -27,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
         "-o",
         "--output",
         type=Path,
-        help="output HTML path (default: temp file when --live, else index.html)",
+        help="output HTML path (default: index.html)",
     )
     parser.add_argument(
         "--live",
@@ -45,11 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     skill_dir = Path(__file__).parent
     generator = skill_dir / "generate_presentation_html.py"
 
-    if args.live and not args.output:
-        tmp_dir = Path(tempfile.mkdtemp())
-        output = tmp_dir / f"{args.input.stem}.html"
-    else:
-        output = args.output or Path("index.html")
+    output = args.output or Path("index.html")
 
     cmd = [
         sys.executable,

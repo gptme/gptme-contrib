@@ -200,3 +200,56 @@ def test_runtime_animation_types_match_schema():
     schema_types = set(schema["definitions"]["animation"]["properties"]["type"]["enum"])
 
     assert generator.SUPPORTED_ANIMATION_TYPES == schema_types
+
+
+def test_animation_timing_preserves_zero_values():
+    javascript = generator._javascript()
+
+    assert "animation.duration ?? 450" in javascript
+    assert "animation.delay ?? 0" in javascript
+    assert "animation.stagger ?? 80" in javascript
+
+
+def test_keyboard_navigation_prevents_button_default_click():
+    javascript = generator._javascript()
+
+    assert javascript.count("event.preventDefault();") == 2
+
+
+def test_live_wrapper_defaults_to_durable_index_html():
+    source = (SKILL_ROOT / "present.py").read_text()
+
+    assert 'output = args.output or Path("index.html")' in source
+    assert "mkdtemp" not in source
+
+
+def test_empty_animations_list_produces_no_animation():
+    deck = _sample_deck()
+    deck["slides"][0]["animations"] = []
+
+    html = generator.render_html(deck)
+
+    payload_start = html.index("data-animations='") + len("data-animations='")
+    payload_end = html.index("'", payload_start)
+
+    raw = html[payload_start:payload_end]
+    # The attribute value is HTML-escaped; unescape to get the JSON
+    import html as html_module
+
+    animations = json.loads(html_module.unescape(raw))
+    assert animations == [], f"expected empty animations, got {animations!r}"
+
+
+def test_validate_presentation_rejects_invalid_slide_id():
+    deck = _sample_deck()
+    deck["slides"][0]["id"] = "bad id!"  # space and ! not in pattern
+
+    with pytest.raises(ValueError, match="must match"):
+        generator.validate_presentation(deck)
+
+
+def test_validate_presentation_accepts_valid_slide_id_patterns():
+    for valid_id in ("a", "slide-01", "MySlide_2", "A1"):
+        deck = _sample_deck()
+        deck["slides"][0]["id"] = valid_id
+        generator.validate_presentation(deck)  # must not raise

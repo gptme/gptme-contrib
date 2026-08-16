@@ -72,6 +72,10 @@ def validate_presentation(deck: Any) -> None:
         slide_id = slide.get("id")
         if not isinstance(slide_id, str) or not slide_id:
             raise ValueError(f"slide {index} must include id")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", slide_id):
+            raise ValueError(
+                f"slide {index} id {slide_id!r} must match ^[A-Za-z0-9][A-Za-z0-9_-]*$"
+            )
         if slide_id in seen_ids:
             raise ValueError(f"duplicate slide id: {slide_id}")
         seen_ids.add(slide_id)
@@ -235,7 +239,8 @@ def _render_gallery(images: list[dict[str, Any]]) -> str:
 
 
 def _animation_payload(slide: dict[str, Any]) -> str:
-    animations = slide.get("animations") or [{"type": "fade-in", "duration": 350}]
+    anims = slide.get("animations")
+    animations = anims if anims is not None else [{"type": "fade-in", "duration": 350}]
     return _attr(json.dumps(animations, separators=(",", ":")))
 
 
@@ -452,9 +457,9 @@ def _javascript() -> str:
       animations.forEach((animation) => {
         const target = selectedTarget(slide, animation.target);
         target.classList.add(`animate-${animation.type}`);
-        target.style.setProperty('--duration', `${animation.duration || 450}ms`);
-        target.style.setProperty('--delay', `${animation.delay || 0}ms`);
-        target.style.setProperty('--stagger', `${animation.stagger || 80}ms`);
+        target.style.setProperty('--duration', `${animation.duration ?? 450}ms`);
+        target.style.setProperty('--delay', `${animation.delay ?? 0}ms`);
+        target.style.setProperty('--stagger', `${animation.stagger ?? 80}ms`);
       });
       requestAnimationFrame(() => {
         animations.forEach((animation) => {
@@ -475,8 +480,14 @@ def _javascript() -> str:
     document.querySelector('#prev').addEventListener('click', () => showSlide(current - 1));
     document.querySelector('#next').addEventListener('click', () => showSlide(current + 1));
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'ArrowLeft') showSlide(current - 1);
-      if (event.key === 'ArrowRight' || event.key === ' ' || event.key === 'Enter') showSlide(current + 1);
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        showSlide(current - 1);
+      }
+      if (event.key === 'ArrowRight' || event.key === ' ' || event.key === 'Enter') {
+        event.preventDefault();
+        showSlide(current + 1);
+      }
     });
     showSlide(0);"""
 
