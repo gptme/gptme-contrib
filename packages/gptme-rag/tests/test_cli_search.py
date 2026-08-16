@@ -563,3 +563,90 @@ def test_search_json_surfaces_warning_only_degraded_path(tmp_path):
     assert data["warnings"] == [
         "Embedding model mismatch; continuing with stored embedding function"
     ]
+
+
+def test_search_invalid_weights_does_not_leak_warning_handler(tmp_path):
+    """An early return during weights parsing must not mutate root logging."""
+    root_logger = logging.getLogger()
+    handlers_before = list(root_logger.handlers)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "search",
+            "test query",
+            "--persist-dir",
+            str(tmp_path / "index"),
+            "--weights",
+            "not-valid-json{{{",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert root_logger.handlers == handlers_before
+
+
+def test_search_non_json_surfaces_warning_to_human(tmp_path):
+    """Non-json search must show arbitrary warning text without Rich parsing it.
+
+    stdout is redirected to /dev/null during init/search in *both* modes, and
+    RichHandler logs to stdout — so without an explicit re-emit the warning is
+    swallowed and a human sees a healthy-looking result set.
+    """
+    from unittest.mock import Mock, patch as mock_patch
+
+    fake_doc = Document(content="hello world", metadata={"source": "test.txt"}, doc_id="doc1")
+
+    mock_indexer = Mock()
+    mock_indexer.search.return_value = ([fake_doc], [0.1], None)
+
+    assembled = Mock()
+    assembled.documents = [fake_doc]
+    assembled.truncated = False
+    mock_assembler = Mock()
+    mock_assembler.assemble_context.return_value = assembled
+    mock_assembler.count_tokens.return_value = 2
+    warning = "Embedding model mismatch for [bert-base]; continuing with stored model ["
+
+    def make_indexer(*args, **kwargs):
+        logging.getLogger("gptme_rag.indexing.indexer").warning(warning)
+        return mock_indexer
+
+    runner = CliRunner()
+    with (
+        mock_patch("gptme_rag.cli.Indexer", side_effect=make_indexer),
+        mock_patch("gptme_rag.cli.ContextAssembler", return_value=mock_assembler),
+    ):
+        result = runner.invoke(
+            cli,
+            ["search", "test query", "--persist-dir", str(tmp_path / "index")],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert warning in result.output
+
+
+def test_search_non_json_surfaces_warning_before_failure(tmp_path):
+    """A captured warning must remain visible when search later fails."""
+    from unittest.mock import patch as mock_patch
+
+    warning = "Embedding model mismatch; continuing with stored model"
+
+    class FailingIndexer:
+        def __init__(self, *args, **kwargs):
+            logging.getLogger("gptme_rag.indexing.indexer").warning(warning)
+
+        def search(self, *args, **kwargs):
+            raise RuntimeError("embedding dimension mismatch")
+
+    runner = CliRunner()
+    with mock_patch("gptme_rag.cli.Indexer", FailingIndexer):
+        result = runner.invoke(
+            cli,
+            ["search", "test query", "--persist-dir", str(tmp_path / "index")],
+        )
+
+    assert result.exit_code != 0
+    assert warning in result.output
+    assert isinstance(result.exception, RuntimeError)
+    assert str(result.exception) == "embedding dimension mismatch"

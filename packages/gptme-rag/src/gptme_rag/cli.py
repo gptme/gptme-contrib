@@ -402,28 +402,32 @@ def search(
     # and redirect stderr too (suppresses model-loading progress bars like "Loading weights").
     status_ctx = contextlib.nullcontext() if output_json else console.status("Initializing...")
     captured_warnings: list[str] = []
-    warning_handler = _JsonWarningCaptureHandler(captured_warnings) if output_json else None
-    if warning_handler is not None:
-        logging.getLogger().addHandler(warning_handler)
-    with status_ctx:
-        # Parse custom weights if provided
-        scoring_weights = None
-        if weights:
-            try:
-                scoring_weights = json.loads(weights)
-            except json.JSONDecodeError as e:
-                if output_json:
-                    print(json.dumps({"error": f"Invalid weights JSON: {e}", "query": query}))
-                else:
-                    console.print(f"❌ Invalid weights JSON: {e}", style="red")
-                return
-            except Exception as e:
-                if output_json:
-                    print(json.dumps({"error": f"Error parsing weights: {e}", "query": query}))
-                else:
-                    console.print(f"❌ Error parsing weights: {e}", style="red")
-                return
 
+    # Parse custom weights before installing the warning handler so early returns
+    # cannot leave the handler attached to the root logger.
+    scoring_weights = None
+    if weights:
+        try:
+            scoring_weights = json.loads(weights)
+        except json.JSONDecodeError as e:
+            if output_json:
+                print(json.dumps({"error": f"Invalid weights JSON: {e}", "query": query}))
+            else:
+                console.print(f"❌ Invalid weights JSON: {e}", style="red")
+            return
+        except Exception as e:
+            if output_json:
+                print(json.dumps({"error": f"Error parsing weights: {e}", "query": query}))
+            else:
+                console.print(f"❌ Error parsing weights: {e}", style="red")
+            return
+
+    # Capture in both modes: stdout is redirected to /dev/null during init/search
+    # regardless of --json, and RichHandler logs to stdout, so warnings would
+    # otherwise be swallowed for humans too (not just JSON consumers).
+    warning_handler = _JsonWarningCaptureHandler(captured_warnings)
+    logging.getLogger().addHandler(warning_handler)
+    with status_ctx:
         # Redirect stdout to suppress ChromaDB/model-loading noise that would
         # corrupt stdout consumers.  In json mode, also redirect stderr:
         # tqdm "Loading weights" progress bars go to stderr, and Click 8.4+
@@ -493,8 +497,12 @@ def search(
                         print(json.dumps(error_output))
                     raise
         finally:
-            if warning_handler is not None:
-                logging.getLogger().removeHandler(warning_handler)
+            logging.getLogger().removeHandler(warning_handler)
+            if not output_json:
+                # stdout was redirected to /dev/null above, taking RichHandler's
+                # output with it. Re-emit before propagating any search failure.
+                for message in captured_warnings:
+                    console.print(f"⚠️  {message}", style="yellow", markup=False)
 
     if not documents:
         if output_json:
