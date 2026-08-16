@@ -161,6 +161,13 @@ REQUIRED_AXES: dict[str, list[str]] = {
         "amount_context",
     ],
     "how_much_to_save": ["goal_type", "time_horizon", "amount_context"],
+    "how_much_to_invest": [
+        "time_horizon",
+        "goal_type",
+        "risk_tolerance",
+        "has_high_interest_debt",
+        "amount_context",
+    ],
     "emergency_fund": ["has_emergency_fund"],
     "default": ["time_horizon", "goal_type", "has_high_interest_debt"],
 }
@@ -210,11 +217,15 @@ def classify_question(user_question: str) -> str:
         and "should" in q
     ):
         return "specific_investment"
-    # "how much" is an unambiguous amount-query signal — check it first so that
-    # "How much should I save for a rainy day?" correctly routes to how_much_to_save.
-    # Generic "save"/"saving" (without "how much") is weaker: "Should I save for a
-    # rainy day?" must route to emergency_fund, not how_much_to_save — the user is
-    # asking whether to build one, not how large it should be.
+    # A generic investment amount question still needs investment-specific safety
+    # context (risk tolerance and high-interest debt), plus the explicit amount
+    # dimension. Instrument-specific variants were handled above.
+    if "how much" in q and "invest" in q:
+        return "how_much_to_invest"
+    # Other "how much" questions are amount-query signals. Check this before
+    # emergency-fund keywords so "How much should I save for a rainy day?"
+    # correctly routes to how_much_to_save. Generic "save"/"saving" (without
+    # "how much") is weaker and must yield to emergency-fund keywords below.
     if "how much" in q:
         return "how_much_to_save"
     if any(kw in q for kw in ["emergency", "rainy day", "safety net"]):

@@ -214,6 +214,18 @@ class TestClassifyQuestion:
         assert result == "specific_investment"
         assert "amount_context" in REQUIRED_AXES[result]
 
+    def test_classify_generic_investment_amount_question_uses_safety_axes(self):
+        """A generic investment amount question must keep all relevant axes."""
+        result = classify_question("How much should I invest?")
+        assert result == "how_much_to_invest"
+        assert set(REQUIRED_AXES[result]) == {
+            "time_horizon",
+            "goal_type",
+            "risk_tolerance",
+            "has_high_interest_debt",
+            "amount_context",
+        }
+
 
 class TestNextQuestions:
     """Test question ordering logic."""
