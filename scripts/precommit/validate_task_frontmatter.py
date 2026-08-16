@@ -130,6 +130,8 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
             if task_type_lower in TASK_TYPE_SYNONYMS:
                 canonical = TASK_TYPE_SYNONYMS[task_type_lower]
                 suggestion = f" — did you mean `task_type: {canonical}`?"
+            elif task_type_lower in VALID_TASK_TYPES:
+                suggestion = f" — did you mean `task_type: {task_type_lower}`?"
             errors.append(
                 f"Invalid task_type: {task_type}. Must be one of: {', '.join(VALID_TASK_TYPES)}{suggestion}. See tasks/templates/default.md for examples."
             )

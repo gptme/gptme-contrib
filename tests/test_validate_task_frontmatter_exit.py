@@ -135,3 +135,17 @@ def test_task_type_unknown_value_no_suggestion(tmp_path: Path) -> None:
     assert (
         "tasks/templates/default.md" in output
     ), f"expected template pointer even for unknown values — got: {output!r}"
+
+
+def test_task_type_wrong_case_suggests_lowercase(tmp_path: Path) -> None:
+    """'task_type: Action' (wrong case) should suggest 'task_type: action'."""
+    f = _make_task(
+        tmp_path,
+        "---\nstate: active\ncreated: 2026-03-02\ntask_type: Action\n---\n# Task\n",
+    )
+    result = _run([str(f)])
+    assert result.returncode != 0, "validator must reject wrong-case task_type values"
+    output = " ".join((result.stdout + result.stderr).split())
+    assert (
+        "did you mean `task_type: action`" in output
+    ), f"expected lowercase canonical suggestion — got: {output!r}"
