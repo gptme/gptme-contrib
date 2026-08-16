@@ -275,7 +275,13 @@ SENSITIVE_PATH_PARTS = (
 # Secret-bearing file formats do not necessarily have a sensitive keyword in
 # their name (for example ``skills/foo/.env`` or ``certificate.pem``). Keep
 # these extensions out of every wholesale self-merge category.
-SENSITIVE_FILE_SUFFIXES = (".env", ".key", ".p12", ".pem", ".pfx")
+SENSITIVE_FILE_SUFFIXES = (".key", ".p12", ".pem", ".pfx")
+SENSITIVE_PRIVATE_KEY_FILENAMES = (
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+)
 INTERNAL_TOOLING_PREFIXES = (
     "scripts/",
     "packages/",
@@ -2185,10 +2191,12 @@ def is_sensitive_path(path: str) -> bool:
     normalized = path.lower().replace("\\", "/")
     if normalized.startswith(tuple(p.lower() for p in SENSITIVE_PATH_PREFIXES)):
         return True
-    name = normalized.rsplit("/", 1)[-1]
+    components = normalized.split("/")
+    name = components[-1]
     if (
-        name == ".env"
-        or name.startswith(".env.")
+        ".ssh" in components[:-1]
+        or name in SENSITIVE_PRIVATE_KEY_FILENAMES
+        or "env" in name.split(".")
         or name.endswith(SENSITIVE_FILE_SUFFIXES)
     ):
         return True

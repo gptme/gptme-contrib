@@ -886,10 +886,15 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
         "skills/example/.env.local",
         "skills/example/prod.env",
         "skills/example/config.env",
+        "skills/example/prod.env.local",
+        "skills/example/config.env.production",
         "skills/example/certificate.PEM",
         "skills/example/private.key",
         "skills/example/identity.p12",
         "skills/example/identity.pfx",
+        "skills/example/.ssh/id_rsa",
+        "skills/example/.SSH/authorized_keys",
+        "skills/example/id_ed25519",
     ],
 )
 def test_secret_bearing_file_formats_are_sensitive(path: str) -> None:
