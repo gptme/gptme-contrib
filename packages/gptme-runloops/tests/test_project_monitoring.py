@@ -67,20 +67,30 @@ def test_compute_timeout_single_pr_update(workspace):
     assert run._compute_timeout(items) == 1200
 
 
-def test_compute_timeout_greptile_needs_fix(workspace):
-    """Greptile fix-and-review cycles use the medium-tier budget (same as pr_update)."""
+@pytest.mark.parametrize(
+    ("item_type", "expected_timeout"),
+    [
+        ("greptile_convergence_adjudication", 1500),
+        ("greptile_needs_fix", 1200),
+        ("linear_notification_retry", 600),
+    ],
+)
+def test_compute_timeout_synced_item_types(
+    workspace, item_type: str, expected_timeout: int
+):
+    """Item types synced from the shell dispatcher retain their timeout tier."""
     run = ProjectMonitoringRun(workspace)
     items = [
         WorkItem(
             repo="r/r",
-            item_type="greptile_needs_fix",
+            item_type=item_type,
             number=1,
             title="t",
             url="u",
             details="d",
         )
     ]
-    assert run._compute_timeout(items) == 1200
+    assert run._compute_timeout(items) == expected_timeout
 
 
 def test_compute_timeout_single_notification(workspace):
