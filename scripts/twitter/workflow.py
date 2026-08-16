@@ -767,6 +767,69 @@ def _quarantine_permanent_reply_failure(
     return True
 
 
+# The X API returns HTTP 403 for BOTH the monthly spend cap AND permanent content
+# rejections (cashtags/dollar amounts, content policy, restricted replies, ...).
+# A bare status-code check cannot tell them apart, which is exactly the bug that
+# let one poison tweet impersonate a spend cap (see the task that filed this).
+# Distinguish by the response body message, never by the status code alone.
+_CAP_403_MARKERS = ("spend cap", "monthly spend cap")
+
+
+def _classify_tweet_post_error(error: Exception) -> str:
+    """Classify a create_tweet failure for the autopost pipeline.
+
+    Returns one of:
+      "cap"       - billing/monthly spend cap. The whole queue is blocked; keep
+                    tweets queued so they post once the cap resets, and signal the
+                    wrapper to set/refresh the spend-cap flag.
+      "permanent" - a non-cap 403 (cashtags/dollar amounts, content policy,
+                    restricted reply, ...) that will NEVER succeed on retry.
+                    Quarantine the offending tweet so it stops blocking the queue.
+      "other"     - transient or unclassified; leave the tweet queued for retry.
+    """
+    message = str(error).lower()
+    # Cap marker takes priority: if the body names a spend cap, treat it as a cap
+    # regardless of exact status framing.
+    if any(marker in message for marker in _CAP_403_MARKERS):
+        return "cap"
+    # A Forbidden/403 on create_tweet is a content/permission rejection. Match on
+    # either the typed tweepy exception (when available) OR the status text in the
+    # message, so a plain Exception carrying a "403 Forbidden: ..." body is still
+    # caught even if the error was wrapped or not a tweepy Forbidden instance.
+    is_403 = "forbidden" in message or message.startswith("403")
+    try:
+        from tweepy.errors import Forbidden as _Forbidden
+
+        is_403 = is_403 or isinstance(error, _Forbidden)
+    except Exception:
+        pass
+    return "permanent" if is_403 else "other"
+
+
+def _quarantine_tweet_post_failure(
+    path: Path, draft: TweetDraft, error: Exception
+) -> bool:
+    """Move an approved tweet that the API permanently rejects to rejected/.
+
+    A non-cap 403 (cashtags/dollar amounts, content policy, restricted reply, etc.)
+    will never succeed on retry. Leaving it in approved/ wedges the queue: every
+    autopost cycle hits the same 403, and the wrapper's "neither posted nor saw a
+    cap" fallback keeps a phantom spend-cap flag alive. Quarantining it on the
+    first confirmed non-cap 403 caps retries at one (content rejections never
+    clear), so the queue can drain.
+    """
+    reason = _permanent_reply_failure_reason(draft, error)
+    if reason is None:
+        reason = f"Permanent Twitter post rejection: {error}"
+    draft.reject_reason = reason
+    draft.save(path)
+    rejected_path = move_draft(path, "rejected")
+    console.print(
+        f"[yellow]Moved permanently rejected tweet to {rejected_path}[/yellow]"
+    )
+    return True
+
+
 def find_draft(
     draft_id: str, status: str | None = None, show_error: bool = True
 ) -> Path | None:
@@ -1580,7 +1643,25 @@ def post(
                     console.print("[red]Error: No response data from tweet creation")
             except Exception as e:
                 console.print(f"[red]Error posting tweet: {e}")
-                _quarantine_permanent_reply_failure(path, draft, e)
+                failure_kind = _classify_tweet_post_error(e)
+                if failure_kind == "cap":
+                    # Whole queue blocked by the billing cap. Keep every tweet queued
+                    # so they post once the cap resets, and stop trying further posts
+                    # this run. The wrapper greps the output for "monthly spend cap"
+                    # to set/refresh its flag.
+                    console.print(
+                        "[yellow]Twitter monthly spend cap reached; tweets will post when the cap resets."
+                    )
+                    break
+                elif failure_kind == "permanent":
+                    # A content/permission 403 that will never succeed on retry.
+                    # Quarantine it so it stops blocking the queue (caps retries).
+                    _quarantine_tweet_post_failure(path, draft, e)
+                else:
+                    # Transient/unclassified; leave queued for the next cycle.
+                    console.print(
+                        "[yellow]Tweet not posted (transient error); leaving queued."
+                    )
         else:
             console.print("[yellow]Skipped posting tweet")
 
@@ -2579,7 +2660,18 @@ def auto(
                         )
                 except Exception as e:
                     console.print(f"[red]Error posting tweet: {e}")
-                    _quarantine_permanent_reply_failure(path, draft, e)
+                    failure_kind = _classify_tweet_post_error(e)
+                    if failure_kind == "cap":
+                        console.print(
+                            "[yellow]Twitter monthly spend cap reached; tweets will post when the cap resets."
+                        )
+                        break
+                    elif failure_kind == "permanent":
+                        _quarantine_tweet_post_failure(path, draft, e)
+                    else:
+                        console.print(
+                            "[yellow]Tweet not posted (transient error); leaving queued."
+                        )
 
     # Summary
     console.print("\n[bold]Automation Cycle Summary:[/bold]")
