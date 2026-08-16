@@ -85,13 +85,16 @@ def validate_presentation(deck: Any) -> None:
             raise ValueError(f"unsupported slide type for {slide_id}: {slide_type}")
         if not isinstance(slide.get("title"), str) or not slide["title"].strip():
             raise ValueError(f"slide {slide_id} must include title")
-        if slide_type == "code-reveal" and "code" not in slide:
-            raise ValueError(f"slide {slide_id} of type code-reveal requires code")
+        if slide_type == "code-reveal" and not isinstance(slide.get("code"), str):
+            raise ValueError(
+                f"slide {slide_id} of type code-reveal requires code as a string"
+            )
         if slide_type == "code-and-text" and (
-            "code" not in slide or "body" not in slide
+            not isinstance(slide.get("code"), str)
+            or not isinstance(slide.get("body"), str)
         ):
             raise ValueError(
-                f"slide {slide_id} of type code-and-text requires body and code"
+                f"slide {slide_id} of type code-and-text requires body and code as strings"
             )
         if slide_type in ("content", "code-and-text"):
             bullets = slide.get("bullets")
@@ -117,6 +120,13 @@ def validate_presentation(deck: Any) -> None:
                 raise ValueError(
                     f"slide {slide_id} has unsupported animation: {animation_type}"
                 )
+            for field in ("duration", "delay", "stagger"):
+                if field in animation and (
+                    not isinstance(animation[field], int) or animation[field] < 0
+                ):
+                    raise ValueError(
+                        f"slide {slide_id} animation {field} must be a non-negative integer"
+                    )
 
 
 def render_html(deck: dict[str, Any]) -> str:

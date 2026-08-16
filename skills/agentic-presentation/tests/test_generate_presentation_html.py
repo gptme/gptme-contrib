@@ -278,3 +278,55 @@ def test_validate_presentation_rejects_non_list_bullets():
         deck["slides"][1]["bullets"] = bad_value
         with pytest.raises(ValueError, match="bullets must be an array"):
             generator.validate_presentation(deck)
+
+
+def _cat_deck(code: object = "print('hello')", body: object = "Explanation.") -> dict:
+    """Return a minimal deck whose last slide is a code-and-text slide."""
+    deck = _sample_deck()
+    deck["slides"][2] = {
+        "id": "cat",
+        "type": "code-and-text",
+        "title": "Side by side",
+        "code": code,
+        "body": body,
+    }
+    return deck
+
+
+def test_validate_presentation_rejects_non_string_code_fields():
+    # code-reveal: code must be a string, not a number or dict.
+    for reveal_bad in (123, {"lines": ["a", "b"]}, None):
+        deck = _sample_deck()
+        deck["slides"][2]["code"] = reveal_bad  # slide 2 is code-reveal
+        with pytest.raises(ValueError, match="requires code as a string"):
+            generator.validate_presentation(deck)
+
+    # code-and-text: valid baseline must not raise.
+    generator.validate_presentation(_cat_deck())
+
+    # code-and-text: non-string code must raise.
+    for cat_bad_code in (42, None, ["line1"]):
+        with pytest.raises(ValueError, match="requires body and code as strings"):
+            generator.validate_presentation(_cat_deck(code=cat_bad_code))
+
+    # code-and-text: non-string body must raise.
+    for cat_bad_body in (42, None, {"text": "x"}):
+        with pytest.raises(ValueError, match="requires body and code as strings"):
+            generator.validate_presentation(_cat_deck(body=cat_bad_body))
+
+
+def test_validate_presentation_rejects_non_integer_animation_timing():
+    # duration, delay, stagger must be non-negative integers per the schema.
+    for field in ("duration", "delay", "stagger"):
+        for bad_val in ("1; } body { display: none; }", -1, 1.5, [450]):
+            deck = _sample_deck()
+            deck["slides"][0]["animations"][0][field] = bad_val
+            with pytest.raises(
+                ValueError, match=f"{field} must be a non-negative integer"
+            ):
+                generator.validate_presentation(deck)
+
+    # Zero is allowed (explicit immediate animation).
+    deck = _sample_deck()
+    deck["slides"][0]["animations"][0]["duration"] = 0
+    generator.validate_presentation(deck)  # must not raise
