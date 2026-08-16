@@ -774,6 +774,42 @@ def _quarantine_permanent_reply_failure(
 # Distinguish by the response body message, never by the status code alone.
 _CAP_403_MARKERS = ("spend cap", "monthly spend cap")
 
+# Known-permanent content rejection patterns (cashtags, dollar amounts, restricted
+# replies). These phrases appear in the X API's own error messages, not in the
+# rejected tweet's text, so substring matching is safe for this list.
+_PERMANENT_403_MARKERS = (
+    "cashtag",
+    "dollar amount",
+    "restricted reply",
+    "automated tweet",
+)
+
+
+def _get_twitter_api_error_type(error: Exception) -> str | None:
+    """Extract the X API v2 'type' field from a structured tweepy response body.
+
+    Tweepy HTTP exceptions carry a `response` attribute whose JSON body follows
+    the X API v2 problem schema: {"type": "<URL or title>", "status": 403, ...}.
+    The `type` field is API-generated and never contains user tweet content, making
+    it the most reliable discriminator between cap and content-rejection 403s.
+
+    Returns the type string if available, or None if the exception has no
+    parseable structured response (e.g. a plain Exception used in tests).
+    """
+    response = getattr(error, "response", None)
+    if response is None:
+        return None
+    get_json = getattr(response, "json", None)
+    if get_json is None:
+        return None
+    try:
+        body = get_json()
+        if isinstance(body, dict):
+            return body.get("type") or body.get("title") or ""
+    except Exception:
+        pass
+    return None
+
 
 def _classify_tweet_post_error(error: Exception) -> str:
     """Classify a create_tweet failure for the autopost pipeline.
@@ -803,11 +839,35 @@ def _classify_tweet_post_error(error: Exception) -> str:
     if not is_403:
         return "other"
 
-    # It is a 403. Distinguish billing cap from content rejection by body text.
+    # P1 fix: prefer the structured X API v2 `type` field over substring matching.
+    # The type URI is API-controlled and is never influenced by user tweet content,
+    # so it cannot be spoofed by a tweet that happens to contain "spend cap".
+    api_error_type = _get_twitter_api_error_type(error)
+    if api_error_type:
+        if (
+            "usage-capped" in api_error_type.lower()
+            or "usagecapped" in api_error_type.lower()
+        ):
+            return "cap"
+        # Got a non-cap structured type — the API explicitly says this is a
+        # content rejection or other permanent error.
+        return "permanent"
+
+    # No structured response body. Fall back to substring matching.
+    # Cap markers (e.g. "spend cap") could theoretically appear in user tweet
+    # content embedded in an error body, but the X API does not embed user text
+    # in 403 error messages as of 2026-08-16. The structured path above is the
+    # robust fix for that case in production.
     if any(marker in message for marker in _CAP_403_MARKERS):
         return "cap"
 
-    return "permanent"
+    # P2 fix: only quarantine on known-permanent rejection patterns. Unknown 403s
+    # (e.g. transient account restrictions, temporary permission changes) return
+    # "other" so the tweet stays queued for retry rather than being silently dropped.
+    if any(marker in message for marker in _PERMANENT_403_MARKERS):
+        return "permanent"
+
+    return "other"
 
 
 def _quarantine_tweet_post_failure(
