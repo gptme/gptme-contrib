@@ -17,6 +17,7 @@ from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -160,9 +161,14 @@ class TestClassifyTweetPostError:
         err = Exception("403 Forbidden: Your monthly spend cap has been reached")
         assert workflow_module._classify_tweet_post_error(err) == "cap"
 
-    def test_spend_cap_message_without_403_is_cap(self, workflow_module):
+    def test_spend_cap_message_without_403_is_other(self, workflow_module):
+        # A message that mentions "spend cap" but carries no 403 status must NOT
+        # be classified as a billing cap — the error is not from the billing layer.
+        # This guards against a tweet whose text contains "spend cap" triggering a
+        # queue break via a non-cap rejection (e.g. a plain Exception from an
+        # unexpected code path).
         err = Exception("your monthly spend cap has been reached")
-        assert workflow_module._classify_tweet_post_error(err) == "cap"
+        assert workflow_module._classify_tweet_post_error(err) == "other"
 
     def test_cashtag_403_classified_permanent(self, workflow_module):
         # This is the poison-tweet case: content-rejection 403 that will never
@@ -197,6 +203,12 @@ class TestClassifyTweetPostError:
         err = Forbidden(_FakeResponse())
         assert workflow_module._classify_tweet_post_error(err) == "permanent"
 
+    def test_http_403_prefix_classified_permanent(self, workflow_module):
+        # Real tweepy/httpx errors may format the status as "HTTP 403: ..." rather
+        # than leading with "403 Forbidden: ...". The classifier must catch these.
+        err = Exception("HTTP 403: Forbidden - policy violation")
+        assert workflow_module._classify_tweet_post_error(err) == "permanent"
+
     def test_non_403_error_is_other(self, workflow_module):
         err = Exception("Connection reset by peer")
         assert workflow_module._classify_tweet_post_error(err) == "other"
@@ -204,3 +216,57 @@ class TestClassifyTweetPostError:
     def test_rate_limit_429_is_other(self, workflow_module):
         err = Exception("429 Too Many Requests")
         assert workflow_module._classify_tweet_post_error(err) == "other"
+
+
+class TestQuarantineTweetPostFailure:
+    def test_moves_file_to_rejected_and_sets_reason(self, workflow_module, tmp_path):
+        """_quarantine_tweet_post_failure removes the approved draft, writes it to
+        rejected/, and records a reject_reason on the moved draft."""
+        approved_dir = tmp_path / "approved"
+        rejected_dir = tmp_path / "rejected"
+        approved_dir.mkdir()
+        rejected_dir.mkdir()
+
+        draft = workflow_module.TweetDraft(text="Hello world tweet")
+        draft_path = approved_dir / "test-tweet.yaml"
+        draft.save(draft_path)
+        assert draft_path.exists()
+
+        error = Exception("403 Forbidden: policy violation")
+
+        with patch.object(workflow_module, "REJECTED_DIR", rejected_dir):
+            result = workflow_module._quarantine_tweet_post_failure(
+                draft_path, draft, error
+            )
+
+        assert result is True
+        assert not draft_path.exists(), "original file must be removed"
+        rejected_files = list(rejected_dir.iterdir())
+        assert len(rejected_files) == 1, "exactly one file must appear in rejected/"
+        moved_draft = workflow_module.TweetDraft.load(rejected_files[0])
+        assert moved_draft.reject_reason, "reject_reason must be set on moved draft"
+        assert (
+            "403" in moved_draft.reject_reason
+            or "rejection" in moved_draft.reject_reason.lower()
+        )
+
+    def test_preserves_draft_text(self, workflow_module, tmp_path):
+        """Quarantined draft must retain its original tweet text."""
+        approved_dir = tmp_path / "approved"
+        rejected_dir = tmp_path / "rejected"
+        approved_dir.mkdir()
+        rejected_dir.mkdir()
+
+        original_text = "Testing spend cap quarantine behavior"
+        draft = workflow_module.TweetDraft(text=original_text)
+        draft_path = approved_dir / "test-tweet.yaml"
+        draft.save(draft_path)
+
+        error = Exception("403 Forbidden: cashtag rejected")
+
+        with patch.object(workflow_module, "REJECTED_DIR", rejected_dir):
+            workflow_module._quarantine_tweet_post_failure(draft_path, draft, error)
+
+        rejected_files = list(rejected_dir.iterdir())
+        moved_draft = workflow_module.TweetDraft.load(rejected_files[0])
+        assert moved_draft.text == original_text

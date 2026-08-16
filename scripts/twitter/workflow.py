@@ -788,22 +788,26 @@ def _classify_tweet_post_error(error: Exception) -> str:
       "other"     - transient or unclassified; leave the tweet queued for retry.
     """
     message = str(error).lower()
-    # Cap marker takes priority: if the body names a spend cap, treat it as a cap
-    # regardless of exact status framing.
-    if any(marker in message for marker in _CAP_403_MARKERS):
-        return "cap"
-    # A Forbidden/403 on create_tweet is a content/permission rejection. Match on
-    # either the typed tweepy exception (when available) OR the status text in the
-    # message, so a plain Exception carrying a "403 Forbidden: ..." body is still
-    # caught even if the error was wrapped or not a tweepy Forbidden instance.
-    is_403 = "forbidden" in message or message.startswith("403")
+    # Establish the 403/Forbidden status FIRST. Cap markers are checked only
+    # within a confirmed 403 to avoid mis-classifying non-403 errors whose
+    # message text happens to contain "spend cap" (e.g. tweet content about
+    # Twitter billing policy). A non-403 can never be a billing cap.
+    is_403 = "403" in message or "forbidden" in message
     try:
         from tweepy.errors import Forbidden as _Forbidden
 
         is_403 = is_403 or isinstance(error, _Forbidden)
     except Exception:
         pass
-    return "permanent" if is_403 else "other"
+
+    if not is_403:
+        return "other"
+
+    # It is a 403. Distinguish billing cap from content rejection by body text.
+    if any(marker in message for marker in _CAP_403_MARKERS):
+        return "cap"
+
+    return "permanent"
 
 
 def _quarantine_tweet_post_failure(
