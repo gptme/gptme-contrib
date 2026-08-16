@@ -119,6 +119,21 @@ class TestQuestionContext:
         ), '"unspecified" amount_context should still be treated as missing'
         assert not ctx.is_ready_to_advise("how_much_to_save")
 
+    def test_savings_amount_requires_debt_context(self):
+        """Savings advice must gather debt context before it is ready."""
+        ctx = QuestionContext(
+            goal_type=GoalType.EMERGENCY_FUND,
+            time_horizon=TimeHorizon.NEAR,
+            amount_context="three months of expenses",
+        )
+
+        assert ctx.missing_axes_for("how_much_to_save") == ["has_high_interest_debt"]
+        assert not ctx.is_ready_to_advise("how_much_to_save")
+
+        ctx.has_high_interest_debt = True
+        assert ctx.should_interrupt_with_debt_advice()
+        assert next_questions(ctx, "how_much_to_save") is None
+
     def test_should_interrupt_with_debt_advice(self):
         """Test debt interrupt detection."""
         ctx_no_debt = QuestionContext(has_high_interest_debt=False)
