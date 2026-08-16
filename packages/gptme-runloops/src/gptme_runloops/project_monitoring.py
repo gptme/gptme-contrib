@@ -92,12 +92,13 @@ class ProjectMonitoringRun(BaseRunLoop):
 
     # Per-item timeout in seconds, mirroring project-monitoring.sh tiers.
     # Assigned issues need the most time (research + PR + response).
-    # PR updates and CI failures need a mid-tier (fix + re-review cycle).
+    # PR updates, CI failures, and greptile review cycles need a mid-tier (fix + re-review cycle).
     # Simple notifications need the least.
     _ITEM_TIMEOUTS: dict[str, int] = {
         "assigned_issue": 1500,  # ~25 min: deep research + PR work + response
         "pr_update": 1200,  # ~20 min: fix + re-review cycle
         "ci_failure": 1200,  # ~20 min: investigate + fix
+        "greptile_needs_fix": 1200,  # ~20 min: fix + re-review cycle (added 2026-08-16)
         "notification": 600,  # ~10 min: simple processing
     }
     _DEFAULT_ITEM_TIMEOUT = 900  # ~15 min for unknown types

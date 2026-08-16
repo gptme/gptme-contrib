@@ -67,6 +67,22 @@ def test_compute_timeout_single_pr_update(workspace):
     assert run._compute_timeout(items) == 1200
 
 
+def test_compute_timeout_greptile_needs_fix(workspace):
+    """Greptile fix-and-review cycles use the medium-tier budget (same as pr_update)."""
+    run = ProjectMonitoringRun(workspace)
+    items = [
+        WorkItem(
+            repo="r/r",
+            item_type="greptile_needs_fix",
+            number=1,
+            title="t",
+            url="u",
+            details="d",
+        )
+    ]
+    assert run._compute_timeout(items) == 1200
+
+
 def test_compute_timeout_single_notification(workspace):
     """Notifications use the shortest budget."""
     run = ProjectMonitoringRun(workspace)
