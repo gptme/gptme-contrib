@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Iterator, Literal
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -28,6 +29,95 @@ DEFAULT_BUDGETS = {
     "ml-optional": 2000,  # MB, for packages with optional ML deps
     "other": 500,  # MB, catch-all default
 }
+
+
+class CheckResult:
+    """Result of check_packages.
+
+    Evaluates as ``bool`` for backward-compatible ``if not check_packages(...)``
+    checks (returns ``all_pass``).  Also supports tuple-unpacking as
+    ``(all_pass, pre_measurement_failures, budget_overages)`` so callers that
+    already unpack the tuple continue to work unchanged.
+
+    Prefer attribute access for new code:
+    - ``result.all_pass`` — overall pass/fail
+    - ``result.config_errors`` — packages with invalid budget config
+    - ``result.resolution_failures`` — packages whose dependencies could not be resolved
+    - ``result.install_failures`` — packages that failed to install (after resolution)
+    - ``result.budget_overages`` — packages that exceeded their size budget
+    - ``result.pre_measurement_failures`` — config_errors + resolution_failures + install_failures (combined)
+    """
+
+    def __init__(
+        self,
+        all_pass: bool,
+        config_errors: int,
+        install_failures: int,
+        budget_overages: int,
+        resolution_failures: int = 0,
+    ) -> None:
+        for _name, _val in (
+            ("config_errors", config_errors),
+            ("resolution_failures", resolution_failures),
+            ("install_failures", install_failures),
+            ("budget_overages", budget_overages),
+        ):
+            if _val < 0:
+                raise ValueError(f"{_name} must be non-negative, got {_val!r}")
+        self.all_pass = all_pass
+        self.config_errors = config_errors
+        self.resolution_failures = resolution_failures
+        self.install_failures = install_failures
+        self.budget_overages = budget_overages
+
+    @property
+    def pre_measurement_failures(self) -> int:
+        return self.config_errors + self.resolution_failures + self.install_failures
+
+    def __bool__(self) -> bool:
+        return self.all_pass
+
+    def __iter__(self) -> Iterator:
+        """Yield (all_pass, pre_measurement_failures, budget_overages) for tuple unpacking."""
+        yield self.all_pass
+        yield self.pre_measurement_failures
+        yield self.budget_overages
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, bool):
+            return self.all_pass == other
+        if isinstance(other, tuple):
+            return tuple(self) == other
+        if isinstance(other, CheckResult):
+            return (
+                self.all_pass == other.all_pass
+                and self.config_errors == other.config_errors
+                and self.resolution_failures == other.resolution_failures
+                and self.install_failures == other.install_failures
+                and self.budget_overages == other.budget_overages
+            )
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.all_pass,
+                self.config_errors,
+                self.resolution_failures,
+                self.install_failures,
+                self.budget_overages,
+            )
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CheckResult(all_pass={self.all_pass!r}, "
+            f"config_errors={self.config_errors!r}, "
+            f"resolution_failures={self.resolution_failures!r}, "
+            f"install_failures={self.install_failures!r}, "
+            f"budget_overages={self.budget_overages!r})"
+        )
+
 
 # Keywords in dependency lists that indicate an ML package (ml-optional budget)
 _ML_DEP_KEYWORDS = ("torch", "tensorflow", "jax", "onnx", "transformers")
@@ -75,7 +165,21 @@ def get_package_budget(pyproject_path: Path) -> int:
     return DEFAULT_BUDGETS[category]
 
 
-def measure_install_size(package_path: Path, package_name: str) -> float | None:
+def _is_resolution_failure(stderr: str) -> bool:
+    """Return True when uv stderr indicates a dependency resolution failure.
+
+    uv prints 'No solution found when resolving' for unsatisfiable constraints.
+    Distinguishing these from generic install errors (network errors, permission
+    failures, etc.) lets CI output say "failed to resolve" instead of the
+    misleading "failed to install" when the index or lock is broken.
+    """
+    lower = stderr.lower()
+    return "no solution found" in lower or ("resolv" in lower and "error" in lower)
+
+
+def measure_install_size(
+    package_path: Path, package_name: str
+) -> float | Literal["resolution_failure"] | None:
     """Install package in a temp venv and measure disk usage.
 
     First tries to export workspace-locked requirements via ``uv export --package``.
@@ -88,7 +192,9 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
     from PyPI and may overestimate size for index-pinned packages.
 
     Returns:
-        Size in MB, or None if installation failed.
+        Size in MB on success, ``"resolution_failure"`` when uv cannot resolve
+        dependencies, or ``None`` for other install errors (timeout, venv
+        creation failure, network error, etc.).
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
@@ -203,6 +309,8 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
             if result.returncode != 0:
                 print(f"❌ Installation failed for {package_name}")
                 print(result.stderr)
+                if _is_resolution_failure(result.stderr):
+                    return "resolution_failure"
                 return None
 
             # Measure venv disk usage with `du -sb` (bytes). du counts each
@@ -230,9 +338,54 @@ def measure_install_size(package_path: Path, package_name: str) -> float | None:
             return None
 
 
+def print_failure_summary(result: CheckResult) -> None:
+    """Print only the failure classes that actually occurred.
+
+    Uses precise labels for each class so the summary directs developers to the
+    right place:
+    - config errors → check pyproject.toml
+    - resolution failures → check the dependency constraints / index configuration
+    - install failures → check the install command / environment
+    - budget overages → trim dependencies or raise the budget
+
+    When all counts are zero (e.g. the ``--package`` filter matched nothing),
+    the per-package error was already printed by :func:`check_packages`; emit a
+    brief final line so the failure is never silent.
+    """
+    if (
+        result.config_errors == 0
+        and result.resolution_failures == 0
+        and result.install_failures == 0
+        and result.budget_overages == 0
+    ):
+        print("✗ No packages were checked (see output above for details)")
+        return
+    if result.config_errors > 0:
+        plural = "package" if result.config_errors == 1 else "packages"
+        print(
+            f"✗ {result.config_errors} {plural} had invalid budget configuration in pyproject.toml "
+            f"(see per-package output above)"
+        )
+    if result.resolution_failures > 0:
+        plural = "package" if result.resolution_failures == 1 else "packages"
+        print(
+            f"✗ {result.resolution_failures} {plural} failed to resolve dependencies "
+            f"(see per-package output above)"
+        )
+    if result.install_failures > 0:
+        plural = "package" if result.install_failures == 1 else "packages"
+        print(
+            f"✗ {result.install_failures} {plural} failed to install "
+            f"(see per-package output above)"
+        )
+    if result.budget_overages > 0:
+        plural = "package" if result.budget_overages == 1 else "packages"
+        print(f"✗ {result.budget_overages} {plural} exceeded their install-size budget")
+
+
 def check_packages(
     packages_dir: Path, verbose: bool = False, only: str | None = None
-) -> bool:
+) -> CheckResult:
     """Check all packages in packages/ directory.
 
     Args:
@@ -240,9 +393,14 @@ def check_packages(
             builds a venv each, so local runs want a single target).
 
     Returns:
-        True if all packages pass, False if any exceed their budget.
+        :class:`CheckResult` with counts for each failure class.
+        Evaluates as ``bool`` for backward-compatible ``if not check_packages(...)`` use.
     """
     all_pass = True
+    config_errors = 0
+    resolution_failures = 0
+    install_failures = 0
+    budget_overages = 0
     packages_dir = packages_dir.resolve()
 
     package_paths = sorted(
@@ -252,7 +410,7 @@ def check_packages(
         package_paths = [p for p in package_paths if p.name == only]
         if not package_paths:
             print(f"❌ No package named {only!r} in {packages_dir}")
-            return False
+            return CheckResult(False, 0, 0, 0)
 
     for package_path in package_paths:
         # Skip symlinks (they point to gptme-contrib submodule)
@@ -272,6 +430,7 @@ def check_packages(
         except (ValueError, TypeError) as e:
             print(f"✗ {package_path.name:40} bad max_install_mb in pyproject.toml: {e}")
             all_pass = False
+            config_errors += 1
             continue
 
         # Read the canonical distribution name from pyproject.toml [project] name.
@@ -286,9 +445,16 @@ def check_packages(
 
         size_mb = measure_install_size(package_path, package_name)
 
+        if size_mb == "resolution_failure":
+            print(f"✗ {package_path.name:40} failed to resolve dependencies")
+            all_pass = False
+            resolution_failures += 1
+            continue
+
         if size_mb is None:
             print(f"✗ {package_path.name:40} installation failed")
             all_pass = False
+            install_failures += 1
             continue
 
         status = "✓" if size_mb <= budget_mb else "✗"
@@ -299,8 +465,15 @@ def check_packages(
 
         if size_mb > budget_mb:
             all_pass = False
+            budget_overages += 1
 
-    return all_pass
+    return CheckResult(
+        all_pass,
+        config_errors,
+        install_failures,
+        budget_overages,
+        resolution_failures=resolution_failures,
+    )
 
 
 if __name__ == "__main__":
@@ -321,11 +494,13 @@ if __name__ == "__main__":
     print("Checking package install sizes...")
     print()
 
-    if check_packages(packages_dir, args.verbose, args.package):
+    result = check_packages(packages_dir, args.verbose, args.package)
+
+    if result:
         print()
         print("✓ All packages within budget")
         sys.exit(0)
     else:
         print()
-        print("✗ One or more packages exceeded budget")
+        print_failure_summary(result)
         sys.exit(1)

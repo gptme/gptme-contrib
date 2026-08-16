@@ -143,7 +143,7 @@ def test_measure_install_size_success():
             package_path.mkdir()
             size = check_install_size.measure_install_size(package_path, "mypkg")
 
-    assert size is not None
+    assert isinstance(size, float), f"expected float, got {size!r}"
     assert 9.0 < size < 11.0  # ~10 MB
     export_cmd = next(cmd for cmd in seen_commands if "export" in cmd)
     install_cmd = next(cmd for cmd in seen_commands if "install" in cmd)
@@ -190,7 +190,7 @@ def test_measure_install_size_export_fallback():
             package_path.mkdir()
             size = check_install_size.measure_install_size(package_path, "mypkg")
 
-    assert size is not None
+    assert isinstance(size, float), f"expected float, got {size!r}"
     assert 4.0 < size < 6.0  # ~5 MB
     install_cmd = next(cmd for cmd in seen_commands if "install" in cmd)
     assert "--index-strategy" in install_cmd
@@ -240,7 +240,7 @@ def test_measure_install_size_timeout():
 
 
 def test_check_packages_pass_and_fail():
-    """check_packages returns True for passing packages and False when over budget."""
+    """check_packages reports budget overages separately from clean passes."""
     import check_install_size
 
     # Stub measure_install_size to return fixed sizes
@@ -270,12 +270,12 @@ def test_check_packages_pass_and_fail():
                 packages_dir, verbose=False, only="failing"
             )
 
-    assert result_pass is True
-    assert result_fail is False
+    assert result_pass == (True, 0, 0)
+    assert result_fail == (False, 0, 1)
 
 
 def test_check_packages_none_size_fails():
-    """check_packages returns False when measure_install_size returns None."""
+    """check_packages counts install failures before size measurement."""
     import check_install_size
 
     def fake_measure(package_path, package_name):
@@ -296,7 +296,7 @@ def test_check_packages_none_size_fails():
                 packages_dir, verbose=False, only="broken"
             )
 
-    assert result is False
+    assert result == (False, 1, 0)
 
 
 def test_check_packages_skips_symlinks():
@@ -330,7 +330,7 @@ def test_check_packages_skips_symlinks():
         ):
             result = check_install_size.check_packages(packages_dir, verbose=True)
 
-    assert result is True
+    assert result == (True, 0, 0)
     assert call_count["n"] == 1, "symlinked package should not be measured"
 
 
@@ -366,8 +366,9 @@ def test_check_packages_bad_budget_does_not_crash():
         ):
             result = check_install_size.check_packages(packages_dir, verbose=False)
 
-    # Script must not crash; result is False (one package failed) but good_pkg was measured
-    assert result is False
+    # Script must not crash; one package failed before size measurement and good_pkg
+    # was still measured.
+    assert result == (False, 1, 0)
     assert call_count["n"] == 1, "good package should still be measured"
 
 
@@ -401,5 +402,276 @@ def test_check_packages_skips_no_pyproject():
         ):
             result = check_install_size.check_packages(packages_dir, verbose=True)
 
-    assert result is True
+    assert result == (True, 0, 0)
     assert call_count["n"] == 1, "package without pyproject.toml should not be measured"
+
+
+def test_print_failure_summary_lists_only_present_classes(capsys):
+    """Failure summary should name config errors, install failures, and budget overages separately."""
+    import check_install_size
+
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=2, install_failures=1, budget_overages=1
+    )
+    check_install_size.print_failure_summary(result)
+
+    out = capsys.readouterr().out
+    assert "2 packages had invalid budget configuration" in out
+    assert "1 package failed to install" in out
+    assert "1 package exceeded their install-size budget" in out
+
+
+def test_print_failure_summary_omits_zero_count_classes(capsys):
+    """Zero-count failure classes should not print a misleading summary line."""
+    import check_install_size
+
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=0, install_failures=0, budget_overages=1
+    )
+    check_install_size.print_failure_summary(result)
+
+    out = capsys.readouterr().out
+    assert "invalid budget configuration" not in out
+    assert "failed to install" not in out
+    assert "1 package exceeded their install-size budget" in out
+
+
+def test_check_result_bool_semantics():
+    """CheckResult.__bool__ returns all_pass so 'if not result' works for failed checks."""
+    import check_install_size
+
+    passing = check_install_size.CheckResult(True, 0, 0, 0)
+    failing = check_install_size.CheckResult(False, 1, 0, 0)
+
+    assert bool(passing) is True
+    assert bool(failing) is False
+    # Crucially: a failing tuple is always truthy; CheckResult is not
+    assert not failing
+
+
+def test_check_result_distinguishes_config_errors_from_install_failures(capsys):
+    """Config errors and install failures should produce distinct summary lines."""
+    import check_install_size
+
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=1, install_failures=2, budget_overages=0
+    )
+    check_install_size.print_failure_summary(result)
+
+    out = capsys.readouterr().out
+    # Config error → directs to pyproject.toml, not install command
+    assert "invalid budget configuration" in out
+    # Install failure → directs to install command
+    assert "2 packages failed to install" in out
+    # No budget overage line
+    assert "exceeded their install-size budget" not in out
+
+
+def test_check_result_tuple_unpacking_backward_compat():
+    """Tuple-unpacking as (all_pass, pre_measurement_failures, budget_overages) still works."""
+    import check_install_size
+
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=1, install_failures=2, budget_overages=3
+    )
+    all_pass, pre_measurement_failures, budget_overages = result
+    assert all_pass is False
+    assert pre_measurement_failures == 3  # config_errors + install_failures
+    assert budget_overages == 3
+
+
+def test_check_packages_mixed_failures(capsys):
+    """check_packages counts config errors and install failures independently.
+
+    A malformed budget config must not spill into install_failures and vice versa.
+    Both counters must accumulate separately so print_failure_summary can direct
+    developers to the right place (pyproject.toml vs the install command).
+    """
+    import check_install_size
+
+    def fake_measure(package_path, package_name):
+        # Only called for the package with a valid budget; simulates install failure
+        return None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+
+        # Package with malformed max_install_mb → config_errors += 1
+        bad_budget = packages_dir / "bad_budget"
+        bad_budget.mkdir(parents=True)
+        (bad_budget / "pyproject.toml").write_text(
+            '[tool.gptme-contrib]\nmax_install_mb = "not-a-number"\n'
+        )
+
+        # Package with valid budget but install returns None → install_failures += 1
+        broken_install = packages_dir / "broken_install"
+        broken_install.mkdir(parents=True)
+        (broken_install / "pyproject.toml").write_text(
+            "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+        )
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result = check_install_size.check_packages(packages_dir, verbose=False)
+
+    # Both failure classes must be counted independently
+    assert result.all_pass is False
+    assert result.config_errors == 1
+    assert result.install_failures == 1
+    assert result.budget_overages == 0
+    assert result.pre_measurement_failures == 2  # config_errors + install_failures
+    assert result == (
+        False,
+        2,
+        0,
+    )  # tuple: (all_pass, pre_measurement_failures, budget_overages)
+
+    # print_failure_summary must emit a distinct line for each class
+    check_install_size.print_failure_summary(result)
+    out = capsys.readouterr().out
+    assert "invalid budget configuration" in out
+    assert "failed to install" in out
+
+
+def test_check_result_is_hashable():
+    """CheckResult defines __hash__ so instances can be used in sets and as dict keys."""
+    import check_install_size
+
+    r1 = check_install_size.CheckResult(True, 0, 0, 0)
+    r2 = check_install_size.CheckResult(False, 1, 0, 0)
+    r3 = check_install_size.CheckResult(True, 0, 0, 0)
+
+    # Must not raise TypeError
+    result_set = {r1, r2}
+    assert r3 in result_set  # r3 equals r1 → same hash, same set membership
+    assert r2 not in {r1}
+    assert isinstance(hash(r1), int)
+
+
+def test_check_result_rejects_negative_counts():
+    """CheckResult.__init__ raises ValueError for negative counter arguments."""
+    import check_install_size
+    import pytest
+
+    with pytest.raises(ValueError, match="config_errors"):
+        check_install_size.CheckResult(False, -1, 0, 0)
+    with pytest.raises(ValueError, match="install_failures"):
+        check_install_size.CheckResult(False, 0, -1, 0)
+    with pytest.raises(ValueError, match="budget_overages"):
+        check_install_size.CheckResult(False, 0, 0, -1)
+    with pytest.raises(ValueError, match="resolution_failures"):
+        check_install_size.CheckResult(False, 0, 0, 0, resolution_failures=-1)
+
+
+def test_is_resolution_failure_detects_uv_error():
+    """_is_resolution_failure should recognise uv's 'no solution found' output."""
+    import check_install_size
+
+    assert check_install_size._is_resolution_failure(
+        "error: No solution found when resolving dependencies:\n  Because pkg>=1.0 requires ..."
+    )
+    assert check_install_size._is_resolution_failure(
+        "× No solution found when resolving\n  | Because ..."
+    )
+    # Generic install errors that are NOT resolution failures
+    assert not check_install_size._is_resolution_failure("ERROR: package not found")
+    assert not check_install_size._is_resolution_failure("timeout")
+    assert not check_install_size._is_resolution_failure("")
+
+
+def test_measure_install_size_resolution_failure():
+    """measure_install_size returns 'resolution_failure' when uv cannot resolve deps."""
+    import check_install_size
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        if "venv" in cmd:
+            result.returncode = 0
+            venv_path = Path(cmd[-1])
+            venv_path.mkdir(parents=True)
+            (venv_path / "bin").mkdir()
+            (venv_path / "bin" / "python").touch()
+        else:
+            result.returncode = 1
+            result.stderr = (
+                "error: No solution found when resolving dependencies:\n"
+                "  Because pkg>=2.0 is not available and ..."
+            )
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package_path = Path(tmpdir) / "mypkg"
+            package_path.mkdir()
+            size = check_install_size.measure_install_size(package_path, "mypkg")
+
+    assert size == "resolution_failure"
+
+
+def test_check_packages_resolution_failure_counted_separately():
+    """check_packages counts resolution failures in resolution_failures, not install_failures."""
+    import check_install_size
+
+    def fake_measure(package_path, package_name):
+        return "resolution_failure"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        packages_dir = Path(tmpdir) / "packages"
+        pkg_dir = packages_dir / "broken_resolve"
+        pkg_dir.mkdir(parents=True)
+        (pkg_dir / "pyproject.toml").write_text(
+            "[tool.gptme-contrib]\nmax_install_mb = 100\n"
+        )
+
+        with patch.object(
+            check_install_size, "measure_install_size", side_effect=fake_measure
+        ):
+            result = check_install_size.check_packages(
+                packages_dir, verbose=False, only="broken_resolve"
+            )
+
+    assert result.all_pass is False
+    assert result.resolution_failures == 1
+    assert result.install_failures == 0
+    assert result.budget_overages == 0
+    # tuple backward compat: pre_measurement_failures includes resolution_failures
+    assert result == (False, 1, 0)
+
+
+def test_print_failure_summary_resolution_failure(capsys):
+    """Resolution failures print 'failed to resolve dependencies', not 'failed to install'."""
+    import check_install_size
+
+    result = check_install_size.CheckResult(
+        all_pass=False,
+        config_errors=0,
+        install_failures=0,
+        budget_overages=0,
+        resolution_failures=2,
+    )
+    check_install_size.print_failure_summary(result)
+
+    out = capsys.readouterr().out
+    assert "2 packages failed to resolve dependencies" in out
+    assert "failed to install" not in out
+    assert "exceeded their install-size budget" not in out
+
+
+def test_print_failure_summary_no_match_fallback(capsys):
+    """When all counts are zero (no-match filter), print_failure_summary emits a brief line."""
+    import check_install_size
+
+    # This is the CheckResult returned when --package filter matches nothing
+    result = check_install_size.CheckResult(
+        all_pass=False, config_errors=0, install_failures=0, budget_overages=0
+    )
+    check_install_size.print_failure_summary(result)
+
+    out = capsys.readouterr().out
+    # Must not be silent — emit at least one line so the CI failure is explained
+    assert out.strip()
+    # Must not claim a specific failure class that didn't occur
+    assert "invalid budget configuration" not in out
+    assert "failed to install" not in out
+    assert "exceeded" not in out
