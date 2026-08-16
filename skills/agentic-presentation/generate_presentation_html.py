@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,7 +22,6 @@ SUPPORTED_ANIMATION_TYPES = {
     "fade-in",
     "slide-in",
     "line-reveal",
-    "line-by-line-reveal",
     "zoom",
     "spin",
 }
@@ -42,9 +42,24 @@ def load_presentation(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], data)
 
 
-def validate_presentation(deck: dict[str, Any]) -> None:
+def validate_presentation(deck: Any) -> None:
+    if not isinstance(deck, dict):
+        raise ValueError("presentation must be an object")
     if not isinstance(deck.get("title"), str) or not deck["title"].strip():
         raise ValueError("presentation must include a non-empty title")
+
+    metadata = deck.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("presentation metadata must be an object")
+    theme = metadata.get("theme", {})
+    if not isinstance(theme, dict):
+        raise ValueError("presentation theme must be an object")
+    for name, value in theme.items():
+        if name in DEFAULT_THEME and (
+            not isinstance(value, str)
+            or re.fullmatch(r"#[0-9A-Fa-f]{6}", value) is None
+        ):
+            raise ValueError(f"theme {name} must be a six-digit hex color")
 
     slides = deck.get("slides")
     if not isinstance(slides, list) or not slides:
@@ -185,7 +200,7 @@ def _render_body_and_bullets(slide: dict[str, Any]) -> str:
             f'            <li class="reveal-line">{_escape(item)}</li>'
             for item in bullets
         )
-        bullet_html = f"""          <ul class="bullets" data-role="body">
+        bullet_html = f"""          <ul class="bullets" data-role="bullets">
 {items}
           </ul>"""
     body_html = f'<p class="body" data-role="body">{body}</p>' if body else ""
@@ -221,13 +236,7 @@ def _render_gallery(images: list[dict[str, Any]]) -> str:
 
 def _animation_payload(slide: dict[str, Any]) -> str:
     animations = slide.get("animations") or [{"type": "fade-in", "duration": 350}]
-    normalized = []
-    for animation in animations:
-        item = dict(animation)
-        if item.get("type") == "line-by-line-reveal":
-            item["type"] = "line-reveal"
-        normalized.append(item)
-    return _attr(json.dumps(normalized, separators=(",", ":")))
+    return _attr(json.dumps(animations, separators=(",", ":")))
 
 
 def _css(theme: dict[str, str]) -> str:

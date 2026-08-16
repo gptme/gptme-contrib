@@ -173,3 +173,30 @@ def test_validate_presentation_rejects_duplicate_slide_ids():
 
     with pytest.raises(ValueError, match="duplicate slide id"):
         generator.validate_presentation(deck)
+
+
+def test_validate_presentation_rejects_non_object_deck():
+    with pytest.raises(ValueError, match="presentation must be an object"):
+        generator.validate_presentation([])
+
+
+def test_validate_presentation_rejects_unsafe_theme_color():
+    deck = _sample_deck()
+    deck["metadata"]["theme"]["accent"] = "red; } body { display: none"
+
+    with pytest.raises(ValueError, match="theme accent must be a six-digit hex color"):
+        generator.validate_presentation(deck)
+
+
+def test_content_body_and_bullets_have_distinct_animation_targets():
+    html = generator.render_html(_sample_deck())
+
+    assert html.count('data-role="body"') == 1
+    assert 'data-role="bullets"' in html
+
+
+def test_runtime_animation_types_match_schema():
+    schema = json.loads(SCHEMA.read_text())
+    schema_types = set(schema["definitions"]["animation"]["properties"]["type"]["enum"])
+
+    assert generator.SUPPORTED_ANIMATION_TYPES == schema_types
