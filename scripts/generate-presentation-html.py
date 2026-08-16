@@ -60,6 +60,12 @@ def validate_presentation(deck: dict[str, Any]) -> None:
     if not isinstance(slides, list) or not slides:
         raise ValueError("presentation must include at least one slide")
 
+    metadata = deck.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("presentation metadata must be an object")
+    if not isinstance(metadata.get("theme", {}), dict):
+        raise ValueError("presentation metadata theme must be an object")
+
     seen_ids: set[str] = set()
     for index, slide in enumerate(slides, start=1):
         if not isinstance(slide, dict):

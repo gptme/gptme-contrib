@@ -161,6 +161,14 @@ def test_theme_rejects_css_injection():
         generator.render_html(deck)
 
 
+def test_validate_presentation_rejects_non_object_theme():
+    deck = _sample_deck()
+    deck["metadata"]["theme"] = "dark"
+
+    with pytest.raises(ValueError, match="metadata theme must be an object"):
+        generator.validate_presentation(deck)
+
+
 def test_theme_accepts_valid_color_formats():
     """Hex (3–8 digits), rgb(), hsl(), and named colours accepted by generator AND schema."""
     schema = json.loads(SCHEMA.read_text())
