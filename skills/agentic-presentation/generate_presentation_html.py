@@ -74,10 +74,14 @@ def validate_presentation(deck: dict[str, Any]) -> None:
             raise ValueError(
                 f"slide {slide_id} of type code-and-text requires body and code"
             )
-        if slide_type == "image" and "image" not in slide:
-            raise ValueError(f"slide {slide_id} of type image requires image")
-        if slide_type == "gallery" and "images" not in slide:
-            raise ValueError(f"slide {slide_id} of type gallery requires images")
+        if slide_type == "image":
+            _validate_image(slide.get("image"), f"slide {slide_id} image")
+        if slide_type == "gallery":
+            images = slide.get("images")
+            if not isinstance(images, list):
+                raise ValueError(f"slide {slide_id} images must be an array")
+            for image_index, image in enumerate(images, start=1):
+                _validate_image(image, f"slide {slide_id} image {image_index}")
 
         for animation in slide.get("animations", []):
             animation_type = (
@@ -428,7 +432,7 @@ def _javascript() -> str:
 
     function selectedTarget(slide, target) {
       if (!target) return slide.querySelector('.slide-inner');
-      return slide.querySelector(`[data-role="${target}"]`) || slide.querySelector('.slide-inner');
+      return slide.querySelector(`[data-role="${CSS.escape(target)}"]`) || slide.querySelector('.slide-inner');
     }
 
     function prepareAnimations(slide) {
@@ -466,6 +470,15 @@ def _javascript() -> str:
       if (event.key === 'ArrowRight' || event.key === ' ' || event.key === 'Enter') showSlide(current + 1);
     });
     showSlide(0);"""
+
+
+def _validate_image(image: Any, context: str) -> None:
+    if not isinstance(image, dict):
+        raise ValueError(f"{context} must be an object")
+    if not isinstance(image.get("src"), str) or not image["src"]:
+        raise ValueError(f"{context} must include src")
+    if not isinstance(image.get("alt"), str):
+        raise ValueError(f"{context} must include alt")
 
 
 def _escape(value: Any) -> str:

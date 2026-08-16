@@ -134,6 +134,39 @@ def test_generator_keeps_twenty_slide_deck_under_500kb(tmp_path: Path):
     assert output_path.stat().st_size < 500 * 1024
 
 
+def test_animation_target_is_not_interpolated_into_javascript():
+    deck = _sample_deck()
+    deck["slides"][1]["animations"][0]["target"] = 'body"];alert(1)//'
+
+    html = generator.render_html(deck)
+
+    assert 'slide.querySelector(`[data-role="${target}"]`)' not in html
+    assert "CSS.escape(target)" in html
+
+
+@pytest.mark.parametrize(
+    ("slide_type", "field", "value", "message"),
+    [
+        ("image", "image", "not-an-object", "image must be an object"),
+        ("gallery", "images", "not-an-array", "images must be an array"),
+        ("gallery", "images", ["not-an-object"], "image 1 must be an object"),
+    ],
+)
+def test_validate_presentation_rejects_malformed_images(
+    slide_type: str, field: str, value: object, message: str
+):
+    deck = _sample_deck()
+    deck["slides"][1] = {
+        "id": "media",
+        "type": slide_type,
+        "title": "Media",
+        field: value,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        generator.validate_presentation(deck)
+
+
 def test_validate_presentation_rejects_duplicate_slide_ids():
     deck = _sample_deck()
     deck["slides"][1]["id"] = "intro"
