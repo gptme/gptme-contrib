@@ -1506,12 +1506,15 @@ def test_is_internal_tooling_does_not_cover_skill_paths() -> None:
         "skills/deployer/helper.py",
         "skills/x/ssh_config.py",
         "skills/x/k8s_apply.py",
-        # Bot/CI config shapes must never ride in under a skill directory.
+        # Bot/CI config shapes must never ride in under a wholesale-allowed
+        # directory, regardless of depth, separator, or case.
         "skills/x/.github/workflows/ci.yml",
-        "skills/x/.github/dependabot.yml",
+        "skills/x/.Github/dependabot.yml",
+        "packages/foo/.github/workflows/ci.yml",
+        "scripts/.GITHUB/dependabot.yml",
     ],
 )
-def test_skill_paths_do_not_bypass_hard_rejects(path: str) -> None:
+def test_allowed_paths_do_not_bypass_hard_rejects(path: str) -> None:
     assert not self_merge_check.is_allowed_file(path)
     category, reasons = self_merge_check.classify_category([path])
     assert category is None, f"{path} should not be self-mergeable (got {category})"

@@ -2093,7 +2093,9 @@ def is_bot_config(path: str) -> bool:
     normalized = path.replace("\\", "/").removeprefix("./")
     if normalized in BOT_CONFIG_FILES:
         return True
-    return any(part in BOT_CONFIG_DIR_SEGMENTS for part in normalized.split("/")[:-1])
+    return any(
+        part.lower() in BOT_CONFIG_DIR_SEGMENTS for part in normalized.split("/")[:-1]
+    )
 
 
 def _parse_repo_path_allowlist(value: str | None) -> dict[str, list[str]]:
