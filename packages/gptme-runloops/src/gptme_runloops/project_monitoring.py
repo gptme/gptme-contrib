@@ -99,6 +99,8 @@ class ProjectMonitoringRun(BaseRunLoop):
         "ci_failure": 1200,  # ~20 min: investigate + fix
         "notification": 600,  # ~10 min: simple processing
         "linear_notification_retry": 600,  # ~10 min: retry a failed Linear notification delivery
+        # greptile_needs_fix and greptile_convergence_adjudication are intentionally
+        # absent: they are dispatcher-derived and handled by run_item.timeout_tier().
     }
     _DEFAULT_ITEM_TIMEOUT = 900  # ~15 min for unknown types
     _MAX_TIMEOUT = 3600  # 60 min cap regardless of item count
