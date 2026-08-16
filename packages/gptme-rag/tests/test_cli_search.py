@@ -565,8 +565,29 @@ def test_search_json_surfaces_warning_only_degraded_path(tmp_path):
     ]
 
 
+def test_search_invalid_weights_does_not_leak_warning_handler(tmp_path):
+    """An early return during weights parsing must not mutate root logging."""
+    root_logger = logging.getLogger()
+    handlers_before = list(root_logger.handlers)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "search",
+            "test query",
+            "--persist-dir",
+            str(tmp_path / "index"),
+            "--weights",
+            "not-valid-json{{{",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert root_logger.handlers == handlers_before
+
+
 def test_search_non_json_surfaces_warning_to_human(tmp_path):
-    """Non-json search must still show degradation warnings.
+    """Non-json search must show arbitrary warning text without Rich parsing it.
 
     stdout is redirected to /dev/null during init/search in *both* modes, and
     RichHandler logs to stdout — so without an explicit re-emit the warning is
@@ -585,11 +606,10 @@ def test_search_non_json_surfaces_warning_to_human(tmp_path):
     mock_assembler = Mock()
     mock_assembler.assemble_context.return_value = assembled
     mock_assembler.count_tokens.return_value = 2
+    warning = "Embedding model mismatch for [bert-base]; continuing with stored model ["
 
     def make_indexer(*args, **kwargs):
-        logging.getLogger("gptme_rag.indexing.indexer").warning(
-            "Embedding model mismatch; continuing with stored embedding function"
-        )
+        logging.getLogger("gptme_rag.indexing.indexer").warning(warning)
         return mock_indexer
 
     runner = CliRunner()
@@ -603,4 +623,4 @@ def test_search_non_json_surfaces_warning_to_human(tmp_path):
         )
 
     assert result.exit_code == 0, result.output
-    assert "Embedding model mismatch" in result.output
+    assert warning in result.output
