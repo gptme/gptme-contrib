@@ -271,6 +271,12 @@ SENSITIVE_PATH_PARTS = (
     "systemd",
     "kube",
     "k8s",
+    "password",
+    "passwd",
+    "apikey",
+    "api_key",
+    "accesstoken",
+    "access_token",
 )
 # Secret-bearing file formats do not necessarily have a sensitive keyword in
 # their name (for example ``skills/foo/.env`` or ``certificate.pem``). Keep

@@ -895,6 +895,12 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
         "skills/example/.ssh/id_rsa",
         "skills/example/.SSH/authorized_keys",
         "skills/example/id_ed25519",
+        "skills/example/password.txt",
+        "skills/example/passwords.json",
+        "skills/example/api_key.py",
+        "skills/example/apikey.json",
+        "skills/example/access_token.txt",
+        "skills/example/accessToken.py",
     ],
 )
 def test_secret_bearing_file_formats_are_sensitive(path: str) -> None:
