@@ -261,7 +261,7 @@ def test_uncomputable_recur_is_terminal_and_gets_completed(
 
     assert result.exit_code == 0, result.output
     task = load_tasks(tasks_dir)[0]
-    assert task.metadata["state"] == "done", "uncomputable recur must not reset to todo"
+    assert task.metadata["state"] == "done", "uncomputable recur must not reset to waiting"
     assert "completed" in task.metadata
     if wait_survives:
         assert task.metadata.get("wait"), (

@@ -2479,7 +2479,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             # Re-load task to get updated metadata
             post = frontmatter.load(task.path)
             if post.metadata.get("state") == "done":
-                # Handle recur: reset task to todo and advance wait: date
+                # Handle recur: reset task to todo with advanced wait: date
                 recur = post.metadata.get("recur")
                 if recur:
                     if parse_recur_interval(str(recur)) is None:
@@ -2491,6 +2491,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     next_wait = advance_wait(current_wait, recur)
                     post.metadata["state"] = "todo"
                     post.metadata["wait"] = next_wait.isoformat()
+                    # Remove waiting-state fields that don't apply to todo state
+                    for _field in ("wait_kind", "waiting_for", "waiting_since"):
+                        post.metadata.pop(_field, None)
                     if not _completed_explicitly_set_global:
                         post.metadata.pop("completed", None)
                     with open(task.path, "w") as f:

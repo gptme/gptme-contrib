@@ -121,6 +121,31 @@ class TestRecurCliReset:
         future = date.fromisoformat(str(post.metadata["wait"]))
         assert future > date.today()
 
+    def test_recurring_task_reset_emits_valid_frontmatter(self, workspace: Path):
+        """Regression test: recur reset must strip waiting-state fields even when pre-populated."""
+        # Pre-populate waiting-state fields that a task might have accumulated before
+        # being set done (e.g., it was previously waiting on a date gate).
+        write_task(
+            workspace,
+            "weekly-review",
+            state="active",
+            recur="7d",
+            wait_kind="machine",
+            waiting_for="scheduled review time",
+            waiting_since="2026-01-01T00:00:00+00:00",
+        )
+        runner = CliRunner()
+        runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+
+        post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
+        # State must be "todo" so gptodo ready can surface it when wait expires
+        assert post.metadata["state"] == "todo"
+        assert "wait" in post.metadata
+        # waiting-state fields must be stripped on reset — the task is now todo, not waiting
+        assert "wait_kind" not in post.metadata
+        assert "waiting_for" not in post.metadata
+        assert "waiting_since" not in post.metadata
+
     def test_unknown_recur_format_marks_done_normally(self, workspace: Path):
         write_task(workspace, "mystery-task", state="active", recur="every-week")
         runner = CliRunner()
