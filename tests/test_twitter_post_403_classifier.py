@@ -287,6 +287,34 @@ class TestClassifyTweetPostError:
         # "about:blank" is not "usage-capped" → "other", not "cap" (anti-spoofing).
         assert workflow_module._classify_tweet_post_error(err) == "other"
 
+    def test_structured_type_with_permanent_marker_is_permanent(self, workflow_module):
+        # A structured 403 whose error message contains a known-permanent content
+        # rejection marker (e.g. "cashtag") must still be quarantined, even though
+        # the `type` field is non-specific ("about:blank").
+        # This is the primary poison-tweet case: a cashtag rejection produces a
+        # tweepy Forbidden with a structured body — the structured-type path must
+        # reach the marker check, not skip to "other".
+        try:
+            from tweepy.errors import Forbidden
+        except Exception:  # pragma: no cover
+            pytest.skip("tweepy not installed")
+
+        class _FakeCashtagResponse:
+            status_code = 403
+            status = "Forbidden"
+            reason = "Forbidden"
+
+            def json(self) -> dict[str, object]:
+                return {
+                    "type": "about:blank",
+                    "title": "Forbidden",
+                    "status": 403,
+                    "detail": "Your post was rejected: you may have entered a dollar amount or a cashtag.",
+                }
+
+        err = Forbidden(_FakeCashtagResponse())
+        assert workflow_module._classify_tweet_post_error(err) == "permanent"
+
     def test_http_403_prefix_classified_other(self, workflow_module):
         # An unstructured "HTTP 403: ..." with no known-permanent markers is
         # classified "other" (may be a transient restriction — P2 fix).
@@ -299,6 +327,27 @@ class TestClassifyTweetPostError:
 
     def test_rate_limit_429_is_other(self, workflow_module):
         err = Exception("429 Too Many Requests")
+        assert workflow_module._classify_tweet_post_error(err) == "other"
+
+    def test_non_string_api_type_does_not_raise(self, workflow_module):
+        # Guard against an integer (or other non-string) `type` field in the X API
+        # response body. Without str() coercion, `.lower()` raises AttributeError,
+        # crashing the posting loop. Any non-string type is treated as "other".
+        try:
+            from tweepy.errors import Forbidden
+        except Exception:  # pragma: no cover
+            pytest.skip("tweepy not installed")
+
+        class _FakeIntTypeResponse:
+            status_code = 403
+            status = "Forbidden"
+            reason = "Forbidden"
+
+            def json(self) -> dict[str, object]:
+                return {"type": 403, "title": "Forbidden", "status": 403}
+
+        err = Forbidden(_FakeIntTypeResponse())
+        # Must not raise AttributeError; 403-as-type is not a cap marker
         assert workflow_module._classify_tweet_post_error(err) == "other"
 
 

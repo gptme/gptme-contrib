@@ -805,7 +805,10 @@ def _get_twitter_api_error_type(error: Exception) -> str | None:
     try:
         body = get_json()
         if isinstance(body, dict):
-            return body.get("type") or body.get("title") or ""
+            # Coerce to str: the X API spec says `type` is a string, but guard
+            # against a non-string (e.g. integer status code) that would cause
+            # AttributeError on the downstream `.lower()` call.
+            return str(body.get("type") or body.get("title") or "")
     except Exception:
         pass
     return None
@@ -849,11 +852,19 @@ def _classify_tweet_post_error(error: Exception) -> str:
             or "usagecapped" in api_error_type.lower()
         ):
             return "cap"
-        # Non-cap structured type: the X API uses non-specific types (including
-        # "about:blank") for many conditions — some of which are transient (e.g.
-        # temporary account restrictions, permission changes). We cannot reliably
-        # classify an unknown type as "permanent", so return "other" and leave the
-        # tweet queued rather than silently quarantining it.
+        # Structured type confirms 403 but is not a billing cap. The type field
+        # short-circuits before cap-marker substring matching, so a tweet whose
+        # content contains "spend cap" cannot impersonate a billing cap. Now check
+        # permanent content-rejection markers in the API error message. The X API
+        # does not embed user tweet text in 403 error bodies, so these markers are
+        # API-controlled and safe to match against.
+        if any(marker in message for marker in _PERMANENT_403_MARKERS):
+            return "permanent"
+        if any(marker in message for marker in _PERMANENT_REPLY_FAILURE_MARKERS):
+            return "permanent"
+        # Unknown structured type with no permanent markers — may be transient
+        # (e.g. temporary account restriction). Leave the tweet queued rather than
+        # silently quarantining it on an unrecognized error type.
         return "other"
 
     # No structured response body. Fall back to substring matching.
@@ -864,14 +875,12 @@ def _classify_tweet_post_error(error: Exception) -> str:
     if any(marker in message for marker in _CAP_403_MARKERS):
         return "cap"
 
-    # P2 fix: only quarantine on known-permanent rejection patterns. Unknown 403s
+    # Only quarantine on known-permanent rejection patterns. Unknown 403s
     # (e.g. transient account restrictions, temporary permission changes) return
     # "other" so the tweet stays queued for retry rather than being silently dropped.
     if any(marker in message for marker in _PERMANENT_403_MARKERS):
         return "permanent"
 
-    # Reply-specific permanent failures (e.g. "Reply to this conversation is not
-    # allowed because you have not been mentioned") are also non-retryable.
     if any(marker in message for marker in _PERMANENT_REPLY_FAILURE_MARKERS):
         return "permanent"
 
