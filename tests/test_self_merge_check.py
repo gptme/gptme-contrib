@@ -882,6 +882,62 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
 @pytest.mark.parametrize(
     "path",
     [
+        "skills/example/.env",
+        "skills/example/.env.local",
+        "skills/example/prod.env",
+        "skills/example/config.env",
+        "skills/example/prod.env.local",
+        "skills/example/config.env.production",
+        "skills/example/certificate.PEM",
+        "skills/example/private.key",
+        "skills/example/identity.p12",
+        "skills/example/identity.pfx",
+        "skills/example/.ssh/id_rsa",
+        "skills/example/.SSH/authorized_keys",
+        "skills/example/id_ed25519",
+        "skills/example/password.txt",
+        "skills/example/passwords.json",
+        "skills/example/api_key.py",
+        "skills/example/apikey.json",
+        "skills/example/access_token.txt",
+        "skills/example/accessToken.py",
+        # Dotfiles with sensitive keywords — stem must not become empty (P0 fix)
+        "skills/example/.secret",
+        "skills/example/.token",
+        "skills/example/.password",
+        "skills/example/.credentials",
+        # Private-key filenames with backup/rotation suffixes (P1 fix)
+        "skills/example/id_rsa.old",
+        "skills/example/id_rsa.bak",
+        "skills/example/id_ed25519.old",
+        "skills/example/id_ecdsa.bak",
+    ],
+)
+def test_secret_bearing_file_formats_are_sensitive(path: str) -> None:
+    assert self_merge_check.is_sensitive_path(path)
+    assert not self_merge_check.is_allowed_file(path)
+    category, reasons = self_merge_check.classify_category([path])
+    assert category is None
+    assert any("sensitive" in reason.lower() for reason in reasons)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "packages/example/env.py",
+        "skills/example/env.json",
+    ],
+)
+def test_env_named_modules_are_not_sensitive(path: str) -> None:
+    assert not self_merge_check.is_sensitive_path(path)
+    assert self_merge_check.is_allowed_file(path)
+    category, reasons = self_merge_check.classify_category([path])
+    assert category is not None, reasons
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "scripts/session-bandit.py",
         "scripts/session-bandit-v2.py",
         "scripts/session_bandit.py",
@@ -1448,6 +1504,111 @@ def test_is_allowed_file_allowlist_does_not_bypass_bot_config() -> None:
     assert not self_merge_check.is_allowed_file(
         ".github/workflows/ci.yml", repo="gptme/gptme", repo_path_allowlist=allowlist
     )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Instruction prose — the same behaviour-rewriting class as lessons/.
+        "skills/financial-advisor/SKILL.md",
+        "skills/agent-onboarding/framework-reference.md",
+        # Bundled executable helpers: a skill is "lesson + bundled scripts", and
+        # splitting the two leaves every skill PR half-mergeable.
+        "skills/financial-advisor/calibration.py",
+        "skills/code-review-helper/review_helpers.py",
+        # Nested helper dirs do NOT start with "scripts/", so is_internal_tooling
+        # never covered them.
+        "skills/home-assistant/scripts/ha.py",
+        "skills/rewrite-soul/agents/openai.yaml",
+    ],
+)
+def test_is_skill_file_recognized(path: str) -> None:
+    assert self_merge_check.is_skill_file(path)
+    assert self_merge_check.is_allowed_file(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Must be anchored at the repo root, not matched as a substring.
+        "packages/skills/foo.py",
+        "src/skills_registry/loader.py",
+        "skillset/foo.py",
+        "scripts/skills.py",
+    ],
+)
+def test_is_skill_file_not_recognized(path: str) -> None:
+    assert not self_merge_check.is_skill_file(path)
+
+
+def test_is_internal_tooling_does_not_cover_skill_paths() -> None:
+    """Documents WHY is_skill_file is needed: is_internal_tooling is prefix-anchored."""
+    assert not self_merge_check.is_internal_tooling(
+        "skills/financial-advisor/calibration.py"
+    )
+    assert not self_merge_check.is_internal_tooling(
+        "skills/home-assistant/scripts/ha.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # The sensitive-path keyword scan runs before the category predicates and
+        # still wins — same guard that carries packages/** today.
+        "skills/x/deploy_secrets.py",
+        "skills/x/auth_token.py",
+        "skills/x/credentials.py",
+        "skills/deployer/helper.py",
+        "skills/x/ssh_config.py",
+        "skills/x/k8s_apply.py",
+        # Bot/CI config shapes must never ride in under a wholesale-allowed
+        # directory, regardless of depth, separator, or case.
+        "skills/x/.github/workflows/ci.yml",
+        "skills/x/.Github/dependabot.yml",
+        "packages/foo/.github/workflows/ci.yml",
+        "scripts/.GITHUB/dependabot.yml",
+    ],
+)
+def test_allowed_paths_do_not_bypass_hard_rejects(path: str) -> None:
+    assert not self_merge_check.is_allowed_file(path)
+    category, reasons = self_merge_check.classify_category([path])
+    assert category is None, f"{path} should not be self-mergeable (got {category})"
+    assert reasons
+
+
+def test_skill_allowlist_does_not_bypass_sensitive_paths_in_classify() -> None:
+    """A mixed skill PR is disqualified as a whole by one sensitive file."""
+    category, reasons = self_merge_check.classify_category(
+        [
+            "skills/financial-advisor/SKILL.md",
+            "skills/financial-advisor/deploy_keys.py",
+        ]
+    )
+    assert category is None, reasons
+    assert any("sensitive" in reason.lower() for reason in reasons)
+
+
+def test_classify_category_skills_only() -> None:
+    """PR #1417's exact file set becomes eligible as a skill PR."""
+    category, reasons = self_merge_check.classify_category(
+        [
+            "skills/financial-advisor/SKILL.md",
+            "skills/financial-advisor/calibration.py",
+            "skills/financial-advisor/tests/test_calibration.py",
+        ]
+    )
+    assert category is not None, reasons
+    assert "skill" in category
+
+
+def test_classify_category_skills_mixed_with_allowed() -> None:
+    category, reasons = self_merge_check.classify_category(
+        ["skills/foo/SKILL.md", "skills/foo/helper.py", "tasks/my-task.md"]
+    )
+    assert category is not None, reasons
+    assert "skills" in category
+    assert "task-metadata" in category
 
 
 @pytest.mark.parametrize(
