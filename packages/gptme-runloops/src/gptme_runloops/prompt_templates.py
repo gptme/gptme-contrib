@@ -426,9 +426,9 @@ _AI_REVIEW_NEEDS_FIX_SECTIONS: dict[str, str] = {
         "gh pr view {number} --repo {repo}\n"
         "gh pr view {number} --repo {repo} --comments\n"
         "\n"
-        "# Get our AI reviewer's inline findings (marked <!-- bob-ai-review -->)\n"
+        "# Get our AI reviewer's inline findings (marked <!-- bob-ai-review-finding -->)\n"
         "gh api repos/{repo}/pulls/{number}/comments \\\n"
-        '  --jq \'.[] | select(.body | test("<!-- bob-ai-review -->"; "i"))'
+        '  --jq \'.[] | select(.body | test("<!-- bob-ai-review-finding -->"; "i"))'
         ' | {id, path, line, body: (.body | split("\\n")[0:5] | join(" "))}\''
     ),
     "assessment": (
@@ -451,7 +451,7 @@ _AI_REVIEW_NEEDS_IMPROVEMENT_SECTIONS: dict[str, str] = {
         "# Read the PR and our AI reviewer's findings\n"
         "gh pr view {number} --repo {repo}\n"
         "gh api repos/{repo}/pulls/{number}/comments \\\n"
-        '  --jq \'.[] | select(.body | test("<!-- bob-ai-review -->"; "i"))'
+        '  --jq \'.[] | select(.body | test("<!-- bob-ai-review-finding -->"; "i"))'
         ' | {id, path, line, body: (.body | split("\\n")[0:3] | join(" "))}\''
     ),
     "assessment": (

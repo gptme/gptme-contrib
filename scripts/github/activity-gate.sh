@@ -1228,11 +1228,15 @@ check_greptile_scores() {
         # asking for work: reporting "Greptile score: 5/5" on an item routed to
         # the fix arm by OUR findings reads as a contradiction.
         local detail="Greptile score: ${greptile_score}/5"
+        local item_source="greptile"
         if [ "$ai_verdict" = "dirty" ]; then
             detail="${detail} · our AI review has open findings"
+            # When Greptile is satisfied (score >= 5) but our reviewer is not,
+            # the dispatch source is our reviewer, not Greptile.
+            [ "$greptile_score" -ge 5 ] 2>/dev/null && item_source="ai-review"
         fi
         echo "${greptile_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
-        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "$detail" "greptile" "$item_severity"
+        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "$detail" "$item_source" "$item_severity"
     done
 }
 

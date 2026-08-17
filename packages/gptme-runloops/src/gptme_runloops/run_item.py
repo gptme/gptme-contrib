@@ -256,6 +256,7 @@ class RunItem:
             repo=self.repo,
             number=self.number if self.number is not None else "",
             types=self.types,
+            source=str(self.raw.get("source", "") or ""),
         )
 
 

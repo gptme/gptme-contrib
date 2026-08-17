@@ -4,7 +4,7 @@
 # Read the PR and our AI reviewer's findings
 gh pr view 7 --repo ErikBjare/alice
 gh api repos/ErikBjare/alice/pulls/7/comments \
-  --jq '.[] | select(.body | test("<!-- bob-ai-review -->"; "i")) | {id, path, line, body: (.body | split("\n")[0:3] | join(" "))}'
+  --jq '.[] | select(.body | test("<!-- bob-ai-review-finding -->"; "i")) | {id, path, line, body: (.body | split("\n")[0:3] | join(" "))}'
 ```
 
 This PR scored 4/5 from our AI reviewer — minor issues. Address them if quick; leave it untouched if trivial.

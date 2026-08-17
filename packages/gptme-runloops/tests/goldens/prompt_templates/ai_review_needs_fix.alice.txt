@@ -5,9 +5,9 @@
 gh pr view 7 --repo ErikBjare/alice
 gh pr view 7 --repo ErikBjare/alice --comments
 
-# Get our AI reviewer's inline findings (marked <!-- bob-ai-review -->)
+# Get our AI reviewer's inline findings (marked <!-- bob-ai-review-finding -->)
 gh api repos/ErikBjare/alice/pulls/7/comments \
-  --jq '.[] | select(.body | test("<!-- bob-ai-review -->"; "i")) | {id, path, line, body: (.body | split("\n")[0:5] | join(" "))}'
+  --jq '.[] | select(.body | test("<!-- bob-ai-review-finding -->"; "i")) | {id, path, line, body: (.body | split("\n")[0:5] | join(" "))}'
 ```
 
 This PR has a low score from our AI reviewer (not Greptile).

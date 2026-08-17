@@ -195,6 +195,10 @@ def greptile_convergence_applicable(item: WorkItem, *, helper_available: bool) -
     """
     if not helper_available or not item.types:
         return False
+    # ai-review items must not enter Greptile backoff logic — the convergence
+    # path consults greptile-helper which is irrelevant for that source.
+    if item.source == "ai-review":
+        return False
     return all(
         t in {"greptile_needs_improvement", "reviewer_needs_improvement"}
         for t in item.types
@@ -271,6 +275,7 @@ class WorkItem:
     repo: str
     number: int | str
     types: tuple[str, ...] = ()
+    source: str = ""  # e.g. "greptile" or "ai-review"; empty = legacy/unknown
 
 
 @dataclass(frozen=True)

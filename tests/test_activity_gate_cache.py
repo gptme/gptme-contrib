@@ -269,7 +269,7 @@ def test_dirty_ai_verdict_keeps_real_greptile_score_and_is_cached() -> None:
         )
         assert result.returncode == 0, result.stderr
         assert call_count == 1, "Only the uncached AI verdict should be fetched"
-        assert "REVIEW FIX (greptile) #42" in result.stdout
+        assert "REVIEW FIX (ai-review) #42" in result.stdout
         assert "Greptile score: 5/5 · our AI review has open findings" in result.stdout
 
         score, _, sha, verdict = _state_file(state_dir).read_text().split(":")
@@ -281,4 +281,4 @@ def test_dirty_ai_verdict_keeps_real_greptile_score_and_is_cached() -> None:
         )
         assert result.returncode in (0, 1), result.stderr
         assert call_count == 1, "Second sweep must not add another comments fetch"
-        assert "REVIEW FIX (greptile) #42" not in result.stdout
+        assert "REVIEW FIX (ai-review) #42" not in result.stdout
