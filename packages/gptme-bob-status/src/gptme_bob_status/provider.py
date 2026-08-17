@@ -131,7 +131,12 @@ def _service_status() -> list[dict]:
     ]
     results: list[dict] = []
     for label, unit in services:
-        status = _run(["systemctl", "--user", "is-active", unit])
+        status = subprocess.run(
+            ["systemctl", "--user", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
         icon = "✓" if status == "active" else ("⚠" if status == "activating" else "✗")
         results.append({"label": label, "icon": icon, "status": status})
     return results
@@ -284,7 +289,7 @@ class BobStatusProvider:
                 wf = str(t.get("waiting_for", "")).split("\n")[0][:70]
                 since = t.get("waiting_since", "")
                 since_str = f" (since {since})" if since else ""
-                lines.append(f"- `{t['id']}`: {wf}{since_str}")
+                lines.append(f"- `{t.get('id', '?')}`: {wf}{since_str}")
         else:
             lines.append("- No active blockers with waiting_for set")
         sections.append("\n".join(lines))
@@ -295,7 +300,7 @@ class BobStatusProvider:
         if ready:
             for i, t in enumerate(ready, 1):
                 title = str(t.get("name", t.get("id", "")))[:65]
-                lines.append(f"{i}. `{t['id']}` — {title}")
+                lines.append(f"{i}. `{t.get('id', '?')}` — {title}")
         else:
             lines.append("- No ready backlog tasks found")
         sections.append("\n".join(lines))
