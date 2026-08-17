@@ -19,10 +19,14 @@ Exit codes (``check`` subcommand):
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
 import sys
+import tempfile
+from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -65,7 +69,8 @@ class NoopStreakDetector:
         detector = NoopStreakDetector(state_path=Path("state/pm-noop-streak.json"))
 
         # At start of dispatch cycle:
-        if detector.should_skip():
+        skip, _ = detector.should_skip()
+        if skip:
             sys.exit("back-off active")
 
         # At end of dispatch cycle:
@@ -82,15 +87,10 @@ class NoopStreakDetector:
         backoff_minutes: int | None = None,
     ) -> None:
         if state_path is None:
-            # Resolve relative to repo root (grandparent of src/gptme_runloops/).
-            pkg_dir = Path(__file__).resolve().parent
-            repo_root = pkg_dir
-            # Walk up until we find a .git directory or fallback to 4 levels up.
-            for _ in range(8):
-                if (repo_root / ".git").exists():
-                    break
-                repo_root = repo_root.parent
-            state_path = repo_root / DEFAULT_STATE_FILENAME
+            # Use the caller's working directory — running from the workspace root
+            # is the expected usage, and walking up from __file__ breaks in pip installs
+            # (site-packages has no .git, so the walk reaches / and writes there).
+            state_path = Path.cwd() / DEFAULT_STATE_FILENAME
         self.state_path = state_path
 
         if backoff_n is None:
@@ -109,6 +109,25 @@ class NoopStreakDetector:
 
     # --- State I/O ---
 
+    @contextlib.contextmanager
+    def _file_lock(self) -> Generator[None, None, None]:
+        """Exclusive file lock around a read-modify-write cycle.
+
+        Uses a separate .lock sidecar file so the lock fd is always openable
+        even before the state file exists.
+        """
+        lock_path = self.state_path.with_suffix(".lock")
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        with open(lock_path, "a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
     def _load(self) -> dict[str, object]:
         try:
             raw = json.loads(self.state_path.read_text())
@@ -117,9 +136,19 @@ class NoopStreakDetector:
             return {}
 
     def _save(self, state: dict[str, object]) -> None:
+        """Atomic write via temp file + os.replace to avoid partial writes."""
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+            data = json.dumps(state, indent=2, ensure_ascii=False)
+            with tempfile.NamedTemporaryFile(
+                "w",
+                dir=self.state_path.parent,
+                delete=False,
+                suffix=".tmp",
+            ) as tf:
+                tf.write(data)
+                tmp_path = tf.name
+            os.replace(tmp_path, self.state_path)
         except OSError as exc:
             logger.warning("Failed to save noop streak state: %s", exc)
 
@@ -165,32 +194,33 @@ class NoopStreakDetector:
         Increments streak_count.  When streak_count >= backoff_n, sets
         backoff_until = now + backoff_minutes.
         """
-        state = self._load()
-        _sc = state.get("streak_count")
-        streak = (int(_sc) if isinstance(_sc, int | float) else 0) + 1
-        now = _now()
-        state["streak_count"] = streak
-        state["last_noop_ts"] = now.isoformat()
+        with self._file_lock():
+            state = self._load()
+            _sc = state.get("streak_count")
+            streak = (int(_sc) if isinstance(_sc, int | float) else 0) + 1
+            now = _now()
+            state["streak_count"] = streak
+            state["last_noop_ts"] = now.isoformat()
 
-        if streak >= self.backoff_n:
-            backoff_until = now + timedelta(minutes=self.backoff_minutes)
-            state["backoff_until"] = backoff_until.isoformat()
-            logger.info(
-                "PM NOOP streak=%d/%d — back-off until %s",
-                streak,
-                self.backoff_n,
-                backoff_until.isoformat(),
-            )
-        else:
-            # Don't reset an active back-off window on a sub-threshold NOOP.
-            # (The window was set on a prior streak; let it expire naturally.)
-            logger.info(
-                "PM NOOP streak=%d/%d — below threshold, no back-off yet",
-                streak,
-                self.backoff_n,
-            )
+            if streak >= self.backoff_n:
+                backoff_until = now + timedelta(minutes=self.backoff_minutes)
+                state["backoff_until"] = backoff_until.isoformat()
+                logger.info(
+                    "PM NOOP streak=%d/%d — back-off until %s",
+                    streak,
+                    self.backoff_n,
+                    backoff_until.isoformat(),
+                )
+            else:
+                # Don't reset an active back-off window on a sub-threshold NOOP.
+                # (The window was set on a prior streak; let it expire naturally.)
+                logger.info(
+                    "PM NOOP streak=%d/%d — below threshold, no back-off yet",
+                    streak,
+                    self.backoff_n,
+                )
 
-        self._save(state)
+            self._save(state)
         return state
 
     def record_success(self) -> dict[str, object]:
@@ -198,13 +228,14 @@ class NoopStreakDetector:
 
         Resets streak_count to 0 and clears any active backoff_until.
         """
-        state = self._load()
-        old_streak = state.get("streak_count", 0)
-        state["streak_count"] = 0
-        state.pop("backoff_until", None)
-        state["last_success_ts"] = _now().isoformat()
-        logger.info("PM dispatch success — streak reset from %d to 0", old_streak)
-        self._save(state)
+        with self._file_lock():
+            state = self._load()
+            old_streak = state.get("streak_count", 0)
+            state["streak_count"] = 0
+            state.pop("backoff_until", None)
+            state["last_success_ts"] = _now().isoformat()
+            logger.info("PM dispatch success — streak reset from %d to 0", old_streak)
+            self._save(state)
         return state
 
     def status(self) -> dict[str, object]:
