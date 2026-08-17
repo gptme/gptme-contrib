@@ -138,12 +138,28 @@ def _service_status() -> list[dict]:
 
 
 def _dead_timers() -> int:
-    out = _run(["systemctl", "--user", "list-timers", "--all"])
-    return sum(
-        1
-        for line in out.splitlines()
-        if "dead" in line.lower() and "bob-" in line.lower()
+    # list-timers shows schedule columns only (NEXT/LEFT/LAST/PASSED/UNIT/ACTIVATES);
+    # "dead" never appears there. list-units shows LOAD/ACTIVE state.
+    out = _run(
+        [
+            "systemctl",
+            "--user",
+            "list-units",
+            "--type=timer",
+            "--all",
+            "--no-pager",
+            "--no-legend",
+        ]
     )
+    count = 0
+    for line in out.splitlines():
+        if "bob-" not in line:
+            continue
+        # Columns: UNIT  LOAD  ACTIVE  SUB  DESCRIPTION
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "loaded" and parts[2] == "inactive":
+            count += 1
+    return count
 
 
 def _blockers(limit: int = 3) -> list[dict]:
