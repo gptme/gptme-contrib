@@ -149,7 +149,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --state-dir Directory for state tracking files (default: /tmp/github-activity-gate-state)"
             echo "  --format    Output format: 'markdown' (default) or 'jsonl' (one JSON object per item)"
             echo ""
-            echo "JSONL format: {\"type\":\"pr_update|ci_failure|merge_ready|greptile_needs_fix|greptile_needs_improvement|assigned_issue|notification\","
+            echo "JSONL format: {\"type\":\"pr_update|ci_failure|merge_ready|reviewer_needs_fix|reviewer_needs_improvement|assigned_issue|notification\","
+            echo "               \"source\":\"greptile|ai-review|human\" (reviewer_needs_* only), \"severity\":\"major|minor\" (reviewer_needs_* only),"
             echo "               \"repo\":\"owner/repo\", \"number\":123, \"title\":\"...\", \"detail\":\"...\"}"
             exit 0
             ;;
@@ -190,23 +191,25 @@ portable_hash() {
 # Emit a work item in the configured format.
 # Args: type repo number title detail
 emit_item() {
-    local type=$1 repo=$2 number=$3 title=$4 detail=${5:-}
+    local type=$1 repo=$2 number=$3 title=$4 detail=${5:-} source=${6:-} severity=${7:-}
     if [ "$FORMAT" = "jsonl" ]; then
-        jq -cn --arg t "$type" --arg r "$repo" --argjson n "$number" --arg title "$title" --arg d "$detail" \
-            '{type: $t, repo: $r, number: $n, title: $title, detail: $d}'
+        jq -cn --arg t "$type" --arg r "$repo" --argjson n "$number" --arg title "$title" \
+            --arg d "$detail" --arg src "$source" --arg sev "$severity" \
+            'if $src != "" then {type: $t, source: $src, severity: $sev, repo: $r, number: $n, title: $title, detail: $d}
+             else {type: $t, repo: $r, number: $n, title: $title, detail: $d} end'
     else
         local label
         case "$type" in
-            pr_update)         label="PR" ;;
-            ci_failure)        label="CI FAIL" ;;
-            assigned_issue)    label="Issue" ;;
-            notification)      label="Notification" ;;
-            master_ci_failure) label="MASTER CI" ;;
-            merge_conflict)        label="CONFLICT" ;;
-            greptile_needs_fix)    label="GREPTILE FIX" ;;
-            greptile_needs_improvement) label="GREPTILE" ;;
-            merge_ready)               label="MERGE READY" ;;
-            *)                     label="$type" ;;
+            pr_update)              label="PR" ;;
+            ci_failure)             label="CI FAIL" ;;
+            assigned_issue)         label="Issue" ;;
+            notification)           label="Notification" ;;
+            master_ci_failure)      label="MASTER CI" ;;
+            merge_conflict)         label="CONFLICT" ;;
+            reviewer_needs_fix)     label="REVIEW FIX${source:+ ($source)}" ;;
+            reviewer_needs_improvement) label="REVIEW${source:+ ($source)}" ;;
+            merge_ready)            label="MERGE READY" ;;
+            *)                      label="$type" ;;
         esac
         echo "$repo — $label #$number: $title ($detail)"
     fi
@@ -938,8 +941,9 @@ check_merge_conflicts() {
 #   HEAD unchanged (covers manual @greptileai triggers via greptile-helper.sh).
 #
 # Emits:
-#   greptile_needs_fix       — score < 4 (significant findings to address)
-#   greptile_needs_improvement — score = 4 (minor fixes needed)
+#   reviewer_needs_fix       — score < 4 (significant findings to address)
+#   reviewer_needs_improvement — score = 4 (minor fixes needed)
+# Both carry source (greptile|ai-review) and severity (major|minor) fields.
 # Does our own AI reviewer still want changes on this PR?
 #
 # Why this exists: check_greptile_scores() reads Greptile's score and nothing
@@ -1131,7 +1135,7 @@ check_greptile_scores() {
                 # Always route dirty AI verdict to greptile_needs_fix, matching the
                 # non-dark path (which sets route_score=3 on dirty → always fix).
                 # dark_score does not change the severity when our AI says fix it.
-                emit_item "greptile_needs_fix" "$repo" "$pr_number" "$pr_title" "$detail"
+                emit_item "reviewer_needs_fix" "$repo" "$pr_number" "$pr_title" "$detail" "ai-review" "major"
             else
                 # clean / pending / none — seed/update state, don't emit.
                 echo ":${fetched_at}:${head_sha}:${ai_verdict}:${dark_score}" > "$state_file"
@@ -1188,11 +1192,13 @@ check_greptile_scores() {
         fi
 
         # Score >= 4 is minor, < 4 needs fix
-        local item_type
+        local item_type item_severity
         if [ "$route_score" -lt 4 ]; then
-            item_type="greptile_needs_fix"
+            item_type="reviewer_needs_fix"
+            item_severity="major"
         else
-            item_type="greptile_needs_improvement"
+            item_type="reviewer_needs_improvement"
+            item_severity="minor"
         fi
 
         if [ -n "$last_state" ]; then
@@ -1224,7 +1230,7 @@ check_greptile_scores() {
             detail="${detail} · our AI review has open findings"
         fi
         echo "${greptile_score}:${fetched_at}:${head_sha}:${ai_verdict}" > "$state_file"
-        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "$detail"
+        emit_item "$item_type" "$repo" "$pr_number" "$pr_title" "$detail" "greptile" "$item_severity"
     done
 }
 
@@ -1321,11 +1327,13 @@ check_own_pr_review_state() {
         fi
 
         # Determine item type from Greptile score
-        local item_type
+        local item_type item_severity
         if [ "$greptile_score" -lt 4 ] 2>/dev/null; then
-            item_type="greptile_needs_fix"
+            item_type="reviewer_needs_fix"
+            item_severity="major"
         else
-            item_type="greptile_needs_improvement"
+            item_type="reviewer_needs_improvement"
+            item_severity="minor"
         fi
 
         # Emit once per (head_sha, greptile_score, merge_state) signature.
@@ -1345,7 +1353,8 @@ check_own_pr_review_state() {
         # New or changed signature — record and emit
         echo "${signature}:${now}" > "$state_file"
         emit_item "$item_type" "$repo" "$pr_number" "$pr_title" \
-            "own-PR review: Greptile ${greptile_score}/5 (merge_state: ${merge_state})"
+            "own-PR review: Greptile ${greptile_score}/5 (merge_state: ${merge_state})" \
+            "greptile" "$item_severity"
     done
 }
 
@@ -1482,9 +1491,10 @@ check_fix_requests() {
             continue
         fi
 
-        emit_item "greptile_needs_fix" "$repo" "$pr_number" \
+        emit_item "reviewer_needs_fix" "$repo" "$pr_number" \
             "${pr_title} [maintainer fix request]" \
-            "fix_request · maintainer asked us to act on outstanding review findings (comment ${comment_id})"
+            "fix_request · maintainer asked us to act on outstanding review findings (comment ${comment_id})" \
+            "greptile" "major"
     done
 }
 

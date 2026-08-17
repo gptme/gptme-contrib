@@ -492,6 +492,12 @@ _VARIANTS: dict[InstructionKind, tuple[str, Mapping[str, str]]] = {
         _INVESTIGATE_SKELETON,
         _NEEDS_IMPROVEMENT_SECTIONS,
     ),
+    # source-agnostic renames — same templates as their greptile counterparts
+    InstructionKind.REVIEWER_NEEDS_FIX: (_INVESTIGATE_SKELETON, _NEEDS_FIX_SECTIONS),
+    InstructionKind.REVIEWER_NEEDS_IMPROVEMENT: (
+        _INVESTIGATE_SKELETON,
+        _NEEDS_IMPROVEMENT_SECTIONS,
+    ),
 }
 
 
@@ -554,6 +560,9 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
 _GREPTILE_INVESTIGATE_KINDS: dict[str, InstructionKind] = {
     "greptile_needs_fix": InstructionKind.GREPTILE_NEEDS_FIX,
     "greptile_needs_improvement": InstructionKind.GREPTILE_NEEDS_IMPROVEMENT,
+    # source-agnostic renames (backward-compat: old names stay above)
+    "reviewer_needs_fix": InstructionKind.REVIEWER_NEEDS_FIX,
+    "reviewer_needs_improvement": InstructionKind.REVIEWER_NEEDS_IMPROVEMENT,
 }
 
 

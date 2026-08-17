@@ -179,6 +179,9 @@ class TestClassifyLane:
             "greptile_needs_fix",
             "greptile_needs_improvement",
             "greptile_convergence_adjudication",
+            # source-agnostic renames (backward-compat: old names stay above)
+            "reviewer_needs_fix",
+            "reviewer_needs_improvement",
         }
         assert SLOW_LANE_TYPES == expected
 
