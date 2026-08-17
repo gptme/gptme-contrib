@@ -20,9 +20,31 @@ import logging
 import re
 import subprocess
 from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
-from gptme.status_provider import StatusProvider
-from gptme.util.git_cmd import GIT_CMD
+try:
+    from gptme.status_provider import StatusProvider
+except ImportError:
+    # Fallback: define StatusProvider as a Protocol if not available in gptme
+    @runtime_checkable
+    class StatusProvider(Protocol):
+        """Protocol for status providers."""
+
+        name: str
+
+        def collect(self) -> dict[str, Any]:
+            """Collect status data."""
+            ...
+
+        def narrative_sections(self) -> list[str]:
+            """Generate narrative status sections."""
+            ...
+
+
+try:
+    from gptme.util.git_cmd import GIT_CMD
+except ImportError:
+    GIT_CMD = "git"
 
 logger = logging.getLogger(__name__)
 

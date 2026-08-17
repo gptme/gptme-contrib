@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from gptme.status_provider import StatusProvider
-from gptme_bob_status.provider import BobStatusProvider, make_provider
+from gptme_bob_status.provider import BobStatusProvider, StatusProvider, make_provider
 
 
 def test_provider_satisfies_protocol():
