@@ -189,6 +189,9 @@ def test_record_noop_in_read_only_dir_does_not_crash(
     import logging
     import os
 
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("cannot simulate read-only dir when running as root")
+
     state_file = tmp_path / "pm-noop-streak.json"
     d = NoopStreakDetector(state_path=state_file, backoff_n=2, backoff_minutes=30)
     os.chmod(tmp_path, 0o555)

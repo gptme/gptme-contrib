@@ -234,7 +234,15 @@ class NoopStreakDetector:
                         "PM NOOP: expired back-off window detected — resetting streak"
                     )
             _sc = state.get("streak_count")
-            streak = (int(_sc) if isinstance(_sc, int | float) else 0) + 1
+            if isinstance(_sc, int | float):
+                streak = int(_sc) + 1
+            elif isinstance(_sc, str):
+                try:
+                    streak = int(_sc) + 1
+                except ValueError:
+                    streak = 1
+            else:
+                streak = 1
 
             state["streak_count"] = streak
             state["last_noop_ts"] = now.isoformat()
