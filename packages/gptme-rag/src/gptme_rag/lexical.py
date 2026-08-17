@@ -18,6 +18,7 @@ without scikit-learn installed raises :class:`LexicalDependencyMissing`.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import pickle
@@ -28,6 +29,54 @@ from pathlib import Path
 from .indexing.document import Document
 
 logger = logging.getLogger(__name__)
+
+# Modules whose classes are permitted during index deserialization.
+# Limiting to these prevents arbitrary code execution from a crafted pickle.
+_SAFE_MODULES = frozenset(
+    {
+        "builtins",
+        "collections",
+        "datetime",
+        "pathlib",
+        "pathlib._local",  # Python 3.13+ internal module for PosixPath/WindowsPath
+        "gptme_rag",
+        "gptme_rag.indexing.document",
+        # sklearn and its internal modules (needed for TfidfVectorizer)
+        "sklearn",
+        "sklearn.feature_extraction",
+        "sklearn.feature_extraction.text",
+        "sklearn.feature_extraction._stop_words",
+        "sklearn.pipeline",
+        "sklearn.utils",
+        "sklearn.utils._bunch",
+        "sklearn.utils._tags",
+        "sklearn.utils.validation",
+        # scipy sparse matrices (persisted inside TfidfVectorizer state)
+        "scipy",
+        "scipy.sparse",
+        "scipy.sparse._csr",
+        "scipy.sparse._csc",
+        "scipy.sparse._compressed",
+        "scipy.sparse._data_matrix",
+        "scipy.sparse._base",
+        "scipy.sparse._index",
+        # numpy arrays and dtypes
+        "numpy",
+        "numpy.core",
+        "numpy.core.multiarray",
+        "numpy.dtypes",
+    }
+)
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Unpickler that only allows classes from known-safe modules."""
+
+    def find_class(self, module: str, name: str):
+        top = module.split(".")[0]
+        if module in _SAFE_MODULES or top in {"numpy", "sklearn", "scipy", "builtins", "pathlib"}:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"Blocked class: {module}.{name}")
 
 
 class LexicalDependencyMissing(ImportError):
@@ -119,6 +168,8 @@ class TfidfIndex:
         ``exclude_paths`` is a set of source paths to skip (e.g. documents already
         in context).  Hits below ``relevance_floor`` are discarded.
         """
+        if n_results <= 0:
+            return []
         if self._vectorizer is None or self._matrix is None:
             return []
 
@@ -181,16 +232,15 @@ class TfidfIndex:
     def load(cls, path: Path) -> TfidfIndex:
         """Load a previously saved index.
 
-        .. warning::
-            The index file is deserialized with :mod:`pickle`.  Only load
-            files that were written by :meth:`save` on this machine or by a
-            trusted process.  Never load an index obtained from a network
-            location, an untrusted archive, or an unknown source — a crafted
-            pickle payload can execute arbitrary code.
+        Deserialization uses :class:`_RestrictedUnpickler`, which only
+        instantiates classes from known-safe modules (builtins, numpy, scipy,
+        sklearn, gptme_rag).  Crafted pickles containing arbitrary classes are
+        rejected with :class:`pickle.UnpicklingError`.
         """
         path = Path(path)
         with open(path, "rb") as f:
-            payload = pickle.load(f)  # nosec B301 — trusted-file; see docstring
+            data = f.read()
+        payload = _RestrictedUnpickler(io.BytesIO(data)).load()
         idx = cls(
             stop_words=payload["stop_words"],
             ngram_range=payload["ngram_range"],

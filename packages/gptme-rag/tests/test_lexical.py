@@ -76,3 +76,39 @@ def test_index_empty_documents_does_not_raise():
     idx = TfidfIndex()
     idx.index([])  # was: ValueError("empty vocabulary") from TfidfVectorizer
     assert idx.search("anything") == []
+
+
+def test_search_zero_n_results_returns_empty():
+    """search(n_results=0) must return [] not 1 hit (off-by-one in append-before-check)."""
+    idx = TfidfIndex()
+    idx.index([_doc("retry_backoff function", "a.md")])
+    assert idx.search("retry_backoff", n_results=0) == []
+    assert idx.search("retry_backoff", n_results=-1) == []
+
+
+def test_load_rejects_crafted_pickle(tmp_path: Path):
+    """_RestrictedUnpickler blocks classes outside the safe-module allowlist."""
+    import io
+    import os
+    import pickle
+
+    from gptme_rag.lexical import _RestrictedUnpickler
+
+    # os.system lives in 'posix'/'nt' module — outside the allowed set.
+    # pickle.dumps of a builtin function serialises a GLOBAL opcode referencing
+    # its module, which find_class intercepts before any code runs.
+    buf = io.BytesIO(pickle.dumps(os.system))
+    with pytest.raises(pickle.UnpicklingError, match="Blocked"):
+        _RestrictedUnpickler(buf).load()
+
+
+def test_save_and_load_with_restricted_unpickler(tmp_path: Path):
+    """save/load roundtrip works through _RestrictedUnpickler (real sklearn objects pass)."""
+    idx = TfidfIndex()
+    idx.index([_doc("retry_backoff function", "a.md"), _doc("other content", "b.md")])
+    path = tmp_path / "index2.pkl"
+    idx.save(path)
+
+    loaded = TfidfIndex.load(path)
+    hits = loaded.search("retry_backoff", n_results=1)
+    assert hits[0].document.metadata["source"] == "a.md"
