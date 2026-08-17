@@ -121,7 +121,15 @@ class NoopStreakDetector:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
-        with open(lock_path, "a") as lf:
+        try:
+            lf = open(lock_path, "a")
+        except OSError as exc:
+            logger.warning(
+                "Cannot open lock file %s: %s — proceeding without lock", lock_path, exc
+            )
+            yield
+            return
+        with lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
             try:
                 yield
