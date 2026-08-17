@@ -147,7 +147,7 @@ def test_edit_unrelated_field_does_not_inject_completed(tmp_path: Path, monkeypa
 
 
 def test_edit_state_done_recurring_does_not_set_completed(tmp_path: Path, monkeypatch) -> None:
-    """Recurring tasks transitioning to done reset to todo and must not get completed."""
+    """Recurring tasks transitioning to done reset to waiting and must not get completed."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     (tasks_dir / "my-task.md").write_text(RECURRING_TASK)
@@ -160,8 +160,8 @@ def test_edit_state_done_recurring_does_not_set_completed(tmp_path: Path, monkey
     tasks = load_tasks(tasks_dir)
     assert len(tasks) == 1
     task = tasks[0]
-    # Recurring tasks reset to todo — completed should not be stamped on reset
-    assert task.metadata["state"] == "todo", "recurring task must reset to todo"
+    # Recurring tasks reset to waiting — completed should not be stamped on reset
+    assert task.metadata["state"] == "waiting", "recurring task must reset to waiting"
     assert (
         "completed" not in task.metadata
     ), "recurring done tasks must not carry a completed stamp into the next cycle"
@@ -261,7 +261,7 @@ def test_uncomputable_recur_is_terminal_and_gets_completed(
 
     assert result.exit_code == 0, result.output
     task = load_tasks(tasks_dir)[0]
-    assert task.metadata["state"] == "done", "uncomputable recur must not reset to todo"
+    assert task.metadata["state"] == "done", "uncomputable recur must not reset to waiting"
     assert "completed" in task.metadata
     if wait_survives:
         assert task.metadata.get("wait"), (
@@ -335,7 +335,7 @@ def test_recurring_reset_preserves_explicitly_set_completed(tmp_path: Path, monk
 
     assert result.exit_code == 0, result.output
     task = load_tasks(tasks_dir)[0]
-    assert task.metadata["state"] == "todo", "7d recur must still reset to todo"
+    assert task.metadata["state"] == "waiting", "7d recur must still reset to waiting"
     assert (
         str(task.metadata.get("completed")) == "2026-05-01T00:00:00+00:00"
     ), "an explicit --set completed must not be silently deleted by the recurrence reset"
@@ -443,5 +443,5 @@ def test_recurring_reset_removes_existing_completed(tmp_path: Path, monkeypatch)
 
     assert result.exit_code == 0, result.output
     task = load_tasks(tasks_dir)[0]
-    assert task.metadata["state"] == "todo"
+    assert task.metadata["state"] == "waiting"
     assert "completed" not in task.metadata
