@@ -12,6 +12,7 @@ This is the **vector search** complement to [`gptme-wisdom`](https://github.com/
 
 - 📚 Document indexing with ChromaDB (vector storage, semantic search, persistence)
 - 🔍 Semantic search with sentence-transformers or OpenRouter API embeddings
+- 🔎 Lexical (TF-IDF) retrieval for exact-identifier queries (`gptme-rag[lexical]`)
 - 📄 Smart document processing (streaming, chunking, reconstruction)
 - 👀 File watching and auto-indexing
 - 🔌 MCP server for agent integration (`gptme-rag mcp`)
