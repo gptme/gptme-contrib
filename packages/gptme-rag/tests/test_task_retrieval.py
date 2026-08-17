@@ -153,6 +153,18 @@ class TestRankTasks:
         hits = rank_tasks(idx, "gptme task", n_results=2)
         assert len(hits) <= 2
 
+    def test_n_results_zero_returns_empty(self):
+        docs = [_task_doc("gptme task", source="tasks/a.md", title="Task A")]
+        idx = _build_index(docs)
+        hits = rank_tasks(idx, "gptme task", n_results=0)
+        assert hits == []
+
+    def test_n_results_negative_returns_empty(self):
+        docs = [_task_doc("gptme task", source="tasks/a.md", title="Task A")]
+        idx = _build_index(docs)
+        hits = rank_tasks(idx, "gptme task", n_results=-1)
+        assert hits == []
+
 
 # ---------------------------------------------------------------------------
 # apply_task_silence_rule

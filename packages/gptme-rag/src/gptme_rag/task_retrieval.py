@@ -185,10 +185,12 @@ def rank_tasks(
         exclude_paths: Set of source paths to skip (e.g. already in context).
 
     Returns:
-        Ranked list of :class:`TaskHit`.  May be longer than *n_results* if
-        ``include_closed=False`` causes many filtered results.
+        Ranked list of :class:`TaskHit`.  May be shorter than *n_results* when
+        ``include_closed=False`` filters out many candidates.
     """
     if not query.strip():
+        return []
+    if n_results <= 0:
         return []
 
     # Over-fetch so filtering (include_closed, exclude_paths) leaves enough hits.
