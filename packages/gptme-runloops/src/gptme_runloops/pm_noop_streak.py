@@ -20,7 +20,6 @@ Exit codes (``check`` subcommand):
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -29,6 +28,11 @@ import tempfile
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # Windows — locking is best-effort
+    _fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -130,11 +134,13 @@ class NoopStreakDetector:
             yield
             return
         with lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
+            if _fcntl is not None:
+                _fcntl.flock(lf, _fcntl.LOCK_EX)
             try:
                 yield
             finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+                if _fcntl is not None:
+                    _fcntl.flock(lf, _fcntl.LOCK_UN)
 
     def _load(self) -> dict[str, object]:
         try:
