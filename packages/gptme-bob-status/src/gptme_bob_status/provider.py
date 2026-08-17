@@ -71,9 +71,7 @@ def _git_root() -> Path | None:
 
 
 def _is_bob_workspace() -> bool:
-    root = _git_root()
-    if not root:
-        return False
+    root = _git_root() or Path.cwd()
     return (root / "tasks").is_dir() and (root / "gptme.toml").is_file()
 
 
@@ -95,9 +93,9 @@ def _active_tasks(lines: int = 3) -> list[dict]:
 
 
 def _pr_queue() -> list[dict]:
-    author = (
-        _run(["gh", "api", "user", "--jq", ".login"], timeout=10) or "TimeToBuildBob"
-    )
+    author = _run(["gh", "api", "user", "--jq", ".login"], timeout=10)
+    if not author:
+        return []
     rows: list[dict] = []
     for repo, cap in _TRACKED_REPOS:
         prs_json = _run(

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from gptme_bob_status.provider import BobStatusProvider, StatusProvider, make_provider
+from gptme_bob_status.provider import BobStatusProvider, make_provider
 
 
 def test_provider_satisfies_protocol():
     """BobStatusProvider satisfies the StatusProvider protocol."""
     provider = make_provider()
-    assert isinstance(provider, StatusProvider)
+    # Use structural check to avoid dependency on @runtime_checkable decoration
+    # in gptme's StatusProvider (which may vary across versions).
+    assert hasattr(provider, "collect") and hasattr(provider, "narrative_sections")
 
 
 def test_provider_name():
