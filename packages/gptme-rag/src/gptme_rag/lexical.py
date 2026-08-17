@@ -83,7 +83,7 @@ class TfidfIndex:
 
     def _make_vectorizer(self):
         try:
-            from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore[import-untyped]
+            from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore[import-not-found]
         except ImportError as exc:
             raise LexicalDependencyMissing(
                 "scikit-learn is required for lexical retrieval; "
@@ -114,7 +114,7 @@ class TfidfIndex:
             return []
 
         try:
-            from sklearn.metrics.pairwise import cosine_similarity  # type: ignore[import-untyped]
+            from sklearn.metrics.pairwise import cosine_similarity  # type: ignore[import-not-found]
         except ImportError as exc:
             raise LexicalDependencyMissing(
                 "scikit-learn is required for lexical retrieval; "
