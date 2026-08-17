@@ -208,6 +208,8 @@ emit_item() {
             merge_conflict)         label="CONFLICT" ;;
             reviewer_needs_fix)     label="REVIEW FIX${source:+ ($source)}" ;;
             reviewer_needs_improvement) label="REVIEW${source:+ ($source)}" ;;
+            greptile_needs_fix)     label="GREPTILE FIX" ;;
+            greptile_needs_improvement) label="GREPTILE" ;;
             merge_ready)            label="MERGE READY" ;;
             *)                      label="$type" ;;
         esac
