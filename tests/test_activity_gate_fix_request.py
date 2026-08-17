@@ -251,7 +251,7 @@ def test_trusted_request_emits_one_fix_item() -> None:
 
         items = _fix_items(result)
         assert len(items) == 1, f"expected one fix item, got {items}\n{result.stdout}"
-        assert items[0]["type"] == "greptile_needs_fix", items[0]
+        assert items[0]["type"] == "reviewer_needs_fix", items[0]
         assert items[0]["number"] == TEST_PR
         assert "[maintainer fix request]" in items[0]["title"], items[0]
 

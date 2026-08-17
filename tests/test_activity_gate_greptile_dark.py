@@ -183,7 +183,12 @@ def _greptile_items(result: subprocess.CompletedProcess[str]) -> list[dict]:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if obj.get("type") in ("greptile_needs_improvement", "greptile_needs_fix"):
+        if obj.get("type") in (
+            "greptile_needs_improvement",
+            "greptile_needs_fix",
+            "reviewer_needs_improvement",
+            "reviewer_needs_fix",
+        ):
             items.append(obj)
     return items
 
@@ -300,8 +305,8 @@ def test_no_greptile_score_dirty_ai_review_emits_needs_fix() -> None:
             f"expected one greptile item, got {items}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        assert items[0]["type"] == "greptile_needs_fix", (
-            f"dirty AI on Greptile-dark PR must emit greptile_needs_fix (not improvement); "
+        assert items[0]["type"] == "reviewer_needs_fix", (
+            f"dirty AI on Greptile-dark PR must emit reviewer_needs_fix (not improvement); "
             f"got: {items[0]}"
         )
         assert items[0]["number"] == TEST_PR
@@ -488,7 +493,13 @@ def test_dark_branch_preserved_score_does_not_cache_hit() -> None:
         cache_path_items = [
             i
             for i in items
-            if i.get("type") in ("greptile_needs_improvement", "greptile_needs_fix")
+            if i.get("type")
+            in (
+                "greptile_needs_improvement",
+                "greptile_needs_fix",
+                "reviewer_needs_improvement",
+                "reviewer_needs_fix",
+            )
             and "Greptile score:" in (i.get("detail") or "")
         ]
         assert cache_path_items == [], (
@@ -617,16 +628,16 @@ def test_dark_branch_sub4_dark_score_emits_needs_fix() -> None:
             f"expected one dark-branch greptile item; got {items}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        assert dark_items[0]["type"] == "greptile_needs_fix", (
-            f"dark_score=3 (<4) must route to greptile_needs_fix, "
-            f"not greptile_needs_improvement; got: {dark_items[0]}"
+        assert dark_items[0]["type"] == "reviewer_needs_fix", (
+            f"dark_score=3 (<4) must route to reviewer_needs_fix, "
+            f"not reviewer_needs_improvement; got: {dark_items[0]}"
         )
         # Verify no item wrongly uses the improvement lane for a sub-4 score.
         improvement_items = [
-            i for i in items if i.get("type") == "greptile_needs_improvement"
+            i for i in items if i.get("type") == "reviewer_needs_improvement"
         ]
         assert improvement_items == [], (
-            f"no item should use greptile_needs_improvement when dark_score=3 (<4); "
+            f"no item should use reviewer_needs_improvement when dark_score=3 (<4); "
             f"got: {improvement_items}"
         )
 
@@ -677,12 +688,12 @@ def test_dark_branch_high_dark_score_dirty_ai_emits_needs_fix() -> None:
             f"expected one dark-branch greptile item; got {items}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        assert dark_items[0]["type"] == "greptile_needs_fix", (
-            f"dirty AI with dark_score=5 (>=4) must still route to greptile_needs_fix "
-            f"(not greptile_needs_improvement); got: {dark_items[0]}"
+        assert dark_items[0]["type"] == "reviewer_needs_fix", (
+            f"dirty AI with dark_score=5 (>=4) must still route to reviewer_needs_fix "
+            f"(not reviewer_needs_improvement); got: {dark_items[0]}"
         )
         improvement_items = [
-            i for i in items if i.get("type") == "greptile_needs_improvement"
+            i for i in items if i.get("type") == "reviewer_needs_improvement"
         ]
         assert (
             improvement_items == []
@@ -1016,11 +1027,11 @@ def test_check_own_pr_review_state_dark_state_preserved_score_emits_needs_fix() 
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if obj.get("type") == "greptile_needs_fix":
+            if obj.get("type") == "reviewer_needs_fix":
                 greptile_fix_items.append(obj)
 
         assert greptile_fix_items, (
-            f"dark-state preserved score 3 must trigger greptile_needs_fix from "
+            f"dark-state preserved score 3 must trigger reviewer_needs_fix from "
             f"check_own_pr_review_state; got nothing.\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
@@ -1080,21 +1091,26 @@ def test_dark_state_dirty_verdict_no_double_dispatch() -> None:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if obj.get("type", "").startswith("greptile_"):
+            if obj.get("type", "") in (
+                "greptile_needs_fix",
+                "greptile_needs_improvement",
+                "reviewer_needs_fix",
+                "reviewer_needs_improvement",
+            ):
                 all_items.append(obj)
 
         improvement_items = [
-            i for i in all_items if i.get("type") == "greptile_needs_improvement"
+            i for i in all_items if i.get("type") == "reviewer_needs_improvement"
         ]
         assert improvement_items == [], (
-            f"P1 fix: check_own_pr_review_state must not emit greptile_needs_improvement "
+            f"P1 fix: check_own_pr_review_state must not emit reviewer_needs_improvement "
             f"when dark-state AI verdict is dirty (double-dispatch prevention); "
             f"got: {improvement_items}\nall greptile items: {all_items}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        fix_items = [i for i in all_items if i.get("type") == "greptile_needs_fix"]
+        fix_items = [i for i in all_items if i.get("type") == "reviewer_needs_fix"]
         assert fix_items, (
-            f"P1 fix: greptile_needs_fix must still be emitted by check_greptile_scores "
+            f"P1 fix: reviewer_needs_fix must still be emitted by check_greptile_scores "
             f"when AI verdict is dirty (dark state); "
             f"got no fix items\nall greptile items: {all_items}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"

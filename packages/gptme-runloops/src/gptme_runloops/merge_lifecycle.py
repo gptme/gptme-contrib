@@ -134,7 +134,9 @@ class InstructionKind(Enum):
     GREPTILE_NEEDS_FIX = "greptile_needs_fix"  # lib.sh:886-912
     GREPTILE_NEEDS_IMPROVEMENT = "greptile_needs_improvement"  # lib.sh:913-932
     REVIEWER_NEEDS_FIX = "reviewer_needs_fix"  # renamed from greptile_needs_fix
-    REVIEWER_NEEDS_IMPROVEMENT = "reviewer_needs_improvement"  # renamed from greptile_needs_improvement
+    REVIEWER_NEEDS_IMPROVEMENT = (
+        "reviewer_needs_improvement"  # renamed from greptile_needs_improvement
+    )
     GREPTILE_CONVERGENCE = "greptile_convergence"  # lib.sh:889-893 adjudication
 
 
@@ -189,7 +191,10 @@ def greptile_convergence_applicable(item: WorkItem, *, helper_available: bool) -
     """
     if not helper_available or not item.types:
         return False
-    return all(t in {"greptile_needs_improvement", "reviewer_needs_improvement"} for t in item.types)
+    return all(
+        t in {"greptile_needs_improvement", "reviewer_needs_improvement"}
+        for t in item.types
+    )
 
 
 def decide_greptile_convergence(
