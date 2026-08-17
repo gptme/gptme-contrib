@@ -77,15 +77,15 @@ def write_task(workspace: Path, name: str, **metadata: object) -> Path:
 
 
 class TestRecurCliReset:
-    def test_done_resets_recurring_task_to_todo(self, workspace: Path):
+    def test_done_resets_recurring_task_to_waiting(self, workspace: Path):
         write_task(workspace, "weekly-review", state="active", recur="7d")
         runner = CliRunner()
         result = runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
         assert result.exit_code == 0, result.output
-        assert "reset to todo" in result.output
+        assert "reset to waiting" in result.output
 
         post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
-        assert post.metadata["state"] == "todo"
+        assert post.metadata["state"] == "waiting"
         assert "last_completed" not in post.metadata
         assert "wait" in post.metadata
 
@@ -95,7 +95,7 @@ class TestRecurCliReset:
         runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
 
         post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
-        assert post.metadata["state"] == "todo"
+        assert post.metadata["state"] == "waiting"
         assert "wait" in post.metadata
         tomorrow = date.today() + timedelta(days=1)
         assert date.fromisoformat(str(post.metadata["wait"])) >= tomorrow
@@ -116,35 +116,25 @@ class TestRecurCliReset:
         runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
 
         post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
-        assert post.metadata["state"] == "todo"
+        assert post.metadata["state"] == "waiting"
         assert "wait" in post.metadata
         future = date.fromisoformat(str(post.metadata["wait"]))
         assert future > date.today()
 
     def test_recurring_task_reset_emits_valid_frontmatter(self, workspace: Path):
-        """Regression test: recur reset must strip waiting-state fields even when pre-populated."""
-        # Pre-populate waiting-state fields that a task might have accumulated before
-        # being set done (e.g., it was previously waiting on a date gate).
-        write_task(
-            workspace,
-            "weekly-review",
-            state="active",
-            recur="7d",
-            wait_kind="machine",
-            waiting_for="scheduled review time",
-            waiting_since="2026-01-01T00:00:00+00:00",
-        )
+        """Regression test: recur reset emits state=waiting with required waiting-state fields."""
+        write_task(workspace, "weekly-review", state="active", recur="7d")
         runner = CliRunner()
         runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
 
         post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
-        # State must be "todo" so gptodo ready can surface it when wait expires
-        assert post.metadata["state"] == "todo"
+        # state=waiting + wait= is valid frontmatter; state=todo + wait= is rejected by validator
+        assert post.metadata["state"] == "waiting"
         assert "wait" in post.metadata
-        # waiting-state fields must be stripped on reset — the task is now todo, not waiting
-        assert "wait_kind" not in post.metadata
-        assert "waiting_for" not in post.metadata
-        assert "waiting_since" not in post.metadata
+        # waiting-state fields must be present so validate_task_frontmatter accepts the file
+        assert post.metadata.get("wait_kind") == "machine"
+        assert "waiting_for" in post.metadata
+        assert "waiting_since" in post.metadata
 
     def test_unknown_recur_format_marks_done_normally(self, workspace: Path):
         write_task(workspace, "mystery-task", state="active", recur="every-week")

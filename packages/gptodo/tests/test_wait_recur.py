@@ -220,11 +220,11 @@ def test_next_skips_future_wait_task(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 # ---------------------------------------------------------------------------
-# gptodo edit --set state done on recurring task resets to todo
+# gptodo edit --set state done on recurring task resets to waiting
 # ---------------------------------------------------------------------------
 
 
-def test_edit_done_with_recur_resets_to_todo(
+def test_edit_done_with_recur_resets_to_waiting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tasks_dir = tmp_path / "tasks"
@@ -247,11 +247,11 @@ def test_edit_done_with_recur_resets_to_todo(
     assert result.exit_code == 0, result.output
     assert "recurring" in result.output.lower() or "reset" in result.output.lower()
 
-    # Task should now be todo with a future wait date
+    # Task should now be waiting with a future wait date
     import frontmatter as fm
 
     post = fm.load(tasks_dir / "weekly-review.md")
-    assert post.metadata["state"] == "todo"
+    assert post.metadata["state"] == "waiting"
     next_wait = date.fromisoformat(str(post.metadata["wait"]))
     assert next_wait > date.today()
 
@@ -282,7 +282,7 @@ def test_edit_done_with_subday_recur_stores_datetime(
     import frontmatter as fm
 
     post = fm.load(tasks_dir / "frequent-check.md")
-    assert post.metadata["state"] == "todo"
+    assert post.metadata["state"] == "waiting"
     wait_val = str(post.metadata["wait"])
     assert (
         "T" in wait_val or " " in wait_val
