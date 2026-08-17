@@ -131,12 +131,15 @@ def _service_status() -> list[dict]:
     ]
     results: list[dict] = []
     for label, unit in services:
-        status = subprocess.run(
-            ["systemctl", "--user", "is-active", unit],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout.strip()
+        try:
+            status = subprocess.run(
+                ["systemctl", "--user", "is-active", unit],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+        except Exception:
+            status = "unknown"
         icon = "✓" if status == "active" else ("⚠" if status == "activating" else "✗")
         results.append({"label": label, "icon": icon, "status": status})
     return results
