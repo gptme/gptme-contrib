@@ -161,6 +161,21 @@ def test_state_persists_across_instances(state_file: Path) -> None:
     assert s["streak_count"] == 1
 
 
+def test_record_noop_in_read_only_dir_does_not_crash(tmp_path: Path) -> None:
+    """_file_lock must fail-open (not raise) when the state directory is not writable."""
+    import os
+
+    state_file = tmp_path / "pm-noop-streak.json"
+    d = NoopStreakDetector(state_path=state_file, backoff_n=2, backoff_minutes=30)
+    os.chmod(tmp_path, 0o555)
+    try:
+        # Neither call should raise — both must fail-open silently
+        d.record_noop()
+        d.record_success()
+    finally:
+        os.chmod(tmp_path, 0o755)
+
+
 def test_state_file_is_valid_json(state_file: Path) -> None:
     d = NoopStreakDetector(state_path=state_file, backoff_n=2, backoff_minutes=5)
     d.record_noop()
