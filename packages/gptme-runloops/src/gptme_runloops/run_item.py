@@ -411,6 +411,7 @@ class RunItemConfig:
             peer_agents=self.peer_agents,
             agent_msg_policy_note=self.agent_msg_policy_note,
             poll_budget_sec=self.poll_budget_sec,
+            source=str(item.raw.get("source") or ""),
         )
 
 

@@ -137,6 +137,10 @@ class InstructionKind(Enum):
     REVIEWER_NEEDS_IMPROVEMENT = (
         "reviewer_needs_improvement"  # renamed from greptile_needs_improvement
     )
+    AI_REVIEW_NEEDS_FIX = "ai_review_needs_fix"  # reviewer_needs_fix, source=ai-review
+    AI_REVIEW_NEEDS_IMPROVEMENT = (
+        "ai_review_needs_improvement"  # reviewer_needs_improvement, source=ai-review
+    )
     GREPTILE_CONVERGENCE = "greptile_convergence"  # lib.sh:889-893 adjudication
 
 
