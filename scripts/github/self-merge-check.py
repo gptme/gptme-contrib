@@ -2201,7 +2201,7 @@ def is_sensitive_path(path: str) -> bool:
     name = components[-1]
     if (
         ".ssh" in components[:-1]
-        or name in SENSITIVE_PRIVATE_KEY_FILENAMES
+        or name.startswith(SENSITIVE_PRIVATE_KEY_FILENAMES)
         or name == ".env"
         or name.startswith(".env.")
         or name.endswith(".env")
@@ -2213,7 +2213,11 @@ def is_sensitive_path(path: str) -> bool:
     # detection; e.g. "authToken.py" → "auth_token" catches the "auth" rule.
     original_components = path.replace("\\", "/").split("/")
     for component in original_components:
-        stem = component.rsplit(".", 1)[0] if "." in component else component
+        # Dotfiles (e.g. ".secret") have a leading dot that is NOT an extension
+        # separator. Only split on the last dot when one appears after the first
+        # character; otherwise use the whole component as the stem so keyword
+        # matching sees ".secret" instead of an empty string.
+        stem = component.rsplit(".", 1)[0] if "." in component[1:] else component
         # Normalise camelCase → snake_case so camelCase filenames are matched.
         # e.g. "authToken" → "auth_token", "deployScript" → "deploy_script".
         stem_normalised = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", stem).lower()

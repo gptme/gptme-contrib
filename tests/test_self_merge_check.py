@@ -901,6 +901,16 @@ def test_is_sensitive_path_handles_deploy_word_forms(path: str, expected: bool) 
         "skills/example/apikey.json",
         "skills/example/access_token.txt",
         "skills/example/accessToken.py",
+        # Dotfiles with sensitive keywords — stem must not become empty (P0 fix)
+        "skills/example/.secret",
+        "skills/example/.token",
+        "skills/example/.password",
+        "skills/example/.credentials",
+        # Private-key filenames with backup/rotation suffixes (P1 fix)
+        "skills/example/id_rsa.old",
+        "skills/example/id_rsa.bak",
+        "skills/example/id_ed25519.old",
+        "skills/example/id_ecdsa.bak",
     ],
 )
 def test_secret_bearing_file_formats_are_sensitive(path: str) -> None:
