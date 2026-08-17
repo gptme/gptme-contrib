@@ -1166,10 +1166,10 @@ def build_investigate(types: Sequence[str], params: ItemPromptParams) -> str:
             sections.append(render_instruction(kind, params.to_prompt_context()))
             continue
         try:
-            kind = ItemPromptKind(t)
+            item_kind = ItemPromptKind(t)
         except ValueError:
             continue
-        sections.append(render_item_investigate(kind, params))
+        sections.append(render_item_investigate(item_kind, params))
     return "".join(sections)
 
 
