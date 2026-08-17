@@ -453,8 +453,12 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
         return "strategy-reply"
     if types_set & {"ci_failure", "master_ci_failure"}:
         return "ci-fix"
-    if types_set & {"greptile_needs_fix", "greptile_needs_improvement",
-                    "reviewer_needs_fix", "reviewer_needs_improvement"}:
+    if types_set & {
+        "greptile_needs_fix",
+        "greptile_needs_improvement",
+        "reviewer_needs_fix",
+        "reviewer_needs_improvement",
+    }:
         return "greptile-fix"
     if "greptile_convergence_adjudication" in types_set:
         # Adjudication is a deep review-and-classify task — distinct arm from
