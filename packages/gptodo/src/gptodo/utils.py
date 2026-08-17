@@ -640,6 +640,9 @@ class TaskInfo:
 def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     """Return True when a task is explicitly waiting on an external condition."""
     state = normalize_state(task.state or "", warn=False) if task.state else ""
+    # A machine time-gate that has already expired is not a blocker — the wait has passed.
+    if task.metadata.get("wait_kind") == "machine" and not task_is_waiting_for_date(task):
+        return False
     if state == "waiting":
         return True
     return bool(task.metadata.get("waiting_for"))

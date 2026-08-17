@@ -2872,7 +2872,16 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
             if task.state in ["backlog", "todo", "active", "ready_for_review"]
         ]
     else:  # both
-        filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "todo", "active"]]
+        filtered_tasks = [
+            task
+            for task in all_tasks
+            if task.state in ["backlog", "todo", "active"]
+            or (
+                task.state == "waiting"
+                and task.metadata.get("wait_kind") == "machine"
+                and not task_is_waiting_for_date(task)
+            )
+        ]
 
     # Apply pool filter (default: general only; --pool all to see every pool)
     filtered_tasks = [
@@ -3086,8 +3095,17 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
         cache_path = get_cache_path(repo_root)
         issue_cache = load_cache(cache_path)
 
-    # Filter for new or active tasks
-    workable_tasks = [task for task in all_tasks if task.state in ["backlog", "todo", "active"]]
+    # Filter for new or active tasks; include waiting tasks whose machine time-gate has expired
+    workable_tasks = [
+        task
+        for task in all_tasks
+        if task.state in ["backlog", "todo", "active"]
+        or (
+            task.state == "waiting"
+            and task.metadata.get("wait_kind") == "machine"
+            and not task_is_waiting_for_date(task)
+        )
+    ]
 
     # Apply pool filter (default: general only; --pool all to see every pool)
     workable_tasks = [
