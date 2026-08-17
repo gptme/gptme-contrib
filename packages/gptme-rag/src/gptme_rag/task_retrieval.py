@@ -221,10 +221,8 @@ def rank_tasks(
                 state=state,
             )
         )
-        if len(hits) >= n_results:
-            break
 
-    return hits
+    return hits[:n_results]
 
 
 # ---------------------------------------------------------------------------

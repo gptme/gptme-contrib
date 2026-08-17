@@ -124,6 +124,34 @@ class TestRankTasks:
         for h in hits:
             assert not h.closed, f"Closed task should be filtered: {h.path}"
 
+    def test_include_closed_false_returns_open_when_closed_dominate(self):
+        # Regression for: early break in loop when closed tasks outnumber open
+        # in the over-fetched set. All docs share the same query terms so scoring
+        # is roughly equal — closed tasks must not crowd out the open ones.
+        closed_docs = [
+            _task_doc(
+                "deploy server monitoring infrastructure",
+                source=f"tasks/closed-{i}.md",
+                state="done",
+                title=f"Closed Deploy {i}",
+            )
+            for i in range(5)
+        ]
+        open_docs = [
+            _task_doc(
+                "deploy server monitoring infrastructure",
+                source=f"tasks/open-{i}.md",
+                state="active",
+                title=f"Open Deploy {i}",
+            )
+            for i in range(3)
+        ]
+        idx = _build_index(closed_docs + open_docs)
+        hits = rank_tasks(idx, "deploy server monitoring", n_results=3, include_closed=False)
+        assert len(hits) == 3, f"Expected 3 open hits, got {len(hits)}"
+        for h in hits:
+            assert not h.closed, f"Closed task leaked through filter: {h.path}"
+
     def test_exclude_paths_skips_document(self):
         docs = [
             _task_doc("gptme retrieval task", source="tasks/a.md", title="Task A"),
