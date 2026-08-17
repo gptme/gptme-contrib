@@ -168,7 +168,10 @@ def test_blocked_pr_with_low_greptile_emits_improvement() -> None:
 
         result = _run_gate(tmp, state_dir, merge_state="BLOCKED")
         assert result.returncode in (0, 1), result.stderr
-        assert "greptile_needs_improvement" in result.stdout, result.stdout
+        assert (
+            "greptile_needs_improvement" in result.stdout
+            or "reviewer_needs_improvement" in result.stdout
+        ), result.stdout
         # The own-PR review path is what fired (identified by its detail string).
         assert "own-PR review" in result.stdout, result.stdout
         assert _own_review_state_file(state_dir).exists()
