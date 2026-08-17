@@ -1,0 +1,14 @@
+
+### AI Reviewer Findings (score = 4/5)
+```bash
+# Read the PR and our AI reviewer's findings
+gh pr view 7 --repo ErikBjare/alice
+gh api repos/ErikBjare/alice/pulls/7/comments \
+  --jq '.[] | select(.body | test("<!-- bob-ai-review -->"; "i")) | {id, path, line, body: (.body | split("\n")[0:3] | join(" "))}'
+```
+
+This PR scored 4/5 from our AI reviewer — minor issues. Address them if quick; leave it untouched if trivial.
+Do NOT re-trigger the reviewer just because you looked at it.
+
+Warning: **Never push trivial changes just to chase 5/5.**
+The AI reviewer runs automatically on the next push — no manual trigger needed.
