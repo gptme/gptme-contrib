@@ -4,7 +4,7 @@ When `gptodo edit --set state done|cancelled` lands a task in a terminal state,
 the now-stale `next_action`, `waiting_for`, `waiting_since`, and `wait` fields
 should be removed (TASKS.md best-practice #7). `tracking_issue` and
 `upstream_coordination_id` are preserved for permanent traceability, and
-recurring tasks (which reset to waiting) keep their fields.
+recurring tasks (which reset to todo) keep their fields.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def test_recurring_cancelled_strips_fields(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_recurring_done_keeps_fields(tmp_path: Path, monkeypatch) -> None:
-    """Recurring tasks reset to waiting and must retain next_action."""
+    """Recurring tasks reset to todo and must retain next_action."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     (tasks_dir / "recurring.md").write_text(RECURRING_TASK)
@@ -110,5 +110,5 @@ def test_recurring_done_keeps_fields(tmp_path: Path, monkeypatch) -> None:
 
     meta = _meta(tasks_dir, "recurring")
     # Recur logic resets to todo and keeps next_action.
-    assert meta["state"] == "waiting"
+    assert meta["state"] == "todo"
     assert meta["next_action"] == "Do the recurring thing"

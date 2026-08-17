@@ -251,7 +251,7 @@ def test_edit_done_with_recur_resets_to_todo(
     import frontmatter as fm
 
     post = fm.load(tasks_dir / "weekly-review.md")
-    assert post.metadata["state"] == "waiting"
+    assert post.metadata["state"] == "todo"
     next_wait = date.fromisoformat(str(post.metadata["wait"]))
     assert next_wait > date.today()
 
@@ -282,7 +282,7 @@ def test_edit_done_with_subday_recur_stores_datetime(
     import frontmatter as fm
 
     post = fm.load(tasks_dir / "frequent-check.md")
-    assert post.metadata["state"] == "waiting"
+    assert post.metadata["state"] == "todo"
     wait_val = str(post.metadata["wait"])
     assert (
         "T" in wait_val or " " in wait_val
