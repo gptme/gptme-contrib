@@ -179,6 +179,18 @@ class TestClassifyTweetPostError:
         )
         assert workflow_module._classify_tweet_post_error(err) == "permanent"
 
+    def test_unstructured_403_with_both_markers_is_permanent(self, workflow_module):
+        # P1 fix: in the unstructured fallback (no structured API response body),
+        # permanent-rejection markers must be checked before cap markers. If the
+        # X API ever echoes rejected tweet text into an unstructured 403 message
+        # that happens to also contain "spend cap", the permanent classification
+        # must win — otherwise the queue-breaking cap path could be spoofed by a
+        # poison tweet, recreating the exact bug this module fixes.
+        err = Exception(
+            "403 Forbidden: rejected, cashtag detected in tweet about spend cap policy"
+        )
+        assert workflow_module._classify_tweet_post_error(err) == "permanent"
+
     def test_generic_forbidden_403_is_other(self, workflow_module):
         # P2 fix: a generic 403 without known-permanent markers may be a transient
         # account restriction. Return "other" so the tweet stays queued for retry

@@ -868,21 +868,25 @@ def _classify_tweet_post_error(error: Exception) -> str:
         return "other"
 
     # No structured response body. Fall back to substring matching.
-    # Cap markers (e.g. "spend cap") could theoretically appear in user tweet
-    # content embedded in an error body, but the X API does not embed user text
-    # in 403 error messages as of 2026-08-16. The structured path above is the
-    # robust fix for that case in production.
-    if any(marker in message for marker in _CAP_403_MARKERS):
-        return "cap"
-
-    # Only quarantine on known-permanent rejection patterns. Unknown 403s
-    # (e.g. transient account restrictions, temporary permission changes) return
-    # "other" so the tweet stays queued for retry rather than being silently dropped.
+    # Check permanent-rejection markers FIRST: they are API-controlled phrases
+    # ("cashtag", "dollar amount", ...) that don't appear in cap messages, so
+    # checking them first is safe. Cap markers (e.g. "spend cap") are checked
+    # only if no permanent marker matched, so a message that happens to contain
+    # both (e.g. the X API echoing rejected tweet text in the error detail)
+    # classifies as "permanent" rather than letting a stray "spend cap"
+    # substring impersonate the billing cap.
     if any(marker in message for marker in _PERMANENT_403_MARKERS):
         return "permanent"
 
     if any(marker in message for marker in _PERMANENT_REPLY_FAILURE_MARKERS):
         return "permanent"
+
+    # Only classify as cap after confirming no permanent marker matched. Unknown
+    # 403s (e.g. transient account restrictions, temporary permission changes)
+    # that match neither list return "other" so the tweet stays queued for retry
+    # rather than being silently dropped or misrouted.
+    if any(marker in message for marker in _CAP_403_MARKERS):
+        return "cap"
 
     return "other"
 
