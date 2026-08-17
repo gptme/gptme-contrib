@@ -161,6 +161,26 @@ def test_state_persists_across_instances(state_file: Path) -> None:
     assert s["streak_count"] == 1
 
 
+def test_noop_after_expired_backoff_resets_streak(state_file: Path) -> None:
+    """After backoff expires, the first NOOP should start streak from 1, not re-arm."""
+    past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    # Write state as if a prior streak of 2 triggered a now-expired backoff
+    state_file.write_text(
+        json.dumps({"streak_count": 2, "backoff_until": past.isoformat()})
+    )
+    d = NoopStreakDetector(state_path=state_file, backoff_n=2, backoff_minutes=30)
+    # should_skip says False (expired)
+    skip, _ = d.should_skip()
+    assert skip is False
+    # Record a NOOP — should reset streak to 0 first, then increment to 1
+    new_state = d.record_noop()
+    assert (
+        new_state["streak_count"] == 1
+    ), "NOOP after expired backoff must start fresh at streak=1, not re-arm at streak=3"
+    assert "backoff_until" not in new_state or not new_state["backoff_until"]
+
+
 def test_record_noop_in_read_only_dir_does_not_crash(tmp_path: Path) -> None:
     """_file_lock must fail-open (not raise) when the state directory is not writable."""
     import os

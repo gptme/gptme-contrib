@@ -116,7 +116,7 @@ class NoopStreakDetector:
         Uses a separate .lock sidecar file so the lock fd is always openable
         even before the state file exists.
         """
-        lock_path = self.state_path.with_suffix(".lock")
+        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -204,9 +204,21 @@ class NoopStreakDetector:
         """
         with self._file_lock():
             state = self._load()
+            now = _now()
+            # If a backoff window just expired, treat it as a fresh start so a
+            # single NOOP after the rest window does not immediately re-arm.
+            _bu = state.get("backoff_until")
+            if _bu and isinstance(_bu, str):
+                bu_dt = _parse_dt(_bu)
+                if bu_dt is not None and now >= bu_dt:
+                    state["streak_count"] = 0
+                    state.pop("backoff_until", None)
+                    logger.info(
+                        "PM NOOP: expired back-off window detected — resetting streak"
+                    )
             _sc = state.get("streak_count")
             streak = (int(_sc) if isinstance(_sc, int | float) else 0) + 1
-            now = _now()
+
             state["streak_count"] = streak
             state["last_noop_ts"] = now.isoformat()
 
