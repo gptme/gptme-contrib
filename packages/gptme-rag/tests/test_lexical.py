@@ -129,3 +129,26 @@ def test_save_and_load_with_restricted_unpickler(tmp_path: Path):
     loaded = TfidfIndex.load(path)
     hits = loaded.search("retry_backoff", n_results=1)
     assert hits[0].document.metadata["source"] == "a.md"
+
+
+def test_index_all_stop_words_does_not_raise():
+    """index() with documents whose tokens are all stop words must not raise ValueError."""
+    idx = TfidfIndex(stop_words="english")
+    # "the", "a", "an", "is" are all English stop words — vocabulary becomes empty.
+    idx.index([_doc("the a an is", "a.md")])
+    assert idx.search("anything") == []
+
+
+def test_restricted_unpickler_blocks_unlisted_module(tmp_path: Path):
+    """_RestrictedUnpickler blocks classes from modules not in _SAFE_MODULES."""
+    import io
+    import pickle
+
+    from gptme_rag.lexical import _RestrictedUnpickler
+
+    # subprocess.Popen is outside _SAFE_MODULES — must be blocked.
+    import subprocess
+
+    buf = io.BytesIO(pickle.dumps(subprocess.Popen))
+    with pytest.raises(pickle.UnpicklingError, match="Blocked"):
+        _RestrictedUnpickler(buf).load()

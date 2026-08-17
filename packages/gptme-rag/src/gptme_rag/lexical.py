@@ -59,11 +59,14 @@ _SAFE_MODULES = frozenset(
         "scipy.sparse._data_matrix",
         "scipy.sparse._base",
         "scipy.sparse._index",
-        # numpy arrays and dtypes
+        # numpy arrays and dtypes (numpy ≥2.0 uses numpy._core instead of numpy.core)
         "numpy",
         "numpy.core",
         "numpy.core.multiarray",
         "numpy.dtypes",
+        "numpy._core",
+        "numpy._core.multiarray",
+        "numpy._core._multiarray_umath",
     }
 )
 
@@ -99,8 +102,7 @@ class _RestrictedUnpickler(pickle.Unpickler):
             if name in _SAFE_BUILTINS:
                 return super().find_class(module, name)
             raise pickle.UnpicklingError(f"Blocked builtin: {module}.{name}")
-        top = module.split(".")[0]
-        if module in _SAFE_MODULES or top in {"numpy", "sklearn", "scipy", "pathlib"}:
+        if module in _SAFE_MODULES:
             return super().find_class(module, name)
         raise pickle.UnpicklingError(f"Blocked class: {module}.{name}")
 
@@ -161,7 +163,14 @@ class TfidfIndex:
             return
         vectorizer = self._make_vectorizer()
         texts = [doc.content for doc in documents]
-        self._matrix = vectorizer.fit_transform(texts)
+        try:
+            self._matrix = vectorizer.fit_transform(texts)
+        except ValueError:
+            # All texts reduced to empty vocabulary (e.g. all stop words).
+            self._vectorizer = None
+            self._matrix = None
+            self._documents = []
+            return
         self._vectorizer = vectorizer
         self._documents = list(documents)
 
@@ -266,7 +275,13 @@ class TfidfIndex:
         path = Path(path)
         with open(path, "rb") as f:
             data = f.read()
-        payload = _RestrictedUnpickler(io.BytesIO(data)).load()
+        try:
+            payload = _RestrictedUnpickler(io.BytesIO(data)).load()
+        except ImportError as exc:
+            raise LexicalDependencyMissing(
+                "scikit-learn is required to load a lexical index; "
+                "install it with `pip install gptme-rag[lexical]`"
+            ) from exc
         idx = cls(
             stop_words=payload["stop_words"],
             ngram_range=payload["ngram_range"],
