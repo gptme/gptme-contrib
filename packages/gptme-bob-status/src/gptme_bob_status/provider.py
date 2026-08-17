@@ -82,7 +82,12 @@ def _active_tasks(lines: int = 3) -> list[dict]:
     tasks: list[dict] = []
     for line in raw.splitlines():
         line = line.strip()
-        if not line or line.startswith("📋") or "0 tasks" in line or "Summary" in line:
+        if (
+            not line
+            or line.startswith("📋")
+            or line.startswith("Summary")
+            or line == "0 tasks"
+        ):
             continue
         parts = line.split(None, 1)
         if len(parts) >= 2:
@@ -161,11 +166,14 @@ def _dead_timers() -> int:
     )
     count = 0
     for line in out.splitlines():
-        if "bob-" not in line:
-            continue
         # Columns: UNIT  LOAD  ACTIVE  SUB  DESCRIPTION
         parts = line.split()
-        if len(parts) >= 3 and parts[1] == "loaded" and parts[2] == "inactive":
+        if (
+            len(parts) >= 3
+            and parts[0].startswith("bob-")
+            and parts[1] == "loaded"
+            and parts[2] == "inactive"
+        ):
             count += 1
     return count
 
