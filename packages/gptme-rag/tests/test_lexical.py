@@ -69,3 +69,10 @@ def test_save_and_load_roundtrip(tmp_path: Path):
 def test_unindexed_search_returns_empty():
     idx = TfidfIndex()
     assert idx.search("anything") == []
+
+
+def test_index_empty_documents_does_not_raise():
+    """index([]) must not raise ValueError from sklearn; search() must return []."""
+    idx = TfidfIndex()
+    idx.index([])  # was: ValueError("empty vocabulary") from TfidfVectorizer
+    assert idx.search("anything") == []

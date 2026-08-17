@@ -74,7 +74,16 @@ class TfidfIndex:
     # -- build ------------------------------------------------------------
 
     def index(self, documents: list[Document]) -> None:
-        """Fit the vectorizer over ``documents`` and store the document list."""
+        """Fit the vectorizer over ``documents`` and store the document list.
+
+        Passing an empty list resets the index to an unbuilt state so that a
+        subsequent :meth:`search` returns ``[]`` rather than crashing.
+        """
+        if not documents:
+            self._vectorizer = None
+            self._matrix = None
+            self._documents = []
+            return
         vectorizer = self._make_vectorizer()
         texts = [doc.content for doc in documents]
         self._matrix = vectorizer.fit_transform(texts)
@@ -170,10 +179,18 @@ class TfidfIndex:
 
     @classmethod
     def load(cls, path: Path) -> TfidfIndex:
-        """Load a previously saved index."""
+        """Load a previously saved index.
+
+        .. warning::
+            The index file is deserialized with :mod:`pickle`.  Only load
+            files that were written by :meth:`save` on this machine or by a
+            trusted process.  Never load an index obtained from a network
+            location, an untrusted archive, or an unknown source — a crafted
+            pickle payload can execute arbitrary code.
+        """
         path = Path(path)
         with open(path, "rb") as f:
-            payload = pickle.load(f)
+            payload = pickle.load(f)  # nosec B301 — trusted-file; see docstring
         idx = cls(
             stop_words=payload["stop_words"],
             ngram_range=payload["ngram_range"],
