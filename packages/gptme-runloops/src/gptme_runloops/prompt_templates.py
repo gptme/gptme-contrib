@@ -405,6 +405,67 @@ _NEEDS_IMPROVEMENT_SECTIONS = {
     ),
 }
 
+# Investigate arm for reviewer_needs_fix / reviewer_needs_improvement when
+# source=ai-review.  No greptile re-trigger step — our AI reviewer fires
+# automatically on the next push, so there is nothing to manually trigger.
+_AI_REVIEW_INVESTIGATE_SKELETON = """
+### {title}
+```bash
+{read_commands}
+```
+
+{assessment}
+
+{warnings}
+"""
+
+_AI_REVIEW_NEEDS_FIX_SECTIONS: dict[str, str] = {
+    "title": "AI Reviewer Findings (score < 4/5)",
+    "read_commands": (
+        "# Read the PR and our AI reviewer's findings\n"
+        "gh pr view {number} --repo {repo}\n"
+        "gh pr view {number} --repo {repo} --comments\n"
+        "\n"
+        "# Get our AI reviewer's inline findings (marked <!-- bob-ai-review-finding -->)\n"
+        "gh api repos/{repo}/pulls/{number}/comments \\\n"
+        '  --jq \'.[] | select(.body | test("<!-- bob-ai-review-finding -->"; "i"))'
+        ' | {id, path, line, body: (.body | split("\\n")[0:5] | join(" "))}\''
+    ),
+    "assessment": (
+        "This PR has a low score from our AI reviewer (not Greptile).\n"
+        "**Action**: Read the findings in the summary comment and inline threads,"
+        " fix the real issues, push commits."
+    ),
+    "warnings": (
+        "Warning: **This is an AI-reviewer dispatch, not Greptile.**"
+        " Do NOT trigger Greptile to clear it.\n"
+        "The reviewer runs automatically on the next push"
+        " — no manual trigger needed or wanted.\n"
+        "If you cannot fix the issues in this session, leave it for the next cycle."
+    ),
+}
+
+_AI_REVIEW_NEEDS_IMPROVEMENT_SECTIONS: dict[str, str] = {
+    "title": "AI Reviewer Findings (score = 4/5)",
+    "read_commands": (
+        "# Read the PR and our AI reviewer's findings\n"
+        "gh pr view {number} --repo {repo}\n"
+        "gh api repos/{repo}/pulls/{number}/comments \\\n"
+        '  --jq \'.[] | select(.body | test("<!-- bob-ai-review-finding -->"; "i"))'
+        ' | {id, path, line, body: (.body | split("\\n")[0:3] | join(" "))}\''
+    ),
+    "assessment": (
+        "This PR scored 4/5 from our AI reviewer — minor issues."
+        " Address them if quick; leave it untouched if trivial.\n"
+        "Do NOT re-trigger the reviewer just because you looked at it."
+    ),
+    "warnings": (
+        "Warning: **Never push trivial changes just to chase 5/5.**\n"
+        "The AI reviewer runs automatically on the next push"
+        " — no manual trigger needed."
+    ),
+}
+
 
 # --- Variant table ---
 
@@ -492,6 +553,22 @@ _VARIANTS: dict[InstructionKind, tuple[str, Mapping[str, str]]] = {
         _INVESTIGATE_SKELETON,
         _NEEDS_IMPROVEMENT_SECTIONS,
     ),
+    # source-agnostic renames — same templates as their greptile counterparts
+    # (used when source=greptile or source absent; see build_investigate)
+    InstructionKind.REVIEWER_NEEDS_FIX: (_INVESTIGATE_SKELETON, _NEEDS_FIX_SECTIONS),
+    InstructionKind.REVIEWER_NEEDS_IMPROVEMENT: (
+        _INVESTIGATE_SKELETON,
+        _NEEDS_IMPROVEMENT_SECTIONS,
+    ),
+    # source=ai-review variants — no greptile re-trigger, AI-reviewer commands
+    InstructionKind.AI_REVIEW_NEEDS_FIX: (
+        _AI_REVIEW_INVESTIGATE_SKELETON,
+        _AI_REVIEW_NEEDS_FIX_SECTIONS,
+    ),
+    InstructionKind.AI_REVIEW_NEEDS_IMPROVEMENT: (
+        _AI_REVIEW_INVESTIGATE_SKELETON,
+        _AI_REVIEW_NEEDS_IMPROVEMENT_SECTIONS,
+    ),
 }
 
 
@@ -554,6 +631,9 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
 _GREPTILE_INVESTIGATE_KINDS: dict[str, InstructionKind] = {
     "greptile_needs_fix": InstructionKind.GREPTILE_NEEDS_FIX,
     "greptile_needs_improvement": InstructionKind.GREPTILE_NEEDS_IMPROVEMENT,
+    # source-agnostic renames (backward-compat: old names stay above)
+    "reviewer_needs_fix": InstructionKind.REVIEWER_NEEDS_FIX,
+    "reviewer_needs_improvement": InstructionKind.REVIEWER_NEEDS_IMPROVEMENT,
 }
 
 
@@ -619,6 +699,7 @@ class ItemPromptParams:
     forum_handle: str = ""
     peer_agents: str = "other agents"
     agent_msg_policy_note: str = ""
+    source: str = ""
     greptile_helper: str | None = None
     pr_address_script: str | None = None
     poll_budget_sec: int = 1800
@@ -1073,17 +1154,22 @@ def build_investigate(types: Sequence[str], params: ItemPromptParams) -> str:
     sections: list[str] = []
     for t in types:
         if t in _GREPTILE_INVESTIGATE_KINDS:
-            sections.append(
-                render_instruction(
-                    _GREPTILE_INVESTIGATE_KINDS[t], params.to_prompt_context()
-                )
-            )
+            kind = _GREPTILE_INVESTIGATE_KINDS[t]
+            # Route reviewer_needs_* to the source-specific template when the
+            # item carries a non-Greptile source.  Greptile-source items and
+            # legacy items without a source keep the existing Greptile template.
+            if params.source == "ai-review":
+                if t == "reviewer_needs_fix":
+                    kind = InstructionKind.AI_REVIEW_NEEDS_FIX
+                elif t == "reviewer_needs_improvement":
+                    kind = InstructionKind.AI_REVIEW_NEEDS_IMPROVEMENT
+            sections.append(render_instruction(kind, params.to_prompt_context()))
             continue
         try:
-            kind = ItemPromptKind(t)
+            item_kind = ItemPromptKind(t)
         except ValueError:
             continue
-        sections.append(render_item_investigate(kind, params))
+        sections.append(render_item_investigate(item_kind, params))
     return "".join(sections)
 
 

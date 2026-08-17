@@ -1,0 +1,18 @@
+
+### AI Reviewer Findings (score < 4/5)
+```bash
+# Read the PR and our AI reviewer's findings
+gh pr view 7 --repo ErikBjare/alice
+gh pr view 7 --repo ErikBjare/alice --comments
+
+# Get our AI reviewer's inline findings (marked <!-- bob-ai-review-finding -->)
+gh api repos/ErikBjare/alice/pulls/7/comments \
+  --jq '.[] | select(.body | test("<!-- bob-ai-review-finding -->"; "i")) | {id, path, line, body: (.body | split("\n")[0:5] | join(" "))}'
+```
+
+This PR has a low score from our AI reviewer (not Greptile).
+**Action**: Read the findings in the summary comment and inline threads, fix the real issues, push commits.
+
+Warning: **This is an AI-reviewer dispatch, not Greptile.** Do NOT trigger Greptile to clear it.
+The reviewer runs automatically on the next push — no manual trigger needed or wanted.
+If you cannot fix the issues in this session, leave it for the next cycle.

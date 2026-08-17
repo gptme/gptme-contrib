@@ -133,6 +133,14 @@ class InstructionKind(Enum):
     CROSS_REPO_GREPTILE_REFRESH = "cross_repo_greptile_refresh"  # lib.sh:474-517
     GREPTILE_NEEDS_FIX = "greptile_needs_fix"  # lib.sh:886-912
     GREPTILE_NEEDS_IMPROVEMENT = "greptile_needs_improvement"  # lib.sh:913-932
+    REVIEWER_NEEDS_FIX = "reviewer_needs_fix"  # renamed from greptile_needs_fix
+    REVIEWER_NEEDS_IMPROVEMENT = (
+        "reviewer_needs_improvement"  # renamed from greptile_needs_improvement
+    )
+    AI_REVIEW_NEEDS_FIX = "ai_review_needs_fix"  # reviewer_needs_fix, source=ai-review
+    AI_REVIEW_NEEDS_IMPROVEMENT = (
+        "ai_review_needs_improvement"  # reviewer_needs_improvement, source=ai-review
+    )
     GREPTILE_CONVERGENCE = "greptile_convergence"  # lib.sh:889-893 adjudication
 
 
@@ -187,7 +195,14 @@ def greptile_convergence_applicable(item: WorkItem, *, helper_available: bool) -
     """
     if not helper_available or not item.types:
         return False
-    return all(t == "greptile_needs_improvement" for t in item.types)
+    # ai-review items must not enter Greptile backoff logic — the convergence
+    # path consults greptile-helper which is irrelevant for that source.
+    if item.source == "ai-review":
+        return False
+    return all(
+        t in {"greptile_needs_improvement", "reviewer_needs_improvement"}
+        for t in item.types
+    )
 
 
 def decide_greptile_convergence(
@@ -260,6 +275,7 @@ class WorkItem:
     repo: str
     number: int | str
     types: tuple[str, ...] = ()
+    source: str = ""  # e.g. "greptile" or "ai-review"; empty = legacy/unknown
 
 
 @dataclass(frozen=True)
