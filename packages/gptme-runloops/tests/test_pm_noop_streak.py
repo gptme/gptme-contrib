@@ -261,7 +261,11 @@ def test_cli_record_success_resets(tmp_path: Path) -> None:
     assert "streak reset" in out
 
 
-def test_cli_status_outputs_json(tmp_path: Path) -> None:
+def test_cli_status_outputs_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PM_NOOP_STREAK_BACKOFF_N", raising=False)
+    monkeypatch.delenv("PM_NOOP_STREAK_BACKOFF_MINUTES", raising=False)
     sf = tmp_path / "streak.json"
     rc, out = _cli("status", state_file=sf)
     assert rc == 0
