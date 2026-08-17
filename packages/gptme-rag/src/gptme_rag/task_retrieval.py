@@ -138,7 +138,7 @@ def load_task_documents(
             continue
 
         fm = _parse_frontmatter(text)
-        state_raw = fm.get("state", "").strip()
+        state_raw = fm.get("state", "").strip().strip('"').strip("'")
         state = state_raw if state_raw else ("archived" if archived else "unknown")
         title = _extract_title(text, fm, path.stem)
 
@@ -194,9 +194,17 @@ def rank_tasks(
         return []
 
     # Over-fetch so filtering (include_closed, exclude_paths) leaves enough hits.
+    # When filtering closed tasks, use a much larger multiplier: closed tasks
+    # often dominate top scores, so a fixed cap of 20 exhausts before any open
+    # task appears (e.g. 30 closed tasks outscoring 5 open ones → 0 open hits).
+    # 1000 is a safe ceiling since TfidfIndex.search returns min(n, corpus_size).
+    if not include_closed:
+        fetch_n = max(n_results * 20, 100)
+    else:
+        fetch_n = max(n_results * 4, 20)
     raw_hits = index.search(
         query,
-        n_results=max(n_results * 4, 20),
+        n_results=fetch_n,
         exclude_paths=exclude_paths,
     )
 

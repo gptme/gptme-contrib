@@ -152,6 +152,36 @@ class TestRankTasks:
         for h in hits:
             assert not h.closed, f"Closed task leaked through filter: {h.path}"
 
+    def test_include_closed_false_with_many_closed_tasks(self):
+        # Regression: with >20 closed tasks scoring higher than open tasks, the
+        # old over-fetch minimum of 20 exhausted entirely on closed docs, returning
+        # zero open hits. Requires 25 closed tasks to exceed the old floor of 20.
+        closed_docs = [
+            _task_doc(
+                "deploy server monitoring infrastructure pipeline",
+                source=f"tasks/closed-{i}.md",
+                state="done",
+                title=f"Closed Deploy {i}",
+            )
+            for i in range(25)
+        ]
+        open_docs = [
+            _task_doc(
+                "deploy server monitoring infrastructure pipeline",
+                source=f"tasks/open-{i}.md",
+                state="active",
+                title=f"Open Deploy {i}",
+            )
+            for i in range(3)
+        ]
+        idx = _build_index(closed_docs + open_docs)
+        hits = rank_tasks(idx, "deploy server monitoring", n_results=3, include_closed=False)
+        assert (
+            len(hits) == 3
+        ), f"Expected 3 open hits even with 25 closed tasks dominating scores, got {len(hits)}"
+        for h in hits:
+            assert not h.closed, f"Closed task leaked through filter: {h.path}"
+
     def test_exclude_paths_skips_document(self):
         docs = [
             _task_doc("gptme retrieval task", source="tasks/a.md", title="Task A"),
@@ -368,3 +398,27 @@ class TestLoadTaskDocuments:
 
     def test_empty_dir_returns_empty_list(self, tmp_path: Path):
         assert load_task_documents(tmp_path) == []
+
+    def test_quoted_state_value_is_recognised_as_closed(self, tmp_path: Path):
+        # Regression: state: "done" (with YAML quotes) was stored as '"done"'
+        # including the quote characters, which did not match TASK_CLOSED_STATES.
+        # The task was then treated as open (closed=False), mislabelling it.
+        (tmp_path / "t.md").write_text(
+            '---\nstate: "done"\n---\n# Quoted State Task\n\nBody.\n',
+            encoding="utf-8",
+        )
+        docs = load_task_documents(tmp_path)
+        assert len(docs) == 1
+        doc = docs[0]
+        assert (
+            doc.metadata["task_state"] == "done"
+        ), f"Quoted state should be stripped to 'done', got {doc.metadata['task_state']!r}"
+        # Verify TaskHit correctly marks it as closed
+        hit = TaskHit(
+            document=doc,
+            score=0.9,
+            title="Quoted State Task",
+            path=str(tmp_path / "t.md"),
+            state=doc.metadata["task_state"],
+        )
+        assert hit.closed, "Task with state 'done' (from quoted YAML) must be closed"
