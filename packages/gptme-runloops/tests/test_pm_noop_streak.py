@@ -181,19 +181,27 @@ def test_noop_after_expired_backoff_resets_streak(state_file: Path) -> None:
     assert "backoff_until" not in new_state or not new_state["backoff_until"]
 
 
-def test_record_noop_in_read_only_dir_does_not_crash(tmp_path: Path) -> None:
-    """_file_lock must fail-open (not raise) when the state directory is not writable."""
+def test_record_noop_in_read_only_dir_does_not_crash(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """_save must fail-open (not raise) when the state directory is not writable,
+    but must log at ERROR level so the failure is not silent."""
+    import logging
     import os
 
     state_file = tmp_path / "pm-noop-streak.json"
     d = NoopStreakDetector(state_path=state_file, backoff_n=2, backoff_minutes=30)
     os.chmod(tmp_path, 0o555)
     try:
-        # Neither call should raise — both must fail-open silently
-        d.record_noop()
-        d.record_success()
+        with caplog.at_level(logging.ERROR, logger="gptme_runloops.pm_noop_streak"):
+            d.record_noop()
+            d.record_success()
     finally:
         os.chmod(tmp_path, 0o755)
+
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert error_records, "Expected at least one ERROR log when state cannot be saved"
+    assert any("fail open" in r.message for r in error_records)
 
 
 def test_state_file_is_valid_json(state_file: Path) -> None:

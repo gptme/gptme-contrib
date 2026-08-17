@@ -151,6 +151,7 @@ class NoopStreakDetector:
 
     def _save(self, state: dict[str, object]) -> None:
         """Atomic write via temp file + os.replace to avoid partial writes."""
+        tmp_path: str | None = None
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             data = json.dumps(state, indent=2, ensure_ascii=False)
@@ -164,7 +165,17 @@ class NoopStreakDetector:
                 tmp_path = tf.name
             os.replace(tmp_path, self.state_path)
         except OSError as exc:
-            logger.warning("Failed to save noop streak state: %s", exc)
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+            # Log at ERROR (not WARNING) — the gate silently fails open when
+            # persistence is unavailable, which defeats the back-off contract.
+            logger.error(
+                "Failed to save noop streak state to %s: %s — "
+                "streak will not persist across invocations; gate may fail open",
+                self.state_path,
+                exc,
+            )
 
     # --- Public API ---
 
