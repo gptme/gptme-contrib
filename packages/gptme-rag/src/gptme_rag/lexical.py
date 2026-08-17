@@ -165,8 +165,11 @@ class TfidfIndex:
         texts = [doc.content for doc in documents]
         try:
             self._matrix = vectorizer.fit_transform(texts)
-        except ValueError:
+        except ValueError as exc:
+            if "empty vocabulary" not in str(exc):
+                raise
             # All texts reduced to empty vocabulary (e.g. all stop words).
+            logger.debug("All documents reduced to empty vocabulary; resetting index")
             self._vectorizer = None
             self._matrix = None
             self._documents = []
@@ -278,6 +281,8 @@ class TfidfIndex:
         try:
             payload = _RestrictedUnpickler(io.BytesIO(data)).load()
         except ImportError as exc:
+            if "sklearn" not in str(exc):
+                raise
             raise LexicalDependencyMissing(
                 "scikit-learn is required to load a lexical index; "
                 "install it with `pip install gptme-rag[lexical]`"
