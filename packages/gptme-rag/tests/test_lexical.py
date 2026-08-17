@@ -102,6 +102,23 @@ def test_load_rejects_crafted_pickle(tmp_path: Path):
         _RestrictedUnpickler(buf).load()
 
 
+def test_load_rejects_builtins_eval(tmp_path: Path):
+    """_RestrictedUnpickler blocks builtins.eval/exec — they bypass the module allowlist."""
+    import io
+    import pickle
+
+    from gptme_rag.lexical import _RestrictedUnpickler
+
+    # builtins.eval and builtins.exec must NOT pass the filter despite "builtins"
+    # being referenced by safe pickle payloads for basic types like str/list/dict.
+    # A crafted pickle can use a GLOBAL opcode for builtins.eval with an
+    # attacker-controlled string argument to achieve arbitrary code execution.
+    for dangerous in (eval, exec, compile, open):
+        buf = io.BytesIO(pickle.dumps(dangerous))
+        with pytest.raises(pickle.UnpicklingError, match="Blocked"):
+            _RestrictedUnpickler(buf).load()
+
+
 def test_save_and_load_with_restricted_unpickler(tmp_path: Path):
     """save/load roundtrip works through _RestrictedUnpickler (real sklearn objects pass)."""
     idx = TfidfIndex()

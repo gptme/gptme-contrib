@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 # Limiting to these prevents arbitrary code execution from a crafted pickle.
 _SAFE_MODULES = frozenset(
     {
-        "builtins",
         "collections",
         "datetime",
         "pathlib",
@@ -68,13 +67,40 @@ _SAFE_MODULES = frozenset(
     }
 )
 
+# Explicit allowlist of builtins pickle may reference for basic Python types.
+# Broad "builtins" top-level permission would also admit eval/exec/open/compile.
+_SAFE_BUILTINS = frozenset(
+    {
+        "str",
+        "int",
+        "float",
+        "bool",
+        "bytes",
+        "bytearray",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "frozenset",
+        "complex",
+        "slice",
+        "type",
+        "object",
+        "NoneType",
+    }
+)
+
 
 class _RestrictedUnpickler(pickle.Unpickler):
     """Unpickler that only allows classes from known-safe modules."""
 
     def find_class(self, module: str, name: str):
+        if module == "builtins":
+            if name in _SAFE_BUILTINS:
+                return super().find_class(module, name)
+            raise pickle.UnpicklingError(f"Blocked builtin: {module}.{name}")
         top = module.split(".")[0]
-        if module in _SAFE_MODULES or top in {"numpy", "sklearn", "scipy", "builtins", "pathlib"}:
+        if module in _SAFE_MODULES or top in {"numpy", "sklearn", "scipy", "pathlib"}:
             return super().find_class(module, name)
         raise pickle.UnpicklingError(f"Blocked class: {module}.{name}")
 
