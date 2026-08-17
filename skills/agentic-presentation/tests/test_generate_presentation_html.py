@@ -167,6 +167,44 @@ def test_validate_presentation_rejects_malformed_images(
         generator.validate_presentation(deck)
 
 
+@pytest.mark.parametrize(
+    "src",
+    [
+        "javascript:alert(1)",
+        "JAVASCRIPT:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "vbscript:msgbox(1)",
+    ],
+)
+def test_validate_image_rejects_unsafe_src_scheme(src: str):
+    deck = _sample_deck()
+    deck["slides"][1] = {
+        "id": "media",
+        "type": "image",
+        "title": "Media",
+        "image": {"src": src, "alt": ""},
+    }
+    with pytest.raises(ValueError, match="unsafe scheme"):
+        generator.validate_presentation(deck)
+
+
+def test_validate_image_allows_safe_src_schemes():
+    deck = _sample_deck()
+    for src in (
+        "https://example.com/img.png",
+        "http://example.com/img.png",
+        "/img.png",
+        "./img.png",
+    ):
+        deck["slides"][1] = {
+            "id": "media",
+            "type": "image",
+            "title": "Media",
+            "image": {"src": src, "alt": ""},
+        }
+        generator.validate_presentation(deck)  # must not raise
+
+
 def test_validate_presentation_rejects_duplicate_slide_ids():
     deck = _sample_deck()
     deck["slides"][1]["id"] = "intro"

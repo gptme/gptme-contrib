@@ -7,6 +7,7 @@ import argparse
 import html
 import json
 import re
+import urllib.parse
 from pathlib import Path
 from typing import Any, cast
 
@@ -509,11 +510,20 @@ def _javascript() -> str:
     showSlide(0);"""
 
 
+_SAFE_URL_SCHEMES = {"", "http", "https"}
+
+
 def _validate_image(image: Any, context: str) -> None:
     if not isinstance(image, dict):
         raise ValueError(f"{context} must be an object")
     if not isinstance(image.get("src"), str) or not image["src"]:
         raise ValueError(f"{context} must include src")
+    scheme = urllib.parse.urlparse(image["src"]).scheme.lower()
+    if scheme not in _SAFE_URL_SCHEMES:
+        raise ValueError(
+            f"{context} src has unsafe scheme '{scheme}'"
+            " — only http/https and relative URLs are allowed"
+        )
     if not isinstance(image.get("alt"), str):
         raise ValueError(f"{context} must include alt")
 
