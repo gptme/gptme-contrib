@@ -443,3 +443,34 @@ def test_machine_probe_only_task_stays_blocked(tmp_path: Path) -> None:
         "(task.wait is None so only the date-gate path should unblock)"
     )
     assert not is_task_ready(task, {}), "probe-only machine task must not be ready"
+
+
+def test_machine_probe_plus_expired_wait_stays_blocked(tmp_path: Path) -> None:
+    """Regression: machine tasks with both a probe and an expired wait: must stay blocked.
+
+    An expired time-gate alone should not unblock a task that also has a probe —
+    the probe still needs to be resolved. Without the probe guard, task_has_waiting_blocker
+    would return False and the task would surface as ready prematurely.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "probe-wait-task.md").write_text(
+        "---\n"
+        "state: waiting\n"
+        "wait_kind: machine\n"
+        "wait: 2020-01-01T00:00:00+00:00\n"  # expired date
+        "probe: 'gh run view 123 --repo owner/repo --json conclusion -q .conclusion'\n"
+        "waiting_for: CI run #123 to complete\n"
+        "waiting_since: 2026-08-18T00:00:00+00:00\n"
+        "---\n"
+        "# probe-wait-task\n"
+    )
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    task = tasks[0]
+    # Probe + expired date: probe gate still pending, must stay blocked
+    assert task_has_waiting_blocker(task), (
+        "machine task with probe AND expired wait: date must remain blocked "
+        "(expired time-gate alone must not bypass an unresolved probe)"
+    )
+    assert not is_task_ready(task, {}), "probe+expired-wait machine task must not be ready"

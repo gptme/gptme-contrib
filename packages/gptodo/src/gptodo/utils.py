@@ -641,11 +641,13 @@ def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     """Return True when a task is explicitly waiting on an external condition."""
     state = normalize_state(task.state or "", warn=False) if task.state else ""
     # A machine time-gate that has already expired is not a blocker — the wait has passed.
-    # Require task.wait is not None so probe-only machine tasks (no wait: field) stay blocked.
+    # Guards: task.wait is not None (probe-only tasks with no date stay blocked)
+    #         and no probe field (probe+expired-date tasks still need probe resolution).
     if (
         task.metadata.get("wait_kind") == "machine"
         and task.wait is not None
         and not task_is_waiting_for_date(task)
+        and not task.metadata.get("probe")
     ):
         return False
     if state == "waiting":
