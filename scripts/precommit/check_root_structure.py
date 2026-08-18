@@ -37,9 +37,14 @@ def is_gitignored(path: Path) -> bool:
         raise RuntimeError(
             f"git check-ignore failed for {path}: {result.stderr or result.returncode}"
         )
-    if result.returncode != 0:
+    # For plain files not matched by .gitignore, trust git check-ignore directly.
+    if result.returncode != 0 and not path.is_dir():
         return False
-    # Path matches .gitignore — but force-added tracked files make it visible anyway
+    # For directories (regardless of whether .gitignore matches the dir itself):
+    # check whether any tracked files exist inside. A directory whose contents are
+    # all individually gitignored (e.g. objs/ with only *.pyc) has no tracked files
+    # and should be treated the same as a gitignored directory.
+    # Also applies when .gitignore matched — force-added tracked files make it visible.
     tracked = subprocess.run(
         ["git", "ls-files", "--", str(path)],
         cwd=REPO_ROOT,
