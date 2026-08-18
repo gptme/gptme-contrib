@@ -51,6 +51,5 @@ Anti-patterns:
 - Clear audit trail in the original request location
 
 ## Related
-- Companion doc: [knowledge/lessons/workflow/communication-loop-closure-patterns.md](../../knowledge/lessons/workflow/communication-loop-closure-patterns.md)
 - [Session Startup Recent Actions Review](./session-startup-recent-actions-review.md)
 - [Memory Failure Prevention](./memory-failure-prevention.md)
