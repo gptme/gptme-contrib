@@ -2492,10 +2492,12 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     post.metadata["state"] = "waiting"
                     post.metadata["wait"] = next_wait.isoformat()
                     post.metadata["wait_kind"] = "machine"
-                    # Do not set waiting_for/waiting_since: the wait: date IS the machine gate.
-                    # A waiting_for field would be treated as a human blocker and prevent the
-                    # task from auto-surfacing once the time gate expires (task_has_waiting_blocker
-                    # requires waiting_for to be absent for the machine-gate early-return to fire).
+                    # Strip any pre-existing waiting_for/waiting_since: the wait: date IS the
+                    # machine gate. Leaving them would trap the task permanently — task_has_waiting_blocker
+                    # treats any waiting_for as a human blocker that requires explicit resolution,
+                    # so the task would never auto-surface after the time gate expires.
+                    post.metadata.pop("waiting_for", None)
+                    post.metadata.pop("waiting_since", None)
                     if not _completed_explicitly_set_global:
                         post.metadata.pop("completed", None)
                     with open(task.path, "w") as f:

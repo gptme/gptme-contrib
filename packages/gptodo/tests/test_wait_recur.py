@@ -257,6 +257,48 @@ def test_edit_done_with_recur_resets_to_waiting(
     assert next_wait > date.today()
 
 
+def test_recur_reset_strips_preexisting_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: recurring reset must strip pre-existing waiting_for/waiting_since.
+
+    A task that was previously in a human-waiting state (waiting_for: 'John to review')
+    with a recur field must have those fields removed on done→reset. Otherwise the
+    waiting_for guard in task_has_waiting_blocker keeps the task permanently blocked.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    today = date.today().isoformat()
+    # Write a recurring task that already carries waiting_for from a prior human-wait state
+    (tasks_dir / "human-wait-recur.md").write_text(
+        f"---\n"
+        f"state: active\n"
+        f"created: 2026-01-01\n"
+        f"wait: {today}\n"
+        f"recur: 7d\n"
+        f"waiting_for: John to review the PR\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"---\n"
+        f"# human-wait-recur\n"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "human-wait-recur", "--set", "state", "done"])
+
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "human-wait-recur.md")
+    assert post.metadata["state"] == "waiting", "recurring task must reset to waiting"
+    assert post.metadata.get("wait_kind") == "machine"
+    assert (
+        "waiting_for" not in post.metadata
+    ), "recur reset must strip waiting_for so the task can auto-surface when the time gate expires"
+    assert "waiting_since" not in post.metadata, "recur reset must strip waiting_since"
+
+
 def test_edit_done_with_subday_recur_stores_datetime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
