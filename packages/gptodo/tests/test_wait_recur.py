@@ -14,6 +14,7 @@ from gptodo.utils import (
     load_tasks,
     parse_recur_interval,
     parse_wait_date,
+    task_has_waiting_blocker,
     task_is_waiting_for_date,
 )
 
@@ -411,3 +412,34 @@ def test_advance_wait_timezone_aware() -> None:
     assert isinstance(result, datetime)
     assert result.tzinfo is not None
     assert result > datetime.now(tz=timezone.utc)
+
+
+def test_machine_probe_only_task_stays_blocked(tmp_path: Path) -> None:
+    """Regression: machine tasks with a probe but no wait: date must stay blocked.
+
+    Before the fix, `wait_kind: machine` without a `wait:` field passed the
+    `not task_is_waiting_for_date` check (since task.wait is None → returns False),
+    causing task_has_waiting_blocker to return False and probe-only machine tasks
+    to appear ready when they shouldn't be.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "probe-task.md").write_text(
+        "---\n"
+        "state: waiting\n"
+        "wait_kind: machine\n"
+        "probe: 'gh run view 123 --repo owner/repo --json conclusion -q .conclusion'\n"
+        "waiting_for: CI run #123 to complete\n"
+        "waiting_since: 2026-08-18T00:00:00+00:00\n"
+        "---\n"
+        "# probe-task\n"
+    )
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    task = tasks[0]
+    # Probe-only machine task must still be treated as blocked
+    assert task_has_waiting_blocker(task), (
+        "machine task with probe but no wait: date must be blocked "
+        "(task.wait is None so only the date-gate path should unblock)"
+    )
+    assert not is_task_ready(task, {}), "probe-only machine task must not be ready"
