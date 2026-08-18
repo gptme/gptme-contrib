@@ -34,6 +34,12 @@ url = "https://download.pytorch.org/whl/cpu"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
+# Pin numpy to pypi so index-strategy="unsafe-best-match" can't
+# nondeterministically re-resolve it from the pytorch-cpu index, which
+# caused recurring uv.lock source-registry churn (numpy flipping between
+# pypi and download.pytorch.org). Same-version, same-hash flip — cosmetic
+# but noisy across machines. See alice journal 2026-08-18.
+numpy = { index = "pypi" }
 gptme = { git = "https://github.com/gptme/gptme.git", branch = "master" }
 gptme-sessions = { workspace = true }
 gptme-usage = { workspace = true }
