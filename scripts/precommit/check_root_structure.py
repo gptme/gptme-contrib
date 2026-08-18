@@ -34,18 +34,15 @@ ALLOWED_ROOT_ENTRIES = {
     "Makefile",
     "README.md",
     # Active structural dirs
-    "commands",  # gptme command definitions
-    "docs",  # protocol specs, plugin docs
+    "docs",  # protocol specs, plugin docs, command references
     "dotfiles",  # dotfile configs for agents
     "journal",  # session journals
     "lessons",  # lesson system (injected into agent context)
     "packages",  # uv workspace packages
     "plugins",  # gptme plugin definitions
-    "schemas",  # JSON Schema files (candidate for consolidation into docs/)
-    "scripts",  # utility scripts and pre-commit hooks
+    "scripts",  # utility scripts, standalone tools, and pre-commit hooks
     "skills",  # skill bundles (Anthropic skill format)
     "tests",  # test suite
-    "tools",  # standalone tools (candidate for consolidation into scripts/)
 }
 
 
