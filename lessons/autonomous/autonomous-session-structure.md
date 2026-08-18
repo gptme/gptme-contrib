@@ -52,6 +52,5 @@ git push origin master
 - Structured approach maximizes productive time
 
 ## Related
-- Companion doc: [knowledge/lessons/autonomous/autonomous-session-structure.md](../../knowledge/lessons/autonomous/autonomous-session-structure.md)
 - [Autonomous Session Pivot Strategies](./autonomous-session-pivot-strategies.md)
 - [Git Workflow](../workflow/git-workflow.md)

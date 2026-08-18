@@ -50,4 +50,3 @@ python3 scripts/gepa-lesson-optimizer.py --bottom 5 --apply
 ## Related
 - Agent-workspace: `scripts/gepa-lesson-optimizer.py` — mutation + judge tooling
 - Agent-workspace: `scripts/lesson-loo-analysis.py` — effectiveness signal
-- `knowledge/lessons/` — companion docs with full detail

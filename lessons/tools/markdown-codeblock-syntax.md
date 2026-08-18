@@ -82,4 +82,3 @@ Benefits:
 **What happens without language tags**: Parser may misinterpret closing ```, cutting content early. Your attention should recognize this pattern when seeing incomplete saves or files ending with ":" or "**".
 
 ## Related
-- Full context: https://github.com/ErikBjare/bob/blob/master/knowledge/lessons/tools/markdown-codeblock-syntax.md

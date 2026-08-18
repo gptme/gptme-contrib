@@ -47,6 +47,5 @@ ls -la dotfiles/install.sh dotfiles/.config/git/hooks scripts/runs/autonomous/au
 - Agent-specific files (ABOUT.md, systemd services, custom workflows) stay custom
 
 ## Related
-- Full guide (maintenance, symlinks, troubleshooting): `knowledge/lessons/workflow/agent-workspace-setup-maintenance.md`
 - gptme-agent-template: https://github.com/gptme/gptme-agent-template
 - Agent Setup Guide: https://gptme.org/docs/agents.html
