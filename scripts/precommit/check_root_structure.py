@@ -31,8 +31,22 @@ def is_gitignored(path: Path) -> bool:
         ["git", "check-ignore", "-q", str(path)],
         cwd=REPO_ROOT,
         capture_output=True,
+        text=True,
     )
-    return result.returncode == 0
+    if result.returncode not in (0, 1):
+        raise RuntimeError(
+            f"git check-ignore failed for {path}: {result.stderr or result.returncode}"
+        )
+    if result.returncode != 0:
+        return False
+    # Path matches .gitignore — but force-added tracked files make it visible anyway
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", str(path)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return not tracked.stdout.strip()
 
 
 # Allowed top-level entries. Update this list (with justification in the PR)
