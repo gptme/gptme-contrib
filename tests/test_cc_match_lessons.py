@@ -840,3 +840,78 @@ def test_bm25_corpus_scale_bypass_admits_relevant_lesson(hook, tmp_path):
         f"relevant lesson was silently filtered by the raw floor despite "
         f"corpus operating at a different IDF scale; results: {matched_names}"
     )
+
+
+# --- Policy manifest / classify_lesson ---
+
+
+def test_classify_lesson_absolute_path(hook, tmp_path):
+    """P1 fix: _classify_lesson must handle absolute lesson paths from scan_lessons.
+
+    scan_lessons stores paths as str(f) where f is an absolute Path, so
+    lesson_path looks like /home/bob/bob/lessons/patterns/foo.md.
+    Before the fix, strip("/").replace("lessons/", "", 1) produced
+    home/bob/bob/patterns/foo which never matched any manifest key.
+    """
+    manifest = {
+        "version": 1,
+        "updated_at": "",
+        "validated_core": [],
+        "exempt": [],
+        "holdout_population": ["patterns/persistent-learning"],
+    }
+    hook._policy_manifest_cache = manifest
+
+    abs_path = "/home/bob/bob/lessons/patterns/persistent-learning.md"
+    policy_class, version = hook._classify_lesson(abs_path)
+
+    hook._policy_manifest_cache = None  # reset cache
+
+    assert policy_class == "holdout", (
+        f"Expected 'holdout' for absolute path {abs_path!r}, got {policy_class!r}. "
+        "Path normalization must extract the part after 'lessons/' regardless of prefix."
+    )
+    assert version == 1
+
+
+def test_classify_lesson_relative_path_still_works(hook):
+    """Relative paths (e.g. from tests) must still resolve correctly after P1 fix."""
+    manifest = {
+        "version": 1,
+        "updated_at": "",
+        "validated_core": [],
+        "exempt": [],
+        "holdout_population": ["patterns/persistent-learning"],
+    }
+    hook._policy_manifest_cache = manifest
+
+    rel_path = "lessons/patterns/persistent-learning.md"
+    policy_class, version = hook._classify_lesson(rel_path)
+
+    hook._policy_manifest_cache = None
+
+    assert policy_class == "holdout"
+    assert version == 1
+
+
+def test_classify_lesson_missing_manifest_returns_holdout(hook, tmp_path, monkeypatch):
+    """P2 fix: when the manifest file is absent, _classify_lesson must return
+    'holdout' (all lessons in holdout), not 'unknown'.
+
+    Before the fix the default holdout_population was [] so every lesson came
+    back as 'unknown', contradicting the docstring.
+    """
+    hook._policy_manifest_cache = None
+    # Point manifest path to a non-existent file
+    monkeypatch.setattr(
+        hook, "_policy_manifest_path", lambda: tmp_path / "nonexistent.yaml"
+    )
+
+    policy_class, version = hook._classify_lesson("lessons/any/lesson.md")
+
+    hook._policy_manifest_cache = None  # reset
+
+    assert policy_class == "holdout", (
+        f"Expected 'holdout' when manifest is missing, got {policy_class!r}. "
+        "The safe default must treat all lessons as holdout, not unknown."
+    )

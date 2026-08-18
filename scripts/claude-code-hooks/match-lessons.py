@@ -233,7 +233,7 @@ def _load_policy_manifest() -> dict:
             "updated_at": "",
             "validated_core": [],
             "exempt": [],
-            "holdout_population": [],
+            "holdout_population": ["*"],  # sentinel: treat all lessons as holdout
         }
         return _policy_manifest_cache
 
@@ -253,7 +253,7 @@ def _load_policy_manifest() -> dict:
             "updated_at": "",
             "validated_core": [],
             "exempt": [],
-            "holdout_population": [],
+            "holdout_population": ["*"],  # sentinel: treat all lessons as holdout
         }
     except Exception as e:
         # Parse error or file read failure — return safe default
@@ -266,7 +266,7 @@ def _load_policy_manifest() -> dict:
             "updated_at": "",
             "validated_core": [],
             "exempt": [],
-            "holdout_population": [],
+            "holdout_population": ["*"],  # sentinel: treat all lessons as holdout
         }
 
     _policy_manifest_cache = manifest
@@ -289,19 +289,28 @@ def _classify_lesson(lesson_path: str) -> tuple[str, int]:
     manifest = _load_policy_manifest()
     policy_version = manifest.get("version", 1)
 
-    # Normalize lesson_path to the key format used in manifest (no leading/trailing slashes)
-    key = lesson_path.strip("/").replace("lessons/", "", 1).replace(".md", "")
+    # Normalize lesson_path to the key format used in manifest.
+    # lesson_path may be absolute (/home/bob/bob/lessons/X/Y.md) or relative
+    # (lessons/X/Y.md). Extract the part after the last "lessons/" component.
+    path_str = str(lesson_path)
+    if "/lessons/" in path_str:
+        key = path_str.split("/lessons/", 1)[1]
+    elif path_str.startswith("lessons/"):
+        key = path_str[len("lessons/") :]
+    else:
+        key = path_str
+    key = key.replace(".md", "").strip("/")
 
-    for category in ["validated_core", "exempt", "holdout_population"]:
+    for category in ["validated_core", "exempt"]:
         if key in manifest.get(category, []):
-            if category == "validated_core":
-                return "validated_core", policy_version
-            elif category == "exempt":
-                return "exempt", policy_version
-            else:
-                return "holdout", policy_version
+            return category, policy_version
 
-    # Not found in manifest — unknown (created after manifest)
+    # "*" sentinel means all lessons fall into holdout (manifest missing/unavailable)
+    holdout_pop = manifest.get("holdout_population", ["*"])
+    if "*" in holdout_pop or key in holdout_pop:
+        return "holdout", policy_version
+
+    # Not found in manifest — unknown (created after manifest timestamp)
     return "unknown", policy_version
 
 
