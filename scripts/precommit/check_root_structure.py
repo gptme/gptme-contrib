@@ -34,6 +34,7 @@ def is_gitignored(path: Path) -> bool:
     )
     return result.returncode == 0
 
+
 # Allowed top-level entries. Update this list (with justification in the PR)
 # when intentionally adding a new top-level file or directory.
 ALLOWED_ROOT_ENTRIES = frozenset(
@@ -70,11 +71,7 @@ ALLOWED_ROOT_ENTRIES = frozenset(
 
 
 def main() -> int:
-    entries = {
-        p.name
-        for p in REPO_ROOT.iterdir()
-        if not is_gitignored(p)
-    }
+    entries = {p.name for p in REPO_ROOT.iterdir() if not is_gitignored(p)}
     unexpected = entries - ALLOWED_ROOT_ENTRIES
     if not unexpected:
         return 0
