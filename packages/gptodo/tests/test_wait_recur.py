@@ -14,6 +14,7 @@ from gptodo.utils import (
     load_tasks,
     parse_recur_interval,
     parse_wait_date,
+    task_has_waiting_blocker,
     task_is_waiting_for_date,
 )
 
@@ -220,11 +221,11 @@ def test_next_skips_future_wait_task(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 # ---------------------------------------------------------------------------
-# gptodo edit --set state done on recurring task resets to todo
+# gptodo edit --set state done on recurring task resets to waiting
 # ---------------------------------------------------------------------------
 
 
-def test_edit_done_with_recur_resets_to_todo(
+def test_edit_done_with_recur_resets_to_waiting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tasks_dir = tmp_path / "tasks"
@@ -247,13 +248,55 @@ def test_edit_done_with_recur_resets_to_todo(
     assert result.exit_code == 0, result.output
     assert "recurring" in result.output.lower() or "reset" in result.output.lower()
 
-    # Task should now be todo with a future wait date
+    # Task should now be waiting with a future wait date
     import frontmatter as fm
 
     post = fm.load(tasks_dir / "weekly-review.md")
-    assert post.metadata["state"] == "todo"
+    assert post.metadata["state"] == "waiting"
     next_wait = date.fromisoformat(str(post.metadata["wait"]))
     assert next_wait > date.today()
+
+
+def test_recur_reset_strips_preexisting_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: recurring reset must strip pre-existing waiting_for/waiting_since.
+
+    A task that was previously in a human-waiting state (waiting_for: 'John to review')
+    with a recur field must have those fields removed on done→reset. Otherwise the
+    waiting_for guard in task_has_waiting_blocker keeps the task permanently blocked.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    today = date.today().isoformat()
+    # Write a recurring task that already carries waiting_for from a prior human-wait state
+    (tasks_dir / "human-wait-recur.md").write_text(
+        f"---\n"
+        f"state: active\n"
+        f"created: 2026-01-01\n"
+        f"wait: {today}\n"
+        f"recur: 7d\n"
+        f"waiting_for: John to review the PR\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"---\n"
+        f"# human-wait-recur\n"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "human-wait-recur", "--set", "state", "done"])
+
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "human-wait-recur.md")
+    assert post.metadata["state"] == "waiting", "recurring task must reset to waiting"
+    assert post.metadata.get("wait_kind") == "machine"
+    assert (
+        "waiting_for" not in post.metadata
+    ), "recur reset must strip waiting_for so the task can auto-surface when the time gate expires"
+    assert "waiting_since" not in post.metadata, "recur reset must strip waiting_since"
 
 
 def test_edit_done_with_subday_recur_stores_datetime(
@@ -282,7 +325,7 @@ def test_edit_done_with_subday_recur_stores_datetime(
     import frontmatter as fm
 
     post = fm.load(tasks_dir / "frequent-check.md")
-    assert post.metadata["state"] == "todo"
+    assert post.metadata["state"] == "waiting"
     wait_val = str(post.metadata["wait"])
     assert (
         "T" in wait_val or " " in wait_val
@@ -411,3 +454,95 @@ def test_advance_wait_timezone_aware() -> None:
     assert isinstance(result, datetime)
     assert result.tzinfo is not None
     assert result > datetime.now(tz=timezone.utc)
+
+
+def test_machine_probe_only_task_stays_blocked(tmp_path: Path) -> None:
+    """Regression: machine tasks with a probe but no wait: date must stay blocked.
+
+    Before the fix, `wait_kind: machine` without a `wait:` field passed the
+    `not task_is_waiting_for_date` check (since task.wait is None → returns False),
+    causing task_has_waiting_blocker to return False and probe-only machine tasks
+    to appear ready when they shouldn't be.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "probe-task.md").write_text(
+        "---\n"
+        "state: waiting\n"
+        "wait_kind: machine\n"
+        "probe: 'gh run view 123 --repo owner/repo --json conclusion -q .conclusion'\n"
+        "waiting_for: CI run #123 to complete\n"
+        "waiting_since: 2026-08-18T00:00:00+00:00\n"
+        "---\n"
+        "# probe-task\n"
+    )
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    task = tasks[0]
+    # Probe-only machine task must still be treated as blocked
+    assert task_has_waiting_blocker(task), (
+        "machine task with probe but no wait: date must be blocked "
+        "(task.wait is None so only the date-gate path should unblock)"
+    )
+    assert not is_task_ready(task, {}), "probe-only machine task must not be ready"
+
+
+def test_machine_probe_plus_expired_wait_stays_blocked(tmp_path: Path) -> None:
+    """Regression: machine tasks with both a probe and an expired wait: must stay blocked.
+
+    An expired time-gate alone should not unblock a task that also has a probe —
+    the probe still needs to be resolved. Without the probe guard, task_has_waiting_blocker
+    would return False and the task would surface as ready prematurely.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "probe-wait-task.md").write_text(
+        "---\n"
+        "state: waiting\n"
+        "wait_kind: machine\n"
+        "wait: 2020-01-01T00:00:00+00:00\n"  # expired date
+        "probe: 'gh run view 123 --repo owner/repo --json conclusion -q .conclusion'\n"
+        "waiting_for: CI run #123 to complete\n"
+        "waiting_since: 2026-08-18T00:00:00+00:00\n"
+        "---\n"
+        "# probe-wait-task\n"
+    )
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    task = tasks[0]
+    # Probe + expired date: probe gate still pending, must stay blocked
+    assert task_has_waiting_blocker(task), (
+        "machine task with probe AND expired wait: date must remain blocked "
+        "(expired time-gate alone must not bypass an unresolved probe)"
+    )
+    assert not is_task_ready(task, {}), "probe+expired-wait machine task must not be ready"
+
+
+def test_machine_expired_wait_with_human_waiting_for_stays_blocked(tmp_path: Path) -> None:
+    """Regression: machine tasks with an expired wait: and a human waiting_for must stay blocked.
+
+    `waiting_for` signals a human-described blocker that must be resolved explicitly.
+    An expired time gate alone must not bypass a waiting_for field — the task should
+    only auto-surface once waiting_for is cleared, even if wait_kind is machine.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "human-wait-task.md").write_text(
+        "---\n"
+        "state: waiting\n"
+        "wait_kind: machine\n"
+        "wait: 2020-01-01T00:00:00+00:00\n"  # expired date
+        "waiting_for: John to review the PR\n"
+        "waiting_since: 2026-08-18T00:00:00+00:00\n"
+        "---\n"
+        "# human-wait-task\n"
+    )
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    task = tasks[0]
+    # Human waiting_for must keep the task blocked even when the time gate expired
+    assert task_has_waiting_blocker(task), (
+        "machine task with expired wait: but human waiting_for must remain blocked "
+        "(waiting_for takes precedence over an expired time gate)"
+    )
+    assert not is_task_ready(task, {}), "machine task with human waiting_for must not be ready"

@@ -2479,7 +2479,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             # Re-load task to get updated metadata
             post = frontmatter.load(task.path)
             if post.metadata.get("state") == "done":
-                # Handle recur: reset task to todo with advanced wait: date
+                # Handle recur: reset task to waiting with advanced wait: date
                 recur = post.metadata.get("recur")
                 if recur:
                     if parse_recur_interval(str(recur)) is None:
@@ -2489,17 +2489,21 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
 
                     current_wait = parse_wait(post.metadata.get("wait"))
                     next_wait = advance_wait(current_wait, recur)
-                    post.metadata["state"] = "todo"
+                    post.metadata["state"] = "waiting"
                     post.metadata["wait"] = next_wait.isoformat()
-                    # Remove waiting-state fields that don't apply to todo state
-                    for _field in ("wait_kind", "waiting_for", "waiting_since"):
-                        post.metadata.pop(_field, None)
+                    post.metadata["wait_kind"] = "machine"
+                    # Strip any pre-existing waiting_for/waiting_since: the wait: date IS the
+                    # machine gate. Leaving them would trap the task permanently — task_has_waiting_blocker
+                    # treats any waiting_for as a human blocker that requires explicit resolution,
+                    # so the task would never auto-surface after the time gate expires.
+                    post.metadata.pop("waiting_for", None)
+                    post.metadata.pop("waiting_since", None)
                     if not _completed_explicitly_set_global:
                         post.metadata.pop("completed", None)
                     with open(task.path, "w") as f:
                         f.write(frontmatter.dumps(post))
                     console.print(
-                        f"[cyan]↩ {task.name} recurring — reset to todo, next wait: {next_wait}[/]"
+                        f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {next_wait}[/]"
                     )
                     continue  # skip done-completion logic for recurring tasks
 
@@ -2868,7 +2872,17 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
             if task.state in ["backlog", "todo", "active", "ready_for_review"]
         ]
     else:  # both
-        filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "todo", "active"]]
+        filtered_tasks = [
+            task
+            for task in all_tasks
+            if task.state in ["backlog", "todo", "active"]
+            or (
+                task.state == "waiting"
+                and task.metadata.get("wait_kind") == "machine"
+                and not task_is_waiting_for_date(task)
+                and not task.metadata.get("waiting_for")
+            )
+        ]
 
     # Apply pool filter (default: general only; --pool all to see every pool)
     filtered_tasks = [
@@ -3082,8 +3096,18 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
         cache_path = get_cache_path(repo_root)
         issue_cache = load_cache(cache_path)
 
-    # Filter for new or active tasks
-    workable_tasks = [task for task in all_tasks if task.state in ["backlog", "todo", "active"]]
+    # Filter for new or active tasks; include waiting tasks whose machine time-gate has expired
+    workable_tasks = [
+        task
+        for task in all_tasks
+        if task.state in ["backlog", "todo", "active"]
+        or (
+            task.state == "waiting"
+            and task.metadata.get("wait_kind") == "machine"
+            and not task_is_waiting_for_date(task)
+            and not task.metadata.get("waiting_for")
+        )
+    ]
 
     # Apply pool filter (default: general only; --pool all to see every pool)
     workable_tasks = [
