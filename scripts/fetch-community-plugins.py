@@ -46,7 +46,7 @@ _TYPE_TO_TOPICS: dict[str, list[str]] = {
     "skill / mcp-server": ["gptme-skill", "gptme-mcp-server"],
 }
 
-DEFAULT_OUTPUT = Path(__file__).parent.parent / "community_plugins.json"
+DEFAULT_OUTPUT = Path(__file__).parent.parent / "docs" / "community_plugins.json"
 
 
 def fetch_registry() -> tuple[list[dict], bool]:

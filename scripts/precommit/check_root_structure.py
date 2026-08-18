@@ -65,7 +65,6 @@ ALLOWED_ROOT_ENTRIES = frozenset(
         ".jscpd.json",
         ".mailmap",
         ".pre-commit-config.yaml",
-        "community_plugins.json",
         "CONTRIBUTING.md",
         "LICENSE",
         "Makefile",
@@ -76,17 +75,14 @@ ALLOWED_ROOT_ENTRIES = frozenset(
         # Directories (trailing slash for readability — checked by name)
         ".git",
         ".github",
-        "commands",
         "docs",
         "dotfiles",
         "lessons",
         "packages",
         "plugins",
-        "schemas",
         "scripts",
         "skills",
         "tests",
-        "tools",
     ]
 )
 

@@ -19,7 +19,7 @@ task system, journals, issues, or coordination claims.
 ## Artifacts in this repo
 
 - This spec: `docs/protocols/gptme-heartbeat.md`
-- Event envelope JSON Schema: `schemas/gptme-heartbeat-event.schema.json`
+- Event envelope JSON Schema: `docs/protocols/gptme-heartbeat-event.schema.json`
 - Validator CLI: `scripts/gptme-heartbeat-validate.py`
 - Example event streams: `docs/protocols/examples/`
 
@@ -113,7 +113,7 @@ without modifying the underlying agent.
 ## Event Envelope
 
 All events share this envelope (see
-`schemas/gptme-heartbeat-event.schema.json`):
+`docs/protocols/gptme-heartbeat-event.schema.json`):
 
 ```json
 {
