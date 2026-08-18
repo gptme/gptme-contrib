@@ -4,6 +4,10 @@ When `gptodo edit --set state waiting` is called, `waiting_since` should be
 automatically populated with the current UTC datetime if it is not already set.
 This prevents the `validate-task-frontmatter` pre-commit hook from rejecting
 commits that transition tasks to waiting state.
+
+Also covers the cumulative waiting history fields:
+- first_waiting_since: set on first spell, never cleared by re-park
+- waiting_spell_count: incremented on every spell entry
 """
 
 from __future__ import annotations
@@ -206,3 +210,131 @@ def test_edit_clearing_waiting_for_does_not_inject_waiting_since(
     assert (
         "waiting_since" not in tasks[0].metadata
     ), "clearing waiting_for must not trigger waiting_since injection"
+
+
+# =============================================================================
+# Cumulative waiting history fields: first_waiting_since + waiting_spell_count
+# =============================================================================
+
+
+def test_first_spell_sets_cumulative_fields(tmp_path: Path, monkeypatch) -> None:
+    """First transition to waiting sets first_waiting_since and waiting_spell_count=1."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(ACTIVE_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    result = CliRunner().invoke(
+        cli,
+        ["edit", "my-task", "--set", "state", "waiting", "--set", "waiting_for", "dep"],
+    )
+    after = datetime.now(timezone.utc)
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    task = tasks[0]
+    assert "first_waiting_since" in task.metadata, "first_waiting_since must be set on first spell"
+    assert task.metadata.get("waiting_spell_count") == 1, "spell_count must be 1 on first spell"
+
+    first_ws = datetime.fromisoformat(str(task.metadata["first_waiting_since"]))
+    if first_ws.tzinfo is None:
+        first_ws = first_ws.replace(tzinfo=timezone.utc)
+    assert before <= first_ws <= after, f"first_waiting_since {first_ws!r} out of range"
+
+
+def test_repark_increments_spell_count_preserves_first_waiting_since(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Re-parking (release → re-waiting) increments spell count but never changes first_waiting_since."""
+    FIRST_SINCE = "2026-06-01T12:00:00+00:00"
+    REPARKED_TASK = f"""\
+---
+state: active
+created: 2026-06-01T00:00:00+00:00
+first_waiting_since: {FIRST_SINCE}
+waiting_spell_count: 1
+---
+# Re-parked Task
+"""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(REPARKED_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["edit", "my-task", "--set", "state", "waiting", "--set", "waiting_for", "dep2"],
+    )
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    task = tasks[0]
+    # YAML may parse the stored datetime with a space instead of T; compare via fromisoformat
+    assert datetime.fromisoformat(
+        str(task.metadata["first_waiting_since"]).replace(" ", "T")
+    ) == datetime.fromisoformat(FIRST_SINCE), "first_waiting_since must not change on re-park"
+    assert (
+        task.metadata.get("waiting_spell_count") == 2
+    ), "spell_count must increment to 2 on second spell"
+
+
+def test_terminal_state_clears_cumulative_fields(tmp_path: Path, monkeypatch) -> None:
+    """Transitioning to done clears first_waiting_since and waiting_spell_count."""
+    WAITING_WITH_CUMULATIVE = """\
+---
+state: waiting
+created: 2026-06-01T00:00:00+00:00
+waiting_for: some-dep
+waiting_since: 2026-06-01T12:00:00+00:00
+first_waiting_since: 2026-05-01T12:00:00+00:00
+waiting_spell_count: 3
+---
+# Task with cumulative fields
+"""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(WAITING_WITH_CUMULATIVE)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "state", "done"])
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    task = tasks[0]
+    assert task.metadata["state"] == "done"
+    assert "first_waiting_since" not in task.metadata, "first_waiting_since must be cleared on done"
+    assert "waiting_spell_count" not in task.metadata, "waiting_spell_count must be cleared on done"
+    assert "waiting_since" not in task.metadata, "waiting_since must be cleared on done"
+
+
+def test_release_from_waiting_preserves_cumulative_fields(tmp_path: Path, monkeypatch) -> None:
+    """Releasing from waiting (→ active) must NOT clear first_waiting_since or waiting_spell_count."""
+    WAITING_WITH_CUMULATIVE = """\
+---
+state: waiting
+created: 2026-06-01T00:00:00+00:00
+waiting_for: some-dep
+waiting_since: 2026-06-15T00:00:00+00:00
+first_waiting_since: 2026-06-01T00:00:00+00:00
+waiting_spell_count: 2
+---
+# Task being released
+"""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(WAITING_WITH_CUMULATIVE)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "state", "active"])
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    task = tasks[0]
+    assert task.metadata["state"] == "active"
+    assert (
+        "first_waiting_since" in task.metadata
+    ), "first_waiting_since must survive release from waiting"
+    assert (
+        task.metadata.get("waiting_spell_count") == 2
+    ), "waiting_spell_count must survive release from waiting"

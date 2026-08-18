@@ -166,6 +166,12 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     "next_action",
     "waiting_for",
     "waiting_since",
+    # Cumulative waiting history — survives release/re-park cycles:
+    # first_waiting_since: timestamp of first ever waiting entry (never cleared by re-park)
+    # waiting_spell_count: count of distinct waiting spells (incremented on each waiting entry)
+    # Both cleared only on terminal states (done/cancelled), same as waiting_since.
+    "first_waiting_since",
+    "waiting_spell_count",
     "depends",  # deprecated alias for requires, but still accepted
     "requires",
     "blocks",  # deprecated (inverse semantics), still accepted

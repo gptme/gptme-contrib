@@ -1967,6 +1967,12 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # Keep "none" as the explicit clear value; otherwise accept any string.
         "assigned_to": {"type": "string"},
         "waiting_since": {"type": "date"},
+        "first_waiting_since": {
+            "type": "date"
+        },  # Cumulative: set on first spell, never cleared by re-park
+        "waiting_spell_count": {
+            "type": "string"
+        },  # Integer spell counter, cleared only on terminal states
         "completed": {"type": "date"},  # When the task was marked done/cancelled
         "wait": {"type": "date"},  # Hide from queue until this date
         # Structured blockers: why this task is waiting, and (for machine-class
@@ -2345,17 +2351,24 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             op == "set" and field == "waiting_for" and value is not None
             for op, field, value in changes
         )
-        if (
-            transitioning_to_waiting
-            and waiting_for_present
-            and not post.metadata.get("waiting_since")
-        ):
+        if transitioning_to_waiting and waiting_for_present:
             from datetime import datetime as _dt, timezone as _tz
 
+            _now_iso = _dt.now(_tz.utc).isoformat(timespec="seconds")
+
+            # Per-spell clock: set once per spell, cleared on release/re-park.
             # Full ISO datetime for intra-day resolution (ErikBjare request, 2026-06-16).
-            # validate_task_frontmatter.py's validate_timestamp() accepts both YYYY-MM-DD
-            # and full ISO datetime via datetime.fromisoformat().
-            post.metadata["waiting_since"] = _dt.now(_tz.utc).isoformat(timespec="seconds")
+            if not post.metadata.get("waiting_since"):
+                post.metadata["waiting_since"] = _now_iso
+
+            # Cumulative history: survives release/re-park cycles.
+            # first_waiting_since: stamped on the very first spell, never cleared by re-park.
+            # waiting_spell_count: increments on every spell entry (including first).
+            if not post.metadata.get("first_waiting_since"):
+                post.metadata["first_waiting_since"] = _now_iso
+            post.metadata["waiting_spell_count"] = (
+                int(post.metadata.get("waiting_spell_count") or 0) + 1
+            )
 
         # Strip now-stale actionable/blocker metadata when the edit lands the task
         # in a terminal state (TASKS.md best-practice #7: terminal tasks must not
@@ -2394,7 +2407,14 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             post.metadata.get("state") == "done" and not _recur_is_valid
         )
         if _should_strip_stale_fields:
-            for _stale_field in ("next_action", "waiting_for", "waiting_since", "wait"):
+            for _stale_field in (
+                "next_action",
+                "waiting_for",
+                "waiting_since",
+                "wait",
+                "first_waiting_since",
+                "waiting_spell_count",
+            ):
                 post.metadata.pop(_stale_field, None)
 
         # Auto-set completed timestamp when transitioning to a terminal state, and
