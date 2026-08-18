@@ -183,7 +183,7 @@ def main() -> int:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help="Output JSON file (default: community_plugins.json)",
+        help="Output JSON file (default: docs/community_plugins.json)",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print result without writing"
