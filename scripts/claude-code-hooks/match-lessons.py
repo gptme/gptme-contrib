@@ -293,6 +293,10 @@ def _classify_lesson(lesson_path: str) -> tuple[str, int]:
     # Normalize lesson_path to the key format used in manifest.
     # lesson_path may be absolute (/home/bob/bob/lessons/X/Y.md), relative
     # (lessons/X/Y.md), or dot-relative (./lessons/X/Y.md).
+    # Note: the manifest format only indexes lessons under the 'lessons/'
+    # directory. Paths under other configured lesson directories (e.g.
+    # 'skills/') cannot be resolved to a manifest key and will always
+    # produce "unknown" (or "holdout" if the "*" sentinel is present).
     path_str = str(lesson_path).replace("\\", "/")
     if "/lessons/" in path_str:
         key = path_str.split("/lessons/", 1)[1]
@@ -302,7 +306,14 @@ def _classify_lesson(lesson_path: str) -> tuple[str, int]:
         if stripped.startswith("lessons/"):
             key = stripped[len("lessons/") :]
         else:
-            key = path_str
+            # Path is not under a 'lessons/' directory — cannot be resolved
+            # to a manifest key. Apply the "*" sentinel if present (the
+            # missing-manifest fallback that classifies all lessons as
+            # holdout), otherwise "unknown" is the correct result.
+            holdout_pop = manifest.get("holdout_population", [])
+            if "*" in holdout_pop:
+                return "holdout", policy_version
+            return "unknown", policy_version
     key = key.replace(".md", "").strip("/")
 
     for category in ["validated_core", "exempt"]:
