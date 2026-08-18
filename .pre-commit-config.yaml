@@ -83,6 +83,14 @@ repos:
     always_run: true
     types: [python]
 
+  - id: check-root-structure
+    name: Check root directory structure
+    description: Rejects new top-level dirs/files not on the allowlist (prevents root sprawl).
+    entry: python3 scripts/precommit/check_root_structure.py
+    language: system
+    pass_filenames: false
+    always_run: true
+
   - id: validate-lesson-metadata
     name: Validate lesson metadata
     description: Ensures lesson files have proper metadata (keywords, valid YAML frontmatter).
