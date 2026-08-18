@@ -40,7 +40,9 @@ def is_gitignored(path: Path) -> bool:
 ALLOWED_ROOT_ENTRIES = frozenset(
     [
         # Files
+        ".gitattributes",
         ".gitignore",
+        ".gitmodules",
         ".jscpd.json",
         ".mailmap",
         ".pre-commit-config.yaml",
