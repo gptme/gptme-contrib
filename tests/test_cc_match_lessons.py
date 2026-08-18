@@ -915,3 +915,86 @@ def test_classify_lesson_missing_manifest_returns_holdout(hook, tmp_path, monkey
         f"Expected 'holdout' when manifest is missing, got {policy_class!r}. "
         "The safe default must treat all lessons as holdout, not unknown."
     )
+
+
+def test_classify_lesson_dot_relative_path(hook):
+    """P3 fix: _classify_lesson must handle dot-relative paths (./lessons/X/Y.md).
+
+    str(Path("./lessons/foo.md")) yields "./lessons/foo.md", which neither
+    contains "/lessons/" nor starts with "lessons/". Without the fix the else
+    branch used the whole string as the key, so the manifest lookup always missed.
+    """
+    manifest = {
+        "version": 1,
+        "updated_at": "",
+        "validated_core": [],
+        "exempt": [],
+        "holdout_population": ["patterns/persistent-learning"],
+    }
+    hook._policy_manifest_cache = manifest
+
+    dot_path = "./lessons/patterns/persistent-learning.md"
+    policy_class, version = hook._classify_lesson(dot_path)
+
+    hook._policy_manifest_cache = None
+
+    assert policy_class == "holdout", (
+        f"Expected 'holdout' for dot-relative path {dot_path!r}, got {policy_class!r}. "
+        "Path normalization must strip ./ before the lessons/ prefix."
+    )
+    assert version == 1
+
+
+def test_classify_lesson_non_dict_yaml_does_not_raise(hook, tmp_path, monkeypatch):
+    """P1 fix: _load_policy_manifest must not cache a non-dict YAML result.
+
+    If manifest.yaml contains a valid YAML list (e.g. `- item`), yaml.safe_load
+    returns a list. Without the isinstance guard, _classify_lesson would call
+    list.get(...) and raise AttributeError, silently disabling dropout logging.
+    """
+    import yaml
+
+    manifest_file = tmp_path / "manifest.yaml"
+    manifest_file.write_text(yaml.dump(["item1", "item2"]))
+
+    hook._policy_manifest_cache = None
+    monkeypatch.setattr(hook, "_policy_manifest_path", lambda: manifest_file)
+
+    # Must not raise; a non-dict result should fall back to the empty-manifest default
+    policy_class, version = hook._classify_lesson("lessons/any/lesson.md")
+
+    hook._policy_manifest_cache = None
+
+    # Empty fallback manifest has no holdout_population key → default [] → "unknown"
+    assert policy_class in (
+        "holdout",
+        "unknown",
+    ), f"Expected 'holdout' or 'unknown' for non-dict manifest, got {policy_class!r}."
+
+
+def test_classify_lesson_present_manifest_missing_holdout_key_returns_unknown(hook):
+    """P2 fix: a present manifest without holdout_population must yield 'unknown'.
+
+    The '*' sentinel default was meant only for the missing/unparseable manifest
+    branches. For a present manifest that simply lacks the key, the correct
+    behaviour is 'unknown' — the lesson exists but isn't catalogued yet.
+    """
+    manifest = {
+        "version": 2,
+        "updated_at": "2026-08-18T00:00:00Z",
+        "validated_core": [],
+        "exempt": [],
+        # holdout_population intentionally absent
+    }
+    hook._policy_manifest_cache = manifest
+
+    policy_class, version = hook._classify_lesson("lessons/new/uncatalogued-lesson.md")
+
+    hook._policy_manifest_cache = None
+
+    assert policy_class == "unknown", (
+        f"Expected 'unknown' for present manifest with no holdout_population key, "
+        f"got {policy_class!r}. Unlisted lessons in a present manifest should be "
+        "'unknown', not spuriously 'holdout'."
+    )
+    assert version == 2

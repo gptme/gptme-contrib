@@ -241,7 +241,8 @@ def _load_policy_manifest() -> dict:
         import yaml
 
         with open(manifest_path, encoding="utf-8") as f:
-            manifest = yaml.safe_load(f) or {}
+            _loaded = yaml.safe_load(f)
+        manifest = _loaded if isinstance(_loaded, dict) else {}
     except ImportError:
         # YAML library unavailable — log once and return safe default
         print(
@@ -290,23 +291,28 @@ def _classify_lesson(lesson_path: str) -> tuple[str, int]:
     policy_version = manifest.get("version", 1)
 
     # Normalize lesson_path to the key format used in manifest.
-    # lesson_path may be absolute (/home/bob/bob/lessons/X/Y.md) or relative
-    # (lessons/X/Y.md). Extract the part after the last "lessons/" component.
-    path_str = str(lesson_path)
+    # lesson_path may be absolute (/home/bob/bob/lessons/X/Y.md), relative
+    # (lessons/X/Y.md), or dot-relative (./lessons/X/Y.md).
+    path_str = str(lesson_path).replace("\\", "/")
     if "/lessons/" in path_str:
         key = path_str.split("/lessons/", 1)[1]
-    elif path_str.startswith("lessons/"):
-        key = path_str[len("lessons/") :]
     else:
-        key = path_str
+        # Strip any leading ./ before checking for lessons/ prefix
+        stripped = path_str.lstrip("./")
+        if stripped.startswith("lessons/"):
+            key = stripped[len("lessons/") :]
+        else:
+            key = path_str
     key = key.replace(".md", "").strip("/")
 
     for category in ["validated_core", "exempt"]:
         if key in manifest.get(category, []):
             return category, policy_version
 
-    # "*" sentinel means all lessons fall into holdout (manifest missing/unavailable)
-    holdout_pop = manifest.get("holdout_population", ["*"])
+    # "*" sentinel means all lessons fall into holdout (manifest missing/unavailable).
+    # For a present manifest that simply lacks holdout_population, default to [] so
+    # unlisted lessons are classified as "unknown", not spuriously as "holdout".
+    holdout_pop = manifest.get("holdout_population", [])
     if "*" in holdout_pop or key in holdout_pop:
         return "holdout", policy_version
 
