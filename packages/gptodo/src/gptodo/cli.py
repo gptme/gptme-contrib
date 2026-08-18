@@ -2492,12 +2492,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     post.metadata["state"] = "waiting"
                     post.metadata["wait"] = next_wait.isoformat()
                     post.metadata["wait_kind"] = "machine"
-                    post.metadata["waiting_for"] = (
-                        f"time gate — next recurrence due {next_wait.isoformat()}"
-                    )
-                    post.metadata["waiting_since"] = datetime.now(timezone.utc).isoformat(
-                        timespec="seconds"
-                    )
+                    # Do not set waiting_for/waiting_since: the wait: date IS the machine gate.
+                    # A waiting_for field would be treated as a human blocker and prevent the
+                    # task from auto-surfacing once the time gate expires (task_has_waiting_blocker
+                    # requires waiting_for to be absent for the machine-gate early-return to fire).
                     if not _completed_explicitly_set_global:
                         post.metadata.pop("completed", None)
                     with open(task.path, "w") as f:
@@ -2880,6 +2878,7 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
                 task.state == "waiting"
                 and task.metadata.get("wait_kind") == "machine"
                 and not task_is_waiting_for_date(task)
+                and not task.metadata.get("waiting_for")
             )
         ]
 
@@ -3104,6 +3103,7 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
             task.state == "waiting"
             and task.metadata.get("wait_kind") == "machine"
             and not task_is_waiting_for_date(task)
+            and not task.metadata.get("waiting_for")
         )
     ]
 

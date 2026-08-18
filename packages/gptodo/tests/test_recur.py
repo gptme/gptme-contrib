@@ -131,10 +131,12 @@ class TestRecurCliReset:
         # state=waiting + wait= is valid frontmatter; state=todo + wait= is rejected by validator
         assert post.metadata["state"] == "waiting"
         assert "wait" in post.metadata
-        # waiting-state fields must be present so validate_task_frontmatter accepts the file
         assert post.metadata.get("wait_kind") == "machine"
-        assert "waiting_for" in post.metadata
-        assert "waiting_since" in post.metadata
+        # waiting_for must NOT be set: the wait: date is the machine gate.
+        # A waiting_for field would be treated as a human blocker and prevent auto-surfacing
+        # once the time gate expires (task_has_waiting_blocker requires waiting_for absent).
+        assert "waiting_for" not in post.metadata
+        assert "waiting_since" not in post.metadata
 
     def test_unknown_recur_format_marks_done_normally(self, workspace: Path):
         write_task(workspace, "mystery-task", state="active", recur="every-week")

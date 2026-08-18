@@ -474,3 +474,33 @@ def test_machine_probe_plus_expired_wait_stays_blocked(tmp_path: Path) -> None:
         "(expired time-gate alone must not bypass an unresolved probe)"
     )
     assert not is_task_ready(task, {}), "probe+expired-wait machine task must not be ready"
+
+
+def test_machine_expired_wait_with_human_waiting_for_stays_blocked(tmp_path: Path) -> None:
+    """Regression: machine tasks with an expired wait: and a human waiting_for must stay blocked.
+
+    `waiting_for` signals a human-described blocker that must be resolved explicitly.
+    An expired time gate alone must not bypass a waiting_for field — the task should
+    only auto-surface once waiting_for is cleared, even if wait_kind is machine.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "human-wait-task.md").write_text(
+        "---\n"
+        "state: waiting\n"
+        "wait_kind: machine\n"
+        "wait: 2020-01-01T00:00:00+00:00\n"  # expired date
+        "waiting_for: John to review the PR\n"
+        "waiting_since: 2026-08-18T00:00:00+00:00\n"
+        "---\n"
+        "# human-wait-task\n"
+    )
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    task = tasks[0]
+    # Human waiting_for must keep the task blocked even when the time gate expired
+    assert task_has_waiting_blocker(task), (
+        "machine task with expired wait: but human waiting_for must remain blocked "
+        "(waiting_for takes precedence over an expired time gate)"
+    )
+    assert not is_task_ready(task, {}), "machine task with human waiting_for must not be ready"
