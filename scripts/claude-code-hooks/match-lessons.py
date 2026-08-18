@@ -205,6 +205,132 @@ def _trajectory_log_dir() -> Path:
     return get_workspace() / "state" / "lesson-trajectories"
 
 
+# --- Lesson policy manifest (Stage 1 shadow logging) ---
+
+_policy_manifest_cache: dict | None = None
+
+
+def _policy_manifest_path() -> Path:
+    """Return path to lesson-policy manifest."""
+    return get_workspace() / "state" / "lesson-policy" / "manifest.yaml"
+
+
+def _load_policy_manifest() -> dict:
+    """Load and cache the lesson-policy manifest (YAML).
+
+    Returns dict with keys: version, updated_at, validated_core, exempt, holdout_population.
+    On load failure or missing file, returns a safe default (all lessons in holdout).
+    """
+    global _policy_manifest_cache
+    if _policy_manifest_cache is not None:
+        return _policy_manifest_cache
+
+    manifest_path = _policy_manifest_path()
+    if not manifest_path.exists():
+        # Manifest not yet created (Stage 0 not run) — default all to holdout
+        _policy_manifest_cache = {
+            "version": 1,
+            "updated_at": "",
+            "validated_core": [],
+            "exempt": [],
+            "holdout_population": ["*"],  # sentinel: treat all lessons as holdout
+        }
+        return _policy_manifest_cache
+
+    try:
+        import yaml
+
+        with open(manifest_path, encoding="utf-8") as f:
+            _loaded = yaml.safe_load(f)
+        manifest = _loaded if isinstance(_loaded, dict) else {}
+    except ImportError:
+        # YAML library unavailable — log once and return safe default
+        print(
+            f"Warning: yaml not available; lesson-policy manifest at {manifest_path} ignored",
+            file=sys.stderr,
+        )
+        manifest = {
+            "version": 1,
+            "updated_at": "",
+            "validated_core": [],
+            "exempt": [],
+            "holdout_population": ["*"],  # sentinel: treat all lessons as holdout
+        }
+    except Exception as e:
+        # Parse error or file read failure — return safe default
+        print(
+            f"Warning: failed to load lesson-policy manifest: {e}",
+            file=sys.stderr,
+        )
+        manifest = {
+            "version": 1,
+            "updated_at": "",
+            "validated_core": [],
+            "exempt": [],
+            "holdout_population": ["*"],  # sentinel: treat all lessons as holdout
+        }
+
+    _policy_manifest_cache = manifest
+    return manifest
+
+
+def _classify_lesson(lesson_path: str) -> tuple[str, int]:
+    """Classify a lesson by its path against the policy manifest.
+
+    Args:
+        lesson_path: e.g. "lessons/patterns/persistent-learning.md"
+
+    Returns:
+        (policy_class, policy_version) where policy_class is one of:
+        - "validated_core": high-ROI, recommended for all sessions
+        - "exempt": safety/retention policy, exempt from dropout
+        - "holdout": under evaluation (default)
+        - "unknown": lesson not in manifest (created after manifest timestamp)
+    """
+    manifest = _load_policy_manifest()
+    policy_version = manifest.get("version", 1)
+
+    # Normalize lesson_path to the key format used in manifest.
+    # lesson_path may be absolute (/home/bob/bob/lessons/X/Y.md), relative
+    # (lessons/X/Y.md), or dot-relative (./lessons/X/Y.md).
+    # Note: the manifest format only indexes lessons under the 'lessons/'
+    # directory. Paths under other configured lesson directories (e.g.
+    # 'skills/') cannot be resolved to a manifest key and will always
+    # produce "unknown" (or "holdout" if the "*" sentinel is present).
+    path_str = str(lesson_path).replace("\\", "/")
+    if "/lessons/" in path_str:
+        key = path_str.split("/lessons/", 1)[1]
+    else:
+        # Strip any leading ./ before checking for lessons/ prefix
+        stripped = path_str.lstrip("./")
+        if stripped.startswith("lessons/"):
+            key = stripped[len("lessons/") :]
+        else:
+            # Path is not under a 'lessons/' directory — cannot be resolved
+            # to a manifest key. Apply the "*" sentinel if present (the
+            # missing-manifest fallback that classifies all lessons as
+            # holdout), otherwise "unknown" is the correct result.
+            holdout_pop = manifest.get("holdout_population", [])
+            if "*" in holdout_pop:
+                return "holdout", policy_version
+            return "unknown", policy_version
+    key = key.replace(".md", "").strip("/")
+
+    for category in ["validated_core", "exempt"]:
+        if key in manifest.get(category, []):
+            return category, policy_version
+
+    # "*" sentinel means all lessons fall into holdout (manifest missing/unavailable).
+    # For a present manifest that simply lacks holdout_population, default to [] so
+    # unlisted lessons are classified as "unknown", not spuriously as "holdout".
+    holdout_pop = manifest.get("holdout_population", [])
+    if "*" in holdout_pop or key in holdout_pop:
+        return "holdout", policy_version
+
+    # Not found in manifest — unknown (created after manifest timestamp)
+    return "unknown", policy_version
+
+
 # --- Lesson loading ---
 
 
@@ -1172,15 +1298,34 @@ def _get_dropout_log_dir(workspace: Path) -> Path:
 def _log_dropout(
     session_id: str, epsilon: float, withheld: list[dict], workspace: Path
 ) -> None:
-    """Append a dropout record for causal LOO analysis. Failures are swallowed."""
+    """Append a dropout record for causal LOO analysis. Failures are swallowed.
+
+    Stage 1 shadow logging: includes policy_class and policy_version per lesson
+    for cross-runtime parity validation.
+    """
     try:
         log_dir = _get_dropout_log_dir(workspace)
         log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Enrich withheld lessons with policy classification
+        enriched_withheld = []
+        for lesson in withheld:
+            policy_class, policy_version = _classify_lesson(lesson.get("path", ""))
+            enriched = dict(lesson)
+            enriched["policy_class"] = policy_class
+            enriched["policy_version"] = policy_version
+            enriched_withheld.append(enriched)
+
+        # Get policy manifest version from the manifest itself
+        manifest = _load_policy_manifest()
+        manifest_version = manifest.get("version", 1)
+
         record = {
             "ts": time.time(),
             "session_id": session_id,
             "epsilon": epsilon,
-            "withheld": withheld,
+            "policy_version": manifest_version,
+            "withheld": enriched_withheld,
         }
         with open(log_dir / f"{session_id}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
