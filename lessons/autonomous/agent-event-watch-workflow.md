@@ -47,5 +47,4 @@ gh pr view 123 --json state -q '.state'
 - Clear decisions — pre-defined thresholds prevent post-hoc bias
 
 ## Related
-- Companion doc: [knowledge/lessons/autonomous/agent-event-watch-workflow.md](../../knowledge/lessons/autonomous/agent-event-watch-workflow.md)
 - [Autonomous Session Structure](./autonomous-session-structure.md)
