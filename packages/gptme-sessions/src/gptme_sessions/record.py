@@ -246,6 +246,12 @@ class SessionRecord:
     # ``None`` when no journal_path was available to scan.
     smell_score: float | None = None
 
+    # Why the recorded outcome differs from what the primary signal said.
+    # ``None`` means no flip happened — the signal was taken at face value.
+    # Set by post_session() at each promotion site so an upgraded outcome
+    # (e.g. noop -> productive on caller deliverables) stays auditable.
+    outcome_flip_reason: str | None = None
+
     # Optional harm category tag (idea #191).  Populated by the
     # --classify-harm-category classifier in compute-harm-signal.py.
     # One of HARM_CATEGORY_LABELS, or None when not classified.
