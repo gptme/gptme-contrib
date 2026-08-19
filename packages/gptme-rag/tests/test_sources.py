@@ -224,3 +224,25 @@ def test_de_accumulate_transcript_skips_non_dict_entries():
     result = de_accumulate_transcript(transcript)  # type: ignore[arg-type]
     assert "first" in result
     assert "second" in result
+
+
+def test_collect_voice_calls_repo_root_guard_relative_vs_absolute(tmp_path: Path):
+    """Guard works when voice_calls_dir is absolute but repo_root is also absolute.
+
+    Regression for the P2 finding: Path.is_relative_to without .resolve() fails
+    when paths are given in different forms (one relative, one absolute).  Using
+    .resolve() on both normalises them so the comparison is spelling-independent.
+    """
+    repo = tmp_path / "repo"
+    call_dir = repo / "calls"
+    call_dir.mkdir(parents=True)
+    (call_dir / "call.json").write_text(
+        '{"transcript": [{"role": "user", "text": "hello"}]}', encoding="utf-8"
+    )
+    # Both absolute — must succeed (call_dir IS under repo)
+    docs = collect_voice_call_documents(call_dir, repo_root=repo)
+    assert len(docs) == 1
+    # Absolute call_dir, absolute repo_root pointing to sibling — must be empty
+    outside = tmp_path / "other"
+    outside.mkdir()
+    assert collect_voice_call_documents(call_dir, repo_root=outside) == []
