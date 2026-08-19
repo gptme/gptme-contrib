@@ -716,12 +716,39 @@ def test_update_record_pr_state_missing_record_is_noop(ws: Path) -> None:
     assert not (ws / "records" / "missing.json").exists()
 
 
-def test_fetch_pr_snapshot_nonzero_exit_is_empty(ws: Path) -> None:
+def test_fetch_pr_snapshot_nonzero_exit_returns_none(ws: Path) -> None:
+    """Non-zero gh exit → None (signals API failure, not empty-diff)."""
+
     def runner(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         assert args[:3] == ["gh", "pr", "view"]
         return subprocess.CompletedProcess(args, returncode=1, stdout="{}", stderr="")
 
-    assert fetch_pr_snapshot("gptme/gptme", 1, cwd=ws, runner=runner) == {}
+    assert fetch_pr_snapshot("gptme/gptme", 1, cwd=ws, runner=runner) is None
+
+
+def test_update_record_pr_state_gh_failure_sets_flag(ws: Path, tmp_path: Path) -> None:
+    """A fetch failure sets gh_snapshot_fetch_failed in the record."""
+    import json
+
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps({"outcome": "succeeded"}), encoding="utf-8")
+
+    def fail_fetch(repo: str, num: int) -> None:  # type: ignore[return]
+        return None
+
+    from gptme_runloops.worker_records import update_record_pr_state
+
+    update_record_pr_state(
+        record,
+        repo="gptme/gptme",
+        number=1,
+        before_json="{}",
+        cwd=ws,
+        fetch=fail_fetch,
+    )
+
+    payload = json.loads(record.read_text())
+    assert payload.get("gh_snapshot_fetch_failed") is True
 
 
 @pytest.mark.parametrize(

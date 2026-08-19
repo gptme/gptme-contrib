@@ -597,10 +597,11 @@ def fetch_pr_snapshot(
     cwd: str | Path,
     timeout: float = 20,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> dict[str, str]:
+) -> dict[str, str] | None:
     """Fetch the live PR snapshot via gh (worker.sh:413-433).
 
-    A non-zero gh exit → ``{}``; unparseable stdout → ``{}``.
+    A non-zero gh exit → ``None`` (caller must distinguish from an empty but
+    successful response); unparseable stdout → ``{}``.
 
     NOTE(parity): a gh *timeout* raises (``subprocess.TimeoutExpired``),
     killing the whole diff step — including the already-parsed before-fields
@@ -624,7 +625,7 @@ def fetch_pr_snapshot(
         check=False,
     )
     if result.returncode != 0:
-        return {}
+        return None
     return parse_pr_snapshot(result.stdout)
 
 
@@ -635,7 +636,7 @@ def update_record_pr_state(
     number: int | str,
     before_json: str,
     cwd: str | Path,
-    fetch: Callable[[str, int], dict[str, str]] | None = None,
+    fetch: Callable[[str, int], dict[str, str] | None] | None = None,
     upgrade_outcome: Callable[[dict[str, Any]], Any] | None = None,
 ) -> None:
     """Run the whole PR-state diff step against a record file (worker.sh:377-502).
@@ -650,10 +651,16 @@ def update_record_pr_state(
     record_path = Path(record_file)
     before = parse_pr_snapshot(before_json)
     pr_number = int(number)
+    after: dict[str, str] | None
     if fetch is not None:
         after = fetch(repo, pr_number)
     else:
         after = fetch_pr_snapshot(repo, pr_number, cwd=cwd)
+
+    # None signals a gh API failure (non-zero exit); distinguish from an empty
+    # but successful response so derive_effect_signal can classify it as infra.
+    gh_fetch_failed = after is None
+    after_safe: dict[str, str] = after if after is not None else {}
 
     with locked_state_file(record_path):
         if not record_path.is_file():
@@ -662,7 +669,8 @@ def update_record_pr_state(
         if not isinstance(payload, dict):
             return
 
-        apply_pr_state_diff(payload, before, after)
+        payload["gh_snapshot_fetch_failed"] = gh_fetch_failed
+        apply_pr_state_diff(payload, before, after_safe)
         outcome_before_upgrade = payload.get("outcome")
         if upgrade_outcome is not None:
             upgrade_outcome(payload)
@@ -1063,6 +1071,9 @@ def read_record_pr_state_after(record_path: Path | str) -> str:
 EFFECT_OBSERVED = "observed"
 EFFECT_NONE = "none"
 EFFECT_UNKNOWN = "unknown"
+#: gh API call failed at snapshot time — the dispatch cannot be blamed for the
+#: PR not moving; classify as infra in the recovery path, not ineffective.
+EFFECT_FETCH_FAILED = "fetch_failed"
 
 
 def derive_effect_signal(
@@ -1093,6 +1104,14 @@ def derive_effect_signal(
        effect for every session that never looked.
     """
     delivery = str(delivery_outcome or "").strip().lower()
+
+    # gh API failed at snapshot time: we cannot observe the "after" state, so
+    # this is an infra failure, not genuine ineffectiveness.  Must take
+    # precedence over delivery_outcome (including orphan_no_delivery) so that a
+    # fetch failure is never recorded as a definitive no-effect.
+    if payload.get("gh_snapshot_fetch_failed"):
+        return EFFECT_FETCH_FAILED
+
     if delivery == "orphan_no_delivery":
         return EFFECT_NONE
     if delivery == "handled":
