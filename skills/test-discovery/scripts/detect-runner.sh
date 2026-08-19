@@ -6,23 +6,37 @@ set -euo pipefail
 REASON=""
 CMD=""
 
-# Python: pytest (priority: explicit config > pyproject > setup.cfg > presence)
+# Resolve pytest invocation: prefer uv run pytest when uv is available
+if command -v uv &>/dev/null; then
+    PYTEST_CMD="uv run pytest -x -q"
+else
+    PYTEST_CMD="pytest -x -q"
+fi
+
+# Python: pytest (priority: explicit config > pyproject > setup.cfg > tox > presence)
 if [[ -f pytest.ini ]]; then
-    CMD="uv run pytest -x -q"
+    CMD="$PYTEST_CMD"
     REASON="pytest.ini found"
 elif [[ -f pyproject.toml ]] && grep -q '\[tool\.pytest' pyproject.toml 2>/dev/null; then
-    CMD="uv run pytest -x -q"
+    CMD="$PYTEST_CMD"
     REASON="[tool.pytest.ini_options] in pyproject.toml"
 elif [[ -f setup.cfg ]] && grep -q '^\[tool:pytest\]' setup.cfg 2>/dev/null; then
-    CMD="uv run pytest -x -q"
+    CMD="$PYTEST_CMD"
     REASON="[tool:pytest] in setup.cfg"
-elif [[ -f tox.ini ]] && grep -q '^\[pytest\]' tox.ini 2>/dev/null; then
-    CMD="uv run pytest -x -q"
-    REASON="[pytest] section in tox.ini"
+elif [[ -f tox.ini ]]; then
+    if grep -q '^\[pytest\]' tox.ini 2>/dev/null; then
+        # tox.ini used as a plain pytest config — run pytest directly
+        CMD="$PYTEST_CMD"
+        REASON="[pytest] section in tox.ini"
+    else
+        # Real tox project (has [testenv] or similar) — let tox manage the env
+        CMD="tox"
+        REASON="tox.ini found"
+    fi
 elif command -v pytest &>/dev/null || command -v uv &>/dev/null; then
     # Heuristic: if there are test files, assume pytest
     if find . -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | grep -q .; then
-        CMD="uv run pytest -x -q"
+        CMD="$PYTEST_CMD"
         REASON="test_*.py files found (pytest assumed)"
     fi
 fi
