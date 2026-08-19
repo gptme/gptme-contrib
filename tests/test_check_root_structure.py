@@ -19,14 +19,20 @@ def test_allowed_entries_pass():
     ), "check_root_structure.main() should return 0 on the current repo"
 
 
-def test_get_tracked_root_entries_returns_known_dirs():
-    """get_tracked_root_entries should include known root dirs like 'scripts'."""
+def test_get_tracked_root_entries_parses_paths_correctly():
+    """get_tracked_root_entries should extract first path components from git ls-files output."""
+    from unittest.mock import MagicMock
+
     import check_root_structure
 
-    entries = check_root_structure.get_tracked_root_entries()
-    assert "scripts" in entries
-    assert "tests" in entries
-    assert "lessons" in entries
+    fake_output = "scripts/foo.py\ntests/test_bar.py\nlessons/README.md\nREADME.md\n"
+    mock_result = MagicMock()
+    mock_result.stdout = fake_output
+
+    with patch("subprocess.run", return_value=mock_result):
+        entries = check_root_structure.get_tracked_root_entries()
+
+    assert entries == {"scripts", "tests", "lessons", "README.md"}
 
 
 def test_detects_unexpected_entry():
