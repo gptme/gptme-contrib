@@ -897,7 +897,7 @@ class TestLaneDispatcher:
         return LaneDispatcher(slot_manager=sm)
 
     def test_dispatch_empty(self, ld_no_slots):
-        launched, deferred = ld_no_slots.dispatch([])
+        launched, deferred, _ = ld_no_slots.dispatch([])
         assert launched == 0
         assert deferred == 0
 
@@ -917,7 +917,7 @@ class TestLaneDispatcher:
             make_item(repo="a/b", number=1, types=["assigned_issue"]),
             make_item(repo="a/b", number=2, types=["pr_update"]),
         ]
-        launched, deferred = ld.dispatch(items, backend="claude-code")
+        launched, deferred, _ = ld.dispatch(items, backend="claude-code")
         assert launched == 2
         assert deferred == 0
         assert len(callback_calls) == 2
@@ -1069,7 +1069,7 @@ class TestLaneDispatcher:
             make_item(types=["assigned_issue"]),  # fast
             make_item(types=["pr_update"]),  # slow
         ]
-        launched, deferred = ld.dispatch(items)
+        launched, deferred, _ = ld.dispatch(items)
         # Fast launches (cap=1, below), slow deferred
         assert launched == 1
         assert deferred == 1
@@ -1092,7 +1092,7 @@ class TestLaneDispatcher:
         ld = LaneDispatcher(slot_manager=sm, dispatch_callback=cb)
 
         items = [make_item(types=["assigned_issue"])]
-        launched, deferred = ld.dispatch(items)
+        launched, deferred, _ = ld.dispatch(items)
         assert launched == 0
         assert deferred == 1
         assert len(callback_calls) == 0
@@ -1118,7 +1118,7 @@ class TestLaneDispatcher:
         items = [
             make_item(types=["assigned_issue"]),  # fast
         ]
-        launched, deferred = ld.dispatch(items)
+        launched, deferred, _ = ld.dispatch(items)
         # Fast should burst
         assert launched == 1
         assert deferred == 0
@@ -1142,7 +1142,7 @@ class TestLaneDispatcher:
         ld = LaneDispatcher(slot_manager=sm, dispatch_callback=cb)
 
         items = [make_item(types=["assigned_issue"])]
-        launched, deferred = ld.dispatch(items)
+        launched, deferred, _ = ld.dispatch(items)
         # Fast burst exhausted
         assert launched == 0
         assert deferred == 1
@@ -1167,7 +1167,7 @@ class TestLaneDispatcher:
             make_item(number=3, types=["ci_failure"]),
             make_item(number=4, types=["mention"]),
         ]
-        launched, deferred = ld.dispatch(items)
+        launched, deferred, _ = ld.dispatch(items)
         assert launched == 4
         lanes = [c["lane"] for c in callback_calls]
         assert lanes == ["fast", "fast", "slow", "slow"]
@@ -2366,11 +2366,14 @@ class TestRepoExclusionList:
         patterns = _get_excluded_repo_patterns()
         assert "ActivityWatch/*" in patterns
 
-    def test_get_excluded_repo_patterns_env_override(self, monkeypatch):
+    def test_get_excluded_repo_patterns_env_additive(self, monkeypatch):
+        """Setting the env var adds repos to the default — ActivityWatch/* is preserved."""
         monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "foo/bar,baz/*")
         patterns = _get_excluded_repo_patterns()
-        assert patterns == ("foo/bar", "baz/*")
-        assert "ActivityWatch/*" not in patterns
+        assert "foo/bar" in patterns
+        assert "baz/*" in patterns
+        # Default must be preserved — setting the env var is additive, not a replacement.
+        assert "ActivityWatch/*" in patterns
 
     def test_get_excluded_repo_patterns_env_empty_disables(self, monkeypatch):
         monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "")
@@ -2489,7 +2492,8 @@ class TestRepoExclusionList:
             ),
             make_item(repo="gptme/gptme", number=1, types=["notification"]),
         ]
-        launched, deferred = ld.dispatch(items)
+        launched, deferred, skipped_excluded = ld.dispatch(items)
         assert launched == 1
         assert deferred == 0
+        assert skipped_excluded == 1
         assert callback_calls == ["gptme/gptme"]

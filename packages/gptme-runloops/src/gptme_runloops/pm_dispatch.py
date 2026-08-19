@@ -63,12 +63,22 @@ def _get_excluded_repo_patterns() -> tuple[str, ...]:
     """Return repo patterns excluded from PM dispatch.
 
     Reads ``PM_DISPATCH_EXCLUDE_REPOS`` (comma-separated ``owner/repo`` or
-    ``owner/*`` globs).  Falls back to :data:`_PM_DISPATCH_EXCLUDE_REPOS_DEFAULT`.
-    Set the env var to an empty string to disable all exclusions.
+    ``owner/*`` globs) and **merges** it with
+    :data:`_PM_DISPATCH_EXCLUDE_REPOS_DEFAULT`.  Setting the env var to a
+    non-empty value adds to the default rather than replacing it, so the
+    built-in ``ActivityWatch/*`` guard is never accidentally dropped.
+    Set the env var to an empty string to disable *all* exclusions
+    (including the default).
     """
     raw = os.environ.get(PM_DISPATCH_EXCLUDE_REPOS_ENV)
     if raw is not None:
-        return tuple(r.strip() for r in raw.split(",") if r.strip())
+        env_patterns = tuple(r.strip() for r in raw.split(",") if r.strip())
+        # Empty string disables all exclusions; non-empty adds to the default.
+        if not env_patterns:
+            return ()
+        return _PM_DISPATCH_EXCLUDE_REPOS_DEFAULT + tuple(
+            p for p in env_patterns if p not in _PM_DISPATCH_EXCLUDE_REPOS_DEFAULT
+        )
     return _PM_DISPATCH_EXCLUDE_REPOS_DEFAULT
 
 
@@ -692,7 +702,7 @@ class LaneDispatcher:
         script_path: str | None = None,
         fast_model: str | None = None,
         bandit: Any = None,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         """Dispatch items via transient systemd units.
 
         Iterates through fast lane first, then slow lane. For each item:
@@ -713,7 +723,10 @@ class LaneDispatcher:
         instance.
 
         Returns:
-            (launched_count, deferred_count)
+            (launched_count, deferred_count, skipped_excluded_count) — the third
+            element counts items dropped because their repo matched an exclusion
+            pattern (mirrors ``DispatchResult.skipped_excluded`` from
+            ``dispatch_grouped_items``).
         """
         if fast_model is None:
             fast_model = os.environ.get("BOB_PM_FAST_LANE_MODEL") or None
@@ -790,7 +803,7 @@ class LaneDispatcher:
                 else:
                     deferred += 1
 
-        return launched, deferred
+        return launched, deferred, skipped_excluded
 
     def _launch_unit(
         self,
