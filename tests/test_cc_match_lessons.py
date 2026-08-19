@@ -210,13 +210,13 @@ def test_session_state_empty_for_new_session(hook, tmp_path, monkeypatch):
 # --- find_workspace ---
 
 
-def test_find_workspace_uses_cwd(hook, workspace, tmp_path, monkeypatch):
+def test_find_workspace_uses_cwd(hook, workspace, tmp_path_factory, monkeypatch):
     """Workspace is found from cwd when script is not inside workspace."""
-    # Point __file__ into a tmp_path-provided directory (guaranteed to contain
-    # no gptme.toml or workspace markers) so the script-dir walk finds nothing,
-    # forcing find_workspace() to fall through to cwd.
-    hook_dir = tmp_path / "isolated_hook_test"
-    hook_dir.mkdir()
+    # Point __file__ into a SEPARATE tmp directory (not a subdirectory of the
+    # workspace fixture's tmp_path) so the script-dir walk finds no gptme.toml
+    # and falls through to cwd.  Using tmp_path_factory.mktemp() gives an
+    # isolated root that is guaranteed to be outside the workspace tree.
+    hook_dir = tmp_path_factory.mktemp("isolated_hook")
     monkeypatch.setattr(hook, "__file__", str(hook_dir / "match-lessons.py"))
     monkeypatch.chdir(workspace)
     # Reset cached workspace
@@ -226,12 +226,11 @@ def test_find_workspace_uses_cwd(hook, workspace, tmp_path, monkeypatch):
     hook._workspace = None  # Reset after test
 
 
-def test_find_workspace_walks_up(hook, workspace, tmp_path, monkeypatch):
+def test_find_workspace_walks_up(hook, workspace, tmp_path_factory, monkeypatch):
     """Workspace found by walking up from subdirectory."""
-    # Point __file__ into a tmp_path-provided directory (guaranteed to contain
-    # no gptme.toml or workspace markers) so the script-dir walk finds nothing.
-    hook_dir = tmp_path / "isolated_hook_test"
-    hook_dir.mkdir()
+    # Point __file__ into a SEPARATE tmp directory (not a subdirectory of the
+    # workspace fixture's tmp_path) so the script-dir walk finds no gptme.toml.
+    hook_dir = tmp_path_factory.mktemp("isolated_hook")
     monkeypatch.setattr(hook, "__file__", str(hook_dir / "match-lessons.py"))
     subdir = workspace / "subdir" / "deep"
     subdir.mkdir(parents=True)
