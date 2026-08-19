@@ -65,9 +65,16 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]]) -> str:
     turns: list[str] = []
     i = 0
     while i < len(transcript):
+        if not isinstance(transcript[i], dict):
+            i += 1
+            continue
         current_role = str(transcript[i].get("role", ""))
         run_texts: list[str] = []
-        while i < len(transcript) and transcript[i].get("role", "") == current_role:
+        while (
+            i < len(transcript)
+            and isinstance(transcript[i], dict)
+            and transcript[i].get("role", "") == current_role
+        ):
             run_texts.append(str(transcript[i].get("text", "")))
             i += 1
         best = max(run_texts, key=len) if run_texts else ""
@@ -185,6 +192,8 @@ def collect_voice_call_documents(
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
             continue
         transcript = data.get("transcript", [])
         if not isinstance(transcript, list) or not transcript:

@@ -171,3 +171,28 @@ def test_collect_voice_calls_repo_root_guard(tmp_path: Path):
     )
     # repo_root is the `repo` dir; `outside` is a sibling, NOT under it.
     assert collect_voice_call_documents(outside, repo_root=repo) == []
+
+
+def test_collect_voice_calls_skips_non_dict_json(tmp_path: Path):
+    """Valid JSON that is not a dict (e.g. an array) must be skipped gracefully."""
+    call_dir = tmp_path / "voice"
+    call_dir.mkdir()
+    (call_dir / "list.json").write_text("[1, 2, 3]", encoding="utf-8")
+    (call_dir / "good.json").write_text(
+        '{"transcript": [{"role": "user", "text": "hello"}]}', encoding="utf-8"
+    )
+    docs = collect_voice_call_documents(call_dir)
+    assert len(docs) == 1
+
+
+def test_de_accumulate_transcript_skips_non_dict_entries():
+    """Non-dict entries in the transcript list must be skipped, not crash."""
+    transcript = [
+        {"role": "user", "text": "first"},
+        "not a dict",
+        42,
+        {"role": "assistant", "text": "second"},
+    ]
+    result = de_accumulate_transcript(transcript)  # type: ignore[arg-type]
+    assert "first" in result
+    assert "second" in result
