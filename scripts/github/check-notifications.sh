@@ -124,7 +124,10 @@ _get_cached_item_state() {
 
     # Check cache validity (file exists and is newer than TTL)
     if [ -f "$cache_file" ]; then
-        local file_age=$(($(date +%s) - $(stat -c%Y "$cache_file" 2>/dev/null || echo 0)))
+        local now mtime file_age
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
+        file_age=$(( now - mtime ))
         if [ "$file_age" -lt "$_STATE_CACHE_TTL" ]; then
             cat "$cache_file"
             return 0
@@ -193,10 +196,11 @@ is_item_open() {
 # is_permission_blocked_merge_ready_pr makes two API calls per PR:
 # 1. gh pr view (for state/mergeStateStatus/isDraft/statusCheckRollup)
 # 2. gh api comments (for Bob's historical merge-ready comments)
-# Cache the result to 10-min TTL. Merge-ready state rarely changes in that window,
-# and checking again within 10 min usually gives the same answer.
+# Cache the result to 2-min TTL. Merge-ready state can change quickly (new CI
+# failure, new commit), so a short TTL limits the window where a stale
+# merge_ready value suppresses a notification that should fire.
 _MERGE_READY_CACHE_DIR="${BOB_NOTIFICATION_MERGE_READY_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/check-notifications/merge-ready}"
-_MERGE_READY_CACHE_TTL=600  # 10 minutes
+_MERGE_READY_CACHE_TTL=120  # 2 minutes (reduced from 10 to limit stale merge_ready suppression)
 
 _is_permission_blocked_merge_ready_pr_cached() {
     local repo=$1
@@ -206,7 +210,10 @@ _is_permission_blocked_merge_ready_pr_cached() {
 
     # Check cache validity
     if [ -f "$cache_file" ]; then
-        local file_age=$(($(date +%s) - $(stat -c%Y "$cache_file" 2>/dev/null || echo 0)))
+        local now mtime file_age
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
+        file_age=$(( now - mtime ))
         if [ "$file_age" -lt "$_MERGE_READY_CACHE_TTL" ]; then
             result=$(cat "$cache_file")
             [[ "$result" == "merge_ready" ]]
