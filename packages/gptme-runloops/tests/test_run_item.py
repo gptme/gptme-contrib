@@ -1040,6 +1040,26 @@ def test_cc_auth_expiry_without_rate_limit_field_is_still_infra(tmp_path) -> Non
         (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
 
 
+def test_cc_auth_marker_in_truncated_log_without_result_is_not_infra(tmp_path) -> None:
+    """Hard-killed log, no result event, last tool output mentions the marker:
+    conservatively NOT infra."""
+    config = make_config(tmp_path)
+    sid = f"test-rl-{os.getpid()}-g"
+    _cc_log(
+        tmp_path,
+        sid,
+        [
+            {"type": "assistant", "message": {"content": "running git fetch"}},
+            {"type": "user", "message": {"content": "fatal: Failed to authenticate"}},
+        ],
+    )
+    plan = _fake_plan(tmp_path, sid)
+    try:
+        assert _inspect_cc_failure(plan, config) == (False, None)
+    finally:
+        (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
+
+
 def test_cc_confirmed_rejection_reports_rate_limit_kind(tmp_path) -> None:
     config = make_config(tmp_path)
     sid = f"test-rl-{os.getpid()}-e"

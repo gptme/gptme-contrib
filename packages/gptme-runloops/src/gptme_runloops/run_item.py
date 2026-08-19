@@ -1679,20 +1679,21 @@ INFRA_FAILURE_CC_RATE_LIMIT = "cc_rate_limit"
 INFRA_FAILURE_CC_AUTH = "cc_auth"
 
 
-def cc_stream_died_on_auth(text: str, *, tail_lines: int = 5) -> bool:
+def cc_stream_died_on_auth(text: str) -> bool:
     """True when the CC stream-json log *terminated* on an auth failure.
 
     Matches :data:`CC_AUTH_FAILURE_MARKERS` only against the terminal
     ``result`` event (the last ``{"type": "result", ...}`` line — its
-    ``result`` text is what the CLI printed as the fatal error), falling back
-    to the last *tail_lines* non-empty lines when no result event exists.
-    Never the whole transcript: a tool output that mentions "Failed to
-    authenticate" mid-session (a git 401, a cache that "could not be
-    refreshed") must not relabel an ordinary failure as infra and hand it a
-    free re-arm.
+    ``result`` text is what the CLI printed as the fatal error). No result
+    event → False, conservatively: a log truncated by a hard kill whose last
+    tool output happened to say "Failed to authenticate" (a git 401) must not
+    relabel an ordinary failure as infra and hand it a free re-arm. Both
+    observed auth deaths (gptme/gptme#3531, 2026-08-17 15:06/15:31) carried a
+    ``result`` event with the marker in ``result``.
     """
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    for raw in reversed(lines):
+    for raw in reversed(text.splitlines()):
+        if not raw.strip():
+            continue
         try:
             ev = json.loads(raw)
         except ValueError:
@@ -1703,8 +1704,7 @@ def cc_stream_died_on_auth(text: str, *, tail_lines: int = 5) -> bool:
             str(ev.get(k) or "") for k in ("result", "error", "message", "subtype")
         )
         return any(marker in blob for marker in CC_AUTH_FAILURE_MARKERS)
-    tail = "\n".join(lines[-tail_lines:])
-    return any(marker in tail for marker in CC_AUTH_FAILURE_MARKERS)
+    return False
 
 
 def _handle_cc_rate_limit(

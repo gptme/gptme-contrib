@@ -1574,17 +1574,32 @@ pr_has_unresolved_human_thread() {
     local owner=${repo%%/*}
     local name=${repo#*/}
     local author="${AUTHOR:-${BOT_USERNAME:-TimeToBuildBob}}"
-    local raw result
-    raw=$(gh api graphql \
-        -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login}}}}}}}}' \
-        -F owner="$owner" -F name="$name" -F number="$number" 2>/dev/null) || return 1
+    # Paginate: large PRs carry dozens of bot threads ahead of the one human
+    # thread, so first:100 alone could miss it and fall through to a merge_ready
+    # emit. Bounded at 10 pages (1000 threads) — beyond that, fail open.
+    local raw result page=0 after="" nodes="[]"
+    local -a cursor_args=()
+    while [ "$page" -lt 10 ]; do
+        cursor_args=()
+        [ -n "$after" ] && cursor_args=(-F "after=$after")
+        raw=$(gh api graphql \
+            -f query='query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{author{login}}}}}}}}' \
+            -F owner="$owner" -F name="$name" -F number="$number" \
+            "${cursor_args[@]}" 2>/dev/null) || return 1
+        nodes=$(printf '%s\n%s' "$nodes" "$raw" | jq -s '.[0] + (.[1].data.repository.pullRequest.reviewThreads.nodes // [])') || return 1
+        if [ "$(printf '%s' "$raw" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage // false')" != "true" ]; then
+            break
+        fi
+        after=$(printf '%s' "$raw" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')
+        page=$((page + 1))
+    done
     # gh's --jq has no --arg; run jq itself so AUTHOR can be bound safely.
-    result=$(printf '%s' "$raw" | jq -r --arg author "$author" '
+    result=$(printf '%s' "$nodes" | jq -r --arg author "$author" '
             def is_bot_login:
                 test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)|(^greptile)"; "i");
             def is_human_login:
                 . != null and . != "" and (ascii_downcase != ($author | ascii_downcase)) and (is_bot_login | not);
-            [ .data.repository.pullRequest.reviewThreads.nodes[]?
+            [ .[]?
               | select(.isResolved == false)
               | (.comments.nodes[0].author.login // "")
               | select(is_human_login) ] | first // empty
