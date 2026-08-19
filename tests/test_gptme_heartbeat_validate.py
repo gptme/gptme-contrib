@@ -8,7 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VALIDATOR_PATH = REPO_ROOT / "scripts" / "gptme-heartbeat-validate.py"
 EXAMPLES_DIR = REPO_ROOT / "docs" / "protocols" / "examples"
-SCHEMA_PATH = REPO_ROOT / "schemas" / "gptme-heartbeat-event.schema.json"
+SCHEMA_PATH = REPO_ROOT / "docs" / "protocols" / "gptme-heartbeat-event.schema.json"
 
 
 def _load_validator():

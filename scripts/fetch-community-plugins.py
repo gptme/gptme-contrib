@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch community gptme extensions and update community_plugins.json.
+"""Fetch community gptme extensions and update docs/community_plugins.json.
 
 Merges two sources:
 1. registry.gptme.org/registry.json — curated official list (seed/baseline)
@@ -46,7 +46,7 @@ _TYPE_TO_TOPICS: dict[str, list[str]] = {
     "skill / mcp-server": ["gptme-skill", "gptme-mcp-server"],
 }
 
-DEFAULT_OUTPUT = Path(__file__).parent.parent / "community_plugins.json"
+DEFAULT_OUTPUT = Path(__file__).parent.parent / "docs" / "community_plugins.json"
 
 
 def fetch_registry() -> tuple[list[dict], bool]:
@@ -183,7 +183,7 @@ def main() -> int:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help="Output JSON file (default: community_plugins.json)",
+        help="Output JSON file (default: docs/community_plugins.json)",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print result without writing"
@@ -205,13 +205,25 @@ def main() -> int:
     # a registry failure silently drops curated repos; a topic failure drops community
     # repos tagged with the failing topic. Either way it's as bad as a total wipe.
     any_source_failed = registry_failed or bool(failed_topics)
+    failed_labels = (["registry"] if registry_failed else []) + failed_topics
+
+    # Guard 1: no previous file but all sources failed → refuse to write empty output.
+    # Previously the committed file was always present so this case couldn't arise;
+    # now docs/community_plugins.json is gitignored and absent on a fresh clone, so
+    # we must explicitly fail-closed rather than silently writing {entries: []}.
+    if any_source_failed and not entries and not args.dry_run:
+        print(
+            f"Error: fetch failed for: {', '.join(failed_labels)} and no entries"
+            " to write. Check GitHub API access.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Guard 2: previous file exists with entries → refuse to overwrite with degraded data.
     if any_source_failed and not args.dry_run and args.output.exists():
         try:
             prev = json.loads(args.output.read_text())
             if prev.get("entries"):
-                failed_labels = (
-                    ["registry"] if registry_failed else []
-                ) + failed_topics
                 print(
                     f"Error: fetch failed for: {', '.join(failed_labels)}."
                     " Refusing to overwrite previous data — check GitHub API access.",
