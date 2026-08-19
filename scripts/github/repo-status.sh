@@ -80,11 +80,18 @@ _disabled_workflows() {
         fi
     fi
     wf=$(gh workflow list --repo "$repo" --all --json name,state --jq '[.[] | select(.state == "disabled_manually") | .name]' 2>/dev/null || true)
-    [ -n "$wf" ] || wf='[]'
-    mkdir -p "$_WF_CACHE_DIR" 2>/dev/null || true
-    printf '%s' "$wf" > "$cache_file.tmp.$$" 2>/dev/null \
-        && mv "$cache_file.tmp.$$" "$cache_file" 2>/dev/null \
-        || rm -f "$cache_file.tmp.$$" 2>/dev/null
+    if [ -n "$wf" ]; then
+        # gh succeeded — cache the result
+        mkdir -p "$_WF_CACHE_DIR" 2>/dev/null || true
+        printf '%s' "$wf" > "$cache_file.tmp.$$" 2>/dev/null \
+            && mv "$cache_file.tmp.$$" "$cache_file" 2>/dev/null \
+            || rm -f "$cache_file.tmp.$$" 2>/dev/null
+    else
+        # gh failed (rate limit, network error, etc.) — do NOT cache; fall back
+        # to '[]' for this run only so the caller sees no disabled workflows
+        # rather than persisting a stale empty list for the next hour.
+        wf='[]'
+    fi
     printf '%s' "$wf"
 }
 
