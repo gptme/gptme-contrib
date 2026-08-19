@@ -220,6 +220,16 @@ class TestDeriveEffectSignal:
     def test_handled_delivery_is_observed(self) -> None:
         assert derive_effect_signal({}, delivery_outcome="handled") == EFFECT_OBSERVED
 
+    def test_handled_delivery_outranks_fetch_failed(self) -> None:
+        """A confirmed delivery (reply posted) must not be overridden by a snapshot fetch failure."""
+        assert (
+            derive_effect_signal(
+                {"gh_snapshot_fetch_failed": True},
+                delivery_outcome="handled",
+            )
+            == EFFECT_OBSERVED
+        )
+
     def test_empty_delivery_outcome_is_not_treated_as_handled(self) -> None:
         # run_post_session holds "handled" as its permissive DEFAULT when no
         # delivery check runs, and passes "" instead of that default. If the
