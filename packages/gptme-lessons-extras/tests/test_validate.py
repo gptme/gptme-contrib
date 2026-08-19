@@ -1,5 +1,6 @@
 """Tests for core LessonValidator behavior."""
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -548,3 +549,63 @@ def test_dead_companion_link_archived_skips():
         assert (
             not companion_errors
         ), f"Archived lesson should not flag dead companion link: {companion_errors}"
+
+
+# A concise lesson with no companion link at all — used to check that the
+# suggested companion path mirrors the lesson's category subdir.
+_LESSON_WITHOUT_COMPANION_LINK = _LESSON_WITH_DEAD_COMPANION_LINK.replace(
+    "- Full context: [knowledge/lessons/test-lesson.md](../../knowledge/lessons/test-lesson.md)",
+    "- Some other reference",
+)
+
+
+def test_existing_companion_suggestion_names_real_subdir_path():
+    """The 'exists but not linked' warning must name where the companion ACTUALLY is.
+
+    Companions live under a category subdir (knowledge/lessons/<category>/<stem>.md).
+    Suggesting a flat knowledge/lessons/<stem>.md sends the author to a path that
+    does not exist, and the resulting link fails the markdown-link check.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "knowledge" / "lessons" / "monitoring").mkdir(parents=True)
+        (root / "knowledge" / "lessons" / "monitoring" / "test-lesson.md").write_text(
+            "# companion\n"
+        )
+        lesson_dir = root / "lessons" / "monitoring"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, _LESSON_WITHOUT_COMPANION_LINK)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+        warnings = [w for w in validator.warnings if "companion" in w.lower()]
+        assert warnings, "Existing-but-unlinked companion should warn"
+        assert "knowledge/lessons/monitoring/test-lesson.md" in warnings[0], warnings[0]
+
+
+def test_missing_companion_suggestion_mirrors_category_subdir():
+    """With no companion on disk, the suggested path still mirrors the category."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "knowledge" / "lessons").mkdir(parents=True)
+        lesson_dir = root / "lessons" / "monitoring"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, _LESSON_WITH_DEAD_COMPANION_LINK)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+        errors = [e for e in validator.errors if "companion" in e.lower()]
+        assert errors, "Dead companion link should error"
+        assert "knowledge/lessons/monitoring/test-lesson.md" in errors[0], errors[0]

@@ -530,25 +530,42 @@ class LessonValidator:
         body_start = len(self.content[:frontmatter_end].split("\n"))
         body_lines = len(lines) - body_start
 
+        # Suggested companion path. When the companion already exists, name where
+        # it ACTUALLY is — companions live under a category subdir mirroring the
+        # lesson's own (knowledge/lessons/<category>/<stem>.md), so a flat
+        # knowledge/lessons/<stem>.md suggestion sends the author to a path that
+        # does not exist and produces a link the markdown-link hook then rejects.
+        if has_companion:
+            suggested_companion = companion_matches[0].as_posix()
+        else:
+            # Mirror the lesson's own category dir, unless it sits at the root.
+            category = self.filepath.parent.name
+            target_dir = (
+                COMPANION_DIR
+                if category in ("", ".", "lessons")
+                else COMPANION_DIR / category
+            )
+            suggested_companion = (target_dir / f"{self.filepath.stem}.md").as_posix()
+
         # If lesson is long but no companion, suggest creating one
         if body_lines > TARGET_LENGTH and not has_companion:
             self.warnings.append(
                 f"Primary lesson is {body_lines} lines (target: {TARGET_LENGTH}). "
-                f"Consider creating companion: knowledge/lessons/{self.filepath.stem}.md"
+                f"Consider creating companion: {suggested_companion}"
             )
 
         # If lesson links a companion that does not exist, that is a dead reference
         if has_companion_link and not has_companion:
             self.errors.append(
                 f"Links a companion doc that does not exist. Create it or remove the "
-                f"link: knowledge/lessons/{self.filepath.stem}.md"
+                f"link: {suggested_companion}"
             )
 
         # If companion exists but not linked, warn
         if has_companion and not has_companion_link:
             self.warnings.append(
                 f"Companion doc exists but not linked. Add to Related section: "
-                f"knowledge/lessons/{self.filepath.stem}.md"
+                f"{suggested_companion}"
             )
 
     def _check_length(self):
