@@ -221,18 +221,29 @@ _is_permission_blocked_merge_ready_pr_cached() {
         fi
     fi
 
-    # Cache miss: compute fresh
-    if _is_permission_blocked_merge_ready_pr_uncached "$repo" "$number"; then
+    # Cache miss: compute fresh.
+    # _is_permission_blocked_merge_ready_pr_uncached returns:
+    #   0 = merge-ready (cache as merge_ready)
+    #   1 = genuinely not merge-ready (cache as not_merge_ready)
+    #   2 = API failure (do NOT cache — let the next call retry live)
+    local uncached_rc
+    _is_permission_blocked_merge_ready_pr_uncached "$repo" "$number"
+    uncached_rc=$?
+
+    if [[ "$uncached_rc" -eq 0 ]]; then
         mkdir -p "$_MERGE_READY_CACHE_DIR" 2>/dev/null || true
         printf 'merge_ready' > "$_MERGE_READY_CACHE_DIR/${cache_key//\//__}.tmp.$$" 2>/dev/null \
             && mv "$_MERGE_READY_CACHE_DIR/${cache_key//\//__}.tmp.$$" "$cache_file" 2>/dev/null \
             || rm -f "$_MERGE_READY_CACHE_DIR/${cache_key//\//__}.tmp.$$" 2>/dev/null
         return 0
-    else
+    elif [[ "$uncached_rc" -eq 1 ]]; then
         mkdir -p "$_MERGE_READY_CACHE_DIR" 2>/dev/null || true
         printf 'not_merge_ready' > "$_MERGE_READY_CACHE_DIR/${cache_key//\//__}.tmp.$$" 2>/dev/null \
             && mv "$_MERGE_READY_CACHE_DIR/${cache_key//\//__}.tmp.$$" "$cache_file" 2>/dev/null \
             || rm -f "$_MERGE_READY_CACHE_DIR/${cache_key//\//__}.tmp.$$" 2>/dev/null
+        return 1
+    else
+        # Exit 2 = API failure: don't cache, propagate as non-merge-ready for this run only
         return 1
     fi
 }
@@ -243,8 +254,11 @@ _is_permission_blocked_merge_ready_pr_uncached() {
     local number=$2
     local pr_json
 
+    # API failures use exit 2 so callers can distinguish "API down" from
+    # "genuinely not merge-ready" (exit 1). The cached path only persists
+    # not_merge_ready on exit 1, never on exit 2.
     pr_json=$(gh pr view "$number" --repo "$repo" \
-        --json state,mergeStateStatus,isDraft,statusCheckRollup 2>/dev/null) || return 1
+        --json state,mergeStateStatus,isDraft,statusCheckRollup 2>/dev/null) || return 2
 
     local state merge_state is_draft non_success_count
     state=$(echo "$pr_json" | jq -r '.state // ""')
@@ -264,7 +278,7 @@ _is_permission_blocked_merge_ready_pr_uncached() {
     # aligned (see ErikBjare/bob#680).
     local bot_comments
     bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq '[.[] | select(.user.login == "TimeToBuildBob") | .body] | join("\n")' 2>/dev/null) || return 1
+        --jq '[.[] | select(.user.login == "TimeToBuildBob") | .body] | join("\n")' 2>/dev/null) || return 2
 
     [[ -n "$bot_comments" ]] || return 1
 
