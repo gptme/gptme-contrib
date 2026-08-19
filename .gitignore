@@ -22,8 +22,9 @@ scripts/.env
 venv/
 .gptme/
 
-# Community plugins index (moved to repo root in #1292)
+# Community plugins index (generated artifact — do not commit snapshots)
 state/community_plugins.json
+docs/community_plugins.json
 
 # Task lock files (runtime state)
 state/locks/
