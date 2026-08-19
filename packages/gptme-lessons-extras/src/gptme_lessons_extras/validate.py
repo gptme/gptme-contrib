@@ -511,9 +511,21 @@ class LessonValidator:
         # companion linking or length on superseded files.
         if self.status == "archived":
             return
-        # Check if companion doc exists (search subdirectories too)
+        # Check if companion doc exists (search subdirectories too).
+        # Only count a match as *this* lesson's companion when it lives in the
+        # same category subdir — a match in a different category shares only the
+        # stem name, not the intent.  Falling back to an arbitrary cross-category
+        # match would send the author to the wrong document.
         companion_matches = list(COMPANION_DIR.rglob(f"{self.filepath.stem}.md"))
-        has_companion = len(companion_matches) > 0
+        own_companion = next(
+            (
+                m
+                for m in companion_matches
+                if m.parent.name == self.filepath.parent.name
+            ),
+            None,
+        )
+        has_companion = own_companion is not None
 
         # Check if linked in Related section (allow optional subdirectory component)
         has_companion_link = bool(
@@ -530,23 +542,13 @@ class LessonValidator:
         body_start = len(self.content[:frontmatter_end].split("\n"))
         body_lines = len(lines) - body_start
 
-        # Suggested companion path. When the companion already exists, name where
-        # it ACTUALLY is — companions live under a category subdir mirroring the
-        # lesson's own (knowledge/lessons/<category>/<stem>.md), so a flat
-        # knowledge/lessons/<stem>.md suggestion sends the author to a path that
-        # does not exist and produces a link the markdown-link hook then rejects.
-        if has_companion:
-            # Prefer the companion whose parent dir matches the lesson's own category.
-            # rglob order is filesystem-dependent, so [0] is non-deterministic when
-            # two lessons in different category subdirs share the same stem.
-            suggested_companion = next(
-                (
-                    m
-                    for m in companion_matches
-                    if m.parent.name == self.filepath.parent.name
-                ),
-                companion_matches[0],
-            ).as_posix()
+        # Suggested companion path. When the companion already exists in the
+        # lesson's own category subdir, name its actual location so that any
+        # Related link written from this suggestion passes markdown-link checks.
+        # Otherwise mirror the lesson's own category dir so the author creates
+        # the file in the right place from the start.
+        if own_companion is not None:
+            suggested_companion = own_companion.as_posix()
         else:
             # Mirror the lesson's own category dir, unless it sits at the root.
             category = self.filepath.parent.name

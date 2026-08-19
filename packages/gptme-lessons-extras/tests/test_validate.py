@@ -609,3 +609,54 @@ def test_missing_companion_suggestion_mirrors_category_subdir():
         errors = [e for e in validator.errors if "companion" in e.lower()]
         assert errors, "Dead companion link should error"
         assert "knowledge/lessons/monitoring/test-lesson.md" in errors[0], errors[0]
+
+
+def test_cross_category_companion_not_counted():
+    """A companion in a different category must not be treated as this lesson's companion.
+
+    When two lessons share the same stem but live in different category subdirs,
+    the validator must not suggest (or treat as linked) a companion from the
+    other category — doing so would point the author at the wrong document.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Only a cross-category companion exists (e.g. for lessons/workflow/test-lesson.md)
+        (root / "knowledge" / "lessons" / "workflow").mkdir(parents=True)
+        (root / "knowledge" / "lessons" / "workflow" / "test-lesson.md").write_text(
+            "# companion for a different lesson\n"
+        )
+        # Our lesson is in the 'monitoring' category — no companion there
+        lesson_dir = root / "lessons" / "monitoring"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, _LESSON_WITHOUT_COMPANION_LINK)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+        # The monitoring lesson has no companion — the workflow companion must be ignored.
+        companion_warnings = [w for w in validator.warnings if "companion" in w.lower()]
+        # Should NOT warn "exists but not linked" (the cross-category file is not ours)
+        for w in companion_warnings:
+            assert "workflow" not in w, (
+                "Must not suggest cross-category companion: " + w
+            )
+        # The suggested path should mirror the lesson's own category (monitoring), not workflow
+        # (we can only check this via the dead-link path; use the link-bearing version)
+        path2 = _write_lesson(lesson_dir, _LESSON_WITH_DEAD_COMPANION_LINK)
+        try:
+            os.chdir(root)
+            validator2 = LessonValidator(path2)
+            validator2.validate()
+        finally:
+            os.chdir(cwd)
+        errors = [e for e in validator2.errors if "companion" in e.lower()]
+        assert errors, "Dead companion link should still error"
+        assert "knowledge/lessons/monitoring/test-lesson.md" in errors[0], errors[0]
+        assert "workflow" not in errors[0], (
+            "Error must not reference cross-category companion: " + errors[0]
+        )
