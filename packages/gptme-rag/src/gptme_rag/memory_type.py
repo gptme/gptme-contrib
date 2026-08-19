@@ -89,7 +89,7 @@ def load_memory_type_map(map_file: Path | None = None) -> dict[str, Any]:
         return {}
     try:
         data = json.loads(map_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         logger.warning("Could not load memory-type map from %s: %s", map_file, exc)
         return {}
     return data if isinstance(data, dict) else {}
