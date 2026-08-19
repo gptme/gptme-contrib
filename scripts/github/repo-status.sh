@@ -148,6 +148,16 @@ check_repo() {
     run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
 
     if [ "$run_json" = "error" ]; then
+        # A cached default branch can go stale if the repo renamed it (7-day TTL) —
+        # `gh run list --branch <stale-name>` errors on a branch that no longer
+        # exists. Drop the cache and retry once with a fresh fetch so a rename
+        # self-heals immediately instead of showing "No Actions" for up to 7 days.
+        rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
+        default_branch=$(_default_branch "$repo")
+        run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
+    fi
+
+    if [ "$run_json" = "error" ]; then
         echo -e "${YELLOW}-${NC} $label: No Actions"
         return
     fi
