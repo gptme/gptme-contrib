@@ -536,7 +536,17 @@ class LessonValidator:
         # knowledge/lessons/<stem>.md suggestion sends the author to a path that
         # does not exist and produces a link the markdown-link hook then rejects.
         if has_companion:
-            suggested_companion = companion_matches[0].as_posix()
+            # Prefer the companion whose parent dir matches the lesson's own category.
+            # rglob order is filesystem-dependent, so [0] is non-deterministic when
+            # two lessons in different category subdirs share the same stem.
+            suggested_companion = next(
+                (
+                    m
+                    for m in companion_matches
+                    if m.parent.name == self.filepath.parent.name
+                ),
+                companion_matches[0],
+            ).as_posix()
         else:
             # Mirror the lesson's own category dir, unless it sits at the root.
             category = self.filepath.parent.name
@@ -554,11 +564,14 @@ class LessonValidator:
                 f"Consider creating companion: {suggested_companion}"
             )
 
-        # If lesson links a companion that does not exist, that is a dead reference
+        # If lesson links a companion that does not exist, that is a dead reference.
+        # Note: the dead link may use a flat path while the canonical location is
+        # category-prefixed — remind the author to update the link too.
         if has_companion_link and not has_companion:
             self.errors.append(
-                f"Links a companion doc that does not exist. Create it or remove the "
-                f"link: {suggested_companion}"
+                f"Links a companion doc that does not exist. Either create it at "
+                f"{suggested_companion} (and update the Related link to match), "
+                f"or remove the link."
             )
 
         # If companion exists but not linked, warn
