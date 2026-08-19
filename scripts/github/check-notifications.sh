@@ -179,6 +179,11 @@ is_item_open() {
                 ;;
         esac
     else
+        # Non-PR/Issue types (Release, Discussion, etc.) have no open/closed state;
+        # always pass them through, matching the bypass path's `*) return 0` behavior.
+        if [[ "$type" != "PullRequest" && "$type" != "Issue" ]]; then
+            return 0
+        fi
         state=$(_get_cached_item_state "$repo" "$number" "$type")
         [[ "$state" == "open" ]]
     fi
