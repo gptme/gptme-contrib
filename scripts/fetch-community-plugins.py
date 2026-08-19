@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch community gptme extensions and update community_plugins.json.
+"""Fetch community gptme extensions and update docs/community_plugins.json.
 
 Merges two sources:
 1. registry.gptme.org/registry.json — curated official list (seed/baseline)
@@ -204,6 +204,8 @@ def main() -> int:
     # Refuse to overwrite when any source failed and the previous file has entries —
     # a registry failure silently drops curated repos; a topic failure drops community
     # repos tagged with the failing topic. Either way it's as bad as a total wipe.
+    # On first run (no previous file), partial data is still written to bootstrap
+    # the output; the guard only prevents degrading data that already exists.
     any_source_failed = registry_failed or bool(failed_topics)
     if any_source_failed and not args.dry_run and args.output.exists():
         try:
