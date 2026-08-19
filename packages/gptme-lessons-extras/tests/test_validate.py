@@ -705,3 +705,37 @@ def test_cross_category_link_to_existing_companion_not_dead():
             "Lesson linking an existing cross-category companion must not be "
             f"flagged as dead: {companion_errors}"
         )
+
+
+def test_missing_companion_suggestion_mirrors_full_nested_category():
+    """Suggested companion path must use the full category path for nested lessons.
+
+    For lessons/foo/bar/lesson.md the validator must suggest
+    knowledge/lessons/foo/bar/lesson.md, not knowledge/lessons/bar/lesson.md
+    (which would be produced by using only .parent.name).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "knowledge" / "lessons").mkdir(parents=True)
+        # Lesson is nested two levels deep: lessons/outer/inner/test-lesson.md
+        lesson_dir = root / "lessons" / "outer" / "inner"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, _LESSON_WITH_DEAD_COMPANION_LINK)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+        errors = [e for e in validator.errors if "companion" in e.lower()]
+        assert errors, "Dead companion link should error for nested lesson"
+        # Must suggest the full nested path, not just the immediate parent
+        assert (
+            "knowledge/lessons/outer/inner/test-lesson.md" in errors[0]
+        ), f"Expected full nested path in suggestion, got: {errors[0]}"
+        assert (
+            "knowledge/lessons/inner/test-lesson.md" not in errors[0]
+        ), f"Must not use only immediate parent name: {errors[0]}"

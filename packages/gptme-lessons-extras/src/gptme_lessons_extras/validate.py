@@ -577,17 +577,13 @@ class LessonValidator:
         # Suggested companion path. When the companion already exists in the
         # lesson's own category subdir, name its actual location so that any
         # Related link written from this suggestion passes markdown-link checks.
-        # Otherwise mirror the lesson's own category dir so the author creates
-        # the file in the right place from the start.
+        # Otherwise mirror the full category path so the author creates the file
+        # in the right place from the start (including nested categories).
         if own_companion is not None:
             suggested_companion = own_companion.as_posix()
         else:
-            # Mirror the lesson's own category dir, unless it sits at the root.
-            category = self.filepath.parent.name
             target_dir = (
-                COMPANION_DIR
-                if category in ("", ".", "lessons")
-                else COMPANION_DIR / category
+                COMPANION_DIR if lesson_cat == Path(".") else COMPANION_DIR / lesson_cat
             )
             suggested_companion = (target_dir / f"{self.filepath.stem}.md").as_posix()
 
