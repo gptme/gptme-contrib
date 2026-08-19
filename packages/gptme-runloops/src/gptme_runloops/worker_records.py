@@ -1071,7 +1071,9 @@ def read_record_pr_state_after(record_path: Path | str) -> str:
 EFFECT_OBSERVED = "observed"
 EFFECT_NONE = "none"
 EFFECT_UNKNOWN = "unknown"
-EFFECT_FETCH_FAILED = "fetch_failed"  # matched by _EFFECT_FETCH_FAILED in pm_dispatch_recovery.py
+EFFECT_FETCH_FAILED = (
+    "fetch_failed"  # matched by _EFFECT_FETCH_FAILED in pm_dispatch_recovery.py
+)
 
 
 def derive_effect_signal(
