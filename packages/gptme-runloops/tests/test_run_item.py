@@ -977,15 +977,10 @@ def test_cc_auth_expiry_is_infra_not_rate_limit(tmp_path) -> None:
                 "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour"},
             },
             {
-                "type": "assistant",
-                "message": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Failed to authenticate: OAuth session expired and could not be refreshed",
-                        }
-                    ]
-                },
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
             },
         ],
     )
@@ -993,6 +988,39 @@ def test_cc_auth_expiry_is_infra_not_rate_limit(tmp_path) -> None:
     try:
         assert _inspect_cc_failure(plan, config) == (False, "cc_auth")
         assert not config.resolved_backend_quota_dir.exists()
+    finally:
+        (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
+
+
+def test_cc_auth_marker_mid_transcript_is_not_infra(tmp_path) -> None:
+    """A tool output mentioning 'Failed to authenticate' (git 401, some cache
+    that 'could not be refreshed') followed by an ordinary failure must NOT be
+    relabeled cc_auth — that would hand a genuinely broken task a free re-arm."""
+    config = make_config(tmp_path)
+    sid = f"test-rl-{os.getpid()}-f"
+    _cc_log(
+        tmp_path,
+        sid,
+        [
+            {
+                "type": "user",
+                "message": {"content": "remote: Failed to authenticate (git 401)"},
+            },
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour"},
+            },
+            {
+                "type": "result",
+                "subtype": "error_max_turns",
+                "is_error": True,
+                "result": "Reached max turns",
+            },
+        ],
+    )
+    plan = _fake_plan(tmp_path, sid)
+    try:
+        assert _inspect_cc_failure(plan, config) == (False, None)
     finally:
         (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
 

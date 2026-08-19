@@ -1581,7 +1581,7 @@ pr_has_unresolved_human_thread() {
     # gh's --jq has no --arg; run jq itself so AUTHOR can be bound safely.
     result=$(printf '%s' "$raw" | jq -r --arg author "$author" '
             def is_bot_login:
-                test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)"; "i");
+                test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)|(^greptile)"; "i");
             def is_human_login:
                 . != null and . != "" and (ascii_downcase != ($author | ascii_downcase)) and (is_bot_login | not);
             [ .data.repository.pullRequest.reviewThreads.nodes[]?
