@@ -1105,17 +1105,20 @@ def derive_effect_signal(
     """
     delivery = str(delivery_outcome or "").strip().lower()
 
+    # A confirmed delivery (reply posted) is a definitive positive effect —
+    # snapshot fetch failures cannot override it.
+    if delivery == "handled":
+        return EFFECT_OBSERVED
+
     # gh API failed at snapshot time: we cannot observe the "after" state, so
-    # this is an infra failure, not genuine ineffectiveness.  Must take
-    # precedence over delivery_outcome (including orphan_no_delivery) so that a
-    # fetch failure is never recorded as a definitive no-effect.
+    # this is an infra failure, not genuine ineffectiveness.  Takes precedence
+    # over orphan_no_delivery so a fetch failure is not recorded as definitive
+    # no-effect, but handled delivery above already takes priority.
     if payload.get("gh_snapshot_fetch_failed"):
         return EFFECT_FETCH_FAILED
 
     if delivery == "orphan_no_delivery":
         return EFFECT_NONE
-    if delivery == "handled":
-        return EFFECT_OBSERVED
 
     before_head = normalize_oid(payload.get("pr_head_oid_before"))
     after_head = normalize_oid(payload.get("pr_head_oid_after"))
