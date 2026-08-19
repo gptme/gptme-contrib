@@ -927,3 +927,79 @@ def test_cross_category_link_does_not_silence_own_companion_unlinked_warning():
         assert "monitoring/test-lesson.md" in companion_warnings[0], companion_warnings[
             0
         ]
+
+
+def test_own_companion_linked_but_dead_prose_mention_reports_dead_path():
+    """When a lesson's own companion is correctly linked but the content also contains
+    a dead companion path mention (e.g. prose cross-category reference), the error
+    should name the dead path rather than telling the author to update the correct link.
+
+    P2 regression (edaae34c): the 'Update the Related link' message fired even when
+    own_companion_linked was True — the own companion was already correctly referenced,
+    so the instruction to update/remove it was misleading. The fix reports the
+    specific dead path(s) and says 'remove or fix', preserving the correct link.
+    """
+    lesson_content = (
+        "---\n"
+        "description: Test lesson\n"
+        "status: active\n"
+        "---\n"
+        "\n"
+        "## Rule\n"
+        "Test rule.\n"
+        "\n"
+        "## Context\n"
+        "Context text.\n"
+        "\n"
+        "## Detection\n"
+        "- signal one\n"
+        "- signal two (three four five six)\n"
+        "\n"
+        "## Pattern\n"
+        "```\npattern\n```\n"
+        "\n"
+        "## Outcome\n"
+        "Good things happen.\n"
+        "\n"
+        "## Related\n"
+        # Own companion correctly linked
+        "- Companion doc: [knowledge/lessons/monitoring/test-lesson.md]"
+        "(../../knowledge/lessons/monitoring/test-lesson.md)\n"
+        # Dead prose mention of a non-existent cross-category path
+        "- See also knowledge/lessons/workflow/test-lesson.md for the workflow variant.\n"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Own companion exists; cross-category file does NOT
+        (root / "knowledge" / "lessons" / "monitoring").mkdir(parents=True)
+        (root / "knowledge" / "lessons" / "monitoring" / "test-lesson.md").write_text(
+            "# monitoring companion\n"
+        )
+        lesson_dir = root / "lessons" / "monitoring"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, lesson_content)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+    # Must flag the dead path
+    assert validator.errors, "Expected an error for the dead prose companion mention"
+    error = validator.errors[0]
+    assert "knowledge/lessons/workflow/test-lesson.md" in error, (
+        "Error should name the specific dead path, not tell the author to update "
+        f"the correct Related link. Got: {error!r}"
+    )
+    assert "remove or fix" in error.lower(), (
+        f"Error should say 'remove or fix the dead reference', got: {error!r}"
+    )
+    # Must NOT tell the author to update/remove the correct own-companion link
+    assert "update the related link" not in error.lower(), (
+        "Error must not instruct author to change the correctly-linked own companion. "
+        f"Got: {error!r}"
+    )

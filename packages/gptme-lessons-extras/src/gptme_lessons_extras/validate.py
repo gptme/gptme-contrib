@@ -618,7 +618,21 @@ class LessonValidator:
         # Note: the dead link may use a flat path while the canonical location is
         # category-prefixed — remind the author to update the link too.
         if has_companion_link and not linked_companion_exists:
-            if own_companion is not None:
+            dead_paths = [
+                m.group(1)
+                for m in _companion_link_matches
+                if not Path(m.group(1)).exists()
+            ]
+            if own_companion is not None and own_companion_linked:
+                # Own companion IS correctly linked — the dead reference is a different
+                # mention (e.g. a prose cross-category reference). Report only the dead
+                # path(s) so the author knows what to remove or fix.
+                dead_list = ", ".join(dead_paths)
+                self.errors.append(
+                    f"Links a non-existent companion path. Remove or fix the dead "
+                    f"reference: {dead_list}"
+                )
+            elif own_companion is not None:
                 # Companion exists but the Related link doesn't point to it — guide
                 # the author to fix the link rather than create a duplicate file.
                 self.errors.append(
