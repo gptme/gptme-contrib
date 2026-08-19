@@ -765,6 +765,14 @@ class ItemPromptParams:
 
 
 # --- Investigate arm templates (lib.sh:670-935, non-greptile arms) ---
+#
+# Helper scripts referenced as ``{workspace}/scripts/...`` live in the AGENT'S
+# workspace repo, not in this package — same contract as ``ai-review-dispose.py``,
+# ``greptile-convergence.py`` and ``pr-address-wait-and-merge.sh`` above. For
+# the pr_update arm that is ``scripts/github/reply-to-thread.py`` (ErikBjare/bob
+# ``f802095834``): it posts into a review thread and refuses a second
+# consecutive bot reply unless the PR head moved (``--after-push``), the
+# mechanical half of the gptme/gptme#3531 reply-spam fix.
 
 _PR_UPDATE_ARM = """
 ### PR Review & Comments
