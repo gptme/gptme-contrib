@@ -156,7 +156,7 @@ check_repo() {
         # self-heals immediately instead of showing "No Actions" for up to 7 days.
         # Only invalidate the cache on branch-not-found errors; transient failures
         # (network, rate-limit) should not discard a possibly-correct cached branch.
-        if echo "$run_err" | grep -qiE "not found|no commit|does not exist|unknown ref|no ref"; then
+        if echo "$run_err" | grep -qiE "not found|no commit|does not exist|unknown ref|no ref|could not resolve|no such branch"; then
             rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
             default_branch=$(_default_branch "$repo")
             run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
