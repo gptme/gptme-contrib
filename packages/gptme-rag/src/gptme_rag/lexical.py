@@ -244,6 +244,9 @@ class TfidfIndex:
         def _weighted(idx: int) -> float:
             doc = self._documents[idx]
             mem_type: str | None = doc.metadata.get("memory_type") or None
+            # Treat unrecognised memory-type labels as untagged (no penalty).
+            if mem_type not in SUPPORTED_MEMORY_TYPES:
+                mem_type = None
             return weighted_similarity(float(raw_sims[idx]), mem_type, requested)
 
         sorted_indices = sorted(range(len(raw_sims)), key=_weighted, reverse=True)

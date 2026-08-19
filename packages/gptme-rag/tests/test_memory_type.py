@@ -324,7 +324,11 @@ def test_search_memory_types_no_tagged_docs():
 
 
 def test_search_penalty_pushes_non_matching_below_floor():
-    """A doc that clears the raw floor but fails penalty may drop below it."""
+    """A doc that clears the raw floor but fails penalty may drop below it.
+
+    The test is structured to assert in both branches so it does not silently
+    pass without verifying anything when the penalty score stays above the floor.
+    """
     floor = 0.3
     idx = TfidfIndex(relevance_floor=floor)
     docs = [
@@ -338,7 +342,35 @@ def test_search_penalty_pushes_non_matching_below_floor():
         pytest.skip("raw similarity below test floor — adjust test corpus")
 
     raw_score = hits_raw[0].score
-    # Apply penalty: if raw * PENALTY < floor, the doc should drop out
-    if raw_score * MEMORY_TYPE_PENALTY < floor:
-        hits_penalised = idx.search("relevant query terms", n_results=5, memory_types={"goal"})
+    penalised_score = raw_score * MEMORY_TYPE_PENALTY
+
+    hits_penalised = idx.search("relevant query terms", n_results=5, memory_types={"goal"})
+
+    if penalised_score < floor:
+        # Penalised score drops below the relevance floor — doc must disappear.
         assert len(hits_penalised) == 0
+    else:
+        # Penalised score stays above the floor — doc survives but with a lower score.
+        assert len(hits_penalised) == 1
+        assert hits_penalised[0].score < raw_score
+
+
+def test_search_unknown_doc_memory_type_not_penalised():
+    """A doc with an unrecognised memory_type label is ranked by raw cosine,
+    not penalised.  This ensures typos or older labels don't silently downrank
+    documents that the caller never intended to penalise."""
+    idx = TfidfIndex()
+    docs = [
+        _doc("hello world query", "typo.md", "typo_type"),  # unknown type
+        _doc("hello world query", "untagged.md"),  # no type
+    ]
+    idx.index(docs)
+
+    # When memory_types={"goal"} is requested, both docs have no matching type.
+    # The one with a typo label must NOT be penalised more than the untagged doc.
+    hits = idx.search("hello world query", n_results=5, memory_types={"goal"})
+    assert len(hits) == 2
+    # Both docs have the same raw similarity; with equal treatment their scores
+    # must be equal (no extra penalty on the unknown-label doc).
+    scores = {h.document.metadata["source"]: h.score for h in hits}
+    assert abs(scores["typo.md"] - scores["untagged.md"]) < 1e-6
