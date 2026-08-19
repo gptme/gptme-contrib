@@ -2361,6 +2361,13 @@ class TestRepoExclusionList:
         assert _repo_is_excluded("ACTIVITYWATCH/aw-webui", ("ActivityWatch/*",))
         assert _repo_is_excluded("ActivityWatch/aw-webui", ("activitywatch/*",))
 
+    def test_repo_is_excluded_none_repo(self):
+        # A malformed SlotItem may have repo=None (missing "repo" field in JSONL).
+        # _repo_is_excluded must not raise — it treats None as an empty string
+        # (no match against any pattern, same permissive behaviour as derive_slot_key).
+        assert not _repo_is_excluded(None, ("ActivityWatch/*",))  # type: ignore[arg-type]
+        assert not _repo_is_excluded(None, ())  # type: ignore[arg-type]
+
     def test_get_excluded_repo_patterns_default(self, monkeypatch):
         monkeypatch.delenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, raising=False)
         patterns = _get_excluded_repo_patterns()

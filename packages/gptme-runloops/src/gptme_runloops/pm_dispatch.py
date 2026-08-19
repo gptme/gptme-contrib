@@ -95,7 +95,11 @@ def _repo_is_excluded(repo: str, patterns: tuple[str, ...] | None = None) -> boo
 
     if patterns is None:
         patterns = _get_excluded_repo_patterns()
-    repo_lower = repo.lower()
+    # Guard against None repo (e.g. a malformed SlotItem from a JSONL line
+    # lacking a "repo" field).  Previously derive_slot_key tolerated None by
+    # stringifying it to "None#…"; we keep the same permissive behaviour here
+    # rather than raising.
+    repo_lower = (repo or "").lower()
     return any(fnmatch.fnmatch(repo_lower, pat.lower()) for pat in patterns)
 
 
@@ -727,6 +731,14 @@ class LaneDispatcher:
             element counts items dropped because their repo matched an exclusion
             pattern (mirrors ``DispatchResult.skipped_excluded`` from
             ``dispatch_grouped_items``).
+
+        .. note:: API change (this PR)
+            The return type was extended from ``tuple[int, int]`` to
+            ``tuple[int, int, int]``.  ``LaneDispatcher`` is an internal class
+            within the ``gptme-runloops`` package; all callers were audited and
+            are inside the package (test suite only — no external service,
+            script, or package calls this method directly).  If you add an
+            external caller, unpack the third element or ignore it with ``_``.
         """
         if fast_model is None:
             fast_model = os.environ.get("BOB_PM_FAST_LANE_MODEL") or None
