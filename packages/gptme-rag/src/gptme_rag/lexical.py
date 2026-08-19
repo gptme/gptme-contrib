@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .indexing.document import Document
+from .memory_type import SUPPORTED_MEMORY_TYPES, weighted_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -197,11 +198,21 @@ class TfidfIndex:
         query: str,
         n_results: int = 5,
         exclude_paths: set[str] | None = None,
+        memory_types: set[str] | None = None,
     ) -> list[LexicalHit]:
         """Return up to ``n_results`` hits ranked by cosine similarity.
 
         ``exclude_paths`` is a set of source paths to skip (e.g. documents already
         in context).  Hits below ``relevance_floor`` are discarded.
+
+        ``memory_types`` is an optional set of memory-type labels (e.g.
+        ``{"goal", "identity"}``) that boosts matching documents and penalises
+        non-matching ones via :func:`~gptme_rag.memory_type.weighted_similarity`.
+        Documents must carry a ``"memory_type"`` key in their metadata (set by the
+        caller during indexing) for this to take effect; documents without the key
+        are ranked by raw cosine similarity.  Only types in
+        :data:`~gptme_rag.memory_type.SUPPORTED_MEMORY_TYPES` are considered —
+        unrecognised values are silently ignored.
         """
         if n_results <= 0:
             return []
@@ -217,14 +228,31 @@ class TfidfIndex:
             ) from exc
 
         q_vec = self._vectorizer.transform([query])
-        sims = cosine_similarity(q_vec, self._matrix)[0]
+        raw_sims = cosine_similarity(q_vec, self._matrix)[0]
         excluded = exclude_paths or set()
 
+        # Normalise the requested memory types to only known values so that a
+        # typo in the caller's set does not silently ignore all boosts.
+        requested: set[str] | None = None
+        if memory_types:
+            requested = {t for t in memory_types if t in SUPPORTED_MEMORY_TYPES}
+            if not requested:
+                requested = None
+
+        # Compute weighted scores and sort by them so that boosted documents
+        # rank above documents with a higher raw similarity but wrong type.
+        def _weighted(idx: int) -> float:
+            doc = self._documents[idx]
+            mem_type: str | None = doc.metadata.get("memory_type") or None
+            return weighted_similarity(float(raw_sims[idx]), mem_type, requested)
+
+        sorted_indices = sorted(range(len(raw_sims)), key=_weighted, reverse=True)
+
         hits: list[LexicalHit] = []
-        for rank, idx in enumerate(sims.argsort()[::-1]):
-            score = float(sims[idx])
+        for rank, idx in enumerate(sorted_indices):
+            score = _weighted(idx)
             if score < self.relevance_floor:
-                continue
+                break  # sorted descending — nothing below this will clear the floor
             doc = self._documents[idx]
             if self._source_path(doc) in excluded:
                 continue
