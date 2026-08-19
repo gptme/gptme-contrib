@@ -27,6 +27,7 @@ from gptme_runloops.pm_dispatch import (
     derive_dispatch_outcome,
 )
 from gptme_runloops.worker_records import (
+    EFFECT_FETCH_FAILED,
     derive_effect_signal,
     read_record_effect_signal,
 )
@@ -189,6 +190,13 @@ class TestDeriveEffectSignal:
         # Absence of evidence must never be recorded as evidence of effect.
         assert derive_effect_signal({}) == EFFECT_UNKNOWN
         assert derive_effect_signal({"pr_head_oid_before": "aaa"}) == EFFECT_UNKNOWN
+
+    def test_gh_fetch_failed_flag_returns_fetch_failed(self) -> None:
+        """gh_snapshot_fetch_failed flag → EFFECT_FETCH_FAILED, not EFFECT_UNKNOWN."""
+        assert (
+            derive_effect_signal({"gh_snapshot_fetch_failed": True})
+            == EFFECT_FETCH_FAILED
+        )
 
     def test_orphan_delivery_is_no_effect(self) -> None:
         assert (

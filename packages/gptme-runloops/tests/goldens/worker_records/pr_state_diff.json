@@ -72,6 +72,7 @@
           "One",
           "Two"
         ],
+        "gh_snapshot_fetch_failed": true,
         "outcome": "productive"
       },
       "gh_fail": true,
