@@ -669,8 +669,7 @@ def update_record_pr_state(
         if not isinstance(payload, dict):
             return
 
-        if gh_fetch_failed:
-            payload["gh_snapshot_fetch_failed"] = True
+        payload["gh_snapshot_fetch_failed"] = gh_fetch_failed
         apply_pr_state_diff(payload, before, after_safe)
         outcome_before_upgrade = payload.get("outcome")
         if upgrade_outcome is not None:
