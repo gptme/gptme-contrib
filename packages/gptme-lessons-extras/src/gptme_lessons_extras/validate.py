@@ -552,12 +552,15 @@ class LessonValidator:
             None,
         )
 
-        # Check if linked in Related section (allow optional subdirectory component).
+        # Check if linked in Related section (allow zero or more subdirectory components).
         # Capture the exact matched path so we can verify it exists separately:
         # a companion in a *different* category does not validate a link that
         # points at a non-existent own-category path.
+        # Use [a-zA-Z0-9._-]+ for path components to stay within the path
+        # boundary and avoid greedily consuming markdown link punctuation
+        # (e.g. ](  or  )  after the path).
         _companion_link_match = re.search(
-            rf"(knowledge/lessons/(?:[^/]+/)?{re.escape(self.filepath.stem)}\.md)",
+            rf"(knowledge/lessons/(?:[a-zA-Z0-9._-]+/)*{re.escape(self.filepath.stem)}\.md)",
             self.content,
             re.IGNORECASE,
         )

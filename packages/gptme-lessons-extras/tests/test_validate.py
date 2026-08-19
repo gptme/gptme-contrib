@@ -739,3 +739,54 @@ def test_missing_companion_suggestion_mirrors_full_nested_category():
         assert (
             "knowledge/lessons/inner/test-lesson.md" not in errors[0]
         ), f"Must not use only immediate parent name: {errors[0]}"
+
+
+def test_nested_companion_link_detected_as_live():
+    """A link to a multi-level companion path must be detected as live.
+
+    For lessons/outer/inner/test-lesson.md with companion at
+    knowledge/lessons/outer/inner/test-lesson.md, a Related link to
+    knowledge/lessons/outer/inner/test-lesson.md must NOT trigger
+    "Companion doc exists but not linked" — the link IS present.
+
+    The detection regex must allow more than one subdir component.
+    """
+    # Lesson linking to its own two-level companion path
+    nested_link_lesson = _LESSON_WITH_DEAD_COMPANION_LINK.replace(
+        "../../knowledge/lessons/test-lesson.md",
+        "../../knowledge/lessons/outer/inner/test-lesson.md",
+    ).replace(
+        "[knowledge/lessons/test-lesson.md]",
+        "[knowledge/lessons/outer/inner/test-lesson.md]",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Create the own-category companion that the lesson links to
+        (root / "knowledge" / "lessons" / "outer" / "inner").mkdir(parents=True)
+        companion = (
+            root / "knowledge" / "lessons" / "outer" / "inner" / "test-lesson.md"
+        )
+        companion.write_text("# companion doc\n")
+        lesson_dir = root / "lessons" / "outer" / "inner"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, nested_link_lesson)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+        companion_errors = [e for e in validator.errors if "companion" in e.lower()]
+        companion_warnings = [w for w in validator.warnings if "companion" in w.lower()]
+        assert not companion_errors, (
+            "Lesson with a live nested-companion link must not have companion errors: "
+            f"{companion_errors}"
+        )
+        assert not companion_warnings, (
+            "Lesson with a live nested-companion link must not warn 'exists but not linked': "
+            f"{companion_warnings}"
+        )
