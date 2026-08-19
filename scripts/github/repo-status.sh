@@ -22,6 +22,36 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# --- default_branch cache ---
+# `api repos/<REPO> .default_branch` was the single largest REST consumer in this
+# script (512 calls/window, ~38% of its traffic) even though a repo's default
+# branch is effectively immutable — it changes only via a rare manual rename.
+# Cache it to disk (no TTL; clear with `rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/repo-status"`)
+# so it is fetched once and reused across every subsequent run and session.
+_DB_CACHE_DIR="${BOB_DEFAULT_BRANCH_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/default-branch}"
+
+_default_branch() {
+    local repo="$1"
+    local cache_file
+    cache_file="$_DB_CACHE_DIR/${repo//\//__}"
+    if [ -f "$cache_file" ]; then
+        cat "$cache_file"
+        return 0
+    fi
+    local db
+    db=$(gh api "repos/$repo" --jq '.default_branch' 2>/dev/null || true)
+    if [ -n "$db" ]; then
+        mkdir -p "$_DB_CACHE_DIR" 2>/dev/null || true
+        # Atomic write so a concurrent check_repo can never read a torn file.
+        printf '%s' "$db" > "$cache_file.tmp.$$" 2>/dev/null \
+            && mv "$cache_file.tmp.$$" "$cache_file" 2>/dev/null \
+            || rm -f "$cache_file.tmp.$$" 2>/dev/null
+        printf '%s' "$db"
+    else
+        printf 'master'
+    fi
+}
+
 check_repo() {
     local repo=$1
     local label=${2:-$repo}
@@ -30,7 +60,7 @@ check_repo() {
     # appear in the list and trigger false-positive stale annotations (a
     # feature-branch headSha is always different from the default-branch HEAD).
     local default_branch
-    default_branch=$(gh api "repos/$repo" --jq '.default_branch' 2>/dev/null || echo "master")
+    default_branch=$(_default_branch "$repo")
 
     # Fetch last 5 runs on the default branch so we can skip disabled-workflow
     # runs and still have a fallback.  headSha is needed so we can detect when
