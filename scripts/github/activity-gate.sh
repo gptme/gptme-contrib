@@ -1553,6 +1553,47 @@ has_maintainer_waiting_comment() {
     return 1
 }
 
+# Return 0 if $repo#$number has at least one UNRESOLVED review thread whose
+# root comment was written by a human (not AUTHOR, not a bot), 1 otherwise
+# (including on API failure — fail open, the merge gate downstream re-checks).
+#
+# Why this exists (gptme/gptme#3531, 2026-08-17..19): check_merge_ready only
+# looked at mergeStateStatus + Greptile and re-emitted merge_ready every 12h
+# for a PR whose maintainer had an open inline thread asking for a design
+# change. Every merge_ready worker found it could not merge (merge_lifecycle
+# classifies an unresolved human thread as OTHER), read "respond to every human
+# comment", and posted yet another reply into the SAME thread — 10 replies over
+# 3 days, graded effect=observed each time. A PR with an open human thread is
+# not merge-ready by definition; the loop vehicle for "maintainer asked for
+# changes" is pr_update (fresh human event), not merge_ready.
+#
+# Echoes the root author login of the first such thread on stdout (for logs).
+pr_has_unresolved_human_thread() {
+    local repo=$1
+    local number=$2
+    local owner=${repo%%/*}
+    local name=${repo#*/}
+    local author="${AUTHOR:-${BOT_USERNAME:-TimeToBuildBob}}"
+    local raw result
+    raw=$(gh api graphql \
+        -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login}}}}}}}}' \
+        -F owner="$owner" -F name="$name" -F number="$number" 2>/dev/null) || return 1
+    # gh's --jq has no --arg; run jq itself so AUTHOR can be bound safely.
+    result=$(printf '%s' "$raw" | jq -r --arg author "$author" '
+            def is_bot_login:
+                test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)"; "i");
+            def is_human_login:
+                . != null and . != "" and (ascii_downcase != ($author | ascii_downcase)) and (is_bot_login | not);
+            [ .data.repository.pullRequest.reviewThreads.nodes[]?
+              | select(.isResolved == false)
+              | (.comments.nodes[0].author.login // "")
+              | select(is_human_login) ] | first // empty
+        ' 2>/dev/null) || return 1
+    [ -n "$result" ] || return 1
+    printf '%s\n' "$result"
+    return 0
+}
+
 # Return 0 if the bot account has merge permission on $repo, 1 if it does not.
 #
 # A bot contributing to an external/upstream repo via a fork typically has
@@ -1696,6 +1737,18 @@ check_merge_ready() {
             # HEAD changed or cooldown expired — re-emit
         fi
         # First-time discovery OR state change — emit immediately (no seed-only behavior)
+
+        # A PR with an unresolved human-authored review thread is not merge-ready:
+        # the worker cannot merge it and has no merge work to do, so emitting
+        # merge_ready only buys a reply-spam session (gptme/gptme#3531). Keep the
+        # cooldown armed so the GraphQL probe runs at most once per 12h per HEAD;
+        # a new maintainer comment still reaches PM through pr_update.
+        local human_thread_author
+        if human_thread_author=$(pr_has_unresolved_human_thread "$repo" "$pr_number"); then
+            echo "${head_sha}:${now}" > "$state_file"
+            echo "  [merge_ready] skip $repo#$pr_number: unresolved review thread by @${human_thread_author}" >&2
+            continue
+        fi
 
         # Suppress re-emits when the bot already signalled it is waiting only on
         # a maintainer merge click. The state file is still updated so we stay

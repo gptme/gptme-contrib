@@ -419,7 +419,7 @@ class TestBuildFullLedgerEntry:
     # Added by the outcome-verification invariant: the recorded outcome is
     # derived from exit status + observable effect, never asserted by the
     # phase alone. See test_pm_dispatch_outcome.py.
-    DERIVED_OUTCOME_KEYS = {"exit_code", "effect", "outcome"}
+    DERIVED_OUTCOME_KEYS = {"exit_code", "effect", "outcome", "infra_failure"}
     EXPECTED_KEYS = LEGACY_KEYS | DERIVED_OUTCOME_KEYS
 
     def test_schema_keys_match_bash(self):
