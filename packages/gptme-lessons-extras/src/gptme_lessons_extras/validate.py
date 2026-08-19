@@ -553,22 +553,37 @@ class LessonValidator:
         )
 
         # Check if linked in Related section (allow zero or more subdirectory components).
-        # Capture the exact matched path so we can verify it exists separately:
-        # a companion in a *different* category does not validate a link that
-        # points at a non-existent own-category path.
+        # Use finditer rather than search so ALL occurrences are captured — a prose
+        # mention of an existing cross-category companion earlier in the document must
+        # not suppress the dead-link error on a later Related-section link that points
+        # at a non-existent own-category path.
         # Use [a-zA-Z0-9._-]+ for path components to stay within the path
         # boundary and avoid greedily consuming markdown link punctuation
         # (e.g. ](  or  )  after the path).
-        _companion_link_match = re.search(
-            rf"(knowledge/lessons/(?:[a-zA-Z0-9._-]+/)*{re.escape(self.filepath.stem)}\.md)",
-            self.content,
-            re.IGNORECASE,
+        _companion_link_matches = list(
+            re.finditer(
+                rf"(knowledge/lessons/(?:[a-zA-Z0-9._-]+/)*{re.escape(self.filepath.stem)}\.md)",
+                self.content,
+                re.IGNORECASE,
+            )
         )
-        has_companion_link = _companion_link_match is not None
-        # A link is "live" only when the specific path it names exists on disk.
-        linked_companion_exists = (
-            _companion_link_match is not None
-            and Path(_companion_link_match.group(1)).exists()
+        has_companion_link = bool(_companion_link_matches)
+        # A link is "live" only when ALL companion path mentions exist on disk.
+        # If any mention names a non-existent path it is a dead reference — even when
+        # earlier mentions happen to be valid (e.g. cross-category prose references).
+        linked_companion_exists = has_companion_link and all(
+            Path(m.group(1)).exists() for m in _companion_link_matches
+        )
+        # Is the own-category companion's exact path specifically mentioned?
+        # has_companion_link is True for ANY companion mention (cross-category too);
+        # this narrower flag checks only for the lesson's own companion path so the
+        # "exists but not linked" warning is not silenced by an unrelated mention.
+        own_companion_linked = own_companion is not None and bool(
+            re.search(
+                re.escape(own_companion.as_posix()),
+                self.content,
+                re.IGNORECASE,
+            )
         )
 
         # Get line count
@@ -598,20 +613,31 @@ class LessonValidator:
             )
 
         # If lesson links a companion that does not exist, that is a dead reference.
-        # Verified against the actual path in the link — a companion in a different
-        # category does not make a stale or flat link live.
+        # Verified against ALL matched paths — a companion in a different category
+        # does not make a stale or flat link live.
         # Note: the dead link may use a flat path while the canonical location is
         # category-prefixed — remind the author to update the link too.
         if has_companion_link and not linked_companion_exists:
-            self.errors.append(
-                f"Links a companion doc that does not exist. Either create it at "
-                f"{suggested_companion} (and update the Related link to match), "
-                f"or remove the link."
-            )
+            if own_companion is not None:
+                # Companion exists but the Related link doesn't point to it — guide
+                # the author to fix the link rather than create a duplicate file.
+                self.errors.append(
+                    f"Links a companion doc that does not exist. Update the Related "
+                    f"link to point to the correct path: {suggested_companion}, "
+                    f"or remove the link."
+                )
+            else:
+                self.errors.append(
+                    f"Links a companion doc that does not exist. Either create it at "
+                    f"{suggested_companion} (and update the Related link to match), "
+                    f"or remove the link."
+                )
 
-        # If own-category companion exists but is not linked, warn.
-        # Cross-category companions are not flagged — they belong to other lessons.
-        if own_companion is not None and not has_companion_link:
+        # If own-category companion exists but is not specifically linked, warn.
+        # Checked against own_companion_linked (not has_companion_link) so that
+        # a cross-category mention elsewhere in the document doesn't silence the
+        # warning — cross-category companions belong to other lessons.
+        if own_companion is not None and not own_companion_linked:
             self.warnings.append(
                 f"Companion doc exists but not linked. Add to Related section: "
                 f"{suggested_companion}"

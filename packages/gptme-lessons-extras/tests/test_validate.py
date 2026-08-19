@@ -790,3 +790,140 @@ def test_nested_companion_link_detected_as_live():
             "Lesson with a live nested-companion link must not warn 'exists but not linked': "
             f"{companion_warnings}"
         )
+
+
+def test_prose_mention_of_existing_cross_category_does_not_mask_dead_related_link():
+    """A prose mention of an existing cross-category companion must not silence the
+    dead-link error when the Related section links a non-existent own-category path.
+
+    P1 regression: re.search found the cross-category mention first (file exists →
+    linked_companion_exists=True), so the dead Related link was never caught.
+    With re.finditer the validator checks ALL mentions; any non-existent path triggers
+    the error regardless of what earlier mentions resolve to.
+    """
+    # Lesson body references an *existing* cross-category companion in prose, but
+    # the Related section links to a non-existent monitoring companion.
+    lesson_with_prose_mention = (
+        "---\n"
+        "description: Test lesson\n"
+        "status: active\n"
+        "---\n"
+        "\n"
+        "## Rule\n"
+        "Test rule.\n"
+        "\n"
+        "## Context\n"
+        "See also knowledge/lessons/workflow/test-lesson.md for the workflow variant.\n"
+        "\n"
+        "## Detection\n"
+        "- signal one\n"
+        "- signal two (three four five six)\n"
+        "\n"
+        "## Pattern\n"
+        "```\npattern\n```\n"
+        "\n"
+        "## Outcome\n"
+        "Good things happen.\n"
+        "\n"
+        "## Related\n"
+        "- Full context: [knowledge/lessons/monitoring/test-lesson.md]"
+        "(../../knowledge/lessons/monitoring/test-lesson.md)\n"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # The cross-category companion EXISTS (workflow), the own-category does NOT.
+        (root / "knowledge" / "lessons" / "workflow").mkdir(parents=True)
+        (root / "knowledge" / "lessons" / "workflow" / "test-lesson.md").write_text(
+            "# workflow companion\n"
+        )
+        # No file at knowledge/lessons/monitoring/test-lesson.md
+        (root / "knowledge" / "lessons" / "monitoring").mkdir(parents=True)
+
+        lesson_dir = root / "lessons" / "monitoring"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, lesson_with_prose_mention)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+        companion_errors = [e for e in validator.errors if "companion" in e.lower()]
+        assert companion_errors, (
+            "Dead Related link must be flagged even when an earlier prose mention "
+            "of a cross-category companion exists on disk"
+        )
+
+
+def test_cross_category_link_does_not_silence_own_companion_unlinked_warning():
+    """A cross-category companion link must not suppress the 'exists but not linked'
+    warning when the lesson's own-category companion exists but is unlinked.
+
+    P2 regression: has_companion_link was True for ANY companion mention, so a
+    cross-category link silenced the warning even though the own companion was not
+    specifically referenced.  own_companion_linked now checks the exact path.
+    """
+    # Lesson links to a cross-category companion (workflow) that exists, but its
+    # own monitoring companion also exists and is NOT linked.
+    cross_cat_link_lesson = (
+        "---\n"
+        "description: Test lesson\n"
+        "status: active\n"
+        "---\n"
+        "\n"
+        "## Rule\n"
+        "Test rule.\n"
+        "\n"
+        "## Context\n"
+        "Context text.\n"
+        "\n"
+        "## Detection\n"
+        "- signal one\n"
+        "- signal two (three four five six)\n"
+        "\n"
+        "## Pattern\n"
+        "```\npattern\n```\n"
+        "\n"
+        "## Outcome\n"
+        "Good things happen.\n"
+        "\n"
+        "## Related\n"
+        "- Workflow variant: [knowledge/lessons/workflow/test-lesson.md]"
+        "(../../knowledge/lessons/workflow/test-lesson.md)\n"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Both companions exist: own-category (monitoring) and cross-category (workflow)
+        (root / "knowledge" / "lessons" / "monitoring").mkdir(parents=True)
+        (root / "knowledge" / "lessons" / "monitoring" / "test-lesson.md").write_text(
+            "# monitoring companion\n"
+        )
+        (root / "knowledge" / "lessons" / "workflow").mkdir(parents=True)
+        (root / "knowledge" / "lessons" / "workflow" / "test-lesson.md").write_text(
+            "# workflow companion\n"
+        )
+        lesson_dir = root / "lessons" / "monitoring"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, cross_cat_link_lesson)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+        companion_warnings = [w for w in validator.warnings if "companion" in w.lower()]
+        assert companion_warnings, (
+            "Own-category companion must still be flagged as 'exists but not linked' "
+            "even when the lesson links a cross-category companion"
+        )
+        assert "monitoring/test-lesson.md" in companion_warnings[0], companion_warnings[
+            0
+        ]
