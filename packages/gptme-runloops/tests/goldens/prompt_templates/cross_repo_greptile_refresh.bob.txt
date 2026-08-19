@@ -49,12 +49,17 @@ reply **on its own thread**, and then a resolution.
 ⚠️ Never resolve a human's review thread. Burying a person's comment is far
 worse than leaving a thread open.
 
-After fixing AND pushing commits, re-trigger Greptile:
+After fixing the findings, push via the in-band AI review wrapper (runs local review before pushing, max 2 iterations):
+```bash
+uv run python3 /home/bob/bob/scripts/github/pm-review-and-push.py
+```
+If it reports P0/P1 findings, fix them and re-run. Once clean, close the loop on every finding as described above.
+Then re-trigger Greptile (required for cross-repo PRs — pr-address-wait-and-merge.sh does not trigger it internally):
 ```bash
 # ONLY call this AFTER pushing fix commits — NEVER trigger without actual fixes
 bash /home/bob/bob/scripts/github/greptile-helper.sh trigger gptme/gptme-contrib 1234
 ```
-Then run `POLL_BUDGET_SEC=1800 bash /home/bob/bob/scripts/github/pr-address-wait-and-merge.sh --repo gptme/gptme-contrib 1234` to wait for the re-review.
+Then run `POLL_BUDGET_SEC=1800 bash /home/bob/bob/scripts/github/pr-address-wait-and-merge.sh --repo gptme/gptme-contrib 1234` to wait for the Greptile re-review.
 - Exit 0: merged — done
 - Exit 2: new findings — address them, push, close their threads, re-run once more
 - Exit 3: poll budget exhausted — stop; next monitoring cycle will continue

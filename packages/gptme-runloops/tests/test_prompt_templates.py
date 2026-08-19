@@ -138,11 +138,13 @@ def test_explicit_helper_paths_override_workspace_derivation() -> None:
         greptile_helper="/opt/tools/greptile.sh",
         pr_address_script="/opt/tools/pr-wait.sh",
         dispose_script="/opt/tools/dispose.py",
+        pm_review_and_push="/opt/tools/pm-review-and-push.py",
     )
     cross = render_instruction(InstructionKind.CROSS_REPO_GREPTILE_REFRESH, ctx)
     assert "bash /opt/tools/greptile.sh trigger o/r 1" in cross
     assert "bash /opt/tools/pr-wait.sh --repo o/r 1" in cross
     assert "python3 /opt/tools/dispose.py o/r 1 --list" in cross
+    assert "python3 /opt/tools/pm-review-and-push.py" in cross
     # Every helper path must be overridable together: one un-overridden default
     # is enough to point a non-Bob agent at a script that does not exist there.
     assert "/ws/scripts" not in cross
