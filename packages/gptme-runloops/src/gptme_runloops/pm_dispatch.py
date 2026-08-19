@@ -1382,13 +1382,16 @@ def dispatch_grouped_items(
     _cooldown_dir = _resolve_cooldown_dir(cooldown_dir)
 
     # Filter excluded repos before partitioning.
+    # Single pass so this works with any iterable, not just lists.
     _exclude_patterns = _get_excluded_repo_patterns()
-    _excluded = [
-        item for item in items if _repo_is_excluded(item.repo, _exclude_patterns)
-    ]
-    items = [
-        item for item in items if not _repo_is_excluded(item.repo, _exclude_patterns)
-    ]
+    _excluded: list[SlotItem] = []
+    _kept: list[SlotItem] = []
+    for _item in items:
+        if _repo_is_excluded(_item.repo, _exclude_patterns):
+            _excluded.append(_item)
+        else:
+            _kept.append(_item)
+    items = _kept
 
     # In-memory slot tracker for this dispatch cycle.
     _active: dict[str, str] = {}  # slot_key -> unit_name
