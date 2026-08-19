@@ -24,18 +24,24 @@ elif [[ -f setup.cfg ]] && grep -q '^\[tool:pytest\]' setup.cfg 2>/dev/null; the
     CMD="$PYTEST_CMD"
     REASON="[tool:pytest] in setup.cfg"
 elif [[ -f tox.ini ]]; then
-    if grep -q '^\[pytest\]' tox.ini 2>/dev/null; then
-        # tox.ini used as a plain pytest config — run pytest directly
+    if grep -qE '^\[(tox|testenv)\]' tox.ini 2>/dev/null; then
+        # Real tox project — [tox] or [testenv] section present; let tox manage the env
+        # (A [pytest] section may coexist; tox still owns the run)
+        CMD="tox"
+        REASON="tox.ini found ([tox]/[testenv] section detected)"
+    elif grep -q '^\[pytest\]' tox.ini 2>/dev/null; then
+        # tox.ini used as a plain pytest config (no [testenv]) — run pytest directly
         CMD="$PYTEST_CMD"
-        REASON="[pytest] section in tox.ini"
+        REASON="[pytest] section in tox.ini (no tox/testenv section)"
     else
-        # Real tox project (has [testenv] or similar) — let tox manage the env
         CMD="tox"
         REASON="tox.ini found"
     fi
 elif command -v pytest &>/dev/null || command -v uv &>/dev/null; then
     # Heuristic: if there are test files, assume pytest
-    if find . -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | grep -q .; then
+    # Note: avoid piping find to grep -q under pipefail — grep exits early and find
+    # gets SIGPIPE (exit 141), making the pipeline non-zero even when a match exists.
+    if [[ -n "$(find . -name 'test_*.py' -o -name '*_test.py' 2>/dev/null)" ]]; then
         CMD="$PYTEST_CMD"
         REASON="test_*.py files found (pytest assumed)"
     fi
@@ -49,6 +55,10 @@ if [[ -z "$CMD" ]] && [[ -f package.json ]]; then
     elif python3 -c "import json,sys; s=json.load(open('package.json')).get('scripts',{}); sys.exit(0 if 'test' in s else 1)" 2>/dev/null; then
         CMD="npm test"
         REASON="test script in package.json"
+    elif python3 -c "import json,sys; s=json.load(open('package.json')).get('scripts',{}); sys.exit(0 if any('jest' in v for v in s.values()) else 1)" 2>/dev/null; then
+        # jest found in a script value but no canonical 'test' key (e.g. 'test:unit': 'jest')
+        CMD="npx jest"
+        REASON="jest in package.json scripts"
     fi
 fi
 
