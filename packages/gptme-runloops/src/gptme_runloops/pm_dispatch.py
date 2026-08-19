@@ -731,11 +731,13 @@ class LaneDispatcher:
         if fast_model is None:
             fast_model = os.environ.get("BOB_PM_FAST_LANE_MODEL") or None
         _exclude_patterns = _get_excluded_repo_patterns()
+        total_before_exclude = len(items)
         items = [
             item
             for item in items
             if not _repo_is_excluded(item.repo, _exclude_patterns)
         ]
+        skipped_excluded = total_before_exclude - len(items)
         fast_items, slow_items = partition_items(items)
 
         launched = 0
