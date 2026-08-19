@@ -2438,3 +2438,51 @@ class TestRepoExclusionList:
         repos = [json.loads(line)["repo"] for line in fast_lines]
         assert "gptme/gptme" in repos
         assert "ActivityWatch/aw-webui" not in repos
+
+    def test_partition_jsonl_io_items_path_filters_excluded(
+        self, tmp_path, monkeypatch
+    ):
+        """_partition_jsonl_io skips excluded repos on the direct items= path."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+        items = [
+            make_item(
+                repo="ActivityWatch/aw-webui", number=255, types=["notification"]
+            ),
+            make_item(repo="gptme/gptme", number=1, types=["notification"]),
+        ]
+        _partition_jsonl_io(fast_path, slow_path, items=items)
+        fast_lines = [
+            line for line in fast_path.read_text().splitlines() if line.strip()
+        ]
+        repos = [json.loads(line)["repo"] for line in fast_lines]
+        assert "gptme/gptme" in repos
+        assert "ActivityWatch/aw-webui" not in repos
+
+    def test_lane_dispatcher_dispatch_filters_excluded(self, monkeypatch):
+        """LaneDispatcher.dispatch() skips items from excluded repos."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs["item"].repo)
+            return True
+
+        sm = SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        ld = LaneDispatcher(slot_manager=sm, dispatch_callback=cb)
+        items = [
+            make_item(
+                repo="ActivityWatch/aw-webui", number=255, types=["notification"]
+            ),
+            make_item(repo="gptme/gptme", number=1, types=["notification"]),
+        ]
+        launched, deferred = ld.dispatch(items)
+        assert launched == 1
+        assert deferred == 0
+        assert callback_calls == ["gptme/gptme"]

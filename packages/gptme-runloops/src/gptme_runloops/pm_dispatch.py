@@ -712,6 +712,12 @@ class LaneDispatcher:
         """
         if fast_model is None:
             fast_model = os.environ.get("BOB_PM_FAST_LANE_MODEL") or None
+        _exclude_patterns = _get_excluded_repo_patterns()
+        items = [
+            item
+            for item in items
+            if not _repo_is_excluded(item.repo, _exclude_patterns)
+        ]
         fast_items, slow_items = partition_items(items)
 
         launched = 0
@@ -1293,6 +1299,10 @@ def _partition_jsonl_io(
         return
 
     # Direct SlotItem path (Python-to-Python)
+    _exclude_patterns = _get_excluded_repo_patterns()
+    items = [
+        item for item in items if not _repo_is_excluded(item.repo, _exclude_patterns)
+    ]
     fast, slow = partition_items(items)
     for f_item in fast:
         with fast_path.open("a", encoding="utf-8") as fh:
