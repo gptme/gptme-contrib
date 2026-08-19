@@ -286,6 +286,7 @@ def build_full_ledger_entry(
     duration_seconds: str | int | None = None,
     exit_code: str | int | None = None,
     effect: str | None = None,
+    infra_failure: str | None = None,
     timestamp: str | None = None,
     max_items: int = 20,
 ) -> dict[str, Any]:
@@ -356,6 +357,12 @@ def build_full_ledger_entry(
         "exit_code": _maybe_int(exit_code),
         "effect": (effect or None) if phase in TERMINAL_LEDGER_PHASES else None,
         "outcome": derive_dispatch_outcome(phase, exit_code, failures, effect),
+        # Why the worker died when the cause was infrastructure (CC auth
+        # expiry / subscription rate limit), not the work. Read by
+        # pm_dispatch_recovery to re-arm without charging the retry budget.
+        "infra_failure": (infra_failure or None)
+        if phase in TERMINAL_LEDGER_PHASES
+        else None,
     }
 
 

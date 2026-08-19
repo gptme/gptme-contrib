@@ -765,6 +765,14 @@ class ItemPromptParams:
 
 
 # --- Investigate arm templates (lib.sh:670-935, non-greptile arms) ---
+#
+# Helper scripts referenced as ``{workspace}/scripts/...`` live in the AGENT'S
+# workspace repo, not in this package — same contract as ``ai-review-dispose.py``,
+# ``greptile-convergence.py`` and ``pr-address-wait-and-merge.sh`` above. For
+# the pr_update arm that is ``scripts/github/reply-to-thread.py`` (ErikBjare/bob
+# ``f802095834``): it posts into a review thread and refuses a second
+# consecutive bot reply unless the PR head moved (``--after-push``), the
+# mechanical half of the gptme/gptme#3531 reply-spam fix.
 
 _PR_UPDATE_ARM = """
 ### PR Review & Comments
@@ -777,9 +785,10 @@ gh pr view {number} --repo {repo} --comments
 gh api repos/{repo}/pulls/{number}/reviews \\
   --jq '.[] | {user: .user.login, state: .state, body: .body}'
 
-# Inline review comments (CRITICAL — often missed!)
-gh api repos/{repo}/pulls/{number}/comments \\
-  --jq '.[] | {id, path, user: .user.login, body: (.body | split("\\n")[0:3] | join(" "))}'
+# Inline review comments, grouped into THREADS (CRITICAL — often missed!). Each
+# thread shows who spoke last — that decides what (if anything) you owe it.
+gh api repos/{repo}/pulls/{number}/comments --paginate \\
+  --jq 'group_by(.in_reply_to_id // .id) | .[] | {thread: .[0].id, path: .[0].path, last_by: .[-1].user.login, n: length, comments: [.[] | {user: .user.login, at: .created_at, body: (.body | split("\\n")[0:2] | join(" "))}]}'
 
 # CI status
 gh pr checks {number} --repo {repo}
@@ -788,12 +797,28 @@ gh pr checks {number} --repo {repo}
 gh pr view {number} --repo {repo} --json mergeable,mergeStateStatus
 ```
 
-**Important**: Check ALL comments — human AND bot (Greptile, etc.). Respond to every
-human comment. If Greptile has unresolved findings, address them, push fixes, then
-run `bash {pr_address_script} --repo {repo} {number}`
+**Important**: Check ALL comments — human AND bot (Greptile, etc.). Never ignore a
+human comment in favor of bot review work. If Greptile has unresolved findings,
+address them, push fixes, then run `bash {pr_address_script} --repo {repo} {number}`
 for {agent_name}-local PRs, or `bash {greptile_helper} trigger {repo} {number}`
 and exit for cross-repo PRs. If it exits 2 or 3, stop there. The next monitoring cycle will pick up any remaining work.
-Never ignore a human comment in favor of bot review work.
+
+**Human review threads — decide per thread, never reflex-reply.** For each unresolved
+thread rooted by a human, look at the LATEST human comment and what {agent_name} posted after it:
+- No {agent_name} reply after it → respond: answer the question, or make the change and reply
+  once with the commit SHA.
+- {agent_name} already replied, and the human asked for a change that is NOT yet in the diff →
+  implement it now (a killed earlier worker may have left `/tmp/worktrees/*-pr{number}-monitor`
+  with uncommitted work — `git status` there first and resume it, don't start over), push,
+  then reply ONCE with the SHA. Do NOT post another explanation of the same point.
+- {agent_name} already replied and either the fix is pushed or the reply asked the human
+  something → leave the thread alone. The ball is in their court; another reply is spam
+  (gptme/gptme#3531 got 10 replies on one thread this way).
+- Never post two replies to one thread in one run; never re-answer a question already
+  answered. Never resolve a human's thread.
+Post thread replies through `python3 {workspace}/scripts/github/reply-to-thread.py {repo} {number} THREAD_ID --body-file /tmp/reply.md`
+— it refuses a second consecutive {agent_name} reply on a thread unless the PR head moved since
+(`--after-push`), and rejects an exact duplicate of something already posted there.
 """
 
 _CI_FAILURE_ARM = """

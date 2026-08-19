@@ -42,6 +42,7 @@ from gptme_runloops.run_item import (
     RunItemConfig,
     RunItemHooks,
     _handle_cc_rate_limit,
+    _inspect_cc_failure,
     build_execution_plan,
     clear_slot_event_markers,
     derive_lock_paths,
@@ -959,6 +960,125 @@ def test_cc_rate_limit_bare_mention_does_not_block(tmp_path) -> None:
         assert not config.resolved_backend_quota_dir.exists()
     finally:
         (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
+
+
+def test_cc_auth_expiry_is_infra_not_rate_limit(tmp_path) -> None:
+    """gptme/gptme#3531 (2026-08-17): 'OAuth session expired and could not be
+    refreshed' killed three dispatches in 50 min. It must classify as an
+    infra failure (free re-arm) WITHOUT writing a rate-limit block file."""
+    config = make_config(tmp_path)
+    sid = f"test-rl-{os.getpid()}-c"
+    _cc_log(
+        tmp_path,
+        sid,
+        [
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour"},
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+            },
+        ],
+    )
+    plan = _fake_plan(tmp_path, sid)
+    try:
+        assert _inspect_cc_failure(plan, config) == (False, "cc_auth")
+        assert not config.resolved_backend_quota_dir.exists()
+    finally:
+        (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
+
+
+def test_cc_auth_marker_mid_transcript_is_not_infra(tmp_path) -> None:
+    """A tool output mentioning 'Failed to authenticate' (git 401, some cache
+    that 'could not be refreshed') followed by an ordinary failure must NOT be
+    relabeled cc_auth — that would hand a genuinely broken task a free re-arm."""
+    config = make_config(tmp_path)
+    sid = f"test-rl-{os.getpid()}-f"
+    _cc_log(
+        tmp_path,
+        sid,
+        [
+            {
+                "type": "user",
+                "message": {"content": "remote: Failed to authenticate (git 401)"},
+            },
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour"},
+            },
+            {
+                "type": "result",
+                "subtype": "error_max_turns",
+                "is_error": True,
+                "result": "Reached max turns",
+            },
+        ],
+    )
+    plan = _fake_plan(tmp_path, sid)
+    try:
+        assert _inspect_cc_failure(plan, config) == (False, None)
+    finally:
+        (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
+
+
+def test_cc_auth_expiry_without_rate_limit_field_is_still_infra(tmp_path) -> None:
+    config = make_config(tmp_path)
+    sid = f"test-rl-{os.getpid()}-d"
+    _cc_log(
+        tmp_path,
+        sid,
+        [{"type": "result", "is_error": True, "result": "Failed to authenticate"}],
+    )
+    plan = _fake_plan(tmp_path, sid)
+    try:
+        assert _inspect_cc_failure(plan, config) == (False, "cc_auth")
+    finally:
+        (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
+
+
+def test_cc_auth_marker_in_truncated_log_without_result_is_not_infra(tmp_path) -> None:
+    """Hard-killed log, no result event, last tool output mentions the marker:
+    conservatively NOT infra."""
+    config = make_config(tmp_path)
+    sid = f"test-rl-{os.getpid()}-g"
+    _cc_log(
+        tmp_path,
+        sid,
+        [
+            {"type": "assistant", "message": {"content": "running git fetch"}},
+            {"type": "user", "message": {"content": "fatal: Failed to authenticate"}},
+        ],
+    )
+    plan = _fake_plan(tmp_path, sid)
+    try:
+        assert _inspect_cc_failure(plan, config) == (False, None)
+    finally:
+        (Path("/tmp") / f"cc-session-log-ref-{sid}.txt").unlink(missing_ok=True)
+
+
+def test_cc_confirmed_rejection_reports_rate_limit_kind(tmp_path) -> None:
+    config = make_config(tmp_path)
+    sid = f"test-rl-{os.getpid()}-e"
+    _cc_log(
+        tmp_path,
+        sid,
+        [
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "status": "rejected",
+                    "rateLimitType": "five_hour",
+                    "resetsAt": 1760000000,
+                },
+            }
+        ],
+    )
+    plan = _fake_plan(tmp_path, sid)
+    assert _inspect_cc_failure(plan, config) == (True, "cc_rate_limit")
 
 
 def test_run_work_file_rate_limit_breaks_remaining_items(tmp_path) -> None:

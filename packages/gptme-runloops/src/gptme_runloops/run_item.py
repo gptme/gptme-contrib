@@ -1379,6 +1379,14 @@ class RunItemOutcome:
     #: signal — but it is emphatically not a success either, so it is tracked
     #: separately and subtracted from the ledger's ``successes``.
     timed_out: bool = False
+    #: Why the worker died, when the cause is infrastructure rather than the
+    #: work: ``cc_rate_limit`` (confirmed rejected rate_limit_event) or
+    #: ``cc_auth`` (OAuth session expired / could not be refreshed). Recorded
+    #: on the completed ledger row as ``infra_failure`` so
+    #: ``pm_dispatch_recovery`` re-arms it for free instead of charging the
+    #: retry budget (gptme/gptme#3531, 2026-08-17: three auth deaths in 50min
+    #: burned the budget and each restart began from scratch).
+    infra_failure: str | None = None
 
 
 def _find_arc(
@@ -1610,6 +1618,7 @@ def execute_plan(
     rate_limited = False
     counted_failure = False
     timed_out = False
+    infra_failure: str | None = None
     if exit_code == 124:
         _log(
             f"WARN: Item {plan.index} timed out after {plan.timeout}s ({plan.time_desc})"
@@ -1619,7 +1628,7 @@ def execute_plan(
         _log(f"WARN: Item {plan.index} exited with code {exit_code}")
         counted_failure = True
         if plan.backend == "claude-code":
-            rate_limited = _handle_cc_rate_limit(plan, config)
+            rate_limited, infra_failure = _inspect_cc_failure(plan, config)
 
     trajectory = plan.trajectory_path
     if not rate_limited:
@@ -1651,34 +1660,97 @@ def execute_plan(
         rate_limited=rate_limited,
         counted_failure=counted_failure,
         timed_out=timed_out,
+        infra_failure=infra_failure,
     )
+
+
+#: Substrings in a CC stream log that mean the session died on credentials,
+#: not on the work. Observed verbatim 2026-08-17 15:06/15:31/15:45 on
+#: gptme/gptme#3531: ``Failed to authenticate: OAuth session expired and could
+#: not be refreshed`` — three dispatches in 50 minutes, each charged to the
+#: retry budget, the first one 35 turns into implementing the maintainer's ask.
+CC_AUTH_FAILURE_MARKERS: tuple[str, ...] = (
+    "OAuth session expired",
+    "Failed to authenticate",
+    "could not be refreshed",
+)
+
+INFRA_FAILURE_CC_RATE_LIMIT = "cc_rate_limit"
+INFRA_FAILURE_CC_AUTH = "cc_auth"
+
+
+def cc_stream_died_on_auth(text: str) -> bool:
+    """True when the CC stream-json log *terminated* on an auth failure.
+
+    Matches :data:`CC_AUTH_FAILURE_MARKERS` only against the terminal
+    ``result`` event (the last ``{"type": "result", ...}`` line — its
+    ``result`` text is what the CLI printed as the fatal error). No result
+    event → False, conservatively: a log truncated by a hard kill whose last
+    tool output happened to say "Failed to authenticate" (a git 401) must not
+    relabel an ordinary failure as infra and hand it a free re-arm. Both
+    observed auth deaths (gptme/gptme#3531, 2026-08-17 15:06/15:31) carried a
+    ``result`` event with the marker in ``result``.
+    """
+    for raw in reversed(text.splitlines()):
+        if not raw.strip():
+            continue
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "result":
+            continue
+        blob = " ".join(
+            str(ev.get(k) or "") for k in ("result", "error", "message", "subtype")
+        )
+        return any(marker in blob for marker in CC_AUTH_FAILURE_MARKERS)
+    return False
 
 
 def _handle_cc_rate_limit(
     plan: ItemPlan, config: RunItemConfig, *, tmp_dir: Path = Path("/tmp")
 ) -> bool:
+    """Bool-only wrapper kept for callers/tests; see :func:`_inspect_cc_failure`."""
+    rate_limited, _kind = _inspect_cc_failure(plan, config, tmp_dir=tmp_dir)
+    return rate_limited
+
+
+def _inspect_cc_failure(
+    plan: ItemPlan, config: RunItemConfig, *, tmp_dir: Path = Path("/tmp")
+) -> tuple[bool, str | None]:
     """worker.sh:107-189 — CC rate-limit detection on a failed session.
 
     Prefers the session-specific log ref (#543); requires a CONFIRMED
     *rejected* rate_limit_event before blocking (never a bare
     ``rateLimitType`` grep — a 401 stream mentions the field too).
     Removes the log + ref when the field was present at all, like the bash.
+
+    Returns ``(rate_limited, infra_failure_kind)``. ``infra_failure_kind`` is
+    :data:`INFRA_FAILURE_CC_RATE_LIMIT` on a confirmed rejection,
+    :data:`INFRA_FAILURE_CC_AUTH` when the stream carries one of
+    :data:`CC_AUTH_FAILURE_MARKERS` (no block file — the watchdog self-reauth
+    is the recovery path, and the next dispatch may already succeed), else
+    ``None``.
     """
     ref = tmp_dir / f"cc-session-log-ref-{plan.session_id}.txt"
     if not (plan.session_id and ref.is_file()):
         ref = tmp_dir / "cc-last-session-log.txt"
     if not ref.is_file():
-        return False
+        return False, None
     log_path_str = ref.read_text(encoding="utf-8", errors="replace").strip()
     log_path = Path(log_path_str) if log_path_str else None
     if log_path is None or not log_path.is_file():
-        return False
+        return False, None
     try:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
+        return False, None
+    auth_failed = cc_stream_died_on_auth(text)
     if '"rateLimitType"' not in text:
-        return False
+        if auth_failed:
+            _log("ERROR: Claude Code auth failure (OAuth expired) — infra, not work")
+            return False, INFRA_FAILURE_CC_AUTH
+        return False, None
 
     rejection = None
     try:
@@ -1702,6 +1774,11 @@ def _handle_cc_rate_limit(
         )
         sub = sub_suffix.rstrip("-") or "unknown"
         _log(f"{msg} (sub: {sub})")
+    elif auth_failed:
+        _log(
+            "ERROR: Claude Code auth failure (OAuth expired) — infra, not work; "
+            "not writing a rate-limit block file"
+        )
     else:
         _log(
             "NOTE: log mentioned rateLimitType but no REJECTED rate_limit_event — "
@@ -1712,7 +1789,11 @@ def _handle_cc_rate_limit(
             p.unlink()
         except OSError:
             pass
-    return rate_limited
+    if rate_limited:
+        return True, INFRA_FAILURE_CC_RATE_LIMIT
+    if auth_failed:
+        return False, INFRA_FAILURE_CC_AUTH
+    return False, None
 
 
 # --- Post-session bookkeeping (worker.sh:192-664; composes worker_records) ---
@@ -2201,6 +2282,7 @@ def _append_ledger(
     duration_seconds: int | None = None,
     exit_code: int | None = None,
     effect: str | None = None,
+    infra_failure: str | None = None,
 ) -> None:
     try:
         append_full_ledger_entry(
@@ -2217,6 +2299,7 @@ def _append_ledger(
             duration_seconds=duration_seconds,
             exit_code=exit_code,
             effect=effect,
+            infra_failure=infra_failure,
         )
     except Exception as exc:
         _log(f"WARN: dispatch-ledger append failed ({phase}): {exc}")
@@ -2468,6 +2551,7 @@ def run_work_file(
         failures = 0
         timeouts = 0
         rate_limited = False
+        infra_failure: str | None = None
         overall_exit = 0
         item_effects: list[str] = []
 
@@ -2549,6 +2633,8 @@ def run_work_file(
                     timeouts += 1
                 if item_outcome.rate_limited:
                     rate_limited = True
+                if item_outcome.infra_failure and not infra_failure:
+                    infra_failure = item_outcome.infra_failure
                 if item_outcome.exit_code != 0 and overall_exit == 0:
                     overall_exit = item_outcome.exit_code
                 item_effects.append(
@@ -2610,9 +2696,11 @@ def run_work_file(
             duration_seconds=duration,
             exit_code=overall_exit,
             effect=dispatch_effect,
+            infra_failure=infra_failure,
         )
         _log(
             f"Items: {group_count} total, {successes} succeeded, {failures} failed, {timeouts} timed out"
+            + (f", infra_failure={infra_failure}" if infra_failure else "")
         )
 
         if hooks.post_run is not None:

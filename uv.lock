@@ -28,6 +28,7 @@ members = [
     "gptme-activity-summary",
     "gptme-attention-tracker",
     "gptme-backoff",
+    "gptme-bob-status",
     "gptme-cc-memory",
     "gptme-claude-code",
     "gptme-codegraph",
@@ -1758,6 +1759,26 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.25" },
     { name = "tenacity", specifier = ">=9.0" },
+]
+provides-extras = ["test"]
+
+[[package]]
+name = "gptme-bob-status"
+version = "0.1.0"
+source = { editable = "packages/gptme-bob-status" }
+dependencies = [
+    { name = "gptme" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
 ]
 provides-extras = ["test"]
 
