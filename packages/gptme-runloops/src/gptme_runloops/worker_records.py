@@ -1104,15 +1104,18 @@ def derive_effect_signal(
        effect for every session that never looked.
     """
     delivery = str(delivery_outcome or "").strip().lower()
+
+    # gh API failed at snapshot time: we cannot observe the "after" state, so
+    # this is an infra failure, not genuine ineffectiveness.  Must take
+    # precedence over delivery_outcome (including orphan_no_delivery) so that a
+    # fetch failure is never recorded as a definitive no-effect.
+    if payload.get("gh_snapshot_fetch_failed"):
+        return EFFECT_FETCH_FAILED
+
     if delivery == "orphan_no_delivery":
         return EFFECT_NONE
     if delivery == "handled":
         return EFFECT_OBSERVED
-
-    # gh API failed at snapshot time: we cannot observe the "after" state, so
-    # this is an infra failure, not genuine ineffectiveness.
-    if payload.get("gh_snapshot_fetch_failed"):
-        return EFFECT_FETCH_FAILED
 
     before_head = normalize_oid(payload.get("pr_head_oid_before"))
     after_head = normalize_oid(payload.get("pr_head_oid_after"))

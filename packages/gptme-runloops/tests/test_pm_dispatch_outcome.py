@@ -198,6 +198,16 @@ class TestDeriveEffectSignal:
             == EFFECT_FETCH_FAILED
         )
 
+    def test_gh_fetch_failed_overrides_orphan_no_delivery(self) -> None:
+        """fetch_failed must outrank orphan_no_delivery — infra failure is not no-effect."""
+        assert (
+            derive_effect_signal(
+                {"gh_snapshot_fetch_failed": True},
+                delivery_outcome="orphan_no_delivery",
+            )
+            == EFFECT_FETCH_FAILED
+        )
+
     def test_orphan_delivery_is_no_effect(self) -> None:
         assert (
             derive_effect_signal(
