@@ -81,6 +81,41 @@ _disabled_workflows() {
     printf '%s' "$wf"
 }
 
+# Current HEAD SHA (`gh api repos/<REPO>/commits .[0].sha`) was ~151 calls/window.
+# Unlike default_branch it *does* change (on every commit push), but it changes
+# infrequently enough that a 5-minute TTL prevents redundant fetches during a
+# session without introducing problematic staleness. If the script runs multiple
+# times within a stale-run's 5-minute window, HEAD detection still works; if it
+# misses a very recent push, it will report stale for one run, then auto-correct
+# on the next refresh cycle. This is acceptable for stale-run *annotation*, not
+# control flow.
+_HEAD_SHA_CACHE_DIR="${BOB_HEAD_SHA_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/head-sha}"
+_HEAD_SHA_CACHE_TTL=300  # 5 minutes
+
+_current_head_sha() {
+    local repo="$1"
+    local cache_file now mtime age sha
+    cache_file="$_HEAD_SHA_CACHE_DIR/${repo//\//__}"
+    if [ -f "$cache_file" ]; then
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || printf '0')
+        age=$(( now - mtime ))
+        if [ "$age" -lt "$_HEAD_SHA_CACHE_TTL" ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    sha=$(gh api "repos/$repo/commits" --jq '.[0].sha' 2>/dev/null || echo "")
+    if [ -n "$sha" ]; then
+        mkdir -p "$_HEAD_SHA_CACHE_DIR" 2>/dev/null || true
+        # Atomic write so concurrent checks never read a torn file.
+        printf '%s' "$sha" > "$cache_file.tmp.$$" 2>/dev/null \
+            && mv "$cache_file.tmp.$$" "$cache_file" 2>/dev/null \
+            || rm -f "$cache_file.tmp.$$" 2>/dev/null
+    fi
+    printf '%s' "$sha"
+}
+
 check_repo() {
     local repo=$1
     local label=${2:-$repo}
@@ -154,7 +189,7 @@ check_repo() {
         run_head_sha=$(echo "$run_json" | jq -r ".[$idx].headSha // \"\"")
         if [ -n "$run_head_sha" ]; then
             local current_head_sha
-            current_head_sha=$(gh api "repos/$repo/commits" --jq '.[0].sha' 2>/dev/null || echo "")
+            current_head_sha=$(_current_head_sha "$repo")
             if [ -n "$current_head_sha" ] && [ "$run_head_sha" != "$current_head_sha" ]; then
                 stale_suffix=" (stale; HEAD=${current_head_sha:0:7}, run=${run_head_sha:0:7})"
             fi
