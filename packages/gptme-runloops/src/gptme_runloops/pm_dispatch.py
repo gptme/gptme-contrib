@@ -76,12 +76,17 @@ def _repo_is_excluded(repo: str, patterns: tuple[str, ...] | None = None) -> boo
     """Return True if *repo* matches any exclusion pattern.
 
     Supports exact match (``owner/repo``) and owner-glob (``owner/*``).
+    Matching is case-insensitive: GitHub repo names are case-preserving but
+    case-insensitive for identification, so ``activitywatch/aw-webui`` must
+    match the default ``ActivityWatch/*`` pattern regardless of casing in the
+    pipeline source.
     """
     import fnmatch
 
     if patterns is None:
         patterns = _get_excluded_repo_patterns()
-    return any(fnmatch.fnmatch(repo, pat) for pat in patterns)
+    repo_lower = repo.lower()
+    return any(fnmatch.fnmatch(repo_lower, pat.lower()) for pat in patterns)
 
 
 # Repositories that receive automated shadow PR reviews (no Greptile free tier).
