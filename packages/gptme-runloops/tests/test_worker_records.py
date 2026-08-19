@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 from gptme_runloops.worker_records import (
+    EFFECT_FETCH_FAILED,
     _iter_bash_commands,
     append_wait_merge_gate_log,
     append_worker_latency_records,
@@ -744,7 +745,7 @@ def test_update_record_pr_state_fetch_failure_sets_effect_fetch_failed(
         fetch=lambda repo, num: None,
     )
     payload = json.loads(record.read_text(encoding="utf-8"))
-    assert payload["effect"] == "fetch_failed"
+    assert payload["effect"] == EFFECT_FETCH_FAILED
 
 
 @pytest.mark.parametrize(

@@ -667,9 +667,8 @@ def update_record_pr_state(
             # gh API failure — still apply dedup/state-diff with empty after so
             # deliverables are normalised, but signal the failure so that
             # classify_completion routes this to CLASS_INFRA, not CLASS_INEFFECTIVE.
-            # Value must match _EFFECT_FETCH_FAILED in pm_dispatch_recovery.py.
             apply_pr_state_diff(payload, before, {})
-            payload["effect"] = "fetch_failed"
+            payload["effect"] = EFFECT_FETCH_FAILED
         else:
             apply_pr_state_diff(payload, before, after)
         outcome_before_upgrade = payload.get("outcome")
@@ -1072,6 +1071,7 @@ def read_record_pr_state_after(record_path: Path | str) -> str:
 EFFECT_OBSERVED = "observed"
 EFFECT_NONE = "none"
 EFFECT_UNKNOWN = "unknown"
+EFFECT_FETCH_FAILED = "fetch_failed"  # matched by _EFFECT_FETCH_FAILED in pm_dispatch_recovery.py
 
 
 def derive_effect_signal(
