@@ -503,8 +503,10 @@ def post_session(
     # this is indistinguishable from a genuine noop and the existing
     # unreliable-trajectory-with-no-deliverables path already records
     # "unknown" rather than penalizing the backend.
+    _format_blind = False
     if trajectory_reliable and deliverables and _trajectory_format_blind(signals):
         trajectory_reliable = False
+        _format_blind = True
         logger.warning(
             "Trajectory reports zero tool calls over %ss — extractor may not "
             "support this trajectory format; trusting caller deliverables",
@@ -632,16 +634,27 @@ def post_session(
     # Rationale: defaulting to "productive" inflates bandit reward signals
     # when callers omit trajectory/commit data.  "unknown" means "we don't
     # know" — callers should skip bandit updates rather than guess.
+    # Records why an outcome was promoted away from what the primary signal
+    # said. None means "no flip" — the signal was taken at face value.
+    outcome_flip_reason: str | None = None
     if exit_code not in (0, 124):
         outcome = "failed"
     elif traj_productive is not None:
         if traj_productive:
             outcome = "productive"
         elif not trajectory_reliable and caller_deliverables:
-            # Trajectory says noop but is unreliable (covers far less wall-clock
-            # than the session ran — likely truncated or misattributed) and the
-            # caller observed real git-range commits. Trust the commits.
+            # Trajectory says noop but is unreliable and the caller observed
+            # real git-range commits. Trust the commits.
+            # Distinguish two sub-cases so audit consumers see the real cause:
+            # - format_blind: trajectory had good wall-clock coverage but the
+            #   extractor couldn't parse the tool-call shape (no duration mismatch)
+            # - unreliable: trajectory covered far less wall-clock than the session
             outcome = "productive"
+            outcome_flip_reason = (
+                "format_blind_trajectory_caller_deliverables"
+                if _format_blind
+                else "unreliable_trajectory_caller_deliverables"
+            )
         elif not trajectory_reliable and not caller_deliverables:
             # Trajectory is unreliable (truncated/misattributed) and no caller
             # deliverables exist — outcome is genuinely unknown.  Recording noop
@@ -681,6 +694,10 @@ def post_session(
             outcome,
             len(caller_deliverables),
         )
+        outcome_flip_reason = (
+            f"no_trajectory_caller_deliverables:{outcome}"
+            f"->productive:n={len(caller_deliverables)}"
+        )
         outcome = "productive"
 
     # --- Compute start_time / end_time from duration ---
@@ -715,6 +732,8 @@ def post_session(
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
     }
+    if outcome_flip_reason is not None:
+        record_kwargs["outcome_flip_reason"] = outcome_flip_reason
     if context_tier is not None:
         record_kwargs["context_tier"] = context_tier
     if ab_group is not None:

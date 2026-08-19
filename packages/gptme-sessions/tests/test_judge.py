@@ -427,6 +427,7 @@ class TestJudgeSession:
 
         assert parsed == {
             "score": 1.0,
+            "judge_status": "ok",
             "reason": "Shipped a real fix",
             "model": "openai-subscription/gpt-5.4",
         }
@@ -743,6 +744,7 @@ class TestModelRouting:
 
         assert normalized == {
             "score": 0.74,
+            "judge_status": "ok",
             "reason": "Meaningful progress",
             "model": "openai-subscription/gpt-5.4",
             "alignment_score": None,
@@ -1011,6 +1013,129 @@ class TestSessionRecordJudgeFields:
         assert updated.span_aggregates["dominant_tool"] == "exec_command"
         assert updated.span_aggregates["error_rate"] == 0.0
 
+    def test_parse_judge_payload_without_score_is_no_score(self) -> None:
+        """A payload with no usable score must NOT become a neutral 0.5."""
+        parsed = _parse_judge_payload(
+            '{"reason": "judge forgot the score"}',
+            "openai-subscription/gpt-5.4",
+        )
+
+        assert parsed == {
+            "score": None,
+            "judge_status": "no_score",
+            "reason": "judge forgot the score",
+            "model": "openai-subscription/gpt-5.4",
+        }
+
+    def test_parse_judge_payload_with_unparseable_score_is_no_score(self) -> None:
+        parsed = _parse_judge_payload(
+            '{"score": "excellent", "reason": "prose instead of a number"}',
+            "openai-subscription/gpt-5.4",
+        )
+
+        assert parsed is not None
+        assert parsed["score"] is None
+        assert parsed["judge_status"] == "no_score"
+
+    def test_parse_judge_payload_with_nan_score_is_no_score(self) -> None:
+        """NaN is a valid JSON value via json.loads but not a usable score.
+
+        In CPython, min(1.0, float('nan')) == 1.0 because nan < 1.0 is False.
+        Without an explicit NaN check _coerce_score would return 1.0 — the
+        maximum alignment score — for a judge that produced no real score.
+        """
+        # json.loads accepts the NaN literal (non-standard but widely supported)
+        parsed = _parse_judge_payload(
+            '{"score": NaN, "reason": "lost track of the number"}',
+            "openai-subscription/gpt-5.4",
+        )
+        # json.loads may reject non-standard NaN literal depending on the
+        # Python/stdlib version; if so, the payload is treated as unparseable.
+        # Either path must yield no_score, not a silent 1.0.
+        if parsed is not None:
+            assert parsed["score"] is None
+            assert parsed["judge_status"] == "no_score"
+
+    def test_normalize_judge_verdict_without_score_is_no_score(self) -> None:
+        normalized = normalize_judge_verdict(
+            {"reason": "no score", "model": "openai-subscription/gpt-5.4"}
+        )
+
+        assert normalized["score"] is None
+        assert normalized["judge_status"] == "no_score"
+
+    def test_score_less_verdict_does_not_write_a_grade(self, tmp_path: Path) -> None:
+        """The record is stamped no_score; no alignment grade is written."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="sess-no-score",
+                harness="claude-code",
+                model="opus",
+                run_type="autonomous",
+                outcome="productive",
+            )
+        )
+
+        with patch(
+            "gptme_sessions.judge.judge_session",
+            return_value={
+                "reason": "judge returned prose only",
+                "model": "openai-subscription/gpt-5.4",
+            },
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id="sess-no-score",
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        assert result["status"] == "no_score"
+        assert result["score"] is None
+
+        record = next(r for r in store.load_all() if r.session_id == "sess-no-score")
+        assert record._legacy_fields.get("judge_status") == "no_score"
+        # The neutral 0.5 that used to be written here is the whole point.
+        assert record.grades.get("alignment") is None
+
+    def test_score_less_verdict_persists_reason_for_audit(self, tmp_path: Path) -> None:
+        """When score is None the judge's reason must still be queryable from
+        the session record — otherwise judge_status=no_score is an opaque fact
+        with no explanation, defeating the records-queryable audit goal."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="sess-no-score-reason",
+                harness="claude-code",
+                model="opus",
+                run_type="autonomous",
+                outcome="productive",
+            )
+        )
+
+        with patch(
+            "gptme_sessions.judge.judge_session",
+            return_value={
+                "reason": "judge forgot the score — explanation is here",
+                "model": "openai-subscription/gpt-5.4",
+            },
+        ):
+            judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id="sess-no-score-reason",
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        record = next(r for r in store.load_all() if r.session_id == "sess-no-score-reason")
+        # The reason must be stored on the record even without a score.
+        assert record.llm_judge_reason == "judge forgot the score — explanation is here"
+
     def test_judge_and_writeback_reports_missing_record(self, tmp_path: Path) -> None:
         with patch(
             "gptme_sessions.judge.judge_session",
@@ -1032,6 +1157,7 @@ class TestSessionRecordJudgeFields:
         assert result == {
             "status": "no_record",
             "score": 0.5,
+            "judge_status": "ok",
             "reason": "Did work",
             "model": "openai-subscription/gpt-5.4",
             "alignment_score": None,

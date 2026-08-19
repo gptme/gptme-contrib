@@ -52,7 +52,11 @@ class JudgeMetadata(TypedDict):
 
 
 class JudgeVerdict(TypedDict, total=False):
-    score: float
+    # ``None`` when the judge returned a payload without a usable score.
+    # Never silently substituted with a neutral default — see
+    # ``_coerce_score`` and ``JUDGE_STATUS_NO_SCORE``.
+    score: float | None
+    judge_status: str
     reason: str
     model: str
     alignment_score: float | None
@@ -489,6 +493,28 @@ def _build_judge_meta(*, model: str) -> JudgeMetadata:
 VALID_ALIGNMENT_VALUES = frozenset({"on_track", "partial", "pivot", "off_target"})
 
 
+JUDGE_STATUS_OK = "ok"
+JUDGE_STATUS_NO_SCORE = "no_score"
+
+
+def _coerce_score(raw: Any) -> float | None:
+    """Clamp a raw judge score to 0.0-1.0, or None when it is unusable.
+
+    Returning None is deliberate: a missing or malformed ``score`` used to
+    become a neutral 0.5, which is indistinguishable from a judge that
+    genuinely scored the session at 0.5. Callers must branch on None.
+    """
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+        if v != v:  # NaN: the only float where x != x is True
+            return None
+        return max(0.0, min(1.0, v))
+    except (ValueError, TypeError):
+        return None
+
+
 def _coerce_alignment_score(raw: Any) -> float | None:
     """Normalize an alignment_score value to float 0.0-1.0 or None."""
     if raw is None:
@@ -520,8 +546,20 @@ def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
     raw_meta = payload.get("meta")
     meta = raw_meta if isinstance(raw_meta, dict) else {}
     base_meta = _build_judge_meta(model=model)
+    score = _coerce_score(payload.get("score"))
+    status = str(payload.get("judge_status") or JUDGE_STATUS_OK)
+    if score is None:
+        status = JUDGE_STATUS_NO_SCORE
+        logger.warning(
+            "Judge verdict has no usable score (raw=%r, model=%s); "
+            "recording judge_status=%s instead of a neutral default",
+            payload.get("score"),
+            model or "unknown",
+            JUDGE_STATUS_NO_SCORE,
+        )
     verdict: JudgeVerdict = {
-        "score": max(0.0, min(1.0, float(payload.get("score", 0.5)))),
+        "score": score,
+        "judge_status": status,
         "reason": str(payload.get("reason", "")),
         "model": model,
         "alignment_score": _coerce_alignment_score(payload.get("alignment_score")),
@@ -563,10 +601,20 @@ def _parse_judge_payload(text: str, model: str) -> dict | None:
             logger.warning("LLM judge returned non-JSON response")
             return None
         verdict = json.loads(match.group(0))
-    score = float(verdict.get("score", 0.5))
+    score = _coerce_score(verdict.get("score"))
     reason = str(verdict.get("reason", ""))
-    score = max(0.0, min(1.0, score))
-    result: dict[str, Any] = {"score": score, "reason": reason, "model": model}
+    if score is None:
+        logger.warning(
+            "LLM judge returned a payload without a usable score (raw=%r, model=%s)",
+            verdict.get("score"),
+            model,
+        )
+    result: dict[str, Any] = {
+        "score": score,
+        "judge_status": JUDGE_STATUS_OK if score is not None else JUDGE_STATUS_NO_SCORE,
+        "reason": reason,
+        "model": model,
+    }
     # Phase 3: pass through intent-contract fields when the judge returns them
     alignment_score = _coerce_alignment_score(verdict.get("alignment_score"))
     if alignment_score is not None:
@@ -911,14 +959,36 @@ def write_alignment_grade(
                 except (json.JSONDecodeError, OSError):
                     pass
 
-        record.set_alignment_grade(
-            normalized["score"],
-            reason=normalized["reason"],
-            model=normalized["model"],
-        )
+        score = normalized.get("score")
+        if score is None:
+            # The judge produced a payload but no usable score. Recording a
+            # neutral default here would be indistinguishable from a real 0.5,
+            # so stamp the failure instead and leave the grade unset — the
+            # reward consumer falls back to the heuristic and says so.
+            logger.warning(
+                "No alignment grade written for %s: judge_status=%s (model=%s)",
+                session_id,
+                normalized.get("judge_status", JUDGE_STATUS_NO_SCORE),
+                normalized.get("model") or "unknown",
+            )
+            # Persist the judge's reason even without a score so an analyst
+            # can find out WHY the judge produced no score by querying session
+            # records rather than grepping logs (the records-queryable goal of
+            # judge_status would be undermined without the accompanying reason).
+            if normalized.get("reason"):
+                record.llm_judge_reason = normalized["reason"]
+        else:
+            record.set_alignment_grade(
+                score,
+                reason=normalized["reason"],
+                model=normalized["model"],
+            )
         # Phase 3: persist intent-contract alignment fields via legacy bridge
         legacy_fields = getattr(record, "_legacy_fields", None)
         if isinstance(legacy_fields, dict):
+            # Always durable, so score-less verdicts are countable by querying
+            # the session records rather than grepping logs.
+            legacy_fields["judge_status"] = normalized.get("judge_status", JUDGE_STATUS_OK)
             if normalized.get("alignment_score") is not None:
                 legacy_fields["alignment_score"] = normalized["alignment_score"]
             if normalized.get("pivot_verdict") is not None:
@@ -993,5 +1063,7 @@ def judge_and_writeback(
     )
     if not updated:
         return {"status": "no_record", **normalized}
+    if normalized.get("score") is None:
+        return {"status": JUDGE_STATUS_NO_SCORE, **normalized}
 
     return {"status": "ok", **normalized}

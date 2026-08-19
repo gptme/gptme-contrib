@@ -661,6 +661,39 @@ def test_post_session_caller_only_deliverables_when_no_trajectory(tmp_path: Path
     ]
 
 
+def test_post_session_no_trajectory_flip_records_reason(tmp_path: Path):
+    """The noop/unknown -> productive promotion must be auditable, not silent."""
+    store = SessionStore(sessions_dir=tmp_path)
+
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="opus",
+        duration_seconds=60,
+        deliverables=["abc1234567890abcdef1234567890abcdef1234"],
+    )
+
+    assert result.record.outcome == "productive"
+    reason = result.record.outcome_flip_reason
+    assert reason is not None
+    assert reason.startswith("no_trajectory_caller_deliverables:")
+    assert "->productive" in reason
+
+
+def test_post_session_unflipped_outcome_has_no_flip_reason(tmp_path: Path):
+    """No flip happened, so nothing is stamped -- absence stays meaningful."""
+    store = SessionStore(sessions_dir=tmp_path)
+
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="opus",
+        duration_seconds=60,
+    )
+
+    assert result.record.outcome_flip_reason is None
+
+
 def test_post_session_caller_deliverables_no_outcome_override_when_traj_noop(tmp_path: Path):
     """Git-range commits must NOT upgrade outcome when trajectory determined noop.
     Prevents concurrent-session commits from inflating session classification."""
@@ -828,6 +861,10 @@ def test_post_session_format_blind_trajectory_keeps_caller_deliverables(tmp_path
 
     assert result.record.outcome == "productive"
     assert result.record.deliverables == [real_sha]
+    # The flip reason must name the real cause (format blindness), not the
+    # duration-unreliable cause — these are distinct mechanisms and audit
+    # consumers need to tell them apart.
+    assert result.record.outcome_flip_reason == "format_blind_trajectory_caller_deliverables"
 
 
 def test_post_session_nonzero_tool_calls_still_drops_caller_deliverables(tmp_path: Path):
