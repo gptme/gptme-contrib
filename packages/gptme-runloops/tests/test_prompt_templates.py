@@ -25,6 +25,17 @@ Regenerate the goldens from a checkout of the brain repo with::
     printf '%s' "$INVESTIGATE" > greptile_needs_improvement.bob.txt
     # ...and again with the second parameter set (see CONTEXTS below).
 
+Two kinds now have goldens **ahead of the bash builders**:
+
+- ``local_greptile_fix`` and ``cross_repo_greptile_refresh`` were hand-edited
+  in gptme-contrib#1463 to add the ``pm-review-and-push`` step before the
+  corresponding bash builders in ErikBjare/bob were updated.  For these two
+  kinds the goldens serve as *drift locks on the Python output*, not parity
+  proofs vs. bash.  Regenerating from bash will not produce matching goldens
+  until ``_build_local_greptile_fix_instructions`` and
+  ``_build_cross_repo_greptile_refresh_instructions`` in ErikBjare/bob are
+  updated to emit the pm-review-and-push instruction.
+
 ``ai_review_fix`` is the one kind with **no bash source**: the bash never
 routed the AI-review-below-floor block to a fix session, so there is nothing
 to capture. Its goldens are generated from :func:`render_instruction` itself
