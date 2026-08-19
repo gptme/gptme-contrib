@@ -40,11 +40,11 @@ Requirements:
 4. Include basic documentation
 5. Handle errors gracefully
 
-### 2. Custom Tools
+### 2. Custom Tools (Plugins)
 
-For cases where you need deeper gptme integration (e.g., for attaching files/images), you can create a custom tool in gptme.
+For cases where you need deeper gptme integration (e.g., for attaching files/images), create a plugin package in the [`plugins/`](./plugins) directory. Each plugin is a self-contained Python package that can register custom tools, hooks, or other extensions.
 
-See the [custom tools documentation](https://gptme.org/docs/custom_tool.html) for details.
+See the [custom tools documentation](https://gptme.org/docs/custom_tool.html) and existing examples in [`plugins/`](./plugins) for reference.
 
 ## Testing
 
