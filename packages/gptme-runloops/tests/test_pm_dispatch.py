@@ -18,6 +18,7 @@ from gptme_runloops.pm_dispatch import (
     HUMAN_PRIORITY_ACTIVITY,
     HUMAN_PRIORITY_CHANGES_REQUESTED,
     MIN_BANDIT_OBSERVATIONS,
+    PM_DISPATCH_EXCLUDE_REPOS_ENV,
     SLOW_LANE_TYPES,
     DispatchLedger,
     LaneDispatcher,
@@ -25,7 +26,9 @@ from gptme_runloops.pm_dispatch import (
     SlotItem,
     SlotManager,
     _bandit_observation_count,
+    _get_excluded_repo_patterns,
     _partition_jsonl_io,
+    _repo_is_excluded,
     _resolve_model_with_bandit,
     _sanitize_unit_name,
     _slot_in_cooldown,
@@ -2332,3 +2335,154 @@ class TestDispatchGroupedItemsCooldown:
             assert any("Failed to write" in r.message for r in caplog.records)
         finally:
             ro_dir.chmod(0o755)
+
+
+class TestRepoExclusionList:
+    """Tests for the PM dispatch exclusion list (ActivityWatch/* etc.)."""
+
+    def test_repo_is_excluded_exact_match(self):
+        assert _repo_is_excluded("ActivityWatch/aw-webui", ("ActivityWatch/aw-webui",))
+
+    def test_repo_is_excluded_glob(self):
+        assert _repo_is_excluded("ActivityWatch/aw-webui", ("ActivityWatch/*",))
+        assert _repo_is_excluded("ActivityWatch/aw-android", ("ActivityWatch/*",))
+
+    def test_repo_is_excluded_no_match(self):
+        assert not _repo_is_excluded("gptme/gptme", ("ActivityWatch/*",))
+        assert not _repo_is_excluded("ErikBjare/bob", ("ActivityWatch/*",))
+
+    def test_repo_is_excluded_empty_patterns(self):
+        assert not _repo_is_excluded("ActivityWatch/aw-webui", ())
+
+    def test_get_excluded_repo_patterns_default(self, monkeypatch):
+        monkeypatch.delenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, raising=False)
+        patterns = _get_excluded_repo_patterns()
+        assert "ActivityWatch/*" in patterns
+
+    def test_get_excluded_repo_patterns_env_override(self, monkeypatch):
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "foo/bar,baz/*")
+        patterns = _get_excluded_repo_patterns()
+        assert patterns == ("foo/bar", "baz/*")
+        assert "ActivityWatch/*" not in patterns
+
+    def test_get_excluded_repo_patterns_env_empty_disables(self, monkeypatch):
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "")
+        patterns = _get_excluded_repo_patterns()
+        assert patterns == ()
+
+    def test_dispatch_grouped_items_skips_excluded(self, tmp_path, monkeypatch):
+        """Excluded repos are not dispatched and counted in skipped_excluded."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        aw_item = make_item(
+            repo="ActivityWatch/aw-webui", number=255, types=["pr_update"]
+        )
+        ok_item = make_item(repo="gptme/gptme", number=1, types=["pr_update"])
+        cd = tmp_path / "cd"
+        result = dispatch_grouped_items(
+            [aw_item, ok_item], slot_cap=5, cooldown_secs=0, cooldown_dir=cd
+        )
+        assert result.skipped_excluded == 1
+        assert result.launched == 1
+
+    def test_dispatch_grouped_items_all_excluded(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        items = [
+            make_item(repo="ActivityWatch/aw-webui", number=255, types=["pr_update"]),
+            make_item(repo="ActivityWatch/aw-android", number=209, types=["pr_update"]),
+        ]
+        cd = tmp_path / "cd"
+        result = dispatch_grouped_items(
+            items, slot_cap=5, cooldown_secs=0, cooldown_dir=cd
+        )
+        assert result.skipped_excluded == 2
+        assert result.launched == 0
+
+    def test_partition_jsonl_io_filters_excluded(self, tmp_path, monkeypatch):
+        """_partition_jsonl_io skips excluded repos on the bash bridge path."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+        # pr_update is slow-lane; notification is fast-lane
+        items_json = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "repo": "ActivityWatch/aw-webui",
+                        "number": 255,
+                        "types": ["notification"],
+                        "title": "AW notif",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "repo": "gptme/gptme",
+                        "number": 1,
+                        "types": ["notification"],
+                        "title": "OK notif",
+                    }
+                ),
+            ]
+        )
+        import io as _io
+        import sys as _sys
+
+        orig_stdin = _sys.stdin
+        try:
+            _sys.stdin = _io.StringIO(items_json)
+            _partition_jsonl_io(fast_path, slow_path)
+        finally:
+            _sys.stdin = orig_stdin
+        fast_lines = [
+            line for line in fast_path.read_text().splitlines() if line.strip()
+        ]
+        repos = [json.loads(line)["repo"] for line in fast_lines]
+        assert "gptme/gptme" in repos
+        assert "ActivityWatch/aw-webui" not in repos
+
+    def test_partition_jsonl_io_items_path_filters_excluded(
+        self, tmp_path, monkeypatch
+    ):
+        """_partition_jsonl_io skips excluded repos on the direct items= path."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+        items = [
+            make_item(
+                repo="ActivityWatch/aw-webui", number=255, types=["notification"]
+            ),
+            make_item(repo="gptme/gptme", number=1, types=["notification"]),
+        ]
+        _partition_jsonl_io(fast_path, slow_path, items=items)
+        fast_lines = [
+            line for line in fast_path.read_text().splitlines() if line.strip()
+        ]
+        repos = [json.loads(line)["repo"] for line in fast_lines]
+        assert "gptme/gptme" in repos
+        assert "ActivityWatch/aw-webui" not in repos
+
+    def test_lane_dispatcher_dispatch_filters_excluded(self, monkeypatch):
+        """LaneDispatcher.dispatch() skips items from excluded repos."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        callback_calls = []
+
+        def cb(**kwargs):
+            callback_calls.append(kwargs["item"].repo)
+            return True
+
+        sm = SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        ld = LaneDispatcher(slot_manager=sm, dispatch_callback=cb)
+        items = [
+            make_item(
+                repo="ActivityWatch/aw-webui", number=255, types=["notification"]
+            ),
+            make_item(repo="gptme/gptme", number=1, types=["notification"]),
+        ]
+        launched, deferred = ld.dispatch(items)
+        assert launched == 1
+        assert deferred == 0
+        assert callback_calls == ["gptme/gptme"]

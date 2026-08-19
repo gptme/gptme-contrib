@@ -49,6 +49,41 @@ DEFAULT_FAST_BURST_ALLOWANCE = 1
 # Minimum bandit observations before preferring bandit routing over static fallback
 MIN_BANDIT_OBSERVATIONS = 5
 
+# Repositories excluded from PM dispatch entirely.
+# Bob cannot comment on these repos (AI-unwelcoming community / no access).
+# Override at runtime via PM_DISPATCH_EXCLUDE_REPOS=owner/repo1,owner/repo2 or owner/*.
+# Set to an empty string to disable all exclusions.
+PM_DISPATCH_EXCLUDE_REPOS_ENV = "PM_DISPATCH_EXCLUDE_REPOS"
+_PM_DISPATCH_EXCLUDE_REPOS_DEFAULT: tuple[str, ...] = (
+    "ActivityWatch/*",  # AW community discourages AI responses on issues (ErikBjare/bob#788)
+)
+
+
+def _get_excluded_repo_patterns() -> tuple[str, ...]:
+    """Return repo patterns excluded from PM dispatch.
+
+    Reads ``PM_DISPATCH_EXCLUDE_REPOS`` (comma-separated ``owner/repo`` or
+    ``owner/*`` globs).  Falls back to :data:`_PM_DISPATCH_EXCLUDE_REPOS_DEFAULT`.
+    Set the env var to an empty string to disable all exclusions.
+    """
+    raw = os.environ.get(PM_DISPATCH_EXCLUDE_REPOS_ENV)
+    if raw is not None:
+        return tuple(r.strip() for r in raw.split(",") if r.strip())
+    return _PM_DISPATCH_EXCLUDE_REPOS_DEFAULT
+
+
+def _repo_is_excluded(repo: str, patterns: tuple[str, ...] | None = None) -> bool:
+    """Return True if *repo* matches any exclusion pattern.
+
+    Supports exact match (``owner/repo``) and owner-glob (``owner/*``).
+    """
+    import fnmatch
+
+    if patterns is None:
+        patterns = _get_excluded_repo_patterns()
+    return any(fnmatch.fnmatch(repo, pat) for pat in patterns)
+
+
 # Repositories that receive automated shadow PR reviews (no Greptile free tier).
 # Override at runtime via AUTOMATED_PR_REVIEW_REPOS=owner/repo1,owner/repo2.
 _AUTOMATED_PR_REVIEW_REPOS_DEFAULT: frozenset[str] = frozenset()
@@ -677,6 +712,12 @@ class LaneDispatcher:
         """
         if fast_model is None:
             fast_model = os.environ.get("BOB_PM_FAST_LANE_MODEL") or None
+        _exclude_patterns = _get_excluded_repo_patterns()
+        items = [
+            item
+            for item in items
+            if not _repo_is_excluded(item.repo, _exclude_patterns)
+        ]
         fast_items, slow_items = partition_items(items)
 
         launched = 0
@@ -1020,6 +1061,7 @@ class DispatchResult:
     skipped_active: int = 0
     skipped_cap: int = 0
     skipped_cooldown: int = 0
+    skipped_excluded: int = 0
     failed: int = 0
     fallback_items: list[SlotItem] = field(default_factory=list)
 
@@ -1235,6 +1277,7 @@ def _partition_jsonl_io(
     if items is None:
         # Read JSONL from stdin (bash bridge path)
         lanes: dict[str, list[dict[str, Any]]] = {"fast": [], "slow": []}
+        _exclude_patterns = _get_excluded_repo_patterns()
         for raw in sys.stdin:
             raw = raw.strip()
             if not raw:
@@ -1244,6 +1287,10 @@ def _partition_jsonl_io(
             except json.JSONDecodeError:
                 logger.warning("skipping unparseable JSONL line: %.80s", raw)
                 continue
+            repo = str(data.get("repo") or "")
+            if _repo_is_excluded(repo, _exclude_patterns):
+                logger.debug("skipping excluded repo %s", repo)
+                continue
             lanes[classify_lane(_item_types(data))].append(data)
         for lane, target_path in (("fast", fast_path), ("slow", slow_path)):
             with target_path.open("a", encoding="utf-8") as fh:
@@ -1252,6 +1299,10 @@ def _partition_jsonl_io(
         return
 
     # Direct SlotItem path (Python-to-Python)
+    _exclude_patterns = _get_excluded_repo_patterns()
+    items = [
+        item for item in items if not _repo_is_excluded(item.repo, _exclude_patterns)
+    ]
     fast, slow = partition_items(items)
     for f_item in fast:
         with fast_path.open("a", encoding="utf-8") as fh:
@@ -1329,6 +1380,16 @@ def dispatch_grouped_items(
         except ValueError:
             cooldown_secs = DEFAULT_DISPATCH_COOLDOWN_SECS
     _cooldown_dir = _resolve_cooldown_dir(cooldown_dir)
+
+    # Filter excluded repos before partitioning.
+    _exclude_patterns = _get_excluded_repo_patterns()
+    _excluded = [
+        item for item in items if _repo_is_excluded(item.repo, _exclude_patterns)
+    ]
+    items = [
+        item for item in items if not _repo_is_excluded(item.repo, _exclude_patterns)
+    ]
+
     # In-memory slot tracker for this dispatch cycle.
     _active: dict[str, str] = {}  # slot_key -> unit_name
     _active_lanes: dict[str, str] = {}  # slot_key -> lane
@@ -1351,7 +1412,7 @@ def dispatch_grouped_items(
     )
 
     fast, slow = partition_items(items)
-    result = DispatchResult()
+    result = DispatchResult(skipped_excluded=len(_excluded))
 
     for lane, lane_items in [("fast", fast), ("slow", slow)]:
         for item in lane_items:
