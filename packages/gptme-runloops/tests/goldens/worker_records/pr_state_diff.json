@@ -72,6 +72,7 @@
           "One",
           "Two"
         ],
+        "effect": "fetch_failed",
         "outcome": "productive"
       },
       "gh_fail": true,

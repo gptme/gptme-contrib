@@ -597,10 +597,11 @@ def fetch_pr_snapshot(
     cwd: str | Path,
     timeout: float = 20,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> dict[str, str]:
+) -> dict[str, str] | None:
     """Fetch the live PR snapshot via gh (worker.sh:413-433).
 
-    A non-zero gh exit → ``{}``; unparseable stdout → ``{}``.
+    A non-zero gh exit → ``None`` (caller should record effect=fetch_failed);
+    unparseable stdout → ``{}`` (empty observation, not a failure).
 
     NOTE(parity): a gh *timeout* raises (``subprocess.TimeoutExpired``),
     killing the whole diff step — including the already-parsed before-fields
@@ -624,7 +625,7 @@ def fetch_pr_snapshot(
         check=False,
     )
     if result.returncode != 0:
-        return {}
+        return None
     return parse_pr_snapshot(result.stdout)
 
 
@@ -635,7 +636,7 @@ def update_record_pr_state(
     number: int | str,
     before_json: str,
     cwd: str | Path,
-    fetch: Callable[[str, int], dict[str, str]] | None = None,
+    fetch: Callable[[str, int], dict[str, str] | None] | None = None,
     upgrade_outcome: Callable[[dict[str, Any]], Any] | None = None,
 ) -> None:
     """Run the whole PR-state diff step against a record file (worker.sh:377-502).
@@ -662,7 +663,15 @@ def update_record_pr_state(
         if not isinstance(payload, dict):
             return
 
-        apply_pr_state_diff(payload, before, after)
+        if after is None:
+            # gh API failure — still apply dedup/state-diff with empty after so
+            # deliverables are normalised, but signal the failure so that
+            # classify_completion routes this to CLASS_INFRA, not CLASS_INEFFECTIVE.
+            # Value must match _EFFECT_FETCH_FAILED in pm_dispatch_recovery.py.
+            apply_pr_state_diff(payload, before, {})
+            payload["effect"] = "fetch_failed"
+        else:
+            apply_pr_state_diff(payload, before, after)
         outcome_before_upgrade = payload.get("outcome")
         if upgrade_outcome is not None:
             upgrade_outcome(payload)

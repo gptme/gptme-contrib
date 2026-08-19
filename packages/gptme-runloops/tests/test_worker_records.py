@@ -716,12 +716,35 @@ def test_update_record_pr_state_missing_record_is_noop(ws: Path) -> None:
     assert not (ws / "records" / "missing.json").exists()
 
 
-def test_fetch_pr_snapshot_nonzero_exit_is_empty(ws: Path) -> None:
+def test_fetch_pr_snapshot_nonzero_exit_is_none(ws: Path) -> None:
     def runner(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         assert args[:3] == ["gh", "pr", "view"]
         return subprocess.CompletedProcess(args, returncode=1, stdout="{}", stderr="")
 
-    assert fetch_pr_snapshot("gptme/gptme", 1, cwd=ws, runner=runner) == {}
+    assert fetch_pr_snapshot("gptme/gptme", 1, cwd=ws, runner=runner) is None
+
+
+def test_update_record_pr_state_fetch_failure_sets_effect_fetch_failed(
+    ws: Path,
+) -> None:
+    """gh call failure → effect=fetch_failed so classify_completion → CLASS_INFRA."""
+    record = ws / "records" / "fail-fetch.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        json.dumps({"outcome": "succeeded", "exit_code": 0, "effect": ""}),
+        encoding="utf-8",
+    )
+    # Simulate gh returning non-zero (API outage)
+    update_record_pr_state(
+        record,
+        repo="gptme/gptme",
+        number=1,
+        before_json='{"state":"OPEN","headRefOid":"abc","mergeCommit":null}',
+        cwd=ws,
+        fetch=lambda repo, num: None,
+    )
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    assert payload["effect"] == "fetch_failed"
 
 
 @pytest.mark.parametrize(
