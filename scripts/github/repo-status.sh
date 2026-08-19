@@ -34,15 +34,22 @@ _DB_CACHE_TTL=604800  # 7 days — branch renames are rare; stale cache self-hea
 
 _default_branch() {
     local repo="$1"
-    local cache_file now mtime age
-    cache_file="$_DB_CACHE_DIR/${repo//\//__}"
+    local cache_file now mtime age cached
+    # Use %2F (URL-encoding) for the slash so the mapping is injective: a/b__c
+    # and a__b/c produce a%2Fb__c and a__%2Fc respectively (no collision).
+    cache_file="$_DB_CACHE_DIR/${repo//\//%2F}"
     if [ -f "$cache_file" ]; then
         now=$(date +%s)
         mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
         age=$(( now - mtime ))
         if [ "$age" -lt "$_DB_CACHE_TTL" ]; then
-            cat "$cache_file"
-            return 0
+            # Guard the read: if the file disappears between the -f test and cat
+            # (e.g. a concurrent prune), fall through to the live fetch rather
+            # than letting set -e abort the whole script.
+            if cached=$(cat "$cache_file" 2>/dev/null) && [ -n "$cached" ]; then
+                printf '%s' "$cached"
+                return 0
+            fi
         fi
     fi
     local db
@@ -68,15 +75,17 @@ _WF_CACHE_DIR="${BOB_DISABLED_WORKFLOW_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache
 
 _disabled_workflows() {
     local repo="$1"
-    local cache_file now mtime age wf
-    cache_file="$_WF_CACHE_DIR/${repo//\//__}"
+    local cache_file now mtime age wf cached
+    cache_file="$_WF_CACHE_DIR/${repo//\//%2F}"
     if [ -f "$cache_file" ]; then
         now=$(date +%s)
         mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
         age=$(( now - mtime ))
         if [ "$age" -lt 3600 ]; then
-            cat "$cache_file"
-            return 0
+            if cached=$(cat "$cache_file" 2>/dev/null) && [ -n "$cached" ]; then
+                printf '%s' "$cached"
+                return 0
+            fi
         fi
     fi
     wf=$(gh workflow list --repo "$repo" --all --json name,state --jq '[.[] | select(.state == "disabled_manually") | .name]' 2>/dev/null || true)
@@ -108,15 +117,17 @@ _HEAD_SHA_CACHE_TTL=300  # 5 minutes
 
 _current_head_sha() {
     local repo="$1"
-    local cache_file now mtime age sha
-    cache_file="$_HEAD_SHA_CACHE_DIR/${repo//\//__}"
+    local cache_file now mtime age sha cached
+    cache_file="$_HEAD_SHA_CACHE_DIR/${repo//\//%2F}"
     if [ -f "$cache_file" ]; then
         now=$(date +%s)
         mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
         age=$(( now - mtime ))
         if [ "$age" -lt "$_HEAD_SHA_CACHE_TTL" ]; then
-            cat "$cache_file"
-            return 0
+            if cached=$(cat "$cache_file" 2>/dev/null) && [ -n "$cached" ]; then
+                printf '%s' "$cached"
+                return 0
+            fi
         fi
     fi
     sha=$(gh api "repos/$repo/commits" --jq '.[0].sha' 2>/dev/null || echo "")
