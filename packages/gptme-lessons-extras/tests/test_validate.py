@@ -995,9 +995,9 @@ def test_own_companion_linked_but_dead_prose_mention_reports_dead_path():
         "Error should name the specific dead path, not tell the author to update "
         f"the correct Related link. Got: {error!r}"
     )
-    assert "remove or fix" in error.lower(), (
-        f"Error should say 'remove or fix the dead reference', got: {error!r}"
-    )
+    assert (
+        "remove or fix" in error.lower()
+    ), f"Error should say 'remove or fix the dead reference', got: {error!r}"
     # Must NOT tell the author to update/remove the correct own-companion link
     assert "update the related link" not in error.lower(), (
         "Error must not instruct author to change the correctly-linked own companion. "
