@@ -861,6 +861,10 @@ def test_post_session_format_blind_trajectory_keeps_caller_deliverables(tmp_path
 
     assert result.record.outcome == "productive"
     assert result.record.deliverables == [real_sha]
+    # The flip reason must name the real cause (format blindness), not the
+    # duration-unreliable cause — these are distinct mechanisms and audit
+    # consumers need to tell them apart.
+    assert result.record.outcome_flip_reason == "format_blind_trajectory_caller_deliverables"
 
 
 def test_post_session_nonzero_tool_calls_still_drops_caller_deliverables(tmp_path: Path):

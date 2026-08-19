@@ -1037,6 +1037,25 @@ class TestSessionRecordJudgeFields:
         assert parsed["score"] is None
         assert parsed["judge_status"] == "no_score"
 
+    def test_parse_judge_payload_with_nan_score_is_no_score(self) -> None:
+        """NaN is a valid JSON value via json.loads but not a usable score.
+
+        In CPython, min(1.0, float('nan')) == 1.0 because nan < 1.0 is False.
+        Without an explicit NaN check _coerce_score would return 1.0 — the
+        maximum alignment score — for a judge that produced no real score.
+        """
+        # json.loads accepts the NaN literal (non-standard but widely supported)
+        parsed = _parse_judge_payload(
+            '{"score": NaN, "reason": "lost track of the number"}',
+            "openai-subscription/gpt-5.4",
+        )
+        # json.loads may reject non-standard NaN literal depending on the
+        # Python/stdlib version; if so, the payload is treated as unparseable.
+        # Either path must yield no_score, not a silent 1.0.
+        if parsed is not None:
+            assert parsed["score"] is None
+            assert parsed["judge_status"] == "no_score"
+
     def test_normalize_judge_verdict_without_score_is_no_score(self) -> None:
         normalized = normalize_judge_verdict(
             {"reason": "no score", "model": "openai-subscription/gpt-5.4"}
@@ -1081,6 +1100,41 @@ class TestSessionRecordJudgeFields:
         assert record._legacy_fields.get("judge_status") == "no_score"
         # The neutral 0.5 that used to be written here is the whole point.
         assert record.grades.get("alignment") is None
+
+    def test_score_less_verdict_persists_reason_for_audit(self, tmp_path: Path) -> None:
+        """When score is None the judge's reason must still be queryable from
+        the session record — otherwise judge_status=no_score is an opaque fact
+        with no explanation, defeating the records-queryable audit goal."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="sess-no-score-reason",
+                harness="claude-code",
+                model="opus",
+                run_type="autonomous",
+                outcome="productive",
+            )
+        )
+
+        with patch(
+            "gptme_sessions.judge.judge_session",
+            return_value={
+                "reason": "judge forgot the score — explanation is here",
+                "model": "openai-subscription/gpt-5.4",
+            },
+        ):
+            judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id="sess-no-score-reason",
+                sessions_dir=tmp_path,
+                model="openai-subscription/gpt-5.4",
+            )
+
+        record = next(r for r in store.load_all() if r.session_id == "sess-no-score-reason")
+        # The reason must be stored on the record even without a score.
+        assert record.llm_judge_reason == "judge forgot the score — explanation is here"
 
     def test_judge_and_writeback_reports_missing_record(self, tmp_path: Path) -> None:
         with patch(

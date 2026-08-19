@@ -507,7 +507,10 @@ def _coerce_score(raw: Any) -> float | None:
     if raw is None:
         return None
     try:
-        return max(0.0, min(1.0, float(raw)))
+        v = float(raw)
+        if v != v:  # NaN: the only float where x != x is True
+            return None
+        return max(0.0, min(1.0, v))
     except (ValueError, TypeError):
         return None
 
@@ -968,6 +971,12 @@ def write_alignment_grade(
                 normalized.get("judge_status", JUDGE_STATUS_NO_SCORE),
                 normalized.get("model") or "unknown",
             )
+            # Persist the judge's reason even without a score so an analyst
+            # can find out WHY the judge produced no score by querying session
+            # records rather than grepping logs (the records-queryable goal of
+            # judge_status would be undermined without the accompanying reason).
+            if normalized.get("reason"):
+                record.llm_judge_reason = normalized["reason"]
         else:
             record.set_alignment_grade(
                 score,

@@ -503,8 +503,10 @@ def post_session(
     # this is indistinguishable from a genuine noop and the existing
     # unreliable-trajectory-with-no-deliverables path already records
     # "unknown" rather than penalizing the backend.
+    _format_blind = False
     if trajectory_reliable and deliverables and _trajectory_format_blind(signals):
         trajectory_reliable = False
+        _format_blind = True
         logger.warning(
             "Trajectory reports zero tool calls over %ss — extractor may not "
             "support this trajectory format; trusting caller deliverables",
@@ -641,11 +643,18 @@ def post_session(
         if traj_productive:
             outcome = "productive"
         elif not trajectory_reliable and caller_deliverables:
-            # Trajectory says noop but is unreliable (covers far less wall-clock
-            # than the session ran — likely truncated or misattributed) and the
-            # caller observed real git-range commits. Trust the commits.
+            # Trajectory says noop but is unreliable and the caller observed
+            # real git-range commits. Trust the commits.
+            # Distinguish two sub-cases so audit consumers see the real cause:
+            # - format_blind: trajectory had good wall-clock coverage but the
+            #   extractor couldn't parse the tool-call shape (no duration mismatch)
+            # - unreliable: trajectory covered far less wall-clock than the session
             outcome = "productive"
-            outcome_flip_reason = "unreliable_trajectory_caller_deliverables"
+            outcome_flip_reason = (
+                "format_blind_trajectory_caller_deliverables"
+                if _format_blind
+                else "unreliable_trajectory_caller_deliverables"
+            )
         elif not trajectory_reliable and not caller_deliverables:
             # Trajectory is unreliable (truncated/misattributed) and no caller
             # deliverables exist — outcome is genuinely unknown.  Recording noop
