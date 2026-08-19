@@ -10,12 +10,22 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "precommit"))
 
 
 def test_allowed_entries_pass():
-    """get_tracked_root_entries() should return a non-empty set from the git index."""
+    """main() exits 0 when tracked entries are a subset of ALLOWED_ROOT_ENTRIES."""
+    from unittest.mock import patch
+
     import check_root_structure
 
-    entries = check_root_structure.get_tracked_root_entries()
-    assert entries, "Expected non-empty root entries from git index"
-    # main() correctness against a clean set is verified by test_no_unexpected_entry_on_known_set
+    # A partial subset — real repos don't always have every allowed entry present.
+    # This is hermetic: no git subprocess, no filesystem dependency.
+    partial_subset = frozenset(["scripts", "tests", "lessons", "README.md"])
+    assert (
+        partial_subset <= check_root_structure.ALLOWED_ROOT_ENTRIES
+    ), "test precondition"
+    with patch.object(
+        check_root_structure, "get_tracked_root_entries", return_value=partial_subset
+    ):
+        result = check_root_structure.main()
+    assert result == 0
 
 
 def test_get_tracked_root_entries_parses_paths_correctly():
@@ -26,6 +36,7 @@ def test_get_tracked_root_entries_parses_paths_correctly():
 
     fake_output = "scripts/foo.py\ntests/test_bar.py\nlessons/README.md\nREADME.md\n"
     mock_result = MagicMock()
+    mock_result.returncode = 0
     mock_result.stdout = fake_output
 
     with patch("subprocess.run", return_value=mock_result):
