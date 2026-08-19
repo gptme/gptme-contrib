@@ -144,17 +144,23 @@ check_repo() {
     # the most recent run lives on an older commit than the current
     # default-branch HEAD — a common case when path filters skip CI on
     # journal-only / docs-only commits.
-    local run_json
-    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
+    local run_json run_err_file run_err
+    run_err_file=$(mktemp)
+    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>"$run_err_file" || echo "error")
+    run_err=$(cat "$run_err_file"); rm -f "$run_err_file"
 
     if [ "$run_json" = "error" ]; then
         # A cached default branch can go stale if the repo renamed it (7-day TTL) —
         # `gh run list --branch <stale-name>` errors on a branch that no longer
         # exists. Drop the cache and retry once with a fresh fetch so a rename
         # self-heals immediately instead of showing "No Actions" for up to 7 days.
-        rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
-        default_branch=$(_default_branch "$repo")
-        run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
+        # Only invalidate the cache on branch-not-found errors; transient failures
+        # (network, rate-limit) should not discard a possibly-correct cached branch.
+        if echo "$run_err" | grep -qiE "not found|no commit|does not exist|unknown ref|no ref"; then
+            rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
+            default_branch=$(_default_branch "$repo")
+            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
+        fi
     fi
 
     if [ "$run_json" = "error" ]; then
