@@ -2338,7 +2338,7 @@ class TestDispatchGroupedItemsCooldown:
 
 
 class TestRepoExclusionList:
-    """Tests for the PM dispatch exclusion list (ActivityWatch/* etc.)."""
+    """Tests for the PM dispatch repo exclusion list (glob patterns, env override)."""
 
     def test_repo_is_excluded_exact_match(self):
         assert _repo_is_excluded("ActivityWatch/aw-webui", ("ActivityWatch/aw-webui",))
@@ -2369,18 +2369,17 @@ class TestRepoExclusionList:
         assert not _repo_is_excluded(None, ())  # type: ignore[arg-type]
 
     def test_get_excluded_repo_patterns_default(self, monkeypatch):
+        """No repos are excluded by default — the default is an empty tuple."""
         monkeypatch.delenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, raising=False)
         patterns = _get_excluded_repo_patterns()
-        assert "ActivityWatch/*" in patterns
+        assert patterns == ()
 
     def test_get_excluded_repo_patterns_env_additive(self, monkeypatch):
-        """Setting the env var adds repos to the default — ActivityWatch/* is preserved."""
+        """Setting the env var to a non-empty value populates the exclusion list."""
         monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "foo/bar,baz/*")
         patterns = _get_excluded_repo_patterns()
         assert "foo/bar" in patterns
         assert "baz/*" in patterns
-        # Default must be preserved — setting the env var is additive, not a replacement.
-        assert "ActivityWatch/*" in patterns
 
     def test_get_excluded_repo_patterns_env_empty_disables(self, monkeypatch):
         monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "")

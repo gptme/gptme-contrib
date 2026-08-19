@@ -50,30 +50,27 @@ DEFAULT_FAST_BURST_ALLOWANCE = 1
 MIN_BANDIT_OBSERVATIONS = 5
 
 # Repositories excluded from PM dispatch entirely.
-# Bob cannot comment on these repos (AI-unwelcoming community / no access).
-# Override at runtime via PM_DISPATCH_EXCLUDE_REPOS=owner/repo1,owner/repo2 or owner/*.
-# Set to an empty string to disable all exclusions.
+# No repos are excluded by default; sessions should act (fix conflicts, escalate)
+# rather than noop even in repos with AI-unwelcoming communities.
+# Operator escape hatch: set PM_DISPATCH_EXCLUDE_REPOS=owner/repo1,owner/repo2 or owner/*
+# to opt out specific repos.  Set to empty string explicitly to make the intent clear.
 PM_DISPATCH_EXCLUDE_REPOS_ENV = "PM_DISPATCH_EXCLUDE_REPOS"
-_PM_DISPATCH_EXCLUDE_REPOS_DEFAULT: tuple[str, ...] = (
-    "ActivityWatch/*",  # AW community discourages AI responses on issues (ErikBjare/bob#788)
-)
+_PM_DISPATCH_EXCLUDE_REPOS_DEFAULT: tuple[str, ...] = ()
 
 
 def _get_excluded_repo_patterns() -> tuple[str, ...]:
     """Return repo patterns excluded from PM dispatch.
 
     Reads ``PM_DISPATCH_EXCLUDE_REPOS`` (comma-separated ``owner/repo`` or
-    ``owner/*`` globs) and **merges** it with
-    :data:`_PM_DISPATCH_EXCLUDE_REPOS_DEFAULT`.  Setting the env var to a
-    non-empty value adds to the default rather than replacing it, so the
-    built-in ``ActivityWatch/*`` guard is never accidentally dropped.
-    Set the env var to an empty string to disable *all* exclusions
-    (including the default).
+    ``owner/*`` globs).  No repos are excluded by default — the env var is an
+    operator escape hatch for cases where dispatch to a repo is genuinely
+    unwanted.  Set to an empty string (or leave unset) to run without any
+    exclusions.
     """
     raw = os.environ.get(PM_DISPATCH_EXCLUDE_REPOS_ENV)
     if raw is not None:
         env_patterns = tuple(r.strip() for r in raw.split(",") if r.strip())
-        # Empty string disables all exclusions; non-empty adds to the default.
+        # Empty string or unset → no exclusions.
         if not env_patterns:
             return ()
         return _PM_DISPATCH_EXCLUDE_REPOS_DEFAULT + tuple(
@@ -87,8 +84,8 @@ def _repo_is_excluded(repo: str, patterns: tuple[str, ...] | None = None) -> boo
 
     Supports exact match (``owner/repo``) and owner-glob (``owner/*``).
     Matching is case-insensitive: GitHub repo names are case-preserving but
-    case-insensitive for identification, so ``activitywatch/aw-webui`` must
-    match the default ``ActivityWatch/*`` pattern regardless of casing in the
+    case-insensitive for identification, so ``activitywatch/aw-webui`` will
+    match an ``ActivityWatch/*`` pattern regardless of casing in the
     pipeline source.
     """
     import fnmatch
