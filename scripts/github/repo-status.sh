@@ -26,17 +26,24 @@ NC='\033[0m' # No Color
 # `api repos/<REPO> .default_branch` was the single largest REST consumer in this
 # script (512 calls/window, ~38% of its traffic) even though a repo's default
 # branch is effectively immutable — it changes only via a rare manual rename.
-# Cache it to disk (no TTL; clear with `rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/repo-status"`)
+# Cache it to disk with a 7-day TTL (self-heals if a branch rename occurs;
+# clear immediately with `rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/repo-status"`)
 # so it is fetched once and reused across every subsequent run and session.
 _DB_CACHE_DIR="${BOB_DEFAULT_BRANCH_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/default-branch}"
+_DB_CACHE_TTL=604800  # 7 days — branch renames are rare; stale cache self-heals on next TTL expiry
 
 _default_branch() {
     local repo="$1"
-    local cache_file
+    local cache_file now mtime age
     cache_file="$_DB_CACHE_DIR/${repo//\//__}"
     if [ -f "$cache_file" ]; then
-        cat "$cache_file"
-        return 0
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
+        age=$(( now - mtime ))
+        if [ "$age" -lt "$_DB_CACHE_TTL" ]; then
+            cat "$cache_file"
+            return 0
+        fi
     fi
     local db
     db=$(gh api "repos/$repo" --jq '.default_branch' 2>/dev/null || true)
@@ -65,7 +72,7 @@ _disabled_workflows() {
     cache_file="$_WF_CACHE_DIR/${repo//\//__}"
     if [ -f "$cache_file" ]; then
         now=$(date +%s)
-        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || printf '0')
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
         age=$(( now - mtime ))
         if [ "$age" -lt 3600 ]; then
             cat "$cache_file"
@@ -98,7 +105,7 @@ _current_head_sha() {
     cache_file="$_HEAD_SHA_CACHE_DIR/${repo//\//__}"
     if [ -f "$cache_file" ]; then
         now=$(date +%s)
-        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || printf '0')
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
         age=$(( now - mtime ))
         if [ "$age" -lt "$_HEAD_SHA_CACHE_TTL" ]; then
             cat "$cache_file"
