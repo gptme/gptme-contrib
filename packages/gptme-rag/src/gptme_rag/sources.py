@@ -184,14 +184,16 @@ def collect_voice_call_documents(
     voice_calls_dir = Path(voice_calls_dir)
     if not voice_calls_dir.exists():
         return []
-    if repo_root is not None and not voice_calls_dir.is_relative_to(repo_root):
+    if repo_root is not None and not voice_calls_dir.resolve().is_relative_to(
+        Path(repo_root).resolve()
+    ):
         return []
 
     docs: list[Document] = []
     for path in sorted(voice_calls_dir.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         if not isinstance(data, dict):
             continue

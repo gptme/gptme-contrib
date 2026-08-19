@@ -185,6 +185,34 @@ def test_collect_voice_calls_skips_non_dict_json(tmp_path: Path):
     assert len(docs) == 1
 
 
+def test_collect_voice_calls_skips_non_utf8_file(tmp_path: Path):
+    """Files with invalid UTF-8 bytes must be skipped, not crash the whole collection."""
+    call_dir = tmp_path / "voice"
+    call_dir.mkdir()
+    (call_dir / "bad_encoding.json").write_bytes(b"\xff\xfe{not utf-8}")
+    (call_dir / "good.json").write_text(
+        '{"transcript": [{"role": "user", "text": "hello"}]}', encoding="utf-8"
+    )
+    docs = collect_voice_call_documents(call_dir)
+    assert len(docs) == 1
+
+
+def test_collect_voice_calls_repo_root_guard_resolves_symlinks(tmp_path: Path):
+    """Symlinks pointing outside repo_root must be caught by the guard."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "call.json").write_text(
+        '{"transcript": [{"role": "user", "text": "hello"}]}', encoding="utf-8"
+    )
+    # Symlink inside repo pointing outside
+    symlink = repo / "calls"
+    symlink.symlink_to(outside)
+    # The guard must catch this even though the symlink path is under repo
+    assert collect_voice_call_documents(symlink, repo_root=repo) == []
+
+
 def test_de_accumulate_transcript_skips_non_dict_entries():
     """Non-dict entries in the transcript list must be skipped, not crash."""
     transcript = [
