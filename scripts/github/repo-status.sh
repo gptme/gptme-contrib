@@ -52,6 +52,35 @@ _default_branch() {
     fi
 }
 
+# The disabled-workflow set (`gh workflow list --all`) was ~540 calls/window —
+# comparable to default_branch. Unlike default_branch it *can* change (an
+# operator disables a flaky workflow), so it gets a 1h TTL rather than a
+# cache-forever: worst case is a stale report for a freshly-disabled workflow,
+# which self-heals on the next hour's refetch.
+_WF_CACHE_DIR="${BOB_DISABLED_WORKFLOW_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/disabled-workflows}"
+
+_disabled_workflows() {
+    local repo="$1"
+    local cache_file now mtime age wf
+    cache_file="$_WF_CACHE_DIR/${repo//\//__}"
+    if [ -f "$cache_file" ]; then
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || printf '0')
+        age=$(( now - mtime ))
+        if [ "$age" -lt 3600 ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    wf=$(gh workflow list --repo "$repo" --all --json name,state --jq '[.[] | select(.state == "disabled_manually") | .name]' 2>/dev/null || true)
+    [ -n "$wf" ] || wf='[]'
+    mkdir -p "$_WF_CACHE_DIR" 2>/dev/null || true
+    printf '%s' "$wf" > "$cache_file.tmp.$$" 2>/dev/null \
+        && mv "$cache_file.tmp.$$" "$cache_file" 2>/dev/null \
+        || rm -f "$cache_file.tmp.$$" 2>/dev/null
+    printf '%s' "$wf"
+}
+
 check_repo() {
     local repo=$1
     local label=${2:-$repo}
@@ -82,7 +111,7 @@ check_repo() {
 
     # Filter out runs from manually disabled workflows (e.g. stale fork workflows)
     local disabled_json
-    disabled_json=$(gh workflow list --repo "$repo" --all --json name,state --jq '[.[] | select(.state == "disabled_manually") | .name]' 2>/dev/null || echo "[]")
+    disabled_json=$(_disabled_workflows "$repo")
     if [ "$disabled_json" != "[]" ]; then
         run_json=$(echo "$run_json" | jq --argjson disabled "$disabled_json" '[.[] | select(.name as $n | $disabled | index($n) | not)]')
     fi
