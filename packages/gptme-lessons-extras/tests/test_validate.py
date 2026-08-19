@@ -660,3 +660,48 @@ def test_cross_category_companion_not_counted():
         assert "workflow" not in errors[0], (
             "Error must not reference cross-category companion: " + errors[0]
         )
+
+
+def test_cross_category_link_to_existing_companion_not_dead():
+    """A link that resolves to an existing companion must not be flagged as dead.
+
+    If a lesson in lessons/monitoring explicitly links
+    knowledge/lessons/workflow/test-lesson.md and that file exists, the
+    validator must not raise a dead-link error — even though there is no
+    monitoring-category companion.  The previous behavior (has_companion based
+    on any stem match) was correct for this case; the fix must preserve it while
+    still catching genuinely broken links.
+    """
+    # Craft a lesson that links to a cross-category companion that exists.
+    cross_cat_link_lesson = _LESSON_WITH_DEAD_COMPANION_LINK.replace(
+        "../../knowledge/lessons/test-lesson.md",
+        "../../knowledge/lessons/workflow/test-lesson.md",
+    ).replace(
+        "[knowledge/lessons/test-lesson.md]",
+        "[knowledge/lessons/workflow/test-lesson.md]",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Create the cross-category companion that the lesson links to.
+        (root / "knowledge" / "lessons" / "workflow").mkdir(parents=True)
+        (root / "knowledge" / "lessons" / "workflow" / "test-lesson.md").write_text(
+            "# cross-category companion\n"
+        )
+        lesson_dir = root / "lessons" / "monitoring"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, cross_cat_link_lesson)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+        companion_errors = [e for e in validator.errors if "companion" in e.lower()]
+        assert not companion_errors, (
+            "Lesson linking an existing cross-category companion must not be "
+            f"flagged as dead: {companion_errors}"
+        )

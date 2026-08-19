@@ -33,6 +33,28 @@ VALID_TARGET_GRADE_FIELDS = frozenset(
 )
 
 
+def _lesson_category(filepath: Path) -> Path:
+    """Return the lesson's category path relative to the lessons root.
+
+    Handles single-level and deeper nesting without relying on a global
+    LESSONS_DIR constant.
+
+    Examples::
+
+        /abs/path/lessons/monitoring/foo.md  → Path("monitoring")
+        /abs/path/lessons/foo/bar/foo.md     → Path("foo/bar")
+        lessons/monitoring/foo.md            → Path("monitoring")
+    """
+    parts = filepath.parts
+    # Find the rightmost "lessons" component not immediately preceded by "knowledge".
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == "lessons" and (i == 0 or parts[i - 1] != "knowledge"):
+            cat_parts = parts[i + 1 : -1]  # segments between "lessons" and the stem
+            return Path(*cat_parts) if cat_parts else Path(".")
+    # Fallback: immediate parent name (single-level category at minimum)
+    return Path(filepath.parent.name)
+
+
 class LessonValidator:
     """Validates lesson and skill structure and content.
 
@@ -517,23 +539,33 @@ class LessonValidator:
         # stem name, not the intent.  Falling back to an arbitrary cross-category
         # match would send the author to the wrong document.
         companion_matches = list(COMPANION_DIR.rglob(f"{self.filepath.stem}.md"))
+        lesson_cat = _lesson_category(self.filepath)
         own_companion = next(
             (
                 m
                 for m in companion_matches
-                if m.parent.name == self.filepath.parent.name
+                # Use the full category-relative path, not just the leaf name, so
+                # nested categories (e.g. lessons/foo/bar/) and different categories
+                # that share a leaf name don't produce false matches.
+                if m.relative_to(COMPANION_DIR).parent == lesson_cat
             ),
             None,
         )
-        has_companion = own_companion is not None
 
-        # Check if linked in Related section (allow optional subdirectory component)
-        has_companion_link = bool(
-            re.search(
-                rf"knowledge/lessons/(?:[^/]+/)?{re.escape(self.filepath.stem)}\.md",
-                self.content,
-                re.IGNORECASE,
-            )
+        # Check if linked in Related section (allow optional subdirectory component).
+        # Capture the exact matched path so we can verify it exists separately:
+        # a companion in a *different* category does not validate a link that
+        # points at a non-existent own-category path.
+        _companion_link_match = re.search(
+            rf"(knowledge/lessons/(?:[^/]+/)?{re.escape(self.filepath.stem)}\.md)",
+            self.content,
+            re.IGNORECASE,
+        )
+        has_companion_link = _companion_link_match is not None
+        # A link is "live" only when the specific path it names exists on disk.
+        linked_companion_exists = (
+            _companion_link_match is not None
+            and Path(_companion_link_match.group(1)).exists()
         )
 
         # Get line count
@@ -559,25 +591,28 @@ class LessonValidator:
             )
             suggested_companion = (target_dir / f"{self.filepath.stem}.md").as_posix()
 
-        # If lesson is long but no companion, suggest creating one
-        if body_lines > TARGET_LENGTH and not has_companion:
+        # If lesson is long but no own-category companion, suggest creating one.
+        if body_lines > TARGET_LENGTH and own_companion is None:
             self.warnings.append(
                 f"Primary lesson is {body_lines} lines (target: {TARGET_LENGTH}). "
                 f"Consider creating companion: {suggested_companion}"
             )
 
         # If lesson links a companion that does not exist, that is a dead reference.
+        # Verified against the actual path in the link — a companion in a different
+        # category does not make a stale or flat link live.
         # Note: the dead link may use a flat path while the canonical location is
         # category-prefixed — remind the author to update the link too.
-        if has_companion_link and not has_companion:
+        if has_companion_link and not linked_companion_exists:
             self.errors.append(
                 f"Links a companion doc that does not exist. Either create it at "
                 f"{suggested_companion} (and update the Related link to match), "
                 f"or remove the link."
             )
 
-        # If companion exists but not linked, warn
-        if has_companion and not has_companion_link:
+        # If own-category companion exists but is not linked, warn.
+        # Cross-category companions are not flagged — they belong to other lessons.
+        if own_companion is not None and not has_companion_link:
             self.warnings.append(
                 f"Companion doc exists but not linked. Add to Related section: "
                 f"{suggested_companion}"
