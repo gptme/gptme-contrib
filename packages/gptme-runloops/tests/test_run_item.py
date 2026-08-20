@@ -1798,7 +1798,9 @@ def test_post_session_malformed_delivery_output_is_not_verified(
     assert not (config.pending_state_dir / "notif-555.state").exists()
 
 
-def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
+def test_post_session_repo_level_item_skips_delivery_check(
+    tmp_path, cooldown_dir
+) -> None:
     """master_ci_failure has no thread, so the reply post-condition must not run.
 
     Its `number` is a workflow run id, not an issue number, so the check would
@@ -1817,10 +1819,15 @@ def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     config.pending_state_dir.mkdir(parents=True, exist_ok=True)
     sentinel = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
     sentinel.write_text("promoted")
+    attempts = redelivery_attempts_file(config, item.repo, item.number)
+    assert attempts is not None
+    attempts.parent.mkdir(parents=True, exist_ok=True)
+    attempts.write_text("1")
     run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
     effect = run_post_session(plan, item, outcome, config, hooks)
     assert run_cmd.find("/fake/check-delivery.py") == []
     assert latency_calls[0]["outcome"] == "handled"
+    assert not attempts.exists(), "a skipped check must not consume retry budget"
     # State must be promoted, not rolled back — otherwise the item re-enters the queue.
     assert (config.state_dir / sentinel.name).exists(), (
         "promote_item_state was not called — state was not promoted from pending; "
@@ -2204,6 +2211,7 @@ def cooldown_dir(tmp_path, monkeypatch):
     d = tmp_path / "cooldown"
     d.mkdir()
     monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(d))
+    monkeypatch.delenv("PM_SLOT_KEY", raising=False)
     return d
 
 

@@ -2386,8 +2386,14 @@ def run_post_session(
                 "promoting state to end re-dispatch churn (no reply is likely correct here)"
             )
             promote_item_state(config, item.repo, item.number)
-    elif hooks.delivery_check is not None and not (
-        delivery_verified and delivery_outcome == "handled"
+    elif (
+        hooks.delivery_check is not None
+        and item.repo
+        and item.number is not None
+        and item.number_str != "0"
+        and THREAD_DELIVERABLE_TYPES & set(item.types)
+        and set(item.types) != {"merge_ready"}
+        and not (delivery_verified and delivery_outcome == "handled")
     ):
         # The delivery check did not verify a reply. Count this through the
         # same bounded rollback as orphan_no_delivery so a permanently broken
