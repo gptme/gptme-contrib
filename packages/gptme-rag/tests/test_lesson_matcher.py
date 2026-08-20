@@ -148,6 +148,70 @@ class TestExtractFrontmatter:
         kw = fm.get("match", {}).get("keywords", fm.get("keywords", []))
         assert "git push" in kw or "git commit" in kw
 
+    def test_regex_fallback_session_categories_block(self, monkeypatch):
+        # Regression: without PyYAML, session_categories was not parsed,
+        # causing gated lessons to fire in every session (security defect).
+        content = (
+            "---\nmatch:\n  keywords:\n    - foo\n"
+            "  session_categories:\n    - code\n    - infrastructure\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        cats = fm.get("match", {}).get("session_categories", [])
+        assert "code" in cats
+        assert "infrastructure" in cats
+
+    def test_regex_fallback_session_categories_inline(self, monkeypatch):
+        content = (
+            "---\nmatch:\n  keywords:\n    - foo\n"
+            "  session_categories: [code, infrastructure]\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        cats = fm.get("match", {}).get("session_categories", [])
+        assert "code" in cats
+        assert "infrastructure" in cats
+
+    def test_regex_fallback_metadata_harness(self, monkeypatch):
+        content = (
+            "---\nmatch:\n  keywords:\n    - foo\n"
+            "metadata:\n  harness:\n    - claude-code\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        harness = fm.get("metadata", {}).get("harness", [])
+        assert "claude-code" in harness
+
 
 # ---------------------------------------------------------------------------
 # scan_lessons
@@ -161,7 +225,7 @@ def _write_lesson(path: Path, content: str) -> None:
 
 def _basic_lesson(keywords: list[str], status: str = "active") -> str:
     kw_yaml = "\n".join(f'    - "{k}"' for k in keywords)
-    return f"---\nmatch:\n  keywords:\n{kw_yaml}\nstatus: {status}\n---\n" f"# Rule\nBody text.\n"
+    return f"---\nmatch:\n  keywords:\n{kw_yaml}\nstatus: {status}\n---\n# Rule\nBody text.\n"
 
 
 class TestScanLessons:
@@ -247,6 +311,18 @@ class TestScanLessons:
         _write_lesson(tmp_path / "archive" / "old.md", _basic_lesson(["old"]))
         lessons = scan_lessons([tmp_path])
         assert lessons == []
+
+    def test_archive_in_dir1_does_not_block_active_in_dir2(self, tmp_path):
+        # Regression: seen_names was incorrectly populated for archived files
+        # with no active sibling in dir1, causing a valid lesson in dir2 to be
+        # silently dropped (first-dir-wins dedup should only apply to ACTIVE files).
+        dir1 = tmp_path / "a"
+        dir2 = tmp_path / "b"
+        _write_lesson(dir1 / "archive" / "foo.md", _basic_lesson(["old-archived"]))
+        _write_lesson(dir2 / "foo.md", _basic_lesson(["active-in-b"]))
+        lessons = scan_lessons([dir1, dir2])
+        assert len(lessons) == 1
+        assert "active-in-b" in lessons[0]["keywords"]
 
     def test_harness_restrict(self, tmp_path):
         content = (

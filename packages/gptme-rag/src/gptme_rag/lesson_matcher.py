@@ -127,6 +127,46 @@ def _extract_scalar_frontmatter_field(fm_str: str, field: str) -> str | None:
     return None
 
 
+def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
+    """Extract a YAML list field from frontmatter using regex (no PyYAML).
+
+    Handles both inline ``[val1, val2]`` / ``["val1", "val2"]`` and block
+    (``- val`` / ``- "val"``) forms.  Values may be quoted or unquoted.
+    Returns an empty list if the field is absent.
+    """
+    # Inline: field: [val1, val2] or field: ["val1", "val2"]
+    inline = re.search(rf"\b{re.escape(field)}:\s*\[(.*?)\]", fm_str, re.DOTALL)
+    if inline:
+        raw = inline.group(1)
+        items: list[str] = []
+        for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'|([a-zA-Z][\w-]*)', raw):
+            val = m.group(1) or m.group(2) or m.group(3)
+            if val and val.strip():
+                items.append(val.strip())
+        return items
+
+    # Block: "field:" on its own line, then "  - val" lines follow
+    block_start = re.search(rf"^\s*{re.escape(field)}:\s*$", fm_str, re.MULTILINE)
+    if block_start:
+        items = []
+        for line in fm_str[block_start.end() :].splitlines():
+            if not line.strip():
+                continue
+            # A non-indented line signals a new top-level key — stop
+            if not line[0:1].isspace():
+                break
+            item_m = (
+                re.match(r'^\s+-\s+"([^"]+)"', line)
+                or re.match(r"^\s+-\s+'([^']+)'", line)
+                or re.match(r"^\s+-\s+(\S+)", line)
+            )
+            if item_m:
+                items.append(item_m.group(1))
+        return items
+
+    return []
+
+
 def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Extract YAML frontmatter and body from a markdown string.
 
@@ -164,8 +204,22 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         keywords = [kw.strip() for kw in re.findall(r'"([^"]+)"', inline.group(1))]
     else:
         keywords = [kw.strip() for kw in re.findall(r'^\s*-\s*"([^"]+)"', fm_str, re.MULTILINE)]
+
+    # Build the match dict with all fields scan_lessons reads from it
+    match_dict: dict[str, Any] = {}
     if keywords:
-        fm["match"] = {"keywords": keywords}
+        match_dict["keywords"] = keywords
+
+    session_categories = _extract_list_frontmatter_field(fm_str, "session_categories")
+    if session_categories:
+        match_dict["session_categories"] = session_categories
+
+    patterns = _extract_list_frontmatter_field(fm_str, "patterns")
+    if patterns:
+        match_dict["patterns"] = patterns
+
+    if match_dict:
+        fm["match"] = match_dict
 
     m = re.search(r"status:\s*(\w+)", fm_str)
     if m:
@@ -175,6 +229,15 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         val = _extract_scalar_frontmatter_field(fm_str, field)
         if val is not None:
             fm[field] = val
+
+    # metadata.harness — used by filter_by_harness; a list or scalar
+    harness_list = _extract_list_frontmatter_field(fm_str, "harness")
+    if not harness_list:
+        harness_val = _extract_scalar_frontmatter_field(fm_str, "harness")
+        if harness_val:
+            harness_list = [harness_val]
+    if harness_list:
+        fm.setdefault("metadata", {})["harness"] = harness_list
 
     return fm, body
 
@@ -389,7 +452,9 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
                         None,
                     )
                     if active_copy is None:
-                        seen_names.add(f.name)
+                        pass  # do NOT add to seen_names: archive in dir1 must
+                        # not block a valid non-archived lesson with the same
+                        # filename in a later directory (first-dir-wins dedup)
                 continue
 
             if f.name != "SKILL.md" and f.name in seen_names:
