@@ -190,7 +190,7 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         import yaml
 
         fm_yaml = yaml.safe_load(fm_str)
-        return (fm_yaml or {}), body
+        return (fm_yaml if isinstance(fm_yaml, dict) else {}), body
     except ImportError:
         pass
     except Exception:
@@ -499,7 +499,9 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             _raw_sc = (
                 match_data.get("session_categories") or [] if isinstance(match_data, dict) else []
             )
-            session_categories = _dedupe_strings([_raw_sc] if isinstance(_raw_sc, str) else _raw_sc)
+            session_categories = _dedupe_strings(
+                _string_list(_raw_sc) if isinstance(_raw_sc, str) else _raw_sc
+            )
 
             if not keywords and not patterns and not skill_name:
                 continue

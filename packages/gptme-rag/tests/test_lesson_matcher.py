@@ -113,6 +113,15 @@ class TestExtractFrontmatter:
         assert fm == {}
         assert "Just a markdown file" in body
 
+    def test_yaml_sequence_returns_empty_dict(self):
+        # If the top-level YAML is a list rather than a mapping, extract_frontmatter
+        # must return {} (not the list) so callers can safely call .get() on it.
+        content = "---\n- item_a\n- item_b\n---\n# Body\n"
+        fm, body = extract_frontmatter(content)
+        assert fm == {}, f"Expected empty dict, got {type(fm).__name__}: {fm!r}"
+        assert isinstance(fm, dict)
+        assert "Body" in body
+
     def test_incomplete_delimiter(self):
         content = "---\nstatus: active\n"  # no closing ---
         fm, body = extract_frontmatter(content)
@@ -277,6 +286,19 @@ class TestScanLessons:
         _write_lesson(tmp_path / "foo.md", content)
         lessons = scan_lessons([tmp_path])
         assert lessons[0]["session_categories"] == ["code"]
+
+    def test_session_categories_comma_separated_string(self, tmp_path):
+        # Regression: YAML scalar "code, infrastructure" was wrapped in a list as
+        # ["code, infrastructure"] instead of being split into ["code", "infrastructure"].
+        # Verifies that filter_by_session_category("code") works correctly.
+        content = (
+            "---\nmatch:\n  keywords:\n    - foo\n"
+            "  session_categories: code, infrastructure\n"
+            "status: active\n---\n# Title\n"
+        )
+        _write_lesson(tmp_path / "foo.md", content)
+        lessons = scan_lessons([tmp_path])
+        assert lessons[0]["session_categories"] == ["code", "infrastructure"]
 
     def test_title_from_h1(self, tmp_path):
         content = (
