@@ -258,7 +258,6 @@ def main() -> int:
     ap.add_argument("--repo", default="gptme/gptme")
     ap.add_argument("--tag", default=None, help="announce this tag (default: latest)")
     ap.add_argument("--org-account", default="gptmeorg")
-    ap.add_argument("--handle", default=None, help="org handle for the quote text")
     ap.add_argument("--skip-quote", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="re-announce a done tag")
