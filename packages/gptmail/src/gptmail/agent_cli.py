@@ -50,7 +50,7 @@ from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from gptmail.transport.agent import AgentTransport, Deliver, _FM_DELIM, meta_of
+from gptmail.transport.agent import _FM_DELIM, AgentTransport, Deliver, meta_of
 
 
 # Inbox messages older than this (days) are assumed handled and no longer
@@ -969,13 +969,22 @@ def pending(
         click.echo(_stale_summary(stale))
 
 
+def _pull_destination(row: dict, *, fallback_mailbox: str) -> Path | None:
+    """Return a contained local inbox path for a remote pending row."""
+    filename = str(row.get("file") or "")
+    if not filename:
+        return None
+    row_mailbox = _normalize_mailbox(str(row.get("mailbox") or fallback_mailbox))
+    inbox = _mailbox_root(row_mailbox) / "inbox"
+    return _within(inbox, filename)
+
+
 def _fetch_from_agent(
     agent_name: str,
     agent: dict[str, str],
     *,
     self_name: str,
     mailboxes: list[str],
-    local_inbox: Path,
 ) -> list[Path]:
     """SCP outbox messages addressed to ``self_name`` from a remote agent's outbox.
 
@@ -1002,13 +1011,22 @@ def _fetch_from_agent(
     new_files: list[Path] = []
     for row in rows:
         filename = str(row.get("file") or "")
-        if not filename:
+        try:
+            dest = _pull_destination(row, fallback_mailbox=mailboxes[0])
+        except click.BadParameter as e:
+            click.echo(f"Warning: refusing invalid mailbox from {agent_name}: {e}", err=True)
             continue
-        dest = local_inbox / filename
+        if dest is None:
+            if filename:
+                click.echo(
+                    f"Warning: refusing unsafe filename from {agent_name}: {filename}", err=True
+                )
+            continue
         if dest.exists():
-            continue  # Already fetched — deduplicate by filename.
+            continue  # Already fetched — deduplicate by mailbox and filename.
+        dest.parent.mkdir(parents=True, exist_ok=True)
         # The row's mailbox field tells us which remote outbox subfolder to look in.
-        row_mailbox = str(row.get("mailbox") or "default")
+        row_mailbox = _normalize_mailbox(str(row.get("mailbox") or mailboxes[0]))
         if row_mailbox == "default":
             remote_path = f"{workspace}/messages/outbox/{filename}"
         else:
@@ -1084,11 +1102,6 @@ def pull(
     self_name = (as_recipient or _self_name()).lower()
     mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
 
-    # Local inbox for the chosen mailbox (pull always targets the first/only mailbox).
-    local_inbox = _mailbox_root(mailboxes[0]) / "inbox"
-    if not dry_run:
-        local_inbox.mkdir(parents=True, exist_ok=True)
-
     new_files: list[Path] = []
     agents_polled: list[str] = []
     agents_skipped: list[str] = []
@@ -1111,9 +1124,20 @@ def pull(
             )
             for row in rows:
                 filename = str(row.get("file") or "")
-                if not filename:
+                try:
+                    dest = _pull_destination(row, fallback_mailbox=mailboxes[0])
+                except click.BadParameter as e:
+                    click.echo(
+                        f"Warning: refusing invalid mailbox from {agent_name}: {e}", err=True
+                    )
                     continue
-                dest = local_inbox / filename
+                if dest is None:
+                    if filename:
+                        click.echo(
+                            f"Warning: refusing unsafe filename from {agent_name}: {filename}",
+                            err=True,
+                        )
+                    continue
                 if not dest.exists():
                     subject = str(row.get("subject", "(no subject)"))
                     click.echo(f"[dry-run] would fetch from {agent_name}: {subject}  ({filename})")
@@ -1124,7 +1148,6 @@ def pull(
             agent_cfg,
             self_name=self_name,
             mailboxes=mailboxes,
-            local_inbox=local_inbox,
         )
         new_files.extend(fetched)
 

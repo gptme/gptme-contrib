@@ -296,6 +296,61 @@ def test_pull_as_override(pull_workspace: Path, monkeypatch: pytest.MonkeyPatch)
     assert payload["new_count"] == 1, "pull --as bob must fetch message addressed to bob"
 
 
+def test_pull_refuses_path_traversal_filename(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filename supplied by a remote pending row cannot escape the inbox."""
+    outside = pull_workspace / "escaped.md"
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": "../../../../escaped.md", "mailbox": "default"}],
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+
+    assert result.exit_code == 0, result.output
+    assert "refusing unsafe filename" in result.output
+    assert not outside.exists()
+
+
+def test_pull_all_mailboxes_preserves_mailbox_destination(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows from a named mailbox are copied into that mailbox's local inbox."""
+    gordon_root = pull_workspace / "gordon" / "messages"
+    default_name = _write_outbox_msg(
+        gordon_root / "outbox",
+        sender="gordon",
+        recipient="erik",
+        subject="Default",
+    )
+    ops_name = _write_outbox_msg(
+        gordon_root / "mailboxes" / "ops" / "outbox",
+        sender="gordon",
+        recipient="erik",
+        subject="Ops",
+        mailbox="ops",
+    )
+    (pull_workspace / "erik" / "messages" / "mailboxes" / "ops").mkdir(parents=True)
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [
+            {"file": default_name, "mailbox": "default"},
+            {"file": ops_name, "mailbox": "ops"},
+        ],
+    )
+
+    result = CliRunner().invoke(agent, ["pull", "--all-mailboxes"])
+
+    assert result.exit_code == 0, result.output
+    messages = pull_workspace / "erik" / "messages"
+    assert (messages / "inbox" / default_name).exists()
+    assert (messages / "mailboxes" / "ops" / "inbox" / ops_name).exists()
+    assert not (messages / "inbox" / ops_name).exists()
+
+
 def test_pull_multiple_messages_fetched(pull_workspace: Path) -> None:
     """``pull`` fetches multiple messages in one run."""
     gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
