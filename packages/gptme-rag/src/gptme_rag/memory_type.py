@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
-from fnmatch import fnmatch
+import re
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +96,48 @@ def load_memory_type_map(map_file: Path | None = None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Glob helper
+# ---------------------------------------------------------------------------
+
+
+def _glob_match_path(path: str, pattern: str) -> bool:
+    """Match *path* against *pattern*, treating ``**`` as a recursive wildcard.
+
+    Unlike :func:`fnmatch.fnmatch`, this function supports ``**`` to mean
+    "zero or more path segments" (standard shell glob / gitignore semantics).
+    ``*`` still matches within a single directory segment only.
+
+    Examples::
+
+        _glob_match_path("knowledge/design.md", "knowledge/**/*.md")  # True
+        _glob_match_path("knowledge/tech/design.md", "knowledge/**/*.md")  # True
+        _glob_match_path("people/alice.md", "people/*.md")  # True
+    """
+    # Build a regex from the pattern character-by-character.
+    regex_parts: list[str] = []
+    i = 0
+    while i < len(pattern):
+        chunk = pattern[i:]
+        if chunk.startswith("**/"):
+            regex_parts.append("(.*/)?")  # zero or more directories
+            i += 3
+        elif chunk.startswith("**"):
+            regex_parts.append(".*")  # match anything including /
+            i += 2
+        elif pattern[i] == "*":
+            regex_parts.append("[^/]*")  # single-directory wildcard
+            i += 1
+        elif pattern[i] == "?":
+            regex_parts.append("[^/]")
+            i += 1
+        else:
+            regex_parts.append(re.escape(pattern[i]))
+            i += 1
+    regex = "".join(regex_parts)
+    return bool(re.fullmatch(regex, path))
+
+
+# ---------------------------------------------------------------------------
 # Frontmatter helpers (inline — avoids cross-module dep on task_retrieval)
 # ---------------------------------------------------------------------------
 
@@ -106,7 +148,12 @@ def _extract_frontmatter(content: str) -> dict[str, Any]:
         return {}
     end = content.find("\n---\n", 4)
     if end == -1:
-        return {}
+        # Also accept frontmatter whose closing --- has no trailing newline
+        # (common when editors omit the final newline on save).
+        if content.endswith("\n---"):
+            end = len(content) - 4
+        else:
+            return {}
     frontmatter_text = content[4:end]
     try:
         import yaml  # optional — yaml is available in gptme-rag's dependency set
@@ -121,9 +168,14 @@ def _extract_frontmatter(content: str) -> dict[str, Any]:
 
 
 def _coerce_string_list(value: Any) -> list[str]:
-    """Normalise a frontmatter value to a list of lowercase strings."""
+    """Normalise a frontmatter value to a list of lowercase strings.
+
+    Handles both list values and plain strings, including comma-separated
+    strings that YAML leaves as a single string (e.g. ``tags: ai, project``).
+    """
     if isinstance(value, str):
-        return [value.strip().lower()] if value.strip() else []
+        # Split on commas to handle "preference, project" as two tags.
+        return [p.strip().lower() for p in value.split(",") if p.strip()]
     if isinstance(value, list):
         return [item.strip().lower() for item in value if isinstance(item, str) and item.strip()]
     return []
@@ -157,20 +209,24 @@ def classify_memory_type(
     metadata = metadata or {}
 
     # 1. Exact-path match
-    exact_paths: dict[str, Any] = rules.get("exact_paths", {})
-    if rel_path in exact_paths:
+    exact_paths = rules.get("exact_paths", {})
+    if isinstance(exact_paths, dict) and rel_path in exact_paths:
         memory_type = str(exact_paths[rel_path])
         return memory_type if memory_type in SUPPORTED_MEMORY_TYPES else None
 
     # 2. Glob-pattern match
-    for pattern, memory_type in rules.get("glob_paths", {}).items():
-        memory_type_str = str(memory_type)
-        if fnmatch(rel_path, pattern) and memory_type_str in SUPPORTED_MEMORY_TYPES:
-            return memory_type_str
+    glob_paths = rules.get("glob_paths", {})
+    if isinstance(glob_paths, dict):
+        for pattern, memory_type in glob_paths.items():
+            memory_type_str = str(memory_type)
+            if _glob_match_path(rel_path, pattern) and memory_type_str in SUPPORTED_MEMORY_TYPES:
+                return memory_type_str
 
     # 3. Task-specific rules (only for paths under tasks/)
     if rel_path.startswith("tasks/"):
-        task_rules: dict[str, Any] = rules.get("task_rules", {})
+        task_rules = rules.get("task_rules", {})
+        if not isinstance(task_rules, dict):
+            return None
         priority = str(metadata.get("priority", "")).strip().lower()
         state = str(metadata.get("state", "")).strip().lower()
         tags = _coerce_string_list(metadata.get("tags"))

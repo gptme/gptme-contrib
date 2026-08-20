@@ -113,8 +113,19 @@ def test_classify_glob_people(rules: dict):
 
 
 def test_classify_glob_knowledge(rules: dict):
-    # Matches knowledge/**/*.md
+    # Matches knowledge/**/*.md with one intermediate directory
     result = classify_memory_type("knowledge/technical/design.md", {}, rules)
+    assert result == "project"
+
+
+def test_classify_glob_knowledge_direct_child(rules: dict):
+    """Files directly under knowledge/ must match knowledge/**/*.md.
+
+    fnmatch does not support ** as a zero-or-more-directories wildcard, so
+    'knowledge/**/*.md' would not match 'knowledge/design.md' with plain
+    fnmatch. The _glob_match_path helper is required.
+    """
+    result = classify_memory_type("knowledge/design.md", {}, rules)
     assert result == "project"
 
 
@@ -132,6 +143,25 @@ def test_classify_glob_first_match_wins():
     }
     result = classify_memory_type("tasks/foo.md", {}, rules)
     assert result in SUPPORTED_MEMORY_TYPES
+
+
+def test_classify_malformed_exact_paths_list():
+    """Malformed rules where exact_paths is a list must not raise TypeError."""
+    rules = {"exact_paths": ["SOUL.md", "ABOUT.md"]}
+    # Should not raise; falls through to glob/task rules and returns None
+    assert classify_memory_type("SOUL.md", {}, rules) is None
+
+
+def test_classify_malformed_glob_paths_list():
+    """Malformed rules where glob_paths is a list must not raise TypeError."""
+    rules = {"glob_paths": ["tasks/*.md"]}
+    assert classify_memory_type("tasks/foo.md", {}, rules) is None
+
+
+def test_classify_malformed_task_rules_list():
+    """Malformed rules where task_rules is a list must not raise TypeError."""
+    rules = {"task_rules": ["goal_priorities"]}
+    assert classify_memory_type("tasks/foo.md", {"priority": "high"}, rules) is None
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +204,16 @@ def test_classify_task_tags_as_string(rules: dict):
     assert result == "preference"
 
 
+def test_classify_task_tags_comma_separated_string(rules: dict):
+    """Tags given as a comma-separated string must be split on commas.
+
+    YAML sometimes leaves 'tags: preference, project' as a single string
+    rather than a list.  _coerce_string_list must split on commas.
+    """
+    result = classify_memory_type("tasks/foo.md", {"tags": "preference, project"}, rules)
+    assert result == "preference"
+
+
 def test_classify_none_metadata(rules: dict):
     """Passing None for metadata must not raise."""
     result = classify_memory_type("SOUL.md", None, rules)
@@ -183,6 +223,17 @@ def test_classify_none_metadata(rules: dict):
 # ---------------------------------------------------------------------------
 # classify_document (content-based)
 # ---------------------------------------------------------------------------
+
+
+def test_classify_document_frontmatter_no_trailing_newline(rules: dict):
+    """Frontmatter blocks without a trailing newline after closing --- must parse.
+
+    _extract_frontmatter previously required '\\n---\\n' and would return {}
+    for files saved without a final newline (ending with '\\n---').
+    """
+    content = "---\npriority: high\nstate: active\n---"  # no trailing newline
+    result = classify_document("tasks/foo.md", content, rules)
+    assert result == "goal"
 
 
 def test_classify_document_from_frontmatter(rules: dict):
@@ -249,12 +300,24 @@ def test_weighted_sim_multi_type_match():
 # ---------------------------------------------------------------------------
 
 
-sklearn = pytest.importorskip("sklearn")
+# Guard sklearn-dependent imports so pure-Python tests above are not skipped
+# when scikit-learn is absent.  Only the TfidfIndex integration tests need it.
+try:
+    from gptme_rag.lexical import TfidfIndex
 
-from pathlib import Path  # noqa: E402 — already imported above but import guard requires this
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    TfidfIndex = None  # type: ignore[assignment,misc]
+    _SKLEARN_AVAILABLE = False
 
-from gptme_rag.indexing.document import Document  # noqa: E402
-from gptme_rag.lexical import TfidfIndex  # noqa: E402
+from gptme_rag.indexing.document import Document
+
+
+@pytest.fixture()
+def require_sklearn():
+    """Skip the calling test if scikit-learn (and thus TfidfIndex) is not installed."""
+    if not _SKLEARN_AVAILABLE:
+        pytest.skip("scikit-learn is not installed (pip install gptme-rag[lexical])")
 
 
 def _doc(text: str, source: str, memory_type: str | None = None) -> Document:
@@ -264,7 +327,7 @@ def _doc(text: str, source: str, memory_type: str | None = None) -> Document:
     return Document(content=text, metadata=metadata, source_path=Path(source))
 
 
-def test_search_without_memory_types_unchanged():
+def test_search_without_memory_types_unchanged(require_sklearn):
     """Without memory_types, search() behaves exactly as before."""
     idx = TfidfIndex()
     docs = [
@@ -278,7 +341,7 @@ def test_search_without_memory_types_unchanged():
     assert all(h.score > 0 for h in hits)
 
 
-def test_search_boost_reranks_matching_memory_type():
+def test_search_boost_reranks_matching_memory_type(require_sklearn):
     """When two docs have equal raw similarity, the boosted one must rank first.
 
     Using docs with identical content ensures the raw TF-IDF score is the same,
@@ -305,7 +368,7 @@ def test_search_boost_reranks_matching_memory_type():
     assert hits_project[0].score > hits_project[1].score
 
 
-def test_search_memory_types_unknown_type_ignored():
+def test_search_memory_types_unknown_type_ignored(require_sklearn):
     """Unknown types in memory_types must not raise; they are silently filtered."""
     idx = TfidfIndex()
     idx.index([_doc("hello world", "a.md", "goal")])
@@ -314,7 +377,7 @@ def test_search_memory_types_unknown_type_ignored():
     assert len(hits) == 1
 
 
-def test_search_memory_types_no_tagged_docs():
+def test_search_memory_types_no_tagged_docs(require_sklearn):
     """memory_types param is safe when no documents carry a memory_type tag."""
     idx = TfidfIndex()
     idx.index([_doc("hello world", "a.md")])  # no memory_type
@@ -323,7 +386,7 @@ def test_search_memory_types_no_tagged_docs():
     assert hits[0].document.metadata["source"] == "a.md"
 
 
-def test_search_penalty_pushes_non_matching_below_floor():
+def test_search_penalty_pushes_non_matching_below_floor(require_sklearn):
     """A doc that clears the raw floor but fails penalty may drop below it.
 
     The test is structured to assert in both branches so it does not silently
@@ -365,7 +428,7 @@ def test_search_penalty_pushes_non_matching_below_floor():
         assert hits_penalised[0].score < raw_score
 
 
-def test_search_unknown_doc_memory_type_not_penalised():
+def test_search_unknown_doc_memory_type_not_penalised(require_sklearn):
     """A doc with an unrecognised memory_type label is ranked by raw cosine,
     not penalised.  This ensures typos or older labels don't silently downrank
     documents that the caller never intended to penalise."""
