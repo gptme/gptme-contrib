@@ -557,12 +557,15 @@ class LessonValidator:
         # mention of an existing cross-category companion earlier in the document must
         # not suppress the dead-link error on a later Related-section link that points
         # at a non-existent own-category path.
-        # Use [a-zA-Z0-9._-]+ for path components to stay within the path
-        # boundary and avoid greedily consuming markdown link punctuation
-        # (e.g. ](  or  )  after the path).
+        # Use [^\]/]+ (exclude "]" and "/") for path components so any valid filesystem
+        # name is matched, including those with spaces or non-ASCII characters.
+        # Excluding "]" is critical: without it, the regex greedily matches across the
+        # markdown link text/URL boundary — e.g. in "[knowledge/lessons/foo/bar.md](url)"
+        # the intermediate pattern [^/]+/ would match "bar.md](../../knowledge/" as a
+        # single component, producing a spurious path that does not exist on disk.
         _companion_link_matches = list(
             re.finditer(
-                rf"(knowledge/lessons/(?:[a-zA-Z0-9._-]+/)*{re.escape(self.filepath.stem)}\.md)",
+                rf"(knowledge/lessons/(?:[^\]/]+/)*{re.escape(self.filepath.stem)}\.md)",
                 self.content,
                 re.IGNORECASE,
             )

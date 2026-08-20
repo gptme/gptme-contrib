@@ -1003,3 +1003,68 @@ def test_own_companion_linked_but_dead_prose_mention_reports_dead_path():
         "Error must not instruct author to change the correctly-linked own companion. "
         f"Got: {error!r}"
     )
+
+
+def test_companion_link_detected_for_category_with_space():
+    """Companion link detection must work when the category dir contains a space.
+
+    The detection regex used [a-zA-Z0-9._-]+ for path components, which silently
+    dropped links to companions in categories like "my lessons" or "tool tips".
+    The fix restores [^/]+ so any valid filesystem name is matched.
+
+    Regression for the P1 finding on gptme-contrib#1460.
+    """
+    lesson_content = (
+        "---\n"
+        "description: Test lesson\n"
+        "status: active\n"
+        "---\n"
+        "\n"
+        "## Rule\n"
+        "Test rule.\n"
+        "\n"
+        "## Context\n"
+        "Context text.\n"
+        "\n"
+        "## Detection\n"
+        "- signal one\n"
+        "- signal two (three four five six)\n"
+        "\n"
+        "## Pattern\n"
+        "```\npattern\n```\n"
+        "\n"
+        "## Outcome\n"
+        "Good things happen.\n"
+        "\n"
+        "## Related\n"
+        "- Companion: [knowledge/lessons/my category/test-lesson.md]"
+        "(../../knowledge/lessons/my category/test-lesson.md)\n"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        category_dir = root / "knowledge" / "lessons" / "my category"
+        category_dir.mkdir(parents=True)
+        (category_dir / "test-lesson.md").write_text("# companion doc\n")
+        lesson_dir = root / "lessons" / "my category"
+        lesson_dir.mkdir(parents=True)
+        path = _write_lesson(lesson_dir, lesson_content)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            validator = LessonValidator(path)
+            validator.validate()
+        finally:
+            os.chdir(cwd)
+
+    companion_errors = [e for e in validator.errors if "companion" in e.lower()]
+    companion_warnings = [w for w in validator.warnings if "companion" in w.lower()]
+    assert not companion_errors, (
+        "A lesson correctly linking a companion in a space-containing category dir "
+        f"must not have companion errors: {companion_errors}"
+    )
+    assert not companion_warnings, (
+        "A lesson correctly linking a companion in a space-containing category dir "
+        f"must not warn 'exists but not linked': {companion_warnings}"
+    )
