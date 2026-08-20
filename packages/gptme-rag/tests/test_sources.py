@@ -380,3 +380,17 @@ def test_de_accumulate_transcript_non_dict_mid_run_does_not_break_cumulative():
     # The partial "I" must NOT appear as a separate block
     assert result.count("USER:") == 1
     assert "ASSISTANT: sure" in result
+
+
+def test_collect_voice_calls_file_path_returns_empty(tmp_path: Path):
+    """Passing a file path instead of a directory must return [] gracefully.
+
+    Regression for P2 finding: the function checked exists() but not is_dir().
+    If a caller passed a path to an existing JSON file (e.g. a single archive),
+    exists() was True so the code proceeded to glob("*.json") which raises
+    NotADirectoryError and aborts collection.
+    """
+    single_file = tmp_path / "call.json"
+    single_file.write_text('{"transcript": [{"role": "user", "text": "hello"}]}', encoding="utf-8")
+    # Must return [] rather than raising NotADirectoryError
+    assert collect_voice_call_documents(single_file) == []

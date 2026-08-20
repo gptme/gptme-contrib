@@ -203,7 +203,7 @@ def collect_voice_call_documents(
         missing or contains no parseable transcripts).
     """
     voice_calls_dir = Path(voice_calls_dir)
-    if not voice_calls_dir.exists():
+    if not voice_calls_dir.exists() or not voice_calls_dir.is_dir():
         return []
     if repo_root is not None and not voice_calls_dir.resolve().is_relative_to(
         Path(repo_root).resolve()
