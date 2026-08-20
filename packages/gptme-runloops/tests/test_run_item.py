@@ -1600,6 +1600,31 @@ def test_post_session_mixed_merge_ready_keeps_delivery_signal(tmp_path) -> None:
     assert effect == "observed"
 
 
+def test_post_session_merge_ready_only_merge_without_reply_promotes(tmp_path) -> None:
+    """A pure merge_ready session that merged the PR but posted no reply must
+    grade observed AND promote state — not roll back into the dispatch queue
+    (an already-settled PR must not re-enter and produce another comment)."""
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("merge_ready",)
+    )
+    item = make_item(types=["merge_ready"])
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # Default fixture snapshot: MERGED, new head, merge commit — the merge landed.
+    # Session posted nothing, so the delivery check reports an orphan.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
+    config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = config.pending_state_dir / "gptme-gptme-contrib-pr-1234.state"
+    sentinel.write_text("promoted")
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert effect == "observed"
+    assert (
+        config.state_dir / sentinel.name
+    ).exists(), "state must be promoted — rollback would re-queue an already-merged PR"
+
+
 def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     """master_ci_failure has no thread, so the reply post-condition must not run.
 

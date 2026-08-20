@@ -2021,6 +2021,8 @@ def run_post_session(
                 "session exited without a thread reply"
             )
 
+    merge_ready_only = set(item.types) == {"merge_ready"}
+
     latency_outcome = compute_latency_outcome(
         delivery_outcome,
         exit_code,
@@ -2229,7 +2231,28 @@ def run_post_session(
     # every pending notif-*.state, consuming exactly what was "rolled back".
     # The result was a fix that passed its tests and changed nothing. Keep all
     # three effects together in rollback_failed_delivery().
-    if delivery_outcome == "orphan_no_delivery":
+    # PR-state-diff-only effect (no delivery signal), needed by both the
+    # rollback guard below and the effect signal in step 9.
+    pr_diff_effect = read_record_effect_signal(record_file, delivery_outcome="")
+
+    # A pure merge_ready session that actually merged/closed the PR (or pushed
+    # a rebase) but posted no reply is NOT a failed delivery — its deliverable
+    # was the merge, not a comment. Rolling it back would re-queue an
+    # already-settled PR (and pre-#1461 that re-dispatch produced yet another
+    # comment). Promote instead. Reply-type items keep the rollback: for them
+    # a missing reply genuinely means the work never reached the thread.
+    if (
+        delivery_outcome == "orphan_no_delivery"
+        and merge_ready_only
+        and pr_diff_effect == EFFECT_OBSERVED
+    ):
+        _log(
+            f"NOTE: merge_ready-only item {plan.repo}#{plan.number}: PR state "
+            "moved (merge/close/push) with no reply posted — promoting state, "
+            "not rolling back (the merge IS the deliverable)"
+        )
+        promote_item_state(config, item.repo, item.number)
+    elif delivery_outcome == "orphan_no_delivery":
         rollback_slot_key = resolve_slot_key(config, item)
         if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
             _log(
@@ -2263,18 +2286,17 @@ def run_post_session(
     # ineffective path instead of a clean success. Mixed items (e.g.
     # ci_failure+merge_ready) keep the delivery signal — a reply there can be
     # the legitimate deliverable of the other type.
-    merge_ready_only = set(item.types) == {"merge_ready"}
     if merge_ready_only and delivery_verified and delivery_outcome == "handled":
         _log(
             "NOTE: merge_ready-only item — a posted reply does not count as "
             "effect; grading on PR state (merge/close/head) only"
         )
-    effect = read_record_effect_signal(
-        record_file,
-        delivery_outcome=(
-            delivery_outcome if (delivery_verified and not merge_ready_only) else ""
-        ),
-    )
+    if delivery_verified and not merge_ready_only:
+        effect = read_record_effect_signal(
+            record_file, delivery_outcome=delivery_outcome
+        )
+    else:
+        effect = pr_diff_effect
     if effect == EFFECT_NONE:
         _log(
             f"WARN: PM dispatch produced NO observable effect on {plan.repo}#{plan.number} "
