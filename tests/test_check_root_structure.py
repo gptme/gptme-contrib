@@ -1,6 +1,5 @@
 """Tests for the root structure checker."""
 
-import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -71,20 +70,20 @@ def test_no_unexpected_entry_on_known_set():
 
 
 def test_reads_git_index_not_filesystem():
-    """get_tracked_root_entries should use git ls-files (index), not iterdir."""
+    """get_tracked_root_entries should call git ls-files --cached, not iterdir."""
+    from unittest.mock import MagicMock
+
     import check_root_structure
 
-    # Verify subprocess call uses git ls-files --cached
-    calls = []
-    real_run = subprocess.run
+    # Hermetic: mock subprocess.run to return fixed output — no real git needed.
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "scripts/foo.py\ntests/test_bar.py\n"
 
-    def spy_run(args, **kwargs):
-        calls.append(args)
-        return real_run(args, **kwargs)
-
-    with patch("subprocess.run", side_effect=spy_run):
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
         check_root_structure.get_tracked_root_entries()
 
-    assert any(
-        "ls-files" in str(c) and "--cached" in str(c) for c in calls
-    ), "Expected git ls-files --cached to be called"
+    assert mock_run.called, "subprocess.run was not called at all"
+    cmd = mock_run.call_args[0][0]
+    assert "ls-files" in cmd, f"Expected 'ls-files' in command, got: {cmd}"
+    assert "--cached" in cmd, f"Expected '--cached' in command, got: {cmd}"
