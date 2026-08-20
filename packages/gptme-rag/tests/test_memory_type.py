@@ -102,6 +102,20 @@ def test_classify_unsupported_type_exact_path_returns_none():
     assert classify_memory_type("foo.md", {}, bad_rules) is None
 
 
+def test_classify_unsupported_exact_path_type_falls_through_to_glob():
+    """A typo in exact_paths must not block a matching glob rule.
+
+    When exact_paths maps a path to an unsupported type (e.g. a typo like
+    ``"identiy"``) the function must fall through to glob_paths and return the
+    valid type found there, rather than short-circuiting to ``None``.
+    """
+    rules = {
+        "exact_paths": {"people/alice.md": "identiy"},  # typo
+        "glob_paths": {"people/*.md": "preference"},
+    }
+    assert classify_memory_type("people/alice.md", {}, rules) == "preference"
+
+
 # ---------------------------------------------------------------------------
 # classify_memory_type — glob paths
 # ---------------------------------------------------------------------------

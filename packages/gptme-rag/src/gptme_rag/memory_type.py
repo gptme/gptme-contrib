@@ -220,7 +220,9 @@ def classify_memory_type(
     exact_paths = rules.get("exact_paths", {})
     if isinstance(exact_paths, dict) and rel_path in exact_paths:
         memory_type = str(exact_paths[rel_path])
-        return memory_type if memory_type in SUPPORTED_MEMORY_TYPES else None
+        if memory_type in SUPPORTED_MEMORY_TYPES:
+            return memory_type
+        # Unsupported type (e.g. typo) — fall through to glob/task rules
 
     # 2. Glob-pattern match
     glob_paths = rules.get("glob_paths", {})
