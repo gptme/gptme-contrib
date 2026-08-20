@@ -8,7 +8,6 @@ import pytest
 from gptme_rag.memory_type import (
     MEMORY_TYPE_BOOST,
     MEMORY_TYPE_PENALTY,
-    SUPPORTED_MEMORY_TYPES,
     classify_document,
     classify_memory_type,
     load_memory_type_map,
@@ -224,9 +223,7 @@ def test_classify_task_tags_list_with_comma_separated_item(rules: dict):
     YAML '- preference, project' parses to the list ['preference, project'];
     the list branch of _coerce_string_list must also split on commas.
     """
-    result = classify_memory_type(
-        "tasks/foo.md", {"tags": ["preference, project"]}, rules
-    )
+    result = classify_memory_type("tasks/foo.md", {"tags": ["preference, project"]}, rules)
     assert result == "preference"
 
 
