@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 
 
@@ -314,6 +315,12 @@ class TestScanLessons:
         lessons = scan_lessons([tmp_path])
         assert lessons == []
 
+    def test_quoted_inactive_skipped_without_yaml(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        content = _basic_lesson(["foo"], status='"deprecated"')
+        _write_lesson(tmp_path / "foo.md", content)
+        assert scan_lessons([tmp_path]) == []
+
     def test_no_keywords_skipped(self, tmp_path):
         content = "---\nstatus: active\n---\n# Title\nBody.\n"
         _write_lesson(tmp_path / "foo.md", content)
@@ -328,6 +335,24 @@ class TestScanLessons:
         lessons = scan_lessons([dir_a, dir_b])
         assert len(lessons) == 1
         assert "from-a" in lessons[0]["keywords"]
+
+    def test_same_filename_in_different_subdirectories_kept(self, tmp_path):
+        _write_lesson(tmp_path / "git" / "merge.md", _basic_lesson(["git-merge"]))
+        _write_lesson(tmp_path / "db" / "merge.md", _basic_lesson(["db-merge"]))
+        lessons = scan_lessons([tmp_path])
+        assert {lesson["keywords"][0] for lesson in lessons} == {
+            "git-merge",
+            "db-merge",
+        }
+
+    def test_matching_relative_path_first_dir_wins(self, tmp_path):
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        _write_lesson(dir_a / "git" / "merge.md", _basic_lesson(["from-a"]))
+        _write_lesson(dir_b / "git" / "merge.md", _basic_lesson(["from-b"]))
+        lessons = scan_lessons([dir_a, dir_b])
+        assert len(lessons) == 1
+        assert lessons[0]["keywords"] == ["from-a"]
 
     def test_session_categories(self, tmp_path):
         content = (

@@ -255,9 +255,9 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     if match_dict:
         fm["match"] = match_dict
 
-    m = re.search(r"status:\s*(\w+)", fm_str)
-    if m:
-        fm["status"] = m.group(1)
+    status = _extract_scalar_frontmatter_field(fm_str, "status")
+    if status is not None:
+        fm["status"] = status
 
     for field in ("name", "description", "when_to_use"):
         val = _extract_scalar_frontmatter_field(fm_str, field)
@@ -450,14 +450,15 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
     **Deduplication** (first-dir-wins, matching ``gptme#1594`` behaviour):
 
     1. By resolved path — handles symlinks to the same file.
-    2. By filename — local workspace lessons take priority over contrib copies.
+    2. By relative path — local workspace lessons take priority over matching
+       contrib copies without conflating same-named lessons in different categories.
 
     Lessons with ``status`` other than ``"active"`` are skipped.
     Lessons with no keywords, patterns, or skill name are skipped.
     """
     lessons: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
-    seen_names: set[str] = set()
+    seen_relative_paths: set[Path] = set()
 
     for lesson_dir in lesson_dirs:
         if not lesson_dir.exists():
@@ -474,24 +475,11 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
                 continue
             seen_paths.add(resolved)
 
-            rel_parts = f.relative_to(lesson_dir).parts
-            if "archive" in rel_parts:
-                if f.name != "SKILL.md":
-                    active_copy = next(
-                        (
-                            p
-                            for p in lesson_dir.rglob(f.name)
-                            if "archive" not in p.relative_to(lesson_dir).parts
-                        ),
-                        None,
-                    )
-                    if active_copy is None:
-                        pass  # do NOT add to seen_names: archive in dir1 must
-                        # not block a valid non-archived lesson with the same
-                        # filename in a later directory (first-dir-wins dedup)
+            relative_path = f.relative_to(lesson_dir)
+            if "archive" in relative_path.parts:
                 continue
 
-            if f.name != "SKILL.md" and f.name in seen_names:
+            if f.name != "SKILL.md" and relative_path in seen_relative_paths:
                 continue
 
             try:
@@ -563,7 +551,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             # lesson in an earlier dir doesn't silently block a valid lesson
             # with the same filename in a later dir.
             if f.name != "SKILL.md":
-                seen_names.add(f.name)
+                seen_relative_paths.add(relative_path)
     return lessons
 
 
