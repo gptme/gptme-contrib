@@ -394,7 +394,11 @@ _NEEDS_FIX_SECTIONS = {
     ),
     "assessment": (
         "This PR has a low Greptile score and likely has real code issues.\n"
-        "**Action**: Read the Greptile findings, fix the issues in the PR's repo, push commits, then re-trigger:"
+        "**Action**: Read the Greptile findings, fix the issues in the PR's repo, push via the in-band AI review wrapper (runs local review before pushing, max 2 iterations):\n"
+        "```bash\n"
+        "uv run python3 {pm_review_and_push}\n"
+        "```\n"
+        "If it reports P0/P1 findings, fix them and re-run. Once clean, then re-trigger:"
     ),
     # NOTE(parity): this arm says "leave it for the next cycle" while the
     # LOCAL_GREPTILE_FIX variant says "leave it for human review" — the
