@@ -394,7 +394,6 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
 
             if f.name != "SKILL.md" and f.name in seen_names:
                 continue
-            seen_names.add(f.name)
 
             try:
                 content = f.read_text(encoding="utf-8")
@@ -461,6 +460,11 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
                     "n_keywords": len(keywords),
                 }
             )
+            # Mark name as seen only after a successful append — so an inactive
+            # lesson in an earlier dir doesn't silently block a valid lesson
+            # with the same filename in a later dir.
+            if f.name != "SKILL.md":
+                seen_names.add(f.name)
     return lessons
 
 
@@ -508,9 +512,10 @@ def filter_by_session_category(
         filter_by_session_category(lessons, None)
     """
     filtered = []
+    cat_lower = category.lower() if category else None
     for lesson in lessons:
         cats = lesson.get("session_categories") or []
-        if not cats or (category and category in {c.lower() for c in cats}):
+        if not cats or (cat_lower and cat_lower in {c.lower() for c in cats}):
             filtered.append(lesson)
     return filtered
 
@@ -722,10 +727,11 @@ def score_lessons(
                 score += 1.0
                 matched_by.append(kw)
 
-        # 2. Pattern matching (full regex)
+        # 2. Pattern matching (full regex, case-insensitive so patterns with
+        #    uppercase chars like "GitHub" or "[A-Z].*" match prompt_lower)
         for pat in lesson["patterns"]:
             try:
-                if re.search(pat, prompt_lower):
+                if re.search(pat, prompt_lower, re.IGNORECASE):
                     score += 1.0
                     matched_by.append(f"pattern:{pat[:30]}")
             except re.error:
