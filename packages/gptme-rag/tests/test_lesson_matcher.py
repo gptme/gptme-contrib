@@ -221,6 +221,58 @@ class TestExtractFrontmatter:
         harness = fm.get("metadata", {}).get("harness", [])
         assert "claude-code" in harness
 
+    def test_regex_fallback_unquoted_block_keywords(self, monkeypatch):
+        # Regression: without PyYAML, block-form keywords without quotes were
+        # silently dropped because the regex only matched "quoted" values.
+        # Real lesson files use unquoted multi-word keywords like:
+        #   - unclosed code block
+        #   - merge conflict
+        content = (
+            "---\nmatch:\n  keywords:\n"
+            "    - unclosed code block\n"
+            "    - merge conflict\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        kw = fm.get("match", {}).get("keywords", [])
+        assert "unclosed code block" in kw
+        assert "merge conflict" in kw
+
+    def test_regex_fallback_session_categories_scalar(self, monkeypatch):
+        # Regression: without PyYAML, scalar session_categories like
+        # "session_categories: code, infrastructure" were not parsed by
+        # _extract_list_frontmatter_field (only handles list/block forms),
+        # causing the lesson to fire in every session (security defect).
+        content = (
+            "---\nmatch:\n  keywords:\n    - foo\n"
+            "  session_categories: code, infrastructure\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        cats = fm.get("match", {}).get("session_categories", [])
+        assert "code" in cats
+        assert "infrastructure" in cats
+
 
 # ---------------------------------------------------------------------------
 # scan_lessons

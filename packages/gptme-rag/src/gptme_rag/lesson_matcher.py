@@ -202,9 +202,29 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     keywords: list[str] = []
     inline = re.search(r"keywords:\s*\[(.*?)\]", fm_str, re.DOTALL)
     if inline:
-        keywords = [kw.strip() for kw in re.findall(r'"([^"]+)"', inline.group(1))]
+        # Inline form: keywords: ["val1", unquoted val, 'val3']
+        # Split on commas, strip surrounding quotes from each item
+        raw_items = re.split(r",", inline.group(1))
+        for raw in raw_items:
+            raw = raw.strip()
+            if not raw:
+                continue
+            if (raw.startswith('"') and raw.endswith('"')) or (
+                raw.startswith("'") and raw.endswith("'")
+            ):
+                raw = raw[1:-1]
+            if raw:
+                keywords.append(raw)
     else:
-        keywords = [kw.strip() for kw in re.findall(r'^\s*-\s*"([^"]+)"', fm_str, re.MULTILINE)]
+        # Block form: "- value" lines (quoted or unquoted multi-word)
+        for m_block in re.finditer(
+            r'^\s*-\s+(?:"([^"]+)"|\'([^\']+)\'|(.+?))\s*$',
+            fm_str,
+            re.MULTILINE,
+        ):
+            val = m_block.group(1) or m_block.group(2) or m_block.group(3)
+            if val and val.strip():
+                keywords.append(val.strip())
 
     # Build the match dict with all fields scan_lessons reads from it
     match_dict: dict[str, Any] = {}
@@ -212,6 +232,19 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         match_dict["keywords"] = keywords
 
     session_categories = _extract_list_frontmatter_field(fm_str, "session_categories")
+    if not session_categories:
+        # Also handle scalar form: session_categories: code, infrastructure
+        # (may be indented under match:); _extract_scalar_frontmatter_field only
+        # handles top-level unindented fields so we use a direct regex here.
+        sc_m = re.search(
+            r"^\s*session_categories:\s*([^\[{\n][^\n]*)",
+            fm_str,
+            re.MULTILINE,
+        )
+        if sc_m:
+            val = sc_m.group(1).strip()
+            if val and not val.startswith("-"):
+                session_categories = [s.strip() for s in val.split(",") if s.strip()]
     if session_categories:
         match_dict["session_categories"] = session_categories
 
