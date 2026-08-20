@@ -95,6 +95,23 @@ def _string_list(value: object) -> list[str]:
     return []
 
 
+def _clean_plain_scalar(raw: str) -> str:
+    """Strip surrounding quotes, then any YAML inline ``#`` comment.
+
+    YAML only begins a comment at a ``#`` that starts the value or is preceded
+    by whitespace, so ``a#b`` survives while ``a  # b`` becomes ``a``. Quoted
+    scalars keep their contents verbatim (a ``#`` inside quotes is data).
+    """
+    value = raw.strip()
+    if value[:1] in {"'", '"'}:
+        quote = value[0]
+        end = value.find(quote, 1)
+        return value[1:end] if end != -1 else value[1:].strip()
+    if value.startswith("#"):
+        return ""
+    return re.split(r"\s+#", value, maxsplit=1)[0].strip()
+
+
 def _extract_scalar_frontmatter_field(fm_str: str, field: str) -> str | None:
     """Extract a simple top-level YAML scalar without PyYAML (regex fallback)."""
     lines = fm_str.splitlines()
@@ -120,10 +137,7 @@ def _extract_scalar_frontmatter_field(fm_str: str, field: str) -> str | None:
             if raw_value[0] == ">":
                 return " ".join(part.strip() for part in text.splitlines() if part.strip())
             return text
-        value = raw_value
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        return value.strip()
+        return _clean_plain_scalar(raw_value)
 
     return None
 
@@ -576,8 +590,10 @@ def filter_by_session_category(
 ) -> list[dict[str, Any]]:
     """Return lessons that are unrestricted or match *category*.
 
-    Lessons with a non-empty ``session_categories`` list in their frontmatter
-    are excluded unless *category* appears in that list (case-insensitive).
+    Lessons with a non-empty ``match.session_categories`` list are excluded
+    unless *category* appears in that list (case-insensitive). Only the nested
+    ``match:`` form is read — a top-level ``session_categories`` key is not the
+    documented schema and is ignored, matching the Claude Code hook this ports.
     When *category* is ``None`` only unrestricted lessons (no list) are kept —
     this prevents social/triage/research lessons from firing when the session
     category is unknown.

@@ -159,6 +159,50 @@ class TestExtractFrontmatter:
         kw = fm.get("match", {}).get("keywords", fm.get("keywords", []))
         assert "git push" in kw or "git commit" in kw
 
+    def test_regex_fallback_strips_inline_comment(self, monkeypatch):
+        # The canonical lesson template in gptme-contrib/lessons/README.md writes
+        # `status: active  # active | automated | ...`, so a fallback that keeps
+        # the comment yields status != "active" and scan_lessons drops the lesson.
+        content = (
+            "---\n"
+            "status: active  # active | automated | deprecated\n"
+            "name: my-skill   # the trigger name\n"
+            'description: "hash # inside quotes stays"\n'
+            "---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("status") == "active"
+        assert fm.get("name") == "my-skill"
+        # A `#` inside a quoted scalar is data, not a comment.
+        assert fm.get("description") == "hash # inside quotes stays"
+
+    def test_regex_fallback_hash_without_leading_space_is_not_a_comment(self, monkeypatch):
+        # YAML only starts a comment at a `#` that begins the value or follows
+        # whitespace, so `issue#42` must survive intact.
+        content = "---\nname: issue#42\n---\n# Title\nBody.\n"
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("name") == "issue#42"
+
     def test_regex_fallback_session_categories_block(self, monkeypatch):
         # Regression: without PyYAML, session_categories was not parsed,
         # causing gated lessons to fire in every session (security defect).
