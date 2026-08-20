@@ -502,10 +502,12 @@ def timeout_tier(
     config: RunItemConfig,
     *,
     instruction_kind: str | None = None,
+    is_mention: bool = False,
 ) -> tuple[int, str]:
     """Complexity-based timeout tiers (p-m.sh:494-514); order matters:
     assigned_issue wins over adjudication, which wins over the greptile-fix
-    tier.
+    tier.  Direct @mentions are floored at the assigned_issue tier so that a
+    complex "please fix X" ask is not killed at 15 min (AW#1402 incident).
 
     Adjudication reads findings, classifies them, possibly fixes one blocking
     issue and posts a structured recommendation — it never waits on a Greptile
@@ -530,6 +532,10 @@ def timeout_tier(
         or ("pr_update" in types and has_greptile_fix)
     ):
         return config.greptile_fix_timeout, config.greptile_fix_time_desc
+    # Direct @mentions need at least the assigned_issue budget — a 900s fast-lane
+    # session was killed at ~14 min before completing (AW#1402, 2026-08-20).
+    if is_mention:
+        return config.assigned_issue_timeout, config.assigned_issue_time_desc
     return config.default_timeout, config.default_time_desc
 
 
@@ -1212,6 +1218,7 @@ def plan_item(
         bool(greptile_fix),
         config,
         instruction_kind=instruction_kind,
+        is_mention=is_direct_mention(item.detail),
     )
 
     mention = ""
