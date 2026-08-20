@@ -1953,6 +1953,14 @@ def run_post_session(
         and item.number_str != "0"
         and hooks.delivery_check is not None
         and THREAD_DELIVERABLE_TYPES & set(item.types)
+        # A pure merge_ready item's deliverable is the MERGE, not a comment —
+        # the reply post-condition does not apply. Running it anyway caused
+        # both halves of the gptme/gptme#3531 spam: --post-fallback-reply
+        # posted "Automated placeholder" comments for silent merges, and
+        # orphan_no_delivery rolled the item back into the queue. Skipping
+        # leaves delivery_verified False, so the effect signal (step 9) grades
+        # purely on the PR-state diff and pm_dispatch_recovery owns retries.
+        and set(item.types) != {"merge_ready"}
     ):
         try:
             try:
@@ -2020,8 +2028,6 @@ def run_post_session(
                 f"WARN: PM delivery post-condition FAILED — {plan.repo}#{plan.number}: "
                 "session exited without a thread reply"
             )
-
-    merge_ready_only = set(item.types) == {"merge_ready"}
 
     latency_outcome = compute_latency_outcome(
         delivery_outcome,
@@ -2231,28 +2237,7 @@ def run_post_session(
     # every pending notif-*.state, consuming exactly what was "rolled back".
     # The result was a fix that passed its tests and changed nothing. Keep all
     # three effects together in rollback_failed_delivery().
-    # PR-state-diff-only effect (no delivery signal), needed by both the
-    # rollback guard below and the effect signal in step 9.
-    pr_diff_effect = read_record_effect_signal(record_file, delivery_outcome="")
-
-    # A pure merge_ready session that actually merged/closed the PR (or pushed
-    # a rebase) but posted no reply is NOT a failed delivery — its deliverable
-    # was the merge, not a comment. Rolling it back would re-queue an
-    # already-settled PR (and pre-#1461 that re-dispatch produced yet another
-    # comment). Promote instead. Reply-type items keep the rollback: for them
-    # a missing reply genuinely means the work never reached the thread.
-    if (
-        delivery_outcome == "orphan_no_delivery"
-        and merge_ready_only
-        and pr_diff_effect == EFFECT_OBSERVED
-    ):
-        _log(
-            f"NOTE: merge_ready-only item {plan.repo}#{plan.number}: PR state "
-            "moved (merge/close/push) with no reply posted — promoting state, "
-            "not rolling back (the merge IS the deliverable)"
-        )
-        promote_item_state(config, item.repo, item.number)
-    elif delivery_outcome == "orphan_no_delivery":
+    if delivery_outcome == "orphan_no_delivery":
         rollback_slot_key = resolve_slot_key(config, item)
         if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
             _log(
@@ -2275,28 +2260,20 @@ def run_post_session(
     # succeeded (gptme/gptme#3468, 2026-08-10). Derived from the before/after
     # PR snapshot step 2 already fetched, so this costs no extra API call.
     #
-    # For a PURE merge_ready item the delivery check's "handled" (= a reply
-    # was posted) is NOT effect: the dispatch exists to merge the PR, and a
-    # comment is exactly the cheap substitute the gptme/gptme#3531 spam loop
-    # produced — 2 of its 10 thread replies came from merge_ready dispatches
-    # graded effect=observed/succeeded, so the loop looked healthy. Feed only
-    # the PR-state diff (merged/closed transition, merge commit, head advance
-    # from a pre-merge rebase); a comment-only session then grades
-    # effect=none → outcome=no_effect → pm_dispatch_recovery's bounded
-    # ineffective path instead of a clean success. Mixed items (e.g.
-    # ci_failure+merge_ready) keep the delivery signal — a reply there can be
-    # the legitimate deliverable of the other type.
-    if merge_ready_only and delivery_verified and delivery_outcome == "handled":
-        _log(
-            "NOTE: merge_ready-only item — a posted reply does not count as "
-            "effect; grading on PR state (merge/close/head) only"
-        )
-    if delivery_verified and not merge_ready_only:
-        effect = read_record_effect_signal(
-            record_file, delivery_outcome=delivery_outcome
-        )
-    else:
-        effect = pr_diff_effect
+    # For a PURE merge_ready item the delivery check never runs (step 4), so
+    # delivery_verified is False and the signal below is the PR-state diff
+    # alone (merged/closed transition, merge commit, head advance). A comment
+    # is NOT effect for merge_ready: 2 of the 10 gptme/gptme#3531 spam replies
+    # came from merge_ready dispatches graded observed/succeeded via the
+    # delivery signal, which kept the loop invisible to pm_dispatch_recovery.
+    # A comment-only session now grades effect=none → outcome=no_effect → the
+    # bounded ineffective retry path. Mixed items (e.g. ci_failure+merge_ready)
+    # keep the delivery signal — a reply there can be the legitimate
+    # deliverable of the other type.
+    effect = read_record_effect_signal(
+        record_file,
+        delivery_outcome=delivery_outcome if delivery_verified else "",
+    )
     if effect == EFFECT_NONE:
         _log(
             f"WARN: PM dispatch produced NO observable effect on {plan.repo}#{plan.number} "

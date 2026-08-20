@@ -1780,10 +1780,18 @@ def test_post_session_thread_deliverable_item_still_runs_delivery_check(
     silently stop running for those items. This parametrized test ensures each type
     in the set actually triggers the check — a future accidental removal will
     fail exactly here.
+
+    Exception by design: a PURE merge_ready item skips the check (its
+    deliverable is the merge, not a comment — see the step-4 gate and
+    test_post_session_merge_ready_only_reply_is_not_effect). So for
+    merge_ready this guard exercises the mixed-item path instead, proving
+    membership in the set still matters when combined with another type.
     """
+    types = (item_type,) if item_type != "merge_ready" else ("merge_ready", "pr_update")
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
-        tmp_path, types=(item_type,)
+        tmp_path, types=types
     )
+    item = make_item(types=list(types))
     hooks.wait_merge_gate = None
     hooks.arc_manager = None
     run_cmd.on(
