@@ -51,8 +51,7 @@ class TestLessonEventsPath:
             / "claude-code-hooks"
             / "match-lessons.py"
         )
-        if not hook.exists():  # pragma: no cover - contrib layout only
-            pytest.skip("match-lessons.py hook not present in this checkout")
+        assert hook.exists(), f"contract producer is missing: {hook}"
         source = hook.read_text(encoding="utf-8")
         assert 'f"cc-session-{safe_id}-lessons.jsonl"' in source
         assert re.search(r'safe_id = re\.sub\(r"\[\^a-zA-Z0-9_-\]", "_", session_id\)', source)
