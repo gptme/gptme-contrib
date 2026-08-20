@@ -1536,6 +1536,70 @@ def test_post_session_missing_delivery_hook_skips_check(tmp_path) -> None:
     assert latency_calls[0]["outcome"] == "handled"
 
 
+def test_post_session_merge_ready_only_reply_is_not_effect(tmp_path) -> None:
+    """A pure merge_ready dispatch that only posts a comment must NOT grade
+    effect=observed (gptme/gptme#3531: comment != merge). With the PR snapshot
+    unchanged before/after and delivery=handled, the effect is `none`."""
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("merge_ready",)
+    )
+    item = make_item(types=["merge_ready"])
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # PR did not move: after-snapshot identical to pr_before_json.
+    hooks.fetch_pr_snapshot = lambda repo, num: {
+        "state": "OPEN",
+        "headRefOid": "aa",
+        "mergeCommit": None,
+    }
+    # Worker posted a reply — the delivery check verifies it as handled.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert effect == "none", (
+        f"merge_ready-only + comment-only must grade effect='none', not {effect!r}; "
+        "'observed' is exactly the grade that made the #3531 reply loop look healthy"
+    )
+
+
+def test_post_session_merge_ready_only_actual_merge_is_observed(tmp_path) -> None:
+    """The same pure merge_ready item DOES grade observed when the PR merged."""
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("merge_ready",)
+    )
+    item = make_item(types=["merge_ready"])
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    # Default fixture snapshot: state MERGED, new head, merge commit present.
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert effect == "observed"
+
+
+def test_post_session_mixed_merge_ready_keeps_delivery_signal(tmp_path) -> None:
+    """ci_failure+merge_ready: a verified reply still counts as effect — the
+    reply can be the legitimate deliverable of the non-merge_ready type."""
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("ci_failure", "merge_ready")
+    )
+    item = make_item(types=["ci_failure", "merge_ready"])
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    hooks.fetch_pr_snapshot = lambda repo, num: {
+        "state": "OPEN",
+        "headRefOid": "aa",
+        "mergeCommit": None,
+    }
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+
+    assert effect == "observed"
+
+
 def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     """master_ci_failure has no thread, so the reply post-condition must not run.
 

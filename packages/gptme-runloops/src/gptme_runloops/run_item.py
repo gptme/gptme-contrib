@@ -2251,9 +2251,29 @@ def run_post_session(
     # and have every `git push` rejected, exiting 0 with a log that says it
     # succeeded (gptme/gptme#3468, 2026-08-10). Derived from the before/after
     # PR snapshot step 2 already fetched, so this costs no extra API call.
+    #
+    # For a PURE merge_ready item the delivery check's "handled" (= a reply
+    # was posted) is NOT effect: the dispatch exists to merge the PR, and a
+    # comment is exactly the cheap substitute the gptme/gptme#3531 spam loop
+    # produced — 2 of its 10 thread replies came from merge_ready dispatches
+    # graded effect=observed/succeeded, so the loop looked healthy. Feed only
+    # the PR-state diff (merged/closed transition, merge commit, head advance
+    # from a pre-merge rebase); a comment-only session then grades
+    # effect=none → outcome=no_effect → pm_dispatch_recovery's bounded
+    # ineffective path instead of a clean success. Mixed items (e.g.
+    # ci_failure+merge_ready) keep the delivery signal — a reply there can be
+    # the legitimate deliverable of the other type.
+    merge_ready_only = set(item.types) == {"merge_ready"}
+    if merge_ready_only and delivery_verified and delivery_outcome == "handled":
+        _log(
+            "NOTE: merge_ready-only item — a posted reply does not count as "
+            "effect; grading on PR state (merge/close/head) only"
+        )
     effect = read_record_effect_signal(
         record_file,
-        delivery_outcome=delivery_outcome if delivery_verified else "",
+        delivery_outcome=(
+            delivery_outcome if (delivery_verified and not merge_ready_only) else ""
+        ),
     )
     if effect == EFFECT_NONE:
         _log(
