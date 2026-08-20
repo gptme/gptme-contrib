@@ -203,7 +203,8 @@ class TfidfIndex:
         """Return up to ``n_results`` hits ranked by cosine similarity.
 
         ``exclude_paths`` is a set of source paths to skip (e.g. documents already
-        in context).  Hits below ``relevance_floor`` are discarded.
+        in context).  Hits whose raw cosine similarity is below
+        ``relevance_floor`` are discarded before memory-type weighting.
 
         ``memory_types`` is an optional set of memory-type labels (e.g.
         ``{"goal", "identity"}``) that boosts matching documents and penalises
@@ -253,9 +254,11 @@ class TfidfIndex:
 
         hits: list[LexicalHit] = []
         for rank, idx in enumerate(sorted_indices):
+            # Keep relevance_floor's existing raw-cosine semantics.  Memory-type
+            # weights only rerank documents that already clear the relevance gate.
+            if float(raw_sims[idx]) < self.relevance_floor:
+                continue  # weighted order is not monotonic in raw similarity
             score = _weighted(idx)
-            if score < self.relevance_floor:
-                break  # sorted descending — nothing below this will clear the floor
             doc = self._documents[idx]
             if self._source_path(doc) in excluded:
                 continue

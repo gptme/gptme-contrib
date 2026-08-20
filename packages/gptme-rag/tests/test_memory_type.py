@@ -432,46 +432,40 @@ def test_search_memory_types_no_tagged_docs(require_sklearn):
     assert hits[0].document.metadata["source"] == "a.md"
 
 
-def test_search_penalty_pushes_non_matching_below_floor(require_sklearn):
-    """A doc that clears the raw floor but fails penalty may drop below it.
+def test_search_relevance_floor_uses_raw_score_before_penalty(require_sklearn):
+    """A raw-relevant document survives even when its weighted score is lower."""
+    idx = TfidfIndex(relevance_floor=0.95)
+    idx.index([_doc("relevant query terms", "a.md", "project")])
 
-    The test is structured to assert in both branches so it does not silently
-    pass without verifying anything when the penalty score stays above the floor.
-    """
-    floor = 0.3
-    idx = TfidfIndex(relevance_floor=floor)
-    docs = [
-        _doc("relevant query terms here", "a.md", "project"),
-    ]
-    idx.index(docs)
+    hits = idx.search("relevant query terms", n_results=5, memory_types={"goal"})
 
-    # Without memory_types: check raw score clears the floor
-    hits_raw = idx.search("relevant query terms", n_results=5)
-    if not hits_raw:
-        pytest.skip("raw similarity below test floor — adjust test corpus")
+    assert len(hits) == 1
+    assert hits[0].score == pytest.approx(MEMORY_TYPE_PENALTY)
+    assert hits[0].score < idx.relevance_floor
 
-    raw_score = hits_raw[0].score
-    penalised_score = raw_score * MEMORY_TYPE_PENALTY
 
-    # The stored score is rounded to 4 decimal places; the actual floor comparison
-    # in _weighted() uses the unrounded cosine similarity.  Skip when the predicted
-    # penalised score is so close to the floor that rounding (≤5e-5) could flip the
-    # prediction — the assertion below would be unreliable in that boundary zone.
-    ROUNDING_GUARD = 5e-5 * MEMORY_TYPE_PENALTY
-    if abs(penalised_score - floor) < ROUNDING_GUARD:
-        pytest.skip(
-            "penalised score too close to floor boundary — rounding makes prediction unreliable"
-        )
+def test_search_relevance_floor_rejects_raw_score_before_boost(require_sklearn):
+    """A boost must not admit a document below the raw relevance floor."""
+    idx = TfidfIndex(relevance_floor=0.0)
+    idx.index(
+        [
+            _doc("query exact", "exact.md", "project"),
+            _doc("query partial extra terms", "partial.md", "goal"),
+        ]
+    )
 
-    hits_penalised = idx.search("relevant query terms", n_results=5, memory_types={"goal"})
+    # Derive a floor inside the interval where the partial match fails by raw
+    # cosine but would pass after its memory-type boost.
+    unfiltered_hits = idx.search("query exact", n_results=5)
+    raw_scores = {hit.document.metadata["source"]: hit.score for hit in unfiltered_hits}
+    partial_raw = raw_scores["partial.md"]
+    idx.relevance_floor = (partial_raw + partial_raw * MEMORY_TYPE_BOOST) / 2
+    assert partial_raw < idx.relevance_floor
+    assert partial_raw * MEMORY_TYPE_BOOST > idx.relevance_floor
+    assert raw_scores["exact.md"] > idx.relevance_floor
 
-    if penalised_score < floor:
-        # Penalised score drops below the relevance floor — doc must disappear.
-        assert len(hits_penalised) == 0
-    else:
-        # Penalised score stays above the floor — doc survives but with a lower score.
-        assert len(hits_penalised) == 1
-        assert hits_penalised[0].score < raw_score
+    boosted_hits = idx.search("query exact", n_results=5, memory_types={"goal"})
+    assert [hit.document.metadata["source"] for hit in boosted_hits] == ["exact.md"]
 
 
 def test_search_unknown_doc_memory_type_not_penalised(require_sklearn):
