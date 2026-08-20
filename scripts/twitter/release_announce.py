@@ -28,7 +28,19 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows
+    _fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - non-Windows
+    _msvcrt = None  # type: ignore[assignment]
 
 TWITTER_CLI = Path(__file__).resolve().parent / "twitter.py"
 STATE_FILE = (
@@ -76,6 +88,30 @@ def save_state(state: dict) -> None:
         tmp.replace(STATE_FILE)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+@contextmanager
+def state_lock() -> Iterator[None]:
+    """Serialize the full post-and-record transaction across timer runs."""
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = STATE_FILE.with_name(f"{STATE_FILE.name}.lock")
+    with lock_file.open("ab") as lock:
+        if _fcntl is not None:
+            _fcntl.flock(lock, _fcntl.LOCK_EX)
+        elif _msvcrt is not None:  # pragma: no cover - Windows only
+            if lock.tell() == 0:
+                lock.write(b"\x00")
+                lock.flush()
+            lock.seek(0)
+            _msvcrt.locking(lock.fileno(), _msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if _fcntl is not None:
+                _fcntl.flock(lock, _fcntl.LOCK_UN)
+            elif _msvcrt is not None:  # pragma: no cover - Windows only
+                lock.seek(0)
+                _msvcrt.locking(lock.fileno(), _msvcrt.LK_UNLCK, 1)
 
 
 def latest_release(repo: str, tag: str | None) -> dict | None:
@@ -132,8 +168,8 @@ def compose_quote(tag: str, repo: str) -> str:
     )
 
 
-def _post(args: list[str], account: str | None = None) -> str | None:
-    """Run twitter.py post ... and return the created tweet id."""
+def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None]:
+    """Run twitter.py post ... and return success plus the created tweet id."""
     cmd = [sys.executable, str(TWITTER_CLI)]
     if account:
         cmd += ["--account", account]
@@ -142,9 +178,79 @@ def _post(args: list[str], account: str | None = None) -> str | None:
     out = r.stdout + r.stderr
     if r.returncode != 0:
         print(f"twitter.py failed ({r.returncode}):\n{out}", file=sys.stderr)
-        return None
+        return False, None
     m = re.search(r"Tweet ID: (\d+)", out)
-    return m.group(1) if m else None
+    if not m:
+        print(
+            "twitter.py succeeded but did not report a tweet ID; "
+            "recording the step as posted and refusing to retry",
+            file=sys.stderr,
+        )
+        return True, None
+    return True, m.group(1)
+
+
+def _main(args: argparse.Namespace, rel: dict) -> int:
+    tag = rel["tagName"]
+    state = load_state()
+    key = f"{args.repo}#{tag}"
+    record = state.get(key, {}) if not args.force else {}
+    if record.get("announced_at"):
+        print(f"{key}: already announced ({record.get('org_tweet_id')})")
+        return 0
+
+    announcement = compose_announcement(tag, rel.get("body", ""), args.repo)
+    link_reply = rel["url"]
+    quote_text = compose_quote(tag, args.repo)
+
+    print(f"--- announcement (@{args.org_account}) ---\n{announcement}\n")
+    print(f"--- link reply ---\n{link_reply}\n")
+    if not args.skip_quote:
+        print(f"--- Bob quote ---\n{quote_text}\n")
+    if args.dry_run:
+        print("dry-run: nothing posted")
+        return 0
+
+    org_id = record.get("org_tweet_id")
+    if "org_tweet_id" not in record:
+        posted, org_id = _post(["post", announcement], account=args.org_account)
+        if not posted:
+            return 1
+        record["org_tweet_id"] = org_id
+        state[key] = record
+        save_state(state)
+    if org_id is None:
+        print(
+            f"{key}: org tweet was posted but its ID is unknown; "
+            "cannot safely post the reply or quote",
+            file=sys.stderr,
+        )
+        return 1
+
+    link_reply_id = record.get("link_reply_id")
+    if "link_reply_id" not in record:
+        posted, link_reply_id = _post(
+            ["post", link_reply, "--reply-to", org_id], account=args.org_account
+        )
+        if not posted:
+            return 1
+        record["link_reply_id"] = link_reply_id
+        save_state(state)
+
+    quote_id = record.get("bob_quote_id")
+    if not args.skip_quote and "bob_quote_id" not in record:
+        posted, quote_id = _post(["post", quote_text, "--quote", org_id])
+        if not posted:
+            return 1
+        record["bob_quote_id"] = quote_id
+        save_state(state)
+
+    from datetime import datetime, timezone
+
+    record["announced_at"] = datetime.now(timezone.utc).isoformat()
+    save_state(state)
+    print(f"announced {key}: org={org_id} quote={quote_id}")
+    return 0
 
 
 def main() -> int:
@@ -168,59 +274,10 @@ def main() -> int:
     if not STABLE_TAG_RE.match(tag):
         print(f"{tag}: not a stable vX.Y.Z tag — skipping")
         return 0
-
-    state = load_state()
-    key = f"{args.repo}#{tag}"
-    record = state.get(key, {}) if not args.force else {}
-    if record.get("announced_at"):
-        print(f"{key}: already announced ({record.get('org_tweet_id')})")
-        return 0
-
-    announcement = compose_announcement(tag, rel.get("body", ""), args.repo)
-    link_reply = rel["url"]
-    quote_text = compose_quote(tag, args.repo)
-
-    print(f"--- announcement (@{args.org_account}) ---\n{announcement}\n")
-    print(f"--- link reply ---\n{link_reply}\n")
-    if not args.skip_quote:
-        print(f"--- Bob quote ---\n{quote_text}\n")
     if args.dry_run:
-        print("dry-run: nothing posted")
-        return 0
-
-    org_id = record.get("org_tweet_id")
-    if not org_id:
-        org_id = _post(["post", announcement], account=args.org_account)
-        if not org_id:
-            return 1
-        record["org_tweet_id"] = org_id
-        state[key] = record
-        save_state(state)
-
-    link_reply_id = record.get("link_reply_id")
-    if not link_reply_id:
-        link_reply_id = _post(
-            ["post", link_reply, "--reply-to", org_id], account=args.org_account
-        )
-        if not link_reply_id:
-            return 1
-        record["link_reply_id"] = link_reply_id
-        save_state(state)
-
-    quote_id = record.get("bob_quote_id")
-    if not args.skip_quote and not quote_id:
-        quote_id = _post(["post", quote_text, "--quote", org_id])
-        if not quote_id:
-            return 1
-        record["bob_quote_id"] = quote_id
-        save_state(state)
-
-    from datetime import datetime, timezone
-
-    record["announced_at"] = datetime.now(timezone.utc).isoformat()
-    save_state(state)
-    print(f"announced {key}: org={org_id} quote={quote_id}")
-    return 0
+        return _main(args, rel)
+    with state_lock():
+        return _main(args, rel)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -77,6 +78,22 @@ def test_state_roundtrip(tmp_path, monkeypatch):
     assert ra.load_state() == {}
 
 
+def test_post_distinguishes_failure_from_success_without_id(monkeypatch):
+    monkeypatch.setattr(
+        ra,
+        "_run",
+        lambda cmd: subprocess.CompletedProcess(cmd, 1, "", "failed"),
+    )
+    assert ra._post(["post", "hello"]) == (False, None)
+
+    monkeypatch.setattr(
+        ra,
+        "_run",
+        lambda cmd: subprocess.CompletedProcess(cmd, 0, "posted", ""),
+    )
+    assert ra._post(["post", "hello"]) == (True, None)
+
+
 def test_main_skips_prerelease(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
     monkeypatch.setattr(
@@ -110,7 +127,7 @@ def test_main_posts_org_reply_and_quote(monkeypatch, tmp_path):
 
     def fake_post(args, account=None):
         calls.append((account, args))
-        return str(100 + len(calls))
+        return True, str(100 + len(calls))
 
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -146,7 +163,7 @@ def test_main_resumes_after_link_reply_failure(monkeypatch, tmp_path):
         },
     )
     calls: list[tuple] = []
-    results = iter(["101", None, "102", "103"])
+    results = iter([(True, "101"), (False, None), (True, "102"), (True, "103")])
 
     def fake_post(args, account=None):
         calls.append((account, args))
@@ -182,7 +199,7 @@ def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
         },
     )
     calls: list[tuple] = []
-    results = iter(["101", "102", None, "103"])
+    results = iter([(True, "101"), (True, "102"), (False, None), (True, "103")])
 
     def fake_post(args, account=None):
         calls.append((account, args))
@@ -195,3 +212,93 @@ def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
     assert ra.main() == 0
     assert len(calls) == 4
     assert calls[-1][1][2:] == ["--quote", "101"]
+
+
+def test_main_does_not_retry_success_without_tweet_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    calls = 0
+
+    def fake_post(args, account=None):
+        nonlocal calls
+        calls += 1
+        return True, None
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 1
+    assert ra.main() == 1
+    assert calls == 1
+    assert ra.load_state()["gptme/gptme#v0.33.0"]["org_tweet_id"] is None
+
+
+def test_main_does_not_retry_reply_success_without_tweet_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    calls: list[tuple] = []
+    results = iter([(True, "101"), (True, None), (True, "103")])
+
+    def fake_post(args, account=None):
+        calls.append((account, args))
+        return next(results)
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 0
+    assert ra.main() == 0
+    assert len(calls) == 3
+    assert ra.load_state()["gptme/gptme#v0.33.0"]["link_reply_id"] is None
+
+
+def test_main_holds_state_lock_while_posting(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    events: list[str] = []
+
+    class FakeLock:
+        def __enter__(self):
+            events.append("lock")
+
+        def __exit__(self, *exc):
+            events.append("unlock")
+
+    monkeypatch.setattr(ra, "state_lock", FakeLock)
+
+    def fake_post(args, account=None):
+        events.append("post")
+        return True, str(len(events))
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 0
+    assert events == ["lock", "post", "post", "post", "unlock"]
