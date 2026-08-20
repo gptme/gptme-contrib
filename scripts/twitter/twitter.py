@@ -277,6 +277,7 @@ def _activate_account_profile(name: str) -> Path:
     except FileExistsError:
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"Account profile must be a regular file: {path}")
+        path.chmod(0o600)
     else:
         with os.fdopen(fd, "w") as profile:
             profile.write(
@@ -326,7 +327,12 @@ def load_twitter_client(
     Twitter's refresh tokens are single-use (RFC 6749 Section 6), so using a
     stale refresh token will result in a 400 Bad Request error.
     """
+    requested_account = current_account()
     load_dotenv(override=True)
+    if requested_account:
+        # A CLI/env-selected profile must outrank TWITTER_ACCOUNT in the
+        # workspace .env, just as command-line options outrank config defaults.
+        os.environ["TWITTER_ACCOUNT"] = requested_account
 
     # Resolve the .env path from THIS script's frame — critical because
     # save_tokens_to_env() calls find_dotenv() from gptmail's installed location

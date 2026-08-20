@@ -85,6 +85,42 @@ def test_profile_rejects_symlink(
     assert target.read_text() == "do not overwrite\n"
 
 
+def test_existing_profile_permissions_are_tightened(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    profile = tmp_path / "gptwitter" / "accounts" / "gptmeorg.env"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("TWITTER_EXPECTED_USERNAME=gptmeorg\n")
+    profile.chmod(0o644)
+
+    twitter_module._activate_account_profile("gptmeorg")
+
+    assert (profile.stat().st_mode & 0o777) == 0o600
+
+
+def test_cli_account_survives_workspace_dotenv_override(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TWITTER_ACCOUNT", "gptmeorg")
+
+    def load_workspace_dotenv(*args, **kwargs) -> None:
+        monkeypatch.setenv("TWITTER_ACCOUNT", "TimeToBuildBob")
+
+    class ProfileActivated(Exception):
+        pass
+
+    def activate_profile(name: str) -> None:
+        assert name == "gptmeorg"
+        raise ProfileActivated
+
+    monkeypatch.setattr(twitter_module, "load_dotenv", load_workspace_dotenv)
+    monkeypatch.setattr(twitter_module, "_activate_account_profile", activate_profile)
+
+    with pytest.raises(ProfileActivated):
+        twitter_module.load_twitter_client(require_auth=True)
+
+
 def test_profile_loads_its_own_tokens(
     twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
