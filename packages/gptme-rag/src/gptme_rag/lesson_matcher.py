@@ -176,7 +176,8 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
         field_indent = len(block_start.group("indent").expandtabs())
         items = []
         for line in fm_str[block_start.end() :].splitlines():
-            if not line.strip():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
                 continue
             item_m = re.match(r"^\s*-\s+(.+?)\s*$", line)
             if item_m is None:

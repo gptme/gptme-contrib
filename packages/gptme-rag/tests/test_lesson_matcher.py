@@ -469,6 +469,15 @@ class TestExtractListFrontmatterField:
             'keywords:\n  - "merge # conflict" # important\n', "keywords"
         ) == ["merge # conflict"]
 
+    def test_block_skips_interspersed_comment(self):
+        assert _extract_list_frontmatter_field(
+            "session_categories:\n"
+            "  - code\n"
+            "  # Applies to interactive implementation sessions too.\n"
+            "  - interactive\n",
+            "session_categories",
+        ) == ["code", "interactive"]
+
     def test_block_stops_at_sibling_key_under_same_parent(self):
         fm = "match:\n  session_categories:\n    - code\n  keywords:\n    - foo\n"
         assert _extract_list_frontmatter_field(fm, "session_categories") == ["code"]
