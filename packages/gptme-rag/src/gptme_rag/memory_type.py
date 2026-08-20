@@ -177,7 +177,15 @@ def _coerce_string_list(value: Any) -> list[str]:
         # Split on commas to handle "preference, project" as two tags.
         return [p.strip().lower() for p in value.split(",") if p.strip()]
     if isinstance(value, list):
-        return [item.strip().lower() for item in value if isinstance(item, str) and item.strip()]
+        # Also split each list item on commas — YAML may parse "- preference, project"
+        # as a single list element containing a comma-separated string.
+        return [
+            p.strip().lower()
+            for item in value
+            if isinstance(item, str)
+            for p in item.split(",")
+            if p.strip()
+        ]
     return []
 
 
@@ -231,13 +239,15 @@ def classify_memory_type(
         state = str(metadata.get("state", "")).strip().lower()
         tags = _coerce_string_list(metadata.get("tags"))
 
-        if priority in task_rules.get("goal_priorities", []):
+        # Use `or []` so that JSON null values fall back to [] rather than
+        # causing `priority in None` TypeError.
+        if priority in (task_rules.get("goal_priorities") or []):
             return "goal"
-        if state in task_rules.get("goal_states", []):
+        if state in (task_rules.get("goal_states") or []):
             return "goal"
-        if any(tag in task_rules.get("preference_tags", []) for tag in tags):
+        if any(tag in (task_rules.get("preference_tags") or []) for tag in tags):
             return "preference"
-        if any(tag in task_rules.get("project_tags", []) for tag in tags):
+        if any(tag in (task_rules.get("project_tags") or []) for tag in tags):
             return "project"
         default_type = task_rules.get("default")
         return default_type if default_type in SUPPORTED_MEMORY_TYPES else None

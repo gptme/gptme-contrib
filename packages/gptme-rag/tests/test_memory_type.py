@@ -134,15 +134,19 @@ def test_classify_glob_no_match(rules: dict):
 
 
 def test_classify_glob_first_match_wins():
-    """When multiple glob patterns match, first match in iteration order wins."""
+    """When multiple glob patterns match, first match in iteration order wins.
+
+    Uses two overlapping patterns — tasks/*.md and tasks/f*.md — that both
+    match 'tasks/foo.md', so the assertion can pin the exact expected type.
+    """
     rules = {
         "glob_paths": {
             "tasks/*.md": "goal",
-            "tasks/special/*.md": "preference",  # more specific but second
+            "tasks/f*.md": "preference",  # also matches tasks/foo.md, but second
         }
     }
     result = classify_memory_type("tasks/foo.md", {}, rules)
-    assert result in SUPPORTED_MEMORY_TYPES
+    assert result == "goal"  # first pattern in dict wins
 
 
 def test_classify_malformed_exact_paths_list():
@@ -212,6 +216,37 @@ def test_classify_task_tags_comma_separated_string(rules: dict):
     """
     result = classify_memory_type("tasks/foo.md", {"tags": "preference, project"}, rules)
     assert result == "preference"
+
+
+def test_classify_task_tags_list_with_comma_separated_item(rules: dict):
+    """A YAML list item that is itself comma-separated must be split.
+
+    YAML '- preference, project' parses to the list ['preference, project'];
+    the list branch of _coerce_string_list must also split on commas.
+    """
+    result = classify_memory_type(
+        "tasks/foo.md", {"tags": ["preference, project"]}, rules
+    )
+    assert result == "preference"
+
+
+def test_classify_task_null_rule_value():
+    """JSON null values in task_rules must not raise TypeError.
+
+    `{"goal_priorities": null}` is valid JSON; task_rules.get() returns None,
+    and `priority in None` would raise TypeError without the `or []` guard.
+    """
+    rules = {
+        "task_rules": {
+            "goal_priorities": None,  # null in JSON
+            "goal_states": None,
+            "preference_tags": None,
+            "project_tags": None,
+            "default": "project",
+        }
+    }
+    result = classify_memory_type("tasks/foo.md", {"priority": "high"}, rules)
+    assert result == "project"  # falls through to default, no TypeError
 
 
 def test_classify_none_metadata(rules: dict):
