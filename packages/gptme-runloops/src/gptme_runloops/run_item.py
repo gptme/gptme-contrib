@@ -1953,6 +1953,14 @@ def run_post_session(
         and item.number_str != "0"
         and hooks.delivery_check is not None
         and THREAD_DELIVERABLE_TYPES & set(item.types)
+        # A pure merge_ready item's deliverable is the MERGE, not a comment —
+        # the reply post-condition does not apply. Running it anyway caused
+        # both halves of the gptme/gptme#3531 spam: --post-fallback-reply
+        # posted "Automated placeholder" comments for silent merges, and
+        # orphan_no_delivery rolled the item back into the queue. Skipping
+        # leaves delivery_verified False, so the effect signal (step 9) grades
+        # purely on the PR-state diff and pm_dispatch_recovery owns retries.
+        and set(item.types) != {"merge_ready"}
     ):
         try:
             try:
@@ -2251,6 +2259,17 @@ def run_post_session(
     # and have every `git push` rejected, exiting 0 with a log that says it
     # succeeded (gptme/gptme#3468, 2026-08-10). Derived from the before/after
     # PR snapshot step 2 already fetched, so this costs no extra API call.
+    #
+    # For a PURE merge_ready item the delivery check never runs (step 4), so
+    # delivery_verified is False and the signal below is the PR-state diff
+    # alone (merged/closed transition, merge commit, head advance). A comment
+    # is NOT effect for merge_ready: 2 of the 10 gptme/gptme#3531 spam replies
+    # came from merge_ready dispatches graded observed/succeeded via the
+    # delivery signal, which kept the loop invisible to pm_dispatch_recovery.
+    # A comment-only session now grades effect=none → outcome=no_effect → the
+    # bounded ineffective retry path. Mixed items (e.g. ci_failure+merge_ready)
+    # keep the delivery signal — a reply there can be the legitimate
+    # deliverable of the other type.
     effect = read_record_effect_signal(
         record_file,
         delivery_outcome=delivery_outcome if delivery_verified else "",
