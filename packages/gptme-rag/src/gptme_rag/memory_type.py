@@ -144,6 +144,7 @@ def _glob_match_path(path: str, pattern: str) -> bool:
 
 def _extract_frontmatter(content: str) -> dict[str, Any]:
     """Parse a YAML frontmatter block if present; returns {} on failure."""
+    content = content.replace("\r\n", "\n")
     if not content.startswith("---\n"):
         return {}
     end = content.find("\n---\n", 4)

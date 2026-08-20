@@ -288,6 +288,12 @@ def test_classify_document_from_frontmatter(rules: dict):
     assert result == "goal"
 
 
+def test_classify_document_from_crlf_frontmatter(rules: dict):
+    content = "---\r\npriority: high\r\nstate: active\r\n---\r\n# My Task"
+    result = classify_document("tasks/foo.md", content, rules)
+    assert result == "goal"
+
+
 def test_classify_document_no_frontmatter(rules: dict):
     content = "# Just a document\nno frontmatter here"
     result = classify_document("SOUL.md", content, rules)
