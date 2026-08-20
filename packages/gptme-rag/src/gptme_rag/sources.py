@@ -66,8 +66,14 @@ def _collapse_partial_chain(run_texts: list[str]) -> list[str]:
             continue
         if kept:
             previous = kept[-1]
-            if text.startswith(previous):
-                # Later partial extends (or exactly repeats) the earlier one.
+            if text == previous:
+                # Exact duplicates carry no new content.
+                continue
+            if len(kept) == 1 and text.startswith(previous):
+                # Only the first monotonic prefix chain is unambiguously a
+                # sequence of cumulative partials. Once a distinct turn has
+                # appeared, a later shared-prefix turn may be a correction or
+                # re-utterance and must remain independent.
                 kept[-1] = text
                 continue
         kept.append(text)

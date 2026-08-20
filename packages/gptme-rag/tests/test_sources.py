@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 from gptme_rag.indexing.document import Document
 from gptme_rag.sources import (
     SourceDescriptor,
@@ -453,6 +452,17 @@ def test_de_accumulate_keeps_shorter_prefix_follow_up():
     ]
     result = de_accumulate_transcript(transcript, cumulative=True)
     assert result == "USER: I want the budget\nI want"
+
+
+def test_de_accumulate_keeps_ambiguous_prefix_chain():
+    """A new turn cannot be replaced by a later text merely sharing its prefix."""
+    transcript = [
+        {"role": "user", "text": "I want"},
+        {"role": "user", "text": "I"},
+        {"role": "user", "text": "I want to go"},
+    ]
+    result = de_accumulate_transcript(transcript, cumulative=True)
+    assert result == "USER: I want\nI\nI want to go"
 
 
 def test_collect_voice_calls_does_not_read_symlink_escaping_repo(tmp_path: Path):
