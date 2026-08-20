@@ -1530,6 +1530,26 @@ def test_post_session_timed_out_worker_does_not_consume_notification_state(
     assert (config.pending_state_dir / "notif-777.state").exists()
 
 
+def test_post_session_clean_exit_with_unverified_delivery_does_not_consume_notification_state(
+    tmp_path, cooldown_dir
+) -> None:
+    """A clean worker exit cannot compensate for a broken delivery check."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not (config.pending_state_dir / "notif-555.state").exists()
+
+
 def test_post_session_failed_exit_with_verified_delivery_still_promotes(
     tmp_path, cooldown_dir
 ) -> None:
@@ -1717,9 +1737,7 @@ def test_post_session_failed_exit_without_delivery_hook_preserves_notification(
     hooks.wait_merge_gate = None
     hooks.arc_manager = None
     config.pending_state_dir.mkdir(parents=True)
-    (config.pending_state_dir / "notif-555.map").write_text(
-        "gptme/gptme-contrib#1234"
-    )
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
     (config.pending_state_dir / "notif-555.state").write_text("t")
 
     run_post_session(plan, item, outcome, config, hooks)
@@ -1740,9 +1758,7 @@ def test_post_session_malformed_delivery_output_is_not_verified(
     run_cmd.on("/fake/check-delivery.py", stdout="not json")
     run_cmd.on("/fake/gate.py", returncode=1)
     config.pending_state_dir.mkdir(parents=True)
-    (config.pending_state_dir / "notif-555.map").write_text(
-        "gptme/gptme-contrib#1234"
-    )
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
     (config.pending_state_dir / "notif-555.state").write_text("t")
 
     run_post_session(plan, item, outcome, config, hooks)

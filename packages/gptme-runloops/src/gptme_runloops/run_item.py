@@ -2381,20 +2381,17 @@ def run_post_session(
                 "promoting state to end re-dispatch churn (no reply is likely correct here)"
             )
             promote_item_state(config, item.repo, item.number)
-    elif (
-        (outcome.timed_out or outcome.exit_code != 0)
-        and hooks.delivery_check is not None
-        and not (delivery_verified and delivery_outcome == "handled")
+    elif hooks.delivery_check is not None and not (
+        delivery_verified and delivery_outcome == "handled"
     ):
-        # The worker did not finish (exit 124) or failed outright, and the
-        # delivery check did not verify a reply. Its PR-side state still
+        # The delivery check did not verify a reply. Its PR-side state still
         # promotes (the head/score it saw are real), but the item's
         # notification state must NOT: promoting it tells the gate the
         # mention was handled, the gate dedupes on `updated_at`, and the thread
         # goes silent until a human comments again. Purge it so the gate
         # re-emits next sweep; pm_dispatch_recovery bounds the retry.
-        # (A non-zero exit AFTER a verified reply falls through to the normal
-        # promotion — re-emitting there would post a duplicate reply.)
+        # A verified reply falls through to normal promotion even when the
+        # worker failed afterward; re-emitting there would post a duplicate.
         #
         # Deliberately NOT clearing the slot's `.event`/`.ts` markers here,
         # unlike rollback_failed_delivery(): once the gate re-emits the thread,
