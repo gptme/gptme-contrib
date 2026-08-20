@@ -36,6 +36,8 @@ from gptme_runloops.merge_lifecycle import (
     run_merge_lifecycle,
 )
 from gptme_runloops.run_item import (
+    PR_OBSERVE_TYPES,
+    PR_STATE_TYPES,
     THREAD_DELIVERABLE_TYPES,
     ArcInfo,
     RunItem,
@@ -1939,6 +1941,65 @@ def test_execute_plan_pr_before_snapshot_only_for_pr_items(tmp_path) -> None:
     outcome = execute_plan(plan, item, config, hooks)
     assert outcome.pr_before_json == ""
     assert [c for c in run_cmd.calls if c["argv"][0] == "gh"] == []
+
+
+@pytest.mark.parametrize(
+    "item_type",
+    sorted(PR_OBSERVE_TYPES),
+)
+def test_execute_plan_pr_before_snapshot_for_every_pr_scoped_type(
+    tmp_path, item_type
+) -> None:
+    """Every PR-scoped item type must take a before-snapshot.
+
+    Regression guard for the effect-observation gap: when a PR-addressed type
+    is missing from the observation gate, `run_post_session` can only return
+    EFFECT_UNKNOWN, which `pm_dispatch_recovery.classify_completion` maps onto
+    CLASS_INEFFECTIVE — draining the retry budget and escalating PRs that PM
+    was actually driving (gptme/gptme-contrib#1466).
+    """
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("gh", stdout='{"state": "OPEN", "headRefOid": "aa"}')
+    hooks = make_hooks(run_cmd=run_cmd)
+    item = make_item(types=[item_type], number=7)
+    plan = plan_item(
+        item,
+        index=1,
+        config=config,
+        backend="codex",
+        model="",
+        monitoring_rules="",
+        lifecycle=LifecycleResult(),
+        arc=None,
+        run_salt=1,
+        records_dir=tmp_path,
+        runner=hooks.runner,
+        sysprompt_file="",
+    )
+    outcome = execute_plan(plan, item, config, hooks)
+    assert (
+        outcome.pr_before_json != ""
+    ), f"{item_type} is in PR_OBSERVE_TYPES but took no before-snapshot"
+    assert any(
+        c["argv"][:3] == ["gh", "pr", "view"] for c in run_cmd.calls
+    ), f"{item_type} did not call `gh pr view`"
+
+
+def test_pr_observe_types_is_superset_of_pr_state_types() -> None:
+    """The observation gate must never be narrower than the bash-parity pair."""
+    assert PR_STATE_TYPES <= PR_OBSERVE_TYPES
+    # Types with no PR behind `number` must stay out, or `gh pr view` is called
+    # with a workflow-run id / synthesized 0 / an issue number.
+    assert not PR_OBSERVE_TYPES & {
+        "agent_msg_reply",
+        "assigned_issue",
+        "erik_decision",
+        "master_ci_failure",
+        "notification",
+        "task_closeout",
+        "voice_postcall",
+    }
 
 
 def test_promote_item_state_copies_matching_files(tmp_path) -> None:

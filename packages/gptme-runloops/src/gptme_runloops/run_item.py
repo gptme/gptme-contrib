@@ -131,7 +131,59 @@ from gptme_runloops.worker_records import (
 
 # Item types that enable the PR-state diff / wait-merge / pr-before snapshot
 # steps (worker.sh:72,379,555 — `grep -qwE "pr_update|merge_ready"`).
+#
+# This narrow pair is the *bash* gate. Keep it for parity with the shell
+# executor's wait-and-merge step; it is deliberately NOT the observation gate.
 PR_STATE_TYPES: frozenset[str] = frozenset({"pr_update", "merge_ready"})
+
+# Item types whose `number` addresses a real PR, so a before/after
+# `gh pr view` snapshot is a meaningful observation of whether the dispatch
+# moved anything. This is a strict superset of PR_STATE_TYPES.
+#
+# Every extra member here is emitted by the PR-health poller
+# (scripts/github/pr-merge-health-poll.py -> project-monitoring-gate.sh) and
+# addresses a pull request, but the bash-parity pair above excluded them from
+# observation entirely. The cost is the same class of bug documented on
+# THREAD_DELIVERABLE_TYPES below, one layer over: no snapshot means
+# `run_post_session` returns EFFECT_UNKNOWN, `pm_dispatch_recovery`'s
+# `classify_completion` maps unknown onto CLASS_INEFFECTIVE, the retry budget
+# drains, and PM escalates "PM cannot drive OWNER/REPO#N" about a PR it was
+# visibly driving.
+#
+# Measured on Bob's dispatch ledger 2026-08-20 (1,605 completed dispatches,
+# 7 days), `unknown`-effect rate by item type:
+#
+#     pr_update                          3%   <- observed
+#     merge_ready                        3%   <- observed
+#     greptile_needs_fix                42%
+#     merge_conflict                    68%
+#     reviewer_needs_fix                69%
+#     pr_changes_requested_stale        87%
+#     reviewer_needs_improvement        87%
+#     greptile_convergence_adjudication 93%
+#
+# The two observed types sit at 3%; everything the gate skipped runs 42-93%.
+# gptme/gptme-contrib#1466 is the worked example: a
+# `greptile_convergence_adjudication` item that PM pushed commits and posted
+# review comments on for three rounds, escalated as
+# `retry_budget_exhausted:ineffective`.
+#
+# Types with no PR behind `number` stay out: `master_ci_failure` (workflow run
+# id), `agent_msg_reply` (synthesized 0), `notification` / `assigned_issue`
+# (may address an issue), `erik_decision`, `voice_postcall`, `task_closeout`.
+PR_OBSERVE_TYPES: frozenset[str] = PR_STATE_TYPES | frozenset(
+    {
+        "ci_failure",
+        "greptile_convergence_adjudication",
+        "greptile_needs_fix",
+        "greptile_needs_improvement",
+        "merge_conflict",
+        "pr_changes_requested_stale",
+        "pr_never_checked",
+        "reviewer_needs_fix",
+        "reviewer_needs_improvement",
+    }
+)
 
 # Item types whose `number` addresses a real issue/PR thread, so "did the
 # session reply on the thread?" is a meaningful post-condition
@@ -1583,7 +1635,7 @@ def execute_plan(
         codex_pre = snapshot_codex_rollouts(config.resolved_codex_sessions_dir)
 
     pr_before_json = ""
-    if PR_STATE_TYPES & set(item.types):
+    if PR_OBSERVE_TYPES & set(item.types):
         try:
             proc = hooks.run_cmd(
                 [
@@ -1893,9 +1945,10 @@ def run_post_session(
             )
 
     is_pr_item = bool(PR_STATE_TYPES & set(item.types))
+    is_pr_observe_item = bool(PR_OBSERVE_TYPES & set(item.types))
 
     # 2. PR-state diff (worker.sh:379-408)
-    if is_pr_item:
+    if is_pr_observe_item:
         try:
             update_record_pr_state(
                 record_file,
