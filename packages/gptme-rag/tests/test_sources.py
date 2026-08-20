@@ -489,3 +489,49 @@ def test_collect_voice_calls_does_not_read_symlink_escaping_repo(tmp_path: Path)
     assert docs == []
     # The escaping file must never have been read at all.
     assert read_paths == []
+
+
+def test_collect_voice_calls_skips_symlink_loop(tmp_path: Path):
+    """A symlink loop must not abort collection of other valid calls."""
+    call_dir = tmp_path / "calls"
+    call_dir.mkdir()
+    (call_dir / "loop.json").symlink_to("loop.json")
+    (call_dir / "good.json").write_text(
+        '{"transcript": [{"role": "user", "text": "hello"}]}',
+        encoding="utf-8",
+    )
+
+    docs = collect_voice_call_documents(call_dir)
+
+    assert [doc.content for doc in docs] == ["USER: hello"]
+
+
+def test_collect_voice_calls_reads_resolved_path(tmp_path: Path):
+    """The file read must use the same resolved path checked by the guard."""
+    repo = tmp_path / "repo"
+    call_dir = repo / "calls"
+    call_dir.mkdir(parents=True)
+    target = call_dir / "target" / "call.json"
+    target.parent.mkdir()
+    target.write_text(
+        '{"transcript": [{"role": "user", "text": "hello"}]}',
+        encoding="utf-8",
+    )
+    link = call_dir / "call.json"
+    link.symlink_to(target.relative_to(call_dir))
+
+    read_paths: list[Path] = []
+    original_read_text = Path.read_text
+
+    def tracking_read_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        read_paths.append(self)
+        return original_read_text(self, *args, **kwargs)
+
+    Path.read_text = tracking_read_text  # type: ignore[method-assign]
+    try:
+        docs = collect_voice_call_documents(call_dir, repo_root=repo)
+    finally:
+        Path.read_text = original_read_text  # type: ignore[method-assign]
+
+    assert [doc.content for doc in docs] == ["USER: hello"]
+    assert read_paths == [target.resolve()]

@@ -237,7 +237,12 @@ def collect_voice_call_documents(
         # though the directory itself passed the guard above, and reading it
         # first would pull out-of-repo content into memory regardless of the
         # later skip.
-        resolved_path = path.resolve()
+        try:
+            resolved_path = path.resolve()
+        except (OSError, RuntimeError):
+            # Broken links and symlink loops must not discard valid calls from
+            # the rest of the source.
+            continue
         if resolved_root is not None and not resolved_path.is_relative_to(resolved_root):
             logger.warning("sources: skipping %s — resolves outside repo_root", path)
             continue
@@ -246,7 +251,10 @@ def collect_voice_call_documents(
             # ``*.json``, which would block the collector on read).
             continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            # Read the path we validated, not the original directory entry.
+            # Otherwise a symlink swap between resolve() and read_text() could
+            # bypass the repo-root guard.
+            data = json.loads(resolved_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         if not isinstance(data, dict):
