@@ -227,8 +227,8 @@ def call_claude_code(
                         fb_cred.name,
                     )
                     fb_result = _try_with_credential_file(cmd, prompt, fb_cred, env, timeout)
-                    if fb_result.returncode == 0:
-                        fb_out = fb_result.stdout.strip()
+                    if fb_result.returncode == 0 and fb_result.stdout is not None:
+                        fb_out: str = fb_result.stdout.strip()
                         if fb_out:
                             logger.info("Fallback slot %s succeeded", fb_cred.name)
                             return fb_out
