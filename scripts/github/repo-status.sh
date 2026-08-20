@@ -63,11 +63,13 @@ _default_branch() {
 }
 
 # The disabled-workflow set (`gh workflow list --all`) was ~540 calls/window —
-# comparable to default_branch. Unlike default_branch it *can* change (an
-# operator disables a flaky workflow), so it gets a 1h TTL rather than a
-# cache-forever: worst case is a stale report for a freshly-disabled workflow,
-# which self-heals on the next hour's refetch.
+# comparable to default_branch. Unlike default_branch it *can* change in either
+# direction (operator disables *or* re-enables a workflow). Re-enabling within
+# the TTL window would hide real CI failures (the re-enabled workflow's failing
+# runs get filtered out because the cache still lists it as disabled). Use a
+# short 5-minute TTL so both directions of change self-heal quickly.
 _WF_CACHE_DIR="${BOB_DISABLED_WORKFLOW_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/disabled-workflows}"
+_WF_CACHE_TTL=300  # 5 minutes — bounds re-enabled workflow staleness
 
 _disabled_workflows() {
     local repo="$1"
@@ -77,7 +79,7 @@ _disabled_workflows() {
         now=$(date +%s)
         mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
         age=$(( now - mtime ))
-        if [ "$age" -lt 3600 ]; then
+        if [ "$age" -lt "$_WF_CACHE_TTL" ]; then
             cat "$cache_file"
             return 0
         fi
