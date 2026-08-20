@@ -5,6 +5,11 @@ Adding new top-level entries signals a structural decision. This check ensures
 that decision is deliberate: update ALLOWED_ROOT_ENTRIES when adding a new
 top-level dir or file, and explain the choice in the PR.
 
+Implementation note: uses ``git ls-files --cached`` (reads the git index) rather
+than walking the filesystem and calling ``git check-ignore`` per entry. This is
+simpler (one subprocess), correct-by-construction (only committed files matter),
+and immune to gitignored on-disk clutter that ``iterdir()`` would surface.
+
 Usage:
     python3 scripts/precommit/check_root_structure.py
 
@@ -26,32 +31,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parent.parent.parent
 
 
-def is_gitignored(path: Path) -> bool:
+def get_tracked_root_entries() -> set[str]:
+    """Return first path components of all files tracked in the git index."""
     result = subprocess.run(
-        ["git", "check-ignore", "-q", str(path)],
+        ["git", "ls-files", "--cached"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        check=True,
     )
-    if result.returncode not in (0, 1):
-        raise RuntimeError(
-            f"git check-ignore failed for {path}: {result.stderr or result.returncode}"
-        )
-    # For plain files not matched by .gitignore, trust git check-ignore directly.
-    if result.returncode != 0 and not path.is_dir():
-        return False
-    # For directories (regardless of whether .gitignore matches the dir itself):
-    # check whether any tracked files exist inside. A directory whose contents are
-    # all individually gitignored (e.g. objs/ with only *.pyc) has no tracked files
-    # and should be treated the same as a gitignored directory.
-    # Also applies when .gitignore matched — force-added tracked files make it visible.
-    tracked = subprocess.run(
-        ["git", "ls-files", "--", str(path)],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    return not tracked.stdout.strip()
+    entries: set[str] = set()
+    for line in result.stdout.splitlines():
+        if line:
+            entries.add(line.split("/")[0])
+    return entries
 
 
 # Allowed top-level entries. Update this list (with justification in the PR)
@@ -73,7 +66,6 @@ ALLOWED_ROOT_ENTRIES = frozenset(
         "README.md",
         "uv.lock",
         # Directories (trailing slash for readability — checked by name)
-        ".git",
         ".github",
         "docs",
         "dotfiles",
@@ -88,16 +80,14 @@ ALLOWED_ROOT_ENTRIES = frozenset(
 
 
 def main() -> int:
-    entries = {p.name for p in REPO_ROOT.iterdir() if not is_gitignored(p)}
+    entries = get_tracked_root_entries()
     unexpected = entries - ALLOWED_ROOT_ENTRIES
     if not unexpected:
         return 0
 
     print("check-root-structure: unexpected top-level entries found:")
     for name in sorted(unexpected):
-        path = REPO_ROOT / name
-        kind = "dir" if path.is_dir() else "file"
-        print(f"  {kind}: {name}")
+        print(f"  {name}")
     print()
     print(
         "If this is intentional, add the entry to ALLOWED_ROOT_ENTRIES in\n"
