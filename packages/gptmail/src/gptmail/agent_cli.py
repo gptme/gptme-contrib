@@ -969,6 +969,206 @@ def pending(
         click.echo(_stale_summary(stale))
 
 
+def _fetch_from_agent(
+    agent_name: str,
+    agent: dict[str, str],
+    *,
+    self_name: str,
+    mailboxes: list[str],
+    local_inbox: Path,
+) -> list[Path]:
+    """SCP outbox messages addressed to ``self_name`` from a remote agent's outbox.
+
+    Returns a list of newly-written local inbox paths (skips files already present).
+    Logs SSH/SCP errors as warnings so one unreachable agent doesn't abort the
+    whole pull — the caller collects partial results and reports the total.
+    """
+    rows = _remote_pending_rows(agent_name, agent, recipient=self_name, mailboxes=mailboxes)
+    ssh_target = agent["ssh"]
+    workspace = agent["workspace"]
+    ctl_path = _ssh_control_path(ssh_target)
+    ssh_opts = [
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPath={ctl_path}",
+        "-o",
+        "ControlPersist=60",
+    ]
+    new_files: list[Path] = []
+    for row in rows:
+        filename = str(row.get("file") or "")
+        if not filename:
+            continue
+        dest = local_inbox / filename
+        if dest.exists():
+            continue  # Already fetched — deduplicate by filename.
+        # The row's mailbox field tells us which remote outbox subfolder to look in.
+        row_mailbox = str(row.get("mailbox") or "default")
+        if row_mailbox == "default":
+            remote_path = f"{workspace}/messages/outbox/{filename}"
+        else:
+            remote_path = f"{workspace}/messages/mailboxes/{row_mailbox}/outbox/{filename}"
+        try:
+            subprocess.run(
+                ["scp", *ssh_opts, f"{ssh_target}:{remote_path}", str(dest)],
+                check=True,
+                capture_output=True,
+                timeout=15,
+            )
+            new_files.append(dest)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            click.echo(f"Warning: failed to fetch {filename} from {agent_name}: {e}", err=True)
+    return new_files
+
+
+@agent.command()
+@click.option(
+    "--as",
+    "as_recipient",
+    default=None,
+    metavar="IDENTITY",
+    help=(
+        "Pull as this identity instead of AGENT_NAME/$USER. "
+        "Useful for pull-only recipients (e.g. humans) checking from a different host."
+    ),
+)
+@click.option("--mailbox", default="default", show_default=True, help="Mailbox to fetch into.")
+@click.option("--all-mailboxes", is_flag=True, help="Pull across default plus every named mailbox.")
+@click.option(
+    "--notify-cmd",
+    default=None,
+    metavar="CMD",
+    help=(
+        "Shell command to invoke when new messages arrive. "
+        "Receives NEW_COUNT (integer) and SUMMARY (human-readable string) as environment variables."
+    ),
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
+@click.option("--dry-run", is_flag=True, help="Show what would be fetched without writing files.")
+def pull(
+    as_recipient: str | None,
+    mailbox: str,
+    all_mailboxes: bool,
+    notify_cmd: str | None,
+    json_output: bool,
+    dry_run: bool,
+) -> None:
+    """Pull messages from all SSH-reachable agents' outboxes (pull-only recipients).
+
+    Iterates the agents.yaml registry, fetches outbox messages addressed to
+    this identity from every agent with an SSH target, and deduplicates them
+    into the local inbox by filename.  Intended for human recipients who cannot
+    receive inbound SSH push delivery — run on a cron/launchd schedule (e.g.
+    every 30 minutes) to surface messages without manual polling.
+
+    Machine-readable output (for scripted callers and notification daemons):
+
+    \b
+        gptmail agent pull --json
+        # {"new_count": 3, "files": ["msg-abc.md", ...], "agents_polled": 2}
+
+    Notification hook:
+
+    \b
+        # macOS — post a Notification Center banner
+        gptmail agent pull --notify-cmd 'osascript -e "display notification \\\"$SUMMARY\\\" with title \\\"gptmail\\\""'
+        # Linux — libnotify
+        gptmail agent pull --notify-cmd 'notify-send "gptmail" "$SUMMARY"'
+    """
+    agents = _load_agents()
+    self_name = (as_recipient or _self_name()).lower()
+    mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
+
+    # Local inbox for the chosen mailbox (pull always targets the first/only mailbox).
+    local_inbox = _mailbox_root(mailboxes[0]) / "inbox"
+    if not dry_run:
+        local_inbox.mkdir(parents=True, exist_ok=True)
+
+    new_files: list[Path] = []
+    agents_polled: list[str] = []
+    agents_skipped: list[str] = []
+
+    for agent_name, agent_cfg in agents.items():
+        if agent_name == self_name:
+            continue
+        # Skip pull-only or incompletely configured agents — they can't be SSHed.
+        if agent_cfg.get("delivery") == "pull-only":
+            agents_skipped.append(agent_name)
+            continue
+        if not all(agent_cfg.get(k) for k in ("ssh", "workspace")):
+            agents_skipped.append(agent_name)
+            continue
+
+        agents_polled.append(agent_name)
+        if dry_run:
+            rows = _remote_pending_rows(
+                agent_name, agent_cfg, recipient=self_name, mailboxes=mailboxes
+            )
+            for row in rows:
+                filename = str(row.get("file") or "")
+                if not filename:
+                    continue
+                dest = local_inbox / filename
+                if not dest.exists():
+                    subject = str(row.get("subject", "(no subject)"))
+                    click.echo(f"[dry-run] would fetch from {agent_name}: {subject}  ({filename})")
+            continue
+
+        fetched = _fetch_from_agent(
+            agent_name,
+            agent_cfg,
+            self_name=self_name,
+            mailboxes=mailboxes,
+            local_inbox=local_inbox,
+        )
+        new_files.extend(fetched)
+
+    n = len(new_files)
+
+    if json_output:
+        payload = {
+            "new_count": n,
+            "files": [f.name for f in new_files],
+            "agents_polled": agents_polled,
+        }
+        click.echo(json.dumps(payload))
+        return
+
+    if dry_run:
+        return
+
+    if n == 0:
+        click.echo("No new messages.")
+    else:
+        click.echo(f"{n} new message(s) fetched into inbox:")
+        for f in new_files:
+            meta = meta_of(f) or {}
+            sender = str(meta.get("from", "unknown"))
+            subject = str(meta.get("subject", "(no subject)"))
+            ts = str(meta.get("timestamp", ""))
+            ts_part = f" [{ts}]" if ts else ""
+            click.echo(f"  {sender}{ts_part}: {subject}  ({f.name})")
+
+    if notify_cmd and n > 0:
+        subjects = "; ".join(
+            str((meta_of(f) or {}).get("subject", "(no subject)")) for f in new_files
+        )
+        env = os.environ.copy()
+        env["NEW_COUNT"] = str(n)
+        env["SUMMARY"] = f"{n} new message(s): {subjects}"
+        try:
+            subprocess.run(  # noqa: S602  (shell=True is intentional — user-supplied hook)
+                notify_cmd, shell=True, env=env, timeout=10
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            click.echo(f"Warning: --notify-cmd failed: {e}", err=True)
+
+
 @agent.command()
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
 @click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")

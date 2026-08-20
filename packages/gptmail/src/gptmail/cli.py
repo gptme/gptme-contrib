@@ -16,10 +16,19 @@ import time
 from datetime import timezone
 from pathlib import Path
 
+import importlib.metadata
+
 import click
 
 from gptmail.communication_utils.state.tracking import MessageState
 from gptmail.lib import AgentEmail
+
+
+def _version_string() -> str:
+    try:
+        return importlib.metadata.version("gptmail")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0+dev"
 
 
 def get_workspace_dir() -> Path:
@@ -71,6 +80,7 @@ def edit_content() -> str:
 
 
 @click.group()
+@click.version_option(version=_version_string(), prog_name="gptmail")
 def cli() -> None:
     """Email system for agent communication."""
     pass
