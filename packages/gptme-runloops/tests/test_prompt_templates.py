@@ -79,7 +79,7 @@ ALL_KINDS = tuple(InstructionKind)
 
 @pytest.mark.parametrize("kind", ALL_KINDS, ids=lambda k: k.value)
 @pytest.mark.parametrize("ctx_name", sorted(CONTEXTS))
-def test_render_matches_bash_golden(kind: InstructionKind, ctx_name: str) -> None:
+def test_render_matches_golden(kind: InstructionKind, ctx_name: str) -> None:
     golden = (GOLDEN_DIR / f"{kind.value}.{ctx_name}.txt").read_text()
     assert render_instruction(kind, CONTEXTS[ctx_name]) == golden
 

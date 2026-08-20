@@ -80,6 +80,12 @@ class PromptContext:
         pr_address_script: path to ``pr-address-wait-and-merge.sh`` (the
             address→wait→merge poller). Default:
             ``<workspace>/scripts/github/pr-address-wait-and-merge.sh``.
+        dispose_script: path to ``ai-review-dispose.py`` (the reply-and-resolve
+            helper for AI review threads). Default:
+            ``<workspace>/scripts/github/ai-review-dispose.py``.
+        pm_review_and_push: path to ``pm-review-and-push.py`` (the local AI
+            review-then-push wrapper). Default:
+            ``<workspace>/scripts/github/pm-review-and-push.py``.
         poll_budget_sec: ``POLL_BUDGET_SEC`` value baked into the
             pr-address-wait-and-merge invocation lines (bash hardcodes 1800).
     """
@@ -707,6 +713,9 @@ class ItemPromptParams:
     - ``workspace`` ← both ``$WORKSPACE`` *and* the hardcoded
       ``/home/bob/bob`` in the twitter/forum/agent-msg arms (identical for
       Bob, parameterized for everyone else).
+    - ``pm_review_and_push`` ← path to ``pm-review-and-push.py`` (the local
+      AI review-then-push wrapper); ``None`` resolves via ``workspace`` like
+      the other helper-script fields.
     """
 
     repo: str
