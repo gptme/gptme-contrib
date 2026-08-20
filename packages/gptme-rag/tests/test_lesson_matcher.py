@@ -315,6 +315,30 @@ class TestExtractFrontmatter:
         assert "unclosed code block" in kw
         assert "merge conflict" in kw
 
+    def test_regex_fallback_ignores_top_level_session_categories(self, monkeypatch):
+        # Regression: the fallback regex matched session_categories at ANY
+        # indentation, so an undocumented top-level key was hoisted into
+        # match.session_categories and started gating a lesson that the PyYAML
+        # path treats as unrestricted. The two parsers must agree.
+        content = (
+            "---\nsession_categories: code\n"
+            "match:\n  keywords:\n    - foo\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert "session_categories" not in fm.get("match", {})
+        assert fm.get("match", {}).get("keywords") == ["foo"]
+
     def test_regex_fallback_session_categories_scalar(self, monkeypatch):
         # Regression: without PyYAML, scalar session_categories like
         # "session_categories: code, infrastructure" were not parsed by
@@ -346,9 +370,7 @@ class TestExtractFrontmatter:
         # causing filter_by_session_category to compare '"code"' against 'code'
         # and silently drop the gate (security defect — gated lesson fires in
         # every session instead of only the intended ones).
-        content = (
-            '---\nmatch:\n  session_categories: "code"\n' "status: active\n---\n# Title\nBody.\n"
-        )
+        content = '---\nmatch:\n  session_categories: "code"\nstatus: active\n---\n# Title\nBody.\n'
         import builtins
 
         real_import = builtins.__import__
@@ -639,6 +661,15 @@ class TestHoldout:
     def test_is_held_out_by_path_suffix(self):
         lesson = self._make("/lessons/workflow/foo.md")
         assert is_held_out(lesson, {"workflow/foo.md"})
+
+    def test_is_held_out_by_path_suffix_without_extension(self):
+        # Regression: the docstring advertises "full or partial path", but a
+        # path-shaped token without the .md suffix never matched, silently
+        # including a lesson the caller meant to hold out of an A/B run.
+        lesson = self._make("/lessons/workflow/foo.md")
+        assert is_held_out(lesson, {"workflow/foo"})
+        assert not is_held_out(lesson, {"workflow/fo"})
+        assert not is_held_out(lesson, {"other/foo"})
 
     def test_is_held_out_by_id(self):
         lesson = self._make("/lessons/foo.md", lesson_id="my-lesson-id")

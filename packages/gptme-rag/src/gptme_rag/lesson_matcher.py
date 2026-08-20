@@ -197,6 +197,29 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
     return []
 
 
+def _extract_match_block(fm_str: str) -> str:
+    """Return the text of the nested ``match:`` mapping, or ``""`` if absent.
+
+    Used by the regex fallback so that exclusionary fields are read only from
+    the documented nested form.  A top-level key of the same name must not be
+    hoisted into ``match`` (see :func:`filter_by_session_category`).
+    """
+    start = re.search(r"^(?P<indent>[ \t]*)match:[ \t]*$", fm_str, re.MULTILINE)
+    if not start:
+        return ""
+    parent_indent = len(start.group("indent").expandtabs())
+    block: list[str] = []
+    for line in fm_str[start.end() :].splitlines():
+        if not line.strip():
+            block.append(line)
+            continue
+        indent = len(line.expandtabs()) - len(line.expandtabs().lstrip())
+        if indent <= parent_indent:
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
 def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Extract YAML frontmatter and body from a markdown string.
 
@@ -235,14 +258,19 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     if keywords:
         match_dict["keywords"] = keywords
 
-    session_categories = _extract_list_frontmatter_field(fm_str, "session_categories")
+    # Only the nested ``match:`` form is the documented schema; a top-level
+    # ``session_categories`` key must stay ignored here so the regex fallback
+    # agrees with the PyYAML path and with filter_by_session_category.  This
+    # field is exclusionary — wrongly honouring it silently drops lessons.
+    match_block = _extract_match_block(fm_str)
+    session_categories = _extract_list_frontmatter_field(match_block, "session_categories")
     if not session_categories:
         # Also handle scalar form: session_categories: code, infrastructure
         # (may be indented under match:); _extract_scalar_frontmatter_field only
         # handles top-level unindented fields so we use a direct regex here.
         sc_m = re.search(
             r"^\s*session_categories:\s*([^\[{\n][^\n]*)",
-            fm_str,
+            match_block,
             re.MULTILINE,
         )
         if sc_m:
@@ -651,8 +679,14 @@ def is_held_out(lesson: dict[str, Any], holdout: set[str]) -> bool:
             return True
         if "/" in token or token.endswith(".md"):
             normalized = token.lstrip("./")
-            if path_str == normalized or path_str.endswith(f"/{normalized}"):
-                return True
+            # The docstring advertises "full or partial path", so a path-shaped
+            # token may omit the ``.md`` suffix ("workflow/foo").  Try both.
+            candidates = {normalized}
+            if not normalized.endswith(".md"):
+                candidates.add(f"{normalized}.md")
+            for candidate in candidates:
+                if path_str == candidate or path_str.endswith(f"/{candidate}"):
+                    return True
     return False
 
 
