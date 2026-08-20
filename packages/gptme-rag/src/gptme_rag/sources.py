@@ -44,19 +44,18 @@ logger = logging.getLogger(__name__)
 SourceCollector = Callable[[], Iterable[Document]]
 
 
-def de_accumulate_transcript(transcript: list[dict[str, Any]]) -> str:
-    """Convert a cumulative transcript list to de-duplicated turn text.
+def de_accumulate_transcript(transcript: list[dict[str, Any]], *, cumulative: bool = False) -> str:
+    """Render transcript turns, optionally collapsing cumulative STT partials.
 
-    Some voice-call transcripts are *cumulative*: each entry in a same-role run
-    contains all prior text for that role, so entries grow monotonically within
-    a run.  Indexing such a transcript raw stores the same utterance many times
-    over and weights the final turn far above earlier turns.
-
-    Taking the **longest** text per contiguous same-role run recovers the full
-    final utterance and drops the intermediate partial accumulations.
+    With ``cumulative=True``, each contiguous same-role run is treated as a
+    sequence of cumulative speech-to-text partials and only its longest entry is
+    kept.  With the safe default, every entry is preserved; content alone cannot
+    reliably distinguish a cumulative partial from a genuine follow-up turn.
 
     Args:
         transcript: A list of turn dicts, each with ``role`` and ``text`` keys.
+        cumulative: Whether same-role runs are known to contain cumulative STT
+            partials.
 
     Returns:
         A ``"ROLE: text"`` block per speaker, blank-line separated.  Empty when
@@ -83,22 +82,10 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]]) -> str:
             run_texts.append(str(transcript[i].get("text", "")))
             i += 1
 
-        # Detect cumulative runs: each entry is a prefix of the next (growing STT
-        # partials, common in voice-call archives).  Only then is it safe to drop
-        # all but the longest entry.  Independent consecutive same-role turns must
-        # be joined to avoid silent data loss (P1 finding).
-        def _each_is_prefix(texts: list[str]) -> bool:
-            return all(
-                texts[j].strip().startswith(texts[j - 1].strip()) for j in range(1, len(texts))
-            )
-
-        is_cumulative = len(run_texts) > 1 and _each_is_prefix(run_texts)
-        if is_cumulative:
-            # Use stripped length so whitespace-only entries never win over
-            # real content (P1 fix: raw len would pick "          " over "hello").
-            best = max(run_texts, key=lambda t: len(t.strip()))
+        if cumulative:
+            best = max(run_texts, key=lambda text: len(text.strip()), default="")
         else:
-            best = "\n".join(t.strip() for t in run_texts if t.strip())
+            best = "\n".join(text.strip() for text in run_texts if text.strip())
         if best.strip():
             turns.append(f"{current_role.upper()}: {best.strip()}")
     return "\n\n".join(turns)
@@ -221,7 +208,7 @@ def collect_voice_call_documents(
         transcript = data.get("transcript", [])
         if not isinstance(transcript, list) or not transcript:
             continue
-        text = de_accumulate_transcript(transcript)
+        text = de_accumulate_transcript(transcript, cumulative=True)
         if not text.strip():
             continue
 

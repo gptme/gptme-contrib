@@ -35,7 +35,7 @@ def test_de_accumulate_transcript_drops_cumulative_partials():
         {"role": "assistant", "text": "hi"},
         {"role": "assistant", "text": "hi there"},
     ]
-    result = de_accumulate_transcript(transcript)
+    result = de_accumulate_transcript(transcript, cumulative=True)
     assert result == "USER: hello world\n\nASSISTANT: hi there"
 
 
@@ -56,7 +56,7 @@ def test_de_accumulate_transcript_role_reset_resumes_run():
         {"role": "user", "text": "c"},
         {"role": "user", "text": "cd"},
     ]
-    result = de_accumulate_transcript(transcript)
+    result = de_accumulate_transcript(transcript, cumulative=True)
     assert result == "USER: ab\n\nASSISTANT: x\n\nUSER: cd"
 
 
@@ -266,17 +266,26 @@ def test_de_accumulate_transcript_preserves_non_cumulative_consecutive_turns():
     assert "I'm well" in result
 
 
-def test_de_accumulate_transcript_still_collapses_cumulative_runs():
-    """Cumulative partial-utterance runs still deduplicate to the longest entry."""
+def test_de_accumulate_transcript_collapses_explicitly_cumulative_runs():
+    """Known cumulative partial-utterance runs deduplicate when opted in."""
     transcript = [
         {"role": "user", "text": "I"},
         {"role": "user", "text": "I want"},
         {"role": "user", "text": "I want to discuss"},
         {"role": "assistant", "text": "ok"},
     ]
-    result = de_accumulate_transcript(transcript)
-    # Only the final cumulative entry survives; partials are dropped.
+    result = de_accumulate_transcript(transcript, cumulative=True)
     assert result == "USER: I want to discuss\n\nASSISTANT: ok"
+
+
+def test_de_accumulate_transcript_preserves_prefix_follow_up_by_default():
+    """Text prefixes alone do not prove that independent turns are STT partials."""
+    transcript = [
+        {"role": "user", "text": "Hello"},
+        {"role": "user", "text": "Hello, how are you?"},
+    ]
+
+    assert de_accumulate_transcript(transcript) == "USER: Hello\nHello, how are you?"
 
 
 def test_collect_voice_calls_skips_file_symlink_outside_repo(tmp_path: Path):
@@ -351,7 +360,7 @@ def test_de_accumulate_transcript_whitespace_only_entry_loses_to_real_content():
         {"role": "user", "text": "          "},  # 10 spaces — longer raw, empty stripped
         {"role": "user", "text": "hello"},  # shorter raw, has real content
     ]
-    result = de_accumulate_transcript(transcript)
+    result = de_accumulate_transcript(transcript, cumulative=True)
     # "hello" must appear; empty-stripped entry must NOT cause the turn to disappear
     assert "hello" in result.lower()
 
@@ -374,7 +383,7 @@ def test_de_accumulate_transcript_non_dict_mid_run_does_not_break_cumulative():
         {"role": "user", "text": "I want to talk"},
         {"role": "assistant", "text": "sure"},
     ]
-    result = de_accumulate_transcript(transcript)
+    result = de_accumulate_transcript(transcript, cumulative=True)
     # The cumulative user run must collapse to the longest entry (last one)
     assert "I want to talk" in result
     # The partial "I" must NOT appear as a separate block
