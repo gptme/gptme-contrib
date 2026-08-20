@@ -337,3 +337,48 @@ def test_collect_voice_calls_source_path_resolves_before_relative_to(tmp_path: P
         assert not Path(docs[0].metadata["source"]).is_absolute()
     finally:
         os.chdir(orig_cwd)
+
+
+def test_de_accumulate_transcript_whitespace_only_entry_loses_to_real_content():
+    """A whitespace-only entry must not win the max() over real content.
+
+    Regression for P1 finding: max(run_texts, key=len) picked a 10-space string
+    over "hello" (raw lengths 10 vs 5).  The cumulative prefix check passes
+    because "hello".startswith("") is True, so the run was treated as cumulative
+    and the spaces won — resulting in best.strip() == "" and the turn being dropped.
+    Fix: max(key=lambda t: len(t.strip())) strips first so only non-whitespace
+    length counts.
+    """
+    transcript = [
+        {"role": "user", "text": "          "},  # 10 spaces — longer raw, empty stripped
+        {"role": "user", "text": "hello"},        # shorter raw, has real content
+    ]
+    result = de_accumulate_transcript(transcript)
+    # "hello" must appear; empty-stripped entry must NOT cause the turn to disappear
+    assert "hello" in result.lower()
+
+
+def test_de_accumulate_transcript_non_dict_mid_run_does_not_break_cumulative():
+    """A non-dict entry in the middle of a same-role run must be skipped, not split the run.
+
+    Regression for P1 finding: the inner while loop checked isinstance() as a
+    loop condition, so a non-dict at position j in a same-role run would end the
+    run at j, then the outer loop would skip the non-dict and start a *new* run
+    on the next same-role dict — causing a cumulative sequence to be treated as
+    two independent turns (first partial kept, final longer text also kept, but
+    reported as separate speaker blocks).
+    """
+    # A cumulative sequence interrupted by a non-dict junk entry mid-run
+    transcript = [
+        {"role": "user", "text": "I"},
+        "junk",  # non-dict in the middle — must be skipped, not end the run
+        {"role": "user", "text": "I want"},
+        {"role": "user", "text": "I want to talk"},
+        {"role": "assistant", "text": "sure"},
+    ]
+    result = de_accumulate_transcript(transcript)
+    # The cumulative user run must collapse to the longest entry (last one)
+    assert "I want to talk" in result
+    # The partial "I" must NOT appear as a separate block
+    assert result.count("USER:") == 1
+    assert "ASSISTANT: sure" in result

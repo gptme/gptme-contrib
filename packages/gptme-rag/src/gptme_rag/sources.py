@@ -70,11 +70,16 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]]) -> str:
             continue
         current_role = str(transcript[i].get("role", ""))
         run_texts: list[str] = []
-        while (
-            i < len(transcript)
-            and isinstance(transcript[i], dict)
-            and transcript[i].get("role", "") == current_role
-        ):
+        # Collect all entries for this role run, skipping non-dict entries
+        # mid-run without ending the run (P1 fix: a non-dict in the middle of
+        # a same-role run used to break the inner loop and start a new run,
+        # mis-treating what could be a cumulative sequence as two independent runs).
+        while i < len(transcript):
+            if not isinstance(transcript[i], dict):
+                i += 1
+                continue
+            if transcript[i].get("role", "") != current_role:
+                break
             run_texts.append(str(transcript[i].get("text", "")))
             i += 1
         # Detect cumulative runs: each entry is a prefix of the next (growing STT
@@ -89,7 +94,9 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]]) -> str:
 
         is_cumulative = len(run_texts) > 1 and _each_is_prefix(run_texts)
         if is_cumulative:
-            best = max(run_texts, key=len)
+            # Use stripped length so whitespace-only entries never win over
+            # real content (P1 fix: raw len would pick "          " over "hello").
+            best = max(run_texts, key=lambda t: len(t.strip()))
         else:
             best = "\n".join(t.strip() for t in run_texts if t.strip())
         if best.strip():
