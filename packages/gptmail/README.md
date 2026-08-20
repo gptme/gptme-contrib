@@ -1,17 +1,22 @@
 # gptmail
 
-Email automation for gptme agents with shared communication utilities.
+Communication tooling for gptme agents, with two transports:
+- **Email** (`gptmail …`) — Gmail via IMAP/SMTP, for talking to the outside world.
+- **Inter-agent messaging** (`gptmail agent …`) — SSH/SCP between agent workspaces,
+  email-free so it runs in isolated LXC sessions with no mail infra.
 
 ## Overview
 
-gptmail provides email automation capabilities including:
+gptmail provides:
 - CLI tools for reading, composing, and sending emails
+- Inter-agent SSH messaging (`gptmail agent`) — a filesystem inbox/outbox delivered
+  over SSH, with no dependency on email infrastructure
 - Background watcher for processing unreplied emails
 - Shared communication utilities (auth, rate limiting, monitoring, state)
 - Integration with Gmail via IMAP/SMTP
 
 This package was originally developed as part of an agent workspace and upstreamed to gptme-contrib
-and upstreamed to gptme-contrib for use by all gptme agents.
+for use by all gptme agents.
 
 ## Installation
 
@@ -57,6 +62,47 @@ gptmail --help
 ```
 
 Note: If installed in development mode, use `python -m gptmail` instead.
+
+### Inter-agent messaging (`gptmail agent`)
+
+Email-free messaging between agent workspaces, delivered over SSH/SCP. Each agent has
+a `messages/` directory (`inbox/`, `outbox/`); sending writes to the local outbox and
+SCPs the message into the recipient's remote inbox. No IMAP/SMTP — works in isolated
+LXC sessions.
+
+```bash
+gptmail agent status                       # self name, registry, inbox/outbox counts
+gptmail agent send bob "Subject" "Body"    # deliver to bob's inbox over SSH
+gptmail agent list                         # unread inbox messages
+gptmail agent read <MESSAGE_ID> --thread   # read (marks read), with thread
+gptmail agent reply <MESSAGE_ID> "Body"    # threaded reply
+gptmail agent pending                      # inbox messages awaiting a reply (SLA)
+gptmail agent broadcast "Subject" "Body"   # send to every agent in the registry
+```
+
+- **Self name**: `AGENT_NAME` env var, else `$USER`. A human can use this to reach
+  agents — set `AGENT_NAME=erik` to send as `erik` rather than your unix username.
+- **Workspace**: resolved via `git rev-parse --show-toplevel`; the registry and your
+  inbox/outbox live under `<workspace>/messages/`.
+- **Registry** (`<workspace>/messages/agents.yaml`) maps names to SSH targets. Both
+  `ssh` and `workspace` (remote workspace root) are required:
+
+  ```yaml
+  bob:
+    ssh: bob@bob          # an ~/.ssh/config Host alias works
+    workspace: bob        # remote path; message lands in <workspace>/messages/inbox/
+  alice:
+    ssh: alice@alice
+    workspace: alice
+  ```
+
+- **Replies without inbound access**: an agent on an unreachable host (e.g. a laptop)
+  can still receive replies by *pulling* — periodically `scp`/`rsync` the sender's
+  remote `messages/outbox/` into your local inbox — instead of requiring the remote to
+  SSH back.
+
+Requires `pyyaml`. If installing standalone, add it:
+`uv tool install --force --with pyyaml git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptmail`
 
 ### Background Watcher
 
