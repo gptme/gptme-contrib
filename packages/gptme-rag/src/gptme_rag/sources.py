@@ -70,9 +70,6 @@ def _collapse_partial_chain(run_texts: list[str]) -> list[str]:
                 # Later partial extends (or exactly repeats) the earlier one.
                 kept[-1] = text
                 continue
-            if previous.startswith(text):
-                # Shorter partial arriving after its own longer form.
-                continue
         kept.append(text)
     return kept
 

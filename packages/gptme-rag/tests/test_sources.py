@@ -445,6 +445,16 @@ def test_de_accumulate_collapses_partials_then_keeps_next_turn():
     assert result == "USER: I want the budget\nAlso the timeline"
 
 
+def test_de_accumulate_keeps_shorter_prefix_follow_up():
+    """A later shorter prefix is a new turn, not a cumulative partial."""
+    transcript = [
+        {"role": "user", "text": "I want the budget"},
+        {"role": "user", "text": "I want"},
+    ]
+    result = de_accumulate_transcript(transcript, cumulative=True)
+    assert result == "USER: I want the budget\nI want"
+
+
 def test_collect_voice_calls_does_not_read_symlink_escaping_repo(tmp_path: Path):
     """A per-file symlink out of the repo must be skipped *before* being read.
 
