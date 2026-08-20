@@ -1550,6 +1550,36 @@ def test_post_session_clean_exit_with_unverified_delivery_does_not_consume_notif
     assert not (config.pending_state_dir / "notif-555.state").exists()
 
 
+def test_post_session_unverified_delivery_honors_redelivery_cap(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    """A persistently broken delivery check must not re-emit forever."""
+    monkeypatch.delenv("PM_SLOT_KEY", raising=False)
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "1")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+
+    def stage_notification() -> None:
+        config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+        (config.pending_state_dir / "notif-555.map").write_text(
+            "gptme/gptme-contrib#1234"
+        )
+        (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    stage_notification()
+    run_post_session(plan, item, outcome, config, hooks)
+    attempts = redelivery_attempts_file(config, item.repo, item.number)
+    assert attempts is not None
+    assert attempts.read_text() == "1"
+    assert not (config.state_dir / "notif-555.state").exists()
+
+    stage_notification()
+    run_post_session(plan, item, outcome, config, hooks)
+    assert not attempts.exists()
+    assert (config.state_dir / "notif-555.state").exists()
+
+
 def test_post_session_failed_exit_with_verified_delivery_still_promotes(
     tmp_path, cooldown_dir
 ) -> None:

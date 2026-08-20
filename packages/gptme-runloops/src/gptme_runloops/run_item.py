@@ -970,14 +970,19 @@ def _mapped_notif_state_files(pending: Path, repo: str, number: int | str | None
 
 
 def promote_item_state(
-    config: RunItemConfig, repo: str, number: int | str | None
+    config: RunItemConfig,
+    repo: str,
+    number: int | str | None,
+    *,
+    reset_redelivery_counter: bool = True,
 ) -> None:
     """Copy the item's pending activity-gate state files to the real state dir.
 
     Includes the item's *mapped* ``notif-*.state`` (via the ``.map`` sidecar):
     notification state is owned by the outcome of the worker that handled the
     item, not by whichever worker happens to finish next — see
-    :func:`promote_notification_states`.
+    :func:`promote_notification_states`. A bounded notification retry may set
+    ``reset_redelivery_counter=False`` while still promoting valid PR-side state.
     """
     import shutil
 
@@ -988,7 +993,7 @@ def promote_item_state(
     # so a later genuine failure gets a full retry budget. Without this the
     # budget degrades monotonically until every failure promotes immediately.
     attempts_file = redelivery_attempts_file(config, repo, number)
-    if attempts_file is not None:
+    if reset_redelivery_counter and attempts_file is not None:
         try:
             attempts_file.unlink()
         except OSError:
@@ -2384,30 +2389,27 @@ def run_post_session(
     elif hooks.delivery_check is not None and not (
         delivery_verified and delivery_outcome == "handled"
     ):
-        # The delivery check did not verify a reply. Its PR-side state still
-        # promotes (the head/score it saw are real), but the item's
-        # notification state must NOT: promoting it tells the gate the
-        # mention was handled, the gate dedupes on `updated_at`, and the thread
-        # goes silent until a human comments again. Purge it so the gate
-        # re-emits next sweep; pm_dispatch_recovery bounds the retry.
-        # A verified reply falls through to normal promotion even when the
-        # worker failed afterward; re-emitting there would post a duplicate.
-        #
-        # Deliberately NOT clearing the slot's `.event`/`.ts` markers here,
-        # unlike rollback_failed_delivery(): once the gate re-emits the thread,
-        # the dispatcher consults pm_dispatch_recovery.py (before its
-        # unchanged-payload and cooldown checks), which clears those markers on
-        # a failed last-terminal row with a 120s→1h backoff and a bounded
-        # attempt budget that escalates to a task. Clearing them here would
-        # re-dispatch on the very next sweep with no backoff and no budget.
-        purged = purge_pending_notif_state(config, item.repo, item.number)
-        if purged:
-            _log(
-                f"WARN: worker exit={outcome.exit_code} timed_out={outcome.timed_out} "
-                f"for {item.repo}#{item.number} — left {purged} notification "
-                "thread(s) un-promoted so the item re-enters the dispatch queue"
+        # The delivery check did not verify a reply. Count this through the
+        # same bounded rollback as orphan_no_delivery so a permanently broken
+        # check cannot re-emit this thread forever. PR-side state is still
+        # valid and promotes on every pass; only mapped notification state is
+        # purged while the retry budget remains.
+        rollback_slot_key = resolve_slot_key(config, item)
+        if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
+            promote_item_state(
+                config, item.repo, item.number, reset_redelivery_counter=False
             )
-        promote_item_state(config, item.repo, item.number)
+            _log(
+                "WARN: PM delivery post-condition was not verified — rolled back "
+                f"event marker and pending notif state for {plan.repo}#{plan.number} "
+                "(item re-enters the dispatch queue)"
+            )
+        else:
+            _log(
+                f"WARN: PM redelivery cap reached for {item.repo}#{item.number} — "
+                "promoting state to end re-dispatch churn"
+            )
+            promote_item_state(config, item.repo, item.number)
     else:
         promote_item_state(config, item.repo, item.number)
 
