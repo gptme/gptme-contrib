@@ -13,15 +13,17 @@ def test_allowed_entries_pass():
     import check_root_structure
 
     # A partial subset — real repos don't always have every allowed entry present.
-    # This is hermetic: no git subprocess for get_tracked_root_entries.
-    # get_repo_root() still runs a real subprocess, which succeeds in the CI
-    # environment (we're always inside a git repo when tests run).
     partial_subset = frozenset(["scripts", "tests", "lessons", "README.md"])
     assert (
         partial_subset <= check_root_structure.ALLOWED_ROOT_ENTRIES
     ), "test precondition"
-    with patch.object(
-        check_root_structure, "get_tracked_root_entries", return_value=partial_subset
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=partial_subset,
+        ),
     ):
         result = check_root_structure.main([])
     assert result == 0
@@ -47,8 +49,13 @@ def test_detects_unexpected_entry():
     import check_root_structure
 
     fake_entries = check_root_structure.ALLOWED_ROOT_ENTRIES | {"unexpected_dir"}
-    with patch.object(
-        check_root_structure, "get_tracked_root_entries", return_value=fake_entries
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=fake_entries,
+        ),
     ):
         result = check_root_structure.main([])
     assert result == 1
@@ -58,10 +65,13 @@ def test_no_unexpected_entry_on_known_set():
     """Passing exactly the allowed set should return 0."""
     import check_root_structure
 
-    with patch.object(
-        check_root_structure,
-        "get_tracked_root_entries",
-        return_value=set(check_root_structure.ALLOWED_ROOT_ENTRIES),
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=set(check_root_structure.ALLOWED_ROOT_ENTRIES),
+        ),
     ):
         result = check_root_structure.main([])
     assert result == 0
@@ -90,10 +100,13 @@ def test_allow_args_override_default_allowlist():
     import check_root_structure
 
     # Only two entries allowed via --allow; everything else is unexpected.
-    with patch.object(
-        check_root_structure,
-        "get_tracked_root_entries",
-        return_value=frozenset(["src", "tests", "README.md"]),
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=frozenset(["src", "tests", "README.md"]),
+        ),
     ):
         # All three present, only src + tests allowed → README.md is unexpected
         result = check_root_structure.main(["--allow=src", "--allow=tests"])
@@ -104,10 +117,13 @@ def test_allow_args_pass_when_all_entries_listed():
     """main() returns 0 when --allow covers every tracked entry."""
     import check_root_structure
 
-    with patch.object(
-        check_root_structure,
-        "get_tracked_root_entries",
-        return_value=frozenset(["src", "tests", "README.md"]),
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=frozenset(["src", "tests", "README.md"]),
+        ),
     ):
         result = check_root_structure.main(
             ["--allow=src", "--allow=tests", "--allow=README.md"]
@@ -119,10 +135,13 @@ def test_allow_args_superset_is_fine():
     """--allow may list more entries than actually exist; extras are ignored."""
     import check_root_structure
 
-    with patch.object(
-        check_root_structure,
-        "get_tracked_root_entries",
-        return_value=frozenset(["src"]),
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=frozenset(["src"]),
+        ),
     ):
         # Allow src + tests, but only src is tracked — should pass.
         result = check_root_structure.main(["--allow=src", "--allow=tests"])
@@ -135,8 +154,13 @@ def test_no_allow_args_falls_back_to_contrib_defaults():
 
     # A valid contrib subset → should pass.
     contrib_subset = frozenset(["scripts", "lessons", "README.md"])
-    with patch.object(
-        check_root_structure, "get_tracked_root_entries", return_value=contrib_subset
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=contrib_subset,
+        ),
     ):
         result = check_root_structure.main([])  # no --allow
     assert result == 0
