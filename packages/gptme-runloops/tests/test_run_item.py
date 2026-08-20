@@ -55,6 +55,7 @@ from gptme_runloops.run_item import (
     plan_item,
     predict_cc_trajectory_path,
     promote_item_state,
+    purge_pending_notif_state,
     redelivery_attempts_file,
     resolve_backend_trajectory,
     resolve_cc_sub_suffix,
@@ -1554,11 +1555,12 @@ def test_post_session_unverified_delivery_honors_redelivery_cap(
     tmp_path, cooldown_dir, monkeypatch
 ) -> None:
     """A persistently broken delivery check must not re-emit forever."""
-    monkeypatch.delenv("PM_SLOT_KEY", raising=False)
+    monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme-contrib#1234")
     monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "1")
     config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
     run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
     run_cmd.on("/fake/gate.py", returncode=1)
+    event_marker = cooldown_dir / "gptme-gptme-contrib-1234.event"
 
     def stage_notification() -> None:
         config.pending_state_dir.mkdir(parents=True, exist_ok=True)
@@ -1566,6 +1568,7 @@ def test_post_session_unverified_delivery_honors_redelivery_cap(
             "gptme/gptme-contrib#1234"
         )
         (config.pending_state_dir / "notif-555.state").write_text("t")
+        event_marker.write_text("fingerprint")
 
     stage_notification()
     run_post_session(plan, item, outcome, config, hooks)
@@ -1573,6 +1576,7 @@ def test_post_session_unverified_delivery_honors_redelivery_cap(
     assert attempts is not None
     assert attempts.read_text() == "1"
     assert not (config.state_dir / "notif-555.state").exists()
+    assert event_marker.exists(), "dispatch recovery owns the backed-off re-arm"
 
     stage_notification()
     run_post_session(plan, item, outcome, config, hooks)
@@ -2279,6 +2283,23 @@ def test_rollback_respects_max_attempts_env(
     monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "1")
     assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
     assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+
+def test_corrupt_notification_map_is_ignored(tmp_path) -> None:
+    """One invalid UTF-8 sidecar must not abort promotion or rollback."""
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    (pending / "notif-1.map").write_bytes(b"\xff")
+    (pending / "notif-1.state").write_text("corrupt")
+    (pending / "notif-2.map").write_text("gptme/gptme#3468")
+    (pending / "notif-2.state").write_text("valid")
+
+    promote_item_state(config, "gptme/gptme", 3468)
+    assert (config.state_dir / "notif-2.state").read_text() == "valid"
+
+    assert purge_pending_notif_state(config, "gptme/gptme", 3468) == 1
+    assert (pending / "notif-1.map").exists()
 
 
 def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:

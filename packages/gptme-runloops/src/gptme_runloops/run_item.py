@@ -891,7 +891,7 @@ def purge_pending_notif_state(
             continue
         try:
             content = map_file.read_text(encoding="utf-8").strip()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         # bash matches the anchored regex ^repo#number$ against the file body.
         if content != target:
@@ -906,18 +906,23 @@ def purge_pending_notif_state(
 
 
 def rollback_failed_delivery(
-    config: RunItemConfig, repo: str, number: int | str | None, slot_key: str
+    config: RunItemConfig,
+    repo: str,
+    number: int | str | None,
+    slot_key: str,
+    *,
+    clear_event_markers: bool = True,
 ) -> bool:
-    """bash ``rollback_failed_delivery`` (lib.sh:956-1005), in full.
-
-    Three effects, all required — a partial rollback is a no-op:
+    """Bound and apply a failed-delivery rollback.
 
     1. Count the attempt; past ``PM_MAX_REDELIVERY_ATTEMPTS`` reset the
        counter and return False, telling the caller to promote instead (this
        is what stops the re-dispatch treadmill on items where no reply is
        ever appropriate).
-    2. Clear the slot's ``.event``/``.event_logged`` fingerprints so the item
-       is not suppressed for the 6h TTL.
+    2. Optionally clear the slot's ``.event``/``.event_logged`` fingerprints.
+       The explicit ``orphan_no_delivery`` path needs an immediate re-dispatch;
+       an unverified delivery check leaves them for ``pm_dispatch_recovery`` so
+       that its backed-off retry policy remains authoritative.
     3. Purge this item's pending ``notif-*`` state so the end-of-run blanket
        promotion cannot consume it.
 
@@ -943,7 +948,8 @@ def rollback_failed_delivery(
         except OSError:
             pass
 
-    clear_slot_event_markers(config, slot_key)
+    if clear_event_markers:
+        clear_slot_event_markers(config, slot_key)
     purge_pending_notif_state(config, repo, number)
     return True
 
@@ -963,7 +969,7 @@ def _mapped_notif_state_files(pending: Path, repo: str, number: int | str | None
             continue
         try:
             content = map_file.read_text(encoding="utf-8").strip()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         if content == target:
             yield map_file, map_file.with_suffix(".state")
@@ -2401,14 +2407,20 @@ def run_post_session(
         # valid and promotes on every pass; only mapped notification state is
         # purged while the retry budget remains.
         rollback_slot_key = resolve_slot_key(config, item)
-        if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
+        if rollback_failed_delivery(
+            config,
+            item.repo,
+            item.number,
+            rollback_slot_key,
+            clear_event_markers=False,
+        ):
             promote_item_state(
                 config, item.repo, item.number, reset_redelivery_counter=False
             )
             _log(
                 "WARN: PM delivery post-condition was not verified — rolled back "
-                f"event marker and pending notif state for {plan.repo}#{plan.number} "
-                "(item re-enters the dispatch queue)"
+                f"pending notif state for {plan.repo}#{plan.number}; leaving the "
+                "event marker for backed-off dispatch recovery"
             )
         else:
             _log(
