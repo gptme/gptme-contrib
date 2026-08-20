@@ -41,6 +41,11 @@ def test_extract_features_strips_attribution_and_caps():
     assert not any("#" in f or "@" in f or "http" in f for f in feats)
 
 
+def test_extract_features_strips_mid_description_pr_ref():
+    notes = "* feat(review): structured handoff (#3442) by @z in #3449"
+    assert ra.extract_features(notes) == ["structured handoff"]
+
+
 def test_compose_fits_and_headlines():
     text = ra.compose_announcement("v0.33.0", NOTES, "gptme/gptme")
     assert text.startswith("gptme v0.33.0 is out")
@@ -51,6 +56,10 @@ def test_compose_fits_and_headlines():
 def test_compose_without_feats_falls_back():
     text = ra.compose_announcement("v0.33.0", "* fix: only fixes\n", "gptme/gptme")
     assert "Release notes in the reply" in text
+
+
+def test_quote_text_uses_repository_name():
+    assert ra.compose_quote("v1.2.3", "owner/widget").startswith("widget v1.2.3 is out")
 
 
 def test_stable_tag_gate():
@@ -122,3 +131,67 @@ def test_main_posts_org_reply_and_quote(monkeypatch, tmp_path):
     n = len(calls)
     assert ra.main() == 0
     assert len(calls) == n
+
+
+def test_main_resumes_after_link_reply_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    calls: list[tuple] = []
+    results = iter(["101", None, "102", "103"])
+
+    def fake_post(args, account=None):
+        calls.append((account, args))
+        return next(results)
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 1
+    partial = json.loads(ra.STATE_FILE.read_text())["gptme/gptme#v0.33.0"]
+    assert partial == {"org_tweet_id": "101"}
+
+    assert ra.main() == 0
+    assert len(calls) == 4
+    # Resume at the missing reply instead of duplicating the org announcement.
+    assert calls[2][1][2:] == ["--reply-to", "101"]
+    completed = json.loads(ra.STATE_FILE.read_text())["gptme/gptme#v0.33.0"]
+    assert completed["link_reply_id"] == "102"
+    assert completed["bob_quote_id"] == "103"
+    assert "announced_at" in completed
+
+
+def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    calls: list[tuple] = []
+    results = iter(["101", "102", None, "103"])
+
+    def fake_post(args, account=None):
+        calls.append((account, args))
+        return next(results)
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 1
+    assert ra.main() == 0
+    assert len(calls) == 4
+    assert calls[-1][1][2:] == ["--quote", "101"]

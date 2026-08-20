@@ -58,6 +58,33 @@ def test_profile_clears_default_user_context(
     assert os.environ["TWITTER_EXPECTED_USERNAME"] == "gptmeorg"
 
 
+@pytest.mark.parametrize(
+    "name", ["../bob", "bob\nTWITTER_ACCESS_TOKEN=stolen", "", "a" * 16]
+)
+def test_profile_rejects_invalid_names(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path, name: str
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    with pytest.raises(ValueError, match="Invalid Twitter account profile"):
+        twitter_module._activate_account_profile(name)
+
+
+def test_profile_rejects_symlink(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    target = tmp_path / "target.env"
+    target.write_text("do not overwrite\n")
+    profile = tmp_path / "gptwitter" / "accounts" / "gptmeorg.env"
+    profile.parent.mkdir(parents=True)
+    profile.symlink_to(target)
+
+    with pytest.raises(ValueError, match="must be a regular file"):
+        twitter_module._activate_account_profile("gptmeorg")
+    assert target.read_text() == "do not overwrite\n"
+
+
 def test_profile_loads_its_own_tokens(
     twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -118,5 +145,5 @@ def test_wait_for_callback_file_parses_code(twitter_module: Any, tmp_path) -> No
     f.write_text("http://localhost:9876/callback?state=x&code=abc123\n")
     code, url = twitter_module._wait_for_callback_file(f, timeout=5)
     assert code == "abc123"
-    assert url.startswith("http://localhost:9876/callback")
+    assert url.startswith("https://localhost:9876/callback")
     assert not f.exists()

@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 TWITTER_CLI = Path(__file__).resolve().parent / "twitter.py"
@@ -62,9 +63,19 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
-    tmp.replace(STATE_FILE)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{STATE_FILE.name}.", dir=STATE_FILE.parent
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(STATE_FILE)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def latest_release(repo: str, tag: str | None) -> dict | None:
@@ -88,6 +99,7 @@ def extract_features(body: str, limit: int = 5) -> list[str]:
         if not m:
             continue
         desc = _TRAIL_RE.sub("", m.group(2)).strip().rstrip(".")
+        desc = re.sub(r"\s*\(?#\d+\)?", "", desc).strip()
         # Strip markdown backticks/bold but keep the text
         desc = desc.replace("**", "")
         if desc:
@@ -110,6 +122,14 @@ def compose_announcement(tag: str, body: str, repo: str) -> str:
             break
         lines = candidate
     return "\n".join(lines)
+
+
+def compose_quote(tag: str, repo: str) -> str:
+    repo_name = repo.split("/")[-1]
+    return (
+        f"{repo_name} {tag} is out — release notes below. "
+        "Built with gptme, reviewed by agents, shipped by CI."
+    )
 
 
 def _post(args: list[str], account: str | None = None) -> str | None:
@@ -151,13 +171,14 @@ def main() -> int:
 
     state = load_state()
     key = f"{args.repo}#{tag}"
-    if key in state and not args.force:
-        print(f"{key}: already announced ({state[key].get('org_tweet_id')})")
+    record = state.get(key, {}) if not args.force else {}
+    if record.get("announced_at"):
+        print(f"{key}: already announced ({record.get('org_tweet_id')})")
         return 0
 
     announcement = compose_announcement(tag, rel.get("body", ""), args.repo)
     link_reply = rel["url"]
-    quote_text = f"gptme {tag} is out — release notes below. Built with gptme, reviewed by agents, shipped by CI."
+    quote_text = compose_quote(tag, args.repo)
 
     print(f"--- announcement (@{args.org_account}) ---\n{announcement}\n")
     print(f"--- link reply ---\n{link_reply}\n")
@@ -167,22 +188,36 @@ def main() -> int:
         print("dry-run: nothing posted")
         return 0
 
-    org_id = _post(["post", announcement], account=args.org_account)
+    org_id = record.get("org_tweet_id")
     if not org_id:
-        return 1
-    _post(["post", link_reply, "--reply-to", org_id], account=args.org_account)
+        org_id = _post(["post", announcement], account=args.org_account)
+        if not org_id:
+            return 1
+        record["org_tweet_id"] = org_id
+        state[key] = record
+        save_state(state)
 
-    quote_id = None
-    if not args.skip_quote:
+    link_reply_id = record.get("link_reply_id")
+    if not link_reply_id:
+        link_reply_id = _post(
+            ["post", link_reply, "--reply-to", org_id], account=args.org_account
+        )
+        if not link_reply_id:
+            return 1
+        record["link_reply_id"] = link_reply_id
+        save_state(state)
+
+    quote_id = record.get("bob_quote_id")
+    if not args.skip_quote and not quote_id:
         quote_id = _post(["post", quote_text, "--quote", org_id])
+        if not quote_id:
+            return 1
+        record["bob_quote_id"] = quote_id
+        save_state(state)
 
     from datetime import datetime, timezone
 
-    state[key] = {
-        "org_tweet_id": org_id,
-        "bob_quote_id": quote_id,
-        "announced_at": datetime.now(timezone.utc).isoformat(),
-    }
+    record["announced_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
     print(f"announced {key}: org={org_id} quote={quote_id}")
     return 0

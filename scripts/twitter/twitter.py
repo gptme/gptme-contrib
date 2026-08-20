@@ -252,7 +252,15 @@ def current_account() -> str:
     return os.getenv("TWITTER_ACCOUNT", "").strip()
 
 
+_ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+
+
 def account_env_path(name: str) -> Path:
+    if not _ACCOUNT_NAME_RE.fullmatch(name):
+        raise ValueError(
+            "Invalid Twitter account profile: expected a 1-15 character username "
+            "containing only letters, digits, and underscores"
+        )
     base = Path(os.getenv("XDG_CONFIG_HOME", str(Path.home() / ".config")))
     return base / "gptwitter" / "accounts" / f"{name}.env"
 
@@ -263,14 +271,19 @@ def _activate_account_profile(name: str) -> Path:
     Returns the profile env path — the token persistence target for this run.
     """
     path = account_env_path(name)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            f"# gptwitter account profile: @{name}\n"
-            f"# OAuth 2.0 user tokens are written here by `twitter.py --account {name} me`\n"
-            f"TWITTER_EXPECTED_USERNAME={name}\n"
-        )
-        path.chmod(0o600)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Account profile must be a regular file: {path}")
+    else:
+        with os.fdopen(fd, "w") as profile:
+            profile.write(
+                f"# gptwitter account profile: @{name}\n"
+                f"# OAuth 2.0 user tokens are written here by `twitter.py --account {name} me`\n"
+                f"TWITTER_EXPECTED_USERNAME={name}\n"
+            )
     for var in _USER_CONTEXT_VARS:
         os.environ.pop(var, None)
     load_dotenv(path, override=True)
