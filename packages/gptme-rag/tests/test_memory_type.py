@@ -344,6 +344,14 @@ def test_search_penalty_pushes_non_matching_below_floor():
     raw_score = hits_raw[0].score
     penalised_score = raw_score * MEMORY_TYPE_PENALTY
 
+    # The stored score is rounded to 4 decimal places; the actual floor comparison
+    # in _weighted() uses the unrounded cosine similarity.  Skip when the predicted
+    # penalised score is so close to the floor that rounding (≤5e-5) could flip the
+    # prediction — the assertion below would be unreliable in that boundary zone.
+    ROUNDING_GUARD = 5e-5 * MEMORY_TYPE_PENALTY
+    if abs(penalised_score - floor) < ROUNDING_GUARD:
+        pytest.skip("penalised score too close to floor boundary — rounding makes prediction unreliable")
+
     hits_penalised = idx.search("relevant query terms", n_results=5, memory_types={"goal"})
 
     if penalised_score < floor:
