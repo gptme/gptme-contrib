@@ -82,14 +82,14 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]]) -> str:
                 break
             run_texts.append(str(transcript[i].get("text", "")))
             i += 1
+
         # Detect cumulative runs: each entry is a prefix of the next (growing STT
         # partials, common in voice-call archives).  Only then is it safe to drop
         # all but the longest entry.  Independent consecutive same-role turns must
         # be joined to avoid silent data loss (P1 finding).
         def _each_is_prefix(texts: list[str]) -> bool:
             return all(
-                texts[j].strip().startswith(texts[j - 1].strip())
-                for j in range(1, len(texts))
+                texts[j].strip().startswith(texts[j - 1].strip()) for j in range(1, len(texts))
             )
 
         is_cumulative = len(run_texts) > 1 and _each_is_prefix(run_texts)
@@ -236,9 +236,7 @@ def collect_voice_call_documents(
 
         try:
             source_path = (
-                path
-                if repo_root is None
-                else path.resolve().relative_to(Path(repo_root).resolve())
+                path if repo_root is None else path.resolve().relative_to(Path(repo_root).resolve())
             )
         except ValueError:
             # path.resolve() points outside repo_root (e.g. a per-file symlink

@@ -294,9 +294,7 @@ def test_collect_voice_calls_skips_file_symlink_outside_repo(tmp_path: Path):
     outside.mkdir()
     # A real file outside the repo
     target = outside / "real_call.json"
-    target.write_text(
-        '{"transcript": [{"role": "user", "text": "secret"}]}', encoding="utf-8"
-    )
+    target.write_text('{"transcript": [{"role": "user", "text": "secret"}]}', encoding="utf-8")
     # Symlink inside call_dir pointing outside repo_root
     link = call_dir / "escaped.json"
     link.symlink_to(target)
@@ -351,7 +349,7 @@ def test_de_accumulate_transcript_whitespace_only_entry_loses_to_real_content():
     """
     transcript = [
         {"role": "user", "text": "          "},  # 10 spaces — longer raw, empty stripped
-        {"role": "user", "text": "hello"},        # shorter raw, has real content
+        {"role": "user", "text": "hello"},  # shorter raw, has real content
     ]
     result = de_accumulate_transcript(transcript)
     # "hello" must appear; empty-stripped entry must NOT cause the turn to disappear
