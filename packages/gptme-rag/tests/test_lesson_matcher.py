@@ -9,6 +9,7 @@ from pathlib import Path
 
 from gptme_rag.lesson_matcher import (
     BM25_MIN_Z,
+    _extract_list_frontmatter_field,
     BM25_STANDOUT_FRACTION,
     extract_frontmatter,
     filter_by_harness,
@@ -177,9 +178,30 @@ class TestExtractFrontmatter:
 
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, body = extract_frontmatter(content)
-        cats = fm.get("match", {}).get("session_categories", [])
-        assert "code" in cats
-        assert "infrastructure" in cats
+        match = fm.get("match", {})
+        assert match.get("keywords") == ["foo"]
+        assert match.get("session_categories") == ["code", "infrastructure"]
+
+    def test_regex_fallback_list_fields_stop_at_sibling_key(self, monkeypatch):
+        content = (
+            "---\nmatch:\n  session_categories:\n    - code\n"
+            "  keywords:\n    - multi word keyword\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        match = fm.get("match", {})
+        assert match.get("session_categories") == ["code"]
+        assert match.get("keywords") == ["multi word keyword"]
 
     def test_regex_fallback_session_categories_inline(self, monkeypatch):
         content = (
@@ -288,6 +310,37 @@ def _write_lesson(path: Path, content: str) -> None:
 def _basic_lesson(keywords: list[str], status: str = "active") -> str:
     kw_yaml = "\n".join(f'    - "{k}"' for k in keywords)
     return f"---\nmatch:\n  keywords:\n{kw_yaml}\nstatus: {status}\n---\n# Rule\nBody text.\n"
+
+
+class TestExtractListFrontmatterField:
+    """Direct unit tests for the PyYAML-free list parser."""
+
+    def test_inline_unquoted_multiword_values_split_on_commas(self):
+        # Tokenizing on word characters would yield ["git", "push", ...].
+        assert _extract_list_frontmatter_field(
+            "keywords: [git push, git commit]\n", "keywords"
+        ) == ["git push", "git commit"]
+
+    def test_inline_mixed_quoting(self):
+        assert _extract_list_frontmatter_field("keywords: ['a b', c d, \"e f\"]\n", "keywords") == [
+            "a b",
+            "c d",
+            "e f",
+        ]
+
+    def test_block_items_flush_with_their_key(self):
+        # Valid YAML: sequence items need not be indented past the key.
+        assert _extract_list_frontmatter_field(
+            "keywords:\n- foo bar\n- baz\nstatus: active\n", "keywords"
+        ) == ["foo bar", "baz"]
+
+    def test_block_stops_at_sibling_key_under_same_parent(self):
+        fm = "match:\n  session_categories:\n    - code\n  keywords:\n    - foo\n"
+        assert _extract_list_frontmatter_field(fm, "session_categories") == ["code"]
+        assert _extract_list_frontmatter_field(fm, "keywords") == ["foo"]
+
+    def test_absent_field_returns_empty(self):
+        assert _extract_list_frontmatter_field("status: active\n", "keywords") == []
 
 
 class TestScanLessons:
