@@ -456,10 +456,13 @@ def load_twitter_client(
                             # redirected URL into this file instead.
                             console.print(
                                 f"[yellow]Waiting for the redirected callback URL to be "
-                                f"written to {_cb_file} (timeout: 30 minutes)..."
+                                f"written to {_cb_file}..."
+                            )
+                            _cb_timeout = int(
+                                os.getenv("TWITTER_OAUTH_CALLBACK_TIMEOUT", "1800")
                             )
                             response_code, full_url = _wait_for_callback_file(
-                                Path(_cb_file), timeout=1800
+                                Path(_cb_file), timeout=_cb_timeout
                             )
                         else:
                             response_code, full_url = run_oauth_callback(
