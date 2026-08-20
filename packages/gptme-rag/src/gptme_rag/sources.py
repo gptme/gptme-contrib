@@ -77,7 +77,21 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]]) -> str:
         ):
             run_texts.append(str(transcript[i].get("text", "")))
             i += 1
-        best = max(run_texts, key=len) if run_texts else ""
+        # Detect cumulative runs: each entry is a prefix of the next (growing STT
+        # partials, common in voice-call archives).  Only then is it safe to drop
+        # all but the longest entry.  Independent consecutive same-role turns must
+        # be joined to avoid silent data loss (P1 finding).
+        def _each_is_prefix(texts: list[str]) -> bool:
+            return all(
+                texts[j].strip().startswith(texts[j - 1].strip())
+                for j in range(1, len(texts))
+            )
+
+        is_cumulative = len(run_texts) > 1 and _each_is_prefix(run_texts)
+        if is_cumulative:
+            best = max(run_texts, key=len)
+        else:
+            best = "\n".join(t.strip() for t in run_texts if t.strip())
         if best.strip():
             turns.append(f"{current_role.upper()}: {best.strip()}")
     return "\n\n".join(turns)
@@ -213,9 +227,17 @@ def collect_voice_call_documents(
         source = str(data.get("source", "")) if isinstance(data.get("source"), str) else ""
         title = f"Voice call {date_str}" + (f" ({source})" if source else "")
 
-        source_path = (
-            path if repo_root is None else path.resolve().relative_to(Path(repo_root).resolve())
-        )
+        try:
+            source_path = (
+                path
+                if repo_root is None
+                else path.resolve().relative_to(Path(repo_root).resolve())
+            )
+        except ValueError:
+            # path.resolve() points outside repo_root (e.g. a per-file symlink
+            # that escapes the repo even though the directory passed the guard).
+            logger.warning("sources: skipping %s — resolves outside repo_root", path)
+            continue
         metadata: dict[str, Any] = {
             "type": "voicecall",
             "source": str(source_path),

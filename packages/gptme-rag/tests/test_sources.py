@@ -248,6 +248,68 @@ def test_collect_voice_calls_repo_root_guard_relative_vs_absolute(tmp_path: Path
     assert collect_voice_call_documents(call_dir, repo_root=outside) == []
 
 
+def test_de_accumulate_transcript_preserves_non_cumulative_consecutive_turns():
+    """Genuine consecutive same-role turns (non-cumulative) must NOT be silently dropped.
+
+    Regression for P1 finding: de_accumulate_transcript always took max(run_texts,
+    key=len), discarding shorter turns even when they weren't cumulative partials.
+    Non-cumulative runs now join all turns instead of picking the longest.
+    """
+    transcript = [
+        {"role": "user", "text": "Hello world"},
+        {"role": "user", "text": "How are you?"},
+        {"role": "assistant", "text": "I'm well"},
+    ]
+    result = de_accumulate_transcript(transcript)
+    assert "Hello world" in result
+    assert "How are you?" in result
+    assert "I'm well" in result
+
+
+def test_de_accumulate_transcript_still_collapses_cumulative_runs():
+    """Cumulative partial-utterance runs still deduplicate to the longest entry."""
+    transcript = [
+        {"role": "user", "text": "I"},
+        {"role": "user", "text": "I want"},
+        {"role": "user", "text": "I want to discuss"},
+        {"role": "assistant", "text": "ok"},
+    ]
+    result = de_accumulate_transcript(transcript)
+    # Only the final cumulative entry survives; partials are dropped.
+    assert result == "USER: I want to discuss\n\nASSISTANT: ok"
+
+
+def test_collect_voice_calls_skips_file_symlink_outside_repo(tmp_path: Path):
+    """A per-file symlink inside a valid call_dir that resolves outside repo_root
+    must be skipped without crashing the whole collection.
+
+    Regression for P1 finding: source_path computation used relative_to() without
+    guarding per-file symlinks, so a single stray symlink raised ValueError and
+    aborted collection for all remaining files.
+    """
+    repo = tmp_path / "repo"
+    call_dir = repo / "calls"
+    call_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    # A real file outside the repo
+    target = outside / "real_call.json"
+    target.write_text(
+        '{"transcript": [{"role": "user", "text": "secret"}]}', encoding="utf-8"
+    )
+    # Symlink inside call_dir pointing outside repo_root
+    link = call_dir / "escaped.json"
+    link.symlink_to(target)
+    # A legitimate in-repo file that must still be collected
+    (call_dir / "good.json").write_text(
+        '{"transcript": [{"role": "user", "text": "hello"}]}', encoding="utf-8"
+    )
+    docs = collect_voice_call_documents(call_dir, repo_root=repo)
+    # Symlinked file outside repo must be skipped; good file must be collected.
+    assert len(docs) == 1
+    assert docs[0].content == "USER: hello"
+
+
 def test_collect_voice_calls_source_path_resolves_before_relative_to(tmp_path: Path):
     """source_path computation must use path.resolve() so relative voice_calls_dir
     does not raise ValueError when repo_root is absolute.
