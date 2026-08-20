@@ -403,3 +403,79 @@ def test_collect_voice_calls_file_path_returns_empty(tmp_path: Path):
     single_file.write_text('{"transcript": [{"role": "user", "text": "hello"}]}', encoding="utf-8")
     # Must return [] rather than raising NotADirectoryError
     assert collect_voice_call_documents(single_file) == []
+
+
+def test_de_accumulate_keeps_distinct_consecutive_same_role_turns():
+    """Two genuine same-role turns must both survive de-accumulation.
+
+    Regression for the P1 finding on head 2429e5a2: ``cumulative=True`` kept
+    only the longest entry of a same-role run, so a real follow-up turn from
+    the same speaker was silently dropped from the indexed content.  Measured
+    against the live archive at ``state/voice-calls/archive`` (81 calls), that
+    behaviour discarded 279 turns across 48 calls.
+    """
+    transcript = [
+        {"role": "assistant", "text": "Understood, I'll leave it for post-call."},
+        {"role": "assistant", "text": "The subagent timed out anyway; I'll handle it after."},
+    ]
+    result = de_accumulate_transcript(transcript, cumulative=True)
+    # Both turns must be present — the shorter one is not a partial of the longer.
+    assert "Understood, I'll leave it for post-call." in result
+    assert "The subagent timed out anyway; I'll handle it after." in result
+
+
+def test_de_accumulate_collapses_exact_duplicate_turns():
+    """Exactly-repeated turns collapse to one copy (the dominant archive shape)."""
+    transcript = [
+        {"role": "user", "text": "Hey, what's up?"},
+        {"role": "user", "text": "Hey, what's up?"},
+    ]
+    result = de_accumulate_transcript(transcript, cumulative=True)
+    assert result == "USER: Hey, what's up?"
+
+
+def test_de_accumulate_collapses_partials_then_keeps_next_turn():
+    """A partial chain collapses, and a following distinct turn is still kept."""
+    transcript = [
+        {"role": "user", "text": "I want"},
+        {"role": "user", "text": "I want the budget"},
+        {"role": "user", "text": "Also the timeline"},
+    ]
+    result = de_accumulate_transcript(transcript, cumulative=True)
+    assert result == "USER: I want the budget\nAlso the timeline"
+
+
+def test_collect_voice_calls_does_not_read_symlink_escaping_repo(tmp_path: Path):
+    """A per-file symlink out of the repo must be skipped *before* being read.
+
+    Regression for the P1 finding on head 2429e5a2: the collector called
+    ``read_text()`` and parsed the JSON before the per-file ``repo_root``
+    resolution check, so out-of-repo content was pulled into memory even though
+    the resulting document was later discarded.
+    """
+    repo = tmp_path / "repo"
+    call_dir = repo / "calls"
+    call_dir.mkdir(parents=True)
+
+    secret = tmp_path / "outside" / "secret.json"
+    secret.parent.mkdir()
+    secret.write_text('{"transcript": [{"role": "user", "text": "classified"}]}', encoding="utf-8")
+
+    (call_dir / "escape.json").symlink_to(secret)
+
+    read_paths: list[Path] = []
+    original_read_text = Path.read_text
+
+    def tracking_read_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        read_paths.append(self)
+        return original_read_text(self, *args, **kwargs)
+
+    Path.read_text = tracking_read_text  # type: ignore[method-assign]
+    try:
+        docs = collect_voice_call_documents(call_dir, repo_root=repo)
+    finally:
+        Path.read_text = original_read_text  # type: ignore[method-assign]
+
+    assert docs == []
+    # The escaping file must never have been read at all.
+    assert read_paths == []

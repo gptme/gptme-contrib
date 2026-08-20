@@ -44,13 +44,48 @@ logger = logging.getLogger(__name__)
 SourceCollector = Callable[[], Iterable[Document]]
 
 
+def _collapse_partial_chain(run_texts: list[str]) -> list[str]:
+    """Collapse cumulative STT partials within one same-role run.
+
+    A cumulative partial is a *prefix* of the utterance it is a partial of, so a
+    growing chain (``"I want"`` → ``"I want the budget"``) collapses to its final
+    form, and an exactly-repeated turn collapses to one copy.  Anything that is
+    not a prefix relative to its neighbour is a genuine follow-up turn and is
+    kept, because dropping it loses transcript content permanently.
+
+    Args:
+        run_texts: The raw texts of one contiguous same-role run, in order.
+
+    Returns:
+        The de-accumulated turns, in order, with empties removed.
+    """
+    kept: list[str] = []
+    for raw in run_texts:
+        text = raw.strip()
+        if not text:
+            continue
+        if kept:
+            previous = kept[-1]
+            if text.startswith(previous):
+                # Later partial extends (or exactly repeats) the earlier one.
+                kept[-1] = text
+                continue
+            if previous.startswith(text):
+                # Shorter partial arriving after its own longer form.
+                continue
+        kept.append(text)
+    return kept
+
+
 def de_accumulate_transcript(transcript: list[dict[str, Any]], *, cumulative: bool = False) -> str:
     """Render transcript turns, optionally collapsing cumulative STT partials.
 
-    With ``cumulative=True``, each contiguous same-role run is treated as a
-    sequence of cumulative speech-to-text partials and only its longest entry is
-    kept.  With the safe default, every entry is preserved; content alone cannot
-    reliably distinguish a cumulative partial from a genuine follow-up turn.
+    With ``cumulative=True``, each contiguous same-role run may contain
+    cumulative speech-to-text partials, so *prefix chains* within the run are
+    collapsed to their final form (see :func:`_collapse_partial_chain`).  Turns
+    that are not prefixes of their neighbour are genuine follow-up turns and are
+    preserved — a same-role run is not assumed to be a single utterance.  With
+    the safe default, every entry is preserved verbatim.
 
     Args:
         transcript: A list of turn dicts, each with ``role`` and ``text`` keys.
@@ -83,9 +118,10 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]], *, cumulative: bo
             i += 1
 
         if cumulative:
-            best = max(run_texts, key=lambda text: len(text.strip()), default="")
+            kept = _collapse_partial_chain(run_texts)
         else:
-            best = "\n".join(text.strip() for text in run_texts if text.strip())
+            kept = [text.strip() for text in run_texts if text.strip()]
+        best = "\n".join(kept)
         if best.strip():
             turns.append(f"{current_role.upper()}: {best.strip()}")
     return "\n\n".join(turns)
@@ -198,7 +234,20 @@ def collect_voice_call_documents(
         return []
 
     docs: list[Document] = []
+    resolved_root = None if repo_root is None else Path(repo_root).resolve()
     for path in sorted(voice_calls_dir.glob("*.json")):
+        # Resolve *before* reading: a per-file symlink can escape the repo even
+        # though the directory itself passed the guard above, and reading it
+        # first would pull out-of-repo content into memory regardless of the
+        # later skip.
+        resolved_path = path.resolve()
+        if resolved_root is not None and not resolved_path.is_relative_to(resolved_root):
+            logger.warning("sources: skipping %s — resolves outside repo_root", path)
+            continue
+        if not resolved_path.is_file():
+            # Skip anything that is not a regular file (e.g. a FIFO named
+            # ``*.json``, which would block the collector on read).
+            continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -221,15 +270,7 @@ def collect_voice_call_documents(
         source = str(data.get("source", "")) if isinstance(data.get("source"), str) else ""
         title = f"Voice call {date_str}" + (f" ({source})" if source else "")
 
-        try:
-            source_path = (
-                path if repo_root is None else path.resolve().relative_to(Path(repo_root).resolve())
-            )
-        except ValueError:
-            # path.resolve() points outside repo_root (e.g. a per-file symlink
-            # that escapes the repo even though the directory passed the guard).
-            logger.warning("sources: skipping %s — resolves outside repo_root", path)
-            continue
+        source_path = path if resolved_root is None else resolved_path.relative_to(resolved_root)
         metadata: dict[str, Any] = {
             "type": "voicecall",
             "source": str(source_path),
