@@ -30,6 +30,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -190,6 +191,37 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
     return True, m.group(1)
 
 
+def _pending_key(step: str) -> str:
+    return f"{step.removesuffix('_id')}_pending_at"
+
+
+def _begin_post(state: dict, key: str, record: dict, step: str) -> bool:
+    """Persist post intent, refusing to repeat an ambiguous remote side effect."""
+    pending_key = _pending_key(step)
+    if pending_key in record:
+        print(
+            f"{key}: {step} may already have been posted at "
+            f"{record[pending_key]}; refusing to retry without reconciliation",
+            file=sys.stderr,
+        )
+        return False
+    record[pending_key] = datetime.now(timezone.utc).isoformat()
+    state[key] = record
+    save_state(state)
+    return True
+
+
+def _finish_post(state: dict, record: dict, step: str, tweet_id: str | None) -> None:
+    record[step] = tweet_id
+    record.pop(_pending_key(step), None)
+    save_state(state)
+
+
+def _clear_post_intent(state: dict, record: dict, step: str) -> None:
+    record.pop(_pending_key(step), None)
+    save_state(state)
+
+
 def _main(args: argparse.Namespace, rel: dict) -> int:
     tag = rel["tagName"]
     state = load_state()
@@ -213,12 +245,13 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
 
     org_id = record.get("org_tweet_id")
     if "org_tweet_id" not in record:
+        if not _begin_post(state, key, record, "org_tweet_id"):
+            return 1
         posted, org_id = _post(["post", announcement], account=args.org_account)
         if not posted:
+            _clear_post_intent(state, record, "org_tweet_id")
             return 1
-        record["org_tweet_id"] = org_id
-        state[key] = record
-        save_state(state)
+        _finish_post(state, record, "org_tweet_id", org_id)
     if org_id is None:
         print(
             f"{key}: org tweet was posted but its ID is unknown; "
@@ -229,23 +262,25 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
 
     link_reply_id = record.get("link_reply_id")
     if "link_reply_id" not in record:
+        if not _begin_post(state, key, record, "link_reply_id"):
+            return 1
         posted, link_reply_id = _post(
             ["post", link_reply, "--reply-to", org_id], account=args.org_account
         )
         if not posted:
+            _clear_post_intent(state, record, "link_reply_id")
             return 1
-        record["link_reply_id"] = link_reply_id
-        save_state(state)
+        _finish_post(state, record, "link_reply_id", link_reply_id)
 
     quote_id = record.get("bob_quote_id")
     if not args.skip_quote and "bob_quote_id" not in record:
+        if not _begin_post(state, key, record, "bob_quote_id"):
+            return 1
         posted, quote_id = _post(["post", quote_text, "--quote", org_id])
         if not posted:
+            _clear_post_intent(state, record, "bob_quote_id")
             return 1
-        record["bob_quote_id"] = quote_id
-        save_state(state)
-
-    from datetime import datetime, timezone
+        _finish_post(state, record, "bob_quote_id", quote_id)
 
     record["announced_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state)

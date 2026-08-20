@@ -302,3 +302,84 @@ def test_main_holds_state_lock_while_posting(monkeypatch, tmp_path):
 
     assert ra.main() == 0
     assert events == ["lock", "post", "post", "post", "unlock"]
+
+
+def test_main_writes_intent_before_each_post(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    expected_markers = iter(
+        [
+            "org_tweet_pending_at",
+            "link_reply_pending_at",
+            "bob_quote_pending_at",
+        ]
+    )
+
+    def fake_post(args, account=None):
+        marker = next(expected_markers)
+        record = ra.load_state()["gptme/gptme#v0.33.0"]
+        assert marker in record
+        return True, str(100 + len(record))
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 0
+    record = ra.load_state()["gptme/gptme#v0.33.0"]
+    assert not any(key.endswith("_pending_at") for key in record)
+
+
+def test_main_refuses_to_retry_ambiguous_post(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    ra.save_state(
+        {"gptme/gptme#v0.33.0": {"org_tweet_pending_at": "2026-08-20T21:00:00+00:00"}}
+    )
+
+    def unexpected_post(args, account=None):
+        raise AssertionError("an ambiguous post must not be retried")
+
+    monkeypatch.setattr(ra, "_post", unexpected_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 1
+    assert "refusing to retry" in capsys.readouterr().err
+
+
+def test_main_clears_intent_after_definite_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    results = iter([(False, None), (True, "101"), (True, "102"), (True, "103")])
+    monkeypatch.setattr(ra, "_post", lambda args, account=None: next(results))
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 1
+    assert ra.load_state()["gptme/gptme#v0.33.0"] == {}
+    assert ra.main() == 0
