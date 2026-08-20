@@ -223,6 +223,7 @@ def call_claude_code(
                     result.stdout.strip()[:200] if result.stdout else result.stderr.strip()[:200],
                 )
                 # Attempt fallback slots (GPTME_CC_FALLBACK_CREDS) before raising.
+                last_non_quota_error: subprocess.CalledProcessError | None = None
                 for fb_cred in _fallback_cred_paths:
                     if not fb_cred.exists():
                         logger.debug("Fallback cred file %s not found, skipping", fb_cred)
@@ -253,6 +254,14 @@ def call_claude_code(
                             (fb_result.stdout or "")[:200],
                             (fb_result.stderr or "")[:200],
                         )
+                        last_non_quota_error = subprocess.CalledProcessError(
+                            fb_result.returncode,
+                            cmd,
+                            fb_result.stdout,
+                            fb_result.stderr,
+                        )
+                if last_non_quota_error is not None:
+                    raise last_non_quota_error
                 raise ClaudeQuotaExhaustedError(
                     result.returncode, attempt_cmd, result.stdout, result.stderr
                 )

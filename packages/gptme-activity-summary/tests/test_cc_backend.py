@@ -571,21 +571,40 @@ def test_call_claude_code_quota_fallback_all_exhausted(
         returncode=1, stdout="You've hit your weekly limit"
     )
 
-    import os
-
-    prev = os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
-    os.environ["GPTME_CC_FALLBACK_CREDS"] = str(fb_cred)
-    try:
-        try:
+    with patch.dict(
+        "os.environ",
+        {"GPTME_CC_FALLBACK_CREDS": str(fb_cred)},
+        clear=True,
+    ):
+        with pytest.raises(ClaudeQuotaExhaustedError):
             call_claude_code("test prompt")
-            assert False, "Should have raised ClaudeQuotaExhaustedError"
-        except ClaudeQuotaExhaustedError:
-            pass
-    finally:
-        if prev is None:
-            os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
-        else:
-            os.environ["GPTME_CC_FALLBACK_CREDS"] = prev
+
+
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_fallback_preserves_non_quota_error(
+    mock_run, mock_sleep, mock_fallback, tmp_path
+):
+    """A fallback auth or service failure is not mislabeled as quota exhaustion."""
+    fb_cred = tmp_path / ".credentials.json.invalid"
+    fb_cred.write_text("{}")
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_fallback.return_value = _make_completed_process(returncode=2, stderr="invalid credentials")
+
+    with patch.dict(
+        "os.environ",
+        {"GPTME_CC_FALLBACK_CREDS": str(fb_cred)},
+        clear=True,
+    ):
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            call_claude_code("test prompt")
+
+    assert not isinstance(exc_info.value, ClaudeQuotaExhaustedError)
+    assert exc_info.value.returncode == 2
+    assert exc_info.value.stderr == "invalid credentials"
 
 
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
