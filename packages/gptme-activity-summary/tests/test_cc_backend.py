@@ -4,6 +4,8 @@ import subprocess
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+import pytest
+
 from gptme_activity_summary.cc_backend import (
     call_claude_code,
     extract_json_from_response,
@@ -166,6 +168,57 @@ def test_call_claude_code_nonzero_exit_raises_after_retries(mock_run, mock_sleep
         assert e.returncode == 1
     assert mock_run.call_count == 3  # retried 3 times, not raised immediately
     assert mock_sleep.call_count == 2  # slept between attempts
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_exhausted_raises_immediately(mock_run, mock_sleep):
+    """Weekly quota exhaustion must raise ClaudeQuotaExhaustedError immediately.
+
+    Retrying the same slot is futile when it is quota-exhausted; the failure
+    should surface on the first attempt so a caller with slot fallback can retry
+    on a different slot instead of burning the full retry window.
+    """
+    from gptme_activity_summary.cc_backend import ClaudeQuotaExhaustedError
+
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit · resets 4pm (UTC)"
+    )
+    with pytest.raises(ClaudeQuotaExhaustedError) as exc_info:
+        call_claude_code("test prompt", max_retries=3)
+    assert exc_info.value.returncode == 1
+    assert mock_run.call_count == 1  # no retries — quota failure is permanent
+    assert mock_sleep.call_count == 0  # no backoff sleep burned
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_marker_in_stderr(mock_run, mock_sleep):
+    """Quota marker in stderr (not stdout) must also be detected."""
+    from gptme_activity_summary.cc_backend import ClaudeQuotaExhaustedError
+
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stderr="You've hit your weekly limit"
+    )
+    with pytest.raises(ClaudeQuotaExhaustedError):
+        call_claude_code("test prompt", max_retries=3)
+    assert mock_run.call_count == 1
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_is_called_process_error_subtype(mock_run, mock_sleep):
+    """ClaudeQuotaExhaustedError must be catchable as CalledProcessError."""
+    from gptme_activity_summary.cc_backend import ClaudeQuotaExhaustedError
+
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    try:
+        call_claude_code("test prompt", max_retries=3)
+        assert False, "Should have raised ClaudeQuotaExhaustedError"
+    except subprocess.CalledProcessError as e:
+        assert isinstance(e, ClaudeQuotaExhaustedError)
 
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")

@@ -20,6 +20,23 @@ logger = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
 
+# Claude Code stdout marker for weekly quota exhaustion on the active slot. When
+# present, retrying on the same slot is futile — every attempt fails identically
+# until the quota resets. Callers with slot fallback should catch
+# ClaudeQuotaExhaustedError and retry on a different slot instead.
+_QUOTA_EXHAUSTED_MARKERS = ("weekly limit", "You've hit your weekly limit")
+
+
+class ClaudeQuotaExhaustedError(subprocess.CalledProcessError):
+    """The active Claude Code slot has exhausted its weekly quota.
+
+    Raised immediately (without the usual retry loop) when ``claude -p`` prints a
+    weekly-quota-exhaustion marker, since retrying the same slot is futile.
+    Subclasses :class:`subprocess.CalledProcessError` so existing callers that
+    catch the base type keep working; callers that can switch to a different slot
+    should catch this subtype specifically.
+    """
+
 
 def call_claude_code(
     prompt: str,
@@ -129,6 +146,21 @@ def call_claude_code(
                     logger.debug("--debug-file appears unsupported; retrying without diagnostics")
                     diagnostic_dir = None
                     plain_retry_pending = True
+            combined_out = (result.stdout or "") + (result.stderr or "")
+            combined_out_lower = combined_out.lower()
+            # Weekly quota exhaustion is a permanent, slot-scoped failure: retrying
+            # the same slot is futile and just burns ~N*delay seconds + token budget.
+            # Signal it distinctly so a caller that can switch slots can retry there.
+            if any(marker.lower() in combined_out_lower for marker in _QUOTA_EXHAUSTED_MARKERS):
+                logger.warning(
+                    "claude -p weekly quota exhausted (attempt %d/%d): %s",
+                    attempt,
+                    max_retries,
+                    result.stdout.strip()[:200] if result.stdout else result.stderr.strip()[:200],
+                )
+                raise ClaudeQuotaExhaustedError(
+                    result.returncode, attempt_cmd, result.stdout, result.stderr
+                )
             stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
             stdout_preview = result.stdout.strip()[:500] if result.stdout else "(none)"
             logger.warning(
