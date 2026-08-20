@@ -159,9 +159,11 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
             r'"([^"]+)"|\'([^\']+)\'|([^,\'"]+?)(?=\s*,|\s*$)',
             inline.group(1),
         ):
-            val = (m.group(1) or m.group(2) or (m.group(3) or "")).strip()
+            val = m.group(1) or m.group(2)
+            if val is None:
+                val = _clean_plain_scalar(m.group(3) or "")
             if val:
-                items.append(val)
+                items.append(val.strip())
         return items
 
     # Block: "field:" on its own line, then more-indented "- val" lines.
@@ -176,11 +178,7 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
         for line in fm_str[block_start.end() :].splitlines():
             if not line.strip():
                 continue
-            item_m = (
-                re.match(r'^\s*-\s+"([^"]+)"\s*$', line)
-                or re.match(r"^\s*-\s+'([^']+)'\s*$", line)
-                or re.match(r"^\s*-\s+(.+?)\s*$", line)
-            )
+            item_m = re.match(r"^\s*-\s+(.+?)\s*$", line)
             if item_m is None:
                 # Any non-item line ends the sequence: a sibling mapping key
                 # (``keywords:`` after ``session_categories:``) is indented just
@@ -191,20 +189,21 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
             if line_indent < field_indent:
                 # A dedented item belongs to an enclosing sequence, not this one.
                 break
-            items.append(item_m.group(1))
+            val = _clean_plain_scalar(item_m.group(1))
+            if val:
+                items.append(val)
         return items
 
     return []
 
 
-def _extract_match_block(fm_str: str) -> str:
-    """Return the text of the nested ``match:`` mapping, or ``""`` if absent.
-
-    Used by the regex fallback so that exclusionary fields are read only from
-    the documented nested form.  A top-level key of the same name must not be
-    hoisted into ``match`` (see :func:`filter_by_session_category`).
-    """
-    start = re.search(r"^(?P<indent>[ \t]*)match:[ \t]*$", fm_str, re.MULTILINE)
+def _extract_mapping_block(fm_str: str, field: str) -> str:
+    """Return a nested mapping's text, or ``""`` if it is absent."""
+    start = re.search(
+        rf"^(?P<indent>[ \t]*){re.escape(field)}:[ \t]*$",
+        fm_str,
+        re.MULTILINE,
+    )
     if not start:
         return ""
     parent_indent = len(start.group("indent").expandtabs())
@@ -262,7 +261,7 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     # ``session_categories`` key must stay ignored here so the regex fallback
     # agrees with the PyYAML path and with filter_by_session_category.  This
     # field is exclusionary — wrongly honouring it silently drops lessons.
-    match_block = _extract_match_block(fm_str)
+    match_block = _extract_mapping_block(fm_str, "match")
     session_categories = _extract_list_frontmatter_field(match_block, "session_categories")
     if not session_categories:
         # Also handle scalar form: session_categories: code, infrastructure
@@ -274,10 +273,7 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             re.MULTILINE,
         )
         if sc_m:
-            val = sc_m.group(1).strip()
-            # Strip surrounding quotes: session_categories: "code" -> code
-            if len(val) >= 2 and val[0] in ('"', "'") and val[-1] == val[0]:
-                val = val[1:-1].strip()
+            val = _clean_plain_scalar(sc_m.group(1))
             if val and not val.startswith("-"):
                 session_categories = [s.strip() for s in val.split(",") if s.strip()]
     if session_categories:
@@ -295,16 +291,25 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         fm["status"] = status
 
     for field in ("name", "description", "when_to_use"):
-        val = _extract_scalar_frontmatter_field(fm_str, field)
-        if val is not None:
-            fm[field] = val
+        scalar_value = _extract_scalar_frontmatter_field(fm_str, field)
+        if scalar_value is not None:
+            fm[field] = scalar_value
 
-    # metadata.harness — used by filter_by_harness; a list or scalar
-    harness_list = _extract_list_frontmatter_field(fm_str, "harness")
+    # metadata.harness — used by filter_by_harness; a list or scalar. Scope
+    # extraction to metadata so a top-level harness key stays ignored, matching
+    # the PyYAML path.
+    metadata_block = _extract_mapping_block(fm_str, "metadata")
+    harness_list = _extract_list_frontmatter_field(metadata_block, "harness")
     if not harness_list:
-        harness_val = _extract_scalar_frontmatter_field(fm_str, "harness")
-        if harness_val:
-            harness_list = [harness_val]
+        harness_match = re.search(
+            r"^\s*harness:\s*([^\[{\n][^\n]*)",
+            metadata_block,
+            re.MULTILINE,
+        )
+        if harness_match:
+            harness_val = _clean_plain_scalar(harness_match.group(1))
+            if harness_val and not harness_val.startswith("-"):
+                harness_list = [harness_val]
     if harness_list:
         fm.setdefault("metadata", {})["harness"] = harness_list
 

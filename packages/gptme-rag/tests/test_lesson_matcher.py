@@ -288,6 +288,42 @@ class TestExtractFrontmatter:
         harness = fm.get("metadata", {}).get("harness", [])
         assert "claude-code" in harness
 
+    def test_regex_fallback_ignores_top_level_harness(self, monkeypatch):
+        content = (
+            "---\nharness: gptme\nmatch:\n  keywords:\n    - foo\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert "harness" not in fm.get("metadata", {})
+
+    def test_regex_fallback_session_category_scalar_strips_comment(self, monkeypatch):
+        content = (
+            '---\nmatch:\n  session_categories: "code" # comment\n'
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("match", {}).get("session_categories") == ["code"]
+
     def test_regex_fallback_unquoted_block_keywords(self, monkeypatch):
         # Regression: without PyYAML, block-form keywords without quotes were
         # silently dropped because the regex only matched "quoted" values.
@@ -422,6 +458,16 @@ class TestExtractListFrontmatterField:
         assert _extract_list_frontmatter_field(
             "keywords:\n- foo bar\n- baz\nstatus: active\n", "keywords"
         ) == ["foo bar", "baz"]
+
+    def test_unquoted_block_item_strips_inline_comment(self):
+        assert _extract_list_frontmatter_field(
+            "keywords:\n  - merge conflict # important\n", "keywords"
+        ) == ["merge conflict"]
+
+    def test_quoted_block_item_preserves_hash(self):
+        assert _extract_list_frontmatter_field(
+            'keywords:\n  - "merge # conflict" # important\n', "keywords"
+        ) == ["merge # conflict"]
 
     def test_block_stops_at_sibling_key_under_same_parent(self):
         fm = "match:\n  session_categories:\n    - code\n  keywords:\n    - foo\n"
