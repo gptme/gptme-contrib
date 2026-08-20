@@ -374,7 +374,6 @@ class TestExtractListFrontmatterField:
         ) == ["git, push", "rebase"]
 
 
-
 class TestScanLessons:
     def test_empty_dir(self, tmp_path):
         lessons = scan_lessons([tmp_path])
