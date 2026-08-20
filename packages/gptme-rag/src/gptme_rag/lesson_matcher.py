@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -70,7 +71,7 @@ _SKIP_DIR_PARTS: frozenset[str] = frozenset(
 )
 
 
-def _dedupe_strings(values: list[object]) -> list[str]:
+def _dedupe_strings(values: Sequence[object]) -> list[str]:
     """Strip and deduplicate strings while preserving first-seen order."""
     deduped: list[str] = []
     seen: set[str] = set()
@@ -499,9 +500,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             _raw_sc = (
                 match_data.get("session_categories") or [] if isinstance(match_data, dict) else []
             )
-            session_categories = _dedupe_strings(
-                _string_list(_raw_sc) if isinstance(_raw_sc, str) else _raw_sc
-            )
+            session_categories = _dedupe_strings(_string_list(_raw_sc))
 
             if not keywords and not patterns and not skill_name:
                 continue
