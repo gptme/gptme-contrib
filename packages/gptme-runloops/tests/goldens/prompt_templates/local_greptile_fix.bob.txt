@@ -62,7 +62,11 @@ reply **on its own thread**, and then a resolution.
 worse than leaving a thread open.
 
 **After addressing the findings:**
-1. Push fixes, then close the loop on every finding as described above
+1. Push fixes via the in-band AI review wrapper (runs local review before pushing, max 2 iterations):
+   ```bash
+   uv run python3 /home/bob/bob/scripts/github/pm-review-and-push.py
+   ```
+   If it reports P0/P1 findings, fix them and re-run. Once clean, close the loop on every finding as described above.
 2. Run `POLL_BUDGET_SEC=1800 bash /home/bob/bob/scripts/github/pr-address-wait-and-merge.sh --repo gptme/gptme-contrib 1234`
    - Exit 0: merged — done
    - Exit 2: Greptile re-reviewed and found new issues — read the new unresolved threads, fix them, push, reply, then re-run the command once more

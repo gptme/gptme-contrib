@@ -15,7 +15,11 @@ gh api repos/ErikBjare/alice/issues/7/comments \
 ```
 
 This PR has a low Greptile score and likely has real code issues.
-**Action**: Read the Greptile findings, fix the issues in the PR's repo, push commits, then re-trigger:
+**Action**: Read the Greptile findings, fix the issues in the PR's repo, push via the in-band AI review wrapper (runs local review before pushing, max 2 iterations):
+```bash
+uv run python3 /srv/agents/alice/workspace/scripts/github/pm-review-and-push.py
+```
+If it reports P0/P1 findings, fix them and re-run. Once clean, then re-trigger:
 ```bash
 bash /srv/agents/alice/workspace/scripts/github/greptile-helper.sh trigger ErikBjare/alice 7
 ```

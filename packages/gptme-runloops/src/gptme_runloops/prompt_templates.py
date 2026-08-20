@@ -80,6 +80,12 @@ class PromptContext:
         pr_address_script: path to ``pr-address-wait-and-merge.sh`` (the
             address→wait→merge poller). Default:
             ``<workspace>/scripts/github/pr-address-wait-and-merge.sh``.
+        dispose_script: path to ``ai-review-dispose.py`` (the reply-and-resolve
+            helper for AI review threads). Default:
+            ``<workspace>/scripts/github/ai-review-dispose.py``.
+        pm_review_and_push: path to ``pm-review-and-push.py`` (the local AI
+            review-then-push wrapper). Default:
+            ``<workspace>/scripts/github/pm-review-and-push.py``.
         poll_budget_sec: ``POLL_BUDGET_SEC`` value baked into the
             pr-address-wait-and-merge invocation lines (bash hardcodes 1800).
     """
@@ -90,6 +96,7 @@ class PromptContext:
     greptile_helper: str | None = None
     pr_address_script: str | None = None
     dispose_script: str | None = None
+    pm_review_and_push: str | None = None
     poll_budget_sec: int = 1800
 
     @property
@@ -114,6 +121,17 @@ class PromptContext:
         if self.pr_address_script is not None:
             return self.pr_address_script
         return f"{self.workspace}/scripts/github/pr-address-wait-and-merge.sh"
+
+    @property
+    def resolved_pm_review_and_push(self) -> str:
+        """``pm-review-and-push.py`` — run local AI review then push.
+
+        Derived from the workspace like the other helpers so non-Bob agents
+        can override it to their own script location.
+        """
+        if self.pm_review_and_push is not None:
+            return self.pm_review_and_push
+        return f"{self.workspace}/scripts/github/pm-review-and-push.py"
 
 
 # --- Token substitution ---
@@ -250,7 +268,11 @@ _LOCAL_FIX_SECTIONS = {
         "\n" + _CLOSE_THE_LOOP + "\n"
         "\n"
         "**After addressing the findings:**\n"
-        "1. Push fixes, then close the loop on every finding as described above\n"
+        "1. Push fixes via the in-band AI review wrapper (runs local review before pushing, max 2 iterations):\n"
+        "   ```bash\n"
+        "   uv run python3 {pm_review_and_push}\n"
+        "   ```\n"
+        "   If it reports P0/P1 findings, fix them and re-run. Once clean, close the loop on every finding as described above.\n"
         "2. Run `POLL_BUDGET_SEC={poll_budget_sec} bash {pr_address_script} --repo {repo} {number}`\n"
         "   - Exit 0: merged — done\n"
         "   - Exit 2: Greptile re-reviewed and found new issues — read the new unresolved threads, fix them, push, reply, then re-run the command once more\n"
@@ -294,12 +316,17 @@ _CROSS_REPO_REFRESH_SECTIONS = {
     "followup": (
         _CLOSE_THE_LOOP + "\n"
         "\n"
-        "After fixing AND pushing commits, re-trigger Greptile:\n"
+        "After fixing the findings, push via the in-band AI review wrapper (runs local review before pushing, max 2 iterations):\n"
+        "```bash\n"
+        "uv run python3 {pm_review_and_push}\n"
+        "```\n"
+        "If it reports P0/P1 findings, fix them and re-run. Once clean, close the loop on every finding as described above.\n"
+        "Then re-trigger Greptile (required for cross-repo PRs — pr-address-wait-and-merge.sh does not trigger it internally):\n"
         "```bash\n"
         "# ONLY call this AFTER pushing fix commits — NEVER trigger without actual fixes\n"
         "bash {greptile_helper} trigger {repo} {number}\n"
         "```\n"
-        "Then run `POLL_BUDGET_SEC={poll_budget_sec} bash {pr_address_script} --repo {repo} {number}` to wait for the re-review.\n"
+        "Then run `POLL_BUDGET_SEC={poll_budget_sec} bash {pr_address_script} --repo {repo} {number}` to wait for the Greptile re-review.\n"
         "- Exit 0: merged — done\n"
         "- Exit 2: new findings — address them, push, close their threads, re-run once more\n"
         "- Exit 3: poll budget exhausted — stop; next monitoring cycle will continue"
@@ -367,7 +394,11 @@ _NEEDS_FIX_SECTIONS = {
     ),
     "assessment": (
         "This PR has a low Greptile score and likely has real code issues.\n"
-        "**Action**: Read the Greptile findings, fix the issues in the PR's repo, push commits, then re-trigger:"
+        "**Action**: Read the Greptile findings, fix the issues in the PR's repo, push via the in-band AI review wrapper (runs local review before pushing, max 2 iterations):\n"
+        "```bash\n"
+        "uv run python3 {pm_review_and_push}\n"
+        "```\n"
+        "If it reports P0/P1 findings, fix them and re-run. Once clean, then re-trigger:"
     ),
     # NOTE(parity): this arm says "leave it for the next cycle" while the
     # LOCAL_GREPTILE_FIX variant says "leave it for human review" — the
@@ -589,6 +620,7 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
         "greptile_helper": ctx.resolved_greptile_helper,
         "pr_address_script": ctx.resolved_pr_address_script,
         "dispose_script": ctx.resolved_dispose_script,
+        "pm_review_and_push": ctx.resolved_pm_review_and_push,
         "poll_budget_sec": str(ctx.poll_budget_sec),
     }
     # Sections may themselves carry {repo}/{number}/... tokens — resolve
@@ -685,6 +717,9 @@ class ItemPromptParams:
     - ``workspace`` ← both ``$WORKSPACE`` *and* the hardcoded
       ``/home/bob/bob`` in the twitter/forum/agent-msg arms (identical for
       Bob, parameterized for everyone else).
+    - ``pm_review_and_push`` ← path to ``pm-review-and-push.py`` (the local
+      AI review-then-push wrapper); ``None`` resolves via ``workspace`` like
+      the other helper-script fields.
     """
 
     repo: str
@@ -702,6 +737,7 @@ class ItemPromptParams:
     source: str = ""
     greptile_helper: str | None = None
     pr_address_script: str | None = None
+    pm_review_and_push: str | None = None
     poll_budget_sec: int = 1800
     # Trace-ledger terminal-event regex used by the voice_postcall arm to
     # verify the post-call.sh script wrote a row. Matches the three terminal
@@ -742,6 +778,7 @@ class ItemPromptParams:
             greptile_helper=self.greptile_helper,
             pr_address_script=self.pr_address_script,
             poll_budget_sec=self.poll_budget_sec,
+            pm_review_and_push=self.pm_review_and_push,
         )
 
     def _tokens(self) -> dict[str, str]:

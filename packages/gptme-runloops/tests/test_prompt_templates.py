@@ -25,6 +25,17 @@ Regenerate the goldens from a checkout of the brain repo with::
     printf '%s' "$INVESTIGATE" > greptile_needs_improvement.bob.txt
     # ...and again with the second parameter set (see CONTEXTS below).
 
+Two kinds now have goldens **ahead of the bash builders**:
+
+- ``local_greptile_fix`` and ``cross_repo_greptile_refresh`` were hand-edited
+  in gptme-contrib#1463 to add the ``pm-review-and-push`` step before the
+  corresponding bash builders in ErikBjare/bob were updated.  For these two
+  kinds the goldens serve as *drift locks on the Python output*, not parity
+  proofs vs. bash.  Regenerating from bash will not produce matching goldens
+  until ``_build_local_greptile_fix_instructions`` and
+  ``_build_cross_repo_greptile_refresh_instructions`` in ErikBjare/bob are
+  updated to emit the pm-review-and-push instruction.
+
 ``ai_review_fix`` is the one kind with **no bash source**: the bash never
 routed the AI-review-below-floor block to a fix session, so there is nothing
 to capture. Its goldens are generated from :func:`render_instruction` itself
@@ -68,7 +79,7 @@ ALL_KINDS = tuple(InstructionKind)
 
 @pytest.mark.parametrize("kind", ALL_KINDS, ids=lambda k: k.value)
 @pytest.mark.parametrize("ctx_name", sorted(CONTEXTS))
-def test_render_matches_bash_golden(kind: InstructionKind, ctx_name: str) -> None:
+def test_render_matches_golden(kind: InstructionKind, ctx_name: str) -> None:
     golden = (GOLDEN_DIR / f"{kind.value}.{ctx_name}.txt").read_text()
     assert render_instruction(kind, CONTEXTS[ctx_name]) == golden
 
@@ -138,11 +149,13 @@ def test_explicit_helper_paths_override_workspace_derivation() -> None:
         greptile_helper="/opt/tools/greptile.sh",
         pr_address_script="/opt/tools/pr-wait.sh",
         dispose_script="/opt/tools/dispose.py",
+        pm_review_and_push="/opt/tools/pm-review-and-push.py",
     )
     cross = render_instruction(InstructionKind.CROSS_REPO_GREPTILE_REFRESH, ctx)
     assert "bash /opt/tools/greptile.sh trigger o/r 1" in cross
     assert "bash /opt/tools/pr-wait.sh --repo o/r 1" in cross
     assert "python3 /opt/tools/dispose.py o/r 1 --list" in cross
+    assert "python3 /opt/tools/pm-review-and-push.py" in cross
     # Every helper path must be overridable together: one un-overridden default
     # is enough to point a non-Bob agent at a script that does not exist there.
     assert "/ws/scripts" not in cross
