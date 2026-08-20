@@ -296,6 +296,29 @@ class TestExtractFrontmatter:
         assert "code" in cats
         assert "infrastructure" in cats
 
+    def test_regex_fallback_session_categories_quoted_scalar(self, monkeypatch):
+        # Regression: scalar session_categories with surrounding quotes like
+        # `session_categories: "code"` were captured *including* the quotes,
+        # causing filter_by_session_category to compare '"code"' against 'code'
+        # and silently drop the gate (security defect — gated lesson fires in
+        # every session instead of only the intended ones).
+        content = (
+            '---\nmatch:\n  session_categories: "code"\n' "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        cats = fm.get("match", {}).get("session_categories", [])
+        assert cats == ["code"], f'expected ["code"] but got {cats!r}'
+
 
 # ---------------------------------------------------------------------------
 # scan_lessons
@@ -341,6 +364,15 @@ class TestExtractListFrontmatterField:
 
     def test_absent_field_returns_empty(self):
         assert _extract_list_frontmatter_field("status: active\n", "keywords") == []
+
+    def test_inline_quoted_commas_not_split(self):
+        # Regression: naive split(",") turned ["git, push", "rebase"] into
+        # ['"git', 'push"', 'rebase'] — commas inside double quotes must not
+        # be treated as item separators.
+        assert _extract_list_frontmatter_field(
+            'keywords: ["git, push", "rebase"]\n', "keywords"
+        ) == ["git, push", "rebase"]
+
 
 
 class TestScanLessons:

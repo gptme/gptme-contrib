@@ -139,10 +139,13 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
     inline = re.search(rf"\b{re.escape(field)}:\s*\[(.*?)\]", fm_str, re.DOTALL)
     if inline:
         items: list[str] = []
-        for part in inline.group(1).split(","):
-            val = part.strip()
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in {"'", '"'}:
-                val = val[1:-1].strip()
+        # Tokenize respecting quotes: commas inside "..." or '...' are not
+        # separators.  Unquoted items run until the next comma or end-of-string.
+        for m in re.finditer(
+            r'"([^"]+)"|\'([^\']+)\'|([^,\'"]+?)(?=\s*,|\s*$)',
+            inline.group(1),
+        ):
+            val = (m.group(1) or m.group(2) or (m.group(3) or "")).strip()
             if val:
                 items.append(val)
         return items
@@ -230,6 +233,9 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         )
         if sc_m:
             val = sc_m.group(1).strip()
+            # Strip surrounding quotes: session_categories: "code" -> code
+            if len(val) >= 2 and val[0] in ('"', "'") and val[-1] == val[0]:
+                val = val[1:-1].strip()
             if val and not val.startswith("-"):
                 session_categories = [s.strip() for s in val.split(",") if s.strip()]
     if session_categories:
