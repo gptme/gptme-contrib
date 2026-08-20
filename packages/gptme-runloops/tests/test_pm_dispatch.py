@@ -27,6 +27,7 @@ from gptme_runloops.pm_dispatch import (
     SlotManager,
     _bandit_observation_count,
     _get_excluded_repo_patterns,
+    _item_involves_bot,
     _partition_jsonl_io,
     _repo_is_excluded,
     _resolve_model_with_bandit,
@@ -2503,3 +2504,126 @@ class TestRepoExclusionList:
         assert deferred == 0
         assert skipped_excluded == 1
         assert callback_calls == ["gptme/gptme"]
+
+    # --- _item_involves_bot tests ---
+
+    def test_item_involves_bot_mention(self):
+        assert _item_involves_bot("mention")
+        assert _item_involves_bot("mention; another token")
+
+    def test_item_involves_bot_author(self):
+        assert _item_involves_bot("author")
+
+    def test_item_involves_bot_assign(self):
+        assert _item_involves_bot("assign")
+
+    def test_item_involves_bot_review_requested(self):
+        assert _item_involves_bot("review_requested")
+
+    def test_item_involves_bot_comment(self):
+        assert _item_involves_bot("comment")
+
+    def test_item_involves_bot_direct_mention_handoff(self):
+        assert _item_involves_bot("source: direct_mention_handoff; extra")
+
+    def test_item_involves_bot_empty_detail(self):
+        assert not _item_involves_bot("")
+
+    def test_item_involves_bot_unrelated_reason(self):
+        assert not _item_involves_bot("subscribed")
+        assert not _item_involves_bot("team_mention")
+        assert not _item_involves_bot("state_change")
+
+    # --- bot-actor override tests ---
+
+    def test_dispatch_grouped_items_bot_actor_bypasses_exclusion(
+        self, tmp_path, monkeypatch
+    ):
+        """An item in an excluded repo is still dispatched when the bot is an actor."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        # own PR: detail carries 'author' — bot is the PR author
+        own_pr = make_item(
+            repo="ActivityWatch/aw-webui",
+            number=772,
+            types=["pr_update"],
+            detail="author",
+        )
+        # cold outreach: no bot-actor detail token
+        cold = make_item(
+            repo="ActivityWatch/aw-webui",
+            number=999,
+            types=["issue_comment"],
+            detail="subscribed",
+        )
+        cd = tmp_path / "cd"
+        result = dispatch_grouped_items(
+            [own_pr, cold], slot_cap=5, cooldown_secs=0, cooldown_dir=cd
+        )
+        # own_pr dispatched, cold blocked
+        assert result.launched == 1
+        assert result.skipped_excluded == 1
+
+    def test_dispatch_grouped_items_mention_bypasses_exclusion(
+        self, tmp_path, monkeypatch
+    ):
+        """An @mention in an excluded repo is dispatched (bot was involved)."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        mention = make_item(
+            repo="ActivityWatch/aw-android",
+            number=66,
+            types=["notification"],
+            detail="mention",
+        )
+        cd = tmp_path / "cd"
+        result = dispatch_grouped_items(
+            [mention], slot_cap=5, cooldown_secs=0, cooldown_dir=cd
+        )
+        assert result.launched == 1
+        assert result.skipped_excluded == 0
+
+    def test_partition_jsonl_io_bot_actor_bypasses_exclusion(
+        self, tmp_path, monkeypatch
+    ):
+        """_partition_jsonl_io lets bot-actor items through on the stdin path."""
+        monkeypatch.setenv(PM_DISPATCH_EXCLUDE_REPOS_ENV, "ActivityWatch/*")
+        import io as _io
+        import sys as _sys
+
+        fast_path = tmp_path / "fast.jsonl"
+        slow_path = tmp_path / "slow.jsonl"
+        items_json = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "repo": "ActivityWatch/aw-webui",
+                        "number": 772,
+                        "types": ["notification"],
+                        "detail": "author",
+                        "title": "Own PR",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "repo": "ActivityWatch/aw-webui",
+                        "number": 999,
+                        "types": ["notification"],
+                        "detail": "subscribed",
+                        "title": "Cold notif",
+                    }
+                ),
+            ]
+        )
+        orig_stdin = _sys.stdin
+        try:
+            _sys.stdin = _io.StringIO(items_json)
+            _partition_jsonl_io(fast_path, slow_path)
+        finally:
+            _sys.stdin = orig_stdin
+        fast_lines = [
+            line for line in fast_path.read_text().splitlines() if line.strip()
+        ]
+        numbers = [json.loads(line)["number"] for line in fast_lines]
+        # own PR (772, detail='author') is allowed through
+        assert 772 in numbers
+        # cold outreach (999, detail='subscribed') is excluded
+        assert 999 not in numbers

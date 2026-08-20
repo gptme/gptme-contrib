@@ -100,6 +100,35 @@ def _repo_is_excluded(repo: str, patterns: tuple[str, ...] | None = None) -> boo
     return any(fnmatch.fnmatch(repo_lower, pat.lower()) for pat in patterns)
 
 
+def _item_involves_bot(detail: str) -> bool:
+    """Return True when *detail* indicates the bot is a direct actor on this item.
+
+    Parses the semicolon-separated notification reason tokens emitted by
+    ``activity-gate.sh``.  When any actor token appears the item is NOT cold
+    outreach — the bot already has a stake in the thread — so it should be
+    dispatched even when the repo is on the operator exclusion list.
+
+    This is the "granular control" that lets operators set
+    ``PM_DISPATCH_EXCLUDE_REPOS=ActivityWatch/*`` to block cold outreach while
+    still allowing the bot to respond to its own PRs, assigned issues, and
+    @-mentions in those repos.
+
+    Recognised actor reasons (subset of the GitHub notification API reasons):
+    - ``author``           — bot created the PR / issue
+    - ``assign``           — bot is assigned to the issue/PR
+    - ``review_requested`` — bot was asked to review the PR
+    - ``mention``          — bot was @-mentioned
+    - ``comment``          — bot previously commented (has history in the thread)
+    - ``direct_mention_handoff`` — embedded by assigned_issue_pending_reply.py
+    """
+    if "direct_mention_handoff" in detail:
+        return True
+    _actor_tokens = frozenset(
+        {"author", "assign", "review_requested", "mention", "comment"}
+    )
+    return any(tok.strip() in _actor_tokens for tok in detail.split(";"))
+
+
 # Repositories that receive automated shadow PR reviews (no Greptile free tier).
 # Override at runtime via AUTOMATED_PR_REVIEW_REPOS=owner/repo1,owner/repo2.
 _AUTOMATED_PR_REVIEW_REPOS_DEFAULT: frozenset[str] = frozenset()
@@ -745,6 +774,7 @@ class LaneDispatcher:
             item
             for item in items
             if not _repo_is_excluded(item.repo, _exclude_patterns)
+            or _item_involves_bot(item.detail)
         ]
         skipped_excluded = total_before_exclude - len(items)
         fast_items, slow_items = partition_items(items)
@@ -1317,8 +1347,11 @@ def _partition_jsonl_io(
                 logger.warning("skipping unparseable JSONL line: %.80s", raw)
                 continue
             repo = str(data.get("repo") or "")
-            if _repo_is_excluded(repo, _exclude_patterns):
-                logger.debug("skipping excluded repo %s", repo)
+            detail = str(data.get("detail") or "")
+            if _repo_is_excluded(repo, _exclude_patterns) and not _item_involves_bot(
+                detail
+            ):
+                logger.debug("skipping cold-outreach item in excluded repo %s", repo)
                 continue
             lanes[classify_lane(_item_types(data))].append(data)
         for lane, target_path in (("fast", fast_path), ("slow", slow_path)):
@@ -1330,7 +1363,10 @@ def _partition_jsonl_io(
     # Direct SlotItem path (Python-to-Python)
     _exclude_patterns = _get_excluded_repo_patterns()
     items = [
-        item for item in items if not _repo_is_excluded(item.repo, _exclude_patterns)
+        item
+        for item in items
+        if not _repo_is_excluded(item.repo, _exclude_patterns)
+        or _item_involves_bot(item.detail)
     ]
     fast, slow = partition_items(items)
     for f_item in fast:
@@ -1416,7 +1452,9 @@ def dispatch_grouped_items(
     _excluded: list[SlotItem] = []
     _kept: list[SlotItem] = []
     for _item in items:
-        if _repo_is_excluded(_item.repo, _exclude_patterns):
+        if _repo_is_excluded(_item.repo, _exclude_patterns) and not _item_involves_bot(
+            _item.detail
+        ):
             _excluded.append(_item)
         else:
             _kept.append(_item)
