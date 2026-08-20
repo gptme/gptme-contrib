@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from gptme_rag.indexing.document import Document
 from gptme_rag.sources import (
     SourceDescriptor,
@@ -57,6 +59,16 @@ def test_de_accumulate_transcript_role_reset_resumes_run():
     ]
     result = de_accumulate_transcript(transcript, cumulative=True)
     assert result == "USER: ab\n\nASSISTANT: x\n\nUSER: cd"
+
+
+def test_de_accumulate_transcript_skips_turns_without_roles():
+    transcript = [
+        {"text": "ambiguous"},
+        {"role": "user", "text": "identified"},
+        {"role": "   ", "text": "also ambiguous"},
+    ]
+
+    assert de_accumulate_transcript(transcript) == "USER: identified"
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +130,23 @@ def test_descriptor_defaults_always_on():
 
 def test_collect_voice_calls_missing_dir(tmp_path: Path):
     assert collect_voice_call_documents(tmp_path / "nope") == []
+
+
+def test_collect_voice_calls_unreadable_dir_returns_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    call_dir = tmp_path / "voice"
+    call_dir.mkdir()
+    original_glob = Path.glob
+
+    def denied_glob(self: Path, pattern: str):
+        if self == call_dir:
+            raise PermissionError("denied")
+        return original_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", denied_glob)
+
+    assert collect_voice_call_documents(call_dir) == []
 
 
 def test_collect_voice_calls_deaccumulates_and_metadata(tmp_path: Path):
@@ -465,7 +494,9 @@ def test_de_accumulate_keeps_ambiguous_prefix_chain():
     assert result == "USER: I want\nI\nI want to go"
 
 
-def test_collect_voice_calls_does_not_read_symlink_escaping_repo(tmp_path: Path):
+def test_collect_voice_calls_does_not_read_symlink_escaping_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """A per-file symlink out of the repo must be skipped *before* being read.
 
     Regression for the P1 finding on head 2429e5a2: the collector called
@@ -490,11 +521,8 @@ def test_collect_voice_calls_does_not_read_symlink_escaping_repo(tmp_path: Path)
         read_paths.append(self)
         return original_read_text(self, *args, **kwargs)
 
-    Path.read_text = tracking_read_text  # type: ignore[method-assign]
-    try:
-        docs = collect_voice_call_documents(call_dir, repo_root=repo)
-    finally:
-        Path.read_text = original_read_text  # type: ignore[method-assign]
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+    docs = collect_voice_call_documents(call_dir, repo_root=repo)
 
     assert docs == []
     # The escaping file must never have been read at all.
@@ -516,7 +544,7 @@ def test_collect_voice_calls_skips_symlink_loop(tmp_path: Path):
     assert [doc.content for doc in docs] == ["USER: hello"]
 
 
-def test_collect_voice_calls_reads_resolved_path(tmp_path: Path):
+def test_collect_voice_calls_reads_resolved_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The file read must use the same resolved path checked by the guard."""
     repo = tmp_path / "repo"
     call_dir = repo / "calls"
@@ -537,11 +565,8 @@ def test_collect_voice_calls_reads_resolved_path(tmp_path: Path):
         read_paths.append(self)
         return original_read_text(self, *args, **kwargs)
 
-    Path.read_text = tracking_read_text  # type: ignore[method-assign]
-    try:
-        docs = collect_voice_call_documents(call_dir, repo_root=repo)
-    finally:
-        Path.read_text = original_read_text  # type: ignore[method-assign]
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+    docs = collect_voice_call_documents(call_dir, repo_root=repo)
 
     assert [doc.content for doc in docs] == ["USER: hello"]
     assert read_paths == [target.resolve()]

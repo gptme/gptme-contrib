@@ -105,7 +105,11 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]], *, cumulative: bo
         if not isinstance(transcript[i], dict):
             i += 1
             continue
-        current_role = str(transcript[i].get("role", ""))
+        role = transcript[i].get("role")
+        if not isinstance(role, str) or not role.strip():
+            i += 1
+            continue
+        current_role = role.strip()
         run_texts: list[str] = []
         # Collect all entries for this role run, skipping non-dict entries
         # mid-run without ending the run (P1 fix: a non-dict in the middle of
@@ -238,7 +242,12 @@ def collect_voice_call_documents(
 
     docs: list[Document] = []
     resolved_root = None if repo_root is None else Path(repo_root).resolve()
-    for path in sorted(voice_calls_dir.glob("*.json")):
+    try:
+        paths = sorted(voice_calls_dir.glob("*.json"))
+    except OSError:
+        logger.warning("sources: cannot list %s", voice_calls_dir)
+        return []
+    for path in paths:
         # Resolve *before* reading: a per-file symlink can escape the repo even
         # though the directory itself passed the guard above, and reading it
         # first would pull out-of-repo content into memory regardless of the
