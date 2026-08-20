@@ -141,8 +141,11 @@ def call_claude_code(
     # Optional command prefix, e.g. to route `claude` through a per-slot
     # credential wrapper. Env var is a single string, shlex-split so callers can
     # pass arguments (e.g. "path/to/wrapper --slot alice --"). Generic hook —
-    # nothing here is slot/credential-specific.
-    prefix_env = env.get("GPTME_CC_CMD_PREFIX", "").strip()
+    # nothing here is slot/credential-specific. Pop from the subprocess env:
+    # if the wrapper itself calls call_claude_code, it must not re-inherit the
+    # prefix or we recurse infinitely (same recursion guard as the fallback
+    # creds above).
+    prefix_env = env.pop("GPTME_CC_CMD_PREFIX", "").strip()
     if prefix_env:
         cmd = shlex.split(prefix_env) + ["claude", "-p", "-"]
     else:

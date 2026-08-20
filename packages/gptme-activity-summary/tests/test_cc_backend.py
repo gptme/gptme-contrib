@@ -574,3 +574,17 @@ def test_call_claude_code_fallback_creds_not_passed_to_subprocess(mock_run):
     call_claude_code("test prompt")
     subprocess_env = mock_run.call_args.kwargs["env"]
     assert "GPTME_CC_FALLBACK_CREDS" not in subprocess_env
+
+
+@patch.dict("os.environ", {}, clear=True)
+@patch("subprocess.run")
+def test_call_claude_code_cmd_prefix_not_passed_to_subprocess(mock_run):
+    """GPTME_CC_CMD_PREFIX must be stripped from the subprocess env to prevent
+    recursion when the prefix wrapper itself calls call_claude_code."""
+    import os
+
+    os.environ["GPTME_CC_CMD_PREFIX"] = "/opt/bin/slot-wrap --slot alice --"
+    mock_run.return_value = _make_completed_process(stdout="ok")
+    call_claude_code("test prompt")
+    subprocess_env = mock_run.call_args.kwargs["env"]
+    assert "GPTME_CC_CMD_PREFIX" not in subprocess_env
