@@ -22,6 +22,119 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# --- default_branch cache ---
+# `api repos/<REPO> .default_branch` was the single largest REST consumer in this
+# script (512 calls/window, ~38% of its traffic) even though a repo's default
+# branch is effectively immutable — it changes only via a rare manual rename.
+# Cache it to disk with a 6-hour TTL (self-heals if a branch rename occurs;
+# clear immediately with `rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/repo-status"`)
+# so it is fetched once and reused across every subsequent run and session.
+# 6h (not 7d): if a branch is renamed but the old branch kept alive, gh run list
+# succeeds on the stale name (no error → no self-heal). Shorter TTL bounds the
+# stale window while still eliminating the vast majority of repeated API calls.
+_DB_CACHE_DIR="${BOB_DEFAULT_BRANCH_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/default-branch}"
+_DB_CACHE_TTL=21600  # 6 hours — reduces stale window for rename-with-old-branch-kept scenarios
+
+_default_branch() {
+    local repo="$1"
+    local cache_file now mtime age
+    cache_file="$_DB_CACHE_DIR/${repo//\//__}"
+    if [ -f "$cache_file" ]; then
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
+        age=$(( now - mtime ))
+        if [ "$age" -lt "$_DB_CACHE_TTL" ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    local db
+    db=$(gh api "repos/$repo" --jq '.default_branch' 2>/dev/null || true)
+    if [ -n "$db" ]; then
+        mkdir -p "$_DB_CACHE_DIR" 2>/dev/null || true
+        # Atomic write so a concurrent check_repo can never read a torn file.
+        printf '%s' "$db" > "$cache_file.tmp.$$" 2>/dev/null \
+            && mv "$cache_file.tmp.$$" "$cache_file" 2>/dev/null \
+            || rm -f "$cache_file.tmp.$$" 2>/dev/null
+        printf '%s' "$db"
+    else
+        printf 'master'
+    fi
+}
+
+# The disabled-workflow set (`gh workflow list --all`) was ~540 calls/window —
+# comparable to default_branch. Unlike default_branch it *can* change in either
+# direction (operator disables *or* re-enables a workflow). Re-enabling within
+# the TTL window would hide real CI failures (the re-enabled workflow's failing
+# runs get filtered out because the cache still lists it as disabled). Use a
+# short 5-minute TTL so both directions of change self-heal quickly.
+_WF_CACHE_DIR="${BOB_DISABLED_WORKFLOW_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/disabled-workflows}"
+_WF_CACHE_TTL=300  # 5 minutes — bounds re-enabled workflow staleness
+
+_disabled_workflows() {
+    local repo="$1"
+    local cache_file now mtime age wf
+    cache_file="$_WF_CACHE_DIR/${repo//\//__}"
+    if [ -f "$cache_file" ]; then
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
+        age=$(( now - mtime ))
+        if [ "$age" -lt "$_WF_CACHE_TTL" ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    wf=$(gh workflow list --repo "$repo" --all --json name,state --jq '[.[] | select(.state == "disabled_manually") | .name]' 2>/dev/null || true)
+    # Only cache when the API returned a valid non-empty JSON array.
+    # An empty/missing response (transient error, rate limit) must not be cached
+    # as '[]' for an hour — that would hide disabled workflows until TTL expires.
+    if [ -n "$wf" ]; then
+        mkdir -p "$_WF_CACHE_DIR" 2>/dev/null || true
+        printf '%s' "$wf" > "$cache_file.tmp.$$" 2>/dev/null \
+            && mv "$cache_file.tmp.$$" "$cache_file" 2>/dev/null \
+            || rm -f "$cache_file.tmp.$$" 2>/dev/null
+    else
+        wf='[]'
+    fi
+    printf '%s' "$wf"
+}
+
+# Current HEAD SHA (`gh api repos/<REPO>/commits .[0].sha`) was ~151 calls/window.
+# Unlike default_branch it *does* change (on every commit push), but it changes
+# infrequently enough that a 5-minute TTL prevents redundant fetches during a
+# session without introducing problematic staleness. If the script runs multiple
+# times within a stale-run's 5-minute window, HEAD detection still works; if it
+# misses a very recent push, it will report stale for one run, then auto-correct
+# on the next refresh cycle. This is acceptable for stale-run *annotation*, not
+# control flow.
+_HEAD_SHA_CACHE_DIR="${BOB_HEAD_SHA_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/head-sha}"
+_HEAD_SHA_CACHE_TTL=300  # 5 minutes
+
+_current_head_sha() {
+    local repo="$1"
+    local cache_file now mtime age sha
+    cache_file="$_HEAD_SHA_CACHE_DIR/${repo//\//__}"
+    if [ -f "$cache_file" ]; then
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || printf '0')
+        age=$(( now - mtime ))
+        if [ "$age" -lt "$_HEAD_SHA_CACHE_TTL" ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    # Use `// empty` so jq emits nothing (not the string "null") for repos with no commits.
+    sha=$(gh api "repos/$repo/commits" --jq '.[0].sha // empty' 2>/dev/null || echo "")
+    if [ -n "$sha" ]; then
+        mkdir -p "$_HEAD_SHA_CACHE_DIR" 2>/dev/null || true
+        # Atomic write so concurrent checks never read a torn file.
+        printf '%s' "$sha" > "$cache_file.tmp.$$" 2>/dev/null \
+            && mv "$cache_file.tmp.$$" "$cache_file" 2>/dev/null \
+            || rm -f "$cache_file.tmp.$$" 2>/dev/null
+    fi
+    printf '%s' "$sha"
+}
+
 check_repo() {
     local repo=$1
     local label=${2:-$repo}
@@ -30,15 +143,31 @@ check_repo() {
     # appear in the list and trigger false-positive stale annotations (a
     # feature-branch headSha is always different from the default-branch HEAD).
     local default_branch
-    default_branch=$(gh api "repos/$repo" --jq '.default_branch' 2>/dev/null || echo "master")
+    default_branch=$(_default_branch "$repo")
 
     # Fetch last 5 runs on the default branch so we can skip disabled-workflow
     # runs and still have a fallback.  headSha is needed so we can detect when
     # the most recent run lives on an older commit than the current
     # default-branch HEAD — a common case when path filters skip CI on
     # journal-only / docs-only commits.
-    local run_json
-    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
+    local run_json run_err_file run_err
+    run_err_file=$(mktemp)
+    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>"$run_err_file" || echo "error")
+    run_err=$(cat "$run_err_file"); rm -f "$run_err_file"
+
+    if [ "$run_json" = "error" ]; then
+        # A cached default branch can go stale if the repo renamed it (7-day TTL) —
+        # `gh run list --branch <stale-name>` errors on a branch that no longer
+        # exists. Drop the cache and retry once with a fresh fetch so a rename
+        # self-heals immediately instead of showing "No Actions" for up to 7 days.
+        # Only invalidate the cache on branch-not-found errors; transient failures
+        # (network, rate-limit) should not discard a possibly-correct cached branch.
+        if echo "$run_err" | grep -qiE "not found|no commit|does not exist|unknown ref|no ref|could not resolve|no such branch"; then
+            rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
+            default_branch=$(_default_branch "$repo")
+            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
+        fi
+    fi
 
     if [ "$run_json" = "error" ]; then
         echo -e "${YELLOW}-${NC} $label: No Actions"
@@ -52,7 +181,7 @@ check_repo() {
 
     # Filter out runs from manually disabled workflows (e.g. stale fork workflows)
     local disabled_json
-    disabled_json=$(gh workflow list --repo "$repo" --all --json name,state --jq '[.[] | select(.state == "disabled_manually") | .name]' 2>/dev/null || echo "[]")
+    disabled_json=$(_disabled_workflows "$repo")
     if [ "$disabled_json" != "[]" ]; then
         run_json=$(echo "$run_json" | jq --argjson disabled "$disabled_json" '[.[] | select(.name as $n | $disabled | index($n) | not)]')
     fi
@@ -95,7 +224,7 @@ check_repo() {
         run_head_sha=$(echo "$run_json" | jq -r ".[$idx].headSha // \"\"")
         if [ -n "$run_head_sha" ]; then
             local current_head_sha
-            current_head_sha=$(gh api "repos/$repo/commits" --jq '.[0].sha' 2>/dev/null || echo "")
+            current_head_sha=$(_current_head_sha "$repo")
             if [ -n "$current_head_sha" ] && [ "$run_head_sha" != "$current_head_sha" ]; then
                 stale_suffix=" (stale; HEAD=${current_head_sha:0:7}, run=${run_head_sha:0:7})"
             fi
