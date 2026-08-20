@@ -246,3 +246,32 @@ def test_collect_voice_calls_repo_root_guard_relative_vs_absolute(tmp_path: Path
     outside = tmp_path / "other"
     outside.mkdir()
     assert collect_voice_call_documents(call_dir, repo_root=outside) == []
+
+
+def test_collect_voice_calls_source_path_resolves_before_relative_to(tmp_path: Path):
+    """source_path computation must use path.resolve() so relative voice_calls_dir
+    does not raise ValueError when repo_root is absolute.
+
+    Regression for P1 finding: line 216 used path.relative_to(repo_root) with an
+    unresolved (relative) path while the guard used resolved paths, causing a
+    ValueError crash instead of returning collected documents.
+    """
+    import os
+
+    repo = tmp_path / "repo"
+    call_dir = repo / "calls"
+    call_dir.mkdir(parents=True)
+    (call_dir / "call.json").write_text(
+        '{"transcript": [{"role": "user", "text": "hello world"}]}', encoding="utf-8"
+    )
+    # Change to the repo dir so a relative "calls" resolves under repo_root
+    orig_cwd = os.getcwd()
+    os.chdir(repo)
+    try:
+        # Relative voice_calls_dir, absolute repo_root — must not raise ValueError
+        docs = collect_voice_call_documents(Path("calls"), repo_root=repo)
+        assert len(docs) == 1
+        # source metadata must be a relative path (relative to repo_root)
+        assert not Path(docs[0].metadata["source"]).is_absolute()
+    finally:
+        os.chdir(orig_cwd)

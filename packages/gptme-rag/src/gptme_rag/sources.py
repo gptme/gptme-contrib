@@ -213,7 +213,9 @@ def collect_voice_call_documents(
         source = str(data.get("source", "")) if isinstance(data.get("source"), str) else ""
         title = f"Voice call {date_str}" + (f" ({source})" if source else "")
 
-        source_path = path if repo_root is None else path.relative_to(repo_root)
+        source_path = (
+            path if repo_root is None else path.resolve().relative_to(Path(repo_root).resolve())
+        )
         metadata: dict[str, Any] = {
             "type": "voicecall",
             "source": str(source_path),
