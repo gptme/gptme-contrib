@@ -56,7 +56,7 @@ STABLE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 #   - feat(tools): read-only audit preset (#3543)
 _FEAT_RE = re.compile(r"^[*-]\s*feat(?:\(([^)]*)\))?!?:\s*(.+)$")
 _TRAIL_RE = re.compile(
-    r"\s*(?:by @[\w-]+)?\s*(?:in\s+)?(?:https?://\S+|\(?#\d+\)?)\s*$"
+    r"\s*(?:by @[\w-]+(?:\s+in\s+(?:https?://\S+|\(?#\d+\)?))?|(?:in\s+)?(?:https?://\S+|\(?#\d+\)?)|by @[\w-]+)\s*$"
 )
 
 MAX_TWEET = 270  # headroom under 280
