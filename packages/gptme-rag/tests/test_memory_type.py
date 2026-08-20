@@ -204,6 +204,24 @@ def test_classify_task_by_project_tag(rules: dict):
     assert result == "project"
 
 
+def test_classify_task_rules_are_case_insensitive():
+    rules = {
+        "task_rules": {
+            "goal_priorities": ["High"],
+            "goal_states": ["ACTIVE"],
+            "preference_tags": ["Preference"],
+            "project_tags": ["PROJECT"],
+        }
+    }
+
+    assert classify_memory_type("tasks/priority.md", {"priority": "high"}, rules) == "goal"
+    assert classify_memory_type("tasks/state.md", {"state": "active"}, rules) == "goal"
+    assert (
+        classify_memory_type("tasks/preference.md", {"tags": ["preference"]}, rules) == "preference"
+    )
+    assert classify_memory_type("tasks/project.md", {"tags": ["project"]}, rules) == "project"
+
+
 def test_classify_task_default(rules: dict):
     # No matching sub-rule → falls through to task_rules["default"]
     result = classify_memory_type("tasks/foo.md", {"priority": "low"}, rules)

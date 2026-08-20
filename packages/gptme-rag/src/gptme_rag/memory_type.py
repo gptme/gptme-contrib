@@ -241,16 +241,18 @@ def classify_memory_type(
         priority = str(metadata.get("priority", "")).strip().lower()
         state = str(metadata.get("state", "")).strip().lower()
         tags = _coerce_string_list(metadata.get("tags"))
+        goal_priorities = _coerce_string_list(task_rules.get("goal_priorities"))
+        goal_states = _coerce_string_list(task_rules.get("goal_states"))
+        preference_tags = _coerce_string_list(task_rules.get("preference_tags"))
+        project_tags = _coerce_string_list(task_rules.get("project_tags"))
 
-        # Use `or []` so that JSON null values fall back to [] rather than
-        # causing `priority in None` TypeError.
-        if priority in (task_rules.get("goal_priorities") or []):
+        if priority in goal_priorities:
             return "goal"
-        if state in (task_rules.get("goal_states") or []):
+        if state in goal_states:
             return "goal"
-        if any(tag in (task_rules.get("preference_tags") or []) for tag in tags):
+        if any(tag in preference_tags for tag in tags):
             return "preference"
-        if any(tag in (task_rules.get("project_tags") or []) for tag in tags):
+        if any(tag in project_tags for tag in tags):
             return "project"
         default_type = task_rules.get("default")
         return default_type if default_type in SUPPORTED_MEMORY_TYPES else None
