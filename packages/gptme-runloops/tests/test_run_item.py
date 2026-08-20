@@ -1704,6 +1704,54 @@ def test_post_session_merge_ready_only_merge_without_reply_promotes(tmp_path) ->
     ).exists(), "state must be promoted — rollback would re-queue an already-merged PR"
 
 
+def test_post_session_failed_exit_without_delivery_hook_preserves_notification(
+    tmp_path,
+) -> None:
+    """Without an observation hook, failure cannot prove no reply was posted."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, _, _ = _post_session_fixture(
+        tmp_path, exit_code=1, types=("notification",)
+    )
+    hooks.delivery_check = None
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text(
+        "gptme/gptme-contrib#1234"
+    )
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert (config.state_dir / "notif-555.state").exists()
+
+
+def test_post_session_malformed_delivery_output_is_not_verified(
+    tmp_path, cooldown_dir
+) -> None:
+    """Exit zero alone is not verification when the output cannot be parsed."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=1
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout="not json")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text(
+        "gptme/gptme-contrib#1234"
+    )
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not (config.pending_state_dir / "notif-555.state").exists()
+
+
 def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     """master_ci_failure has no thread, so the reply post-condition must not run.
 

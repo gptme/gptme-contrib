@@ -625,6 +625,9 @@ class TestNotifStateIsOwnedByTheHandlingWorker:
         """Side door: a number-0 item used to blanket-copy every notif state."""
         self._stage(env)
         (env.pending_state_dir / "notif-1.state").write_text("unmapped")
+        master_ci = env.pending_state_dir / "ErikBjare-bob-master-ci.state"
+        master_ci.write_text("sibling")
         promote_item_state(env, "ErikBjare/bob", 0)
         assert (env.state_dir / "notif-1.state").exists()
         assert not (env.state_dir / "notif-25192203058.state").exists()
+        assert not (env.state_dir / master_ci.name).exists()

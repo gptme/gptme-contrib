@@ -113,6 +113,7 @@ from gptme_runloops.prompt_templates import (
     render_preheld_claim_block,
 )
 from gptme_runloops.worker_records import (
+    KNOWN_DELIVERY_OUTCOMES,
     append_wait_merge_gate_log,
     append_worker_latency_records,
     build_wait_merge_gate_entry,
@@ -1005,7 +1006,8 @@ def promote_item_state(
         # `.map` for number > 0), so it promotes only the unmapped remainder —
         # the same rule as promote_notification_states(). Copying every
         # notif-*.state here would consume siblings' emitted-but-unhandled
-        # threads through a side door.
+        # threads through a side door. It cannot own repo-level master-CI
+        # state either.
         patterns = []
         for f in pending.glob("notif-*.state"):
             if f.is_file() and not f.with_suffix(".map").is_file():
@@ -1014,8 +1016,8 @@ def promote_item_state(
         patterns = [
             f"{repo_safe}-pr-{number}*.state",
             f"{repo_safe}-issue-{number}*.state",
+            f"{repo_safe}-master-ci.state",
         ]
-    patterns.append(f"{repo_safe}-master-ci.state")
     for pattern in patterns:
         for f in pending.glob(pattern):
             if f.is_file():
@@ -2114,16 +2116,16 @@ def run_post_session(
                     text=True,
                     cwd=str(config.workspace),
                 )
-                if proc.returncode == 0:
+                check_succeeded = proc.returncode == 0
+                if check_succeeded:
                     raw = proc.stdout
-                    delivery_verified = True
                 else:
                     raw = '{"outcome":"handled"}'
             except (OSError, subprocess.SubprocessError):
+                check_succeeded = False
                 raw = '{"outcome":"handled"}'
-            delivery_outcome = normalize_delivery_outcome(
-                extract_delivery_field(raw, "outcome")
-            )
+            raw_outcome = extract_delivery_field(raw, "outcome")
+            delivery_outcome = normalize_delivery_outcome(raw_outcome)
             needs_fallback = re.sub(
                 r"[ \t\n\r\f\v]+",
                 "",
@@ -2133,6 +2135,12 @@ def run_post_session(
                 r"[ \t\n\r\f\v]+",
                 "",
                 extract_delivery_field(raw, "fallback_reply_posted"),
+            )
+            # normalize_delivery_outcome deliberately maps malformed/unknown
+            # values to the permissive "handled" default. That is safe for
+            # compatibility, but it is not evidence that delivery was observed.
+            delivery_verified = (
+                check_succeeded and raw_outcome.strip() in KNOWN_DELIVERY_OUTCOMES
             )
         except Exception:
             # NOTE(divergence, kept from step 3): total extractor death fails
@@ -2373,8 +2381,10 @@ def run_post_session(
                 "promoting state to end re-dispatch churn (no reply is likely correct here)"
             )
             promote_item_state(config, item.repo, item.number)
-    elif (outcome.timed_out or outcome.exit_code != 0) and not (
-        delivery_verified and delivery_outcome == "handled"
+    elif (
+        (outcome.timed_out or outcome.exit_code != 0)
+        and hooks.delivery_check is not None
+        and not (delivery_verified and delivery_outcome == "handled")
     ):
         # The worker did not finish (exit 124) or failed outright, and the
         # delivery check did not verify a reply. Its PR-side state still
