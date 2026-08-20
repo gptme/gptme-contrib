@@ -193,6 +193,83 @@ def _abort_on_bad_urls(messages: list[str]) -> None:
     sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Account profiles
+#
+# The default profile is the workspace .env (Bob's @TimeToBuildBob). A named
+# profile (``--account gptmeorg`` / ``TWITTER_ACCOUNT=gptmeorg``) keeps its own
+# OAuth 2.0 user tokens in ``$XDG_CONFIG_HOME/gptwitter/accounts/<name>.env``
+# (same variable names, so gptmail's refresh/persist helpers work unchanged) and
+# is authorized against the SAME X app (TWITTER_CLIENT_ID/SECRET from .env).
+#
+# Safety: when a named profile is active, every user-context credential from
+# the default .env (OAuth 2.0 tokens AND OAuth 1.0a access tokens) is removed
+# from the environment before the profile is loaded, so a profile with missing
+# or expired tokens can never silently post as the default account. The
+# identity guard (TWITTER_EXPECTED_USERNAME, defaulting to the profile name)
+# is the second net.
+# ---------------------------------------------------------------------------
+_USER_CONTEXT_VARS = (
+    "TWITTER_OAUTH2_ACCESS_TOKEN",
+    "TWITTER_OAUTH2_REFRESH_TOKEN",
+    "TWITTER_OAUTH2_EXPIRES_AT",
+    "TWITTER_ACCESS_TOKEN",
+    "TWITTER_ACCESS_SECRET",
+    "TWITTER_EXPECTED_USERNAME",
+)
+
+
+def _wait_for_callback_file(path: Path, timeout: int) -> tuple[str | None, str | None]:
+    """Poll ``path`` for a pasted OAuth redirect URL; returns (code, full_url)."""
+    import time
+    from urllib.parse import parse_qs, urlparse
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            raw = path.read_text().strip()
+            if raw.startswith("http"):
+                code = parse_qs(urlparse(raw).query).get("code", [None])[0]
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                return code, raw
+        time.sleep(2)
+    return None, None
+
+
+def current_account() -> str:
+    """Active account profile name ('' = default workspace .env)."""
+    return os.getenv("TWITTER_ACCOUNT", "").strip()
+
+
+def account_env_path(name: str) -> Path:
+    base = Path(os.getenv("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    return base / "gptwitter" / "accounts" / f"{name}.env"
+
+
+def _activate_account_profile(name: str) -> Path:
+    """Load a named profile's env file (creating a template if absent).
+
+    Returns the profile env path — the token persistence target for this run.
+    """
+    path = account_env_path(name)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"# gptwitter account profile: @{name}\n"
+            f"# OAuth 2.0 user tokens are written here by `twitter.py --account {name} me`\n"
+            f"TWITTER_EXPECTED_USERNAME={name}\n"
+        )
+        path.chmod(0o600)
+    for var in _USER_CONTEXT_VARS:
+        os.environ.pop(var, None)
+    load_dotenv(path, override=True)
+    os.environ.setdefault("TWITTER_EXPECTED_USERNAME", name)
+    return path
+
+
 def _verify_account_identity(username: str, console) -> None:
     """Safety guard: verify the authenticated account matches the expected identity.
 
@@ -239,6 +316,11 @@ def load_twitter_client(
     _env_path = Path(_env_path_str) if _env_path_str else None
     if not _env_path:
         console.print("[yellow]Warning: could not locate .env file for token storage")
+
+    _account = current_account()
+    if _account:
+        _env_path = _activate_account_profile(_account)
+        console.print(f"[dim]Account profile: @{_account} ({_env_path})")
 
     # Check for bearer token (required for read operations)
     bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
@@ -366,9 +448,23 @@ def load_twitter_client(
                         "[yellow]Waiting for authorization (timeout: 5 minutes)..."
                     )
                     try:
-                        response_code, full_url = run_oauth_callback(
-                            port=9876, timeout=300
-                        )
+                        _cb_file = os.getenv("TWITTER_OAUTH_CALLBACK_FILE")
+                        if _cb_file:
+                            # The authorizing browser is on another machine (an
+                            # operator authorizing a shared account): it cannot
+                            # reach our localhost:9876, so the operator pastes the
+                            # redirected URL into this file instead.
+                            console.print(
+                                f"[yellow]Waiting for the redirected callback URL to be "
+                                f"written to {_cb_file} (timeout: 30 minutes)..."
+                            )
+                            response_code, full_url = _wait_for_callback_file(
+                                Path(_cb_file), timeout=1800
+                            )
+                        else:
+                            response_code, full_url = run_oauth_callback(
+                                port=9876, timeout=300
+                            )
                         # run_oauth_callback returns (None, None) on timeout
                         # instead of raising — handle this explicitly
                         if not response_code or not full_url:
@@ -630,9 +726,19 @@ def display_tweets(tweets: tweepy.Response, username: str) -> None:
 
 
 @click.group()
-def cli() -> None:
+@click.option(
+    "--account",
+    envvar="TWITTER_ACCOUNT",
+    default="",
+    help=(
+        "Account profile to act as (e.g. gptmeorg). Tokens live in "
+        "~/.config/gptwitter/accounts/<name>.env; default = workspace .env."
+    ),
+)
+def cli(account: str) -> None:
     """Twitter Tool - Simple CLI for Twitter operations"""
-    pass
+    if account:
+        os.environ["TWITTER_ACCOUNT"] = account
 
 
 @cli.command()
@@ -679,10 +785,16 @@ def me(limit: int) -> None:
 @cli.command()
 @click.argument("text")
 @click.option("--reply-to", help="Tweet ID to reply to")
+@click.option("--quote", "quote_id", help="Tweet ID to quote-tweet")
 @click.option("--thread", is_flag=True, help="Post as thread (split by ---)")
-def post(text: str, reply_to: str | None, thread: bool) -> None:
+def post(
+    text: str, reply_to: str | None, thread: bool, quote_id: str | None = None
+) -> None:
     """Post a tweet (requires OAuth authentication)"""
     client = load_twitter_client(require_auth=True)
+    if quote_id and thread:
+        console.print("[red]--quote cannot be combined with --thread")
+        sys.exit(1)
 
     # Handle thread posting
     if thread:
@@ -717,7 +829,10 @@ def post(text: str, reply_to: str | None, thread: bool) -> None:
         # Single tweet
         _abort_on_bad_urls([text])
         response = client.create_tweet(
-            text=text, in_reply_to_tweet_id=reply_to, user_auth=_get_user_auth(client)
+            text=text,
+            in_reply_to_tweet_id=reply_to,
+            quote_tweet_id=quote_id,
+            user_auth=_get_user_auth(client),
         )
         if not response.data:
             console.print("[red]Error: No response data from tweet creation")
