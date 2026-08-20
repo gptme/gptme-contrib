@@ -286,6 +286,12 @@ class SessionRecord:
     gen_ms_total: float | None = None  # total generation (streaming) time
     tool_ms_total: float | None = None  # total tool-execution wall time
 
+    # Harness supply: lessons injected into this session by the match-lessons
+    # hook (name, file, match_type, injection_point, timestamp). Ingested by
+    # post_session() from the hook's per-session events file. Empty for
+    # harnesses that don't run the hook.
+    lesson_events: list[dict[str, Any]] = field(default_factory=list)
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``recommended_confidence``, ``notes``).
@@ -309,6 +315,8 @@ class SessionRecord:
             self.duration_seconds = 0
         if self.deliverable_details is None:
             self.deliverable_details = []
+        if self.lesson_events is None:
+            self.lesson_events = []
         if self.grades is None:
             self.grades = {}
         if self.grade_reasons is None:

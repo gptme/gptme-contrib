@@ -35,6 +35,7 @@ from .deliverables import (
 )
 from .discovery import extract_project, extract_session_name
 from .failure_capture import capture_session_failure
+from .lesson_events import load_lesson_events
 from .record import SessionRecord
 from .signals import extract_from_path
 from .smell import compute_smell_score
@@ -281,6 +282,7 @@ def post_session(
     deliverables: list[str] | None = None,
     journal_path: str | None = None,
     session_id: str | None = None,
+    harness_session_id: str | None = None,
     harness_stderr_path: Path | None = None,
     failure_reason: str | None = None,
     error: str | None = None,
@@ -354,6 +356,11 @@ def post_session(
         the first ``/journal/`` write in the trajectory signals.
     session_id:
         Override the auto-generated session ID.
+    harness_session_id:
+        Harness-native session id used by the ``match-lessons`` hook to name its
+        per-session events file (for Claude Code, the transcript UUID). Used to
+        ingest ``lesson_events``. Defaults to ``$CC_SESSION_ID``, which the
+        autonomous runner exports before launching the harness.
     harness_stderr_path:
         Optional path to a harness stderr log (e.g. gptme ``2>>`` capture from
         ``run.sh``). Used with the trajectory to populate ``failure_reason`` and
@@ -830,6 +837,13 @@ def post_session(
             record_kwargs["failure_reason"] = failure_reason
         if error is not None:
             record_kwargs["error"] = error
+
+    # Harness supply: lessons the match-lessons hook injected during this
+    # session. Defaults to $CC_SESSION_ID so callers inside the session's
+    # process tree get this for free.
+    lesson_events = load_lesson_events(harness_session_id)
+    if lesson_events:
+        record_kwargs["lesson_events"] = lesson_events
 
     record = SessionRecord(**record_kwargs)
     if grade is not None:
