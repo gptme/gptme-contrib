@@ -238,6 +238,7 @@ def test_call_claude_code_cmd_prefix_env(mock_run):
     cmd = mock_run.call_args[0][0]
     assert cmd[:5] == ["/opt/bin/slot-wrap", "--slot", "alice", "--", "claude"]
     assert cmd[5:7] == ["-p", "-"]
+    assert "GPTME_CC_CMD_PREFIX" not in mock_run.call_args.kwargs["env"]
 
 
 @patch.dict("os.environ", {}, clear=True)
@@ -248,6 +249,29 @@ def test_call_claude_code_cmd_prefix_empty_env_unchanged(mock_run):
     call_claude_code("test prompt")
     cmd = mock_run.call_args[0][0]
     assert cmd == ["claude", "-p", "-"]
+
+
+@patch.dict("os.environ", {"GPTME_CC_CMD_PREFIX": "wrapper '"}, clear=True)
+@patch("subprocess.run")
+def test_call_claude_code_cmd_prefix_invalid_quote(mock_run):
+    """An invalid command prefix reports which setting is malformed."""
+    with pytest.raises(ValueError, match="Invalid GPTME_CC_CMD_PREFIX"):
+        call_claude_code("test prompt")
+    mock_run.assert_not_called()
+
+
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_does_not_match_generic_weekly_limit(mock_run, mock_sleep):
+    """Unrelated output mentioning a weekly limit follows the normal retry path."""
+    mock_run.side_effect = [
+        _make_completed_process(returncode=1, stderr="See the weekly limit documentation"),
+        _make_completed_process(stdout='{"ok": true}'),
+    ]
+
+    assert call_claude_code("test prompt", max_retries=2) == '{"ok": true}'
+    assert mock_run.call_count == 2
+    mock_sleep.assert_called_once()
 
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
@@ -503,6 +527,33 @@ def test_call_claude_code_quota_fallback_success(mock_run, mock_sleep, mock_fall
     assert mock_fallback.call_count == 1  # fallback tried once
 
 
+@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired("claude", 30), OSError("boom")])
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_fallback_continues_after_launch_failure(
+    mock_run, mock_sleep, mock_fallback, tmp_path, failure
+):
+    """A hung or unlaunchable fallback slot does not block later slots."""
+    first_cred = tmp_path / ".credentials.json.first"
+    second_cred = tmp_path / ".credentials.json.second"
+    first_cred.write_text("{}")
+    second_cred.write_text("{}")
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_fallback.side_effect = [failure, _make_completed_process(stdout='{"ok": true}')]
+
+    with patch.dict(
+        "os.environ",
+        {"GPTME_CC_FALLBACK_CREDS": f"{first_cred}:{second_cred}"},
+        clear=True,
+    ):
+        assert call_claude_code("test prompt") == '{"ok": true}'
+
+    assert mock_fallback.call_count == 2
+
+
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
@@ -547,7 +598,9 @@ def test_call_claude_code_quota_fallback_missing_file_skipped(mock_run, mock_sle
     nonexistent = "/tmp/nonexistent-slot-cred-99999"
     prev = os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
     os.environ["GPTME_CC_FALLBACK_CREDS"] = nonexistent
-    mock_run.return_value = _make_completed_process(returncode=1, stdout="weekly limit")
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
     try:
         try:
             call_claude_code("test prompt")
@@ -574,17 +627,3 @@ def test_call_claude_code_fallback_creds_not_passed_to_subprocess(mock_run):
     call_claude_code("test prompt")
     subprocess_env = mock_run.call_args.kwargs["env"]
     assert "GPTME_CC_FALLBACK_CREDS" not in subprocess_env
-
-
-@patch.dict("os.environ", {}, clear=True)
-@patch("subprocess.run")
-def test_call_claude_code_cmd_prefix_not_passed_to_subprocess(mock_run):
-    """GPTME_CC_CMD_PREFIX must be stripped from the subprocess env to prevent
-    recursion when the prefix wrapper itself calls call_claude_code."""
-    import os
-
-    os.environ["GPTME_CC_CMD_PREFIX"] = "/opt/bin/slot-wrap --slot alice --"
-    mock_run.return_value = _make_completed_process(stdout="ok")
-    call_claude_code("test prompt")
-    subprocess_env = mock_run.call_args.kwargs["env"]
-    assert "GPTME_CC_CMD_PREFIX" not in subprocess_env

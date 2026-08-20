@@ -27,7 +27,7 @@ _RETRY_DELAY_S = 5
 # present, retrying on the same slot is futile — every attempt fails identically
 # until the quota resets. Callers with slot fallback should catch
 # ClaudeQuotaExhaustedError and retry on a different slot instead.
-_QUOTA_EXHAUSTED_MARKERS = ("weekly limit", "You've hit your weekly limit")
+_QUOTA_EXHAUSTED_MARKERS = ("you've hit your weekly limit",)
 
 
 class ClaudeQuotaExhaustedError(subprocess.CalledProcessError):
@@ -141,13 +141,15 @@ def call_claude_code(
     # Optional command prefix, e.g. to route `claude` through a per-slot
     # credential wrapper. Env var is a single string, shlex-split so callers can
     # pass arguments (e.g. "path/to/wrapper --slot alice --"). Generic hook —
-    # nothing here is slot/credential-specific. Pop from the subprocess env:
-    # if the wrapper itself calls call_claude_code, it must not re-inherit the
-    # prefix or we recurse infinitely (same recursion guard as the fallback
-    # creds above).
+    # nothing here is slot/credential-specific. Strip it from the child env so a
+    # wrapper that invokes this backend cannot recursively apply itself.
     prefix_env = env.pop("GPTME_CC_CMD_PREFIX", "").strip()
     if prefix_env:
-        cmd = shlex.split(prefix_env) + ["claude", "-p", "-"]
+        try:
+            prefix = shlex.split(prefix_env)
+        except ValueError as exc:
+            raise ValueError(f"Invalid GPTME_CC_CMD_PREFIX: {exc}") from exc
+        cmd = prefix + ["claude", "-p", "-"]
     else:
         cmd = ["claude", "-p", "-"]
     if nested:
@@ -229,7 +231,11 @@ def call_claude_code(
                         "Active slot quota exhausted; trying fallback slot: %s",
                         fb_cred.name,
                     )
-                    fb_result = _try_with_credential_file(cmd, prompt, fb_cred, env, timeout)
+                    try:
+                        fb_result = _try_with_credential_file(cmd, prompt, fb_cred, env, timeout)
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        logger.warning("Fallback slot %s failed to run: %s", fb_cred.name, exc)
+                        continue
                     if fb_result.returncode == 0 and fb_result.stdout is not None:
                         fb_out: str = fb_result.stdout.strip()
                         if fb_out:
