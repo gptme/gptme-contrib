@@ -26,11 +26,14 @@ NC='\033[0m' # No Color
 # `api repos/<REPO> .default_branch` was the single largest REST consumer in this
 # script (512 calls/window, ~38% of its traffic) even though a repo's default
 # branch is effectively immutable — it changes only via a rare manual rename.
-# Cache it to disk with a 7-day TTL (self-heals if a branch rename occurs;
+# Cache it to disk with a 6-hour TTL (self-heals if a branch rename occurs;
 # clear immediately with `rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/repo-status"`)
 # so it is fetched once and reused across every subsequent run and session.
+# 6h (not 7d): if a branch is renamed but the old branch kept alive, gh run list
+# succeeds on the stale name (no error → no self-heal). Shorter TTL bounds the
+# stale window while still eliminating the vast majority of repeated API calls.
 _DB_CACHE_DIR="${BOB_DEFAULT_BRANCH_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/repo-status/default-branch}"
-_DB_CACHE_TTL=604800  # 7 days — branch renames are rare; stale cache self-heals on next TTL expiry
+_DB_CACHE_TTL=21600  # 6 hours — reduces stale window for rename-with-old-branch-kept scenarios
 
 _default_branch() {
     local repo="$1"
