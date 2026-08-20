@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 
 
 from gptme_rag.lesson_matcher import (
     BM25_MIN_Z,
+    _extract_list_frontmatter_field,
     BM25_STANDOUT_FRACTION,
     extract_frontmatter,
     filter_by_harness,
@@ -176,9 +178,30 @@ class TestExtractFrontmatter:
 
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, body = extract_frontmatter(content)
-        cats = fm.get("match", {}).get("session_categories", [])
-        assert "code" in cats
-        assert "infrastructure" in cats
+        match = fm.get("match", {})
+        assert match.get("keywords") == ["foo"]
+        assert match.get("session_categories") == ["code", "infrastructure"]
+
+    def test_regex_fallback_list_fields_stop_at_sibling_key(self, monkeypatch):
+        content = (
+            "---\nmatch:\n  session_categories:\n    - code\n"
+            "  keywords:\n    - multi word keyword\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        match = fm.get("match", {})
+        assert match.get("session_categories") == ["code"]
+        assert match.get("keywords") == ["multi word keyword"]
 
     def test_regex_fallback_session_categories_inline(self, monkeypatch):
         content = (
@@ -273,6 +296,29 @@ class TestExtractFrontmatter:
         assert "code" in cats
         assert "infrastructure" in cats
 
+    def test_regex_fallback_session_categories_quoted_scalar(self, monkeypatch):
+        # Regression: scalar session_categories with surrounding quotes like
+        # `session_categories: "code"` were captured *including* the quotes,
+        # causing filter_by_session_category to compare '"code"' against 'code'
+        # and silently drop the gate (security defect — gated lesson fires in
+        # every session instead of only the intended ones).
+        content = (
+            '---\nmatch:\n  session_categories: "code"\n' "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, body = extract_frontmatter(content)
+        cats = fm.get("match", {}).get("session_categories", [])
+        assert cats == ["code"], f'expected ["code"] but got {cats!r}'
+
 
 # ---------------------------------------------------------------------------
 # scan_lessons
@@ -287,6 +333,45 @@ def _write_lesson(path: Path, content: str) -> None:
 def _basic_lesson(keywords: list[str], status: str = "active") -> str:
     kw_yaml = "\n".join(f'    - "{k}"' for k in keywords)
     return f"---\nmatch:\n  keywords:\n{kw_yaml}\nstatus: {status}\n---\n# Rule\nBody text.\n"
+
+
+class TestExtractListFrontmatterField:
+    """Direct unit tests for the PyYAML-free list parser."""
+
+    def test_inline_unquoted_multiword_values_split_on_commas(self):
+        # Tokenizing on word characters would yield ["git", "push", ...].
+        assert _extract_list_frontmatter_field(
+            "keywords: [git push, git commit]\n", "keywords"
+        ) == ["git push", "git commit"]
+
+    def test_inline_mixed_quoting(self):
+        assert _extract_list_frontmatter_field("keywords: ['a b', c d, \"e f\"]\n", "keywords") == [
+            "a b",
+            "c d",
+            "e f",
+        ]
+
+    def test_block_items_flush_with_their_key(self):
+        # Valid YAML: sequence items need not be indented past the key.
+        assert _extract_list_frontmatter_field(
+            "keywords:\n- foo bar\n- baz\nstatus: active\n", "keywords"
+        ) == ["foo bar", "baz"]
+
+    def test_block_stops_at_sibling_key_under_same_parent(self):
+        fm = "match:\n  session_categories:\n    - code\n  keywords:\n    - foo\n"
+        assert _extract_list_frontmatter_field(fm, "session_categories") == ["code"]
+        assert _extract_list_frontmatter_field(fm, "keywords") == ["foo"]
+
+    def test_absent_field_returns_empty(self):
+        assert _extract_list_frontmatter_field("status: active\n", "keywords") == []
+
+    def test_inline_quoted_commas_not_split(self):
+        # Regression: naive split(",") turned ["git, push", "rebase"] into
+        # ['"git', 'push"', 'rebase'] — commas inside double quotes must not
+        # be treated as item separators.
+        assert _extract_list_frontmatter_field(
+            'keywords: ["git, push", "rebase"]\n', "keywords"
+        ) == ["git, push", "rebase"]
 
 
 class TestScanLessons:
@@ -314,6 +399,12 @@ class TestScanLessons:
         lessons = scan_lessons([tmp_path])
         assert lessons == []
 
+    def test_quoted_inactive_skipped_without_yaml(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        content = _basic_lesson(["foo"], status='"deprecated"')
+        _write_lesson(tmp_path / "foo.md", content)
+        assert scan_lessons([tmp_path]) == []
+
     def test_no_keywords_skipped(self, tmp_path):
         content = "---\nstatus: active\n---\n# Title\nBody.\n"
         _write_lesson(tmp_path / "foo.md", content)
@@ -328,6 +419,24 @@ class TestScanLessons:
         lessons = scan_lessons([dir_a, dir_b])
         assert len(lessons) == 1
         assert "from-a" in lessons[0]["keywords"]
+
+    def test_same_filename_in_different_subdirectories_kept(self, tmp_path):
+        _write_lesson(tmp_path / "git" / "merge.md", _basic_lesson(["git-merge"]))
+        _write_lesson(tmp_path / "db" / "merge.md", _basic_lesson(["db-merge"]))
+        lessons = scan_lessons([tmp_path])
+        assert {lesson["keywords"][0] for lesson in lessons} == {
+            "git-merge",
+            "db-merge",
+        }
+
+    def test_matching_relative_path_first_dir_wins(self, tmp_path):
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        _write_lesson(dir_a / "git" / "merge.md", _basic_lesson(["from-a"]))
+        _write_lesson(dir_b / "git" / "merge.md", _basic_lesson(["from-b"]))
+        lessons = scan_lessons([dir_a, dir_b])
+        assert len(lessons) == 1
+        assert lessons[0]["keywords"] == ["from-a"]
 
     def test_session_categories(self, tmp_path):
         content = (

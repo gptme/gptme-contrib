@@ -138,31 +138,46 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
     # Inline: field: [val1, val2] or field: ["val1", "val2"]
     inline = re.search(rf"\b{re.escape(field)}:\s*\[(.*?)\]", fm_str, re.DOTALL)
     if inline:
-        raw = inline.group(1)
         items: list[str] = []
-        for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'|([a-zA-Z][\w-]*)', raw):
-            val = m.group(1) or m.group(2) or m.group(3)
-            if val and val.strip():
-                items.append(val.strip())
+        # Tokenize respecting quotes: commas inside "..." or '...' are not
+        # separators.  Unquoted items run until the next comma or end-of-string.
+        for m in re.finditer(
+            r'"([^"]+)"|\'([^\']+)\'|([^,\'"]+?)(?=\s*,|\s*$)',
+            inline.group(1),
+        ):
+            val = (m.group(1) or m.group(2) or (m.group(3) or "")).strip()
+            if val:
+                items.append(val)
         return items
 
-    # Block: "field:" on its own line, then "  - val" lines follow
-    block_start = re.search(rf"^\s*{re.escape(field)}:\s*$", fm_str, re.MULTILINE)
+    # Block: "field:" on its own line, then more-indented "- val" lines.
+    block_start = re.search(
+        rf"^(?P<indent>[ \t]*){re.escape(field)}:\s*$",
+        fm_str,
+        re.MULTILINE,
+    )
     if block_start:
+        field_indent = len(block_start.group("indent").expandtabs())
         items = []
         for line in fm_str[block_start.end() :].splitlines():
             if not line.strip():
                 continue
-            # A non-indented line signals a new top-level key — stop
-            if not line[0:1].isspace():
-                break
             item_m = (
-                re.match(r'^\s+-\s+"([^"]+)"', line)
-                or re.match(r"^\s+-\s+'([^']+)'", line)
-                or re.match(r"^\s+-\s+(\S+)", line)
+                re.match(r'^\s*-\s+"([^"]+)"\s*$', line)
+                or re.match(r"^\s*-\s+'([^']+)'\s*$", line)
+                or re.match(r"^\s*-\s+(.+?)\s*$", line)
             )
-            if item_m:
-                items.append(item_m.group(1))
+            if item_m is None:
+                # Any non-item line ends the sequence: a sibling mapping key
+                # (``keywords:`` after ``session_categories:``) is indented just
+                # like its parent's other keys, so indentation alone cannot tell
+                # them apart.
+                break
+            line_indent = len(line.expandtabs()) - len(line.expandtabs().lstrip())
+            if line_indent < field_indent:
+                # A dedented item belongs to an enclosing sequence, not this one.
+                break
+            items.append(item_m.group(1))
         return items
 
     return []
@@ -199,32 +214,7 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
 
     # Regex fallback
     fm: dict[str, Any] = {}
-    keywords: list[str] = []
-    inline = re.search(r"keywords:\s*\[(.*?)\]", fm_str, re.DOTALL)
-    if inline:
-        # Inline form: keywords: ["val1", unquoted val, 'val3']
-        # Split on commas, strip surrounding quotes from each item
-        raw_items = re.split(r",", inline.group(1))
-        for raw in raw_items:
-            raw = raw.strip()
-            if not raw:
-                continue
-            if (raw.startswith('"') and raw.endswith('"')) or (
-                raw.startswith("'") and raw.endswith("'")
-            ):
-                raw = raw[1:-1]
-            if raw:
-                keywords.append(raw)
-    else:
-        # Block form: "- value" lines (quoted or unquoted multi-word)
-        for m_block in re.finditer(
-            r'^\s*-\s+(?:"([^"]+)"|\'([^\']+)\'|(.+?))\s*$',
-            fm_str,
-            re.MULTILINE,
-        ):
-            val = m_block.group(1) or m_block.group(2) or m_block.group(3)
-            if val and val.strip():
-                keywords.append(val.strip())
+    keywords = _extract_list_frontmatter_field(fm_str, "keywords")
 
     # Build the match dict with all fields scan_lessons reads from it
     match_dict: dict[str, Any] = {}
@@ -243,6 +233,9 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         )
         if sc_m:
             val = sc_m.group(1).strip()
+            # Strip surrounding quotes: session_categories: "code" -> code
+            if len(val) >= 2 and val[0] in ('"', "'") and val[-1] == val[0]:
+                val = val[1:-1].strip()
             if val and not val.startswith("-"):
                 session_categories = [s.strip() for s in val.split(",") if s.strip()]
     if session_categories:
@@ -255,9 +248,9 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     if match_dict:
         fm["match"] = match_dict
 
-    m = re.search(r"status:\s*(\w+)", fm_str)
-    if m:
-        fm["status"] = m.group(1)
+    status = _extract_scalar_frontmatter_field(fm_str, "status")
+    if status is not None:
+        fm["status"] = status
 
     for field in ("name", "description", "when_to_use"):
         val = _extract_scalar_frontmatter_field(fm_str, field)
@@ -450,14 +443,15 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
     **Deduplication** (first-dir-wins, matching ``gptme#1594`` behaviour):
 
     1. By resolved path — handles symlinks to the same file.
-    2. By filename — local workspace lessons take priority over contrib copies.
+    2. By relative path — local workspace lessons take priority over matching
+       contrib copies without conflating same-named lessons in different categories.
 
     Lessons with ``status`` other than ``"active"`` are skipped.
     Lessons with no keywords, patterns, or skill name are skipped.
     """
     lessons: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
-    seen_names: set[str] = set()
+    seen_relative_paths: set[Path] = set()
 
     for lesson_dir in lesson_dirs:
         if not lesson_dir.exists():
@@ -474,24 +468,11 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
                 continue
             seen_paths.add(resolved)
 
-            rel_parts = f.relative_to(lesson_dir).parts
-            if "archive" in rel_parts:
-                if f.name != "SKILL.md":
-                    active_copy = next(
-                        (
-                            p
-                            for p in lesson_dir.rglob(f.name)
-                            if "archive" not in p.relative_to(lesson_dir).parts
-                        ),
-                        None,
-                    )
-                    if active_copy is None:
-                        pass  # do NOT add to seen_names: archive in dir1 must
-                        # not block a valid non-archived lesson with the same
-                        # filename in a later directory (first-dir-wins dedup)
+            relative_path = f.relative_to(lesson_dir)
+            if "archive" in relative_path.parts:
                 continue
 
-            if f.name != "SKILL.md" and f.name in seen_names:
+            if f.name != "SKILL.md" and relative_path in seen_relative_paths:
                 continue
 
             try:
@@ -563,7 +544,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             # lesson in an earlier dir doesn't silently block a valid lesson
             # with the same filename in a later dir.
             if f.name != "SKILL.md":
-                seen_names.add(f.name)
+                seen_relative_paths.add(relative_path)
     return lessons
 
 
