@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from gptme_activity_summary.cc_backend import (
+    ClaudeQuotaExhaustedError,
     call_claude_code,
     extract_json_from_response,
     summarize_journal_with_cc,
@@ -219,6 +220,34 @@ def test_call_claude_code_quota_is_called_process_error_subtype(mock_run, mock_s
         assert False, "Should have raised ClaudeQuotaExhaustedError"
     except subprocess.CalledProcessError as e:
         assert isinstance(e, ClaudeQuotaExhaustedError)
+
+
+@patch.dict(
+    "os.environ",
+    # Explicitly clear CLAUDECODE so nested detection doesn't append
+    # --no-session-persistence and complicate the cmd assertion.
+    {"GPTME_CC_CMD_PREFIX": "/opt/bin/slot-wrap --slot alice --", "CLAUDECODE": ""},
+    clear=False,
+)
+@patch("subprocess.run")
+def test_call_claude_code_cmd_prefix_env(mock_run):
+    """GPTME_CC_CMD_PREFIX must prepend the claude command via shlex split."""
+    mock_run.return_value = _make_completed_process(stdout='{"ok": true}')
+    result = call_claude_code("test prompt")
+    assert result == '{"ok": true}'
+    cmd = mock_run.call_args[0][0]
+    assert cmd[:5] == ["/opt/bin/slot-wrap", "--slot", "alice", "--", "claude"]
+    assert cmd[5:7] == ["-p", "-"]
+
+
+@patch.dict("os.environ", {}, clear=True)
+@patch("subprocess.run")
+def test_call_claude_code_cmd_prefix_empty_env_unchanged(mock_run):
+    """No GPTME_CC_CMD_PREFIX => plain claude -p invocation."""
+    mock_run.return_value = _make_completed_process(stdout='{"ok": true}')
+    call_claude_code("test prompt")
+    cmd = mock_run.call_args[0][0]
+    assert cmd == ["claude", "-p", "-"]
 
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
@@ -439,3 +468,109 @@ def test_summarize_journal_no_failed_flag_on_success(mock_cc):
     result = summarize_journal_with_cc("test content", "2026-03-26")
     assert "_cc_failed" not in result
     assert result["narrative"] == "did stuff"
+
+
+# --- Tests for GPTME_CC_FALLBACK_CREDS slot fallback ---
+
+
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_fallback_success(mock_run, mock_sleep, mock_fallback, tmp_path):
+    """Quota exhaustion on primary slot triggers fallback; first healthy slot wins."""
+    fb_cred = tmp_path / ".credentials.json.alice"
+    fb_cred.write_text("{}")
+
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit · resets 4pm"
+    )
+    mock_fallback.return_value = _make_completed_process(stdout='{"ok": true}')
+
+    import os
+
+    prev = os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
+    os.environ["GPTME_CC_FALLBACK_CREDS"] = str(fb_cred)
+    try:
+        result = call_claude_code("test prompt")
+    finally:
+        if prev is None:
+            os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
+        else:
+            os.environ["GPTME_CC_FALLBACK_CREDS"] = prev
+
+    assert result == '{"ok": true}'
+    assert mock_run.call_count == 1  # primary slot tried once
+    assert mock_fallback.call_count == 1  # fallback tried once
+
+
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_fallback_all_exhausted(
+    mock_run, mock_sleep, mock_fallback, tmp_path
+):
+    """If all fallback slots are also exhausted, raise ClaudeQuotaExhaustedError."""
+    fb_cred = tmp_path / ".credentials.json.erik"
+    fb_cred.write_text("{}")
+
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_fallback.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+
+    import os
+
+    prev = os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
+    os.environ["GPTME_CC_FALLBACK_CREDS"] = str(fb_cred)
+    try:
+        try:
+            call_claude_code("test prompt")
+            assert False, "Should have raised ClaudeQuotaExhaustedError"
+        except ClaudeQuotaExhaustedError:
+            pass
+    finally:
+        if prev is None:
+            os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
+        else:
+            os.environ["GPTME_CC_FALLBACK_CREDS"] = prev
+
+
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_fallback_missing_file_skipped(mock_run, mock_sleep, mock_fallback):
+    """A fallback cred path that does not exist on disk is silently skipped."""
+    import os
+
+    nonexistent = "/tmp/nonexistent-slot-cred-99999"
+    prev = os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
+    os.environ["GPTME_CC_FALLBACK_CREDS"] = nonexistent
+    mock_run.return_value = _make_completed_process(returncode=1, stdout="weekly limit")
+    try:
+        try:
+            call_claude_code("test prompt")
+            assert False, "Should have raised ClaudeQuotaExhaustedError"
+        except ClaudeQuotaExhaustedError:
+            pass
+    finally:
+        if prev is None:
+            os.environ.pop("GPTME_CC_FALLBACK_CREDS", None)
+        else:
+            os.environ["GPTME_CC_FALLBACK_CREDS"] = prev
+
+    mock_fallback.assert_not_called()  # missing file never attempted
+
+
+@patch.dict("os.environ", {}, clear=True)
+@patch("subprocess.run")
+def test_call_claude_code_fallback_creds_not_passed_to_subprocess(mock_run):
+    """GPTME_CC_FALLBACK_CREDS must be stripped from the env passed to subprocess."""
+    import os
+
+    os.environ["GPTME_CC_FALLBACK_CREDS"] = "/tmp/fake-cred"
+    mock_run.return_value = _make_completed_process(stdout="ok")
+    call_claude_code("test prompt")
+    subprocess_env = mock_run.call_args.kwargs["env"]
+    assert "GPTME_CC_FALLBACK_CREDS" not in subprocess_env
