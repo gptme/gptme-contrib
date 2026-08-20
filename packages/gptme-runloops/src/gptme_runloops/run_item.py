@@ -1937,10 +1937,11 @@ def run_post_session(
                 f"for {plan.repo}#{plan.number}"
             )
 
-    is_pr_item = bool(PR_OBSERVE_TYPES & set(item.types))
+    is_pr_item = bool(PR_STATE_TYPES & set(item.types))
+    is_pr_observe_item = bool(PR_OBSERVE_TYPES & set(item.types))
 
     # 2. PR-state diff (worker.sh:379-408)
-    if is_pr_item:
+    if is_pr_observe_item:
         try:
             update_record_pr_state(
                 record_file,
