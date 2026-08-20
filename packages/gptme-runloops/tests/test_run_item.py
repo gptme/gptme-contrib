@@ -1890,6 +1890,29 @@ def test_timeout_tier_instruction_kind_routes_to_adjudication(tmp_path) -> None:
     assert timeout == config.default_timeout == 900
 
 
+def test_timeout_tier_direct_mention_gets_assigned_issue_budget(tmp_path) -> None:
+    """Direct @mention items must get at least the assigned_issue timeout (1500s).
+
+    A 900s fast-lane session was killed at ~14 min before completing AW#1402.
+    Regression: notification items with detail=direct_mention must land on ≥1500s.
+    """
+    config = make_config(tmp_path)
+    # A bare notification item normally falls to the 900s default.
+    timeout_default, _ = timeout_tier(["notification"], False, config)
+    assert timeout_default == config.default_timeout == 900
+
+    # With is_mention=True it is floored at the assigned_issue budget.
+    timeout, desc = timeout_tier(["notification"], False, config, is_mention=True)
+    assert timeout == config.assigned_issue_timeout == 1500
+    assert desc == config.assigned_issue_time_desc == "~20 minutes"
+
+    # assigned_issue still wins when both flags are set (order of precedence).
+    timeout_ai, _ = timeout_tier(
+        ["assigned_issue", "notification"], False, config, is_mention=True
+    )
+    assert timeout_ai == config.assigned_issue_timeout == 1500
+
+
 # --- Claim behavior via execute path ---
 
 
