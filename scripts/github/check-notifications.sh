@@ -201,6 +201,18 @@ is_item_open() {
 # merge_ready value suppresses a notification that should fire.
 _MERGE_READY_CACHE_DIR="${BOB_NOTIFICATION_MERGE_READY_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/check-notifications/merge-ready}"
 _MERGE_READY_CACHE_TTL=120  # 2 minutes (reduced from 10 to limit stale merge_ready suppression)
+_CACHE_PRUNE_MAX_AGE_MINS=60  # prune files older than 1 hour from both cache dirs
+
+# Prune stale cache files to prevent unbounded disk growth.
+# Closed PRs/issues leave orphan cache files; this limits accumulation.
+# Runs probabilistically (~10% of invocations) to keep per-call overhead low.
+_prune_check_notification_caches() {
+    if (( RANDOM % 10 == 0 )); then
+        find "$_STATE_CACHE_DIR" -maxdepth 1 -type f -mmin +"$_CACHE_PRUNE_MAX_AGE_MINS" -delete 2>/dev/null || true
+        find "$_MERGE_READY_CACHE_DIR" -maxdepth 1 -type f -mmin +"$_CACHE_PRUNE_MAX_AGE_MINS" -delete 2>/dev/null || true
+    fi
+}
+_prune_check_notification_caches
 
 _is_permission_blocked_merge_ready_pr_cached() {
     local repo=$1
