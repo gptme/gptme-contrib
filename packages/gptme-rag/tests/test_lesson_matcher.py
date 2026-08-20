@@ -581,8 +581,10 @@ class TestScoreLessons:
             self._make_lesson("lessons/other.md", [], description="social media posts"),
         ]
         results = score_lessons(lessons, "rag upstreaming semantic retrieval", use_bm25=True)
-        if results:  # BM25 may admit nothing on small corpus
-            assert results[0]["path"] == "lessons/retrieval.md"
+        # With n_nonzero < 3, bm_min_z = -inf, so any lesson with bm_raw > 0 is
+        # admitted. The retrieval lesson shares 4 query terms and always scores > 0.
+        assert results, "BM25 should admit the retrieval lesson on a 2-item corpus"
+        assert results[0]["path"] == "lessons/retrieval.md"
 
     def test_bm25_disabled(self):
         lessons = [
