@@ -1493,6 +1493,83 @@ def test_post_session_orphan_delivery_rolls_back_instead_of_promoting(
     assert not (cooldown_dir / "gptme-gptme-contrib-1234.event").exists()
 
 
+def test_post_session_timed_out_worker_does_not_consume_notification_state(
+    tmp_path, cooldown_dir
+) -> None:
+    """A worker killed at its time budget (exit 124) handled nothing; promoting
+    the item's notif state would make the gate treat the mention as done
+    (ActivityWatch/activitywatch#1402, 2026-08-20). PR-side state still
+    promotes; the notification thread must stay re-emittable even after the
+    end-of-run blanket promotion."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=124
+    )
+    outcome.timed_out = True
+    # A killed worker has no verified delivery (the check cannot attribute a reply).
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text(
+        "s"
+    )
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("2026-08-20T09:31:35Z")
+    (config.pending_state_dir / "notif-777.map").write_text("gptme/gptme-contrib#9999")
+    (config.pending_state_dir / "notif-777.state").write_text("other-item")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert (config.state_dir / "gptme-gptme-contrib-pr-1234-update.state").exists()
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not (config.pending_state_dir / "notif-555.state").exists()
+    # a sibling's emitted-but-unhandled thread is left alone, not promoted
+    assert not (config.state_dir / "notif-777.state").exists()
+    assert (config.pending_state_dir / "notif-777.state").exists()
+
+
+def test_post_session_failed_exit_with_verified_delivery_still_promotes(
+    tmp_path, cooldown_dir
+) -> None:
+    """A worker that posted its reply and then died non-zero DID handle the
+    thread; purging here would re-emit it and post a duplicate reply."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=1
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert (config.state_dir / "notif-555.state").exists()
+
+
+def test_post_session_clean_exit_promotes_mapped_notification_state(
+    tmp_path, cooldown_dir
+) -> None:
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert (config.state_dir / "notif-555.state").exists()
+
+
 def test_post_session_orphan_delivery_promotes_after_redelivery_cap(
     tmp_path, cooldown_dir, monkeypatch
 ) -> None:

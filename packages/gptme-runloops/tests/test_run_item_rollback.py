@@ -123,10 +123,15 @@ class TestRollbackSurvivesEndOfRunPromotion:
         (env.pending_state_dir / "notif-11112222.state").write_text("seen")
 
         rollback_failed_delivery(env, "gptme/gptme", 3468, "gptme/gptme#3468")
+        # The unrelated item's pending state is untouched by the rollback ...
+        assert (env.pending_state_dir / "notif-11112222.state").exists()
+        # ... and its own handling worker still promotes it normally. (It is
+        # no longer promoted by the end-of-run blanket pass — mapped state is
+        # owned by its item; see TestNotifStateIsOwnedByTheHandlingWorker.)
+        promote_item_state(env, "gptme/gptme", 9999)
         promote_notification_states(env)
 
         assert not (env.state_dir / "notif-99887766.state").exists()
-        # The unrelated item must still be promoted normally.
         assert (env.state_dir / "notif-11112222.state").exists()
 
     def test_purge_matches_the_key_exactly_not_by_prefix(
@@ -544,3 +549,82 @@ class TestPortedInvestigateArms:
         from gptme_runloops.prompt_templates import build_investigate
 
         assert build_investigate([kind], self._params("d=1")).strip()
+
+
+class TestNotifStateIsOwnedByTheHandlingWorker:
+    """ActivityWatch/activitywatch#1402 (2026-08-20): an Erik @mention whose
+    one worker was killed at exit 124 never re-emitted. Two mechanisms each
+    consumed the thread's gate state on their own:
+
+    - the killed worker's own end-of-run promotion (timeout != delivered);
+    - ANY sibling worker's blanket ``promote_notification_states()`` while the
+      item sat emitted-but-skipped in the shared pending dir.
+
+    ``pm_dispatch_recovery`` would have re-armed the slot, but it only runs for
+    emitted items, and the gate dedupes on ``updated_at``. These tests pin the
+    on-disk contract that closes both holes.
+    """
+
+    def _stage(self, env: RunItemConfig, *, mapped: bool = True) -> None:
+        env.pending_state_dir.mkdir(parents=True, exist_ok=True)
+        (env.pending_state_dir / "notif-25192203058.state").write_text(
+            "2026-08-20T09:31:35Z"
+        )
+        if mapped:
+            (env.pending_state_dir / "notif-25192203058.map").write_text(
+                "ActivityWatch/activitywatch#1402"
+            )
+
+    def test_blanket_promotion_leaves_mapped_state_to_its_item(
+        self, env: RunItemConfig
+    ) -> None:
+        """A sibling worker finishing must not consume another item's thread."""
+        self._stage(env)
+        promote_notification_states(env)
+        assert not (env.state_dir / "notif-25192203058.state").exists()
+
+    def test_blanket_promotion_still_promotes_unmapped_state(
+        self, env: RunItemConfig
+    ) -> None:
+        """Negative control: legacy/unattributable notif state keeps the old path,
+        or the gate would re-emit it every cycle (the 85% NOOP incident)."""
+        self._stage(env, mapped=False)
+        promote_notification_states(env)
+        assert (env.state_dir / "notif-25192203058.state").exists()
+
+    def test_handling_worker_success_promotes_its_mapped_state(
+        self, env: RunItemConfig
+    ) -> None:
+        """The thread IS consumed — by the worker that handled it."""
+        self._stage(env)
+        promote_item_state(env, "ActivityWatch/activitywatch", 1402)
+        promote_notification_states(env)
+        assert (env.state_dir / "notif-25192203058.state").read_text() == (
+            "2026-08-20T09:31:35Z"
+        )
+        assert (env.state_dir / "notif-25192203058.map").exists()
+
+    def test_promotion_is_per_item_not_per_repo(self, env: RunItemConfig) -> None:
+        self._stage(env)
+        promote_item_state(env, "ActivityWatch/activitywatch", 1401)
+        promote_notification_states(env)
+        assert not (env.state_dir / "notif-25192203058.state").exists()
+
+    def test_failed_worker_leaves_thread_re_emittable(self, env: RunItemConfig) -> None:
+        """The failure path: purge, then the blanket promotion must find nothing."""
+        self._stage(env)
+        assert purge_pending_notif_state(env, "ActivityWatch/activitywatch", 1402) == 1
+        promote_item_state(env, "ActivityWatch/activitywatch", 1402)
+        promote_notification_states(env)
+        assert not (env.state_dir / "notif-25192203058.state").exists()
+        assert not (env.pending_state_dir / "notif-25192203058.state").exists()
+
+    def test_zero_number_item_promotes_only_unmapped_state(
+        self, env: RunItemConfig
+    ) -> None:
+        """Side door: a number-0 item used to blanket-copy every notif state."""
+        self._stage(env)
+        (env.pending_state_dir / "notif-1.state").write_text("unmapped")
+        promote_item_state(env, "ErikBjare/bob", 0)
+        assert (env.state_dir / "notif-1.state").exists()
+        assert not (env.state_dir / "notif-25192203058.state").exists()

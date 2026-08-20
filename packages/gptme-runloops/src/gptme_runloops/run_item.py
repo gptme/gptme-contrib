@@ -947,10 +947,37 @@ def rollback_failed_delivery(
     return True
 
 
+def _mapped_notif_state_files(pending: Path, repo: str, number: int | str | None):
+    """Yield ``(map_file, state_file)`` for pending notif state mapped to this item.
+
+    Notification state is keyed by GitHub API id (``notif-<id>.state``); the
+    ``.map`` sidecar written by ``activity-gate.sh`` carries the ``repo#number``
+    association. This is the only way to attribute a notif state to an item.
+    """
+    if not pending.is_dir():
+        return
+    target = f"{repo}#{number}"
+    for map_file in pending.glob("notif-*.map"):
+        if not map_file.is_file():
+            continue
+        try:
+            content = map_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if content == target:
+            yield map_file, map_file.with_suffix(".state")
+
+
 def promote_item_state(
     config: RunItemConfig, repo: str, number: int | str | None
 ) -> None:
-    """Copy the item's pending activity-gate state files to the real state dir."""
+    """Copy the item's pending activity-gate state files to the real state dir.
+
+    Includes the item's *mapped* ``notif-*.state`` (via the ``.map`` sidecar):
+    notification state is owned by the outcome of the worker that handled the
+    item, not by whichever worker happens to finish next — see
+    :func:`promote_notification_states`.
+    """
     import shutil
 
     # The item advanced, so any redelivery treadmill for it is over — restore
@@ -974,7 +1001,15 @@ def promote_item_state(
     repo_safe = str(repo).replace("/", "-")
     is_zero = str(number) == "0"
     if is_zero:
-        patterns = ["notif-*.state"]
+        # A number-0 item cannot own a mapped thread (the gate only writes a
+        # `.map` for number > 0), so it promotes only the unmapped remainder —
+        # the same rule as promote_notification_states(). Copying every
+        # notif-*.state here would consume siblings' emitted-but-unhandled
+        # threads through a side door.
+        patterns = []
+        for f in pending.glob("notif-*.state"):
+            if f.is_file() and not f.with_suffix(".map").is_file():
+                shutil.copy(f, state / f.name)
     else:
         patterns = [
             f"{repo_safe}-pr-{number}*.state",
@@ -985,14 +1020,38 @@ def promote_item_state(
         for f in pending.glob(pattern):
             if f.is_file():
                 shutil.copy(f, state / f.name)
+    if not is_zero:
+        for map_file, state_file in _mapped_notif_state_files(pending, repo, number):
+            for f in (map_file, state_file):
+                if f.is_file():
+                    shutil.copy(f, state / f.name)
 
 
 def promote_notification_states(config: RunItemConfig) -> None:
-    """Promote ALL pending notif state files at end of run (p-m.sh:695-704).
+    """Promote pending notif state that no item owns, at end of run (p-m.sh:695-704).
 
     Notification state files use GitHub API ids, not repo#number, so the
-    per-item promotion never copies them; without this the gate re-emits the
-    same notifications every cycle.
+    per-item promotion cannot find them by name; the gate writes a ``.map``
+    sidecar (``repo#number``) for every thread it can attribute. Only the
+    *unmapped* remainder is promoted here.
+
+    History: this used to promote EVERY pending ``notif-*.state`` under the
+    assumption "sessions already ran for every emitted notification". That
+    held when one monolithic session handled the whole sweep. With per-slot
+    transient units it does not: the pending dir is shared, so a sibling
+    worker finishing while another item sits emitted-but-skipped
+    (``skipped_active`` / cooldown / recovery backoff) promoted that item's
+    state too — and a worker that *timed out* promoted its own. Either way
+    the gate never re-emitted the thread (it dedupes on ``updated_at``) and
+    ``pm_dispatch_recovery`` was never consulted, because it only runs for
+    emitted items. ActivityWatch/activitywatch#1402 (2026-08-20): an Erik
+    @mention, one 900s worker killed at exit 124, then silence.
+
+    Mapped state is promoted by :func:`promote_item_state` on the handling
+    worker's success path and purged by :func:`purge_pending_notif_state` on
+    its failure path, so the thread re-emits and the bounded recovery retry
+    applies. Skipped items' pending state is simply left for the next sweep's
+    ``rsync --delete`` to discard, so they re-emit and are re-evaluated.
     """
     import shutil
 
@@ -1001,8 +1060,11 @@ def promote_notification_states(config: RunItemConfig) -> None:
         return
     config.state_dir.mkdir(parents=True, exist_ok=True)
     for f in pending.glob("notif-*.state"):
-        if f.is_file():
-            shutil.copy(f, config.state_dir / f.name)
+        if not f.is_file():
+            continue
+        if f.with_suffix(".map").is_file():
+            continue  # owned by an item; its worker's outcome decides
+        shutil.copy(f, config.state_dir / f.name)
 
 
 # --- Trajectory resolution (worker.sh:196-300; design §4.4) ---
@@ -2311,6 +2373,34 @@ def run_post_session(
                 "promoting state to end re-dispatch churn (no reply is likely correct here)"
             )
             promote_item_state(config, item.repo, item.number)
+    elif (outcome.timed_out or outcome.exit_code != 0) and not (
+        delivery_verified and delivery_outcome == "handled"
+    ):
+        # The worker did not finish (exit 124) or failed outright, and the
+        # delivery check did not verify a reply. Its PR-side state still
+        # promotes (the head/score it saw are real), but the item's
+        # notification state must NOT: promoting it tells the gate the
+        # mention was handled, the gate dedupes on `updated_at`, and the thread
+        # goes silent until a human comments again. Purge it so the gate
+        # re-emits next sweep; pm_dispatch_recovery bounds the retry.
+        # (A non-zero exit AFTER a verified reply falls through to the normal
+        # promotion — re-emitting there would post a duplicate reply.)
+        #
+        # Deliberately NOT clearing the slot's `.event`/`.ts` markers here,
+        # unlike rollback_failed_delivery(): once the gate re-emits the thread,
+        # the dispatcher consults pm_dispatch_recovery.py (before its
+        # unchanged-payload and cooldown checks), which clears those markers on
+        # a failed last-terminal row with a 120s→1h backoff and a bounded
+        # attempt budget that escalates to a task. Clearing them here would
+        # re-dispatch on the very next sweep with no backoff and no budget.
+        purged = purge_pending_notif_state(config, item.repo, item.number)
+        if purged:
+            _log(
+                f"WARN: worker exit={outcome.exit_code} timed_out={outcome.timed_out} "
+                f"for {item.repo}#{item.number} — left {purged} notification "
+                "thread(s) un-promoted so the item re-enters the dispatch queue"
+            )
+        promote_item_state(config, item.repo, item.number)
     else:
         promote_item_state(config, item.repo, item.number)
 
