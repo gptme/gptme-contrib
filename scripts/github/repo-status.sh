@@ -121,7 +121,8 @@ _current_head_sha() {
             return 0
         fi
     fi
-    sha=$(gh api "repos/$repo/commits" --jq '.[0].sha' 2>/dev/null || echo "")
+    # Use `// empty` so jq emits nothing (not the string "null") for repos with no commits.
+    sha=$(gh api "repos/$repo/commits" --jq '.[0].sha // empty' 2>/dev/null || echo "")
     if [ -n "$sha" ]; then
         mkdir -p "$_HEAD_SHA_CACHE_DIR" 2>/dev/null || true
         # Atomic write so concurrent checks never read a torn file.
