@@ -490,6 +490,7 @@ def test_search_relevance_floor_rejects_raw_score_before_boost(require_sklearn):
 
     boosted_hits = idx.search("query exact", n_results=5, memory_types={"goal"})
     assert [hit.document.metadata["source"] for hit in boosted_hits] == ["exact.md"]
+    assert [hit.rank for hit in boosted_hits] == [0]
 
 
 def test_search_unknown_doc_memory_type_not_penalised(require_sklearn):
