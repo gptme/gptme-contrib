@@ -318,8 +318,9 @@ def test_classify_document_from_crlf_frontmatter(rules: dict):
     assert result == "goal"
 
 
-def test_classify_document_fallback_parses_inline_list(rules: dict, monkeypatch):
-    """The no-PyYAML fallback normalises inline-list brackets before matching."""
+@pytest.fixture()
+def without_yaml(monkeypatch):
+    """Force frontmatter parsing through the no-PyYAML fallback."""
     import builtins
 
     real_import = builtins.__import__
@@ -330,7 +331,18 @@ def test_classify_document_fallback_parses_inline_list(rules: dict, monkeypatch)
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", import_without_yaml)
+
+
+def test_classify_document_fallback_parses_inline_list(rules: dict, without_yaml):
+    """The no-PyYAML fallback normalises inline-list brackets before matching."""
     content = "---\ntags: [preference, project]\n---\n# My Task"
+
+    assert classify_document("tasks/foo.md", content, rules) == "preference"
+
+
+def test_classify_document_fallback_parses_block_list(rules: dict, without_yaml):
+    """The no-PyYAML fallback preserves indented block-list values."""
+    content = "---\ntags:\n  - preference\n  - project\n---\n# My Task"
 
     assert classify_document("tasks/foo.md", content, rules) == "preference"
 

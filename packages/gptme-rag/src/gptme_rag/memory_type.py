@@ -161,9 +161,25 @@ def _extract_frontmatter(content: str) -> dict[str, Any]:
 
         parsed = yaml.safe_load(frontmatter_text) or {}
     except Exception:
-        # Fallback: simple key: value regex (no nested structures). Inline YAML
+        # Fallback for simple top-level scalars and string lists. Inline YAML
         # lists stay as strings here and are normalised by _coerce_string_list.
-        parsed = {k: v for k, v in re.findall(r"^(\w[\w_-]*):\s*(.*)", frontmatter_text, re.M)}
+        parsed = {}
+        current_key: str | None = None
+        for line in frontmatter_text.splitlines():
+            key_value = re.fullmatch(r"(\w[\w_-]*):\s*(.*)", line)
+            if key_value:
+                current_key, value = key_value.groups()
+                parsed[current_key] = value
+                continue
+            list_item = re.fullmatch(r"\s+-\s*(.+)", line)
+            if current_key is not None and list_item:
+                existing = parsed[current_key]
+                if not isinstance(existing, list):
+                    existing = [] if not existing else [existing]
+                    parsed[current_key] = existing
+                existing.append(list_item.group(1))
+            elif line.strip():
+                current_key = None
     return parsed if isinstance(parsed, dict) else {}
 
 
