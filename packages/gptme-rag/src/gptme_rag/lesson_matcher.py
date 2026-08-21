@@ -110,8 +110,15 @@ def _clean_plain_scalar(raw: str) -> str:
     value = raw.strip()
     if value[:1] in {"'", '"'}:
         quote = value[0]
-        end = value.find(quote, 1)
-        return value[1:end] if end != -1 else value[1:].strip()
+        escaped = False
+        for index, char in enumerate(value[1:], start=1):
+            if quote == '"' and char == "\\" and not escaped:
+                escaped = True
+                continue
+            if char == quote and not escaped:
+                return value[1:index]
+            escaped = False
+        return value[1:].strip()
     if value.startswith("#"):
         return ""
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
@@ -650,7 +657,8 @@ def filter_by_session_category(
     documented schema and is ignored, matching the Claude Code hook this ports.
     When *category* is ``None`` only unrestricted lessons (no list) are kept —
     this prevents social/triage/research lessons from firing when the session
-    category is unknown.
+    category is unknown. An empty string is compared as a known category rather
+    than treated as ``None``.
 
     Examples::
 
@@ -662,10 +670,10 @@ def filter_by_session_category(
         filter_by_session_category(lessons, None)
     """
     filtered = []
-    cat_lower = category.lower() if category else None
+    cat_lower = category.lower() if category is not None else None
     for lesson in lessons:
         cats = lesson.get("session_categories") or []
-        if not cats or (cat_lower and cat_lower in {c.lower() for c in cats}):
+        if not cats or (cat_lower is not None and cat_lower in {c.lower() for c in cats}):
             filtered.append(lesson)
     return filtered
 

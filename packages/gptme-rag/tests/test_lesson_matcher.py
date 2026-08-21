@@ -190,6 +190,21 @@ class TestExtractFrontmatter:
         # A `#` inside a quoted scalar is data, not a comment.
         assert fm.get("description") == "hash # inside quotes stays"
 
+    def test_regex_fallback_preserves_escaped_quotes(self, monkeypatch):
+        content = '---\nstatus: active\ndescription: "He said \\"hello\\""\n---\n# Title\nBody.\n'
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("description") == r"He said \"hello\""
+
     def test_regex_fallback_hash_without_leading_space_is_not_a_comment(self, monkeypatch):
         # YAML only starts a comment at a `#` that begins the value or follows
         # whitespace, so `issue#42` must survive intact.
@@ -754,6 +769,11 @@ class TestFilterBySessionCategory:
     def test_unknown_category_excludes_restricted(self):
         lessons = [self._make(["code"])]
         assert filter_by_session_category(lessons, None) == []
+
+    def test_empty_category_is_not_unknown(self):
+        matching = self._make([""])
+        nonmatching = self._make(["code"])
+        assert filter_by_session_category([matching, nonmatching], "") == [matching]
 
     def test_case_insensitive(self):
         lessons = [self._make(["Code"])]
