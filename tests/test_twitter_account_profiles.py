@@ -208,7 +208,9 @@ def test_post_quote_passes_quote_tweet_id(
     monkeypatch.setattr(
         twitter_module,
         "load_twitter_client",
-        lambda require_auth=True: SimpleNamespace(create_tweet=fake_create_tweet),
+        lambda require_auth=True, headless=False: SimpleNamespace(
+            create_tweet=fake_create_tweet
+        ),
     )
     monkeypatch.setattr(twitter_module, "_get_user_auth", lambda client: True)
 
@@ -253,6 +255,30 @@ def test_wait_for_callback_file_parses_code(twitter_module: Any, tmp_path) -> No
     assert not f.exists()
 
 
+def test_wait_for_callback_file_handles_file_disappearing_before_read(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    f = tmp_path / "cb.txt"
+    f.write_text("http://localhost:9876/callback?state=x&code=abc123")
+    original_read_text = Path.read_text
+    reads = 0
+
+    def disappearing_read_text(path: Path, *args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            path.unlink()
+            raise FileNotFoundError(path)
+        return original_read_text(path, *args, **kwargs)
+
+    monotonic_values = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(Path, "read_text", disappearing_read_text)
+    monkeypatch.setattr("time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    assert twitter_module._wait_for_callback_file(f, timeout=1) == (None, None)
+
+
 def test_wait_for_callback_file_keeps_partial_url(
     twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -264,6 +290,27 @@ def test_wait_for_callback_file_keeps_partial_url(
 
     assert twitter_module._wait_for_callback_file(f, timeout=1) == (None, None)
     assert f.exists()
+
+
+def test_post_passes_headless_to_auth(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    class Client:
+        def create_tweet(self, **kwargs):
+            return type("Response", (), {"data": {"id": "123"}})()
+
+    def fake_load_twitter_client(**kwargs):
+        seen.update(kwargs)
+        return Client()
+
+    monkeypatch.setattr(twitter_module, "load_twitter_client", fake_load_twitter_client)
+    twitter_module.post(
+        "hello", reply_to=None, thread=False, quote_id=None, headless=True
+    )
+
+    assert seen == {"require_auth": True, "headless": True}
 
 
 def test_wait_for_callback_file_rejects_non_callback_host(

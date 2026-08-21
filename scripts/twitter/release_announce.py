@@ -209,6 +209,8 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
         env["TWITTER_ACCOUNT"] = ""
         for var in _USER_CONTEXT_VARS:
             env.pop(var, None)
+    if args and args[0] == "post":
+        args = [*args, "--headless"]
     cmd += args
     r = _run(cmd, env=env)
     out = r.stdout + r.stderr

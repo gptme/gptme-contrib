@@ -285,12 +285,14 @@ def test_post_default_account_clears_environment_profile(monkeypatch):
     seen: dict = {}
 
     def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
         seen.update(kwargs)
         return subprocess.CompletedProcess(cmd, 0, stdout="Tweet ID: 123\n", stderr="")
 
     monkeypatch.setattr(ra, "_run", fake_run)
 
     assert ra._post(["post", "hello"]) == (True, "123")
+    assert seen["cmd"][-1] == "--headless"
     assert seen["env"]["TWITTER_ACCOUNT"] == ""
     stripped = {*ra._USER_CONTEXT_VARS, *ra._AUTOMATION_UNSAFE_OAUTH_VARS}
     assert not stripped & seen["env"].keys()
@@ -311,6 +313,7 @@ def test_post_named_account_keeps_inherited_environment(monkeypatch):
 
     assert ra._post(["post", "hello"], account="gptmeorg") == (True, "123")
     assert seen["cmd"][2:4] == ["--account", "gptmeorg"]
+    assert seen["cmd"][-1] == "--headless"
     assert seen["env"]["TWITTER_ACCOUNT"] == "default"
     assert not set(ra._AUTOMATION_UNSAFE_OAUTH_VARS) & seen["env"].keys()
 

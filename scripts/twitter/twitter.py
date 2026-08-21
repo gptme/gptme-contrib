@@ -235,8 +235,11 @@ def _wait_for_callback_file(path: Path, timeout: int) -> tuple[str | None, str |
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if path.exists():
+        try:
             raw = path.read_text().strip()
+        except FileNotFoundError:
+            raw = ""
+        if raw:
             parsed = urlparse(raw)
             if parsed.scheme in {"http", "https"} and parsed.hostname in {
                 "localhost",
@@ -827,8 +830,17 @@ def me(limit: int) -> None:
 @click.option("--reply-to", help="Tweet ID to reply to")
 @click.option("--quote", "quote_id", help="Tweet ID to quote-tweet")
 @click.option("--thread", is_flag=True, help="Post as thread (split by ---)")
+@click.option(
+    "--headless",
+    is_flag=True,
+    help="Never start interactive OAuth; fail if saved credentials cannot authenticate.",
+)
 def post(
-    text: str, reply_to: str | None, thread: bool, quote_id: str | None = None
+    text: str,
+    reply_to: str | None,
+    thread: bool,
+    quote_id: str | None = None,
+    headless: bool = False,
 ) -> None:
     """Post a tweet (requires OAuth authentication)"""
     if quote_id and thread:
@@ -837,7 +849,7 @@ def post(
     if quote_id and reply_to:
         console.print("[red]--quote cannot be combined with --reply-to")
         sys.exit(1)
-    client = load_twitter_client(require_auth=True)
+    client = load_twitter_client(require_auth=True, headless=headless)
 
     # Handle thread posting
     if thread:
