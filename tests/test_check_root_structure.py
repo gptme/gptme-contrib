@@ -131,6 +131,22 @@ def test_allow_args_pass_when_all_entries_listed():
     assert result == 0
 
 
+def test_allow_args_are_literal_root_entry_names():
+    """Directory-like syntax is not silently normalized into another entry."""
+    import check_root_structure
+
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=frozenset(["src"]),
+        ),
+    ):
+        result = check_root_structure.main(["--allow=src/"])
+    assert result == 1
+
+
 def test_allow_args_superset_is_fine():
     """--allow may list more entries than actually exist; extras are ignored."""
     import check_root_structure
