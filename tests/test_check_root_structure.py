@@ -56,6 +56,21 @@ def test_get_repo_root_preserves_non_utf8_path_bytes():
     assert str(repo_root).encode("utf-8", errors="surrogateescape") == b"/tmp/repo-\xff"
 
 
+def test_missing_git_reports_clean_error(capsys):
+    """main() should fail cleanly when the git executable is unavailable."""
+    import check_root_structure
+
+    error = FileNotFoundError(2, "No such file or directory", "git")
+    with patch("subprocess.run", side_effect=error):
+        result = check_root_structure.main([])
+
+    assert result == 1
+    assert capsys.readouterr().err == (
+        "check-root-structure: unable to inspect repository: "
+        "[Errno 2] No such file or directory: 'git'.\n"
+    )
+
+
 def test_get_tracked_entries_reports_git_failure(capsys):
     """main() should fail cleanly when git cannot read the tracked files."""
     import check_root_structure

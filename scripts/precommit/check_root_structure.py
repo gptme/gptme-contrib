@@ -158,6 +158,12 @@ def main(argv: "list[str] | None" = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except OSError as error:
+        print(
+            f"check-root-structure: unable to inspect repository: {error}.",
+            file=sys.stderr,
+        )
+        return 1
     unexpected = entries - allowed
     if not unexpected:
         return 0
