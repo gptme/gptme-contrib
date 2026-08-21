@@ -293,6 +293,25 @@ def test_pull_dry_run_does_not_write(pull_workspace: Path) -> None:
     assert not (local_inbox / name).exists(), "dry-run must not write files"
 
 
+def test_pull_dry_run_json_is_machine_readable(pull_workspace: Path) -> None:
+    """``--dry-run --json`` emits JSON only and lists prospective messages."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = _write_outbox_msg(
+        gordon_outbox, sender="gordon", recipient="erik", subject="Dry run msg"
+    )
+
+    result = CliRunner().invoke(agent, ["pull", "--dry-run", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "new_count": 1,
+        "files": [name],
+        "agents_polled": ["gordon"],
+    }
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert not (local_inbox / name).exists()
+
+
 def test_pull_skips_pull_only_agents(pull_workspace: Path) -> None:
     """Agents with ``delivery: pull-only`` are skipped (they have no SSH outbox to poll)."""
     # alice is registered as pull-only in the fixture — polling alice should be a no-op.
@@ -405,8 +424,7 @@ def test_failed_scp_removes_partial_destination(
     )
 
     def _partial_scp(cmd, **kwargs):
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text("partial")
+        Path(cmd[-1]).write_text("partial")
         raise subprocess.CalledProcessError(1, cmd)
 
     monkeypatch.setattr(agent_cli.subprocess, "run", _partial_scp)
@@ -416,6 +434,34 @@ def test_failed_scp_removes_partial_destination(
     assert result.exit_code == 0, result.output
     assert "failed to fetch" in result.output
     assert not destination.exists()
+    assert not list(destination.parent.glob(f".{filename}.*"))
+
+
+def test_pull_concurrent_publish_deduplicates_atomically(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent winner is preserved rather than overwritten by this pull."""
+    filename = "concurrent.md"
+    destination = pull_workspace / "erik" / "messages" / "inbox" / filename
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": filename, "mailbox": "default"}],
+    )
+
+    def _concurrent_scp(cmd, **kwargs):
+        Path(cmd[-1]).write_text("this pull")
+        destination.write_text("concurrent winner")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _concurrent_scp)
+
+    result = CliRunner().invoke(agent, ["pull", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["new_count"] == 0
+    assert destination.read_text() == "concurrent winner"
+    assert not list(destination.parent.glob(f".{filename}.*"))
 
 
 def test_pull_multiple_messages_fetched(pull_workspace: Path) -> None:

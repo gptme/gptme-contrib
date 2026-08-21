@@ -40,6 +40,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1042,17 +1043,25 @@ def _fetch_from_agent(
             remote_path = f"{workspace}/messages/outbox/{filename}"
         else:
             remote_path = f"{workspace}/messages/mailboxes/{row_mailbox}/outbox/{filename}"
+        fd, temp_name = tempfile.mkstemp(prefix=f".{dest.name}.", dir=dest.parent)
+        os.close(fd)
+        temp_dest = Path(temp_name)
         try:
             subprocess.run(
-                ["scp", *ssh_opts, f"{ssh_target}:{remote_path}", str(dest)],
+                ["scp", *ssh_opts, f"{ssh_target}:{remote_path}", str(temp_dest)],
                 check=True,
                 capture_output=True,
                 timeout=15,
             )
+            try:
+                os.link(temp_dest, dest)
+            except FileExistsError:
+                continue  # A concurrent pull published this message first.
             new_files.append(dest)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            dest.unlink(missing_ok=True)
             click.echo(f"Warning: failed to fetch {filename} from {agent_name}: {e}", err=True)
+        finally:
+            temp_dest.unlink(missing_ok=True)
     return new_files
 
 
@@ -1154,8 +1163,12 @@ def pull(
                         )
                     continue
                 if not dest.exists():
-                    subject = str(row.get("subject", "(no subject)"))
-                    click.echo(f"[dry-run] would fetch from {agent_name}: {subject}  ({filename})")
+                    new_files.append(dest)
+                    if not json_output:
+                        subject = str(row.get("subject", "(no subject)"))
+                        click.echo(
+                            f"[dry-run] would fetch from {agent_name}: {subject}  ({filename})"
+                        )
             continue
 
         fetched = _fetch_from_agent(
