@@ -40,6 +40,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,7 +51,7 @@ from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from gptmail.transport.agent import AgentTransport, Deliver, _FM_DELIM, meta_of
+from gptmail.transport.agent import _FM_DELIM, AgentTransport, Deliver, meta_of
 
 
 # Inbox messages older than this (days) are assumed handled and no longer
@@ -620,6 +621,7 @@ def _remote_pending_rows(
     *,
     recipient: str,
     mailboxes: list[str],
+    all_mailboxes: bool,
 ) -> list[dict]:
     missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
     if missing:
@@ -629,10 +631,10 @@ def _remote_pending_rows(
         )
         return []
     cmd = ["uv", "run", "gptmail", "agent", "pending", "--for", recipient, "--json", "--local-only"]
-    if len(mailboxes) == 1:
-        cmd.extend(["--mailbox", mailboxes[0]])
-    else:
+    if all_mailboxes:
         cmd.append("--all-mailboxes")
+    else:
+        cmd.extend(["--mailbox", mailboxes[0]])
     remote_cmd = " && ".join(
         [
             f"cd {shlex.quote(agent['workspace'])}",
@@ -676,6 +678,7 @@ def _fleet_pending_rows(
     self_name: str,
     agents: dict[str, dict[str, str]],
     fleet: bool,
+    all_mailboxes: bool,
 ) -> list[dict]:
     rows = _outbox_rows_for_recipient(mailboxes, recipient=recipient, self_name=self_name)
     if not fleet:
@@ -689,6 +692,7 @@ def _fleet_pending_rows(
                 agent,
                 recipient=recipient,
                 mailboxes=mailboxes,
+                all_mailboxes=all_mailboxes,
             )
         )
     rows.sort(
@@ -921,6 +925,7 @@ def pending(
             self_name=self_name,
             agents=agents,
             fleet=fleet and not local_only,
+            all_mailboxes=all_mailboxes,
         )
         if json_output:
             click.echo(json.dumps(rows, indent=2, sort_keys=True, default=str))
@@ -967,6 +972,249 @@ def pending(
         click.echo("No messages awaiting reply.")
     if stale:
         click.echo(_stale_summary(stale))
+
+
+def _pull_destination(row: dict, *, fallback_mailbox: str) -> Path | None:
+    """Return a contained local inbox path for a remote pending row."""
+    filename = str(row.get("file") or "")
+    # Pending rows originate on another host. Requiring a basename protects
+    # both the local destination and the separately constructed remote source.
+    if not filename or Path(filename).name != filename:
+        return None
+    row_mailbox = _normalize_mailbox(str(row.get("mailbox") or fallback_mailbox))
+    inbox = _mailbox_root(row_mailbox) / "inbox"
+    return _within(inbox, filename)
+
+
+def _fetch_from_agent(
+    agent_name: str,
+    agent: dict[str, str],
+    *,
+    self_name: str,
+    mailboxes: list[str],
+    all_mailboxes: bool,
+    fallback_mailbox: str | None = None,
+) -> list[Path]:
+    """SCP outbox messages addressed to ``self_name`` from a remote agent's outbox.
+
+    Returns a list of newly-written local inbox paths (skips files already present).
+    Logs SSH/SCP errors as warnings so one unreachable agent doesn't abort the
+    whole pull — the caller collects partial results and reports the total.
+    """
+    rows = _remote_pending_rows(
+        agent_name,
+        agent,
+        recipient=self_name,
+        mailboxes=mailboxes,
+        all_mailboxes=all_mailboxes,
+    )
+    fallback_mailbox = fallback_mailbox or (mailboxes[0] if mailboxes else "default")
+    ssh_target = agent["ssh"]
+    workspace = agent["workspace"]
+    ctl_path = _ssh_control_path(ssh_target)
+    ssh_opts = [
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPath={ctl_path}",
+        "-o",
+        "ControlPersist=60",
+    ]
+    new_files: list[Path] = []
+    for row in rows:
+        filename = str(row.get("file") or "")
+        try:
+            dest = _pull_destination(row, fallback_mailbox=fallback_mailbox)
+        except click.BadParameter as e:
+            click.echo(f"Warning: refusing invalid mailbox from {agent_name}: {e}", err=True)
+            continue
+        if dest is None:
+            if filename:
+                click.echo(
+                    f"Warning: refusing unsafe filename from {agent_name}: {filename}", err=True
+                )
+            continue
+        if dest.exists():
+            continue  # Already fetched — deduplicate by mailbox and filename.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # The row's mailbox field tells us which remote outbox subfolder to look in.
+        row_mailbox = _normalize_mailbox(str(row.get("mailbox") or fallback_mailbox))
+        if row_mailbox == "default":
+            remote_path = f"{workspace}/messages/outbox/{filename}"
+        else:
+            remote_path = f"{workspace}/messages/mailboxes/{row_mailbox}/outbox/{filename}"
+        fd, temp_name = tempfile.mkstemp(prefix=f".{dest.name}.", dir=dest.parent)
+        os.close(fd)
+        temp_dest = Path(temp_name)
+        try:
+            subprocess.run(
+                ["scp", *ssh_opts, f"{ssh_target}:{shlex.quote(remote_path)}", str(temp_dest)],
+                check=True,
+                capture_output=True,
+                timeout=15,
+            )
+            try:
+                os.link(temp_dest, dest)
+            except FileExistsError:
+                continue  # A concurrent pull published this message first.
+            new_files.append(dest)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            click.echo(f"Warning: failed to fetch {filename} from {agent_name}: {e}", err=True)
+        finally:
+            temp_dest.unlink(missing_ok=True)
+    return new_files
+
+
+@agent.command()
+@click.option(
+    "--as",
+    "as_recipient",
+    default=None,
+    metavar="IDENTITY",
+    help=(
+        "Pull as this identity instead of AGENT_NAME/$USER. "
+        "Useful for pull-only recipients (e.g. humans) checking from a different host."
+    ),
+)
+@click.option("--mailbox", default="default", show_default=True, help="Mailbox to fetch into.")
+@click.option("--all-mailboxes", is_flag=True, help="Pull across default plus every named mailbox.")
+@click.option(
+    "--notify-cmd",
+    default=None,
+    metavar="CMD",
+    help=(
+        "Command to invoke when new messages arrive. "
+        "Receives NEW_COUNT (integer) and SUMMARY (human-readable string) as environment variables."
+    ),
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
+@click.option("--dry-run", is_flag=True, help="Show what would be fetched without writing files.")
+def pull(
+    as_recipient: str | None,
+    mailbox: str,
+    all_mailboxes: bool,
+    notify_cmd: str | None,
+    json_output: bool,
+    dry_run: bool,
+) -> None:
+    """Pull messages from all SSH-reachable agents' outboxes (pull-only recipients).
+
+    Iterates the agents.yaml registry, fetches outbox messages addressed to
+    this identity from every agent with an SSH target, and deduplicates them
+    into the local inbox by filename.  Intended for human recipients who cannot
+    receive inbound SSH push delivery — run on a cron/launchd schedule (e.g.
+    every 30 minutes) to surface messages without manual polling.
+
+    Machine-readable output (for scripted callers and notification daemons):
+
+    \b
+        gptmail agent pull --json
+        # {"new_count": 3, "files": ["msg-abc.md", ...], "agents_polled": 2}
+
+    Notification hook:
+
+    \b
+        # Use an explicit shell when environment expansion is wanted
+        gptmail agent pull --notify-cmd "sh -c 'notify-send gptmail \"$SUMMARY\"'"
+    """
+    agents = _load_agents()
+    self_name = (as_recipient or _self_name()).lower()
+    mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
+    remote_mailboxes = [] if all_mailboxes else mailboxes
+
+    new_files: list[Path] = []
+    agents_polled: list[str] = []
+
+    for agent_name, agent_cfg in agents.items():
+        if agent_name == self_name:
+            continue
+        # Skip pull-only or incompletely configured agents — they can't be SSHed.
+        if agent_cfg.get("delivery") == "pull-only":
+            continue
+        if not all(agent_cfg.get(k) for k in ("ssh", "workspace")):
+            continue
+
+        agents_polled.append(agent_name)
+        if dry_run:
+            rows = _remote_pending_rows(
+                agent_name,
+                agent_cfg,
+                recipient=self_name,
+                mailboxes=remote_mailboxes,
+                all_mailboxes=all_mailboxes,
+            )
+            for row in rows:
+                filename = str(row.get("file") or "")
+                try:
+                    dest = _pull_destination(row, fallback_mailbox=mailboxes[0])
+                except click.BadParameter as e:
+                    click.echo(
+                        f"Warning: refusing invalid mailbox from {agent_name}: {e}", err=True
+                    )
+                    continue
+                if dest is None:
+                    if filename:
+                        click.echo(
+                            f"Warning: refusing unsafe filename from {agent_name}: {filename}",
+                            err=True,
+                        )
+                    continue
+                if not dest.exists():
+                    new_files.append(dest)
+                    if not json_output:
+                        subject = str(row.get("subject", "(no subject)"))
+                        click.echo(
+                            f"[dry-run] would fetch from {agent_name}: {subject}  ({filename})"
+                        )
+            continue
+
+        fetched = _fetch_from_agent(
+            agent_name,
+            agent_cfg,
+            self_name=self_name,
+            mailboxes=remote_mailboxes,
+            all_mailboxes=all_mailboxes,
+        )
+        new_files.extend(fetched)
+
+    n = len(new_files)
+
+    if not json_output and not dry_run:
+        if n == 0:
+            click.echo("No new messages.")
+        else:
+            click.echo(f"{n} new message(s) fetched into inbox:")
+            for f in new_files:
+                meta = meta_of(f) or {}
+                sender = str(meta.get("from", "unknown"))
+                subject = str(meta.get("subject", "(no subject)"))
+                ts = str(meta.get("timestamp", ""))
+                ts_part = f" [{ts}]" if ts else ""
+                click.echo(f"  {sender}{ts_part}: {subject}  ({f.name})")
+
+    if notify_cmd and n > 0 and not dry_run:
+        subjects = "; ".join(
+            str((meta_of(f) or {}).get("subject", "(no subject)")) for f in new_files
+        )
+        env = os.environ.copy()
+        env["NEW_COUNT"] = str(n)
+        env["SUMMARY"] = f"{n} new message(s): {subjects}"
+        try:
+            subprocess.run(shlex.split(notify_cmd), env=env, timeout=10, check=True)
+        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            click.echo(f"Warning: --notify-cmd failed: {e}", err=True)
+
+    if json_output:
+        payload = {
+            "new_count": n,
+            "files": [f.name for f in new_files],
+            "agents_polled": agents_polled,
+        }
+        click.echo(json.dumps(payload))
 
 
 @agent.command()
