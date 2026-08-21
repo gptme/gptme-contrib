@@ -84,6 +84,32 @@ def test_extract_features_strips_github_pr_url_in_parens():
     assert ra.extract_features(notes) == ["add guide"]
 
 
+def test_extract_features_strips_github_pr_url_with_trailing_period():
+    # A trailing period after the URL must not prevent stripping.
+    notes = "* feat(docs): add guide in https://github.com/gptme/gptme/pull/123."
+    assert ra.extract_features(notes) == ["add guide"]
+
+
+def test_post_places_double_dash_before_tweet_text(monkeypatch):
+    # Tweet text starting with '-' must not be parsed as a CLI option.
+    # _post must insert '--' before the text so Click treats it as positional.
+    captured: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "Tweet ID: 42", "")
+
+    monkeypatch.setattr(ra, "_run", fake_run)
+    ok, tid = ra._post(["post", "-f, --force option-like text"])
+    assert ok
+    assert tid == "42"
+    cmd = captured[0]
+    assert "--" in cmd
+    dash_idx = cmd.index("--")
+    text_idx = cmd.index("-f, --force option-like text")
+    assert dash_idx < text_idx, "'--' must precede the tweet text"
+
+
 def test_compose_fits_and_headlines():
     text = ra.compose_announcement("v0.33.0", NOTES, "gptme/gptme")
     assert text.startswith("gptme v0.33.0 is out")
@@ -317,7 +343,7 @@ def test_post_default_account_clears_environment_profile(monkeypatch):
     monkeypatch.setattr(ra, "_run", fake_run)
 
     assert ra._post(["post", "hello"]) == (True, "123")
-    assert seen["cmd"][-1] == "--headless"
+    assert "--headless" in seen["cmd"]
     assert seen["env"]["TWITTER_ACCOUNT"] == ""
     stripped = {*ra._USER_CONTEXT_VARS, *ra._AUTOMATION_UNSAFE_OAUTH_VARS}
     assert not stripped & seen["env"].keys()
@@ -338,7 +364,7 @@ def test_post_named_account_keeps_inherited_environment(monkeypatch):
 
     assert ra._post(["post", "hello"], account="gptmeorg") == (True, "123")
     assert seen["cmd"][2:4] == ["--account", "gptmeorg"]
-    assert seen["cmd"][-1] == "--headless"
+    assert "--headless" in seen["cmd"]
     assert seen["env"]["TWITTER_ACCOUNT"] == "default"
     assert not set(ra._AUTOMATION_UNSAFE_OAUTH_VARS) & seen["env"].keys()
 

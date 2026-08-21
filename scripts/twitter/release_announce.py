@@ -70,10 +70,10 @@ STABLE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 _FEAT_RE = re.compile(r"^[*-]\s*feat(?:\(([^)]*)\))?!?:\s*(.+)$")
 _AUTHOR_LIST = r"@[\w-]+(?:\s+(?:and|&)\s+@[\w-]+)*"
 _AUTHOR_TRAIL_RE = re.compile(rf"\s+by {_AUTHOR_LIST}[.,;:!?]*\s*$")
-_PR_NUMBER_TRAIL_RE = re.compile(r"\s+(?:in\s+)?\(?#\d+\)?\s*$")
+_PR_NUMBER_TRAIL_RE = re.compile(r"\s+(?:in\s+)?\(?#\d+\)?[.,;:!?]*\s*$")
 _RELEASE_URL_TRAIL_RE = re.compile(
     r"\s+(?:in\s+)?\(?https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/"
-    r"(?:pull|issues)/\d+/?\)?\s*$"
+    r"(?:pull|issues)/\d+/?\)?[.,;:!?]*\s*$"
 )
 
 MAX_TWEET = 270  # headroom under 280
@@ -209,7 +209,13 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
         env["TWITTER_ACCOUNT"] = ""
         for var in _USER_CONTEXT_VARS:
             env.pop(var, None)
-    if args and args[0] == "post":
+    if args and args[0] == "post" and len(args) > 1:
+        # Protect the tweet text (second arg) from being parsed as a CLI option
+        # when it starts with '-'. Restructure to: post [options] --headless -- TEXT
+        text = args[1]
+        rest = args[2:]  # any trailing options like --reply-to, --quote
+        args = ["post", *rest, "--headless", "--", text]
+    elif args and args[0] == "post":
         args = [*args, "--headless"]
     cmd += args
     r = _run(cmd, env=env)
