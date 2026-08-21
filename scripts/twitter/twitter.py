@@ -237,16 +237,18 @@ def _wait_for_callback_file(path: Path, timeout: int) -> tuple[str | None, str |
     while time.monotonic() < deadline:
         if path.exists():
             raw = path.read_text().strip()
-            if raw.startswith("http"):
+            parsed = urlparse(raw)
+            if parsed.scheme in {"http", "https"} and parsed.hostname in {
+                "localhost",
+                "127.0.0.1",
+            }:
                 # oauthlib enforces https on the redirect URL at parse time
                 # (InsecureTransportError). The URL is never fetched — it only
                 # carries state+code — so upgrading the scheme is safe and
                 # matches the OAUTHLIB_INSECURE_TRANSPORT localhost norm.
-                if raw.startswith("http://localhost") or raw.startswith(
-                    "http://127.0.0.1"
-                ):
+                if parsed.scheme == "http":
                     raw = "https://" + raw[len("http://") :]
-                code = parse_qs(urlparse(raw).query).get("code", [None])[0]
+                code = parse_qs(parsed.query).get("code", [None])[0]
                 if code:
                     try:
                         path.unlink()

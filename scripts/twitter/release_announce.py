@@ -41,6 +41,10 @@ _USER_CONTEXT_VARS = (
     "TWITTER_ACCESS_SECRET",
     "TWITTER_EXPECTED_USERNAME",
 )
+_AUTOMATION_UNSAFE_OAUTH_VARS = (
+    "TWITTER_OAUTH_CALLBACK_FILE",
+    "TWITTER_OAUTH_CALLBACK_TIMEOUT",
+)
 
 try:
     import fcntl as _fcntl
@@ -202,7 +206,7 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
     else:
         env = os.environ.copy()
         env["TWITTER_ACCOUNT"] = ""
-        for var in _USER_CONTEXT_VARS:
+        for var in (*_USER_CONTEXT_VARS, *_AUTOMATION_UNSAFE_OAUTH_VARS):
             env.pop(var, None)
     cmd += args
     r = _run(cmd, env=env)
