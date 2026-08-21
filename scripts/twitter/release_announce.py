@@ -64,8 +64,9 @@ STABLE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 #   * feat(cli): add `gptme explain` for offline concept answers by @Bob in #3542
 #   - feat(tools): read-only audit preset (#3543)
 _FEAT_RE = re.compile(r"^[*-]\s*feat(?:\(([^)]*)\))?!?:\s*(.+)$")
+_AUTHOR_LIST = r"@[\w-]+(?:\s+(?:and|&)\s+@[\w-]+)*"
 _TRAIL_RE = re.compile(
-    r"\s*(?:by @[\w-]+(?:\s+in\s+(?:https?://\S+|\(?#\d+\)?))?|(?:in\s+)?(?:https?://\S+|\(?#\d+\)?)|by @[\w-]+)\s*$"
+    rf"\s*(?:by {_AUTHOR_LIST}(?:\s+in\s+(?:https?://\S+|\(?#\d+\)?))?|(?:in\s+)?(?:https?://\S+|\(?#\d+\)?))\s*$"
 )
 
 MAX_TWEET = 270  # headroom under 280
@@ -148,8 +149,13 @@ def extract_features(body: str, limit: int = 5) -> list[str]:
         m = _FEAT_RE.match(line.strip())
         if not m:
             continue
-        desc = _TRAIL_RE.sub("", m.group(2)).strip().rstrip(".")
-        desc = re.sub(r"\s*\(?#\d+\)?", "", desc).strip()
+        desc = m.group(2)
+        while True:
+            stripped = _TRAIL_RE.sub("", desc).strip()
+            if stripped == desc:
+                break
+            desc = stripped
+        desc = desc.rstrip(".")
         # Strip markdown backticks/bold but keep the text
         desc = desc.replace("**", "")
         if desc:

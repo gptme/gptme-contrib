@@ -219,6 +219,15 @@ _USER_CONTEXT_VARS = (
 )
 
 
+def _oauth_callback_timeout() -> int:
+    """Return the callback-file timeout, falling back on invalid config."""
+    try:
+        timeout = int(os.getenv("TWITTER_OAUTH_CALLBACK_TIMEOUT", "1800"))
+    except ValueError:
+        return 1800
+    return timeout if timeout > 0 else 1800
+
+
 def _wait_for_callback_file(path: Path, timeout: int) -> tuple[str | None, str | None]:
     """Poll ``path`` for a pasted OAuth redirect URL; returns (code, full_url)."""
     import time
@@ -486,11 +495,8 @@ def load_twitter_client(
                                 f"[yellow]Waiting for the redirected callback URL to be "
                                 f"written to {_cb_file}..."
                             )
-                            _cb_timeout = int(
-                                os.getenv("TWITTER_OAUTH_CALLBACK_TIMEOUT", "1800")
-                            )
                             response_code, full_url = _wait_for_callback_file(
-                                Path(_cb_file), timeout=_cb_timeout
+                                Path(_cb_file), timeout=_oauth_callback_timeout()
                             )
                         else:
                             response_code, full_url = run_oauth_callback(
@@ -822,13 +828,13 @@ def post(
     text: str, reply_to: str | None, thread: bool, quote_id: str | None = None
 ) -> None:
     """Post a tweet (requires OAuth authentication)"""
-    client = load_twitter_client(require_auth=True)
     if quote_id and thread:
         console.print("[red]--quote cannot be combined with --thread")
         sys.exit(1)
     if quote_id and reply_to:
         console.print("[red]--quote cannot be combined with --reply-to")
         sys.exit(1)
+    client = load_twitter_client(require_auth=True)
 
     # Handle thread posting
     if thread:

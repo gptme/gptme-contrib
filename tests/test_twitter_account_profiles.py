@@ -191,17 +191,31 @@ def test_post_quote_passes_quote_tweet_id(
     assert calls and calls[0]["quote_tweet_id"] == "999"
 
 
-def test_post_rejects_quote_with_reply(
-    twitter_module: Any, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("reply_to", "thread"),
+    [("123", False), (None, True)],
+)
+def test_post_rejects_invalid_quote_combinations_before_auth(
+    twitter_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    reply_to: str | None,
+    thread: bool,
 ) -> None:
-    monkeypatch.setattr(
-        twitter_module,
-        "load_twitter_client",
-        lambda require_auth=True: SimpleNamespace(),
-    )
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("authentication must not run for invalid arguments")
+
+    monkeypatch.setattr(twitter_module, "load_twitter_client", fail_if_called)
 
     with pytest.raises(SystemExit):
-        twitter_module.post("invalid", "123", False, quote_id="999")
+        twitter_module.post("invalid", reply_to, thread, quote_id="999")
+
+
+@pytest.mark.parametrize("value", ["30m", "", "0", "-1"])
+def test_oauth_callback_timeout_falls_back_on_invalid_config(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("TWITTER_OAUTH_CALLBACK_TIMEOUT", value)
+    assert twitter_module._oauth_callback_timeout() == 1800
 
 
 def test_wait_for_callback_file_parses_code(twitter_module: Any, tmp_path) -> None:

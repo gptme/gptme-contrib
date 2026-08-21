@@ -52,6 +52,11 @@ def test_extract_features_strips_standalone_trailing_author():
     assert ra.extract_features(notes) == ["improve caching"]
 
 
+def test_extract_features_strips_multiple_trailing_authors():
+    notes = "* feat(cache): improve caching by @alice and @bob (#100)"
+    assert ra.extract_features(notes) == ["improve caching"]
+
+
 def test_compose_fits_and_headlines():
     text = ra.compose_announcement("v0.33.0", NOTES, "gptme/gptme")
     assert text.startswith("gptme v0.33.0 is out")
