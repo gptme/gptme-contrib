@@ -210,7 +210,8 @@ def _extract_mapping_block(fm_str: str, field: str) -> str:
     parent_indent = len(start.group("indent").expandtabs())
     block: list[str] = []
     for line in fm_str[start.end() :].splitlines():
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             block.append(line)
             continue
         indent = len(line.expandtabs()) - len(line.expandtabs().lstrip())
@@ -328,7 +329,7 @@ def keyword_to_regex(keyword: str) -> re.Pattern[str] | None:
     Mirrors gptme's internal ``_keyword_to_pattern``:
 
     * ``*`` → ``\\w*`` (zero or more word characters).
-    * A bare ``*`` alone returns ``None`` (too broad to be useful).
+    * A keyword made only of ``*`` characters returns ``None`` (too broad to be useful).
 
     Examples::
 
@@ -337,7 +338,7 @@ def keyword_to_regex(keyword: str) -> re.Pattern[str] | None:
         keyword_to_regex("*")               # → None
     """
     keyword = keyword.strip()
-    if not keyword or keyword == "*":
+    if not keyword or not keyword.strip("*"):
         return None
     parts = keyword.split("*")
     escaped = r"\w*".join(re.escape(p) for p in parts)

@@ -57,6 +57,10 @@ class TestKeywordToRegex:
     def test_bare_wildcard_returns_none(self):
         assert keyword_to_regex("*") is None
 
+    def test_wildcard_only_keyword_returns_none(self):
+        assert keyword_to_regex("**") is None
+        assert keyword_to_regex(" *** ") is None
+
     def test_empty_returns_none(self):
         assert keyword_to_regex("") is None
         assert keyword_to_regex("   ") is None
@@ -202,6 +206,26 @@ class TestExtractFrontmatter:
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, _ = extract_frontmatter(content)
         assert fm.get("name") == "issue#42"
+
+    def test_regex_fallback_comment_at_parent_indent(self, monkeypatch):
+        content = (
+            "---\nmatch:\n"
+            "# A same-indent comment remains part of the mapping.\n"
+            "  keywords: [merge conflict]\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("match", {}).get("keywords") == ["merge conflict"]
 
     def test_regex_fallback_session_categories_block(self, monkeypatch):
         # Regression: without PyYAML, session_categories was not parsed,
