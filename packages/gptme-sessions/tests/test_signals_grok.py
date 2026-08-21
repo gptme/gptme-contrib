@@ -480,3 +480,56 @@ def test_task_output_list_result_and_exit_code_error():
     signals = extract_signals_grok(msgs)
     assert signals["git_commits"] == ["1234abc m"]
     assert signals["error_count"] == 1
+
+
+def test_repeated_task_output_counts_failed_task_once():
+    """Polling the same completed task must not inflate its failure count."""
+    failed_result = {
+        "type": "TaskOutput",
+        "Result": {
+            "task_id": "failed-task",
+            "command": "pytest",
+            "exit_code": 1,
+            "output": "fail",
+        },
+    }
+    msgs = [
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-1",
+            "status": "completed",
+            "rawOutput": failed_result,
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-2",
+            "status": "completed",
+            "rawOutput": failed_result,
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["error_count"] == 1
+
+
+def test_task_outputs_without_ids_remain_distinct_failures():
+    """Only stable task IDs can safely identify duplicate task output."""
+    failed_result = {
+        "type": "TaskOutput",
+        "Result": {"command": "pytest", "exit_code": 1, "output": "fail"},
+    }
+    msgs = [
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-1",
+            "status": "completed",
+            "rawOutput": failed_result,
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-2",
+            "status": "completed",
+            "rawOutput": failed_result,
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["error_count"] == 2

@@ -2309,6 +2309,7 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
     # still sees the output (2026-08-20: 6 of 8 productive grok sessions graded
     # noop because commits were invisible to the old inline-output path).
     background_tasks: dict[str, dict[str, str]] = {}  # task_id -> command/output_file
+    counted_error_tasks: set[str] = set()
 
     def _scan_command_output(command: str, output_text: str) -> None:
         if not command or not output_text:
@@ -2337,7 +2338,10 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
         exit_code = result.get("exit_code")
         if isinstance(exit_code, int) and exit_code != 0:
             nonlocal error_count
-            error_count += 1
+            if not task_id or task_id not in counted_error_tasks:
+                error_count += 1
+            if task_id:
+                counted_error_tasks.add(task_id)
         _scan_command_output(command, output_text)
         if task is not None and output_text:
             task["seen_output"] = "1"
