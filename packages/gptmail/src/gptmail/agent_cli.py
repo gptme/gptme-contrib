@@ -622,14 +622,20 @@ def _remote_pending_rows(
     recipient: str,
     mailboxes: list[str],
     all_mailboxes: bool,
-) -> list[dict]:
+) -> list[dict] | None:
+    """Return pending message rows from a remote agent, or None if unreachable.
+
+    Returns ``None`` when the agent could not be contacted (missing config,
+    SSH failure, or timeout) so callers can distinguish "unreachable" from
+    "reachable but no messages" (which returns ``[]``).
+    """
     missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
     if missing:
         click.echo(
             f"Warning: skipping {agent_name}; missing required key(s): {', '.join(missing)}",
             err=True,
         )
-        return []
+        return None
     cmd = ["uv", "run", "gptmail", "agent", "pending", "--for", recipient, "--json", "--local-only"]
     if all_mailboxes:
         cmd.append("--all-mailboxes")
@@ -651,7 +657,7 @@ def _remote_pending_rows(
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         click.echo(f"Warning: failed to collect pending rows from {agent_name}: {e}", err=True)
-        return []
+        return None
     try:
         payload = json.loads(result.stdout or "[]")
     except json.JSONDecodeError as e:
@@ -686,15 +692,15 @@ def _fleet_pending_rows(
     for agent_name, agent in agents.items():
         if agent_name == self_name:
             continue
-        rows.extend(
-            _remote_pending_rows(
-                agent_name,
-                agent,
-                recipient=recipient,
-                mailboxes=mailboxes,
-                all_mailboxes=all_mailboxes,
-            )
+        remote_rows = _remote_pending_rows(
+            agent_name,
+            agent,
+            recipient=recipient,
+            mailboxes=mailboxes,
+            all_mailboxes=all_mailboxes,
         )
+        if remote_rows is not None:
+            rows.extend(remote_rows)
     rows.sort(
         key=lambda meta: (
             str(meta.get("timestamp", "")),
@@ -1026,22 +1032,17 @@ def _fetch_from_agent(
     Logs SSH/SCP errors as warnings so one unreachable agent doesn't abort the
     whole pull — the caller collects partial results and reports the total.
     """
-    rows = _remote_pending_rows(
+    _rows = _remote_pending_rows(
         agent_name,
         agent,
         recipient=self_name,
         mailboxes=mailboxes,
         all_mailboxes=all_mailboxes,
     )
-    # _remote_pending_rows returns an empty list both for "no messages" and for
-    # "SSH failed".  We distinguish them by checking whether the agent has an
-    # outbox we'd expect to reach — but that requires a second SSH hop.  Instead
-    # we tag each row with "_fetch_failed" inside _remote_pending_rows itself.
-    # For now, rely on the warning already printed by _remote_pending_rows: if it
-    # echoed a warning and returned [], the agent was unreachable.  We surface
-    # agent_failed=True when rows is None (our sentinel for SSH failure).
-    # Since _remote_pending_rows currently returns [] on failure, agent_failed
-    # is determined by checking the ``_agent_reachable`` side-channel below.
+    # None means SSH/config failure (unreachable); [] means reachable but no messages.
+    if _rows is None:
+        return [], True
+    rows = _rows
     fallback_mailbox = fallback_mailbox or (mailboxes[0] if mailboxes else "default")
     ssh_target = agent["ssh"]
     workspace = agent["workspace"]
@@ -1177,14 +1178,17 @@ def pull(
 
         agents_polled.append(agent_name)
         if dry_run:
-            rows = _remote_pending_rows(
+            _dry_rows = _remote_pending_rows(
                 agent_name,
                 agent_cfg,
                 recipient=self_name,
                 mailboxes=remote_mailboxes,
                 all_mailboxes=all_mailboxes,
             )
-            for row in rows:
+            if _dry_rows is None:
+                failed_agents.append(agent_name)
+                continue
+            for row in _dry_rows:
                 filename = str(row.get("file") or "")
                 try:
                     dest = _pull_destination(row, fallback_mailbox=mailboxes[0])

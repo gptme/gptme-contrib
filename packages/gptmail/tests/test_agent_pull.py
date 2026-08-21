@@ -746,3 +746,34 @@ def test_pull_json_failed_agents_populated_on_scp_failure(
     payload = json.loads(json_line)
     assert "gordon" in payload["failed_agents"]
     assert payload["new_count"] == 0
+
+
+def test_pull_json_failed_agents_populated_on_ssh_failure(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pull --json`` lists agents where SSH listing failed in ``failed_agents``.
+
+    This covers the case where ``_remote_pending_rows`` returns None (SSH failure)
+    rather than a list — previously the loop never ran so ``any_scp_failure``
+    stayed False and the agent was silently omitted from ``failed_agents``.
+    """
+
+    # Simulate SSH failure: _remote_pending_rows returns None
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: None,
+    )
+
+    result = CliRunner().invoke(agent, ["pull", "--json"])
+    assert result.exit_code == 0, result.output
+    json_line = next(
+        (line for line in reversed(result.output.splitlines()) if line.startswith("{")),
+        None,
+    )
+    assert json_line is not None, f"No JSON in output: {result.output!r}"
+    payload = json.loads(json_line)
+    assert (
+        "gordon" in payload["failed_agents"]
+    ), f"SSH-unreachable agent missing from failed_agents: {payload}"
+    assert payload["new_count"] == 0
