@@ -67,6 +67,23 @@ def test_extract_features_strips_github_pr_url():
     assert ra.extract_features(notes) == ["add guide"]
 
 
+def test_extract_features_strips_author_with_trailing_period():
+    # Trailing punctuation after author handle must not block stripping.
+    notes = "* feat(cache): improve caching by @alice."
+    assert ra.extract_features(notes) == ["improve caching"]
+
+
+def test_extract_features_strips_author_with_trailing_comma():
+    notes = "* feat(cache): improve caching by @alice,"
+    assert ra.extract_features(notes) == ["improve caching"]
+
+
+def test_extract_features_strips_github_pr_url_in_parens():
+    # URL wrapped in parentheses must still be stripped.
+    notes = "* feat(docs): add guide (https://github.com/gptme/gptme/pull/123)"
+    assert ra.extract_features(notes) == ["add guide"]
+
+
 def test_compose_fits_and_headlines():
     text = ra.compose_announcement("v0.33.0", NOTES, "gptme/gptme")
     assert text.startswith("gptme v0.33.0 is out")

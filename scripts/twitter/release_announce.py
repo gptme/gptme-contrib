@@ -69,11 +69,11 @@ STABLE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 #   - feat(tools): read-only audit preset (#3543)
 _FEAT_RE = re.compile(r"^[*-]\s*feat(?:\(([^)]*)\))?!?:\s*(.+)$")
 _AUTHOR_LIST = r"@[\w-]+(?:\s+(?:and|&)\s+@[\w-]+)*"
-_AUTHOR_TRAIL_RE = re.compile(rf"\s+by {_AUTHOR_LIST}\s*$")
+_AUTHOR_TRAIL_RE = re.compile(rf"\s+by {_AUTHOR_LIST}[.,;:!?]*\s*$")
 _PR_NUMBER_TRAIL_RE = re.compile(r"\s+(?:in\s+)?\(?#\d+\)?\s*$")
 _RELEASE_URL_TRAIL_RE = re.compile(
-    r"\s+(?:in\s+)?https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/"
-    r"(?:pull|issues)/\d+/?\s*$"
+    r"\s+(?:in\s+)?\(?https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/"
+    r"(?:pull|issues)/\d+/?\)?\s*$"
 )
 
 MAX_TWEET = 270  # headroom under 280
