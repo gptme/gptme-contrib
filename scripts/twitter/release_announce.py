@@ -33,6 +33,15 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+_USER_CONTEXT_VARS = (
+    "TWITTER_OAUTH2_ACCESS_TOKEN",
+    "TWITTER_OAUTH2_REFRESH_TOKEN",
+    "TWITTER_OAUTH2_EXPIRES_AT",
+    "TWITTER_ACCESS_TOKEN",
+    "TWITTER_ACCESS_SECRET",
+    "TWITTER_EXPECTED_USERNAME",
+)
+
 try:
     import fcntl as _fcntl
 except ImportError:  # pragma: no cover - Windows
@@ -182,7 +191,8 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
     else:
         env = os.environ.copy()
         env.pop("TWITTER_ACCOUNT", None)
-        env.pop("TWITTER_EXPECTED_USERNAME", None)
+        for var in _USER_CONTEXT_VARS:
+            env.pop(var, None)
     cmd += args
     r = _run(cmd, env=env)
     out = r.stdout + r.stderr

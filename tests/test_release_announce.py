@@ -265,7 +265,8 @@ def test_main_adds_quote_after_skip_quote_run(monkeypatch, tmp_path):
 
 def test_post_default_account_clears_environment_profile(monkeypatch):
     monkeypatch.setenv("TWITTER_ACCOUNT", "gptmeorg")
-    monkeypatch.setenv("TWITTER_EXPECTED_USERNAME", "gptmeorg")
+    for var in ra._USER_CONTEXT_VARS:
+        monkeypatch.setenv(var, f"org-{var.lower()}")
     seen: dict = {}
 
     def fake_run(cmd, **kwargs):
@@ -276,7 +277,7 @@ def test_post_default_account_clears_environment_profile(monkeypatch):
 
     assert ra._post(["post", "hello"]) == (True, "123")
     assert "TWITTER_ACCOUNT" not in seen["env"]
-    assert "TWITTER_EXPECTED_USERNAME" not in seen["env"]
+    assert not set(ra._USER_CONTEXT_VARS) & seen["env"].keys()
 
 
 def test_post_named_account_keeps_inherited_environment(monkeypatch):

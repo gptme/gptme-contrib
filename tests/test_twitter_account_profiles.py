@@ -211,3 +211,16 @@ def test_wait_for_callback_file_parses_code(twitter_module: Any, tmp_path) -> No
     assert code == "abc123"
     assert url.startswith("https://localhost:9876/callback")
     assert not f.exists()
+
+
+def test_wait_for_callback_file_keeps_partial_url(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    f = tmp_path / "cb.txt"
+    f.write_text("http://localhost:9876/callback?state=x")
+    monotonic_values = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr("time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    assert twitter_module._wait_for_callback_file(f, timeout=1) == (None, None)
+    assert f.exists()

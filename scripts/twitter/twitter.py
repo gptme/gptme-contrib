@@ -238,11 +238,12 @@ def _wait_for_callback_file(path: Path, timeout: int) -> tuple[str | None, str |
                 ):
                     raw = "https://" + raw[len("http://") :]
                 code = parse_qs(urlparse(raw).query).get("code", [None])[0]
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-                return code, raw
+                if code:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    return code, raw
         time.sleep(2)
     return None, None
 
