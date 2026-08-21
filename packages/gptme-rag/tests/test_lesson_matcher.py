@@ -573,6 +573,25 @@ class TestExtractFrontmatter:
         cats = fm.get("match", {}).get("session_categories", [])
         assert cats == ["code"], f'expected ["code"] but got {cats!r}'
 
+    def test_regex_fallback_single_quoted_doubled_escape(self, monkeypatch):
+        # Regression: YAML single-quoted scalars use '' (doubled single quote)
+        # to embed a literal single quote. The old code terminated the string at
+        # the first '' and returned only the prefix (e.g. 'it''s' → 'it' instead
+        # of the correct "it's"), silently corrupting lesson names/descriptions.
+        content = "---\nstatus: active\nname: 'it''s a lesson'\n---\n# Title\nBody.\n"
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("name") == "it's a lesson"
+
 
 # ---------------------------------------------------------------------------
 # scan_lessons

@@ -106,13 +106,32 @@ def _clean_plain_scalar(raw: str) -> str:
     YAML only begins a comment at a ``#`` that starts the value or is preceded
     by whitespace, so ``a#b`` survives while ``a  # b`` becomes ``a``. Quoted
     scalars keep their contents verbatim (a ``#`` inside quotes is data).
+
+    Single-quoted YAML scalars use ``''`` (doubled single quote) as the only
+    escape sequence for a literal single quote (e.g. ``'it''s'`` → ``it's``).
     """
     value = raw.strip()
     if value[:1] in {"'", '"'}:
         quote = value[0]
+        if quote == "'":
+            # YAML single-quoted: '' is the only escape sequence for a literal '
+            result: list[str] = []
+            i = 1
+            while i < len(value):
+                ch = value[i]
+                if ch == "'" and i + 1 < len(value) and value[i + 1] == "'":
+                    result.append("'")
+                    i += 2
+                elif ch == "'":
+                    return "".join(result)
+                else:
+                    result.append(ch)
+                    i += 1
+            return "".join(result).strip()
+        # Double-quoted: backslash escape only
         escaped = False
         for index, char in enumerate(value[1:], start=1):
-            if quote == '"' and char == "\\" and not escaped:
+            if char == "\\" and not escaped:
                 escaped = True
                 continue
             if char == quote and not escaped:
