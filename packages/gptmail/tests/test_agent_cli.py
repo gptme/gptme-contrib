@@ -841,7 +841,7 @@ def test_remote_pending_rows_warns_on_missing_transport(capsys: pytest.CaptureFi
     )
 
     captured = capsys.readouterr()
-    assert rows == []
+    assert rows is None
     assert "Warning: skipping bob; missing required key(s): ssh" in captured.err
 
 
