@@ -191,6 +191,19 @@ def test_post_quote_passes_quote_tweet_id(
     assert calls and calls[0]["quote_tweet_id"] == "999"
 
 
+def test_post_rejects_quote_with_reply(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        twitter_module,
+        "load_twitter_client",
+        lambda require_auth=True: SimpleNamespace(),
+    )
+
+    with pytest.raises(SystemExit):
+        twitter_module.post("invalid", "123", False, quote_id="999")
+
+
 def test_wait_for_callback_file_parses_code(twitter_module: Any, tmp_path) -> None:
     f = tmp_path / "cb.txt"
     f.write_text("http://localhost:9876/callback?state=x&code=abc123\n")

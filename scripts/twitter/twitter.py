@@ -825,6 +825,9 @@ def post(
     if quote_id and thread:
         console.print("[red]--quote cannot be combined with --thread")
         sys.exit(1)
+    if quote_id and reply_to:
+        console.print("[red]--quote cannot be combined with --reply-to")
+        sys.exit(1)
 
     # Handle thread posting
     if thread:
