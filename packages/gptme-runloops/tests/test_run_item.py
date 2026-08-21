@@ -2307,6 +2307,30 @@ def test_invalid_notification_map_is_treated_as_unmapped(tmp_path, map_value) ->
     assert (config.state_dir / "notif-1.state").read_text() == "invalid-map-state"
 
 
+def test_unreadable_notification_map_is_treated_as_unmapped(
+    tmp_path, monkeypatch
+) -> None:
+    """A map read failure cannot establish ownership or strand pending state."""
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    map_file = pending / "notif-1.map"
+    map_file.write_text("gptme/gptme#3468")
+    (pending / "notif-1.state").write_text("unreadable-map-state")
+    original_read_text = Path.read_text
+
+    def fail_map_read(path, *args, **kwargs):
+        if path == map_file:
+            raise OSError("simulated read failure")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_map_read)
+
+    promote_notification_states(config)
+
+    assert (config.state_dir / "notif-1.state").read_text() == "unreadable-map-state"
+
+
 def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:
     config = make_config(tmp_path)
     config.pending_state_dir.mkdir(parents=True)

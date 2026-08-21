@@ -1075,10 +1075,8 @@ def promote_notification_states(config: RunItemConfig) -> None:
         if map_file.is_file():
             try:
                 owner = map_file.read_text(encoding="utf-8").strip()
-            except UnicodeDecodeError:
-                pass  # corrupt map cannot prove item ownership
-            except OSError:
-                continue  # transient read failure: preserve the safer ownership gate
+            except (OSError, UnicodeDecodeError):
+                pass  # unreadable map cannot prove item ownership
             else:
                 if owner:
                     continue  # owned by an item; its worker's outcome decides
