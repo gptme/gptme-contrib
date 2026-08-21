@@ -2287,6 +2287,46 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
     detail_by_value: dict[str, dict[str, object]] = {}
     call_id_to_input: dict[str, dict] = {}
     current_batch_has_tool = False
+    # grok CLI >=0.2.117 runs terminal commands as BACKGROUND TASKS: the
+    # run_terminal_command completed update carries only a BackgroundTaskStarted
+    # envelope (task_id, output_file) — the actual output arrives later via
+    # get_command_or_subagent_output TaskOutput results, or only ever lands in
+    # the on-disk output_file. Track pending tasks so commit/journal detection
+    # still sees the output (2026-08-20: 6 of 8 productive grok sessions graded
+    # noop because commits were invisible to the old inline-output path).
+    background_tasks: dict[str, dict[str, str]] = {}  # task_id -> command/output_file
+
+    def _scan_command_output(command: str, output_text: str) -> None:
+        if not command or not output_text:
+            return
+        if "git commit" in command or "git-safe-commit" in command:
+            for commit_match in _COMMIT_RE.finditer(output_text):
+                commit_value = f"{commit_match.group(1)} {commit_match.group(2).strip()}"
+                if commit_value not in git_commits:
+                    git_commits.append(commit_value)
+                    _record_deliverable_detail(
+                        detail_by_value,
+                        value=commit_value,
+                        kind="git_commit",
+                        provenance_class="tool_authored",
+                        evidence={
+                            "source": "trajectory",
+                            "tool_name": "run_terminal_command",
+                        },
+                    )
+
+    def _consume_task_output(result: dict) -> None:
+        task_id = str(result.get("task_id", ""))
+        task = background_tasks.get(task_id)
+        command = str(result.get("command", "") or (task or {}).get("command", ""))
+        output_text = str(result.get("output", "") or "")
+        exit_code = result.get("exit_code")
+        if isinstance(exit_code, int) and exit_code != 0:
+            nonlocal error_count
+            error_count += 1
+        _scan_command_output(command, output_text)
+        if task is not None and output_text:
+            task["seen_output"] = "1"
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -2331,19 +2371,33 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
 
             raw_input = call_id_to_input.get(call_id, {})
             command = raw_input.get("command", "") or raw_output.get("command", "")
-            if command and ("git commit" in command or "git-safe-commit" in command):
-                output_text = raw_output.get("output_for_prompt", "")
-                for commit_match in _COMMIT_RE.finditer(output_text):
-                    commit_value = f"{commit_match.group(1)} {commit_match.group(2).strip()}"
-                    if commit_value not in git_commits:
-                        git_commits.append(commit_value)
-                        _record_deliverable_detail(
-                            detail_by_value,
-                            value=commit_value,
-                            kind="git_commit",
-                            provenance_class="tool_authored",
-                            evidence={"source": "trajectory", "tool_name": "run_terminal_command"},
-                        )
+
+            if raw_output.get("type") == "BackgroundTaskStarted":
+                task_id = str(raw_output.get("task_id", ""))
+                if task_id:
+                    background_tasks[task_id] = {
+                        "command": str(command or raw_output.get("command", "")),
+                        "output_file": str(raw_output.get("output_file", "")),
+                        "seen_output": "",
+                    }
+                continue
+
+            if raw_output.get("type") == "TaskOutput":
+                result = raw_output.get("Result")
+                results = (
+                    result
+                    if isinstance(result, list)
+                    else [result]
+                    if isinstance(result, dict)
+                    else []
+                )
+                for res in results:
+                    if isinstance(res, dict):
+                        _consume_task_output(res)
+                continue
+
+            # Legacy inline-output shape (grok CLI < 0.2.117)
+            _scan_command_output(command, raw_output.get("output_for_prompt", ""))
 
         elif rec_type == "text" and current_batch_has_tool:
             steps += 1
@@ -2351,6 +2405,25 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
 
     if current_batch_has_tool:
         steps += 1
+
+    # Background git-commit commands whose output never re-entered the
+    # transcript: fall back to the on-disk output file (persists under
+    # ~/.grok/sessions/.../terminal/).
+    for task in background_tasks.values():
+        if task.get("seen_output"):
+            continue
+        command = task.get("command", "")
+        if "git commit" not in command and "git-safe-commit" not in command:
+            continue
+        output_file = task.get("output_file", "")
+        if output_file:
+            try:
+                _scan_command_output(
+                    command,
+                    Path(output_file).read_text(errors="replace")[:200_000],
+                )
+            except OSError:
+                pass
 
     deliverables = list(dict.fromkeys(git_commits + file_writes))
     deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)

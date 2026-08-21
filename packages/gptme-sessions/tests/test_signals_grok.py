@@ -309,3 +309,112 @@ def test_extract_usage_grok_cache_read_tokens_included():
     ]
     usage = extract_usage_grok(msgs)
     assert usage["cache_read_input_tokens"] == 29184
+
+
+def test_background_task_commit_via_task_output():
+    """grok CLI >=0.2.117: run_terminal_command completes with a
+    BackgroundTaskStarted envelope; output arrives via a later
+    get_command_or_subagent_output TaskOutput result. Commits must be detected
+    there (2026-08-20: 6/8 productive sessions graded noop without this)."""
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git-safe-commit --scope-only f.py -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": "/nonexistent/t1.log",
+                "status": "running",
+            },
+        },
+        {
+            "type": "tool_call",
+            "toolCallId": "c2",
+            "toolName": "get_command_or_subagent_output",
+            "rawInput": {"task_ids": ["t1"]},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c2",
+            "status": "completed",
+            "rawOutput": {
+                "type": "TaskOutput",
+                "Result": {
+                    "task_id": "t1",
+                    "command": "git-safe-commit --scope-only f.py -m 'fix: x'",
+                    "exit_code": 0,
+                    "output": "[master abc1234] fix: x\n 1 file changed",
+                },
+            },
+        },
+        {"type": "text", "data": "done"},
+    ]
+    signals = extract_signals_grok(msgs)
+    assert signals["git_commits"] == ["abc1234 fix: x"]
+    assert signals["deliverables"] == ["abc1234 fix: x"]
+
+
+def test_background_task_commit_via_output_file(tmp_path):
+    """Output never re-entered the transcript: fall back to the on-disk log."""
+    log = tmp_path / "t9.log"
+    log.write_text("[master beef123] feat: y\n 2 files changed")
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'feat: y'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t9",
+                "output_file": str(log),
+                "status": "running",
+            },
+        },
+        {"type": "text", "data": "done"},
+    ]
+    signals = extract_signals_grok(msgs)
+    assert signals["git_commits"] == ["beef123 feat: y"]
+
+
+def test_task_output_list_result_and_exit_code_error():
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "get_command_or_subagent_output",
+            "rawInput": {"task_ids": ["a", "b"]},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "TaskOutput",
+                "Result": [
+                    {
+                        "task_id": "a",
+                        "command": "git-safe-commit x -m 'm'",
+                        "exit_code": 0,
+                        "output": "[master 1234abc] m",
+                    },
+                    {"task_id": "b", "command": "pytest", "exit_code": 1, "output": "fail"},
+                ],
+            },
+        },
+    ]
+    signals = extract_signals_grok(msgs)
+    assert signals["git_commits"] == ["1234abc m"]
+    assert signals["error_count"] == 1
