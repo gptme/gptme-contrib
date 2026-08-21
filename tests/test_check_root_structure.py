@@ -45,6 +45,17 @@ def test_get_repo_root_reports_non_git_directory(capsys):
     )
 
 
+def test_get_repo_root_preserves_non_utf8_path_bytes():
+    """Repository paths should round-trip undecodable bytes via surrogateescape."""
+    import check_root_structure
+
+    mock_result = MagicMock(stdout=b"/tmp/repo-\xff\n")
+    with patch("subprocess.run", return_value=mock_result):
+        repo_root = check_root_structure.get_repo_root()
+
+    assert str(repo_root).encode("utf-8", errors="surrogateescape") == b"/tmp/repo-\xff"
+
+
 def test_get_tracked_entries_reports_git_failure(capsys):
     """main() should fail cleanly when git cannot read the tracked files."""
     import check_root_structure

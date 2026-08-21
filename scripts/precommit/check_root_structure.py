@@ -57,10 +57,9 @@ def get_repo_root() -> Path:
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         capture_output=True,
-        text=True,
         check=True,
     )
-    return Path(result.stdout.strip())
+    return Path(result.stdout.rstrip(b"\r\n").decode("utf-8", errors="surrogateescape"))
 
 
 def get_tracked_root_entries(repo_root: "Path | None" = None) -> set[str]:
