@@ -391,3 +391,96 @@ def test_generation_pre_hook_noop_when_bypass_env_set(
 
     # messages must be unchanged — no LLM call, no summarization
     assert messages == original
+
+
+def test_call_summarizer_memoizes_unchanged_source() -> None:
+    """An unchanged (context, model) source must invoke the LLM only once.
+
+    Phase 1.2 regression: preparation runs twice over the same stored log must
+    reuse the cached summary instead of re-calling the summarizer LLM. Without
+    memoization the two calls below would invoke `_chat_complete` twice.
+    """
+    calls: list[str] = []
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append(model)
+        return "- Executed command: found result\n- Task-level progress: done", None
+
+    with patch(
+        "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+        return_value=SimpleNamespace(full="openai/gpt-4o"),
+    ):
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer._chat_complete",
+            side_effect=fake_chat_complete,
+        ):
+            first = _call_summarizer("unchanged-context-source")
+            second = _call_summarizer("unchanged-context-source")
+
+    assert first == second
+    assert first == "- Executed command: found result\n- Task-level progress: done"
+    # The summarizer LLM must run exactly once for an unchanged source.
+    assert calls == ["openai/gpt-4o"]
+
+
+def test_call_summarizer_memoize_is_model_scoped() -> None:
+    """The memo key must include model identity: a different model re-calls."""
+    calls: list[str] = []
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append(model)
+        return f"summary from {model}", None
+
+    def run_with_model(model: str) -> str | None:
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+            return_value=SimpleNamespace(full=model),
+        ):
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._chat_complete",
+                side_effect=fake_chat_complete,
+            ):
+                return _call_summarizer("same-source")
+
+    with patch(
+        "tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE",
+        {},
+    ):
+        a = run_with_model("openai/gpt-4o")
+        b = run_with_model("openai/gpt-4o")
+        c = run_with_model("anthropic/claude-4")
+
+    assert a == "summary from openai/gpt-4o"
+    assert b == "summary from openai/gpt-4o"
+    assert c == "summary from anthropic/claude-4"
+    # Same model twice (1 call), different model once (1 call) = 2 total.
+    assert calls == ["openai/gpt-4o", "anthropic/claude-4"]
+
+
+def test_call_summarizer_memoize_is_source_scoped() -> None:
+    """The memo key must include source content: a changed source re-calls."""
+    calls: list[str] = []
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append("call")
+        return "- summary", None
+
+    with patch(
+        "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+        return_value=SimpleNamespace(full="openai/gpt-4o"),
+    ):
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer._chat_complete",
+            side_effect=fake_chat_complete,
+        ):
+            _call_summarizer("source-one")
+            _call_summarizer("source-one")  # cached
+            _call_summarizer("source-two")  # different source -> re-call
+
+    assert calls == ["call", "call"]

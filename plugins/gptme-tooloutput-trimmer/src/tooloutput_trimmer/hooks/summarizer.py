@@ -13,6 +13,7 @@ pruning alone at ~+3.4% token cost.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -81,6 +82,31 @@ Summary of previous tool calls:
 - [action]: [result]
 - [action]: [result]
 - Task-level progress: [what's been done, what's pending]"""
+
+# Bounded content-addressable memo of LLM-produced summaries. The source is the
+# summarization context string plus the model identity; an unchanged source and
+# model reuse the cached summary so repeated preparation passes over the same
+# stored log do not re-bill the summarizer LLM (Phase 1.2 of the append-only
+# request-construction audit). The key uses a SHA-256 of the context so a large
+# tool-output blob is not held in memory and membership is O(1).
+_SUMMARY_CACHE: dict[tuple[str, str], str] = {}
+_SUMMARY_CACHE_MAX = 64
+
+
+def _cache_summary(context: str, model: str, summary: str) -> None:
+    """Store a summary under (context-hash, model), bounding cache size."""
+    key = (hashlib.sha256(context.encode()).hexdigest(), model)
+    if len(_SUMMARY_CACHE) >= _SUMMARY_CACHE_MAX and key not in _SUMMARY_CACHE:
+        # Evict an arbitrary entry to keep the cache bounded. This is a plain
+        # memo, not an LRU: correctness is unaffected by which entry goes.
+        _SUMMARY_CACHE.pop(next(iter(_SUMMARY_CACHE)))
+    _SUMMARY_CACHE[key] = summary
+
+
+def _cached_summary(context: str, model: str) -> str | None:
+    """Return a cached summary for (context-hash, model), or None."""
+    key = (hashlib.sha256(context.encode()).hexdigest(), model)
+    return _SUMMARY_CACHE.get(key)
 
 
 @dataclass
@@ -171,14 +197,21 @@ def _build_summarization_context(
 
 
 def _call_summarizer(context: str) -> str | None:
-    """Call the summarizer LLM to produce a summary of the given context.
+    """Produce a summary of the given context, memoized by source and model.
 
-    Returns the summary text, or None if summarization fails.
+    Returns the summary text, or None if summarization fails. An unchanged
+    (context, model) pair reuses the cached summary so repeated preparation
+    passes over the same stored log do not re-bill the summarizer LLM.
     """
     model = get_default_model_summary()
     if not model:
         logger.warning("summarizer: no default model set, skipping")
         return None
+
+    cached = _cached_summary(context, model.full)
+    if cached is not None:
+        logger.debug("summarizer: using cached summary (%d chars)", len(cached))
+        return cached
 
     prompt = SUMMARIZATION_PROMPT.format(context=context)
     msgs = [
@@ -198,7 +231,9 @@ def _call_summarizer(context: str) -> str | None:
             "summarizer: produced %d chars",
             len(summary),
         )
-        return summary.strip()
+        summary = summary.strip()
+        _cache_summary(context, model.full, summary)
+        return summary
     except Exception:
         logger.exception("summarizer: LLM call failed")
         return None
@@ -238,7 +273,7 @@ def apply_summarization(
     # Take the W most recently evicted pairs
     recent_evicted = evictable[-config.window :]
     # Build the summary message content
-    summary_content = f"{SUMMARIZATION_MARKER}\n" f"{summary}"
+    summary_content = f"{SUMMARIZATION_MARKER}\n{summary}"
     summary_msg = messages[recent_evicted[0]].replace(content=summary_content)
 
     # Rebuild message list: replace the first evicted position with summary,
