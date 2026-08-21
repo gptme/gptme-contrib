@@ -200,13 +200,14 @@ def compose_quote(tag: str, repo: str) -> str:
 def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None]:
     """Run twitter.py post ... and return success plus the created tweet id."""
     cmd = [sys.executable, str(TWITTER_CLI)]
-    env = None
+    env = os.environ.copy()
+    for var in _AUTOMATION_UNSAFE_OAUTH_VARS:
+        env.pop(var, None)
     if account:
         cmd += ["--account", account]
     else:
-        env = os.environ.copy()
         env["TWITTER_ACCOUNT"] = ""
-        for var in (*_USER_CONTEXT_VARS, *_AUTOMATION_UNSAFE_OAUTH_VARS):
+        for var in _USER_CONTEXT_VARS:
             env.pop(var, None)
     cmd += args
     r = _run(cmd, env=env)

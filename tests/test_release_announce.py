@@ -298,6 +298,8 @@ def test_post_default_account_clears_environment_profile(monkeypatch):
 
 def test_post_named_account_keeps_inherited_environment(monkeypatch):
     monkeypatch.setenv("TWITTER_ACCOUNT", "default")
+    for var in ra._AUTOMATION_UNSAFE_OAUTH_VARS:
+        monkeypatch.setenv(var, f"unsafe-{var.lower()}")
     seen: dict = {}
 
     def fake_run(cmd, **kwargs):
@@ -309,7 +311,8 @@ def test_post_named_account_keeps_inherited_environment(monkeypatch):
 
     assert ra._post(["post", "hello"], account="gptmeorg") == (True, "123")
     assert seen["cmd"][2:4] == ["--account", "gptmeorg"]
-    assert seen["env"] is None
+    assert seen["env"]["TWITTER_ACCOUNT"] == "default"
+    assert not set(ra._AUTOMATION_UNSAFE_OAUTH_VARS) & seen["env"].keys()
 
 
 def test_main_does_not_retry_success_without_tweet_id(monkeypatch, tmp_path):
