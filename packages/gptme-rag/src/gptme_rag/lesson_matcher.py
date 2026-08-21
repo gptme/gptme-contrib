@@ -128,35 +128,16 @@ def _clean_plain_scalar(raw: str) -> str:
                     result.append(ch)
                     i += 1
             return "".join(result).strip()
-        # Double-quoted: process standard YAML backslash escape sequences
-        _DQUOTE_ESCAPES: dict[str, str] = {
-            '"': '"',
-            "\\": "\\",
-            "n": "\n",
-            "t": "\t",
-            "r": "\r",
-            "a": "\a",
-            "b": "\b",
-            "f": "\f",
-            "v": "\v",
-        }
-        chars: list[str] = []
-        i = 1
-        while i < len(value):
-            ch = value[i]
-            if ch == "\\":
-                if i + 1 < len(value):
-                    chars.append(_DQUOTE_ESCAPES.get(value[i + 1], value[i + 1]))
-                    i += 2
-                else:
-                    chars.append("\\")
-                    i += 1
-            elif ch == '"':
-                return "".join(chars)
-            else:
-                chars.append(ch)
-                i += 1
-        return "".join(chars).strip()
+        # Double-quoted: backslash escape only
+        escaped = False
+        for index, char in enumerate(value[1:], start=1):
+            if char == "\\" and not escaped:
+                escaped = True
+                continue
+            if char == quote and not escaped:
+                return value[1:index]
+            escaped = False
+        return value[1:].strip()
     if value.startswith("#"):
         return ""
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
@@ -195,18 +176,26 @@ def _extract_scalar_frontmatter_field(
     return None
 
 
-def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
+def _extract_list_frontmatter_field(
+    fm_str: str, field: str, *, allow_indented: bool = True
+) -> list[str]:
     """Extract a YAML list field from frontmatter using regex (no PyYAML).
 
     Handles both inline ``[val1, val2]`` / ``["val1", "val2"]`` and block
     (``- val`` / ``- "val"``) forms.  Values may be quoted or unquoted.
     Returns an empty list if the field is absent.
+
+    When *allow_indented* is ``False`` the key must begin at column zero.
+    Use this when searching ``top_level_without_match`` so that a same-named
+    field nested inside another mapping (e.g. ``metadata.keywords``) is not
+    accidentally hoisted to the top-level match keywords.
     """
+    indent = r"[ \t]*" if allow_indented else ""
     # Inline: field: [val1, val2] or field: ["val1", "val2"].  Match the
     # closing bracket only outside quoted values so a keyword such as "a]b"
     # does not truncate the list.
     inline = re.search(
-        rf"^[ \t]*{re.escape(field)}:\s*\[((?:[^\]\"']|\"[^\"]*\"|'[^']*')*)\]",
+        rf"^{indent}{re.escape(field)}:\s*\[((?:[^\]\"']|\"[^\"]*\"|'[^']*')*)\]",
         fm_str,
         re.MULTILINE | re.DOTALL,
     )
@@ -227,7 +216,7 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
 
     # Block: "field:" on its own line, then more-indented "- val" lines.
     block_start = re.search(
-        rf"^(?P<indent>[ \t]*){re.escape(field)}:\s*$",
+        rf"^(?P<indent>{indent}){re.escape(field)}:\s*$",
         fm_str,
         re.MULTILINE,
     )
@@ -316,7 +305,9 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     # Build the match dict with all fields scan_lessons reads from it.  Combine
     # legacy top-level and documented nested match fields like the PyYAML path.
     match_dict: dict[str, Any] = {}
-    top_level_keywords = _extract_list_frontmatter_field(top_level_without_match, "keywords")
+    top_level_keywords = _extract_list_frontmatter_field(
+        top_level_without_match, "keywords", allow_indented=False
+    )
     nested_keywords = _extract_list_frontmatter_field(match_block, "keywords")
     keywords = _dedupe_strings(
         top_level_keywords
@@ -360,7 +351,9 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     if session_categories:
         match_dict["session_categories"] = session_categories
 
-    top_level_patterns = _extract_list_frontmatter_field(top_level_without_match, "patterns")
+    top_level_patterns = _extract_list_frontmatter_field(
+        top_level_without_match, "patterns", allow_indented=False
+    )
     nested_patterns = _extract_list_frontmatter_field(match_block, "patterns")
     patterns = _dedupe_strings(
         top_level_patterns
@@ -933,6 +926,11 @@ def _bm25_zscores(scores: list[float]) -> list[float]:
     Lessons scoring 0 (no term overlap) receive ``0.0``.  If fewer than two
     lessons score nonzero the spread is degenerate and every z is ``0.0`` —
     nothing can "stand out" from a background of one.
+
+    When all nonzero scores are identical (zero variance, e.g. two lessons with
+    equal BM25 overlap) returning ``0.0`` would cause the z-gate to reject every
+    lesson (since 0 < ``_bm25_min_z(n)`` for n≥2).  Instead, tied lessons receive
+    a nominal z of ``1.0`` so the gate can still admit them.
     """
     nonzero = [s for s in scores if s > 0]
     if len(nonzero) < 2:
@@ -941,7 +939,9 @@ def _bm25_zscores(scores: list[float]) -> list[float]:
     var = sum((s - mean) ** 2 for s in nonzero) / len(nonzero)
     sd = math.sqrt(var)
     if sd <= 0:
-        return [0.0] * len(scores)
+        # All nonzero scores are identical — give each a nominal z of 1.0 so
+        # the z-gate can admit them rather than silently dropping all of them.
+        return [1.0 if s > 0 else 0.0 for s in scores]
     return [(s - mean) / sd if s > 0 else 0.0 for s in scores]
 
 

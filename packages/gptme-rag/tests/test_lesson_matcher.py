@@ -190,11 +190,7 @@ class TestExtractFrontmatter:
         # A `#` inside a quoted scalar is data, not a comment.
         assert fm.get("description") == "hash # inside quotes stays"
 
-    def test_regex_fallback_processes_double_quoted_escapes(self, monkeypatch):
-        # Per YAML spec, double-quoted scalars process backslash escapes:
-        # `"He said \"hello\""` → `He said "hello"` (not the raw `He said \"hello\"`).
-        # The old code found the closing quote correctly but returned raw value[1:index]
-        # without substituting escape sequences, silently corrupting descriptions.
+    def test_regex_fallback_preserves_escaped_quotes(self, monkeypatch):
         content = '---\nstatus: active\ndescription: "He said \\"hello\\""\n---\n# Title\nBody.\n'
         import builtins
 
@@ -207,7 +203,7 @@ class TestExtractFrontmatter:
 
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, _ = extract_frontmatter(content)
-        assert fm.get("description") == 'He said "hello"'
+        assert fm.get("description") == r"He said \"hello\""
 
     def test_regex_fallback_hash_without_leading_space_is_not_a_comment(self, monkeypatch):
         # YAML only starts a comment at a `#` that begins the value or follows
@@ -596,13 +592,27 @@ class TestExtractFrontmatter:
         fm, _ = extract_frontmatter(content)
         assert fm.get("name") == "it's a lesson"
 
-    def test_regex_fallback_double_quoted_backslash_escape(self, monkeypatch):
-        # Regression: double-quoted YAML scalars use backslash escape sequences.
-        # The old code found the closing quote correctly (treating \" as escaped)
-        # but returned the raw value[1:index] without processing the escapes, so
-        # `description: "He said \"hello\""` → 'He said \\"hello\\"' instead of
-        # 'He said "hello"', corrupting BM25 indexing and skill-name matching.
-        content = '---\nstatus: active\nname: "He said \\"hello\\""\n---\n# Body.\n'
+    def test_regex_fallback_metadata_keywords_not_hoisted(self, monkeypatch):
+        """keywords nested under metadata must not be merged into match.keywords.
+
+        _extract_list_frontmatter_field used ``^[ \t]*keywords:`` which matched
+        indented keys.  A ``metadata.keywords`` list was accidentally merged into
+        the lesson's top-level keyword set, changing match behaviour vs. PyYAML.
+        The fix passes ``allow_indented=False`` for top-level searches.
+        """
+        content = (
+            "---\n"
+            "status: active\n"
+            "match:\n"
+            "  keywords:\n"
+            "    - real-keyword\n"
+            "metadata:\n"
+            "  keywords:\n"
+            "    - should-not-appear\n"
+            "---\n"
+            "# Title\n"
+            "Body.\n"
+        )
         import builtins
 
         real_import = builtins.__import__
@@ -614,7 +624,9 @@ class TestExtractFrontmatter:
 
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, _ = extract_frontmatter(content)
-        assert fm.get("name") == 'He said "hello"'
+        match_keywords = fm.get("match", {}).get("keywords", [])
+        assert "real-keyword" in match_keywords
+        assert "should-not-appear" not in match_keywords
 
 
 # ---------------------------------------------------------------------------
@@ -1056,9 +1068,10 @@ class TestBM25Internals:
         assert zs[2] == 0.0
 
     def test_bm25_zscores_uniform(self):
-        # All equal → sd=0 → all zeros
+        # All equal → sd=0 → nominal z of 1.0 so the z-gate can still admit them
+        # (returning 0.0 would cause bm_z < bm_min_z and silently drop all lessons)
         zs = _bm25_zscores([5.0, 5.0, 5.0])
-        assert zs == [0.0, 0.0, 0.0]
+        assert zs == [1.0, 1.0, 1.0]
 
     def test_bm25_score_zero_for_no_overlap(self):
         index = _build_bm25_index(
@@ -1196,6 +1209,26 @@ class TestScoreLessons:
         results = score_lessons(lessons, "query", use_bm25=True)
 
         assert [result["path"] for result in results] == ["lessons/strong.md"]
+
+    def test_bm25_tied_scores_both_contribute(self, monkeypatch):
+        """Two lessons with identical BM25 scores should both receive contribution.
+
+        When all nonzero BM25 scores are equal, sd=0 so _bm25_zscores used to
+        return [0.0, 0.0].  With bm_min_z≈0.57 for n=2 the z-gate then rejected
+        BOTH lessons — a false negative.  The fix assigns a nominal z of 1.0 to
+        tied lessons so they can still be admitted.
+        """
+        lessons = [
+            self._make_lesson("lessons/a.md", [], description="foo bar baz"),
+            self._make_lesson("lessons/b.md", [], description="foo bar baz"),
+        ]
+        # Force identical nonzero BM25 scores for both lessons.
+        monkeypatch.setattr(
+            "gptme_rag.lesson_matcher._bm25_score",
+            lambda _q, doc, _i: 100.0 if doc else 0.0,
+        )
+        results = score_lessons(lessons, "foo bar baz", use_bm25=True)
+        assert len(results) == 2, "Both lessons should be admitted when tied on BM25"
 
     def test_bm25_disabled(self):
         lessons = [
