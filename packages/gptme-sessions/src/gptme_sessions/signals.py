@@ -2261,6 +2261,20 @@ def extract_usage_copilot(msgs: list[dict]) -> dict:
 
 
 _GROK_WRITE_TOOLS = {"write", "search_replace"}
+_GROK_TERMINAL_OUTPUT_ROOT = Path.home() / ".grok" / "sessions"
+
+
+def _read_grok_terminal_output(output_file: str) -> str:
+    """Read a Grok terminal log only from the CLI's trusted session tree."""
+    try:
+        output_path = Path(output_file).resolve()
+        if not output_path.is_relative_to(_GROK_TERMINAL_OUTPUT_ROOT.resolve()):
+            return ""
+        if output_path.parent.name != "terminal" or output_path.suffix != ".log":
+            return ""
+        return output_path.read_text(errors="replace")[:200_000]
+    except OSError:
+        return ""
 
 
 def extract_signals_grok(msgs: list[dict]) -> dict:
@@ -2417,13 +2431,7 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
             continue
         output_file = task.get("output_file", "")
         if output_file:
-            try:
-                _scan_command_output(
-                    command,
-                    Path(output_file).read_text(errors="replace")[:200_000],
-                )
-            except OSError:
-                pass
+            _scan_command_output(command, _read_grok_terminal_output(output_file))
 
     deliverables = list(dict.fromkeys(git_commits + file_writes))
     deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)

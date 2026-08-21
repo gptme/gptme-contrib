@@ -361,10 +361,13 @@ def test_background_task_commit_via_task_output():
     assert signals["deliverables"] == ["abc1234 fix: x"]
 
 
-def test_background_task_commit_via_output_file(tmp_path):
+def test_background_task_commit_via_output_file(tmp_path, monkeypatch):
     """Output never re-entered the transcript: fall back to the on-disk log."""
-    log = tmp_path / "t9.log"
+    terminal_dir = tmp_path / "sessions" / "encoded-cwd" / "session-id" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    log = terminal_dir / "t9.log"
     log.write_text("[master beef123] feat: y\n 2 files changed")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", tmp_path / "sessions")
     msgs = [
         {
             "type": "tool_call",
@@ -387,6 +390,65 @@ def test_background_task_commit_via_output_file(tmp_path):
     ]
     signals = extract_signals_grok(msgs)
     assert signals["git_commits"] == ["beef123 feat: y"]
+
+
+def test_background_task_output_file_outside_grok_sessions_is_rejected(tmp_path):
+    """A crafted trajectory must not make signal extraction read arbitrary files."""
+    log = tmp_path / "outside.log"
+    log.write_text("[master bad1234] fix: should not be read")
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(log),
+            },
+        },
+    ]
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
+def test_background_task_output_file_must_be_a_terminal_log(tmp_path, monkeypatch):
+    """Files elsewhere in the Grok tree are metadata, not command output."""
+    sessions_dir = tmp_path / "sessions"
+    log = sessions_dir / "encoded-cwd" / "session-id" / "events.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text("[master bad1234] fix: should not be read")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(log),
+            },
+        },
+    ]
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+    disguised_metadata = log.parent / "terminal" / "events.jsonl"
+    disguised_metadata.parent.mkdir()
+    disguised_metadata.write_text("[master bad1234] fix: should not be read")
+    msgs[1]["rawOutput"]["output_file"] = str(disguised_metadata)
+    assert extract_signals_grok(msgs)["git_commits"] == []
 
 
 def test_task_output_list_result_and_exit_code_error():
