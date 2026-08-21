@@ -233,7 +233,11 @@ def classify_memory_type(
     if isinstance(glob_paths, dict):
         for pattern, memory_type in glob_paths.items():
             memory_type_str = str(memory_type)
-            if _glob_match_path(rel_path, pattern) and memory_type_str in SUPPORTED_MEMORY_TYPES:
+            if (
+                isinstance(pattern, str)
+                and _glob_match_path(rel_path, pattern)
+                and memory_type_str in SUPPORTED_MEMORY_TYPES
+            ):
                 return memory_type_str
 
     # 3. Task-specific rules (only for paths under tasks/)
@@ -298,7 +302,7 @@ def weighted_similarity(
     When the caller has no preference (``requested_memory_types`` is ``None`` or
     empty), the similarity is returned unchanged.  When a preference is provided:
 
-    * A match applies :data:`MEMORY_TYPE_BOOST` (default 1.35×), clamped to 1.0.
+    * A match applies :data:`MEMORY_TYPE_BOOST` (default 1.35×).
     * A miss applies :data:`MEMORY_TYPE_PENALTY` (default 0.9×).
 
     Args:
@@ -309,5 +313,5 @@ def weighted_similarity(
     if not requested_memory_types or not memory_type:
         return similarity
     if memory_type in requested_memory_types:
-        return min(1.0, similarity * MEMORY_TYPE_BOOST)
+        return similarity * MEMORY_TYPE_BOOST
     return similarity * MEMORY_TYPE_PENALTY

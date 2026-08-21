@@ -175,6 +175,12 @@ def test_classify_malformed_glob_paths_list():
     assert classify_memory_type("tasks/foo.md", {}, rules) is None
 
 
+def test_classify_malformed_glob_pattern_key():
+    """Caller-supplied rules with non-string glob keys must fail soft."""
+    rules = {"glob_paths": {1: "project"}}
+    assert classify_memory_type("tasks/foo.md", {}, rules) is None
+
+
 def test_classify_malformed_task_rules_list():
     """Malformed rules where task_rules is a list must not raise TypeError."""
     rules = {"task_rules": ["goal_priorities"]}
@@ -366,10 +372,13 @@ def test_weighted_sim_penalty_on_mismatch():
     assert score < 0.5
 
 
-def test_weighted_sim_clamp_at_one():
-    """Boosting a high score must not exceed 1.0."""
-    score = weighted_similarity(0.99, "identity", {"identity"})
-    assert score <= 1.0
+def test_weighted_sim_preserves_high_score_ordering():
+    """Boosting must not clamp distinct high scores to the same value."""
+    lower = weighted_similarity(0.8, "identity", {"identity"})
+    higher = weighted_similarity(0.9, "identity", {"identity"})
+    assert lower == pytest.approx(0.8 * MEMORY_TYPE_BOOST)
+    assert higher == pytest.approx(0.9 * MEMORY_TYPE_BOOST)
+    assert higher > lower
 
 
 def test_weighted_sim_boost_requires_match_in_set():
@@ -379,7 +388,7 @@ def test_weighted_sim_boost_requires_match_in_set():
 
 def test_weighted_sim_multi_type_match():
     score = weighted_similarity(0.5, "identity", {"identity", "goal"})
-    assert score == pytest.approx(min(1.0, 0.5 * MEMORY_TYPE_BOOST))
+    assert score == pytest.approx(0.5 * MEMORY_TYPE_BOOST)
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +462,26 @@ def test_search_boost_reranks_matching_memory_type(require_sklearn):
     hits_project = idx.search("autonomous agent", n_results=5, memory_types={"project"})
     assert hits_project[0].document.metadata["source"] == "a.md"
     assert hits_project[0].score > hits_project[1].score
+
+
+def test_search_boost_preserves_raw_order_above_one(require_sklearn):
+    """Two matching high-similarity docs remain ordered by raw relevance."""
+    idx = TfidfIndex(relevance_floor=0.0)
+    idx.index(
+        [
+            _doc("query exact extra", "lower.md", "goal"),
+            _doc("query exact", "higher.md", "goal"),
+        ]
+    )
+
+    hits = idx.search("query exact", n_results=5, memory_types={"goal"})
+
+    assert [hit.document.metadata["source"] for hit in hits] == [
+        "higher.md",
+        "lower.md",
+    ]
+    assert hits[0].score > 1.0
+    assert hits[0].score > hits[1].score
 
 
 def test_search_memory_types_unknown_type_ignored(require_sklearn):
