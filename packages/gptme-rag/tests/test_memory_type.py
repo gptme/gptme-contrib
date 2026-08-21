@@ -312,6 +312,23 @@ def test_classify_document_from_crlf_frontmatter(rules: dict):
     assert result == "goal"
 
 
+def test_classify_document_fallback_parses_inline_list(rules: dict, monkeypatch):
+    """The no-PyYAML fallback normalises inline-list brackets before matching."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def import_without_yaml(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("simulated missing optional dependency")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_yaml)
+    content = "---\ntags: [preference, project]\n---\n# My Task"
+
+    assert classify_document("tasks/foo.md", content, rules) == "preference"
+
+
 def test_classify_document_no_frontmatter(rules: dict):
     content = "# Just a document\nno frontmatter here"
     result = classify_document("SOUL.md", content, rules)
@@ -490,7 +507,25 @@ def test_search_relevance_floor_rejects_raw_score_before_boost(require_sklearn):
 
     boosted_hits = idx.search("query exact", n_results=5, memory_types={"goal"})
     assert [hit.document.metadata["source"] for hit in boosted_hits] == ["exact.md"]
-    assert [hit.rank for hit in boosted_hits] == [0]
+
+
+def test_search_default_rank_preserves_filtered_candidate_position(require_sklearn):
+    """Default search keeps the historical full-candidate rank semantics."""
+    idx = TfidfIndex(relevance_floor=0.0)
+    idx.index(
+        [
+            _doc("same query exact", "excluded.md"),
+            _doc("same query", "included.md"),
+        ]
+    )
+
+    # The first document is the unambiguous top candidate. Exclude it and verify
+    # the surviving candidate retains its original position.
+    hits = idx.search("same query exact", n_results=5, exclude_paths={"excluded.md"})
+
+    assert len(hits) == 1
+    assert hits[0].document.metadata["source"] == "included.md"
+    assert hits[0].rank == 1
 
 
 def test_search_unknown_doc_memory_type_not_penalised(require_sklearn):

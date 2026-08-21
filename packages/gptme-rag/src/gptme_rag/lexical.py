@@ -253,7 +253,7 @@ class TfidfIndex:
         sorted_indices = sorted(range(len(raw_sims)), key=_weighted, reverse=True)
 
         hits: list[LexicalHit] = []
-        for idx in sorted_indices:
+        for rank, idx in enumerate(sorted_indices):
             # Keep relevance_floor's existing raw-cosine semantics.  Memory-type
             # weights only rerank documents that already clear the relevance gate.
             if float(raw_sims[idx]) < self.relevance_floor:
@@ -262,7 +262,9 @@ class TfidfIndex:
             doc = self._documents[idx]
             if self._source_path(doc) in excluded:
                 continue
-            hits.append(LexicalHit(document=doc, score=round(score, 4), rank=len(hits)))
+            # Preserve LexicalHit.rank as the candidate's position in the full
+            # sorted list, including candidates skipped by filters.
+            hits.append(LexicalHit(document=doc, score=round(score, 4), rank=rank))
             if len(hits) >= n_results:
                 break
         return hits

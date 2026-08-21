@@ -161,9 +161,8 @@ def _extract_frontmatter(content: str) -> dict[str, Any]:
 
         parsed = yaml.safe_load(frontmatter_text) or {}
     except Exception:
-        # Fallback: simple key: value regex (no nested structures)
-        import re
-
+        # Fallback: simple key: value regex (no nested structures). Inline YAML
+        # lists stay as strings here and are normalised by _coerce_string_list.
         parsed = {k: v for k, v in re.findall(r"^(\w[\w_-]*):\s*(.*)", frontmatter_text, re.M)}
     return parsed if isinstance(parsed, dict) else {}
 
@@ -175,7 +174,11 @@ def _coerce_string_list(value: Any) -> list[str]:
     strings that YAML leaves as a single string (e.g. ``tags: ai, project``).
     """
     if isinstance(value, str):
-        # Split on commas to handle "preference, project" as two tags.
+        # Split on commas to handle both plain comma-separated tags and inline
+        # YAML lists emitted as strings by the no-PyYAML fallback parser.
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            value = value[1:-1]
         return [p.strip().lower() for p in value.split(",") if p.strip()]
     if isinstance(value, list):
         # Also split each list item on commas — YAML may parse "- preference, project"
