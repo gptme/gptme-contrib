@@ -261,20 +261,25 @@ def call_claude_code(
                         fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
                         if any(m.lower() in fb_combined.lower() for m in _QUOTA_EXHAUSTED_MARKERS):
                             logger.warning("Fallback slot %s also quota-exhausted", fb_cred.name)
-                        else:
-                            logger.warning(
-                                "Fallback slot %s failed (rc=%d): stdout=%s stderr=%s",
-                                fb_cred.name,
-                                fb_result.returncode,
-                                (fb_result.stdout or "")[:200],
-                                (fb_result.stderr or "")[:200],
-                            )
-                            last_non_quota_error = subprocess.CalledProcessError(
-                                fb_result.returncode,
-                                cmd,
-                                fb_result.stdout,
-                                fb_result.stderr,
-                            )
+                            break
+                        logger.warning(
+                            "Fallback slot %s failed (rc=%d, attempt %d/%d): stdout=%s stderr=%s",
+                            fb_cred.name,
+                            fb_result.returncode,
+                            fb_attempt,
+                            max_retries,
+                            (fb_result.stdout or "")[:200],
+                            (fb_result.stderr or "")[:200],
+                        )
+                        last_non_quota_error = subprocess.CalledProcessError(
+                            fb_result.returncode,
+                            cmd,
+                            fb_result.stdout,
+                            fb_result.stderr,
+                        )
+                        if fb_attempt < max_retries:
+                            time.sleep(_RETRY_DELAY_S * fb_attempt)
+                            continue
                         break
                 if last_non_quota_error is not None:
                     raise last_non_quota_error

@@ -636,10 +636,38 @@ def test_call_claude_code_quota_fallback_all_exhausted(
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
+def test_call_claude_code_quota_fallback_retries_non_quota_error(
+    mock_run, mock_sleep, mock_fallback, tmp_path
+):
+    """A transient fallback error gets the same retry opportunity as the primary slot."""
+    fb_cred = tmp_path / ".credentials.json.alice"
+    fb_cred.write_text("{}")
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_fallback.side_effect = [
+        _make_completed_process(returncode=1, stderr="temporary API failure"),
+        _make_completed_process(stdout='{"ok": true}'),
+    ]
+
+    with patch.dict(
+        "os.environ",
+        {"GPTME_CC_FALLBACK_CREDS": str(fb_cred)},
+        clear=True,
+    ):
+        assert call_claude_code("test prompt", max_retries=2) == '{"ok": true}'
+
+    assert mock_fallback.call_count == 2
+    mock_sleep.assert_called_once_with(5)
+
+
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
 def test_call_claude_code_quota_fallback_preserves_non_quota_error(
     mock_run, mock_sleep, mock_fallback, tmp_path
 ):
-    """A fallback auth or service failure is not mislabeled as quota exhaustion."""
+    """An exhausted fallback retry window preserves the last non-quota failure."""
     fb_cred = tmp_path / ".credentials.json.invalid"
     fb_cred.write_text("{}")
     mock_run.return_value = _make_completed_process(
@@ -653,11 +681,13 @@ def test_call_claude_code_quota_fallback_preserves_non_quota_error(
         clear=True,
     ):
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            call_claude_code("test prompt")
+            call_claude_code("test prompt", max_retries=2)
 
     assert not isinstance(exc_info.value, ClaudeQuotaExhaustedError)
     assert exc_info.value.returncode == 2
     assert exc_info.value.stderr == "invalid credentials"
+    assert mock_fallback.call_count == 2
+    mock_sleep.assert_called_once_with(5)
 
 
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
