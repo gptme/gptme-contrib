@@ -1,5 +1,6 @@
 """Tests for source-descriptor document collection (Phase 2.1)."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -560,7 +561,7 @@ def test_collect_voice_calls_skips_symlink_loop(tmp_path: Path):
 
 
 def test_collect_voice_calls_reads_resolved_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """The file read must use the same resolved path checked by the guard."""
+    """The file open must use the same resolved path checked by the guard."""
     repo = tmp_path / "repo"
     call_dir = repo / "calls"
     call_dir.mkdir(parents=True)
@@ -573,15 +574,52 @@ def test_collect_voice_calls_reads_resolved_path(tmp_path: Path, monkeypatch: py
     link = call_dir / "call.json"
     link.symlink_to(target.relative_to(call_dir))
 
-    read_paths: list[Path] = []
-    original_read_text = Path.read_text
+    opened_paths: list[Path] = []
+    original_open = os.open
 
-    def tracking_read_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
-        read_paths.append(self)
-        return original_read_text(self, *args, **kwargs)
+    def tracking_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        opened_paths.append(Path(path))
+        return original_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+    monkeypatch.setattr(os, "open", tracking_open)
     docs = collect_voice_call_documents(call_dir, repo_root=repo)
 
     assert [doc.content for doc in docs] == ["USER: hello"]
-    assert read_paths == [target.resolve()]
+    assert opened_paths == [target.resolve()]
+
+
+def test_collect_voice_calls_rejects_symlink_swapped_after_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A final-component symlink swap after resolve() must not escape repo_root."""
+    repo = tmp_path / "repo"
+    call_dir = repo / "calls"
+    call_dir.mkdir(parents=True)
+    call = call_dir / "call.json"
+    call.write_text(
+        '{"transcript": [{"role": "user", "text": "safe"}]}',
+        encoding="utf-8",
+    )
+    secret = tmp_path / "secret.json"
+    secret.write_text(
+        '{"transcript": [{"role": "user", "text": "secret"}]}',
+        encoding="utf-8",
+    )
+
+    original_open = os.open
+    seen_flags = 0
+    original_call_path = call.resolve()
+
+    def swapping_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal seen_flags
+        candidate = Path(path)
+        if candidate == original_call_path and not candidate.is_symlink():
+            seen_flags = flags
+            candidate.unlink()
+            candidate.symlink_to(secret)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+
+    assert collect_voice_call_documents(call_dir, repo_root=repo) == []
+    assert seen_flags & os.O_NOFOLLOW

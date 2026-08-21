@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -265,17 +267,31 @@ def collect_voice_call_documents(
         if resolved_root is not None and not resolved_path.is_relative_to(resolved_root):
             logger.warning("sources: skipping %s — resolves outside repo_root", path)
             continue
-        if not resolved_path.is_file():
-            # Skip anything that is not a regular file (e.g. a FIFO named
-            # ``*.json``, which would block the collector on read).
-            continue
+        fd = -1
         try:
-            # Read the path we validated, not the original directory entry.
-            # Otherwise a symlink swap between resolve() and read_text() could
-            # bypass the repo-root guard.
-            data = json.loads(resolved_path.read_text(encoding="utf-8"))
+            # O_NOFOLLOW closes the final-component race between resolve() and
+            # open(): replacing a checked file with a symlink must not let the
+            # read escape repo_root. O_NONBLOCK also keeps a swapped-in FIFO
+            # from blocking before fstat() can reject it.
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(resolved_path, flags)
+            opened = os.fstat(fd)
+            current = os.stat(resolved_path, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                continue
+            stream = os.fdopen(fd, encoding="utf-8")
+            fd = -1  # stream owns the descriptor now
+            with stream:
+                data = json.load(stream)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
+        finally:
+            if fd >= 0:
+                os.close(fd)
         if not isinstance(data, dict):
             continue
         transcript = data.get("transcript", [])
