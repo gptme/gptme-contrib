@@ -210,8 +210,12 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
         for var in _USER_CONTEXT_VARS:
             env.pop(var, None)
     if args and args[0] == "post" and len(args) > 1:
-        # Protect the tweet text (second arg) from being parsed as a CLI option
-        # when it starts with '-'. Restructure to: post [options] --headless -- TEXT
+        # Protect the tweet text from being parsed as a CLI option when it starts
+        # with '-'. Restructure to: post [options] --headless -- TEXT.
+        # CALLER CONTRACT: args[1] must be the tweet text; all trailing options
+        # (--reply-to, --quote …) must come at args[2:]. Placing an option at
+        # args[1] silently corrupts the command line, so _post callers must not
+        # start with an option at position 1.
         text = args[1]
         rest = args[2:]  # any trailing options like --reply-to, --quote
         args = ["post", *rest, "--headless", "--", text]
@@ -279,7 +283,12 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     state = load_state()
     key = f"{args.repo}#{tag}"
     record = state.get(key, {}) if not args.force else {}
-    if record.get("announced_at") and (args.skip_quote or "bob_quote_id" in record):
+    # "org_tweet_id" in record with value None = posted but ID unknown; quote is
+    # not recoverable without the ID, so treat this as a complete (degraded) state.
+    _org_id_unknown = "org_tweet_id" in record and record["org_tweet_id"] is None
+    if record.get("announced_at") and (
+        args.skip_quote or "bob_quote_id" in record or _org_id_unknown
+    ):
         print(f"{key}: already announced ({record.get('org_tweet_id')})")
         return 0
 
@@ -306,12 +315,21 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             return 1
         _finish_post(state, record, "org_tweet_id", org_id)
     if org_id is None:
+        # The org tweet was posted but its ID was not captured.  The reply and
+        # quote steps both need the ID, so they cannot be posted automatically.
+        # Mark as announced (degraded: no reply or quote) so that subsequent
+        # timer runs do not permanently fail.
+        # To add the missing reply and quote: edit the state file to set
+        # org_tweet_id to the actual tweet ID and remove announced_at, then re-run.
         print(
             f"{key}: org tweet was posted but its ID is unknown; "
-            "cannot safely post the reply or quote",
+            "reply and quote skipped — marking as announced (degraded). "
+            f"Recovery: set org_tweet_id in {STATE_FILE}, remove announced_at, then re-run.",
             file=sys.stderr,
         )
-        return 1
+        record["announced_at"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
+        return 0
 
     link_reply_id = record.get("link_reply_id")
     if "link_reply_id" not in record:

@@ -324,3 +324,31 @@ def test_wait_for_callback_file_rejects_non_callback_host(
 
     assert twitter_module._wait_for_callback_file(f, timeout=1) == (None, None)
     assert f.exists()
+
+
+def test_wait_for_callback_file_rejects_wrong_port(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A localhost URL on the wrong port must not be accepted."""
+    f = tmp_path / "cb.txt"
+    f.write_text("http://localhost:9999/callback?state=x&code=abc123")
+    monotonic_values = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr("time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    assert twitter_module._wait_for_callback_file(f, timeout=1) == (None, None)
+    assert f.exists()
+
+
+def test_wait_for_callback_file_rejects_wrong_path(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A localhost:9876 URL on a path other than /callback must not be accepted."""
+    f = tmp_path / "cb.txt"
+    f.write_text("http://localhost:9876/evil?state=x&code=abc123")
+    monotonic_values = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr("time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    assert twitter_module._wait_for_callback_file(f, timeout=1) == (None, None)
+    assert f.exists()

@@ -241,10 +241,12 @@ def _wait_for_callback_file(path: Path, timeout: int) -> tuple[str | None, str |
             raw = ""
         if raw:
             parsed = urlparse(raw)
-            if parsed.scheme in {"http", "https"} and parsed.hostname in {
-                "localhost",
-                "127.0.0.1",
-            }:
+            if (
+                parsed.scheme in {"http", "https"}
+                and parsed.hostname in {"localhost", "127.0.0.1"}
+                and parsed.port == 9876
+                and parsed.path == "/callback"
+            ):
                 # oauthlib enforces https on the redirect URL at parse time
                 # (InsecureTransportError). The URL is never fetched — it only
                 # carries state+code — so upgrading the scheme is safe and

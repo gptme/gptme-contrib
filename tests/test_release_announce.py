@@ -370,6 +370,8 @@ def test_post_named_account_keeps_inherited_environment(monkeypatch):
 
 
 def test_main_does_not_retry_success_without_tweet_id(monkeypatch, tmp_path):
+    """When the org tweet posts but its ID is not captured, mark as announced
+    (degraded: no reply or quote) and do not retry on subsequent runs."""
     monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
     monkeypatch.setattr(
         ra,
@@ -391,10 +393,14 @@ def test_main_does_not_retry_success_without_tweet_id(monkeypatch, tmp_path):
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
 
-    assert ra.main() == 1
-    assert ra.main() == 1
+    # First run: org tweet posted (no ID) → degraded completion, exit 0.
+    assert ra.main() == 0
+    state = ra.load_state()["gptme/gptme#v0.33.0"]
+    assert state["org_tweet_id"] is None
+    assert "announced_at" in state
+    # Second run: already announced (degraded) → early exit, no extra posts.
+    assert ra.main() == 0
     assert calls == 1
-    assert ra.load_state()["gptme/gptme#v0.33.0"]["org_tweet_id"] is None
 
 
 def test_main_does_not_retry_reply_success_without_tweet_id(monkeypatch, tmp_path):
