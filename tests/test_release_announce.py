@@ -57,6 +57,16 @@ def test_extract_features_strips_multiple_trailing_authors():
     assert ra.extract_features(notes) == ["improve caching"]
 
 
+def test_extract_features_preserves_description_url():
+    notes = "* feat(docs): add guide at https://example.com/guide"
+    assert ra.extract_features(notes) == ["add guide at https://example.com/guide"]
+
+
+def test_extract_features_strips_github_pr_url():
+    notes = "* feat(docs): add guide in https://github.com/gptme/gptme/pull/123"
+    assert ra.extract_features(notes) == ["add guide"]
+
+
 def test_compose_fits_and_headlines():
     text = ra.compose_announcement("v0.33.0", NOTES, "gptme/gptme")
     assert text.startswith("gptme v0.33.0 is out")
@@ -281,7 +291,7 @@ def test_post_default_account_clears_environment_profile(monkeypatch):
     monkeypatch.setattr(ra, "_run", fake_run)
 
     assert ra._post(["post", "hello"]) == (True, "123")
-    assert "TWITTER_ACCOUNT" not in seen["env"]
+    assert seen["env"]["TWITTER_ACCOUNT"] == ""
     assert not set(ra._USER_CONTEXT_VARS) & seen["env"].keys()
 
 

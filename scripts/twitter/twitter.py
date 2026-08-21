@@ -338,10 +338,11 @@ def load_twitter_client(
     stale refresh token will result in a 400 Bad Request error.
     """
     requested_account = current_account()
+    account_was_explicit = "TWITTER_ACCOUNT" in os.environ
     load_dotenv(override=True)
-    if requested_account:
-        # A CLI/env-selected profile must outrank TWITTER_ACCOUNT in the
-        # workspace .env, just as command-line options outrank config defaults.
+    if account_was_explicit:
+        # An explicit CLI/env selection, including the empty default-account
+        # sentinel, must outrank TWITTER_ACCOUNT in the workspace .env.
         os.environ["TWITTER_ACCOUNT"] = requested_account
 
     # Resolve the .env path from THIS script's frame — critical because

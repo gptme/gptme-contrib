@@ -65,8 +65,11 @@ STABLE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 #   - feat(tools): read-only audit preset (#3543)
 _FEAT_RE = re.compile(r"^[*-]\s*feat(?:\(([^)]*)\))?!?:\s*(.+)$")
 _AUTHOR_LIST = r"@[\w-]+(?:\s+(?:and|&)\s+@[\w-]+)*"
-_TRAIL_RE = re.compile(
-    rf"\s*(?:by {_AUTHOR_LIST}(?:\s+in\s+(?:https?://\S+|\(?#\d+\)?))?|(?:in\s+)?(?:https?://\S+|\(?#\d+\)?))\s*$"
+_AUTHOR_TRAIL_RE = re.compile(rf"\s+by {_AUTHOR_LIST}\s*$")
+_PR_NUMBER_TRAIL_RE = re.compile(r"\s+(?:in\s+)?\(?#\d+\)?\s*$")
+_RELEASE_URL_TRAIL_RE = re.compile(
+    r"\s+(?:in\s+)?https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/"
+    r"(?:pull|issues)/\d+/?\s*$"
 )
 
 MAX_TWEET = 270  # headroom under 280
@@ -151,7 +154,9 @@ def extract_features(body: str, limit: int = 5) -> list[str]:
             continue
         desc = m.group(2)
         while True:
-            stripped = _TRAIL_RE.sub("", desc).strip()
+            stripped = _AUTHOR_TRAIL_RE.sub("", desc)
+            stripped = _PR_NUMBER_TRAIL_RE.sub("", stripped)
+            stripped = _RELEASE_URL_TRAIL_RE.sub("", stripped).strip()
             if stripped == desc:
                 break
             desc = stripped
@@ -196,7 +201,7 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
         cmd += ["--account", account]
     else:
         env = os.environ.copy()
-        env.pop("TWITTER_ACCOUNT", None)
+        env["TWITTER_ACCOUNT"] = ""
         for var in _USER_CONTEXT_VARS:
             env.pop(var, None)
     cmd += args

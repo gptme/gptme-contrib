@@ -136,6 +136,32 @@ def test_cli_account_survives_workspace_dotenv_override(
         twitter_module.load_twitter_client(require_auth=True)
 
 
+def test_explicit_default_account_survives_workspace_dotenv_override(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TWITTER_ACCOUNT", "")
+
+    def load_workspace_dotenv(*args, **kwargs) -> None:
+        monkeypatch.setenv("TWITTER_ACCOUNT", "gptmeorg")
+
+    monkeypatch.setattr(twitter_module, "load_dotenv", load_workspace_dotenv)
+    monkeypatch.setattr(
+        twitter_module,
+        "_activate_account_profile",
+        lambda name: pytest.fail(f"unexpected profile activation: {name}"),
+    )
+    monkeypatch.setattr(
+        twitter_module, "console", SimpleNamespace(print=lambda *a, **k: None)
+    )
+
+    with pytest.raises(SystemExit):
+        twitter_module.load_twitter_client(require_auth=True)
+
+    import os
+
+    assert os.environ["TWITTER_ACCOUNT"] == ""
+
+
 def test_profile_loads_its_own_tokens(
     twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
