@@ -1,0 +1,12 @@
+- id: check-root-structure
+  name: Check root directory structure
+  description: >
+    Enforce an explicit allowlist of top-level files and directories. Any
+    committed root-level entry not on the list fails the check, forcing an
+    intentional review. Pass ``--allow ENTRY`` (repeatable) for each permitted
+    entry in the consuming repo's ``.pre-commit-config.yaml``.
+  entry: scripts/precommit/check_root_structure.py
+  language: script
+  pass_filenames: false
+  always_run: true
+  additional_dependencies: []

@@ -1,8 +1,9 @@
 """Tests for the root structure checker."""
 
+import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "precommit"))
@@ -10,30 +11,91 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "precommit"))
 
 def test_allowed_entries_pass():
     """main() exits 0 when tracked entries are a subset of ALLOWED_ROOT_ENTRIES."""
-    from unittest.mock import patch
-
     import check_root_structure
 
     # A partial subset — real repos don't always have every allowed entry present.
-    # This is hermetic: no git subprocess, no filesystem dependency.
     partial_subset = frozenset(["scripts", "tests", "lessons", "README.md"])
     assert (
         partial_subset <= check_root_structure.ALLOWED_ROOT_ENTRIES
     ), "test precondition"
-    with patch.object(
-        check_root_structure, "get_tracked_root_entries", return_value=partial_subset
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=partial_subset,
+        ),
     ):
-        result = check_root_structure.main()
+        result = check_root_structure.main([])
     assert result == 0
+
+
+def test_get_repo_root_reports_non_git_directory(capsys):
+    """main() should fail cleanly when git cannot resolve a repository root."""
+    import check_root_structure
+
+    error = subprocess.CalledProcessError(128, ["git", "rev-parse", "--show-toplevel"])
+    with patch("subprocess.run", side_effect=error):
+        result = check_root_structure.main([])
+
+    assert result == 1
+    assert capsys.readouterr().err == (
+        "check-root-structure: unable to inspect repository: "
+        "git rev-parse --show-toplevel failed with exit code 128.\n"
+    )
+
+
+def test_get_repo_root_preserves_non_utf8_path_bytes():
+    """Repository paths should round-trip undecodable bytes via surrogateescape."""
+    import check_root_structure
+
+    mock_result = MagicMock(stdout=b"/tmp/repo-\xff\n")
+    with patch("subprocess.run", return_value=mock_result):
+        repo_root = check_root_structure.get_repo_root()
+
+    assert str(repo_root).encode("utf-8", errors="surrogateescape") == b"/tmp/repo-\xff"
+
+
+def test_missing_git_reports_clean_error(capsys):
+    """main() should fail cleanly when the git executable is unavailable."""
+    import check_root_structure
+
+    error = FileNotFoundError(2, "No such file or directory", "git")
+    with patch("subprocess.run", side_effect=error):
+        result = check_root_structure.main([])
+
+    assert result == 1
+    assert capsys.readouterr().err == (
+        "check-root-structure: unable to inspect repository: "
+        "[Errno 2] No such file or directory: 'git'.\n"
+    )
+
+
+def test_get_tracked_entries_reports_git_failure(capsys):
+    """main() should fail cleanly when git cannot read the tracked files."""
+    import check_root_structure
+
+    error = subprocess.CalledProcessError(128, ["git", "ls-files", "--cached"])
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure, "get_tracked_root_entries", side_effect=error
+        ),
+    ):
+        result = check_root_structure.main([])
+
+    assert result == 1
+    assert capsys.readouterr().err == (
+        "check-root-structure: unable to inspect repository: "
+        "git ls-files --cached failed with exit code 128.\n"
+    )
 
 
 def test_get_tracked_root_entries_parses_paths_correctly():
     """get_tracked_root_entries should extract first path components from git ls-files output."""
-    from unittest.mock import MagicMock
-
     import check_root_structure
 
-    fake_output = "scripts/foo.py\ntests/test_bar.py\nlessons/README.md\nREADME.md\n"
+    fake_output = b"scripts/foo.py\0tests/test_bar.py\0lessons/README.md\0README.md\0"
     mock_result = MagicMock()
     mock_result.returncode = 0
     mock_result.stdout = fake_output
@@ -44,15 +106,33 @@ def test_get_tracked_root_entries_parses_paths_correctly():
     assert entries == {"scripts", "tests", "lessons", "README.md"}
 
 
+def test_get_tracked_root_entries_handles_newline_in_filename():
+    """Newlines inside tracked paths must not create fake root entries."""
+    import check_root_structure
+
+    mock_result = MagicMock()
+    mock_result.stdout = b"src/foo.py\0strange\nfile.txt\0"
+
+    with patch("subprocess.run", return_value=mock_result):
+        entries = check_root_structure.get_tracked_root_entries()
+
+    assert entries == {"src", "strange\nfile.txt"}
+
+
 def test_detects_unexpected_entry():
     """Unexpected entries should cause main() to return 1."""
     import check_root_structure
 
     fake_entries = check_root_structure.ALLOWED_ROOT_ENTRIES | {"unexpected_dir"}
-    with patch.object(
-        check_root_structure, "get_tracked_root_entries", return_value=fake_entries
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=fake_entries,
+        ),
     ):
-        result = check_root_structure.main()
+        result = check_root_structure.main([])
     assert result == 1
 
 
@@ -60,30 +140,117 @@ def test_no_unexpected_entry_on_known_set():
     """Passing exactly the allowed set should return 0."""
     import check_root_structure
 
-    with patch.object(
-        check_root_structure,
-        "get_tracked_root_entries",
-        return_value=set(check_root_structure.ALLOWED_ROOT_ENTRIES),
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=set(check_root_structure.ALLOWED_ROOT_ENTRIES),
+        ),
     ):
-        result = check_root_structure.main()
+        result = check_root_structure.main([])
     assert result == 0
 
 
 def test_reads_git_index_not_filesystem():
     """get_tracked_root_entries should call git ls-files --cached, not iterdir."""
-    from unittest.mock import MagicMock
-
     import check_root_structure
 
     # Hermetic: mock subprocess.run to return fixed output — no real git needed.
     mock_result = MagicMock()
     mock_result.returncode = 0
-    mock_result.stdout = "scripts/foo.py\ntests/test_bar.py\n"
+    mock_result.stdout = b"scripts/foo.py\0tests/test_bar.py\0"
 
     with patch("subprocess.run", return_value=mock_result) as mock_run:
         check_root_structure.get_tracked_root_entries()
 
     assert mock_run.called, "subprocess.run was not called at all"
     cmd = mock_run.call_args[0][0]
-    assert "ls-files" in cmd, f"Expected 'ls-files' in command, got: {cmd}"
-    assert "--cached" in cmd, f"Expected '--cached' in command, got: {cmd}"
+    assert cmd == ["git", "ls-files", "--cached", "-z"]
+
+
+def test_allow_args_override_default_allowlist():
+    """--allow args should replace ALLOWED_ROOT_ENTRIES as the allowlist."""
+    import check_root_structure
+
+    # Only two entries allowed via --allow; everything else is unexpected.
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=frozenset(["src", "tests", "README.md"]),
+        ),
+    ):
+        # All three present, only src + tests allowed → README.md is unexpected
+        result = check_root_structure.main(["--allow=src", "--allow=tests"])
+    assert result == 1
+
+
+def test_allow_args_pass_when_all_entries_listed():
+    """main() returns 0 when --allow covers every tracked entry."""
+    import check_root_structure
+
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=frozenset(["src", "tests", "README.md"]),
+        ),
+    ):
+        result = check_root_structure.main(
+            ["--allow=src", "--allow=tests", "--allow=README.md"]
+        )
+    assert result == 0
+
+
+def test_allow_args_are_literal_root_entry_names():
+    """Directory-like syntax is not silently normalized into another entry."""
+    import check_root_structure
+
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=frozenset(["src"]),
+        ),
+    ):
+        result = check_root_structure.main(["--allow=src/"])
+    assert result == 1
+
+
+def test_allow_args_superset_is_fine():
+    """--allow may list more entries than actually exist; extras are ignored."""
+    import check_root_structure
+
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=frozenset(["src"]),
+        ),
+    ):
+        # Allow src + tests, but only src is tracked — should pass.
+        result = check_root_structure.main(["--allow=src", "--allow=tests"])
+    assert result == 0
+
+
+def test_no_allow_args_falls_back_to_contrib_defaults():
+    """Without --allow args, ALLOWED_ROOT_ENTRIES is used (gptme-contrib defaults)."""
+    import check_root_structure
+
+    # A valid contrib subset → should pass.
+    contrib_subset = frozenset(["scripts", "lessons", "README.md"])
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure,
+            "get_tracked_root_entries",
+            return_value=contrib_subset,
+        ),
+    ):
+        result = check_root_structure.main([])  # no --allow
+    assert result == 0
