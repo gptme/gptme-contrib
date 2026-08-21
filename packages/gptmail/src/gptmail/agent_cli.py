@@ -977,7 +977,9 @@ def pending(
 def _pull_destination(row: dict, *, fallback_mailbox: str) -> Path | None:
     """Return a contained local inbox path for a remote pending row."""
     filename = str(row.get("file") or "")
-    if not filename:
+    # Pending rows originate on another host. Requiring a basename protects
+    # both the local destination and the separately constructed remote source.
+    if not filename or Path(filename).name != filename:
         return None
     row_mailbox = _normalize_mailbox(str(row.get("mailbox") or fallback_mailbox))
     inbox = _mailbox_root(row_mailbox) / "inbox"

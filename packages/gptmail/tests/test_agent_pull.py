@@ -353,15 +353,22 @@ def test_pull_as_override(pull_workspace: Path, monkeypatch: pytest.MonkeyPatch)
     assert payload["new_count"] == 1, "pull --as bob must fetch message addressed to bob"
 
 
-def test_pull_refuses_path_traversal_filename(
-    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("filename", ["../../../../escaped.md", "subdir/message.md"])
+def test_pull_refuses_unsafe_remote_filename(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch, filename: str
 ) -> None:
-    """A filename supplied by a remote pending row cannot escape the inbox."""
+    """A remote row cannot escape either the source outbox or local inbox."""
     outside = pull_workspace / "escaped.md"
+    scp_calls: list[list[str]] = []
     monkeypatch.setattr(
         agent_cli,
         "_remote_pending_rows",
-        lambda *args, **kwargs: [{"file": "../../../../escaped.md", "mailbox": "default"}],
+        lambda *args, **kwargs: [{"file": filename, "mailbox": "default"}],
+    )
+    monkeypatch.setattr(
+        agent_cli.subprocess,
+        "run",
+        lambda cmd, **kwargs: scp_calls.append(cmd),
     )
 
     result = CliRunner().invoke(agent, ["pull"])
@@ -369,6 +376,7 @@ def test_pull_refuses_path_traversal_filename(
     assert result.exit_code == 0, result.output
     assert "refusing unsafe filename" in result.output
     assert not outside.exists()
+    assert scp_calls == []
 
 
 def test_pull_all_mailboxes_preserves_mailbox_destination(
