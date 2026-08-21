@@ -190,7 +190,11 @@ class TestExtractFrontmatter:
         # A `#` inside a quoted scalar is data, not a comment.
         assert fm.get("description") == "hash # inside quotes stays"
 
-    def test_regex_fallback_preserves_escaped_quotes(self, monkeypatch):
+    def test_regex_fallback_processes_double_quoted_escapes(self, monkeypatch):
+        # Per YAML spec, double-quoted scalars process backslash escapes:
+        # `"He said \"hello\""` → `He said "hello"` (not the raw `He said \"hello\"`).
+        # The old code found the closing quote correctly but returned raw value[1:index]
+        # without substituting escape sequences, silently corrupting descriptions.
         content = '---\nstatus: active\ndescription: "He said \\"hello\\""\n---\n# Title\nBody.\n'
         import builtins
 
@@ -203,7 +207,7 @@ class TestExtractFrontmatter:
 
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, _ = extract_frontmatter(content)
-        assert fm.get("description") == r"He said \"hello\""
+        assert fm.get("description") == 'He said "hello"'
 
     def test_regex_fallback_hash_without_leading_space_is_not_a_comment(self, monkeypatch):
         # YAML only starts a comment at a `#` that begins the value or follows
@@ -591,6 +595,26 @@ class TestExtractFrontmatter:
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, _ = extract_frontmatter(content)
         assert fm.get("name") == "it's a lesson"
+
+    def test_regex_fallback_double_quoted_backslash_escape(self, monkeypatch):
+        # Regression: double-quoted YAML scalars use backslash escape sequences.
+        # The old code found the closing quote correctly (treating \" as escaped)
+        # but returned the raw value[1:index] without processing the escapes, so
+        # `description: "He said \"hello\""` → 'He said \\"hello\\"' instead of
+        # 'He said "hello"', corrupting BM25 indexing and skill-name matching.
+        content = '---\nstatus: active\nname: "He said \\"hello\\""\n---\n# Body.\n'
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("name") == 'He said "hello"'
 
 
 # ---------------------------------------------------------------------------

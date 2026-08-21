@@ -128,16 +128,35 @@ def _clean_plain_scalar(raw: str) -> str:
                     result.append(ch)
                     i += 1
             return "".join(result).strip()
-        # Double-quoted: backslash escape only
-        escaped = False
-        for index, char in enumerate(value[1:], start=1):
-            if char == "\\" and not escaped:
-                escaped = True
-                continue
-            if char == quote and not escaped:
-                return value[1:index]
-            escaped = False
-        return value[1:].strip()
+        # Double-quoted: process standard YAML backslash escape sequences
+        _DQUOTE_ESCAPES: dict[str, str] = {
+            '"': '"',
+            "\\": "\\",
+            "n": "\n",
+            "t": "\t",
+            "r": "\r",
+            "a": "\a",
+            "b": "\b",
+            "f": "\f",
+            "v": "\v",
+        }
+        result: list[str] = []
+        i = 1
+        while i < len(value):
+            ch = value[i]
+            if ch == "\\":
+                if i + 1 < len(value):
+                    result.append(_DQUOTE_ESCAPES.get(value[i + 1], value[i + 1]))
+                    i += 2
+                else:
+                    result.append("\\")
+                    i += 1
+            elif ch == '"':
+                return "".join(result)
+            else:
+                result.append(ch)
+                i += 1
+        return "".join(result).strip()
     if value.startswith("#"):
         return ""
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
