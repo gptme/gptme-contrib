@@ -37,6 +37,8 @@ from pathlib import Path
 from collections.abc import Sequence
 from typing import Any
 
+import regex
+
 # ---------------------------------------------------------------------------
 # BM25 constants (calibrated on 9,025 real injections, 2026-08-05)
 # ---------------------------------------------------------------------------
@@ -61,6 +63,9 @@ BM25_MIN_RAW: float = 40.0
 #: When fewer than 17 lessons score nonzero the theoretical z ceiling drops
 #: below 4.0; this fraction keeps the gate reachable for small corpora.
 BM25_STANDOUT_FRACTION: float = 0.8
+
+#: Maximum wall-clock time for one user-supplied ``match.patterns`` search.
+PATTERN_TIMEOUT_SECONDS: float = 0.01
 
 # ---------------------------------------------------------------------------
 # Internal helpers for frontmatter parsing
@@ -865,13 +870,19 @@ def score_lessons(
                 matched_by.append(kw)
 
         # 2. Pattern matching (full regex, case-insensitive so patterns with
-        #    uppercase chars like "GitHub" or "[A-Z].*" match prompt_lower)
+        #    uppercase chars like "GitHub" or "[A-Z].*" match prompt_lower).
+        #    Lessons can come from shared repositories, so bound each search.
         for pat in lesson["patterns"]:
             try:
-                if re.search(pat, prompt_lower, re.IGNORECASE):
+                if regex.search(
+                    pat,
+                    prompt_lower,
+                    regex.IGNORECASE,
+                    timeout=PATTERN_TIMEOUT_SECONDS,
+                ):
                     score += 1.0
                     matched_by.append(f"pattern:{pat[:30]}")
-            except re.error:
+            except (regex.error, TimeoutError):
                 pass
 
         # 3. Skill name exact / near-match

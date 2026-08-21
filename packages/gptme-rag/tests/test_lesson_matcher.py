@@ -933,6 +933,17 @@ class TestScoreLessons:
         )
         assert len(results) == 1
 
+    def test_pathological_pattern_times_out(self):
+        lessons = [self._make_lesson("lessons/a.md", [], patterns=[r"^(a+)+$"])]
+        prompt = "a" * 30_000 + "!"
+
+        assert score_lessons(lessons, prompt, use_bm25=False) == []
+
+    def test_invalid_pattern_is_ignored(self):
+        lessons = [self._make_lesson("lessons/a.md", [], patterns=["["])]
+
+        assert score_lessons(lessons, "anything", use_bm25=False) == []
+
     def test_results_sorted_descending(self):
         lessons = [
             self._make_lesson("lessons/a.md", ["merge"]),
