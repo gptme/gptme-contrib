@@ -910,8 +910,6 @@ def rollback_failed_delivery(
     repo: str,
     number: int | str | None,
     slot_key: str,
-    *,
-    clear_event_markers: bool = True,
 ) -> bool:
     """Bound and apply a failed-delivery rollback.
 
@@ -919,10 +917,8 @@ def rollback_failed_delivery(
        counter and return False, telling the caller to promote instead (this
        is what stops the re-dispatch treadmill on items where no reply is
        ever appropriate).
-    2. Optionally clear the slot's ``.event``/``.event_logged`` fingerprints.
-       The explicit ``orphan_no_delivery`` path needs an immediate re-dispatch;
-       an unverified delivery check leaves them for ``pm_dispatch_recovery`` so
-       that its backed-off retry policy remains authoritative.
+    2. Clear the slot's ``.event``/``.event_logged`` fingerprints so the item
+       can re-enter after the dispatcher's normal ``.ts`` cooldown.
     3. Purge this item's pending ``notif-*`` state so the end-of-run blanket
        promotion cannot consume it.
 
@@ -948,8 +944,7 @@ def rollback_failed_delivery(
         except OSError:
             pass
 
-    if clear_event_markers:
-        clear_slot_event_markers(config, slot_key)
+    clear_slot_event_markers(config, slot_key)
     purge_pending_notif_state(config, repo, number)
     return True
 
