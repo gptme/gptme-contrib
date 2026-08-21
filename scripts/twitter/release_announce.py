@@ -233,12 +233,26 @@ def _pending_key(step: str) -> str:
 
 
 def _begin_post(state: dict, key: str, record: dict, step: str) -> bool:
-    """Persist post intent, refusing to repeat an ambiguous remote side effect."""
+    """Persist post intent, refusing to repeat an ambiguous remote side effect.
+
+    The pending marker is cleared only on confirmed success (``_finish_post``).
+    If the post step failed (subprocess non-zero) or the process was killed
+    after ``_begin_post`` but before the result was recorded, the marker remains
+    so a later timer run refuses to retry blindly.
+
+    Recovery: if you are certain the tweet was NOT posted (e.g. the crash
+    happened before the subprocess started), run with ``--force`` to reset all
+    state for this tag and retry from scratch.  If the tweet WAS posted but the
+    ID was never recorded, reconcile the state file manually (set the tweet ID
+    and remove the pending key) before running without ``--force``.
+    """
     pending_key = _pending_key(step)
     if pending_key in record:
         print(
             f"{key}: {step} may already have been posted at "
-            f"{record[pending_key]}; refusing to retry without reconciliation",
+            f"{record[pending_key]}; refusing to retry without reconciliation. "
+            "Run with --force to reset all state for this tag (risk: duplicate "
+            "tweet if the post succeeded), or edit the state file manually.",
             file=sys.stderr,
         )
         return False
@@ -250,11 +264,6 @@ def _begin_post(state: dict, key: str, record: dict, step: str) -> bool:
 
 def _finish_post(state: dict, record: dict, step: str, tweet_id: str | None) -> None:
     record[step] = tweet_id
-    record.pop(_pending_key(step), None)
-    save_state(state)
-
-
-def _clear_post_intent(state: dict, record: dict, step: str) -> None:
     record.pop(_pending_key(step), None)
     save_state(state)
 
@@ -286,7 +295,8 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             return 1
         posted, org_id = _post(["post", announcement], account=args.org_account)
         if not posted:
-            _clear_post_intent(state, record, "org_tweet_id")
+            # Keep the pending marker so a later run refuses blind retry.
+            # Use --force to reset if certain no tweet was posted.
             return 1
         _finish_post(state, record, "org_tweet_id", org_id)
     if org_id is None:
@@ -305,7 +315,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             ["post", link_reply, "--reply-to", org_id], account=args.org_account
         )
         if not posted:
-            _clear_post_intent(state, record, "link_reply_id")
+            # Keep the pending marker so a later run refuses blind retry.
             return 1
         _finish_post(state, record, "link_reply_id", link_reply_id)
 
@@ -315,7 +325,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             return 1
         posted, quote_id = _post(["post", quote_text, "--quote", org_id])
         if not posted:
-            _clear_post_intent(state, record, "bob_quote_id")
+            # Keep the pending marker so a later run refuses blind retry.
             return 1
         _finish_post(state, record, "bob_quote_id", quote_id)
 
@@ -332,7 +342,15 @@ def main() -> int:
     ap.add_argument("--org-account", default="gptmeorg")
     ap.add_argument("--skip-quote", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--force", action="store_true", help="re-announce a done tag")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "re-announce a done tag or clear stale pending markers left by a "
+            "crashed run; resets all per-tag state, so a partially-completed "
+            "announcement may re-post already-sent tweets"
+        ),
+    )
     args = ap.parse_args()
 
     rel = latest_release(args.repo, args.tag)

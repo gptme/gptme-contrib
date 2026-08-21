@@ -491,6 +491,13 @@ def load_twitter_client(
                         "[yellow]Waiting for authorization (timeout: 5 minutes)..."
                     )
                     try:
+                        from urllib.parse import parse_qs, urlparse
+
+                        # Capture expected state for CSRF validation below.
+                        _expected_state = parse_qs(urlparse(auth_url).query).get(
+                            "state", [None]
+                        )[0]
+
                         _cb_file = os.getenv("TWITTER_OAUTH_CALLBACK_FILE")
                         if _cb_file:
                             # The authorizing browser is on another machine (an
@@ -514,6 +521,23 @@ def load_twitter_client(
                             raise TimeoutError(
                                 "No authorization callback received within timeout"
                             )
+                        # Explicit CSRF state check: validate the returned state
+                        # against the one embedded in auth_url, before passing
+                        # the full callback URL to fetch_token.  tweepy's
+                        # OAuth2UserHandler also validates state internally, but
+                        # an early explicit check provides a clear error message
+                        # and rejects the callback before any token exchange.
+                        if _expected_state:
+                            _got_state = parse_qs(urlparse(full_url).query).get(
+                                "state", [None]
+                            )[0]
+                            if _got_state != _expected_state:
+                                raise ValueError(
+                                    "OAuth state mismatch in callback: "
+                                    f"expected {_expected_state!r}, "
+                                    f"got {_got_state!r}. "
+                                    "Possible CSRF attempt or stale callback file."
+                                )
                         console.print("[green]Authorization received!")
                     except TimeoutError as e:
                         console.print("[red]Error: Authorization timeout")

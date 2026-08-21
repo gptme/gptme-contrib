@@ -182,6 +182,7 @@ def test_main_posts_org_reply_and_quote(monkeypatch, tmp_path):
 
 
 def test_main_resumes_after_link_reply_failure(monkeypatch, tmp_path):
+    """A failed link_reply leaves the pending marker; the next run refuses retry."""
     monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
     monkeypatch.setattr(
         ra,
@@ -194,7 +195,7 @@ def test_main_resumes_after_link_reply_failure(monkeypatch, tmp_path):
         },
     )
     calls: list[tuple] = []
-    results = iter([(True, "101"), (False, None), (True, "102"), (True, "103")])
+    results = iter([(True, "101"), (False, None)])
 
     def fake_post(args, account=None):
         calls.append((account, args))
@@ -203,21 +204,21 @@ def test_main_resumes_after_link_reply_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
 
+    # First run: org tweet succeeds, link reply fails.
     assert ra.main() == 1
     partial = json.loads(ra.STATE_FILE.read_text())["gptme/gptme#v0.33.0"]
-    assert partial == {"org_tweet_id": "101"}
+    assert partial["org_tweet_id"] == "101"
+    # Pending marker must survive so the next run refuses blind retry.
+    assert "link_reply_pending_at" in partial
+    assert len(calls) == 2
 
-    assert ra.main() == 0
-    assert len(calls) == 4
-    # Resume at the missing reply instead of duplicating the org announcement.
-    assert calls[2][1][2:] == ["--reply-to", "101"]
-    completed = json.loads(ra.STATE_FILE.read_text())["gptme/gptme#v0.33.0"]
-    assert completed["link_reply_id"] == "102"
-    assert completed["bob_quote_id"] == "103"
-    assert "announced_at" in completed
+    # Second run: link_reply_pending_at blocks retry to avoid duplicate tweet.
+    assert ra.main() == 1
+    assert len(calls) == 2  # no new _post calls
 
 
 def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
+    """A failed quote-tweet leaves the pending marker; the next run refuses retry."""
     monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
     monkeypatch.setattr(
         ra,
@@ -230,7 +231,7 @@ def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
         },
     )
     calls: list[tuple] = []
-    results = iter([(True, "101"), (True, "102"), (False, None), (True, "103")])
+    results = iter([(True, "101"), (True, "102"), (False, None)])
 
     def fake_post(args, account=None):
         calls.append((account, args))
@@ -239,10 +240,17 @@ def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
 
+    # First run: org tweet and link reply succeed, quote fails.
     assert ra.main() == 1
-    assert ra.main() == 0
-    assert len(calls) == 4
-    assert calls[-1][1][2:] == ["--quote", "101"]
+    partial = json.loads(ra.STATE_FILE.read_text())["gptme/gptme#v0.33.0"]
+    assert partial["org_tweet_id"] == "101"
+    assert partial["link_reply_id"] == "102"
+    assert "bob_quote_pending_at" in partial
+    assert len(calls) == 3
+
+    # Second run: bob_quote_pending_at blocks retry.
+    assert ra.main() == 1
+    assert len(calls) == 3  # no new _post calls
 
 
 def test_main_adds_quote_after_skip_quote_run(monkeypatch, tmp_path):
@@ -468,7 +476,10 @@ def test_main_refuses_to_retry_ambiguous_post(monkeypatch, tmp_path, capsys):
     assert "refusing to retry" in capsys.readouterr().err
 
 
-def test_main_clears_intent_after_definite_failure(monkeypatch, tmp_path):
+def test_main_keeps_intent_after_post_failure_prevents_retry(
+    monkeypatch, tmp_path, capsys
+):
+    """A failed org-tweet post keeps the pending marker so blind retry is refused."""
     monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
     monkeypatch.setattr(
         ra,
@@ -480,10 +491,61 @@ def test_main_clears_intent_after_definite_failure(monkeypatch, tmp_path):
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
         },
     )
-    results = iter([(False, None), (True, "101"), (True, "102"), (True, "103")])
-    monkeypatch.setattr(ra, "_post", lambda args, account=None: next(results))
+    calls = 0
+
+    def fake_post(args, account=None):
+        nonlocal calls
+        calls += 1
+        return False, None  # every attempt fails
+
+    monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
 
+    # First run: org-tweet fails → pending marker stays.
     assert ra.main() == 1
-    assert ra.load_state()["gptme/gptme#v0.33.0"] == {}
+    record = ra.load_state()["gptme/gptme#v0.33.0"]
+    assert "org_tweet_pending_at" in record
+    assert calls == 1
+
+    # Second run: pending marker blocks retry without --force.
+    assert ra.main() == 1
+    assert "refusing to retry" in capsys.readouterr().err
+    assert calls == 1  # _post was NOT called again
+
+
+def test_main_force_clears_pending_markers(monkeypatch, tmp_path):
+    """--force resets state including stale pending markers from a crashed run."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    # Seed a stale pending marker from a hypothetical crashed run.
+    ra.save_state(
+        {
+            "gptme/gptme#v0.33.0": {
+                "org_tweet_pending_at": "2026-08-20T10:00:00+00:00",
+            }
+        }
+    )
+    calls: list[tuple] = []
+
+    def fake_post(args, account=None):
+        calls.append((account, args))
+        return True, str(100 + len(calls))
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py", "--force"])
+
+    # --force ignores all pending markers and re-announces from scratch.
     assert ra.main() == 0
+    assert len(calls) == 3
+    record = ra.load_state()["gptme/gptme#v0.33.0"]
+    assert record["org_tweet_id"] == "101"
+    assert "announced_at" in record
