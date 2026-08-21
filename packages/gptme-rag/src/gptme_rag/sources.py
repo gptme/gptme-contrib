@@ -127,7 +127,9 @@ def de_accumulate_transcript(transcript: list[dict[str, Any]], *, cumulative: bo
                 continue
             if run_role.strip() != current_role:
                 break
-            run_texts.append(str(transcript[i].get("text", "")))
+            text = transcript[i].get("text")
+            if isinstance(text, str) and text.strip():
+                run_texts.append(text)
             i += 1
 
         if cumulative:

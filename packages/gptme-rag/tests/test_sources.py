@@ -510,16 +510,21 @@ def test_de_accumulate_keeps_ambiguous_prefix_chain():
     assert result == "USER: I want\nI\nI want to go"
 
 
+def test_de_accumulate_skips_non_string_text():
+    """Missing or null STT text must not become indexable placeholder content."""
+    transcript = [
+        {"role": "user", "text": None},
+        {"role": "user", "text": "hello"},
+        {"role": "assistant", "text": 42},
+    ]
+
+    assert de_accumulate_transcript(transcript, cumulative=True) == "USER: hello"
+
+
 def test_collect_voice_calls_does_not_read_symlink_escaping_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A per-file symlink out of the repo must be skipped *before* being read.
-
-    Regression for the P1 finding on head 2429e5a2: the collector called
-    ``read_text()`` and parsed the JSON before the per-file ``repo_root``
-    resolution check, so out-of-repo content was pulled into memory even though
-    the resulting document was later discarded.
-    """
+    """A per-file symlink out of the repo must be skipped before opening it."""
     repo = tmp_path / "repo"
     call_dir = repo / "calls"
     call_dir.mkdir(parents=True)
@@ -527,22 +532,19 @@ def test_collect_voice_calls_does_not_read_symlink_escaping_repo(
     secret = tmp_path / "outside" / "secret.json"
     secret.parent.mkdir()
     secret.write_text('{"transcript": [{"role": "user", "text": "classified"}]}', encoding="utf-8")
-
     (call_dir / "escape.json").symlink_to(secret)
 
-    read_paths: list[Path] = []
-    original_read_text = Path.read_text
+    opened_paths: list[Path] = []
+    original_open = os.open
 
-    def tracking_read_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
-        read_paths.append(self)
-        return original_read_text(self, *args, **kwargs)
+    def tracking_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        opened_paths.append(Path(path))
+        return original_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", tracking_read_text)
-    docs = collect_voice_call_documents(call_dir, repo_root=repo)
+    monkeypatch.setattr(os, "open", tracking_open)
 
-    assert docs == []
-    # The escaping file must never have been read at all.
-    assert read_paths == []
+    assert collect_voice_call_documents(call_dir, repo_root=repo) == []
+    assert opened_paths == []
 
 
 def test_collect_voice_calls_skips_symlink_loop(tmp_path: Path):
@@ -622,4 +624,6 @@ def test_collect_voice_calls_rejects_symlink_swapped_after_resolution(
     monkeypatch.setattr(os, "open", swapping_open)
 
     assert collect_voice_call_documents(call_dir, repo_root=repo) == []
-    assert seen_flags & os.O_NOFOLLOW
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        assert seen_flags & nofollow
