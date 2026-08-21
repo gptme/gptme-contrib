@@ -224,6 +224,7 @@ def call_claude_code(
                 )
                 # Attempt fallback slots (GPTME_CC_FALLBACK_CREDS) before raising.
                 last_non_quota_error: subprocess.CalledProcessError | None = None
+                saw_empty_response = False
                 for fb_cred in _fallback_cred_paths:
                     if not fb_cred.exists():
                         logger.debug("Fallback cred file %s not found, skipping", fb_cred)
@@ -232,36 +233,57 @@ def call_claude_code(
                         "Active slot quota exhausted; trying fallback slot: %s",
                         fb_cred.name,
                     )
-                    try:
-                        fb_result = _try_with_credential_file(cmd, prompt, fb_cred, env, timeout)
-                    except (OSError, subprocess.TimeoutExpired) as exc:
-                        logger.warning("Fallback slot %s failed to run: %s", fb_cred.name, exc)
-                        continue
-                    if fb_result.returncode == 0 and fb_result.stdout is not None:
-                        fb_out: str = fb_result.stdout.strip()
-                        if fb_out:
-                            logger.info("Fallback slot %s succeeded", fb_cred.name)
-                            return fb_out
-                    # Check if this fallback slot is also quota-exhausted
-                    fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
-                    if any(m.lower() in fb_combined.lower() for m in _QUOTA_EXHAUSTED_MARKERS):
-                        logger.warning("Fallback slot %s also quota-exhausted", fb_cred.name)
-                    else:
-                        logger.warning(
-                            "Fallback slot %s failed (rc=%d): stdout=%s stderr=%s",
-                            fb_cred.name,
-                            fb_result.returncode,
-                            (fb_result.stdout or "")[:200],
-                            (fb_result.stderr or "")[:200],
-                        )
-                        last_non_quota_error = subprocess.CalledProcessError(
-                            fb_result.returncode,
-                            cmd,
-                            fb_result.stdout,
-                            fb_result.stderr,
-                        )
+                    for fb_attempt in range(1, max_retries + 1):
+                        try:
+                            fb_result = _try_with_credential_file(
+                                cmd, prompt, fb_cred, env, timeout
+                            )
+                        except (OSError, subprocess.TimeoutExpired) as exc:
+                            logger.warning("Fallback slot %s failed to run: %s", fb_cred.name, exc)
+                            break
+                        if fb_result.returncode == 0:
+                            fb_out = (fb_result.stdout or "").strip()
+                            if fb_out:
+                                logger.info("Fallback slot %s succeeded", fb_cred.name)
+                                return fb_out
+                            saw_empty_response = True
+                            logger.warning(
+                                "Fallback slot %s returned empty response (attempt %d/%d)",
+                                fb_cred.name,
+                                fb_attempt,
+                                max_retries,
+                            )
+                            if fb_attempt < max_retries:
+                                time.sleep(_RETRY_DELAY_S * fb_attempt)
+                                continue
+                            break
+                        # Check if this fallback slot is also quota-exhausted.
+                        fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
+                        if any(m.lower() in fb_combined.lower() for m in _QUOTA_EXHAUSTED_MARKERS):
+                            logger.warning("Fallback slot %s also quota-exhausted", fb_cred.name)
+                        else:
+                            logger.warning(
+                                "Fallback slot %s failed (rc=%d): stdout=%s stderr=%s",
+                                fb_cred.name,
+                                fb_result.returncode,
+                                (fb_result.stdout or "")[:200],
+                                (fb_result.stderr or "")[:200],
+                            )
+                            last_non_quota_error = subprocess.CalledProcessError(
+                                fb_result.returncode,
+                                cmd,
+                                fb_result.stdout,
+                                fb_result.stderr,
+                            )
+                        break
                 if last_non_quota_error is not None:
                     raise last_non_quota_error
+                if saw_empty_response:
+                    logger.error(
+                        "Fallback slots returned empty responses after %d attempts",
+                        max_retries,
+                    )
+                    return ""
                 raise ClaudeQuotaExhaustedError(
                     result.returncode, attempt_cmd, result.stdout, result.stderr
                 )

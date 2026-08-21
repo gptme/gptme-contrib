@@ -557,6 +557,59 @@ def test_call_claude_code_quota_fallback_continues_after_launch_failure(
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
+def test_call_claude_code_quota_fallback_retries_empty_response(
+    mock_run, mock_sleep, mock_fallback, tmp_path
+):
+    """A transient empty response from a healthy fallback slot is retried."""
+    fb_cred = tmp_path / ".credentials.json.alice"
+    fb_cred.write_text("{}")
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_fallback.side_effect = [
+        _make_completed_process(stdout=""),
+        _make_completed_process(stdout='{"ok": true}'),
+    ]
+
+    with patch.dict(
+        "os.environ",
+        {"GPTME_CC_FALLBACK_CREDS": str(fb_cred)},
+        clear=True,
+    ):
+        assert call_claude_code("test prompt", max_retries=2) == '{"ok": true}'
+
+    assert mock_fallback.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_fallback_empty_exhaustion_returns_empty(
+    mock_run, mock_sleep, mock_fallback, tmp_path
+):
+    """Repeated empty responses retain the main path's graceful-empty contract."""
+    fb_cred = tmp_path / ".credentials.json.alice"
+    fb_cred.write_text("{}")
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_fallback.return_value = _make_completed_process(stdout="")
+
+    with patch.dict(
+        "os.environ",
+        {"GPTME_CC_FALLBACK_CREDS": str(fb_cred)},
+        clear=True,
+    ):
+        assert call_claude_code("test prompt", max_retries=2) == ""
+
+    assert mock_fallback.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
 def test_call_claude_code_quota_fallback_all_exhausted(
     mock_run, mock_sleep, mock_fallback, tmp_path
 ):
