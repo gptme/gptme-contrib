@@ -137,7 +137,7 @@ def test_post_aborts_before_single_tweet_with_dead_url(
     monkeypatch.setattr(
         twitter_module,
         "load_twitter_client",
-        lambda require_auth=True: SimpleNamespace(
+        lambda require_auth=True, headless=False: SimpleNamespace(
             create_tweet=lambda **kwargs: posted.append(kwargs["text"])
         ),
     )
@@ -175,7 +175,7 @@ def test_post_aborts_before_thread_with_dead_followup_url(
     monkeypatch.setattr(
         twitter_module,
         "load_twitter_client",
-        lambda require_auth=True: SimpleNamespace(
+        lambda require_auth=True, headless=False: SimpleNamespace(
             create_tweet=lambda **kwargs: posted.append(kwargs["text"])
         ),
     )
