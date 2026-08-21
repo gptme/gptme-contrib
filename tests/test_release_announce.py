@@ -87,14 +87,14 @@ def test_post_distinguishes_failure_from_success_without_id(monkeypatch):
     monkeypatch.setattr(
         ra,
         "_run",
-        lambda cmd: subprocess.CompletedProcess(cmd, 1, "", "failed"),
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, "", "failed"),
     )
     assert ra._post(["post", "hello"]) == (False, None)
 
     monkeypatch.setattr(
         ra,
         "_run",
-        lambda cmd: subprocess.CompletedProcess(cmd, 0, "posted", ""),
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, "posted", ""),
     )
     assert ra._post(["post", "hello"]) == (True, None)
 
@@ -217,6 +217,69 @@ def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
     assert ra.main() == 0
     assert len(calls) == 4
     assert calls[-1][1][2:] == ["--quote", "101"]
+
+
+def test_main_adds_quote_after_skip_quote_run(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    calls: list[tuple] = []
+
+    def fake_post(args, account=None):
+        calls.append((account, args))
+        return True, str(100 + len(calls))
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py", "--skip-quote"])
+
+    assert ra.main() == 0
+    assert len(calls) == 2
+    assert "announced_at" in ra.load_state()["gptme/gptme#v0.33.0"]
+
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+    assert ra.main() == 0
+    assert len(calls) == 3
+    assert calls[-1][0] is None
+    assert calls[-1][1][2:] == ["--quote", "101"]
+    assert ra.load_state()["gptme/gptme#v0.33.0"]["bob_quote_id"] == "103"
+
+
+def test_post_default_account_clears_environment_profile(monkeypatch):
+    monkeypatch.setenv("TWITTER_ACCOUNT", "gptmeorg")
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout="Tweet ID: 123\n", stderr="")
+
+    monkeypatch.setattr(ra, "_run", fake_run)
+
+    assert ra._post(["post", "hello"]) == (True, "123")
+    assert "TWITTER_ACCOUNT" not in seen["env"]
+
+
+def test_post_named_account_keeps_inherited_environment(monkeypatch):
+    monkeypatch.setenv("TWITTER_ACCOUNT", "default")
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout="Tweet ID: 123\n", stderr="")
+
+    monkeypatch.setattr(ra, "_run", fake_run)
+
+    assert ra._post(["post", "hello"], account="gptmeorg") == (True, "123")
+    assert seen["cmd"][2:4] == ["--account", "gptmeorg"]
+    assert seen["env"] is None
 
 
 def test_main_does_not_retry_success_without_tweet_id(monkeypatch, tmp_path):

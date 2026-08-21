@@ -172,10 +172,14 @@ def compose_quote(tag: str, repo: str) -> str:
 def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None]:
     """Run twitter.py post ... and return success plus the created tweet id."""
     cmd = [sys.executable, str(TWITTER_CLI)]
+    env = None
     if account:
         cmd += ["--account", account]
+    else:
+        env = os.environ.copy()
+        env.pop("TWITTER_ACCOUNT", None)
     cmd += args
-    r = _run(cmd)
+    r = _run(cmd, env=env)
     out = r.stdout + r.stderr
     if r.returncode != 0:
         print(f"twitter.py failed ({r.returncode}):\n{out}", file=sys.stderr)
@@ -227,7 +231,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     state = load_state()
     key = f"{args.repo}#{tag}"
     record = state.get(key, {}) if not args.force else {}
-    if record.get("announced_at"):
+    if record.get("announced_at") and (args.skip_quote or "bob_quote_id" in record):
         print(f"{key}: already announced ({record.get('org_tweet_id')})")
         return 0
 
