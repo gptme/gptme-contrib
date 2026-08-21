@@ -261,6 +261,10 @@ def call_claude_code(
                         fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
                         if any(m.lower() in fb_combined.lower() for m in _QUOTA_EXHAUSTED_MARKERS):
                             logger.warning("Fallback slot %s also quota-exhausted", fb_cred.name)
+                            # Clear any prior non-quota error so the caller receives
+                            # ClaudeQuotaExhaustedError rather than a stale error from
+                            # an earlier fallback that failed for a different reason.
+                            last_non_quota_error = None
                             break
                         logger.warning(
                             "Fallback slot %s failed (rc=%d, attempt %d/%d): stdout=%s stderr=%s",

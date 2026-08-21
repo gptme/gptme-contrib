@@ -693,6 +693,42 @@ def test_call_claude_code_quota_fallback_preserves_non_quota_error(
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
+def test_call_claude_code_quota_fallback_non_quota_then_quota_raises_quota_error(
+    mock_run, mock_sleep, mock_fallback, tmp_path
+):
+    """Non-quota error on slot A then quota-exhaustion on slot B → ClaudeQuotaExhaustedError.
+
+    Regression for: last_non_quota_error was not cleared when a later fallback slot
+    was itself quota-exhausted, causing the stale error from slot A to be raised instead
+    of ClaudeQuotaExhaustedError — violating the stated contract.
+    """
+    cred_a = tmp_path / ".credentials.json.alice"
+    cred_a.write_text("{}")
+    cred_b = tmp_path / ".credentials.json.erik"
+    cred_b.write_text("{}")
+
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_fallback.side_effect = [
+        # Slot A: non-quota failure (e.g. invalid credentials)
+        _make_completed_process(returncode=2, stderr="invalid credentials"),
+        # Slot B: also quota-exhausted
+        _make_completed_process(returncode=1, stdout="You've hit your weekly limit"),
+    ]
+
+    with patch.dict(
+        "os.environ",
+        {"GPTME_CC_FALLBACK_CREDS": f"{cred_a}:{cred_b}"},
+        clear=True,
+    ):
+        with pytest.raises(ClaudeQuotaExhaustedError):
+            call_claude_code("test prompt", max_retries=1)
+
+
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
 def test_call_claude_code_quota_fallback_missing_file_skipped(mock_run, mock_sleep, mock_fallback):
     """A fallback cred path that does not exist on disk is silently skipped."""
     import os
