@@ -392,6 +392,50 @@ def test_background_task_commit_via_output_file(tmp_path, monkeypatch):
     assert signals["git_commits"] == ["beef123 feat: y"]
 
 
+def test_background_task_noncommit_output_falls_back_to_terminal_log(tmp_path, monkeypatch):
+    """Partial TaskOutput must not suppress a commit present in the terminal log."""
+    sessions_dir = tmp_path / "sessions"
+    terminal_dir = sessions_dir / "encoded-cwd" / "session-id" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    log = terminal_dir / "t9.log"
+    log.write_text("running checks...\n[master beef123] feat: y\n 2 files changed")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'feat: y'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t9",
+                "output_file": str(log),
+            },
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c2",
+            "status": "completed",
+            "rawOutput": {
+                "type": "TaskOutput",
+                "Result": {
+                    "task_id": "t9",
+                    "command": "git commit -m 'feat: y'",
+                    "exit_code": 0,
+                    "output": "running checks...",
+                },
+            },
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["git_commits"] == ["beef123 feat: y"]
+
+
 def test_background_task_output_file_outside_grok_sessions_is_rejected(tmp_path):
     """A crafted trajectory must not make signal extraction read arbitrary files."""
     log = tmp_path / "outside.log"
