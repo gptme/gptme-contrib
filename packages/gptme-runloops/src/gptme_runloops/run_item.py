@@ -1041,7 +1041,8 @@ def promote_notification_states(config: RunItemConfig) -> None:
     Notification state files use GitHub API ids, not repo#number, so the
     per-item promotion cannot find them by name; the gate writes a ``.map``
     sidecar (``repo#number``) for every thread it can attribute. Only the
-    *unmapped* remainder is promoted here.
+    *unmapped* remainder is promoted here. An undecodable map cannot establish
+    ownership, so treat its state as unmapped rather than stranding it forever.
 
     History: this used to promote EVERY pending ``notif-*.state`` under the
     assumption "sessions already ran for every emitted notification". That
@@ -1070,8 +1071,16 @@ def promote_notification_states(config: RunItemConfig) -> None:
     for f in pending.glob("notif-*.state"):
         if not f.is_file():
             continue
-        if f.with_suffix(".map").is_file():
-            continue  # owned by an item; its worker's outcome decides
+        map_file = f.with_suffix(".map")
+        if map_file.is_file():
+            try:
+                map_file.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                pass  # corrupt map cannot prove item ownership
+            except OSError:
+                continue  # transient read failure: preserve the safer ownership gate
+            else:
+                continue  # owned by an item; its worker's outcome decides
         shutil.copy(f, config.state_dir / f.name)
 
 

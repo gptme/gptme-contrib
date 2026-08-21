@@ -55,6 +55,7 @@ from gptme_runloops.run_item import (
     plan_item,
     predict_cc_trajectory_path,
     promote_item_state,
+    promote_notification_states,
     purge_pending_notif_state,
     redelivery_attempts_file,
     resolve_backend_trajectory,
@@ -2285,13 +2286,13 @@ def test_rollback_respects_max_attempts_env(
     assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
 
 
-def test_corrupt_notification_map_is_ignored(tmp_path) -> None:
-    """One invalid UTF-8 sidecar must not abort promotion or rollback."""
+def test_corrupt_notification_map_is_treated_as_unmapped(tmp_path) -> None:
+    """An unreadable sidecar must not strand its notification state pending."""
     config = make_config(tmp_path)
     pending = config.pending_state_dir
     pending.mkdir(parents=True)
     (pending / "notif-1.map").write_bytes(b"\xff")
-    (pending / "notif-1.state").write_text("corrupt")
+    (pending / "notif-1.state").write_text("corrupt-map-state")
     (pending / "notif-2.map").write_text("gptme/gptme#3468")
     (pending / "notif-2.state").write_text("valid")
 
@@ -2300,6 +2301,9 @@ def test_corrupt_notification_map_is_ignored(tmp_path) -> None:
 
     assert purge_pending_notif_state(config, "gptme/gptme", 3468) == 1
     assert (pending / "notif-1.map").exists()
+
+    promote_notification_states(config)
+    assert (config.state_dir / "notif-1.state").read_text() == "corrupt-map-state"
 
 
 def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:
