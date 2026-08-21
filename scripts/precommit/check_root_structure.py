@@ -145,7 +145,17 @@ def main(argv: "list[str] | None" = None) -> int:
     # When absent, fall back to the gptme-contrib defaults.
     allowed = frozenset(args.allowed) if args.allowed else ALLOWED_ROOT_ENTRIES
 
-    entries = get_tracked_root_entries(get_repo_root())
+    try:
+        repo_root = get_repo_root()
+    except subprocess.CalledProcessError:
+        print(
+            "check-root-structure: unable to determine repository root; "
+            "run this command inside a Git repository.",
+            file=sys.stderr,
+        )
+        return 1
+
+    entries = get_tracked_root_entries(repo_root)
     unexpected = entries - allowed
     if not unexpected:
         return 0

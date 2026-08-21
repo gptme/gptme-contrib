@@ -1,5 +1,6 @@
 """Tests for the root structure checker."""
 
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -27,6 +28,21 @@ def test_allowed_entries_pass():
     ):
         result = check_root_structure.main([])
     assert result == 0
+
+
+def test_get_repo_root_reports_non_git_directory(capsys):
+    """main() should fail cleanly when git cannot resolve a repository root."""
+    import check_root_structure
+
+    error = subprocess.CalledProcessError(128, ["git", "rev-parse"])
+    with patch("subprocess.run", side_effect=error):
+        result = check_root_structure.main([])
+
+    assert result == 1
+    assert capsys.readouterr().err == (
+        "check-root-structure: unable to determine repository root; "
+        "run this command inside a Git repository.\n"
+    )
 
 
 def test_get_tracked_root_entries_parses_paths_correctly():
