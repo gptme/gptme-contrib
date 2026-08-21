@@ -34,14 +34,34 @@ def test_get_repo_root_reports_non_git_directory(capsys):
     """main() should fail cleanly when git cannot resolve a repository root."""
     import check_root_structure
 
-    error = subprocess.CalledProcessError(128, ["git", "rev-parse"])
+    error = subprocess.CalledProcessError(128, ["git", "rev-parse", "--show-toplevel"])
     with patch("subprocess.run", side_effect=error):
         result = check_root_structure.main([])
 
     assert result == 1
     assert capsys.readouterr().err == (
-        "check-root-structure: unable to determine repository root; "
-        "run this command inside a Git repository.\n"
+        "check-root-structure: unable to inspect repository: "
+        "git rev-parse --show-toplevel failed with exit code 128.\n"
+    )
+
+
+def test_get_tracked_entries_reports_git_failure(capsys):
+    """main() should fail cleanly when git cannot read the tracked files."""
+    import check_root_structure
+
+    error = subprocess.CalledProcessError(128, ["git", "ls-files", "--cached"])
+    with (
+        patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
+        patch.object(
+            check_root_structure, "get_tracked_root_entries", side_effect=error
+        ),
+    ):
+        result = check_root_structure.main([])
+
+    assert result == 1
+    assert capsys.readouterr().err == (
+        "check-root-structure: unable to inspect repository: "
+        "git ls-files --cached failed with exit code 128.\n"
     )
 
 
@@ -49,7 +69,7 @@ def test_get_tracked_root_entries_parses_paths_correctly():
     """get_tracked_root_entries should extract first path components from git ls-files output."""
     import check_root_structure
 
-    fake_output = "scripts/foo.py\ntests/test_bar.py\nlessons/README.md\nREADME.md\n"
+    fake_output = b"scripts/foo.py\0tests/test_bar.py\0lessons/README.md\0README.md\0"
     mock_result = MagicMock()
     mock_result.returncode = 0
     mock_result.stdout = fake_output
@@ -58,6 +78,19 @@ def test_get_tracked_root_entries_parses_paths_correctly():
         entries = check_root_structure.get_tracked_root_entries()
 
     assert entries == {"scripts", "tests", "lessons", "README.md"}
+
+
+def test_get_tracked_root_entries_handles_newline_in_filename():
+    """Newlines inside tracked paths must not create fake root entries."""
+    import check_root_structure
+
+    mock_result = MagicMock()
+    mock_result.stdout = b"src/foo.py\0strange\nfile.txt\0"
+
+    with patch("subprocess.run", return_value=mock_result):
+        entries = check_root_structure.get_tracked_root_entries()
+
+    assert entries == {"src", "strange\nfile.txt"}
 
 
 def test_detects_unexpected_entry():
@@ -100,15 +133,14 @@ def test_reads_git_index_not_filesystem():
     # Hermetic: mock subprocess.run to return fixed output — no real git needed.
     mock_result = MagicMock()
     mock_result.returncode = 0
-    mock_result.stdout = "scripts/foo.py\ntests/test_bar.py\n"
+    mock_result.stdout = b"scripts/foo.py\0tests/test_bar.py\0"
 
     with patch("subprocess.run", return_value=mock_result) as mock_run:
         check_root_structure.get_tracked_root_entries()
 
     assert mock_run.called, "subprocess.run was not called at all"
     cmd = mock_run.call_args[0][0]
-    assert "ls-files" in cmd, f"Expected 'ls-files' in command, got: {cmd}"
-    assert "--cached" in cmd, f"Expected '--cached' in command, got: {cmd}"
+    assert cmd == ["git", "ls-files", "--cached", "-z"]
 
 
 def test_allow_args_override_default_allowlist():

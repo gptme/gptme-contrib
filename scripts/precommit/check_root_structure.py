@@ -75,16 +75,19 @@ def get_tracked_root_entries(repo_root: "Path | None" = None) -> set[str]:
     """
     cwd = repo_root if repo_root is not None else Path(__file__).parent.parent.parent
     result = subprocess.run(
-        ["git", "ls-files", "--cached"],
+        ["git", "ls-files", "--cached", "-z"],
         cwd=cwd,
         capture_output=True,
-        text=True,
         check=True,
     )
     entries: set[str] = set()
-    for line in result.stdout.splitlines():
-        if line:
-            entries.add(line.split("/")[0])
+    for path in result.stdout.split(b"\0"):
+        if path:
+            entries.add(
+                path.split(b"/", maxsplit=1)[0].decode(
+                    "utf-8", errors="surrogateescape"
+                )
+            )
     return entries
 
 
@@ -147,15 +150,15 @@ def main(argv: "list[str] | None" = None) -> int:
 
     try:
         repo_root = get_repo_root()
-    except subprocess.CalledProcessError:
+        entries = get_tracked_root_entries(repo_root)
+    except subprocess.CalledProcessError as error:
+        command = " ".join(str(arg) for arg in error.cmd)
         print(
-            "check-root-structure: unable to determine repository root; "
-            "run this command inside a Git repository.",
+            "check-root-structure: unable to inspect repository: "
+            f"{command} failed with exit code {error.returncode}.",
             file=sys.stderr,
         )
         return 1
-
-    entries = get_tracked_root_entries(repo_root)
     unexpected = entries - allowed
     if not unexpected:
         return 0
