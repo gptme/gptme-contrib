@@ -662,10 +662,10 @@ def _remote_pending_rows(
         payload = json.loads(result.stdout or "[]")
     except json.JSONDecodeError as e:
         click.echo(f"Warning: invalid pending JSON from {agent_name}: {e}", err=True)
-        return []
+        return None
     if not isinstance(payload, list):
         click.echo(f"Warning: invalid pending payload from {agent_name}: expected a list", err=True)
-        return []
+        return None
     rows: list[dict] = []
     for item in payload:
         if not isinstance(item, dict):
