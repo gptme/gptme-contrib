@@ -13,6 +13,7 @@ Covers the missing human-side delivery introduced in issue #1476:
 
 import json
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,7 +23,6 @@ from click.testing import CliRunner
 
 from gptmail import agent_cli
 from gptmail.agent_cli import agent
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -89,7 +89,7 @@ def pull_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     # Replace _remote_pending_rows with a local-filesystem scan of gordon's outbox
     # (avoids SSH; returns the same dict shape _remote_pending_rows produces).
-    def _local_remote_pending_rows(agent_name, agent_cfg, *, recipient, mailboxes):
+    def _local_remote_pending_rows(agent_name, agent_cfg, *, recipient, mailboxes, all_mailboxes):
         outbox = Path(agent_cfg["workspace"]) / "messages" / "outbox"
         rows = []
         if not outbox.exists():
@@ -233,14 +233,13 @@ def test_pull_notify_cmd_invoked_with_env(
     _write_outbox_msg(gordon_outbox, sender="gordon", recipient="erik", subject="Urgent")
 
     sentinel = tmp_path / "notify_fired.txt"
-    # Shell command: write env vars to sentinel file.
-    notify_cmd = f'echo "$NEW_COUNT $SUMMARY" > {sentinel}'
+    notify_cmd = f'sh -c \'printf "%s %s" "$NEW_COUNT" "$SUMMARY" > {sentinel}\''
 
     result = CliRunner().invoke(agent, ["pull", "--notify-cmd", notify_cmd])
     assert result.exit_code == 0, result.output
     assert sentinel.exists(), "--notify-cmd must have been invoked"
     content = sentinel.read_text()
-    assert "1 " in content
+    assert content.startswith("1 ")
     assert "Urgent" in content
 
 
@@ -252,6 +251,30 @@ def test_pull_notify_cmd_not_invoked_when_empty(pull_workspace: Path, tmp_path: 
     result = CliRunner().invoke(agent, ["pull", "--notify-cmd", notify_cmd])
     assert result.exit_code == 0, result.output
     assert not sentinel.exists(), "--notify-cmd must not fire when new_count=0"
+
+
+def test_pull_notify_cmd_does_not_shell_expand_message_subject(
+    pull_workspace: Path, tmp_path: Path
+) -> None:
+    """Message subjects stay data even when the hook invokes a shell explicitly."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    injected = tmp_path / "injected"
+    filename = _write_outbox_msg(
+        gordon_outbox,
+        sender="gordon",
+        recipient="erik",
+        subject="safe filename",
+    )
+    message = gordon_outbox / filename
+    message.write_text(message.read_text().replace("safe filename", f"$(touch {injected})"))
+
+    sentinel = tmp_path / "summary.txt"
+    notify_cmd = f"sh -c 'printf %s \"$SUMMARY\" > {sentinel}'"
+    result = CliRunner().invoke(agent, ["pull", "--notify-cmd", notify_cmd])
+
+    assert result.exit_code == 0, result.output
+    assert not injected.exists()
+    assert f"$(touch {injected})" in sentinel.read_text()
 
 
 def test_pull_dry_run_does_not_write(pull_workspace: Path) -> None:
@@ -349,6 +372,50 @@ def test_pull_all_mailboxes_preserves_mailbox_destination(
     assert (messages / "inbox" / default_name).exists()
     assert (messages / "mailboxes" / "ops" / "inbox" / ops_name).exists()
     assert not (messages / "inbox" / ops_name).exists()
+
+
+def test_pull_all_mailboxes_queries_remote_for_remote_only_mailboxes(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--all-mailboxes`` reaches mailboxes that do not exist locally yet."""
+    calls: list[tuple[list[str], bool]] = []
+
+    def _remote_rows(*args, **kwargs):
+        calls.append((kwargs["mailboxes"], kwargs["all_mailboxes"]))
+        return [{"file": "remote-only.md", "mailbox": "ops"}]
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _remote_rows)
+
+    result = CliRunner().invoke(agent, ["pull", "--all-mailboxes", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [([], True)]
+
+
+def test_failed_scp_removes_partial_destination(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed transfer cannot leave a file that suppresses the next retry."""
+    filename = "partial.md"
+    destination = pull_workspace / "erik" / "messages" / "inbox" / filename
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": filename, "mailbox": "default"}],
+    )
+
+    def _partial_scp(cmd, **kwargs):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("partial")
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _partial_scp)
+
+    result = CliRunner().invoke(agent, ["pull"])
+
+    assert result.exit_code == 0, result.output
+    assert "failed to fetch" in result.output
+    assert not destination.exists()
 
 
 def test_pull_multiple_messages_fetched(pull_workspace: Path) -> None:

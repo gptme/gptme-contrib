@@ -796,10 +796,12 @@ def test_pending_for_recipient_fleet_merges_remote_rows(
         *,
         recipient: str,
         mailboxes: list[str],
+        all_mailboxes: bool,
     ) -> list[dict]:
         assert agent_name == "bob"
         assert recipient == "erik"
         assert mailboxes == ["default", "ops"]
+        assert all_mailboxes is True
         return [
             {
                 "agent": "bob",
@@ -829,11 +831,46 @@ def test_remote_pending_rows_warns_on_missing_transport(capsys: pytest.CaptureFi
         {"workspace": "/tmp/bob"},
         recipient="erik",
         mailboxes=["default"],
+        all_mailboxes=False,
     )
 
     captured = capsys.readouterr()
     assert rows == []
     assert "Warning: skipping bob; missing required key(s): ssh" in captured.err
+
+
+def test_remote_pending_rows_all_mailboxes_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    class Result:
+        stdout = "[]"
+
+    def _run(cmd, **kwargs):
+        commands.append(cmd[-1])
+        return Result()
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    agent_cfg = {"ssh": "bob.example", "workspace": "/srv/bob"}
+
+    agent_cli._remote_pending_rows(
+        "bob",
+        agent_cfg,
+        recipient="erik",
+        mailboxes=["default"],
+        all_mailboxes=True,
+    )
+    agent_cli._remote_pending_rows(
+        "bob",
+        agent_cfg,
+        recipient="erik",
+        mailboxes=["default"],
+        all_mailboxes=False,
+    )
+
+    assert "--all-mailboxes" in commands[0]
+    assert "--mailbox default" in commands[1]
 
 
 def test_pending_stays_silent_without_registry(

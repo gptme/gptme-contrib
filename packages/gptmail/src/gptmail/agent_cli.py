@@ -620,6 +620,7 @@ def _remote_pending_rows(
     *,
     recipient: str,
     mailboxes: list[str],
+    all_mailboxes: bool,
 ) -> list[dict]:
     missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
     if missing:
@@ -629,10 +630,10 @@ def _remote_pending_rows(
         )
         return []
     cmd = ["uv", "run", "gptmail", "agent", "pending", "--for", recipient, "--json", "--local-only"]
-    if len(mailboxes) == 1:
-        cmd.extend(["--mailbox", mailboxes[0]])
-    else:
+    if all_mailboxes:
         cmd.append("--all-mailboxes")
+    else:
+        cmd.extend(["--mailbox", mailboxes[0]])
     remote_cmd = " && ".join(
         [
             f"cd {shlex.quote(agent['workspace'])}",
@@ -689,6 +690,7 @@ def _fleet_pending_rows(
                 agent,
                 recipient=recipient,
                 mailboxes=mailboxes,
+                all_mailboxes=len(mailboxes) > 1,
             )
         )
     rows.sort(
@@ -985,6 +987,8 @@ def _fetch_from_agent(
     *,
     self_name: str,
     mailboxes: list[str],
+    all_mailboxes: bool,
+    fallback_mailbox: str | None = None,
 ) -> list[Path]:
     """SCP outbox messages addressed to ``self_name`` from a remote agent's outbox.
 
@@ -992,7 +996,14 @@ def _fetch_from_agent(
     Logs SSH/SCP errors as warnings so one unreachable agent doesn't abort the
     whole pull — the caller collects partial results and reports the total.
     """
-    rows = _remote_pending_rows(agent_name, agent, recipient=self_name, mailboxes=mailboxes)
+    rows = _remote_pending_rows(
+        agent_name,
+        agent,
+        recipient=self_name,
+        mailboxes=mailboxes,
+        all_mailboxes=all_mailboxes,
+    )
+    fallback_mailbox = fallback_mailbox or (mailboxes[0] if mailboxes else "default")
     ssh_target = agent["ssh"]
     workspace = agent["workspace"]
     ctl_path = _ssh_control_path(ssh_target)
@@ -1012,7 +1023,7 @@ def _fetch_from_agent(
     for row in rows:
         filename = str(row.get("file") or "")
         try:
-            dest = _pull_destination(row, fallback_mailbox=mailboxes[0])
+            dest = _pull_destination(row, fallback_mailbox=fallback_mailbox)
         except click.BadParameter as e:
             click.echo(f"Warning: refusing invalid mailbox from {agent_name}: {e}", err=True)
             continue
@@ -1026,7 +1037,7 @@ def _fetch_from_agent(
             continue  # Already fetched — deduplicate by mailbox and filename.
         dest.parent.mkdir(parents=True, exist_ok=True)
         # The row's mailbox field tells us which remote outbox subfolder to look in.
-        row_mailbox = _normalize_mailbox(str(row.get("mailbox") or mailboxes[0]))
+        row_mailbox = _normalize_mailbox(str(row.get("mailbox") or fallback_mailbox))
         if row_mailbox == "default":
             remote_path = f"{workspace}/messages/outbox/{filename}"
         else:
@@ -1040,6 +1051,7 @@ def _fetch_from_agent(
             )
             new_files.append(dest)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            dest.unlink(missing_ok=True)
             click.echo(f"Warning: failed to fetch {filename} from {agent_name}: {e}", err=True)
     return new_files
 
@@ -1062,7 +1074,7 @@ def _fetch_from_agent(
     default=None,
     metavar="CMD",
     help=(
-        "Shell command to invoke when new messages arrive. "
+        "Command to invoke when new messages arrive. "
         "Receives NEW_COUNT (integer) and SUMMARY (human-readable string) as environment variables."
     ),
 )
@@ -1093,14 +1105,13 @@ def pull(
     Notification hook:
 
     \b
-        # macOS — post a Notification Center banner
-        gptmail agent pull --notify-cmd 'osascript -e "display notification \\\"$SUMMARY\\\" with title \\\"gptmail\\\""'
-        # Linux — libnotify
-        gptmail agent pull --notify-cmd 'notify-send "gptmail" "$SUMMARY"'
+        # Use an explicit shell when environment expansion is wanted
+        gptmail agent pull --notify-cmd "sh -c 'notify-send gptmail \"$SUMMARY\"'"
     """
     agents = _load_agents()
     self_name = (as_recipient or _self_name()).lower()
     mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
+    remote_mailboxes = [] if all_mailboxes else mailboxes
 
     new_files: list[Path] = []
     agents_polled: list[str] = []
@@ -1120,7 +1131,11 @@ def pull(
         agents_polled.append(agent_name)
         if dry_run:
             rows = _remote_pending_rows(
-                agent_name, agent_cfg, recipient=self_name, mailboxes=mailboxes
+                agent_name,
+                agent_cfg,
+                recipient=self_name,
+                mailboxes=remote_mailboxes,
+                all_mailboxes=all_mailboxes,
             )
             for row in rows:
                 filename = str(row.get("file") or "")
@@ -1147,7 +1162,8 @@ def pull(
             agent_name,
             agent_cfg,
             self_name=self_name,
-            mailboxes=mailboxes,
+            mailboxes=remote_mailboxes,
+            all_mailboxes=all_mailboxes,
         )
         new_files.extend(fetched)
 
@@ -1185,9 +1201,7 @@ def pull(
         env["NEW_COUNT"] = str(n)
         env["SUMMARY"] = f"{n} new message(s): {subjects}"
         try:
-            subprocess.run(  # noqa: S602  (shell=True is intentional — user-supplied hook)
-                notify_cmd, shell=True, env=env, timeout=10
-            )
+            subprocess.run(shlex.split(notify_cmd), env=env, timeout=10, check=True)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Warning: --notify-cmd failed: {e}", err=True)
 
