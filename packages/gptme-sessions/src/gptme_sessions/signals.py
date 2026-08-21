@@ -2314,13 +2314,11 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
     background_tasks: dict[str, dict[str, str]] = {}  # task_id -> command/output_file
     counted_error_tasks: set[str] = set()
 
-    def _scan_command_output(command: str, output_text: str) -> bool:
+    def _scan_command_output(command: str, output_text: str) -> None:
         if not command or not output_text:
-            return False
-        found_commit = False
+            return
         if "git commit" in command or "git-safe-commit" in command:
             for commit_match in _COMMIT_RE.finditer(output_text):
-                found_commit = True
                 commit_value = f"{commit_match.group(1)} {commit_match.group(2).strip()}"
                 if commit_value not in git_commits:
                     git_commits.append(commit_value)
@@ -2334,7 +2332,6 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
                             "tool_name": "run_terminal_command",
                         },
                     )
-        return found_commit
 
     def _consume_task_output(result: dict) -> None:
         task_id = str(result.get("task_id", ""))
@@ -2348,9 +2345,7 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
                 error_count += 1
             if task_id:
                 counted_error_tasks.add(task_id)
-        found_commit = _scan_command_output(command, output_text)
-        if task is not None and found_commit:
-            task["seen_commit"] = "1"
+        _scan_command_output(command, output_text)
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -2407,7 +2402,6 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
                     background_tasks[task_id] = {
                         "command": str(command or raw_output.get("command", "")),
                         "output_file": str(raw_output.get("output_file", "")),
-                        "seen_commit": "",
                     }
                 continue
 
@@ -2420,6 +2414,8 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
                     if isinstance(result, dict)
                     else []
                 )
+                if not results and isinstance(exit_code, int) and exit_code != 0:
+                    error_count += 1
                 for res in results:
                     if isinstance(res, dict):
                         _consume_task_output(res)
@@ -2439,8 +2435,6 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
     # transcript: fall back to the on-disk output file (persists under
     # ~/.grok/sessions/.../terminal/).
     for task in background_tasks.values():
-        if task.get("seen_commit"):
-            continue
         command = task.get("command", "")
         if "git commit" not in command and "git-safe-commit" not in command:
             continue
