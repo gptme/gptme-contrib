@@ -140,23 +140,23 @@ def _clean_plain_scalar(raw: str) -> str:
             "f": "\f",
             "v": "\v",
         }
-        result: list[str] = []
+        chars: list[str] = []
         i = 1
         while i < len(value):
             ch = value[i]
             if ch == "\\":
                 if i + 1 < len(value):
-                    result.append(_DQUOTE_ESCAPES.get(value[i + 1], value[i + 1]))
+                    chars.append(_DQUOTE_ESCAPES.get(value[i + 1], value[i + 1]))
                     i += 2
                 else:
-                    result.append("\\")
+                    chars.append("\\")
                     i += 1
             elif ch == '"':
-                return "".join(result)
+                return "".join(chars)
             else:
-                result.append(ch)
+                chars.append(ch)
                 i += 1
-        return "".join(result).strip()
+        return "".join(chars).strip()
     if value.startswith("#"):
         return ""
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
