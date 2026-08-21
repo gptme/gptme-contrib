@@ -1576,7 +1576,7 @@ def test_post_session_unverified_delivery_honors_redelivery_cap(
     assert attempts is not None
     assert attempts.read_text() == "1"
     assert not (config.state_dir / "notif-555.state").exists()
-    assert event_marker.exists(), "dispatch recovery owns the backed-off re-arm"
+    assert not event_marker.exists(), "failed delivery must not remain suppressed"
 
     stage_notification()
     run_post_session(plan, item, outcome, config, hooks)

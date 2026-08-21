@@ -2403,24 +2403,26 @@ def run_post_session(
     ):
         # The delivery check did not verify a reply. Count this through the
         # same bounded rollback as orphan_no_delivery so a permanently broken
-        # check cannot re-emit this thread forever. PR-side state is still
-        # valid and promotes on every pass; only mapped notification state is
-        # purged while the retry budget remains.
+        # check cannot re-emit this thread forever. Clear the launch marker so
+        # the item can re-enter after the dispatcher's normal .ts cooldown;
+        # leaving it stamped suppresses a genuinely unanswered mention for the
+        # full event TTL. PR-side state is still valid and promotes on every
+        # pass; only mapped notification state is purged while the retry budget
+        # remains.
         rollback_slot_key = resolve_slot_key(config, item)
         if rollback_failed_delivery(
             config,
             item.repo,
             item.number,
             rollback_slot_key,
-            clear_event_markers=False,
         ):
             promote_item_state(
                 config, item.repo, item.number, reset_redelivery_counter=False
             )
             _log(
                 "WARN: PM delivery post-condition was not verified — rolled back "
-                f"pending notif state for {plan.repo}#{plan.number}; leaving the "
-                "event marker for backed-off dispatch recovery"
+                f"pending notif state and event marker for {plan.repo}#{plan.number} "
+                "(item re-enters after the dispatch cooldown)"
             )
         else:
             _log(
