@@ -2272,7 +2272,10 @@ def _read_grok_terminal_output(output_file: str) -> str:
             return ""
         if output_path.parent.name != "terminal" or output_path.suffix != ".log":
             return ""
-        return output_path.read_text(errors="replace")[:200_000]
+        if not output_path.is_file():
+            return ""
+        with output_path.open(errors="replace") as output:
+            return output.read(200_000)
     except OSError:
         return ""
 
@@ -2386,14 +2389,19 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
             if not isinstance(raw_output, dict):
                 continue
 
+            output_type = raw_output.get("type")
             exit_code = raw_output.get("exit_code")
-            if isinstance(exit_code, int) and exit_code != 0:
+            if (
+                output_type not in {"BackgroundTaskStarted", "TaskOutput"}
+                and isinstance(exit_code, int)
+                and exit_code != 0
+            ):
                 error_count += 1
 
             raw_input = call_id_to_input.get(call_id, {})
             command = raw_input.get("command", "") or raw_output.get("command", "")
 
-            if raw_output.get("type") == "BackgroundTaskStarted":
+            if output_type == "BackgroundTaskStarted":
                 task_id = str(raw_output.get("task_id", ""))
                 if task_id:
                     background_tasks[task_id] = {
@@ -2403,7 +2411,7 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
                     }
                 continue
 
-            if raw_output.get("type") == "TaskOutput":
+            if output_type == "TaskOutput":
                 result = raw_output.get("Result")
                 results = (
                     result

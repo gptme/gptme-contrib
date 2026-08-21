@@ -9,6 +9,8 @@ and dispatches to extract_signals_grok / extract_usage_grok.
 
 from __future__ import annotations
 
+import os
+
 from gptme_sessions.signals import (
     _detect_format,
     extract_signals_grok,
@@ -461,6 +463,36 @@ def test_background_task_output_file_outside_grok_sessions_is_rejected(tmp_path)
     assert extract_signals_grok(msgs)["git_commits"] == []
 
 
+def test_background_task_output_file_must_be_regular(tmp_path, monkeypatch):
+    """Non-regular terminal paths must not block while being read."""
+    sessions_dir = tmp_path / "sessions"
+    terminal_dir = sessions_dir / "encoded-cwd" / "session-id" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    fifo = terminal_dir / "task.log"
+    os.mkfifo(fifo)
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(fifo),
+            },
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
 def test_background_task_output_file_must_be_a_terminal_log(tmp_path, monkeypatch):
     """Files elsewhere in the Grok tree are metadata, not command output."""
     sessions_dir = tmp_path / "sessions"
@@ -524,6 +556,29 @@ def test_task_output_list_result_and_exit_code_error():
     signals = extract_signals_grok(msgs)
     assert signals["git_commits"] == ["1234abc m"]
     assert signals["error_count"] == 1
+
+
+def test_task_output_top_level_and_result_exit_codes_count_once():
+    """The polling call and its task result describe one task failure."""
+    msgs = [
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "TaskOutput",
+                "exit_code": 1,
+                "Result": {
+                    "task_id": "failed-task",
+                    "command": "pytest",
+                    "exit_code": 1,
+                    "output": "fail",
+                },
+            },
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["error_count"] == 1
 
 
 def test_repeated_task_output_counts_failed_task_once():
