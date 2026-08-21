@@ -46,6 +46,28 @@ logger = logging.getLogger(__name__)
 SourceCollector = Callable[[], Iterable[Document]]
 
 
+_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_FILE_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+
+
+def _open_beneath(root: Path, relative_path: Path) -> int:
+    """Open a regular file beneath *root* without following symlink components."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("safe path traversal requires O_NOFOLLOW")
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError(f"path must be relative to root: {relative_path}")
+
+    directory_fd = os.open(root, _DIRECTORY_OPEN_FLAGS)
+    try:
+        for part in relative_path.parts[:-1]:
+            next_fd = os.open(part, _DIRECTORY_OPEN_FLAGS, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return os.open(relative_path.name, _FILE_OPEN_FLAGS, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _collapse_partial_chain(run_texts: list[str]) -> list[str]:
     """Collapse cumulative STT partials within one same-role run.
 
@@ -220,6 +242,7 @@ def collect_voice_call_documents(
     voice_calls_dir: Path,
     *,
     repo_root: Path | None = None,
+    cumulative: bool = True,
 ) -> list[Document]:
     """Collect archived voice-call transcripts as indexable documents.
 
@@ -235,6 +258,9 @@ def collect_voice_call_documents(
         repo_root: Optional repository root; when set, only calls under it are
             collected (a safety guard against indexing paths outside the repo)
             and ``metadata["source"]`` is written relative to it.
+        cumulative: Whether same-role runs contain cumulative STT partials.
+            Disable this for finalized transcripts whose consecutive entries
+            are independent turns.
 
     Returns:
         List of :class:`Document` objects (possibly empty if the directory is
@@ -271,19 +297,15 @@ def collect_voice_call_documents(
             continue
         fd = -1
         try:
-            # O_NOFOLLOW closes the final-component race between resolve() and
-            # open(): replacing a checked file with a symlink must not let the
-            # read escape repo_root. O_NONBLOCK also keeps a swapped-in FIFO
-            # from blocking before fstat() can reject it.
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            fd = os.open(resolved_path, flags)
+            # Walk from repo_root one directory descriptor at a time when a
+            # root guard is requested. O_NOFOLLOW on every component prevents
+            # an intermediate-directory symlink swap between resolve and open.
+            if resolved_root is None:
+                fd = os.open(resolved_path, _FILE_OPEN_FLAGS)
+            else:
+                fd = _open_beneath(resolved_root, resolved_path.relative_to(resolved_root))
             opened = os.fstat(fd)
-            current = os.stat(resolved_path, follow_symlinks=False)
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or not stat.S_ISREG(current.st_mode)
-                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
-            ):
+            if not stat.S_ISREG(opened.st_mode):
                 continue
             stream = os.fdopen(fd, encoding="utf-8")
             fd = -1  # stream owns the descriptor now
@@ -299,7 +321,7 @@ def collect_voice_call_documents(
         transcript = data.get("transcript", [])
         if not isinstance(transcript, list) or not transcript:
             continue
-        text = de_accumulate_transcript(transcript, cumulative=True)
+        text = de_accumulate_transcript(transcript, cumulative=cumulative)
         if not text.strip():
             continue
 

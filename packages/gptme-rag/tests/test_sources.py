@@ -169,6 +169,21 @@ def test_collect_voice_calls_deaccumulates_and_metadata(tmp_path: Path):
     assert doc.metadata["date"] == "2026-08-11"
 
 
+def test_collect_voice_calls_can_preserve_finalized_prefix_turns(tmp_path: Path):
+    """Finalized transcripts can opt out of cumulative-partial collapsing."""
+    call_dir = tmp_path / "voice"
+    call_dir.mkdir()
+    (call_dir / "call.json").write_text(
+        '{"transcript": [{"role": "user", "text": "I want"}, '
+        '{"role": "user", "text": "I want to go"}]}',
+        encoding="utf-8",
+    )
+
+    docs = collect_voice_call_documents(call_dir, cumulative=False)
+
+    assert [doc.content for doc in docs] == ["USER: I want\nI want to go"]
+
+
 def test_collect_voice_calls_skips_bad_json(tmp_path: Path):
     call_dir = tmp_path / "voice"
     call_dir.mkdir()
@@ -563,7 +578,7 @@ def test_collect_voice_calls_skips_symlink_loop(tmp_path: Path):
 
 
 def test_collect_voice_calls_reads_resolved_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """The file open must use the same resolved path checked by the guard."""
+    """The guarded open must traverse the resolved target beneath repo_root."""
     repo = tmp_path / "repo"
     call_dir = repo / "calls"
     call_dir.mkdir(parents=True)
@@ -587,7 +602,7 @@ def test_collect_voice_calls_reads_resolved_path(tmp_path: Path, monkeypatch: py
     docs = collect_voice_call_documents(call_dir, repo_root=repo)
 
     assert [doc.content for doc in docs] == ["USER: hello"]
-    assert opened_paths == [target.resolve()]
+    assert opened_paths == [repo.resolve(), Path("calls"), Path("target"), Path("call.json")]
 
 
 def test_collect_voice_calls_rejects_symlink_swapped_after_resolution(
@@ -615,10 +630,10 @@ def test_collect_voice_calls_rejects_symlink_swapped_after_resolution(
     def swapping_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
         nonlocal seen_flags
         candidate = Path(path)
-        if candidate == original_call_path and not candidate.is_symlink():
+        if candidate == Path("call.json") and kwargs.get("dir_fd") is not None:
             seen_flags = flags
-            candidate.unlink()
-            candidate.symlink_to(secret)
+            original_call_path.unlink()
+            original_call_path.symlink_to(secret)
         return original_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", swapping_open)
@@ -627,3 +642,41 @@ def test_collect_voice_calls_rejects_symlink_swapped_after_resolution(
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if nofollow:
         assert seen_flags & nofollow
+
+
+def test_collect_voice_calls_rejects_intermediate_directory_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An intermediate directory swapped to an escaping symlink is rejected."""
+    repo = tmp_path / "repo"
+    call_dir = repo / "calls"
+    archive_dir = call_dir / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "call.json").write_text(
+        '{"transcript": [{"role": "user", "text": "safe"}]}',
+        encoding="utf-8",
+    )
+    link = call_dir / "call.json"
+    link.symlink_to(Path("archive") / "call.json")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "call.json").write_text(
+        '{"transcript": [{"role": "user", "text": "secret"}]}',
+        encoding="utf-8",
+    )
+
+    original_open = os.open
+    swapped = False
+
+    def swapping_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal swapped
+        if Path(path) == Path("archive") and kwargs.get("dir_fd") is not None:
+            swapped = True
+            archive_dir.rename(call_dir / "original-archive")
+            archive_dir.symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+
+    assert collect_voice_call_documents(call_dir, repo_root=repo) == []
+    assert swapped
