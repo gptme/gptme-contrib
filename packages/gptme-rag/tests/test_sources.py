@@ -423,6 +423,17 @@ def test_de_accumulate_transcript_non_dict_mid_run_does_not_break_cumulative():
     assert "ASSISTANT: sure" in result
 
 
+def test_de_accumulate_transcript_empty_role_mid_run_does_not_break_cumulative():
+    """An empty-role dict is malformed junk, not a boundary between partials."""
+    transcript = [
+        {"role": "user", "text": "I"},
+        {"role": "   ", "text": "ignored"},
+        {"role": "user", "text": "I want"},
+    ]
+
+    assert de_accumulate_transcript(transcript, cumulative=True) == "USER: I want"
+
+
 def test_collect_voice_calls_file_path_returns_empty(tmp_path: Path):
     """Passing a file path instead of a directory must return [] gracefully.
 
