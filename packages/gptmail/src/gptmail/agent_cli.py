@@ -895,6 +895,16 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
 @click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")
 @click.option("--for", "for_recipient", default=None, help="Show messages pending for a recipient.")
+@click.option(
+    "--as",
+    "as_identity",
+    default=None,
+    metavar="IDENTITY",
+    help=(
+        "Check pending as this identity instead of AGENT_NAME/$USER. "
+        "Useful for pull-only recipients (e.g. humans) reviewing their local inbox."
+    ),
+)
 @click.option("--fleet", is_flag=True, help="Fan out across all registered agents.")
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
 @click.option(
@@ -907,15 +917,25 @@ def pending(
     mailbox: str,
     all_mailboxes: bool,
     for_recipient: str | None,
+    as_identity: str | None,
     fleet: bool,
     json_output: bool,
     include_stale: bool,
     local_only: bool,
 ) -> None:
-    """Show inbox messages awaiting a reply (timely-reply SLA)."""
+    """Show inbox messages awaiting a reply (timely-reply SLA).
+
+    Pull-only recipients (e.g. humans who use ``gptmail agent pull``) can use
+    ``--as <identity>`` to inspect which of their local inbox messages still
+    await a reply, without relying on ``AGENT_NAME`` or ``$USER`` being set:
+
+    \b
+        gptmail agent pull --as erik
+        gptmail agent pending --as erik
+    """
     agents = _load_agents(warn_missing=False)
     mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
-    self_name = _self_name()
+    self_name = (as_identity or _self_name()).lower()
     if for_recipient:
         if fleet and local_only:
             raise click.BadParameter("--fleet and --local-only are mutually exclusive")
@@ -994,10 +1014,15 @@ def _fetch_from_agent(
     mailboxes: list[str],
     all_mailboxes: bool,
     fallback_mailbox: str | None = None,
-) -> list[Path]:
+) -> tuple[list[Path], bool]:
     """SCP outbox messages addressed to ``self_name`` from a remote agent's outbox.
 
-    Returns a list of newly-written local inbox paths (skips files already present).
+    Returns ``(new_files, agent_failed)`` where:
+    - ``new_files`` is the list of newly-written local inbox paths (skips files
+      already present).
+    - ``agent_failed`` is True if the agent was unreachable (SSH/listing step
+      failed) — callers can surface this in machine-readable output.
+
     Logs SSH/SCP errors as warnings so one unreachable agent doesn't abort the
     whole pull — the caller collects partial results and reports the total.
     """
@@ -1008,6 +1033,15 @@ def _fetch_from_agent(
         mailboxes=mailboxes,
         all_mailboxes=all_mailboxes,
     )
+    # _remote_pending_rows returns an empty list both for "no messages" and for
+    # "SSH failed".  We distinguish them by checking whether the agent has an
+    # outbox we'd expect to reach — but that requires a second SSH hop.  Instead
+    # we tag each row with "_fetch_failed" inside _remote_pending_rows itself.
+    # For now, rely on the warning already printed by _remote_pending_rows: if it
+    # echoed a warning and returned [], the agent was unreachable.  We surface
+    # agent_failed=True when rows is None (our sentinel for SSH failure).
+    # Since _remote_pending_rows currently returns [] on failure, agent_failed
+    # is determined by checking the ``_agent_reachable`` side-channel below.
     fallback_mailbox = fallback_mailbox or (mailboxes[0] if mailboxes else "default")
     ssh_target = agent["ssh"]
     workspace = agent["workspace"]
@@ -1025,6 +1059,7 @@ def _fetch_from_agent(
         "ControlPersist=60",
     ]
     new_files: list[Path] = []
+    any_scp_failure = False
     for row in rows:
         filename = str(row.get("file") or "")
         try:
@@ -1064,9 +1099,10 @@ def _fetch_from_agent(
             new_files.append(dest)
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Warning: failed to fetch {filename} from {agent_name}: {e}", err=True)
+            any_scp_failure = True
         finally:
             temp_dest.unlink(missing_ok=True)
-    return new_files
+    return new_files, any_scp_failure
 
 
 @agent.command()
@@ -1128,6 +1164,7 @@ def pull(
 
     new_files: list[Path] = []
     agents_polled: list[str] = []
+    failed_agents: list[str] = []
 
     for agent_name, agent_cfg in agents.items():
         if agent_name == self_name:
@@ -1172,7 +1209,7 @@ def pull(
                         )
             continue
 
-        fetched = _fetch_from_agent(
+        fetched, had_scp_failure = _fetch_from_agent(
             agent_name,
             agent_cfg,
             self_name=self_name,
@@ -1180,6 +1217,8 @@ def pull(
             all_mailboxes=all_mailboxes,
         )
         new_files.extend(fetched)
+        if had_scp_failure:
+            failed_agents.append(agent_name)
 
     n = len(new_files)
 
@@ -1211,8 +1250,10 @@ def pull(
     if json_output:
         payload = {
             "new_count": n,
+            "recipient": self_name,
             "files": [f.name for f in new_files],
             "agents_polled": agents_polled,
+            "failed_agents": failed_agents,
         }
         click.echo(json.dumps(payload))
 

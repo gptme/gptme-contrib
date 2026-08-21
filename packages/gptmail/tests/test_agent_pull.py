@@ -352,8 +352,10 @@ def test_pull_dry_run_json_is_machine_readable(pull_workspace: Path) -> None:
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {
         "new_count": 1,
+        "recipient": "erik",
         "files": [name],
         "agents_polled": ["gordon"],
+        "failed_agents": [],
     }
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     assert not (local_inbox / name).exists()
@@ -486,7 +488,7 @@ def test_pull_quotes_remote_workspace_with_spaces(
 
     monkeypatch.setattr(agent_cli.subprocess, "run", _record_scp)
 
-    new_files = agent_cli._fetch_from_agent(
+    new_files, had_scp_failure = agent_cli._fetch_from_agent(
         "gordon",
         {"ssh": "gordon@example", "workspace": workspace},
         self_name="erik",
@@ -495,6 +497,7 @@ def test_pull_quotes_remote_workspace_with_spaces(
     )
 
     assert len(new_files) == 1
+    assert not had_scp_failure
     assert (
         scp_calls[0][-2]
         == f"gordon@example:{shlex.quote(f'{workspace}/messages/outbox/{filename}')}"
@@ -594,3 +597,152 @@ def test_pull_multiple_messages_fetched(pull_workspace: Path) -> None:
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     for name in names:
         assert (local_inbox / name).exists()
+
+
+# ---------------------------------------------------------------------------
+# pending --as: identity override for pull-only recipients (issue #1476)
+# ---------------------------------------------------------------------------
+
+
+def _write_inbox_msg(
+    inbox_dir: Path,
+    *,
+    sender: str,
+    recipient: str,
+    subject: str,
+    replied: bool = False,
+) -> str:
+    """Write a message file into ``inbox_dir``; return filename."""
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    name = f"{ts}-{sender}-to-{recipient}.md"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    replied_line = "replied: true\n" if replied else ""
+    (inbox_dir / name).write_text(
+        f"---\nfrom: {sender}\nto: {recipient}\n"
+        f"timestamp: {timestamp}\nsubject: {subject}\n"
+        f"reply_expected: true\n{replied_line}---\n\nPlease advise.\n"
+    )
+    return name
+
+
+def test_pending_as_shows_unreplied_for_identity(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pending --as erik`` shows inbox messages addressed to erik awaiting a reply."""
+    erik_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    _write_inbox_msg(erik_inbox, sender="gordon", recipient="erik", subject="Decision needed")
+
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: pull_workspace / "erik")
+
+    result = CliRunner().invoke(agent, ["pending", "--as", "erik"])
+    assert result.exit_code == 0, result.output
+    assert "Decision needed" in result.output
+
+
+def test_pending_as_excludes_others_messages(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pending --as erik`` ignores inbox messages addressed to a different recipient."""
+    erik_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    _write_inbox_msg(erik_inbox, sender="gordon", recipient="alice", subject="For Alice")
+
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: pull_workspace / "erik")
+
+    result = CliRunner().invoke(agent, ["pending", "--as", "erik"])
+    assert result.exit_code == 0, result.output
+    assert "For Alice" not in result.output
+    assert "No messages awaiting reply" in result.output
+
+
+def test_pending_as_excludes_already_replied(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pending --as`` omits messages already marked ``replied: true``."""
+    erik_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    _write_inbox_msg(
+        erik_inbox, sender="gordon", recipient="erik", subject="Old thread", replied=True
+    )
+
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: pull_workspace / "erik")
+
+    result = CliRunner().invoke(agent, ["pending", "--as", "erik"])
+    assert result.exit_code == 0, result.output
+    assert "Old thread" not in result.output
+    assert "No messages awaiting reply" in result.output
+
+
+def test_pending_as_overrides_env_agent_name(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--as <identity>`` overrides AGENT_NAME for the pending check."""
+    erik_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    _write_inbox_msg(erik_inbox, sender="gordon", recipient="erik", subject="For Erik only")
+
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: pull_workspace / "erik")
+    # AGENT_NAME is overridden to 'bob' — without --as, pending would look for bob's messages
+    monkeypatch.setenv("AGENT_NAME", "bob")
+
+    result = CliRunner().invoke(agent, ["pending", "--as", "erik"])
+    assert result.exit_code == 0, result.output
+    assert "For Erik only" in result.output
+
+
+# ---------------------------------------------------------------------------
+# pull --json: failed_agents and recipient fields (issue #1476)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_json_includes_recipient(pull_workspace: Path) -> None:
+    """``pull --json`` emits ``recipient`` identifying who was pulled for."""
+    result = CliRunner().invoke(agent, ["pull", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["recipient"] == "erik"
+
+
+def test_pull_json_as_includes_recipient(pull_workspace: Path) -> None:
+    """``pull --as bob --json`` emits the overridden identity in ``recipient``."""
+    result = CliRunner().invoke(agent, ["pull", "--as", "bob", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["recipient"] == "bob"
+
+
+def test_pull_json_failed_agents_empty_on_success(pull_workspace: Path) -> None:
+    """``pull --json`` reports an empty ``failed_agents`` list when all fetches succeed."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    _write_outbox_msg(gordon_outbox, sender="gordon", recipient="erik", subject="OK")
+
+    result = CliRunner().invoke(agent, ["pull", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["failed_agents"] == []
+
+
+def test_pull_json_failed_agents_populated_on_scp_failure(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pull --json`` lists agents where SCP transfers failed in ``failed_agents``."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    _write_outbox_msg(gordon_outbox, sender="gordon", recipient="erik", subject="Failing transfer")
+
+    # Simulate SCP failing for every file
+    def _failing_scp(cmd, **kwargs):
+        if isinstance(cmd, list) and cmd and cmd[0] == "scp":
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _failing_scp)
+
+    result = CliRunner().invoke(agent, ["pull", "--json"])
+    assert result.exit_code == 0, result.output
+    # CliRunner mixes stderr warnings into output; find the JSON line at the end.
+    json_line = next(
+        (line for line in reversed(result.output.splitlines()) if line.startswith("{")),
+        None,
+    )
+    assert json_line is not None, f"No JSON in output: {result.output!r}"
+    payload = json.loads(json_line)
+    assert "gordon" in payload["failed_agents"]
+    assert payload["new_count"] == 0
