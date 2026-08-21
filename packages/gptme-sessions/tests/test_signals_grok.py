@@ -9,6 +9,8 @@ and dispatches to extract_signals_grok / extract_usage_grok.
 
 from __future__ import annotations
 
+import os
+
 from gptme_sessions.signals import (
     _detect_format,
     extract_signals_grok,
@@ -309,3 +311,414 @@ def test_extract_usage_grok_cache_read_tokens_included():
     ]
     usage = extract_usage_grok(msgs)
     assert usage["cache_read_input_tokens"] == 29184
+
+
+def test_background_task_commit_via_task_output():
+    """grok CLI >=0.2.117: run_terminal_command completes with a
+    BackgroundTaskStarted envelope; output arrives via a later
+    get_command_or_subagent_output TaskOutput result. Commits must be detected
+    there (2026-08-20: 6/8 productive sessions graded noop without this)."""
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git-safe-commit --scope-only f.py -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": "/nonexistent/t1.log",
+                "status": "running",
+            },
+        },
+        {
+            "type": "tool_call",
+            "toolCallId": "c2",
+            "toolName": "get_command_or_subagent_output",
+            "rawInput": {"task_ids": ["t1"]},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c2",
+            "status": "completed",
+            "rawOutput": {
+                "type": "TaskOutput",
+                "Result": {
+                    "task_id": "t1",
+                    "command": "git-safe-commit --scope-only f.py -m 'fix: x'",
+                    "exit_code": 0,
+                    "output": "[master abc1234] fix: x\n 1 file changed",
+                },
+            },
+        },
+        {"type": "text", "data": "done"},
+    ]
+    signals = extract_signals_grok(msgs)
+    assert signals["git_commits"] == ["abc1234 fix: x"]
+    assert signals["deliverables"] == ["abc1234 fix: x"]
+
+
+def test_background_task_commit_via_output_file(tmp_path, monkeypatch):
+    """Output never re-entered the transcript: fall back to the on-disk log."""
+    terminal_dir = tmp_path / "sessions" / "encoded-cwd" / "session-id" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    log = terminal_dir / "t9.log"
+    log.write_text("[master beef123] feat: y\n 2 files changed")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", tmp_path / "sessions")
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'feat: y'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t9",
+                "output_file": str(log),
+                "status": "running",
+            },
+        },
+        {"type": "end", "sessionId": "session-id"},
+    ]
+    signals = extract_signals_grok(msgs)
+    assert signals["git_commits"] == ["beef123 feat: y"]
+
+
+def test_background_task_partial_commit_output_falls_back_to_complete_log(tmp_path, monkeypatch):
+    """One streamed commit must not suppress later commits in the complete log."""
+    sessions_dir = tmp_path / "sessions"
+    terminal_dir = sessions_dir / "encoded-cwd" / "session-id" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    log = terminal_dir / "t9.log"
+    log.write_text(
+        "[master beef123] feat: first\n"
+        " 1 file changed\n"
+        "[master cafe456] feat: second\n"
+        " 1 file changed"
+    )
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'feat: first' && git commit -m 'feat: second'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t9",
+                "output_file": str(log),
+            },
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c2",
+            "status": "completed",
+            "rawOutput": {
+                "type": "TaskOutput",
+                "Result": {
+                    "task_id": "t9",
+                    "exit_code": 0,
+                    "output": "[master beef123] feat: first\n 1 file changed",
+                },
+            },
+        },
+        {"type": "end", "sessionId": "session-id"},
+    ]
+
+    assert extract_signals_grok(msgs)["git_commits"] == [
+        "beef123 feat: first",
+        "cafe456 feat: second",
+    ]
+
+
+def test_background_task_output_file_outside_grok_sessions_is_rejected(tmp_path):
+    """A crafted trajectory must not make signal extraction read arbitrary files."""
+    log = tmp_path / "outside.log"
+    log.write_text("[master bad1234] fix: should not be read")
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(log),
+            },
+        },
+    ]
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
+def test_background_task_output_file_must_be_regular(tmp_path, monkeypatch):
+    """Non-regular terminal paths must not block while being read."""
+    sessions_dir = tmp_path / "sessions"
+    terminal_dir = sessions_dir / "encoded-cwd" / "session-id" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    fifo = terminal_dir / "task.log"
+    os.mkfifo(fifo)
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(fifo),
+            },
+        },
+        {"type": "end", "sessionId": "session-id"},
+    ]
+
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
+def test_background_task_output_file_must_be_a_terminal_log(tmp_path, monkeypatch):
+    """Files elsewhere in the Grok tree are metadata, not command output."""
+    sessions_dir = tmp_path / "sessions"
+    log = sessions_dir / "encoded-cwd" / "session-id" / "events.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text("[master bad1234] fix: should not be read")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(log),
+            },
+        },
+    ]
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+    disguised_metadata = log.parent / "terminal" / "events.jsonl"
+    disguised_metadata.parent.mkdir()
+    disguised_metadata.write_text("[master bad1234] fix: should not be read")
+    msgs[1]["rawOutput"]["output_file"] = str(disguised_metadata)
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
+def test_background_task_output_file_must_match_current_session(tmp_path, monkeypatch):
+    """A trajectory cannot claim another Grok session's terminal output."""
+    sessions_dir = tmp_path / "sessions"
+    terminal_dir = sessions_dir / "encoded-cwd" / "other-session" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    log = terminal_dir / "task.log"
+    log.write_text("[master bad1234] fix: belongs to another session")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(log),
+            },
+        },
+        {"type": "end", "sessionId": "current-session"},
+    ]
+
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
+def test_background_task_output_file_requires_session_identity(tmp_path, monkeypatch):
+    """Fallback is fail-closed when an incomplete trajectory lacks sessionId."""
+    sessions_dir = tmp_path / "sessions"
+    terminal_dir = sessions_dir / "encoded-cwd" / "session-id" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    log = terminal_dir / "task.log"
+    log.write_text("[master bad1234] fix: unbound output")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(log),
+            },
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
+def test_task_output_list_result_and_exit_code_error():
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "get_command_or_subagent_output",
+            "rawInput": {"task_ids": ["a", "b"]},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "TaskOutput",
+                "Result": [
+                    {
+                        "task_id": "a",
+                        "command": "git-safe-commit x -m 'm'",
+                        "exit_code": 0,
+                        "output": "[master 1234abc] m",
+                    },
+                    {"task_id": "b", "command": "pytest", "exit_code": 1, "output": "fail"},
+                ],
+            },
+        },
+    ]
+    signals = extract_signals_grok(msgs)
+    assert signals["git_commits"] == ["1234abc m"]
+    assert signals["error_count"] == 1
+
+
+def test_task_output_top_level_and_result_exit_codes_count_once():
+    """The polling call and its task result describe one task failure."""
+    msgs = [
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "TaskOutput",
+                "exit_code": 1,
+                "Result": {
+                    "task_id": "failed-task",
+                    "command": "pytest",
+                    "exit_code": 1,
+                    "output": "fail",
+                },
+            },
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["error_count"] == 1
+
+
+def test_task_output_without_result_counts_top_level_failure():
+    """A failed polling envelope can lack an individual task result."""
+    msgs = [
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-1",
+            "status": "completed",
+            "rawOutput": {"type": "TaskOutput", "exit_code": 1},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-2",
+            "status": "completed",
+            "rawOutput": {"type": "TaskOutput", "exit_code": 1, "Result": []},
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["error_count"] == 2
+
+
+def test_repeated_task_output_counts_failed_task_once():
+    """Polling the same completed task must not inflate its failure count."""
+    failed_result = {
+        "type": "TaskOutput",
+        "Result": {
+            "task_id": "failed-task",
+            "command": "pytest",
+            "exit_code": 1,
+            "output": "fail",
+        },
+    }
+    msgs = [
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-1",
+            "status": "completed",
+            "rawOutput": failed_result,
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-2",
+            "status": "completed",
+            "rawOutput": failed_result,
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["error_count"] == 1
+
+
+def test_task_outputs_without_ids_remain_distinct_failures():
+    """Only stable task IDs can safely identify duplicate task output."""
+    failed_result = {
+        "type": "TaskOutput",
+        "Result": {"command": "pytest", "exit_code": 1, "output": "fail"},
+    }
+    msgs = [
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-1",
+            "status": "completed",
+            "rawOutput": failed_result,
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "poll-2",
+            "status": "completed",
+            "rawOutput": failed_result,
+        },
+    ]
+
+    assert extract_signals_grok(msgs)["error_count"] == 2
