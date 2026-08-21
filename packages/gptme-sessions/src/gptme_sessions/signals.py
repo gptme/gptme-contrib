@@ -2264,10 +2264,14 @@ _GROK_WRITE_TOOLS = {"write", "search_replace"}
 _GROK_TERMINAL_OUTPUT_ROOT = Path.home() / ".grok" / "sessions"
 
 
-def _read_grok_terminal_output(output_file: str) -> str:
-    """Read a Grok terminal log only from the CLI's trusted session tree."""
+def _read_grok_terminal_output(output_file: str, session_id: str | None) -> str:
+    """Read a terminal log belonging to the Grok session being analyzed."""
+    if not session_id:
+        return ""
     try:
         output_path = Path(output_file).resolve()
+        if output_path.parent.parent.name != session_id:
+            return ""
         if not output_path.is_relative_to(_GROK_TERMINAL_OUTPUT_ROOT.resolve()):
             return ""
         if output_path.parent.name != "terminal" or output_path.suffix != ".log":
@@ -2313,6 +2317,7 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
     # noop because commits were invisible to the old inline-output path).
     background_tasks: dict[str, dict[str, str]] = {}  # task_id -> command/output_file
     counted_error_tasks: set[str] = set()
+    session_id: str | None = None
 
     def _scan_command_output(command: str, output_text: str) -> None:
         if not command or not output_text:
@@ -2349,6 +2354,9 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
 
     for record in msgs:
         rec_type = record.get("type", "")
+        record_session_id = record.get("sessionId")
+        if isinstance(record_session_id, str) and record_session_id:
+            session_id = record_session_id
 
         if rec_type == "tool_call":
             tool_name = record.get("toolName", "")
@@ -2440,7 +2448,7 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
             continue
         output_file = task.get("output_file", "")
         if output_file:
-            _scan_command_output(command, _read_grok_terminal_output(output_file))
+            _scan_command_output(command, _read_grok_terminal_output(output_file, session_id))
 
     deliverables = list(dict.fromkeys(git_commits + file_writes))
     deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)

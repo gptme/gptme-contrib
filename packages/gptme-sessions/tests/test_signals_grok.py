@@ -388,7 +388,7 @@ def test_background_task_commit_via_output_file(tmp_path, monkeypatch):
                 "status": "running",
             },
         },
-        {"type": "text", "data": "done"},
+        {"type": "end", "sessionId": "session-id"},
     ]
     signals = extract_signals_grok(msgs)
     assert signals["git_commits"] == ["beef123 feat: y"]
@@ -437,6 +437,7 @@ def test_background_task_partial_commit_output_falls_back_to_complete_log(tmp_pa
                 },
             },
         },
+        {"type": "end", "sessionId": "session-id"},
     ]
 
     assert extract_signals_grok(msgs)["git_commits"] == [
@@ -495,6 +496,7 @@ def test_background_task_output_file_must_be_regular(tmp_path, monkeypatch):
                 "output_file": str(fifo),
             },
         },
+        {"type": "end", "sessionId": "session-id"},
     ]
 
     assert extract_signals_grok(msgs)["git_commits"] == []
@@ -531,6 +533,67 @@ def test_background_task_output_file_must_be_a_terminal_log(tmp_path, monkeypatc
     disguised_metadata.parent.mkdir()
     disguised_metadata.write_text("[master bad1234] fix: should not be read")
     msgs[1]["rawOutput"]["output_file"] = str(disguised_metadata)
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
+def test_background_task_output_file_must_match_current_session(tmp_path, monkeypatch):
+    """A trajectory cannot claim another Grok session's terminal output."""
+    sessions_dir = tmp_path / "sessions"
+    terminal_dir = sessions_dir / "encoded-cwd" / "other-session" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    log = terminal_dir / "task.log"
+    log.write_text("[master bad1234] fix: belongs to another session")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(log),
+            },
+        },
+        {"type": "end", "sessionId": "current-session"},
+    ]
+
+    assert extract_signals_grok(msgs)["git_commits"] == []
+
+
+def test_background_task_output_file_requires_session_identity(tmp_path, monkeypatch):
+    """Fallback is fail-closed when an incomplete trajectory lacks sessionId."""
+    sessions_dir = tmp_path / "sessions"
+    terminal_dir = sessions_dir / "encoded-cwd" / "session-id" / "terminal"
+    terminal_dir.mkdir(parents=True)
+    log = terminal_dir / "task.log"
+    log.write_text("[master bad1234] fix: unbound output")
+    monkeypatch.setattr("gptme_sessions.signals._GROK_TERMINAL_OUTPUT_ROOT", sessions_dir)
+    msgs = [
+        {
+            "type": "tool_call",
+            "toolCallId": "c1",
+            "toolName": "run_terminal_command",
+            "rawInput": {"command": "git commit -m 'fix: x'"},
+        },
+        {
+            "type": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "rawOutput": {
+                "type": "BackgroundTaskStarted",
+                "task_id": "t1",
+                "output_file": str(log),
+            },
+        },
+    ]
+
     assert extract_signals_grok(msgs)["git_commits"] == []
 
 
