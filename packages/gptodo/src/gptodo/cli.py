@@ -24,6 +24,7 @@ Features:
 import json
 import logging
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1292,6 +1293,31 @@ def _show_github_issues(
         )
 
 
+def _display_task_path(path: Path, repo_root: Path) -> Path:
+    """Return a repo-relative path when possible, preserving external paths."""
+    try:
+        return path.resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        return path
+
+
+def _last_committed_author(path: Path, repo_root: Path) -> str:
+    """Return the file's last committed author, or an honest fallback."""
+    display_path = _display_task_path(path, repo_root)
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%an", "--", str(display_path)],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "unknown/uncommitted"
+    author = result.stdout.strip() if result.returncode == 0 else ""
+    return author or "unknown/uncommitted"
+
+
 @cli.command()
 @click.option("--type", type=click.Choice(list(CONFIGS.keys())), default="tasks")
 @click.option("--all", is_flag=True, help="Check all directory types")
@@ -1460,19 +1486,19 @@ def check(fix: bool, task_files: list[str]):
     # Capture per-file load errors so we can surface invisible tasks (files that
     # fail to parse, e.g. broken YAML frontmatter, are otherwise silently dropped
     # by load_tasks and the user sees a misleading "All N tasks verified" report).
-    load_errors: list[tuple[Path, str]] = []
-    all_tasks = load_tasks(tasks_dir, errors_out=load_errors)
-    if not all_tasks and not load_errors:
+    global_load_errors: list[tuple[Path, str]] = []
+    all_tasks = load_tasks(tasks_dir, errors_out=global_load_errors)
+    if not all_tasks and not global_load_errors:
         console.print("[yellow]No tasks found in tasks directory![/]")
         return
 
-    # Build complete task_ids set from ALL tasks
-    task_ids = {task.id for task in all_tasks}
-
     # Determine which tasks to validate
+    scoped_load_errors: list[tuple[Path, str]] = []
+    warning_load_errors: list[tuple[Path, str]] = []
     if task_files:
         # Only validate the specified files
         tasks_to_validate = []
+        scoped_paths: set[Path] = set()
         for file in task_files:
             path = Path(file)
             # Handle different path formats from pre-commit
@@ -1485,24 +1511,35 @@ def check(fix: bool, task_files: list[str]):
             else:
                 # Just filename, resolve from tasks_dir
                 path = tasks_dir / path
+            scoped_paths.add(path.resolve())
             try:
                 file_errors: list[tuple[Path, str]] = []
                 file_tasks = load_tasks(path.parent, single_file=path, errors_out=file_errors)
-                if file_errors:
-                    existing_paths = {e[0] for e in load_errors}
-                    load_errors.extend(e for e in file_errors if e[0] not in existing_paths)
+                scoped_load_errors.extend(file_errors)
                 if file_tasks:
                     tasks_to_validate.extend(file_tasks)
                 else:
                     console.print(f"[yellow]Warning: No valid task found in {file}[/]")
             except Exception as e:
                 console.print(f"[red]Error reading {file}: {e}[/]")
-        if not tasks_to_validate and not load_errors:
+        if not tasks_to_validate and not scoped_load_errors and not global_load_errors:
             console.print("[yellow]No valid tasks to validate![/]")
             return
+        warning_load_errors = [
+            error for error in global_load_errors if error[0].resolve() not in scoped_paths
+        ]
+        blocking_load_errors = scoped_load_errors
     else:
         # Validate all tasks
         tasks_to_validate = all_tasks
+        blocking_load_errors = global_load_errors
+
+    # A malformed task file still exists for relationship checks. Treating its
+    # id as missing would turn a non-blocking out-of-scope parse warning into a
+    # blocking dependency error on an otherwise valid scoped task.
+    task_ids = {task.id for task in all_tasks}
+    task_ids.update(path.stem for path, _ in global_load_errors)
+    task_ids.update(path.stem for path, _ in scoped_load_errors)
 
     # Track dependencies in tasks being validated
     tasks_with_deps = [task for task in tasks_to_validate if task.requires]
@@ -1558,14 +1595,29 @@ def check(fix: bool, task_files: list[str]):
     # Report results by category
     has_issues = False
 
-    if load_errors:
+    if blocking_load_errors:
         has_issues = True
         console.print(
-            f"\n[bold red]Unloadable Task Files ({len(load_errors)}) — "
+            f"\n[bold red]Unloadable Task Files ({len(blocking_load_errors)}) — "
             "these were silently dropped from selection:[/]"
         )
-        for unloadable_path, err in load_errors:
-            console.print(f"  • {unloadable_path.relative_to(repo_root)}: {err}")
+        for unloadable_path, err in blocking_load_errors:
+            display_path = _display_task_path(unloadable_path, repo_root)
+            console.print(f"  • {markup_escape(str(display_path))}: {markup_escape(err)}")
+
+    if warning_load_errors:
+        console.print(
+            f"\n[bold yellow]WARNING: Out-of-scope unloadable task files "
+            f"({len(warning_load_errors)}) — scoped validation continues:[/]"
+        )
+        for unloadable_path, err in warning_load_errors:
+            display_path = _display_task_path(unloadable_path, repo_root)
+            author = _last_committed_author(unloadable_path, repo_root)
+            console.print(
+                f"  • {markup_escape(str(display_path))} "
+                f"(last committed author: {markup_escape(author)})"
+            )
+            console.print(f"    {markup_escape(err)}")
 
     if validation_issues:
         has_issues = True

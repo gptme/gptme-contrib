@@ -7,6 +7,7 @@ stderr, and ``gptodo check`` reported "All N tasks verified" with the wrong
 N. The ``errors_out`` parameter lets callers detect this case.
 """
 
+import subprocess
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -36,6 +37,30 @@ next_action: Run user-testing loop on `v0.31.1.dev202604277` (or later) on
 ---
 # Broken Task
 """
+
+
+def commit_task_fixtures(repo_root: Path, author: str = "Poison Author") -> None:
+    """Commit task fixtures so warning attribution exercises real git history."""
+    subprocess.run(["git", "init", "--quiet"], cwd=repo_root, check=True)
+    subprocess.run(["git", "add", "tasks"], cwd=repo_root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            f"user.name={author}",
+            "-c",
+            "user.email=poison@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            "test fixtures",
+        ],
+        cwd=repo_root,
+        check=True,
+    )
 
 
 def test_load_tasks_appends_to_errors_out_when_yaml_invalid(tmp_path: Path) -> None:
@@ -107,3 +132,40 @@ def test_check_targeted_file_surfaces_unloadable(tmp_path: Path, monkeypatch) ->
     )
     assert "Unloadable Task Files" in result.output
     assert "broken.md" in result.output
+
+
+def test_check_targeted_file_warns_on_out_of_scope_unloadable(tmp_path: Path, monkeypatch) -> None:
+    """A broken sibling must not poison a scoped check of a valid task."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "valid.md").write_text(VALID_TASK)
+    (tasks_dir / "broken.md").write_text(BROKEN_TASK)
+    commit_task_fixtures(tmp_path)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["check", "tasks/valid.md"])
+
+    assert result.exit_code == 0, result.output
+    assert "Out-of-scope unloadable task files" in result.output
+    assert "tasks/broken.md" in result.output
+    assert "last committed author: Poison Author" in result.output
+    assert "All 1 tasks verified successfully" in result.output
+
+
+def test_out_of_scope_unloadable_dependency_does_not_poison_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A known broken dependency exists even though its metadata cannot load."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    dependent = VALID_TASK.replace("---\n# Valid Task", "requires: [broken]\n---\n# Valid Task")
+    (tasks_dir / "valid.md").write_text(dependent)
+    (tasks_dir / "broken.md").write_text(BROKEN_TASK)
+    commit_task_fixtures(tmp_path)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["check", "tasks/valid.md"])
+
+    assert result.exit_code == 0, result.output
+    assert "Out-of-scope unloadable task files" in result.output
+    assert "Dependency 'broken' not found" not in result.output
