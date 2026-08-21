@@ -1074,13 +1074,14 @@ def promote_notification_states(config: RunItemConfig) -> None:
         map_file = f.with_suffix(".map")
         if map_file.is_file():
             try:
-                map_file.read_text(encoding="utf-8")
+                owner = map_file.read_text(encoding="utf-8").strip()
             except UnicodeDecodeError:
                 pass  # corrupt map cannot prove item ownership
             except OSError:
                 continue  # transient read failure: preserve the safer ownership gate
             else:
-                continue  # owned by an item; its worker's outcome decides
+                if owner:
+                    continue  # owned by an item; its worker's outcome decides
         shutil.copy(f, config.state_dir / f.name)
 
 

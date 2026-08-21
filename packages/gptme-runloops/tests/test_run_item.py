@@ -2286,13 +2286,14 @@ def test_rollback_respects_max_attempts_env(
     assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
 
 
-def test_corrupt_notification_map_is_treated_as_unmapped(tmp_path) -> None:
-    """An unreadable sidecar must not strand its notification state pending."""
+@pytest.mark.parametrize("map_value", [b"\xff", b"", b" \n"])
+def test_invalid_notification_map_is_treated_as_unmapped(tmp_path, map_value) -> None:
+    """An invalid sidecar must not strand its notification state pending."""
     config = make_config(tmp_path)
     pending = config.pending_state_dir
     pending.mkdir(parents=True)
-    (pending / "notif-1.map").write_bytes(b"\xff")
-    (pending / "notif-1.state").write_text("corrupt-map-state")
+    (pending / "notif-1.map").write_bytes(map_value)
+    (pending / "notif-1.state").write_text("invalid-map-state")
     (pending / "notif-2.map").write_text("gptme/gptme#3468")
     (pending / "notif-2.state").write_text("valid")
 
@@ -2303,7 +2304,7 @@ def test_corrupt_notification_map_is_treated_as_unmapped(tmp_path) -> None:
     assert (pending / "notif-1.map").exists()
 
     promote_notification_states(config)
-    assert (config.state_dir / "notif-1.state").read_text() == "corrupt-map-state"
+    assert (config.state_dir / "notif-1.state").read_text() == "invalid-map-state"
 
 
 def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:
