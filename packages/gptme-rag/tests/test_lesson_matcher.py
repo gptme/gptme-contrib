@@ -327,6 +327,29 @@ class TestExtractFrontmatter:
         assert "code" in cats
         assert "infrastructure" in cats
 
+    def test_regex_fallback_ignores_commented_inline_lists(self, monkeypatch):
+        content = (
+            "---\nmatch:\n"
+            "  # session_categories: [social]\n"
+            "  # keywords: [commented keyword]\n"
+            "  keywords: [active keyword]\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        match = fm.get("match", {})
+        assert match.get("keywords") == ["active keyword"]
+        assert "session_categories" not in match
+
     def test_regex_fallback_metadata_harness(self, monkeypatch):
         content = (
             "---\nmatch:\n  keywords:\n    - foo\n"

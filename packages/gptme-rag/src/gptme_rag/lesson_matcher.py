@@ -165,9 +165,9 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
     # closing bracket only outside quoted values so a keyword such as "a]b"
     # does not truncate the list.
     inline = re.search(
-        rf"\b{re.escape(field)}:\s*\[((?:[^\]\"']|\"[^\"]*\"|'[^']*')*)\]",
+        rf"^[ \t]*{re.escape(field)}:\s*\[((?:[^\]\"']|\"[^\"]*\"|'[^']*')*)\]",
         fm_str,
-        re.DOTALL,
+        re.MULTILINE | re.DOTALL,
     )
     if inline:
         items: list[str] = []
