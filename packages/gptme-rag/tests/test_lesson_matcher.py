@@ -262,6 +262,37 @@ class TestExtractFrontmatter:
         assert fm["match"]["keywords"] == ["legacy", "nested"]
         assert fm["match"]["patterns"] == ["legacy-pattern", "nested-pattern"]
 
+    def test_regex_fallback_scalar_keywords_and_patterns(self, monkeypatch):
+        content = (
+            "---\nkeywords: legacy one, legacy two\npatterns: legacy-a, legacy-b\n"
+            "match:\n  keywords: nested one, nested two\n"
+            "  patterns: nested-a, nested-b\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm["match"]["keywords"] == [
+            "legacy one",
+            "legacy two",
+            "nested one",
+            "nested two",
+        ]
+        assert fm["match"]["patterns"] == [
+            "legacy-a",
+            "legacy-b",
+            "nested-a",
+            "nested-b",
+        ]
+
     def test_regex_fallback_session_categories_block(self, monkeypatch):
         # Regression: without PyYAML, session_categories was not parsed,
         # causing gated lessons to fire in every session (security defect).

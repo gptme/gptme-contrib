@@ -124,10 +124,13 @@ def _clean_plain_scalar(raw: str) -> str:
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
 
 
-def _extract_scalar_frontmatter_field(fm_str: str, field: str) -> str | None:
-    """Extract a simple top-level YAML scalar without PyYAML (regex fallback)."""
+def _extract_scalar_frontmatter_field(
+    fm_str: str, field: str, *, allow_indented: bool = False
+) -> str | None:
+    """Extract a simple YAML scalar without PyYAML (regex fallback)."""
     lines = fm_str.splitlines()
-    field_pattern = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
+    indent = r"[ \t]*" if allow_indented else ""
+    field_pattern = re.compile(rf"^{indent}{re.escape(field)}:\s*(.*)$")
 
     for index, line in enumerate(lines):
         match = field_pattern.match(line)
@@ -275,9 +278,25 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     # Build the match dict with all fields scan_lessons reads from it.  Combine
     # legacy top-level and documented nested match fields like the PyYAML path.
     match_dict: dict[str, Any] = {}
+    top_level_keywords = _extract_list_frontmatter_field(top_level_without_match, "keywords")
+    nested_keywords = _extract_list_frontmatter_field(match_block, "keywords")
     keywords = _dedupe_strings(
-        _extract_list_frontmatter_field(top_level_without_match, "keywords")
-        + _extract_list_frontmatter_field(match_block, "keywords")
+        top_level_keywords
+        + (
+            []
+            if top_level_keywords
+            else _string_list(
+                _extract_scalar_frontmatter_field(top_level_without_match, "keywords")
+            )
+        )
+        + nested_keywords
+        + (
+            []
+            if nested_keywords
+            else _string_list(
+                _extract_scalar_frontmatter_field(match_block, "keywords", allow_indented=True)
+            )
+        )
     )
     if keywords:
         match_dict["keywords"] = keywords
@@ -303,9 +322,25 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     if session_categories:
         match_dict["session_categories"] = session_categories
 
+    top_level_patterns = _extract_list_frontmatter_field(top_level_without_match, "patterns")
+    nested_patterns = _extract_list_frontmatter_field(match_block, "patterns")
     patterns = _dedupe_strings(
-        _extract_list_frontmatter_field(top_level_without_match, "patterns")
-        + _extract_list_frontmatter_field(match_block, "patterns")
+        top_level_patterns
+        + (
+            []
+            if top_level_patterns
+            else _string_list(
+                _extract_scalar_frontmatter_field(top_level_without_match, "patterns")
+            )
+        )
+        + nested_patterns
+        + (
+            []
+            if nested_patterns
+            else _string_list(
+                _extract_scalar_frontmatter_field(match_block, "patterns", allow_indented=True)
+            )
+        )
     )
     if patterns:
         match_dict["patterns"] = patterns
