@@ -288,7 +288,7 @@ def _activate_account_profile(name: str) -> Path:
     for var in _USER_CONTEXT_VARS:
         os.environ.pop(var, None)
     load_dotenv(path, override=True)
-    os.environ.setdefault("TWITTER_EXPECTED_USERNAME", name)
+    os.environ["TWITTER_EXPECTED_USERNAME"] = name
     return path
 
 

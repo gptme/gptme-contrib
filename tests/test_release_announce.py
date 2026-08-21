@@ -83,6 +83,17 @@ def test_state_roundtrip(tmp_path, monkeypatch):
     assert ra.load_state() == {}
 
 
+def test_latest_release_handles_invalid_json(monkeypatch, capsys):
+    monkeypatch.setattr(
+        ra,
+        "_run",
+        lambda cmd: subprocess.CompletedProcess(cmd, 0, "not json", ""),
+    )
+
+    assert ra.latest_release("gptme/gptme", None) is None
+    assert "returned invalid JSON" in capsys.readouterr().err
+
+
 def test_post_distinguishes_failure_from_success_without_id(monkeypatch):
     monkeypatch.setattr(
         ra,
@@ -254,6 +265,7 @@ def test_main_adds_quote_after_skip_quote_run(monkeypatch, tmp_path):
 
 def test_post_default_account_clears_environment_profile(monkeypatch):
     monkeypatch.setenv("TWITTER_ACCOUNT", "gptmeorg")
+    monkeypatch.setenv("TWITTER_EXPECTED_USERNAME", "gptmeorg")
     seen: dict = {}
 
     def fake_run(cmd, **kwargs):
@@ -264,6 +276,7 @@ def test_post_default_account_clears_environment_profile(monkeypatch):
 
     assert ra._post(["post", "hello"]) == (True, "123")
     assert "TWITTER_ACCOUNT" not in seen["env"]
+    assert "TWITTER_EXPECTED_USERNAME" not in seen["env"]
 
 
 def test_post_named_account_keeps_inherited_environment(monkeypatch):

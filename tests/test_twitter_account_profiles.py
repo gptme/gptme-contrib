@@ -85,6 +85,21 @@ def test_profile_rejects_symlink(
     assert target.read_text() == "do not overwrite\n"
 
 
+def test_profile_expected_username_cannot_override_profile_name(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    profile = tmp_path / "gptwitter" / "accounts" / "gptmeorg.env"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("TWITTER_EXPECTED_USERNAME=TimeToBuildBob\n")
+
+    twitter_module._activate_account_profile("gptmeorg")
+
+    import os
+
+    assert os.environ["TWITTER_EXPECTED_USERNAME"] == "gptmeorg"
+
+
 def test_existing_profile_permissions_are_tightened(
     twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

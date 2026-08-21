@@ -124,7 +124,11 @@ def latest_release(repo: str, tag: str | None) -> dict | None:
     if r.returncode != 0:
         print(f"gh release view failed: {r.stderr.strip()}", file=sys.stderr)
         return None
-    data = json.loads(r.stdout)
+    try:
+        data = json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        print(f"gh release view returned invalid JSON: {exc}", file=sys.stderr)
+        return None
     return data if isinstance(data, dict) else None
 
 
@@ -178,6 +182,7 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
     else:
         env = os.environ.copy()
         env.pop("TWITTER_ACCOUNT", None)
+        env.pop("TWITTER_EXPECTED_USERNAME", None)
     cmd += args
     r = _run(cmd, env=env)
     out = r.stdout + r.stderr
