@@ -247,6 +247,19 @@ def test_pull_notify_cmd_invoked_with_env(
     assert "Urgent" in content
 
 
+def test_pull_json_still_invokes_notify_cmd(pull_workspace: Path, tmp_path: Path) -> None:
+    """Machine-readable output and notification hooks can be combined."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    _write_outbox_msg(gordon_outbox, sender="gordon", recipient="erik", subject="Urgent")
+    sentinel = tmp_path / "notify_fired.txt"
+
+    result = CliRunner().invoke(agent, ["pull", "--json", "--notify-cmd", f"touch {sentinel}"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["new_count"] == 1
+    assert sentinel.exists(), "--json must not suppress --notify-cmd"
+
+
 def test_pull_notify_cmd_failure_warns_after_fetch(pull_workspace: Path) -> None:
     """A missing notification executable must not discard a successful pull."""
     gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"

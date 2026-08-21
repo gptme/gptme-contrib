@@ -1128,17 +1128,14 @@ def pull(
 
     new_files: list[Path] = []
     agents_polled: list[str] = []
-    agents_skipped: list[str] = []
 
     for agent_name, agent_cfg in agents.items():
         if agent_name == self_name:
             continue
         # Skip pull-only or incompletely configured agents — they can't be SSHed.
         if agent_cfg.get("delivery") == "pull-only":
-            agents_skipped.append(agent_name)
             continue
         if not all(agent_cfg.get(k) for k in ("ssh", "workspace")):
-            agents_skipped.append(agent_name)
             continue
 
         agents_polled.append(agent_name)
@@ -1186,31 +1183,20 @@ def pull(
 
     n = len(new_files)
 
-    if json_output:
-        payload = {
-            "new_count": n,
-            "files": [f.name for f in new_files],
-            "agents_polled": agents_polled,
-        }
-        click.echo(json.dumps(payload))
-        return
+    if not json_output and not dry_run:
+        if n == 0:
+            click.echo("No new messages.")
+        else:
+            click.echo(f"{n} new message(s) fetched into inbox:")
+            for f in new_files:
+                meta = meta_of(f) or {}
+                sender = str(meta.get("from", "unknown"))
+                subject = str(meta.get("subject", "(no subject)"))
+                ts = str(meta.get("timestamp", ""))
+                ts_part = f" [{ts}]" if ts else ""
+                click.echo(f"  {sender}{ts_part}: {subject}  ({f.name})")
 
-    if dry_run:
-        return
-
-    if n == 0:
-        click.echo("No new messages.")
-    else:
-        click.echo(f"{n} new message(s) fetched into inbox:")
-        for f in new_files:
-            meta = meta_of(f) or {}
-            sender = str(meta.get("from", "unknown"))
-            subject = str(meta.get("subject", "(no subject)"))
-            ts = str(meta.get("timestamp", ""))
-            ts_part = f" [{ts}]" if ts else ""
-            click.echo(f"  {sender}{ts_part}: {subject}  ({f.name})")
-
-    if notify_cmd and n > 0:
+    if notify_cmd and n > 0 and not dry_run:
         subjects = "; ".join(
             str((meta_of(f) or {}).get("subject", "(no subject)")) for f in new_files
         )
@@ -1221,6 +1207,14 @@ def pull(
             subprocess.run(shlex.split(notify_cmd), env=env, timeout=10, check=True)
         except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Warning: --notify-cmd failed: {e}", err=True)
+
+    if json_output:
+        payload = {
+            "new_count": n,
+            "files": [f.name for f in new_files],
+            "agents_polled": agents_polled,
+        }
+        click.echo(json.dumps(payload))
 
 
 @agent.command()
