@@ -449,6 +449,24 @@ def test_search_without_memory_types_unchanged(require_sklearn):
     assert all(h.score > 0 for h in hits)
 
 
+def test_search_without_memory_types_preserves_tie_order(require_sklearn):
+    """Default search retains numpy's historical ordering for tied scores."""
+    idx = TfidfIndex(relevance_floor=0.0)
+    idx.index(
+        [
+            _doc("identical content", "first.md", "goal"),
+            _doc("identical content", "second.md", "project"),
+        ]
+    )
+
+    hits = idx.search("identical", n_results=5)
+
+    assert [hit.document.metadata["source"] for hit in hits] == [
+        "second.md",
+        "first.md",
+    ]
+
+
 def test_search_boost_reranks_matching_memory_type(require_sklearn):
     """When two docs have equal raw similarity, the boosted one must rank first.
 

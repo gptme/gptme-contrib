@@ -250,7 +250,13 @@ class TfidfIndex:
                 mem_type = None
             return weighted_similarity(float(raw_sims[idx]), mem_type, requested)
 
-        sorted_indices = sorted(range(len(raw_sims)), key=_weighted, reverse=True)
+        # Preserve numpy's historical default-path ordering exactly.  Equal
+        # scores have no semantic ordering contract, but callers still should
+        # not see an unrelated order change when memory-type weighting is off.
+        if requested is None:
+            sorted_indices = raw_sims.argsort()[::-1]
+        else:
+            sorted_indices = sorted(range(len(raw_sims)), key=_weighted, reverse=True)
 
         hits: list[LexicalHit] = []
         for rank, idx in enumerate(sorted_indices):
