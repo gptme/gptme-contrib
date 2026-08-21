@@ -784,11 +784,14 @@ def test_matches_recipient_normalizes_recipient_argument() -> None:
     assert agent_cli._matches_recipient({"to": ["Erik"]}, "ERIK")
 
 
-def test_pending_for_recipient_fleet_merges_remote_rows(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("named_mailbox_exists", [False, True])
+def test_pending_for_recipient_fleet_propagates_all_mailboxes(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, named_mailbox_exists: bool
 ) -> None:
     local_msg = _seed_outbox(workspace, "erik", "Local")
-    ops_msg = _seed_outbox(workspace, "erik", "Ops", mailbox="ops")
+    ops_msg = (
+        _seed_outbox(workspace, "erik", "Ops", mailbox="ops") if named_mailbox_exists else None
+    )
 
     def _fake_remote_pending_rows(
         agent_name: str,
@@ -800,7 +803,7 @@ def test_pending_for_recipient_fleet_merges_remote_rows(
     ) -> list[dict]:
         assert agent_name == "bob"
         assert recipient == "erik"
-        assert mailboxes == ["default", "ops"]
+        assert mailboxes == (["default", "ops"] if named_mailbox_exists else ["default"])
         assert all_mailboxes is True
         return [
             {
@@ -822,7 +825,10 @@ def test_pending_for_recipient_fleet_merges_remote_rows(
     assert result.exit_code == 0, result.output
     rows = json.loads(result.output)
     assert {row["agent"] for row in rows} == {"alice", "bob"}
-    assert {row["file"] for row in rows} == {local_msg, ops_msg, "20260616-remote.md"}
+    expected_files = {local_msg, "20260616-remote.md"}
+    if ops_msg is not None:
+        expected_files.add(ops_msg)
+    assert {row["file"] for row in rows} == expected_files
 
 
 def test_remote_pending_rows_warns_on_missing_transport(capsys: pytest.CaptureFixture[str]) -> None:

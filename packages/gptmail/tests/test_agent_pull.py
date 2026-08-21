@@ -243,6 +243,21 @@ def test_pull_notify_cmd_invoked_with_env(
     assert "Urgent" in content
 
 
+def test_pull_notify_cmd_failure_warns_after_fetch(pull_workspace: Path) -> None:
+    """A missing notification executable must not discard a successful pull."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = _write_outbox_msg(
+        gordon_outbox, sender="gordon", recipient="erik", subject="Still fetched"
+    )
+
+    result = CliRunner().invoke(agent, ["pull", "--notify-cmd", "missing-notifier"])
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: --notify-cmd failed" in result.output
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert (local_inbox / name).exists()
+
+
 def test_pull_notify_cmd_not_invoked_when_empty(pull_workspace: Path, tmp_path: Path) -> None:
     """``--notify-cmd`` must NOT be invoked when there are no new messages."""
     sentinel = tmp_path / "notify_fired.txt"

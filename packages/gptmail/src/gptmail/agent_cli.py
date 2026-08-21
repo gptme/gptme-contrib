@@ -678,6 +678,7 @@ def _fleet_pending_rows(
     self_name: str,
     agents: dict[str, dict[str, str]],
     fleet: bool,
+    all_mailboxes: bool,
 ) -> list[dict]:
     rows = _outbox_rows_for_recipient(mailboxes, recipient=recipient, self_name=self_name)
     if not fleet:
@@ -691,7 +692,7 @@ def _fleet_pending_rows(
                 agent,
                 recipient=recipient,
                 mailboxes=mailboxes,
-                all_mailboxes=len(mailboxes) > 1,
+                all_mailboxes=all_mailboxes,
             )
         )
     rows.sort(
@@ -924,6 +925,7 @@ def pending(
             self_name=self_name,
             agents=agents,
             fleet=fleet and not local_only,
+            all_mailboxes=all_mailboxes,
         )
         if json_output:
             click.echo(json.dumps(rows, indent=2, sort_keys=True, default=str))
@@ -1215,7 +1217,7 @@ def pull(
         env["SUMMARY"] = f"{n} new message(s): {subjects}"
         try:
             subprocess.run(shlex.split(notify_cmd), env=env, timeout=10, check=True)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Warning: --notify-cmd failed: {e}", err=True)
 
 
