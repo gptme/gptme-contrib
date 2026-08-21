@@ -225,8 +225,7 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Extract YAML frontmatter and body from a markdown string.
 
     Tries ``yaml.safe_load`` first; falls back to a regex parser that handles
-    ``keywords``, ``status``, ``name``, ``description``, and ``when_to_use``
-    without requiring PyYAML.
+    every field consumed by :func:`scan_lessons` without requiring PyYAML.
 
     Returns ``(frontmatter_dict, body_string)``.
     """
@@ -292,28 +291,29 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     if status is not None:
         fm["status"] = status
 
-    for field in ("name", "description", "when_to_use"):
+    for field in ("id", "name", "description", "when_to_use"):
         scalar_value = _extract_scalar_frontmatter_field(fm_str, field)
         if scalar_value is not None:
             fm[field] = scalar_value
 
-    # metadata.harness — used by filter_by_harness; a list or scalar. Scope
-    # extraction to metadata so a top-level harness key stays ignored, matching
-    # the PyYAML path.
+    # metadata.harness / metadata.tags — both are consumed by scan_lessons.
+    # Scope extraction to metadata so top-level keys stay ignored, matching the
+    # PyYAML path.
     metadata_block = _extract_mapping_block(fm_str, "metadata")
-    harness_list = _extract_list_frontmatter_field(metadata_block, "harness")
-    if not harness_list:
-        harness_match = re.search(
-            r"^\s*harness:\s*([^\[{\n][^\n]*)",
-            metadata_block,
-            re.MULTILINE,
-        )
-        if harness_match:
-            harness_val = _clean_plain_scalar(harness_match.group(1))
-            if harness_val and not harness_val.startswith("-"):
-                harness_list = [harness_val]
-    if harness_list:
-        fm.setdefault("metadata", {})["harness"] = harness_list
+    for field in ("harness", "tags"):
+        values = _extract_list_frontmatter_field(metadata_block, field)
+        if not values:
+            scalar_match = re.search(
+                rf"^\s*{field}:\s*([^\[{{\n][^\n]*)",
+                metadata_block,
+                re.MULTILINE,
+            )
+            if scalar_match:
+                scalar_value = _clean_plain_scalar(scalar_match.group(1))
+                if scalar_value and not scalar_value.startswith("-"):
+                    values = [item.strip() for item in scalar_value.split(",") if item.strip()]
+        if values:
+            fm.setdefault("metadata", {})[field] = values
 
     return fm, body
 
@@ -893,22 +893,17 @@ def score_lessons(
         if bm_scores:
             bm_raw = bm_scores[i]
             bm_z = bm_zs[i]
-            small_corpus = bm_n_nonzero < 3
             corpus_below_floor = max(bm_scores) < BM25_MIN_RAW
-            if bm_z >= bm_min_z and (
-                bm_raw >= BM25_MIN_RAW or ((small_corpus or corpus_below_floor) and bm_raw > 0)
-            ):
+            passes_raw_gate = bm_raw >= BM25_MIN_RAW or (corpus_below_floor and bm_raw > 0)
+            # With two overlaps, only the positive-z standout should contribute;
+            # flooring the weaker negative-z hit would over-credit noise.
+            passes_z_gate = bm_z >= bm_min_z and not (bm_n_nonzero == 2 and bm_z <= 0)
+            if passes_z_gate and passes_raw_gate:
                 # Use z-score as the contribution so ranking is preserved.
-                # Edge cases: n<2 → z=0 (degenerate), floor to 1.0.
-                #             n=2 → z=±1; both admitted (bm_min_z==-inf) but
-                #             the weaker would get z<0 → floor to 0.5.
-                if bm_n_nonzero >= 3:
-                    bm_contribution = bm_z
-                elif bm_n_nonzero == 2:
-                    bm_contribution = max(bm_z, 0.5)
-                else:
-                    bm_contribution = 1.0
-                score += BM25_WEIGHT * max(bm_contribution, 0.0)
+                # Edge case: one nonzero score has a degenerate z-score of 0,
+                # so give that sole overlap a neutral contribution of 1.0.
+                bm_contribution = bm_z if bm_n_nonzero >= 2 else 1.0
+                score += BM25_WEIGHT * bm_contribution
                 matched_by.append(f"bm25:{bm_raw:.2f}")
 
         if score > 0:

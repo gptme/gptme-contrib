@@ -312,6 +312,45 @@ class TestExtractFrontmatter:
         harness = fm.get("metadata", {}).get("harness", [])
         assert "claude-code" in harness
 
+    def test_regex_fallback_id_and_metadata_tags(self, monkeypatch):
+        content = (
+            "---\nid: lesson-id # stable holdout identifier\n"
+            "name: deploy-skill\n"
+            "metadata:\n  tags:\n    - deployment\n    - 'release automation' # comment\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("id") == "lesson-id"
+        assert fm.get("metadata", {}).get("tags") == ["deployment", "release automation"]
+
+    def test_regex_fallback_metadata_tags_scalar(self, monkeypatch):
+        content = (
+            "---\nname: deploy-skill\nmetadata:\n  tags: deployment, release\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("metadata", {}).get("tags") == ["deployment", "release"]
+
     def test_regex_fallback_ignores_top_level_harness(self, monkeypatch):
         content = (
             "---\nharness: gptme\nmatch:\n  keywords:\n    - foo\n"
@@ -918,10 +957,24 @@ class TestScoreLessons:
             self._make_lesson("lessons/other.md", [], description="social media posts"),
         ]
         results = score_lessons(lessons, "rag upstreaming semantic retrieval", use_bm25=True)
-        # With n_nonzero < 3, bm_min_z = -inf, so any lesson with bm_raw > 0 is
-        # admitted. The retrieval lesson shares 4 query terms and always scores > 0.
+        # With only one nonzero score, the below-floor corpus bypass admits the
+        # sole overlap despite its degenerate z-score.
         assert results, "BM25 should admit the retrieval lesson on a 2-item corpus"
         assert results[0]["path"] == "lessons/retrieval.md"
+
+    def test_bm25_two_nonzero_scores_excludes_weaker_overlap(self, monkeypatch):
+        lessons = [
+            self._make_lesson("lessons/strong.md", [], description="strong"),
+            self._make_lesson("lessons/weak.md", [], description="weak"),
+        ]
+        monkeypatch.setattr(
+            "gptme_rag.lesson_matcher._bm25_score",
+            lambda _query, doc, _index: 100.0 if "strong" in doc else 0.1,
+        )
+
+        results = score_lessons(lessons, "query", use_bm25=True)
+
+        assert [result["path"] for result in results] == ["lessons/strong.md"]
 
     def test_bm25_disabled(self):
         lessons = [
