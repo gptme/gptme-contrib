@@ -227,6 +227,26 @@ class TestExtractFrontmatter:
         fm, _ = extract_frontmatter(content)
         assert fm.get("match", {}).get("keywords") == ["merge conflict"]
 
+    def test_regex_fallback_combines_top_level_and_nested_match_lists(self, monkeypatch):
+        content = (
+            "---\nkeywords: [legacy]\npatterns: [legacy-pattern]\n"
+            "match:\n  keywords: [nested]\n  patterns: [nested-pattern]\n"
+            "status: active\n---\n# Title\nBody.\n"
+        )
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm["match"]["keywords"] == ["legacy", "nested"]
+        assert fm["match"]["patterns"] == ["legacy-pattern", "nested-pattern"]
+
     def test_regex_fallback_session_categories_block(self, monkeypatch):
         # Regression: without PyYAML, session_categories was not parsed,
         # causing gated lessons to fire in every session (security defect).
@@ -557,6 +577,12 @@ class TestExtractListFrontmatterField:
             'keywords: ["git, push", "rebase"]\n', "keywords"
         ) == ["git, push", "rebase"]
 
+    def test_inline_quoted_closing_bracket_is_data(self):
+        assert _extract_list_frontmatter_field('keywords: ["a]b", "c"]\n', "keywords") == [
+            "a]b",
+            "c",
+        ]
+
 
 class TestScanLessons:
     def test_empty_dir(self, tmp_path):
@@ -755,6 +781,10 @@ class TestFilterByHarness:
         lessons = [self._make(["gptme"])]
         assert filter_by_harness(lessons, "claude-code") == []
 
+    def test_case_insensitive(self):
+        lessons = [self._make(["Claude-Code"])]
+        assert filter_by_harness(lessons, "claude-code") == lessons
+
 
 # ---------------------------------------------------------------------------
 # Holdout filtering
@@ -788,6 +818,11 @@ class TestHoldout:
         assert is_held_out(lesson, {"workflow/foo"})
         assert not is_held_out(lesson, {"workflow/fo"})
         assert not is_held_out(lesson, {"other/foo"})
+
+    def test_is_held_out_by_relative_path(self):
+        lesson = self._make("workflow/foo.md")
+        assert is_held_out(lesson, {"workflow/foo"})
+        assert is_held_out(lesson, {"workflow/foo.md"})
 
     def test_is_held_out_by_id(self):
         lesson = self._make("/lessons/foo.md", lesson_id="my-lesson-id")

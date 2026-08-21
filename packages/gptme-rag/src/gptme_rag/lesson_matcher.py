@@ -154,8 +154,14 @@ def _extract_list_frontmatter_field(fm_str: str, field: str) -> list[str]:
     (``- val`` / ``- "val"``) forms.  Values may be quoted or unquoted.
     Returns an empty list if the field is absent.
     """
-    # Inline: field: [val1, val2] or field: ["val1", "val2"]
-    inline = re.search(rf"\b{re.escape(field)}:\s*\[(.*?)\]", fm_str, re.DOTALL)
+    # Inline: field: [val1, val2] or field: ["val1", "val2"].  Match the
+    # closing bracket only outside quoted values so a keyword such as "a]b"
+    # does not truncate the list.
+    inline = re.search(
+        rf"\b{re.escape(field)}:\s*\[((?:[^\]\"']|\"[^\"]*\"|'[^']*')*)\]",
+        fm_str,
+        re.DOTALL,
+    )
     if inline:
         items: list[str] = []
         # Tokenize respecting quotes: commas inside "..." or '...' are not
@@ -256,10 +262,16 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
 
     # Regex fallback
     fm: dict[str, Any] = {}
-    keywords = _extract_list_frontmatter_field(fm_str, "keywords")
+    match_block = _extract_mapping_block(fm_str, "match")
+    top_level_without_match = fm_str.replace(match_block, "", 1) if match_block else fm_str
 
-    # Build the match dict with all fields scan_lessons reads from it
+    # Build the match dict with all fields scan_lessons reads from it.  Combine
+    # legacy top-level and documented nested match fields like the PyYAML path.
     match_dict: dict[str, Any] = {}
+    keywords = _dedupe_strings(
+        _extract_list_frontmatter_field(top_level_without_match, "keywords")
+        + _extract_list_frontmatter_field(match_block, "keywords")
+    )
     if keywords:
         match_dict["keywords"] = keywords
 
@@ -267,7 +279,6 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     # ``session_categories`` key must stay ignored here so the regex fallback
     # agrees with the PyYAML path and with filter_by_session_category.  This
     # field is exclusionary — wrongly honouring it silently drops lessons.
-    match_block = _extract_mapping_block(fm_str, "match")
     session_categories = _extract_list_frontmatter_field(match_block, "session_categories")
     if not session_categories:
         # Also handle scalar form: session_categories: code, infrastructure
@@ -285,7 +296,10 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     if session_categories:
         match_dict["session_categories"] = session_categories
 
-    patterns = _extract_list_frontmatter_field(fm_str, "patterns")
+    patterns = _dedupe_strings(
+        _extract_list_frontmatter_field(top_level_without_match, "patterns")
+        + _extract_list_frontmatter_field(match_block, "patterns")
+    )
     if patterns:
         match_dict["patterns"] = patterns
 
@@ -619,8 +633,8 @@ def filter_by_harness(lessons: list[dict[str, Any]], harness: str) -> list[dict[
         if not restrict:
             filtered.append(lesson)
             continue
-        allowed = {str(v).strip() for v in restrict if str(v).strip()}
-        if harness in allowed:
+        allowed = {str(v).strip().lower() for v in restrict if str(v).strip()}
+        if harness.lower() in allowed:
             filtered.append(lesson)
     return filtered
 
