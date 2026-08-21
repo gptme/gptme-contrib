@@ -976,6 +976,7 @@ def promote_item_state(
     number: int | str | None,
     *,
     reset_redelivery_counter: bool = True,
+    include_master_ci: bool = False,
 ) -> None:
     """Copy the item's pending activity-gate state files to the real state dir.
 
@@ -1022,8 +1023,9 @@ def promote_item_state(
         patterns = [
             f"{repo_safe}-pr-{number}*.state",
             f"{repo_safe}-issue-{number}*.state",
-            f"{repo_safe}-master-ci.state",
         ]
+        if include_master_ci:
+            patterns.append(f"{repo_safe}-master-ci.state")
     for pattern in patterns:
         for f in pending.glob(pattern):
             if f.is_file():
@@ -1041,8 +1043,9 @@ def promote_notification_states(config: RunItemConfig) -> None:
     Notification state files use GitHub API ids, not repo#number, so the
     per-item promotion cannot find them by name; the gate writes a ``.map``
     sidecar (``repo#number``) for every thread it can attribute. Only the
-    *unmapped* remainder is promoted here. An undecodable map cannot establish
-    ownership, so treat its state as unmapped rather than stranding it forever.
+    *unmapped* remainder is promoted here. A readable empty map is unmapped;
+    an unreadable map remains pending because its ownership is unknown and
+    promoting it could silently consume an unhandled notification.
 
     History: this used to promote EVERY pending ``notif-*.state`` under the
     assumption "sessions already ran for every emitted notification". That
@@ -1076,10 +1079,9 @@ def promote_notification_states(config: RunItemConfig) -> None:
             try:
                 owner = map_file.read_text(encoding="utf-8").strip()
             except (OSError, UnicodeDecodeError):
-                pass  # unreadable map cannot prove item ownership
-            else:
-                if owner:
-                    continue  # owned by an item; its worker's outcome decides
+                continue  # unknown ownership: fail closed and retry next sweep
+            if owner:
+                continue  # owned by an item; its worker's outcome decides
         shutil.copy(f, config.state_dir / f.name)
 
 
@@ -2434,7 +2436,12 @@ def run_post_session(
             )
             promote_item_state(config, item.repo, item.number)
     else:
-        promote_item_state(config, item.repo, item.number)
+        promote_item_state(
+            config,
+            item.repo,
+            item.number,
+            include_master_ci="master_ci_failure" in item.types,
+        )
 
     # 9. Observable-effect signal.
     # A clean exit is not evidence the work landed: a worker can commit a fix

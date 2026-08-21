@@ -2185,7 +2185,9 @@ def test_pr_observe_types_is_superset_of_pr_state_types() -> None:
     }
 
 
-def test_promote_item_state_copies_matching_files(tmp_path) -> None:
+def test_promote_item_state_copies_only_number_scoped_matching_files(
+    tmp_path,
+) -> None:
     config = make_config(tmp_path)
     pending = config.pending_state_dir
     pending.mkdir(parents=True)
@@ -2198,8 +2200,19 @@ def test_promote_item_state_copies_matching_files(tmp_path) -> None:
     assert names == {
         "gptme-gptme-pr-5-update.state",
         "gptme-gptme-issue-5.state",
-        "gptme-gptme-master-ci.state",
     }
+
+
+def test_promote_item_state_copies_master_ci_only_when_requested(tmp_path) -> None:
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    master_ci = pending / "gptme-gptme-master-ci.state"
+    master_ci.write_text("failed-run")
+
+    promote_item_state(config, "gptme/gptme", 123, include_master_ci=True)
+
+    assert (config.state_dir / master_ci.name).read_text() == "failed-run"
 
 
 # --- Delivery rollback (bash lib.sh:946-995 parity) ---
@@ -2286,14 +2299,14 @@ def test_rollback_respects_max_attempts_env(
     assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
 
 
-@pytest.mark.parametrize("map_value", [b"\xff", b"", b" \n"])
-def test_invalid_notification_map_is_treated_as_unmapped(tmp_path, map_value) -> None:
-    """An invalid sidecar must not strand its notification state pending."""
+@pytest.mark.parametrize("map_value", [b"", b" \n"])
+def test_empty_notification_map_is_treated_as_unmapped(tmp_path, map_value) -> None:
+    """A readable empty sidecar does not establish notification ownership."""
     config = make_config(tmp_path)
     pending = config.pending_state_dir
     pending.mkdir(parents=True)
     (pending / "notif-1.map").write_bytes(map_value)
-    (pending / "notif-1.state").write_text("invalid-map-state")
+    (pending / "notif-1.state").write_text("empty-map-state")
     (pending / "notif-2.map").write_text("gptme/gptme#3468")
     (pending / "notif-2.state").write_text("valid")
 
@@ -2304,13 +2317,11 @@ def test_invalid_notification_map_is_treated_as_unmapped(tmp_path, map_value) ->
     assert (pending / "notif-1.map").exists()
 
     promote_notification_states(config)
-    assert (config.state_dir / "notif-1.state").read_text() == "invalid-map-state"
+    assert (config.state_dir / "notif-1.state").read_text() == "empty-map-state"
 
 
-def test_unreadable_notification_map_is_treated_as_unmapped(
-    tmp_path, monkeypatch
-) -> None:
-    """A map read failure cannot establish ownership or strand pending state."""
+def test_unreadable_notification_map_remains_pending(tmp_path, monkeypatch) -> None:
+    """Unknown ownership fails closed so an unhandled notification can retry."""
     config = make_config(tmp_path)
     pending = config.pending_state_dir
     pending.mkdir(parents=True)
@@ -2328,7 +2339,8 @@ def test_unreadable_notification_map_is_treated_as_unmapped(
 
     promote_notification_states(config)
 
-    assert (config.state_dir / "notif-1.state").read_text() == "unreadable-map-state"
+    assert not (config.state_dir / "notif-1.state").exists()
+    assert (pending / "notif-1.state").read_text() == "unreadable-map-state"
 
 
 def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:
