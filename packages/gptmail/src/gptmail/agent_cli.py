@@ -1052,7 +1052,7 @@ def _fetch_from_agent(
         temp_dest = Path(temp_name)
         try:
             subprocess.run(
-                ["scp", *ssh_opts, f"{ssh_target}:{remote_path}", str(temp_dest)],
+                ["scp", *ssh_opts, f"{ssh_target}:{shlex.quote(remote_path)}", str(temp_dest)],
                 check=True,
                 capture_output=True,
                 timeout=15,
@@ -1062,7 +1062,7 @@ def _fetch_from_agent(
             except FileExistsError:
                 continue  # A concurrent pull published this message first.
             new_files.append(dest)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Warning: failed to fetch {filename} from {agent_name}: {e}", err=True)
         finally:
             temp_dest.unlink(missing_ok=True)
@@ -1219,7 +1219,7 @@ def pull(
         env["SUMMARY"] = f"{n} new message(s): {subjects}"
         try:
             subprocess.run(shlex.split(notify_cmd), env=env, timeout=10, check=True)
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Warning: --notify-cmd failed: {e}", err=True)
 
 

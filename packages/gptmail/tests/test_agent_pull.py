@@ -12,6 +12,7 @@ Covers the missing human-side delivery introduced in issue #1476:
 """
 
 import json
+import shlex
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -135,9 +136,12 @@ def pull_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             src_arg = next((a for a in cmd[1:] if ":" in a and not a.startswith("-")), None)
             dest_arg = cmd[-1]
             if src_arg:
-                # Parse "host:/path/to/file" → local equivalent path
+                # Parse "host:/path/to/file" → local equivalent path. SCP's
+                # remote path is shell-quoted because the real command crosses
+                # a remote shell boundary.
                 _, remote_path = src_arg.split(":", 1)
-                src_path = Path(remote_path)
+                parsed_path = shlex.split(remote_path)
+                src_path = Path(parsed_path[0]) if len(parsed_path) == 1 else Path()
                 if src_path.exists():
                     shutil.copy2(src_path, dest_arg)
                     import subprocess
@@ -251,6 +255,21 @@ def test_pull_notify_cmd_failure_warns_after_fetch(pull_workspace: Path) -> None
     )
 
     result = CliRunner().invoke(agent, ["pull", "--notify-cmd", "missing-notifier"])
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: --notify-cmd failed" in result.output
+    local_inbox = pull_workspace / "erik" / "messages" / "inbox"
+    assert (local_inbox / name).exists()
+
+
+def test_pull_notify_cmd_malformed_value_warns_after_fetch(pull_workspace: Path) -> None:
+    """Malformed notification syntax cannot turn a successful pull into failure."""
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = _write_outbox_msg(
+        gordon_outbox, sender="gordon", recipient="erik", subject="Still fetched"
+    )
+
+    result = CliRunner().invoke(agent, ["pull", "--notify-cmd", "unterminated '"])
 
     assert result.exit_code == 0, result.output
     assert "Warning: --notify-cmd failed" in result.output
@@ -432,6 +451,66 @@ def test_pull_all_mailboxes_queries_remote_for_remote_only_mailboxes(
 
     assert result.exit_code == 0, result.output
     assert calls == [([], True)]
+
+
+def test_pull_quotes_remote_workspace_with_spaces(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SCP remote source remains one path when the workspace contains spaces."""
+    filename = "message.md"
+    workspace = "/Users/John Doe/workspace"
+    scp_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": filename, "mailbox": "default"}],
+    )
+
+    def _record_scp(cmd, **kwargs):
+        scp_calls.append(cmd)
+        Path(cmd[-1]).write_text("message")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _record_scp)
+
+    new_files = agent_cli._fetch_from_agent(
+        "gordon",
+        {"ssh": "gordon@example", "workspace": workspace},
+        self_name="erik",
+        mailboxes=["default"],
+        all_mailboxes=False,
+    )
+
+    assert len(new_files) == 1
+    assert (
+        scp_calls[0][-2]
+        == f"gordon@example:{shlex.quote(f'{workspace}/messages/outbox/{filename}')}"
+    )
+
+
+def test_missing_scp_warns_and_preserves_partial_results(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing SCP executable is a per-agent warning rather than a CLI crash."""
+    filename = "message.md"
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *args, **kwargs: [{"file": filename, "mailbox": "default"}],
+    )
+    monkeypatch.setattr(
+        agent_cli.subprocess,
+        "run",
+        lambda cmd, **kwargs: (_ for _ in ()).throw(FileNotFoundError("scp")),
+    )
+
+    result = CliRunner().invoke(agent, ["pull"])
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: failed to fetch" in result.output
+    destination = pull_workspace / "erik" / "messages" / "inbox" / filename
+    assert not destination.exists()
+    assert not list(destination.parent.glob(f".{filename}.*"))
 
 
 def test_failed_scp_removes_partial_destination(
