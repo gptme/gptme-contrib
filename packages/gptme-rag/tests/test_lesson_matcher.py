@@ -699,14 +699,15 @@ class TestScanLessons:
         assert len(lessons) == 1
         assert "from-a" in lessons[0]["keywords"]
 
-    def test_same_filename_in_different_subdirectories_kept(self, tmp_path):
+    def test_same_filename_in_different_subdirectories_first_wins(self, tmp_path):
+        # Filename dedup applies within a root too (lexicographic order: db < git).
+        # Lesson filenames are treated as identities: the live corpus has 30
+        # duplicate basenames and every one is the *same* lesson in two places
+        # (archived/ vs category/, or local vs contrib), never two distinct lessons.
         _write_lesson(tmp_path / "git" / "merge.md", _basic_lesson(["git-merge"]))
         _write_lesson(tmp_path / "db" / "merge.md", _basic_lesson(["db-merge"]))
         lessons = scan_lessons([tmp_path])
-        assert {lesson["keywords"][0] for lesson in lessons} == {
-            "git-merge",
-            "db-merge",
-        }
+        assert [lesson["keywords"] for lesson in lessons] == [["db-merge"]]
 
     def test_matching_relative_path_first_dir_wins(self, tmp_path):
         dir_a = tmp_path / "a"
@@ -716,6 +717,18 @@ class TestScanLessons:
         lessons = scan_lessons([dir_a, dir_b])
         assert len(lessons) == 1
         assert lessons[0]["keywords"] == ["from-a"]
+
+    def test_same_filename_different_category_first_dir_wins(self, tmp_path):
+        # Dedup is by filename, not relative path: a local copy that was moved
+        # to another category dir (e.g. lessons/archived/foo.md, still active)
+        # must still override contrib's lessons/patterns/foo.md. The live corpus
+        # has real cases of this and none of distinct same-named lessons.
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        _write_lesson(dir_a / "archived" / "foo.md", _basic_lesson(["from-a"]))
+        _write_lesson(dir_b / "patterns" / "foo.md", _basic_lesson(["from-b"]))
+        lessons = scan_lessons([dir_a, dir_b])
+        assert [lesson["keywords"] for lesson in lessons] == [["from-a"]]
 
     def test_session_categories(self, tmp_path):
         content = (
@@ -774,17 +787,62 @@ class TestScanLessons:
         lessons = scan_lessons([tmp_path])
         assert lessons == []
 
-    def test_archive_in_dir1_does_not_block_active_in_dir2(self, tmp_path):
-        # Regression: seen_names was incorrectly populated for archived files
-        # with no active sibling in dir1, causing a valid lesson in dir2 to be
-        # silently dropped (first-dir-wins dedup should only apply to ACTIVE files).
+    def test_archive_in_dir1_shadows_same_name_in_dir2(self, tmp_path):
+        # Archiving a lesson locally must also silence the shared contrib copy —
+        # otherwise the archive is undone by the next layer. Parity with the
+        # brain hook: 8 of 10 leaked lessons in the 2026-08-20 run were exactly this.
         dir1 = tmp_path / "a"
         dir2 = tmp_path / "b"
         _write_lesson(dir1 / "archive" / "foo.md", _basic_lesson(["old-archived"]))
         _write_lesson(dir2 / "foo.md", _basic_lesson(["active-in-b"]))
+        assert scan_lessons([dir1, dir2]) == []
+
+    def test_archive_does_not_shadow_active_sibling_in_same_dir(self, tmp_path):
+        dir1 = tmp_path / "a"
+        dir2 = tmp_path / "b"
+        _write_lesson(dir1 / "archive" / "foo.md", _basic_lesson(["old-archived"]))
+        _write_lesson(dir1 / "foo.md", _basic_lesson(["active-in-a"]))
+        _write_lesson(dir2 / "foo.md", _basic_lesson(["active-in-b"]))
         lessons = scan_lessons([dir1, dir2])
-        assert len(lessons) == 1
-        assert "active-in-b" in lessons[0]["keywords"]
+        assert [sorted(lesson["keywords"]) for lesson in lessons] == [["active-in-a"]]
+
+    def test_retired_status_in_dir1_shadows_same_name_in_dir2(self, tmp_path):
+        # status: archived/deprecated/automated in an earlier dir suppresses a
+        # same-named lesson in a later dir, regardless of category path.
+        dir1 = tmp_path / "a"
+        dir2 = tmp_path / "b"
+        for i, status in enumerate(("archived", "deprecated", "automated")):
+            name = f"lesson{i}.md"
+            _write_lesson(
+                dir1 / "cat-a" / name,
+                f"---\nmatch:\n  keywords:\n    - old{i}\nstatus: {status}\n---\n# T\n",
+            )
+            _write_lesson(dir2 / "cat-b" / name, _basic_lesson([f"contrib{i}"]))
+        assert scan_lessons([dir1, dir2]) == []
+
+    def test_no_match_data_in_dir1_shadows_same_name_in_dir2(self, tmp_path):
+        dir1 = tmp_path / "a"
+        dir2 = tmp_path / "b"
+        _write_lesson(
+            dir1 / "workflow" / "foo.md",
+            "---\ndescription: local rewrite without keywords\nstatus: active\n---\n# T\n",
+        )
+        _write_lesson(dir2 / "workflow" / "foo.md", _basic_lesson(["contrib"]))
+        assert scan_lessons([dir1, dir2]) == []
+
+    def test_retired_skill_md_does_not_shadow_other_skills(self, tmp_path):
+        dir1 = tmp_path / "a"
+        dir2 = tmp_path / "b"
+        _write_lesson(
+            dir1 / "old-skill" / "SKILL.md",
+            "---\nname: old-skill\nstatus: archived\n---\n# Old\n",
+        )
+        _write_lesson(
+            dir2 / "new-skill" / "SKILL.md",
+            "---\nname: new-skill\nstatus: active\n---\n# New\n",
+        )
+        lessons = scan_lessons([dir1, dir2])
+        assert [lesson["skill_name"] for lesson in lessons] == ["new-skill"]
 
     def test_harness_restrict(self, tmp_path):
         content = (
@@ -1167,3 +1225,34 @@ class TestScanAndScore:
         paths = {r["path"] for r in results}
         assert any("code" in p for p in paths)
         assert not any("social" in p for p in paths)
+
+
+class TestDescriptorStopwords:
+    def test_agent_corpus_generic_tokens_are_stopwords(self):
+        from gptme_rag.lesson_matcher import _DESCRIPTOR_STOPWORDS, _descriptor_tokens
+
+        # These fire on nearly every skill in an agent corpus; dropping them from the
+        # stopword set made descriptor scores degrade toward a constant (parity run
+        # 2026-08-20). Guard the set against being "simplified" again.
+        for word in (
+            "agent",
+            "agents",
+            "task",
+            "tool",
+            "tools",
+            "code",
+            "project",
+            "work",
+            "run",
+            "build",
+            "process",
+            "debug",
+            "use",
+            "using",
+        ):
+            assert word in _DESCRIPTOR_STOPWORDS, word
+        assert len(_DESCRIPTOR_STOPWORDS) >= 53
+        assert _descriptor_tokens("agent template onboarding for agents") == {
+            "template",
+            "onboarding",
+        }

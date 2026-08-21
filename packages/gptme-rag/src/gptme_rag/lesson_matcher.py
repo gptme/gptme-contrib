@@ -429,31 +429,67 @@ _DESCRIPTOR_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _SHORT_DESCRIPTOR_TOKENS: frozenset[str] = frozenset(
     {"ai", "ci", "cd", "pr", "vm", "ui", "ux", "db", "id", "io", "os"}
 )
+# Tokens excluded from skill-descriptor scoring.  Tuned for an *agent* corpus:
+# nearly every skill is "about" agents, tasks, tools, code and projects, so
+# those tokens carry no routing signal and would make the descriptor score
+# degrade toward a constant.  Shrinking this set measurably regresses
+# routing (brain parity run, 2026-08-20: +2.8 on one skill from generic-token
+# overlap alone).  Do not shrink it to a generic-English list.
 _DESCRIPTOR_STOPWORDS: frozenset[str] = frozenset(
     {
-        "the",
+        "about",
+        "after",
+        "agent",
+        "agents",
         "and",
+        "any",
+        "are",
+        "before",
+        "build",
+        "can",
+        "code",
+        "debug",
+        "does",
         "for",
         "from",
-        "with",
-        "that",
-        "this",
-        "when",
-        "use",
-        "should",
-        "you",
-        "can",
-        "not",
-        "all",
-        "are",
-        "its",
-        "has",
-        "have",
-        "was",
-        "were",
-        "will",
-        "your",
+        "get",
+        "how",
+        "into",
+        "just",
+        "make",
+        "need",
+        "only",
+        "other",
         "our",
+        "out",
+        "over",
+        "process",
+        "project",
+        "run",
+        "set",
+        "should",
+        "task",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "there",
+        "these",
+        "this",
+        "those",
+        "through",
+        "tool",
+        "tools",
+        "use",
+        "used",
+        "using",
+        "when",
+        "where",
+        "which",
+        "with",
+        "work",
+        "your",
     }
 )
 
@@ -553,15 +589,24 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
     **Deduplication** (first-dir-wins, matching ``gptme#1594`` behaviour):
 
     1. By resolved path — handles symlinks to the same file.
-    2. By relative path — local workspace lessons take priority over matching
-       contrib copies without conflating same-named lessons in different categories.
+    2. By filename — if ``lessons/X/foo.md`` exists, a later
+       ``contrib/lessons/Y/foo.md`` is skipped, *whatever* its category dir.
+       The name is registered when the file is first encountered, **before**
+       the status/match-data filters, so a local lesson that has been retired
+       (``status: archived|deprecated|automated``), moved under ``archived/``,
+       or stripped of its keywords still silences the shared contrib copy.
+       Otherwise archiving a lesson locally is undone by the next layer.
+       An ``archive/`` copy registers its name only when the same dir has no
+       active sibling of that name.
+
+    ``SKILL.md`` files are never deduplicated by name.
 
     Lessons with ``status`` other than ``"active"`` are skipped.
     Lessons with no keywords, patterns, or skill name are skipped.
     """
     lessons: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
-    seen_relative_paths: set[Path] = set()
+    seen_names: set[str] = set()  # filename-based dedup: first dir wins
 
     for lesson_dir in lesson_dirs:
         if not lesson_dir.exists():
@@ -579,11 +624,23 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             seen_paths.add(resolved)
 
             relative_path = f.relative_to(lesson_dir)
+            is_skill_file = f.name == "SKILL.md"
             if "archive" in relative_path.parts:
+                # An archived copy shadows later dirs unless this dir also
+                # carries an active (non-archived) lesson with the same name.
+                # rglob sorts ``archive/foo.md`` before ``foo.md`` so the
+                # active sibling has to be looked up explicitly.
+                if not is_skill_file and not any(
+                    "archive" not in p.relative_to(lesson_dir).parts
+                    for p in lesson_dir.rglob(f.name)
+                ):
+                    seen_names.add(f.name)
                 continue
 
-            if f.name != "SKILL.md" and relative_path in seen_relative_paths:
-                continue
+            if not is_skill_file:
+                if f.name in seen_names:
+                    continue
+                seen_names.add(f.name)
 
             try:
                 content = f.read_text(encoding="utf-8")
@@ -650,11 +707,6 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
                     "n_keywords": len(keywords),
                 }
             )
-            # Mark name as seen only after a successful append — so an inactive
-            # lesson in an earlier dir doesn't silently block a valid lesson
-            # with the same filename in a later dir.
-            if f.name != "SKILL.md":
-                seen_relative_paths.add(relative_path)
     return lessons
 
 
