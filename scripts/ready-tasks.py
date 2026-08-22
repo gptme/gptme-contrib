@@ -130,13 +130,16 @@ def select_ready_tasks(
     if state == "ready_for_review":
         return [task for task in filtered_tasks if not task_has_waiting_blocker(task)]
     if state == "waiting":
-        # Return waiting tasks whose gates have elapsed
+        # Return waiting tasks whose time gates have elapsed and have no remaining blocker.
+        # A task with waiting_for still set is blocked on a human/external condition even
+        # if its date gate passed — exclude it so agents don't pick up stalled work.
         return [
             task
             for task in filtered_tasks
             if task.state == "waiting"
             if task.wait is not None
             if not task_is_waiting_for_date(task)
+            if not task.metadata.get("waiting_for")
         ]
     if state == "actionable":
         from dataclasses import replace
@@ -149,6 +152,7 @@ def select_ready_tasks(
                 task.state == "waiting"
                 and task.wait is not None
                 and not task_is_waiting_for_date(task)
+                and not task.metadata.get("waiting_for")
             )
             or (
                 task.state in ["backlog", "todo", "active"]
