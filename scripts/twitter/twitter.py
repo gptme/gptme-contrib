@@ -255,10 +255,8 @@ def _wait_for_callback_file(path: Path, timeout: int) -> tuple[str | None, str |
                     raw = "https://" + raw[len("http://") :]
                 code = parse_qs(parsed.query).get("code", [None])[0]
                 if code:
-                    try:
-                        path.unlink()
-                    except OSError:
-                        pass
+                    # Unlink deferred to caller after CSRF state validation,
+                    # so a bad paste can be diagnosed without restarting OAuth.
                     return code, raw
         time.sleep(2)
     return None, None
@@ -541,6 +539,12 @@ def load_twitter_client(
                                     "Possible CSRF attempt or stale callback file."
                                 )
                         console.print("[green]Authorization received!")
+                        # Clean up the callback file now that CSRF state passed.
+                        if _cb_file:
+                            try:
+                                Path(_cb_file).unlink()
+                            except OSError:
+                                pass
                     except TimeoutError as e:
                         console.print("[red]Error: Authorization timeout")
                         console.print(f"[red]Details: {str(e)}")

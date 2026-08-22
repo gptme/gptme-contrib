@@ -252,7 +252,24 @@ def test_wait_for_callback_file_parses_code(twitter_module: Any, tmp_path) -> No
     code, url = twitter_module._wait_for_callback_file(f, timeout=5)
     assert code == "abc123"
     assert url.startswith("https://localhost:9876/callback")
-    assert not f.exists()
+    # Unlink is now deferred to the caller (after CSRF state validation),
+    # so the file should still exist after _wait_for_callback_file returns.
+    assert f.exists()
+
+
+def test_wait_for_callback_file_preserves_file_for_caller_cleanup(
+    twitter_module: Any, tmp_path
+) -> None:
+    """Callback file must survive _wait_for_callback_file so the caller can
+    unlink it after CSRF state validation rather than before."""
+    f = tmp_path / "cb.txt"
+    f.write_text("http://localhost:9876/callback?state=good&code=xyz\n")
+    code, url = twitter_module._wait_for_callback_file(f, timeout=5)
+    assert code == "xyz"
+    # File still present — caller's responsibility to clean up after CSRF check.
+    assert (
+        f.exists()
+    ), "callback file must not be deleted inside _wait_for_callback_file"
 
 
 def test_wait_for_callback_file_handles_file_disappearing_before_read(

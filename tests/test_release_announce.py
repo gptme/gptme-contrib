@@ -344,6 +344,52 @@ def test_main_adds_quote_after_skip_quote_run(monkeypatch, tmp_path):
     assert ra.load_state()["gptme/gptme#v0.33.0"]["bob_quote_id"] == "103"
 
 
+def test_skip_quote_clears_stale_pending_marker(monkeypatch, tmp_path):
+    """--skip-quote must clear a stale bob_quote_pending_at so a later normal
+    run can post the missing quote without needing --force."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    calls: list[tuple] = []
+    # Run 1: org + reply succeed, quote fails → leaves bob_quote_pending_at
+    results1 = iter([(True, "101"), (True, "102"), (False, None)])
+
+    def fake_post1(args, account=None):
+        calls.append((account, args))
+        return next(results1)
+
+    monkeypatch.setattr(ra, "_post", fake_post1)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+    assert ra.main() == 1
+    assert "bob_quote_pending_at" in ra.load_state()["gptme/gptme#v0.33.0"]
+
+    # Run 2: --skip-quote → must clear bob_quote_pending_at and set announced_at
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "999"))
+    monkeypatch.setattr(sys, "argv", ["release_announce.py", "--skip-quote"])
+    assert ra.main() == 0
+    state = ra.load_state()["gptme/gptme#v0.33.0"]
+    assert "announced_at" in state
+    assert "bob_quote_pending_at" not in state
+
+    # Run 3: normal run → must be able to post the quote (not stuck at 1)
+    def fake_post3(args, account=None):
+        calls.append((account, args))
+        return True, "103"
+
+    monkeypatch.setattr(ra, "_post", fake_post3)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+    assert ra.main() == 0
+    assert ra.load_state()["gptme/gptme#v0.33.0"]["bob_quote_id"] == "103"
+
+
 def test_post_default_account_clears_environment_profile(monkeypatch):
     monkeypatch.setenv("TWITTER_ACCOUNT", "gptmeorg")
     for var in (*ra._USER_CONTEXT_VARS, *ra._AUTOMATION_UNSAFE_OAUTH_VARS):

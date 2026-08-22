@@ -357,6 +357,10 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             return 1
         _finish_post(state, record, "bob_quote_id", quote_id)
 
+    # When --skip-quote is in effect, clear any stale quote-pending marker so
+    # a later run without --skip-quote can post the missing quote without --force.
+    if args.skip_quote:
+        record.pop(_pending_key("bob_quote_id"), None)
     record["announced_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
     print(f"announced {key}: org={org_id} quote={quote_id}")
