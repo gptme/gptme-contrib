@@ -156,7 +156,12 @@ def parse_since(value: str) -> datetime:
             "d": timedelta(days=n),
         }[unit]
         return datetime.now(timezone.utc) - delta
-    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise SystemExit(
+            f"error: --since '{value}' is not a valid ISO date or duration (e.g. '90m', '2h', '2026-08-01')"
+        )
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
@@ -272,8 +277,10 @@ def _touched_this_session(path: Path, since: datetime | None) -> bool:
 
 def _in_scope(rel: str, scope: list[str] | None) -> bool:
     """True when `rel` is under one of the scope paths (or no scope given)."""
-    if not scope:
+    if scope is None:
         return True
+    if not scope:
+        return False
     rel_n = rel.rstrip("/")
     for sp in scope:
         sp_n = sp.rstrip("/")
@@ -433,7 +440,9 @@ def check_unpushed(
     """
     rc, up = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
     if rc != 0:
-        rc2, cnt = git(["rev-list", "--count", "HEAD", "--not", "--remotes"], cwd)
+        base_args = ["rev-list", "--count", "HEAD", "--not", "--remotes"]
+        scoped_args = [*base_args, "--", *scope] if scope else base_args
+        rc2, cnt = git(scoped_args, cwd)
         n = int(cnt) if rc2 == 0 and cnt.isdigit() else 0
         if n:
             newest = _newest_commit_date(cwd, ["HEAD", "--not", "--remotes"])

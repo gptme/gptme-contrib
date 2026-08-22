@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    if pid in (0, 1, os.getpid(), os.getppid()) and not args.pid:
+    if pid <= 0 or pid == 1 or pid in (os.getpid(), os.getppid()):
         print(f"end-exit: refusing to signal pid {pid}", file=sys.stderr)
         return 1
     cmd = " ".join(check._proc_cmdline(pid))[:160]
