@@ -1694,7 +1694,9 @@ def test_post_session_orphan_delivery_cap_promotes_master_ci_state(
     config.pending_state_dir.mkdir(parents=True)
     master_ci = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
     master_ci.write_text("seen")
-    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text("s")
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text(
+        "s"
+    )
 
     run_post_session(plan, item, outcome, config, hooks)
 
