@@ -488,7 +488,7 @@ def test_pull_quotes_remote_workspace_with_spaces(
 
     monkeypatch.setattr(agent_cli.subprocess, "run", _record_scp)
 
-    new_files, had_scp_failure = agent_cli._fetch_from_agent(
+    new_files, had_failure, was_unreachable = agent_cli._fetch_from_agent(
         "gordon",
         {"ssh": "gordon@example", "workspace": workspace},
         self_name="erik",
@@ -497,7 +497,8 @@ def test_pull_quotes_remote_workspace_with_spaces(
     )
 
     assert len(new_files) == 1
-    assert not had_scp_failure
+    assert not had_failure
+    assert not was_unreachable
     assert (
         scp_calls[0][-2]
         == f"gordon@example:{shlex.quote(f'{workspace}/messages/outbox/{filename}')}"
@@ -745,6 +746,9 @@ def test_pull_json_failed_agents_populated_on_scp_failure(
     assert json_line is not None, f"No JSON in output: {result.output!r}"
     payload = json.loads(json_line)
     assert "gordon" in payload["failed_agents"]
+    assert "gordon" in payload["agents_polled"], (
+        "SCP-failed agent was reachable and should appear in agents_polled: " f"{payload}"
+    )
     assert payload["new_count"] == 0
 
 
@@ -776,4 +780,7 @@ def test_pull_json_failed_agents_populated_on_ssh_failure(
     assert (
         "gordon" in payload["failed_agents"]
     ), f"SSH-unreachable agent missing from failed_agents: {payload}"
+    assert (
+        "gordon" not in payload["agents_polled"]
+    ), f"SSH-unreachable agent should not appear in agents_polled: {payload}"
     assert payload["new_count"] == 0

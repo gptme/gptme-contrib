@@ -1020,14 +1020,18 @@ def _fetch_from_agent(
     mailboxes: list[str],
     all_mailboxes: bool,
     fallback_mailbox: str | None = None,
-) -> tuple[list[Path], bool]:
+) -> tuple[list[Path], bool, bool]:
     """SCP outbox messages addressed to ``self_name`` from a remote agent's outbox.
 
-    Returns ``(new_files, agent_failed)`` where:
+    Returns ``(new_files, had_failure, was_unreachable)`` where:
     - ``new_files`` is the list of newly-written local inbox paths (skips files
       already present).
-    - ``agent_failed`` is True if the agent was unreachable (SSH/listing step
-      failed) — callers can surface this in machine-readable output.
+    - ``had_failure`` is True if any error occurred (unreachable or SCP failure).
+    - ``was_unreachable`` is True if the SSH/listing step failed (agent never responded).
+
+    Distinguishing ``was_unreachable`` from SCP-only failures lets callers track
+    which agents were contacted at all (``agents_polled``) vs. which had any error
+    (``failed_agents``).
 
     Logs SSH/SCP errors as warnings so one unreachable agent doesn't abort the
     whole pull — the caller collects partial results and reports the total.
@@ -1041,7 +1045,7 @@ def _fetch_from_agent(
     )
     # None means SSH/config failure (unreachable); [] means reachable but no messages.
     if _rows is None:
-        return [], True
+        return [], True, True
     rows = _rows
     fallback_mailbox = fallback_mailbox or (mailboxes[0] if mailboxes else "default")
     ssh_target = agent["ssh"]
@@ -1103,7 +1107,7 @@ def _fetch_from_agent(
             any_scp_failure = True
         finally:
             temp_dest.unlink(missing_ok=True)
-    return new_files, any_scp_failure
+    return new_files, any_scp_failure, False
 
 
 @agent.command()
@@ -1176,7 +1180,6 @@ def pull(
         if not all(agent_cfg.get(k) for k in ("ssh", "workspace")):
             continue
 
-        agents_polled.append(agent_name)
         if dry_run:
             _dry_rows = _remote_pending_rows(
                 agent_name,
@@ -1188,6 +1191,7 @@ def pull(
             if _dry_rows is None:
                 failed_agents.append(agent_name)
                 continue
+            agents_polled.append(agent_name)
             for row in _dry_rows:
                 filename = str(row.get("file") or "")
                 try:
@@ -1213,7 +1217,7 @@ def pull(
                         )
             continue
 
-        fetched, had_scp_failure = _fetch_from_agent(
+        fetched, had_failure, was_unreachable = _fetch_from_agent(
             agent_name,
             agent_cfg,
             self_name=self_name,
@@ -1221,8 +1225,12 @@ def pull(
             all_mailboxes=all_mailboxes,
         )
         new_files.extend(fetched)
-        if had_scp_failure:
+        if was_unreachable:
             failed_agents.append(agent_name)
+        else:
+            agents_polled.append(agent_name)
+            if had_failure:
+                failed_agents.append(agent_name)
 
     n = len(new_files)
 
