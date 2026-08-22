@@ -404,9 +404,18 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
     if tagged:
         subjects = [f"{s} {j}" for s, j in tagged]
         shas = [s for s, _ in tagged]
+    elif not sid:
+        # No session id available — can't distinguish our commits from siblings'.
+        # Attribute nothing rather than blocking a session that did no work.
+        subjects = []
+        shas = []
     rep.commits = subjects
     if shas:
         rc, out = git(["diff", "--shortstat", f"{shas[-1]}^", shas[0]], rep.root)
+        if rc != 0:
+            # shas[-1] is the root commit (no parent); diff from the empty tree.
+            empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            rc, out = git(["diff", "--shortstat", empty_tree, shas[0]], rep.root)
         m = re.search(r"(\d+) files? changed", out) if rc == 0 else None
         rep.files_changed = int(m.group(1)) if m else 0
     rep.add(

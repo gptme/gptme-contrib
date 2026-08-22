@@ -63,7 +63,7 @@ def repo(tmp_path: Path) -> Path:
     return work
 
 
-def run_check(work: Path, *extra: str) -> tuple[int, dict]:
+def run_check(work: Path, *extra: str, env: dict | None = None) -> tuple[int, dict]:
     p = subprocess.run(
         [
             sys.executable,
@@ -77,9 +77,26 @@ def run_check(work: Path, *extra: str) -> tuple[int, dict]:
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     assert p.stdout, p.stderr
     return p.returncode, json.loads(p.stdout)
+
+
+def _env_without_cc_session() -> dict:
+    """Strip Claude Code session vars to simulate a gptme / Codex harness."""
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k
+        not in (
+            "CC_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CC_MODEL",
+        )
+    }
 
 
 def _status(rep: dict, name: str) -> str | None:
@@ -283,6 +300,55 @@ def test_exit_dry_run_never_signals(tmp_path: Path):
         assert victim.poll() is None
     finally:
         victim.kill()
+
+
+def test_no_session_id_recent_commit_not_attributed(tmp_path: Path):
+    """P1: without a session_id (gptme/Codex env), recent commits must not block.
+
+    When no CC_SESSION_ID is present, `check_commits` cannot distinguish this
+    session's commits from a sibling's or from pre-session repository activity.
+    The old code attributed every time-window commit to this session, which
+    blocked sessions that did nothing just because the repo had recent commits.
+    """
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "-q", "--bare", str(origin))
+    work = tmp_path / "work"
+    _git(tmp_path, "clone", "-q", str(origin), str(work))
+    _git(work, "config", "user.email", "t@example.com")
+    _git(work, "config", "user.name", "t")
+    (work / "README.md").write_text("hi\n")
+    _git(work, "add", "README.md")
+    _git(work, "commit", "-q", "-m", "feat: pre-session commit")
+    _git(work, "push", "-q", "-u", "origin", "HEAD:master")
+    # Journal dir exists; this is what triggers the false BLOCKED when
+    # did_work=True leaks in from unattributed commits.
+    (work / "journal").mkdir()
+    # Strip CC session env vars to simulate gptme / Codex (no session_id).
+    env = _env_without_cc_session()
+    rc, rep = run_check(work, "--since", "1h", env=env)
+    assert rc == 0, rep
+    assert rep["commits"] == [], "without session_id, no commits should be attributed"
+
+
+def test_root_commit_files_changed_counted(tmp_path: Path):
+    """P2: a session whose only commit is the root commit must have files_changed > 0."""
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "-q", "--bare", str(origin))
+    work = tmp_path / "work"
+    _git(tmp_path, "clone", "-q", str(origin), str(work))
+    _git(work, "config", "user.email", "t@example.com")
+    _git(work, "config", "user.name", "t")
+    for i in range(15):
+        (work / f"f{i}.txt").write_text(f"{i}\n")
+    _git(work, "add", ".")
+    _git(work, "commit", "-q", "-m", "feat: init 15 files")
+    _git(work, "push", "-q", "-u", "origin", "HEAD:master")
+    rc, rep = run_check(work, "--since", "1h")
+    assert rc == 0, rep
+    assert (
+        rep["files_changed"] >= 15
+    ), "root commit files must be counted via empty-tree diff"
+    assert rep["verdict"] == "CLEAN_SUBSTANTIAL"
 
 
 def test_exit_signals_target_after_delay():
