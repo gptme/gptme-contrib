@@ -8,7 +8,10 @@ This provides better quality summaries and saves tokens in the main gptme sessio
 import json
 import logging
 import re
+import shlex
+import shutil
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +22,58 @@ logger = logging.getLogger(__name__)
 # Retry configuration for empty CC responses (nesting detection, transient failures)
 _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
+
+# Claude Code stdout marker for weekly quota exhaustion on the active slot. When
+# present, retrying on the same slot is futile — every attempt fails identically
+# until the quota resets. Callers with slot fallback should catch
+# ClaudeQuotaExhaustedError and retry on a different slot instead.
+_QUOTA_EXHAUSTED_MARKERS = ("you've hit your weekly limit",)
+
+
+class ClaudeQuotaExhaustedError(subprocess.CalledProcessError):
+    """The active Claude Code slot has exhausted its weekly quota.
+
+    Raised immediately (without the usual retry loop) when ``claude -p`` prints a
+    weekly-quota-exhaustion marker, since retrying the same slot is futile.
+    Subclasses :class:`subprocess.CalledProcessError` so existing callers that
+    catch the base type keep working; callers that can switch to a different slot
+    should catch this subtype specifically.
+    """
+
+
+def _try_with_credential_file(
+    cmd: list[str],
+    prompt: str,
+    cred_path: Path,
+    base_env: dict,
+    timeout: int,
+) -> subprocess.CompletedProcess:
+    """Run ``claude -p`` with a specific credential file via a temporary CLAUDE_CONFIG_DIR.
+
+    Creates a temporary directory containing only a ``.credentials.json`` symlink
+    pointing at *cred_path*, sets ``CLAUDE_CONFIG_DIR`` to that directory, and
+    runs *cmd* (which is expected to be ``["claude", "-p", "-", ...]``).  The
+    temporary directory is removed after the call regardless of outcome.
+
+    This avoids mutating the shared live symlink (``~/.claude/.credentials.json``),
+    making it safe to call from concurrent sessions.
+    """
+    tmpdir = Path(tempfile.mkdtemp(prefix="gptme-cc-slot-"))
+    try:
+        cred_link = tmpdir / ".credentials.json"
+        cred_link.symlink_to(cred_path.resolve())
+        slot_env = dict(base_env)
+        slot_env["CLAUDE_CONFIG_DIR"] = str(tmpdir)
+        return subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=slot_env,
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def call_claude_code(
@@ -70,7 +125,33 @@ def call_claude_code(
     # subprocess sessions (the generic cross-agent signal).
     env["GPTME_SUBPROCESS"] = "1"
 
-    cmd = ["claude", "-p", "-"]
+    # Fallback credential paths for quota exhaustion recovery.  When the active
+    # slot is exhausted, call_claude_code tries each path in order via a temp
+    # CLAUDE_CONFIG_DIR.  Extract here (before the subprocess env is locked) and
+    # strip from the env so the subprocess never sees it (prevents recursion).
+    # Format: colon-separated absolute paths to credential files.
+    # Example: /home/bob/.claude/.credentials.json.alice:/home/bob/.claude/.credentials.json.erik
+    _fallback_creds_env = env.pop("GPTME_CC_FALLBACK_CREDS", "").strip()
+    _fallback_cred_paths: list[Path] = (
+        [Path(p.strip()) for p in _fallback_creds_env.split(":") if p.strip()]
+        if _fallback_creds_env
+        else []
+    )
+
+    # Optional command prefix, e.g. to route `claude` through a per-slot
+    # credential wrapper. Env var is a single string, shlex-split so callers can
+    # pass arguments (e.g. "path/to/wrapper --slot alice --"). Generic hook —
+    # nothing here is slot/credential-specific. Strip it from the child env so a
+    # wrapper that invokes this backend cannot recursively apply itself.
+    prefix_env = env.pop("GPTME_CC_CMD_PREFIX", "").strip()
+    if prefix_env:
+        try:
+            prefix = shlex.split(prefix_env)
+        except ValueError as exc:
+            raise ValueError(f"Invalid GPTME_CC_CMD_PREFIX: {exc}") from exc
+        cmd = prefix + ["claude", "-p", "-"]
+    else:
+        cmd = ["claude", "-p", "-"]
     if nested:
         cmd.append("--no-session-persistence")
 
@@ -129,6 +210,92 @@ def call_claude_code(
                     logger.debug("--debug-file appears unsupported; retrying without diagnostics")
                     diagnostic_dir = None
                     plain_retry_pending = True
+            combined_out = (result.stdout or "") + (result.stderr or "")
+            combined_out_lower = combined_out.lower()
+            # Weekly quota exhaustion is a permanent, slot-scoped failure: retrying
+            # the same slot is futile and just burns ~N*delay seconds + token budget.
+            # Signal it distinctly so a caller that can switch slots can retry there.
+            if any(marker.lower() in combined_out_lower for marker in _QUOTA_EXHAUSTED_MARKERS):
+                logger.warning(
+                    "claude -p weekly quota exhausted (attempt %d/%d): %s",
+                    attempt,
+                    max_retries,
+                    result.stdout.strip()[:200] if result.stdout else result.stderr.strip()[:200],
+                )
+                # Attempt fallback slots (GPTME_CC_FALLBACK_CREDS) before raising.
+                last_non_quota_error: subprocess.CalledProcessError | None = None
+                saw_empty_response = False
+                for fb_cred in _fallback_cred_paths:
+                    if not fb_cred.exists():
+                        logger.debug("Fallback cred file %s not found, skipping", fb_cred)
+                        continue
+                    logger.info(
+                        "Active slot quota exhausted; trying fallback slot: %s",
+                        fb_cred.name,
+                    )
+                    for fb_attempt in range(1, max_retries + 1):
+                        try:
+                            fb_result = _try_with_credential_file(
+                                cmd, prompt, fb_cred, env, timeout
+                            )
+                        except (OSError, subprocess.TimeoutExpired) as exc:
+                            logger.warning("Fallback slot %s failed to run: %s", fb_cred.name, exc)
+                            break
+                        if fb_result.returncode == 0:
+                            fb_out = (fb_result.stdout or "").strip()
+                            if fb_out:
+                                logger.info("Fallback slot %s succeeded", fb_cred.name)
+                                return fb_out
+                            saw_empty_response = True
+                            logger.warning(
+                                "Fallback slot %s returned empty response (attempt %d/%d)",
+                                fb_cred.name,
+                                fb_attempt,
+                                max_retries,
+                            )
+                            if fb_attempt < max_retries:
+                                time.sleep(_RETRY_DELAY_S * fb_attempt)
+                                continue
+                            break
+                        # Check if this fallback slot is also quota-exhausted.
+                        fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
+                        if any(m.lower() in fb_combined.lower() for m in _QUOTA_EXHAUSTED_MARKERS):
+                            logger.warning("Fallback slot %s also quota-exhausted", fb_cred.name)
+                            # Clear any prior non-quota error so the caller receives
+                            # ClaudeQuotaExhaustedError rather than a stale error from
+                            # an earlier fallback that failed for a different reason.
+                            last_non_quota_error = None
+                            break
+                        logger.warning(
+                            "Fallback slot %s failed (rc=%d, attempt %d/%d): stdout=%s stderr=%s",
+                            fb_cred.name,
+                            fb_result.returncode,
+                            fb_attempt,
+                            max_retries,
+                            (fb_result.stdout or "")[:200],
+                            (fb_result.stderr or "")[:200],
+                        )
+                        last_non_quota_error = subprocess.CalledProcessError(
+                            fb_result.returncode,
+                            cmd,
+                            fb_result.stdout,
+                            fb_result.stderr,
+                        )
+                        if fb_attempt < max_retries:
+                            time.sleep(_RETRY_DELAY_S * fb_attempt)
+                            continue
+                        break
+                if last_non_quota_error is not None:
+                    raise last_non_quota_error
+                if saw_empty_response:
+                    logger.error(
+                        "Fallback slots returned empty responses after %d attempts",
+                        max_retries,
+                    )
+                    return ""
+                raise ClaudeQuotaExhaustedError(
+                    result.returncode, attempt_cmd, result.stdout, result.stderr
+                )
             stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
             stdout_preview = result.stdout.strip()[:500] if result.stdout else "(none)"
             logger.warning(
