@@ -128,16 +128,38 @@ def _clean_plain_scalar(raw: str) -> str:
                     result.append(ch)
                     i += 1
             return "".join(result).strip()
-        # Double-quoted: backslash escape only
-        escaped = False
-        for index, char in enumerate(value[1:], start=1):
-            if char == "\\" and not escaped:
-                escaped = True
-                continue
-            if char == quote and not escaped:
-                return value[1:index]
-            escaped = False
-        return value[1:].strip()
+        # Double-quoted: process standard YAML backslash escape sequences.
+        # 684bff52 accidentally restored the old "skip backslash, return
+        # value[1:index]" scan, which left literal backslashes in the result
+        # (`"He said \"hello\""` → `He said \"hello\"` instead of `He said "hello"`).
+        _DQUOTE_ESCAPES: dict[str, str] = {
+            '"': '"',
+            "\\": "\\",
+            "n": "\n",
+            "t": "\t",
+            "r": "\r",
+            "a": "\a",
+            "b": "\b",
+            "f": "\f",
+            "v": "\v",
+        }
+        chars: list[str] = []
+        i = 1
+        while i < len(value):
+            ch = value[i]
+            if ch == "\\":
+                if i + 1 < len(value):
+                    chars.append(_DQUOTE_ESCAPES.get(value[i + 1], value[i + 1]))
+                    i += 2
+                else:
+                    chars.append("\\")
+                    i += 1
+            elif ch == '"':
+                return "".join(chars)
+            else:
+                chars.append(ch)
+                i += 1
+        return "".join(chars).strip()
     if value.startswith("#"):
         return ""
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
@@ -194,8 +216,12 @@ def _extract_list_frontmatter_field(
     # Inline: field: [val1, val2] or field: ["val1", "val2"].  Match the
     # closing bracket only outside quoted values so a keyword such as "a]b"
     # does not truncate the list.
+    # Quoted items must allow YAML escapes: \" inside double quotes and
+    # '' (doubled single quote) inside single quotes.  A naive '[^']*'
+    # splits `'it''s'` into `it` + `s`.
+    _quoted_item = r'"(?:[^"\\]|\\.)*"|\'(?:[^\']|\'\')*\''
     inline = re.search(
-        rf"^{indent}{re.escape(field)}:\s*\[((?:[^\]\"']|\"[^\"]*\"|'[^']*')*)\]",
+        rf"^{indent}{re.escape(field)}:\s*\[((?:[^\]\"']|{_quoted_item})*)\]",
         fm_str,
         re.MULTILINE | re.DOTALL,
     )
@@ -203,15 +229,15 @@ def _extract_list_frontmatter_field(
         items: list[str] = []
         # Tokenize respecting quotes: commas inside "..." or '...' are not
         # separators.  Unquoted items run until the next comma or end-of-string.
+        # Quoted tokens keep their quotes so _clean_plain_scalar can unescape.
         for m in re.finditer(
-            r'"([^"]+)"|\'([^\']+)\'|([^,\'"]+?)(?=\s*,|\s*$)',
+            rf"{_quoted_item}|([^,\'\"]+?)(?=\s*,|\s*$)",
             inline.group(1),
         ):
-            val = m.group(1) or m.group(2)
-            if val is None:
-                val = _clean_plain_scalar(m.group(3) or "")
+            raw = m.group(0)
+            val = _clean_plain_scalar(raw)
             if val:
-                items.append(val.strip())
+                items.append(val)
         return items
 
     # Block: "field:" on its own line, then more-indented "- val" lines.

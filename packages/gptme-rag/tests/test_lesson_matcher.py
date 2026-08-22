@@ -190,7 +190,9 @@ class TestExtractFrontmatter:
         # A `#` inside a quoted scalar is data, not a comment.
         assert fm.get("description") == "hash # inside quotes stays"
 
-    def test_regex_fallback_preserves_escaped_quotes(self, monkeypatch):
+    def test_regex_fallback_processes_double_quoted_escapes(self, monkeypatch):
+        # Per YAML spec, double-quoted scalars process backslash escapes:
+        # `"He said \"hello\""` → `He said "hello"` (not the raw `He said \"hello\"`).
         content = '---\nstatus: active\ndescription: "He said \\"hello\\""\n---\n# Title\nBody.\n'
         import builtins
 
@@ -203,7 +205,7 @@ class TestExtractFrontmatter:
 
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, _ = extract_frontmatter(content)
-        assert fm.get("description") == r"He said \"hello\""
+        assert fm.get("description") == 'He said "hello"'
 
     def test_regex_fallback_hash_without_leading_space_is_not_a_comment(self, monkeypatch):
         # YAML only starts a comment at a `#` that begins the value or follows
@@ -591,6 +593,39 @@ class TestExtractFrontmatter:
         monkeypatch.setattr(builtins, "__import__", block_yaml)
         fm, _ = extract_frontmatter(content)
         assert fm.get("name") == "it's a lesson"
+
+    def test_regex_fallback_double_quoted_backslash_escape(self, monkeypatch):
+        # Regression: double-quoted YAML scalars use backslash escape sequences.
+        content = '---\nstatus: active\nname: "He said \\"hello\\""\n---\n# Body.\n'
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("name") == 'He said "hello"'
+
+    def test_inline_single_quoted_doubled_apostrophe(self, monkeypatch):
+        # Regression: inline lists used '[^']+' which splits `'it''s'` into
+        # `it` + `s` instead of the YAML single-quoted value `it's`.
+        content = "---\nstatus: active\nmatch:\n  keywords: ['it''s', other]\n---\n# Title\nBody.\n"
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_yaml(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError("yaml blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_yaml)
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("match", {}).get("keywords") == ["it's", "other"]
 
     def test_regex_fallback_metadata_keywords_not_hoisted(self, monkeypatch):
         """keywords nested under metadata must not be merged into match.keywords.
