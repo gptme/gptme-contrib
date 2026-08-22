@@ -152,6 +152,21 @@ def test_latest_release_handles_invalid_json(monkeypatch, capsys):
     assert "returned invalid JSON" in capsys.readouterr().err
 
 
+def test_post_ignores_tweet_id_substring_in_body(monkeypatch):
+    """Tweet text containing 'Tweet ID: N' must not steal the created id."""
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="Posted tweet: see Tweet ID: 999 in the notes\nTweet ID: 42\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(ra, "_run", fake_run)
+    assert ra._post(["post", "hello"]) == (True, "42")
+
+
 def test_post_distinguishes_failure_from_success_without_id(monkeypatch):
     monkeypatch.setattr(
         ra,

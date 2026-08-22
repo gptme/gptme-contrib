@@ -227,15 +227,19 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
     if r.returncode != 0:
         print(f"twitter.py failed ({r.returncode}):\n{out}", file=sys.stderr)
         return False, None
-    m = re.search(r"Tweet ID: (\d+)", out)
-    if not m:
+    # Strip ANSI so a Rich-colored "Tweet ID: N" still matches. Line-anchored
+    # last match wins: tweet text containing "Tweet ID: 123" must not steal
+    # the created id (the CLI prints the id on its own line after the body).
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    ids = re.findall(r"(?m)^\s*Tweet ID: (\d+)\s*$", clean)
+    if not ids:
         print(
             "twitter.py succeeded but did not report a tweet ID; "
             "recording the step as posted and refusing to retry",
             file=sys.stderr,
         )
         return True, None
-    return True, m.group(1)
+    return True, ids[-1]
 
 
 def _pending_key(step: str) -> str:
