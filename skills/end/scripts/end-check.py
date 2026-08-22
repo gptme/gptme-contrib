@@ -408,7 +408,7 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
         # No session id available — can't distinguish our commits from siblings'.
         # Attribute nothing rather than blocking a session that did no work.
         subjects = []
-        shas = []
+        # Keep shas for files_changed calculation (still needed for the verdict)
     rep.commits = subjects
     if shas:
         rc, out = git(["diff", "--shortstat", f"{shas[-1]}^", shas[0]], rep.root)
