@@ -200,7 +200,11 @@ def get_foreign_cascade_claims(repo_root: Path) -> dict[str, str]:
                   AND (? = '' OR claimer != ?)""",
                 (my_agent, my_agent),
             ).fetchall()
-    except Exception:
+    except Exception as exc:
+        print(
+            f"warning: coordination claim filtering disabled due to error: {exc}",
+            file=sys.stderr,
+        )
         return {}
 
     prefix = "cascade:task:"
@@ -264,6 +268,12 @@ def main() -> int:
         all_tasks = load_tasks(tasks_dir, errors_out=load_errors)
     finally:
         logging.disable(previous_logging_disable)
+
+    if load_errors:
+        print(
+            f"warning: {len(load_errors)} task file(s) failed to load: {load_errors}",
+            file=sys.stderr,
+        )
 
     tasks_dict = {task.name: task for task in all_tasks}
 
