@@ -944,6 +944,22 @@ class TestScanLessons:
         lessons = scan_lessons([tmp_path])
         assert lessons[0]["harness_restrict"] == ["claude-code"]
 
+    def test_unreadable_file_does_not_block_same_name_in_later_dir(self, tmp_path):
+        # An unreadable (permission-denied) file in dir_a must not claim the
+        # seen_names slot for dir_b's valid copy with the same filename.
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        bad_file = dir_a / "foo.md"
+        _write_lesson(bad_file, _basic_lesson(["should-be-blocked"]))
+        bad_file.chmod(0o000)  # make unreadable
+        _write_lesson(dir_b / "foo.md", _basic_lesson(["valid-lesson"]))
+        try:
+            lessons = scan_lessons([dir_a, dir_b])
+            keywords = [kw for lesson in lessons for kw in lesson["keywords"]]
+            assert "valid-lesson" in keywords
+        finally:
+            bad_file.chmod(0o644)  # restore so tmp_path cleanup works
+
 
 # ---------------------------------------------------------------------------
 # filter_by_session_category

@@ -694,15 +694,16 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
                     seen_names.add(f.name)
                 continue
 
-            if not is_skill_file:
-                if f.name in seen_names:
-                    continue
-                seen_names.add(f.name)
+            if not is_skill_file and f.name in seen_names:
+                continue
 
             try:
                 content = f.read_text(encoding="utf-8")
             except Exception:
                 continue
+
+            if not is_skill_file:
+                seen_names.add(f.name)
 
             fm, body = extract_frontmatter(content)
 
