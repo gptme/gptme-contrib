@@ -841,8 +841,48 @@ def test_remote_pending_rows_warns_on_missing_transport(capsys: pytest.CaptureFi
     )
 
     captured = capsys.readouterr()
-    assert rows == []
+    assert rows is None
     assert "Warning: skipping bob; missing required key(s): ssh" in captured.err
+
+
+def test_remote_pending_rows_returns_none_on_invalid_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Result:
+        stdout = "not valid json {"
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", lambda *a, **kw: Result())
+    rows = agent_cli._remote_pending_rows(
+        "bob",
+        {"ssh": "bob.example", "workspace": "/srv/bob"},
+        recipient="erik",
+        mailboxes=["default"],
+        all_mailboxes=False,
+    )
+
+    captured = capsys.readouterr()
+    assert rows is None
+    assert "Warning: invalid pending JSON from bob" in captured.err
+
+
+def test_remote_pending_rows_returns_none_on_non_list_payload(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Result:
+        stdout = '{"unexpected": "dict"}'
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", lambda *a, **kw: Result())
+    rows = agent_cli._remote_pending_rows(
+        "bob",
+        {"ssh": "bob.example", "workspace": "/srv/bob"},
+        recipient="erik",
+        mailboxes=["default"],
+        all_mailboxes=False,
+    )
+
+    captured = capsys.readouterr()
+    assert rows is None
+    assert "Warning: invalid pending payload from bob" in captured.err
 
 
 def test_remote_pending_rows_all_mailboxes_is_explicit(

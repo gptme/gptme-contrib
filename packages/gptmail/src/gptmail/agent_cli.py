@@ -622,14 +622,20 @@ def _remote_pending_rows(
     recipient: str,
     mailboxes: list[str],
     all_mailboxes: bool,
-) -> list[dict]:
+) -> list[dict] | None:
+    """Return pending message rows from a remote agent, or None if unreachable.
+
+    Returns ``None`` when the agent could not be contacted (missing config,
+    SSH failure, or timeout) so callers can distinguish "unreachable" from
+    "reachable but no messages" (which returns ``[]``).
+    """
     missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
     if missing:
         click.echo(
             f"Warning: skipping {agent_name}; missing required key(s): {', '.join(missing)}",
             err=True,
         )
-        return []
+        return None
     cmd = ["uv", "run", "gptmail", "agent", "pending", "--for", recipient, "--json", "--local-only"]
     if all_mailboxes:
         cmd.append("--all-mailboxes")
@@ -651,15 +657,15 @@ def _remote_pending_rows(
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         click.echo(f"Warning: failed to collect pending rows from {agent_name}: {e}", err=True)
-        return []
+        return None
     try:
         payload = json.loads(result.stdout or "[]")
     except json.JSONDecodeError as e:
         click.echo(f"Warning: invalid pending JSON from {agent_name}: {e}", err=True)
-        return []
+        return None
     if not isinstance(payload, list):
         click.echo(f"Warning: invalid pending payload from {agent_name}: expected a list", err=True)
-        return []
+        return None
     rows: list[dict] = []
     for item in payload:
         if not isinstance(item, dict):
@@ -686,15 +692,15 @@ def _fleet_pending_rows(
     for agent_name, agent in agents.items():
         if agent_name == self_name:
             continue
-        rows.extend(
-            _remote_pending_rows(
-                agent_name,
-                agent,
-                recipient=recipient,
-                mailboxes=mailboxes,
-                all_mailboxes=all_mailboxes,
-            )
+        remote_rows = _remote_pending_rows(
+            agent_name,
+            agent,
+            recipient=recipient,
+            mailboxes=mailboxes,
+            all_mailboxes=all_mailboxes,
         )
+        if remote_rows is not None:
+            rows.extend(remote_rows)
     rows.sort(
         key=lambda meta: (
             str(meta.get("timestamp", "")),
@@ -895,6 +901,16 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
 @click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")
 @click.option("--for", "for_recipient", default=None, help="Show messages pending for a recipient.")
+@click.option(
+    "--as",
+    "as_identity",
+    default=None,
+    metavar="IDENTITY",
+    help=(
+        "Check pending as this identity instead of AGENT_NAME/$USER. "
+        "Useful for pull-only recipients (e.g. humans) reviewing their local inbox."
+    ),
+)
 @click.option("--fleet", is_flag=True, help="Fan out across all registered agents.")
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
 @click.option(
@@ -907,15 +923,25 @@ def pending(
     mailbox: str,
     all_mailboxes: bool,
     for_recipient: str | None,
+    as_identity: str | None,
     fleet: bool,
     json_output: bool,
     include_stale: bool,
     local_only: bool,
 ) -> None:
-    """Show inbox messages awaiting a reply (timely-reply SLA)."""
+    """Show inbox messages awaiting a reply (timely-reply SLA).
+
+    Pull-only recipients (e.g. humans who use ``gptmail agent pull``) can use
+    ``--as <identity>`` to inspect which of their local inbox messages still
+    await a reply, without relying on ``AGENT_NAME`` or ``$USER`` being set:
+
+    \b
+        gptmail agent pull --as erik
+        gptmail agent pending --as erik
+    """
     agents = _load_agents(warn_missing=False)
     mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
-    self_name = _self_name()
+    self_name = (as_identity or _self_name()).lower()
     if for_recipient:
         if fleet and local_only:
             raise click.BadParameter("--fleet and --local-only are mutually exclusive")
@@ -994,20 +1020,33 @@ def _fetch_from_agent(
     mailboxes: list[str],
     all_mailboxes: bool,
     fallback_mailbox: str | None = None,
-) -> list[Path]:
+) -> tuple[list[Path], bool, bool]:
     """SCP outbox messages addressed to ``self_name`` from a remote agent's outbox.
 
-    Returns a list of newly-written local inbox paths (skips files already present).
+    Returns ``(new_files, had_failure, was_unreachable)`` where:
+    - ``new_files`` is the list of newly-written local inbox paths (skips files
+      already present).
+    - ``had_failure`` is True if any error occurred (unreachable or SCP failure).
+    - ``was_unreachable`` is True if the SSH/listing step failed (agent never responded).
+
+    Distinguishing ``was_unreachable`` from SCP-only failures lets callers track
+    which agents were contacted at all (``agents_polled``) vs. which had any error
+    (``failed_agents``).
+
     Logs SSH/SCP errors as warnings so one unreachable agent doesn't abort the
     whole pull — the caller collects partial results and reports the total.
     """
-    rows = _remote_pending_rows(
+    _rows = _remote_pending_rows(
         agent_name,
         agent,
         recipient=self_name,
         mailboxes=mailboxes,
         all_mailboxes=all_mailboxes,
     )
+    # None means SSH/config failure (unreachable); [] means reachable but no messages.
+    if _rows is None:
+        return [], True, True
+    rows = _rows
     fallback_mailbox = fallback_mailbox or (mailboxes[0] if mailboxes else "default")
     ssh_target = agent["ssh"]
     workspace = agent["workspace"]
@@ -1025,6 +1064,7 @@ def _fetch_from_agent(
         "ControlPersist=60",
     ]
     new_files: list[Path] = []
+    any_scp_failure = False
     for row in rows:
         filename = str(row.get("file") or "")
         try:
@@ -1064,9 +1104,10 @@ def _fetch_from_agent(
             new_files.append(dest)
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Warning: failed to fetch {filename} from {agent_name}: {e}", err=True)
+            any_scp_failure = True
         finally:
             temp_dest.unlink(missing_ok=True)
-    return new_files
+    return new_files, any_scp_failure, False
 
 
 @agent.command()
@@ -1128,6 +1169,7 @@ def pull(
 
     new_files: list[Path] = []
     agents_polled: list[str] = []
+    failed_agents: list[str] = []
 
     for agent_name, agent_cfg in agents.items():
         if agent_name == self_name:
@@ -1138,16 +1180,19 @@ def pull(
         if not all(agent_cfg.get(k) for k in ("ssh", "workspace")):
             continue
 
-        agents_polled.append(agent_name)
         if dry_run:
-            rows = _remote_pending_rows(
+            _dry_rows = _remote_pending_rows(
                 agent_name,
                 agent_cfg,
                 recipient=self_name,
                 mailboxes=remote_mailboxes,
                 all_mailboxes=all_mailboxes,
             )
-            for row in rows:
+            if _dry_rows is None:
+                failed_agents.append(agent_name)
+                continue
+            agents_polled.append(agent_name)
+            for row in _dry_rows:
                 filename = str(row.get("file") or "")
                 try:
                     dest = _pull_destination(row, fallback_mailbox=mailboxes[0])
@@ -1172,7 +1217,7 @@ def pull(
                         )
             continue
 
-        fetched = _fetch_from_agent(
+        fetched, had_failure, was_unreachable = _fetch_from_agent(
             agent_name,
             agent_cfg,
             self_name=self_name,
@@ -1180,6 +1225,12 @@ def pull(
             all_mailboxes=all_mailboxes,
         )
         new_files.extend(fetched)
+        if was_unreachable:
+            failed_agents.append(agent_name)
+        else:
+            agents_polled.append(agent_name)
+            if had_failure:
+                failed_agents.append(agent_name)
 
     n = len(new_files)
 
@@ -1211,8 +1262,10 @@ def pull(
     if json_output:
         payload = {
             "new_count": n,
+            "recipient": self_name,
             "files": [f.name for f in new_files],
             "agents_polled": agents_polled,
+            "failed_agents": failed_agents,
         }
         click.echo(json.dumps(payload))
 
