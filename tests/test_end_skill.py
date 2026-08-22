@@ -118,6 +118,23 @@ def test_old_dirt_is_info_not_block(repo: Path):
     assert _status(rep, "uncommitted-other") == "info"
 
 
+def test_staged_old_file_blocks(repo: Path):
+    """A staged file with an old mtime (content pre-dates session) still blocks."""
+    f = repo / "staged.txt"
+    f.write_text("x\n")
+    old = (datetime.now(timezone.utc) - timedelta(hours=5)).timestamp()
+    os.utime(f, (old, old))
+    # Without staging: old file is "info" (other session's dirt)
+    rc, rep = run_check(repo, "--since", "1h")
+    assert rc == 0 and _status(rep, "uncommitted-other") == "info"
+    # After explicit git add: staged index change must block regardless of mtime
+    _git(repo, "add", "staged.txt")
+    rc, rep = run_check(repo, "--since", "1h")
+    assert rc == 2, rep
+    assert _status(rep, "uncommitted") == "block"
+    assert any("staged.txt" in it for c in rep["checks"] for it in c["items"])
+
+
 def test_paths_scope_ignores_sibling_dirt(repo: Path):
     """--paths: dirt outside the declared scope is info even inside the time window."""
     (repo / "mine.txt").write_text("m\n")

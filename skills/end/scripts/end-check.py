@@ -321,7 +321,12 @@ def _dirty_entries(
             submods.append(rel)
             continue
         label = f"{code.strip() or '??'} {rel}"
-        if _in_scope(rel, scope) and _touched_this_session(root / rel, since):
+        # A staged index change (explicit `git add`) counts as "mine" regardless of
+        # file mtime, because the staging act itself is the session-time touch.
+        has_index_change = code[0] not in (" ", "?")
+        if _in_scope(rel, scope) and (
+            has_index_change or _touched_this_session(root / rel, since)
+        ):
             mine.append(label)
         else:
             others.append(label)
