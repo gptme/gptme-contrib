@@ -63,8 +63,6 @@ try:
         metaproductivity_src_str = str(METAPRODUCTIVITY_SRC)
         if metaproductivity_src_str not in sys.path:
             sys.path.insert(0, metaproductivity_src_str)
-    from metaproductivity.tasks import parse_wait_value
-
     _HAS_METAPRODUCTIVITY = True
 except (ImportError, ModuleNotFoundError):
     pass
