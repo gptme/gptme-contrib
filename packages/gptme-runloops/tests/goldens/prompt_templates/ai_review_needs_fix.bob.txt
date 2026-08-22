@@ -11,8 +11,13 @@ gh api repos/gptme/gptme-contrib/pulls/1234/comments \
 ```
 
 This PR has a low score from our AI reviewer (not Greptile).
-**Action**: Read the findings in the summary comment and inline threads, fix the real issues, push commits.
+**Action**: Read the findings in the summary comment and inline threads, fix the real issues, then push via the in-band AI review wrapper
+(runs the same reviewer locally BEFORE pushing — findings surface here in-session instead of costing a GitHub round-trip + re-dispatch, max 2 iterations):
+```bash
+uv run python3 /home/bob/bob/scripts/github/pm-review-and-push.py
+```
+If it reports P0/P1 findings, fix them and re-run it; once clean it pushes.
 
 Warning: **This is an AI-reviewer dispatch, not Greptile.** Do NOT trigger Greptile to clear it.
-The reviewer runs automatically on the next push — no manual trigger needed or wanted.
+The reviewer still runs automatically on the push the wrapper makes — no manual trigger needed or wanted.
 If you cannot fix the issues in this session, leave it for the next cycle.
