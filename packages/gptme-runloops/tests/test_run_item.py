@@ -1674,6 +1674,64 @@ def test_post_session_unverified_rollback_promotes_master_ci_state(
     assert not (config.state_dir / "notif-555.state").exists()
 
 
+def test_post_session_orphan_delivery_cap_promotes_master_ci_state(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    """orphan_no_delivery cap-reached path must promote master-CI state for a
+    mixed item (pr_update + master_ci_failure), so the activity gate stops
+    re-emitting the master-CI failure (AI-review finding fp:1cf0f59340b8
+    cap-reached branch on gptme/gptme-contrib#1474)."""
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("pr_update", "master_ci_failure")
+    )
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout='{"outcome": "orphan_no_delivery", "needs_fallback_reply": true, '
+        '"fallback_reply_posted": false}',
+    )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    master_ci = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
+    master_ci.write_text("seen")
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text("s")
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / master_ci.name).is_file(), (
+        "orphan cap-reached path must promote master-CI state so the activity "
+        "gate stops re-emitting a handled master-CI failure"
+    )
+
+
+def test_post_session_unverified_delivery_cap_promotes_master_ci_state(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    """unverified-delivery cap-reached path must promote master-CI state for a
+    mixed item (pr_update + master_ci_failure), so the activity gate stops
+    re-emitting the master-CI failure (AI-review finding fp:1cf0f59340b8
+    cap-reached branch on gptme/gptme-contrib#1474)."""
+    monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme-contrib#1234")
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("pr_update", "master_ci_failure")
+    )
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    master_ci = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
+    master_ci.write_text("seen")
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / master_ci.name).is_file(), (
+        "unverified cap-reached path must promote master-CI state so the activity "
+        "gate stops re-emitting a handled master-CI failure"
+    )
+
+
 def test_post_session_failed_exit_maps_latency_failed(tmp_path) -> None:
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
         tmp_path, exit_code=1

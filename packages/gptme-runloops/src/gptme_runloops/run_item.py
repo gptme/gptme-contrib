@@ -2396,7 +2396,12 @@ def run_post_session(
                 f"WARN: PM redelivery cap reached for {item.repo}#{item.number} — "
                 "promoting state to end re-dispatch churn (no reply is likely correct here)"
             )
-            promote_item_state(config, item.repo, item.number)
+            promote_item_state(
+                config,
+                item.repo,
+                item.number,
+                include_master_ci="master_ci_failure" in item.types,
+            )
     elif (
         hooks.delivery_check is not None
         and item.repo
@@ -2438,7 +2443,12 @@ def run_post_session(
                 f"WARN: PM redelivery cap reached for {item.repo}#{item.number} — "
                 "promoting state to end re-dispatch churn"
             )
-            promote_item_state(config, item.repo, item.number)
+            promote_item_state(
+                config,
+                item.repo,
+                item.number,
+                include_master_ci="master_ci_failure" in item.types,
+            )
     else:
         promote_item_state(
             config,
