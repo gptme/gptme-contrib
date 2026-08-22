@@ -11,4 +11,8 @@ This PR scored 4/5 from our AI reviewer — minor issues. Address them if quick;
 Do NOT re-trigger the reviewer just because you looked at it.
 
 Warning: **Never push trivial changes just to chase 5/5.**
-The AI reviewer runs automatically on the next push — no manual trigger needed.
+If you do fix something, push via the in-band wrapper so the re-review happens in-session:
+```bash
+uv run python3 /home/bob/bob/scripts/github/pm-review-and-push.py
+```
+The AI reviewer also runs automatically on any push — never trigger it manually.

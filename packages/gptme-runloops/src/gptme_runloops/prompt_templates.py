@@ -465,12 +465,19 @@ _AI_REVIEW_NEEDS_FIX_SECTIONS: dict[str, str] = {
     "assessment": (
         "This PR has a low score from our AI reviewer (not Greptile).\n"
         "**Action**: Read the findings in the summary comment and inline threads,"
-        " fix the real issues, push commits."
+        " fix the real issues, then push via the in-band AI review wrapper\n"
+        "(runs the same reviewer locally BEFORE pushing — findings surface here"
+        " in-session instead of costing a GitHub round-trip + re-dispatch,"
+        " max 2 iterations):\n"
+        "```bash\n"
+        "uv run python3 {pm_review_and_push}\n"
+        "```\n"
+        "If it reports P0/P1 findings, fix them and re-run it; once clean it pushes."
     ),
     "warnings": (
         "Warning: **This is an AI-reviewer dispatch, not Greptile.**"
         " Do NOT trigger Greptile to clear it.\n"
-        "The reviewer runs automatically on the next push"
+        "The reviewer still runs automatically on the push the wrapper makes"
         " — no manual trigger needed or wanted.\n"
         "If you cannot fix the issues in this session, leave it for the next cycle."
     ),
@@ -492,8 +499,13 @@ _AI_REVIEW_NEEDS_IMPROVEMENT_SECTIONS: dict[str, str] = {
     ),
     "warnings": (
         "Warning: **Never push trivial changes just to chase 5/5.**\n"
-        "The AI reviewer runs automatically on the next push"
-        " — no manual trigger needed."
+        "If you do fix something, push via the in-band wrapper so the re-review"
+        " happens in-session:\n"
+        "```bash\n"
+        "uv run python3 {pm_review_and_push}\n"
+        "```\n"
+        "The AI reviewer also runs automatically on any push"
+        " — never trigger it manually."
     ),
 }
 
