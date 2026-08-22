@@ -63,7 +63,15 @@ def repo(tmp_path: Path) -> Path:
     return work
 
 
+_DEFAULT_SESSION_ID = "test-fixture-session-00000000"
+
+
 def run_check(work: Path, *extra: str, env: dict | None = None) -> tuple[int, dict]:
+    # Inject a fake session ID so commit attribution works in CI (which has no
+    # CC_SESSION_ID).  Tests that deliberately strip it pass env= explicitly.
+    base_env = (
+        {**os.environ, "CC_SESSION_ID": _DEFAULT_SESSION_ID} if env is None else env
+    )
     p = subprocess.run(
         [
             sys.executable,
@@ -77,7 +85,7 @@ def run_check(work: Path, *extra: str, env: dict | None = None) -> tuple[int, di
         capture_output=True,
         text=True,
         check=False,
-        env=env,
+        env=base_env,
     )
     assert p.stdout, p.stderr
     return p.returncode, json.loads(p.stdout)
