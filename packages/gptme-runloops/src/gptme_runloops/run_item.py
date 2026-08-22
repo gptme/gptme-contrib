@@ -2422,7 +2422,11 @@ def run_post_session(
             rollback_slot_key,
         ):
             promote_item_state(
-                config, item.repo, item.number, reset_redelivery_counter=False
+                config,
+                item.repo,
+                item.number,
+                reset_redelivery_counter=False,
+                include_master_ci="master_ci_failure" in item.types,
             )
             _log(
                 "WARN: PM delivery post-condition was not verified — rolled back "

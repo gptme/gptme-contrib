@@ -1647,6 +1647,33 @@ def test_post_session_orphan_delivery_promotes_after_redelivery_cap(
     assert (config.state_dir / "gptme-gptme-contrib-pr-1234-update.state").is_file()
 
 
+def test_post_session_unverified_rollback_promotes_master_ci_state(
+    tmp_path, cooldown_dir
+) -> None:
+    """A mixed thread-deliverable + master_ci_failure item that rolls back for
+    unverified delivery must still promote its master-CI state, so the activity
+    gate does not re-emit the master-CI failure it already handled (AI-review
+    finding 1cf0f59340b8 on gptme/gptme-contrib#1474)."""
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("pr_update", "master_ci_failure")
+    )
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    master_ci = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
+    master_ci.write_text("seen")
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / master_ci.name).is_file(), (
+        "rollback-path promotion must copy the item's master-CI state so the "
+        "activity gate stops re-emitting a handled master-CI failure"
+    )
+    assert not (config.state_dir / "notif-555.state").exists()
+
+
 def test_post_session_failed_exit_maps_latency_failed(tmp_path) -> None:
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
         tmp_path, exit_code=1
