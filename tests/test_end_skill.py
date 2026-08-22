@@ -182,6 +182,36 @@ def test_substantial_session_stays_alive(repo: Path):
     assert rep["verdict"] == "CLEAN_LIGHT"
 
 
+def test_paths_scope_commits_unpushed_and_worktrees(repo: Path, tmp_path: Path):
+    # A sibling session's unpushed commit outside the footprint → info, not block
+    (repo / "theirs.txt").write_text("t\n")
+    _git(repo, "add", "theirs.txt")
+    _git(repo, "commit", "-q", "-m", "feat: theirs")
+    rc, rep = run_check(repo, "--since", "1h", "--paths", "mine/")
+    assert rc == 0, rep
+    assert _status(rep, "unpushed") == "info"
+    assert rep["commits"] == []  # commits are attributed by footprint too
+    # Own commit inside the footprint still blocks until pushed
+    (repo / "mine").mkdir()
+    (repo / "mine" / "a.txt").write_text("a\n")
+    _git(repo, "add", "mine/a.txt")
+    _git(repo, "commit", "-q", "-m", "feat: mine")
+    rc, rep = run_check(repo, "--since", "1h", "--paths", "mine/")
+    assert rc == 2 and _status(rep, "unpushed") == "block"
+    assert [c for c in rep["commits"] if "feat: mine" in c] and not [
+        c for c in rep["commits"] if "feat: theirs" in c
+    ]
+    _git(repo, "push", "-q")
+    # Undeclared dirty worktree → info; declared (absolute path in --paths) → block
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "feature", str(wt))
+    (wt / "wip.txt").write_text("wip\n")
+    rc, rep = run_check(repo, "--since", "1h", "--paths", "mine/")
+    assert rc == 0 and _status(rep, "worktrees") == "info"
+    rc, rep = run_check(repo, "--since", "1h", "--paths", "mine/", str(wt))
+    assert rc == 2 and _status(rep, "worktrees") == "block"
+
+
 def test_dirty_worktree_blocks(repo: Path, tmp_path: Path):
     wt = tmp_path / "wt"
     _git(repo, "worktree", "add", "-q", "-b", "feature", str(wt))

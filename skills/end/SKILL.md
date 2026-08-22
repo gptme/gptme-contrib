@@ -64,11 +64,13 @@ shared worktree is listed as `info`, not a blocker. Pass `--since 2h` if the
 process-start heuristic is wrong (e.g. a resumed session).
 
 **Shared worktree with parallel sessions** (Bob's brain repo): siblings share
-your time window, so pass the paths *you* touched and only dirt under them can
-block — you know them from the conversation:
+your time window, so declare your footprint — the repo paths you touched plus
+the absolute paths of any linked worktrees you created. Only dirt/commits under
+those paths and only declared worktrees can block; the rest is info:
 
 ```bash
-python3 "$SKILL_DIR/scripts/end-check.py" --paths journal/2026-08-22/my-session.md scripts/foo.py
+python3 "$SKILL_DIR/scripts/end-check.py" \
+  --paths journal/2026-08-22/my-session.md scripts/foo.py /tmp/worktrees/my-feature
 ```
 
 A parallel session's fresh worktree can still show as a blocker; if

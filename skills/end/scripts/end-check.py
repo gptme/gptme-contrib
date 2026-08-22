@@ -194,9 +194,39 @@ def _mtime(path: Path) -> datetime | None:
         return None
 
 
+_SUBMODULE_CACHE: dict[Path, set[str]] = {}
+
+
+def _submodule_paths(root: Path) -> set[str]:
+    """Submodule paths of a checkout, one git call per repo (cached).
+
+    Never call git per status entry: a worktree with thousands of untracked
+    files turned that into minutes.
+    """
+    key = root.resolve()
+    if key not in _SUBMODULE_CACHE:
+        rc, out = git(
+            [
+                "config",
+                "--file",
+                ".gitmodules",
+                "--get-regexp",
+                r"^submodule\..*\.path$",
+            ],
+            root,
+        )
+        paths = set()
+        if rc == 0:
+            for line in out.splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    paths.add(parts[1].strip().rstrip("/"))
+        _SUBMODULE_CACHE[key] = paths
+    return _SUBMODULE_CACHE[key]
+
+
 def _is_submodule(root: Path, rel: str) -> bool:
-    rc, out = git(["ls-files", "-s", "--", rel], root)
-    return rc == 0 and out.startswith("160000 ")
+    return rel.rstrip("/") in _submodule_paths(root)
 
 
 # --------------------------------------------------------------------------- #
@@ -321,7 +351,7 @@ def check_dirty(rep: Report, scope: list[str] | None = None) -> None:
         rep.add(Check("submodules", "info", "submodule pointer(s) differ", submods))
 
 
-def check_commits(rep: Report) -> None:
+def check_commits(rep: Report, scope: list[str] | None = None) -> None:
     if rep.since is None:
         rep.add(
             Check(
@@ -330,10 +360,16 @@ def check_commits(rep: Report) -> None:
         )
         return
     since_iso = rep.since.isoformat()
-    rc, out = git(
-        ["log", f"--since={since_iso}", "--format=%h%x1f%s%x1f%b%x1e", "-n", "200"],
-        rep.root,
-    )
+    log_args = [
+        "log",
+        f"--since={since_iso}",
+        "--format=%h%x1f%s%x1f%b%x1e",
+        "-n",
+        "200",
+    ]
+    if scope:
+        log_args += ["--", *scope]
+    rc, out = git(log_args, rep.root)
     if rc != 0:
         rep.add(Check("commits", "warn", "git log failed", [out]))
         return
@@ -365,7 +401,8 @@ def check_commits(rep: Report) -> None:
         Check(
             "commits",
             "info",
-            f"{len(subjects)} commit(s) attributed to this session",
+            f"{len(subjects)} commit(s) attributed to this session"
+            + (" (touching --paths)" if scope else ""),
             subjects[:20],
         )
     )
@@ -386,8 +423,14 @@ def _newest_commit_date(cwd: Path, rev_range: list[str]) -> datetime | None:
     return newest
 
 
-def check_unpushed(rep: Report, cwd: Path, label: str) -> tuple[Check, datetime | None]:
-    """Returns the check plus the newest unpushed commit date (None if nothing unpushed)."""
+def check_unpushed(
+    rep: Report, cwd: Path, label: str, scope: list[str] | None = None
+) -> tuple[Check, datetime | None]:
+    """Returns the check plus the newest unpushed commit date (None if nothing unpushed).
+
+    With `scope`, only unpushed commits touching those paths block; the rest
+    are listed as info (another session's commits in a shared worktree).
+    """
     rc, up = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
     if rc != 0:
         rc2, cnt = git(["rev-list", "--count", "HEAD", "--not", "--remotes"], cwd)
@@ -406,6 +449,20 @@ def check_unpushed(rep: Report, cwd: Path, label: str) -> tuple[Check, datetime 
         return Check(label, "ok", "no upstream, nothing unpublished"), None
     rc, out = git(["log", "@{u}..HEAD", "--format=%h %s"], cwd)
     lines = [ln for ln in out.splitlines() if ln.strip()] if rc == 0 else []
+    if lines and scope:
+        rc, scoped = git(["log", "@{u}..HEAD", "--format=%h %s", "--", *scope], cwd)
+        mine = [ln for ln in scoped.splitlines() if ln.strip()] if rc == 0 else []
+        if not mine:
+            return (
+                Check(
+                    label,
+                    "info",
+                    f"{len(lines)} unpushed commit(s) on {up}, none touching --paths (other sessions)",
+                    lines[:10],
+                ),
+                None,
+            )
+        lines = mine
     if lines:
         newest = _newest_commit_date(cwd, ["@{u}..HEAD"])
         return (
@@ -417,7 +474,11 @@ def check_unpushed(rep: Report, cwd: Path, label: str) -> tuple[Check, datetime 
     return Check(label, "ok", f"in sync with {up}"), None
 
 
-def check_worktrees(rep: Report) -> None:
+def check_worktrees(
+    rep: Report, declared: list[Path] | None = None, footprint_given: bool = False
+) -> None:
+    """With a declared footprint (--paths), only declared worktrees can block."""
+    declared_set = {d.resolve() for d in (declared or [])}
     rc, out = git(["worktree", "list", "--porcelain"], rep.root)
     if rc != 0:
         return
@@ -455,6 +516,14 @@ def check_worktrees(rep: Report) -> None:
             (recent_problems if unpushed_recent else old_problems).append(
                 unpushed.summary
             )
+        if footprint_given and wt.resolve() not in declared_set:
+            old_problems = recent_problems + old_problems
+            recent_problems = []
+            if old_problems:
+                infos.append(
+                    f"{shown}: {', '.join(old_problems)} (not declared in --paths)"
+                )
+                continue
         if recent_problems:
             blocked.append(f"{shown}: {', '.join(recent_problems)}")
         elif old_problems:
@@ -593,7 +662,9 @@ def decide(rep: Report, light_commits: int, light_files: int) -> None:
         len(rep.commits) > light_commits
         or rep.files_changed > light_files
         or bool(rep.prs)
-        or any(c.name == "worktrees" and c.status != "ok" for c in rep.checks)
+        or any(
+            c.name == "worktrees" and c.status in ("warn", "block") for c in rep.checks
+        )
         or any(c.status == "warn" for c in rep.checks)
     )
     if substantial:
@@ -680,8 +751,9 @@ def main(argv: list[str] | None = None) -> int:
         "--paths",
         nargs="+",
         metavar="PATH",
-        help="repo-relative paths this session touched; only dirt under them can block "
-        "(use in shared worktrees where parallel sessions share the time window)",
+        help="this session's footprint: repo-relative paths it touched and absolute paths of "
+        "linked worktrees it created. Only dirt/commits under them and only declared "
+        "worktrees can block (shared worktrees: parallel sessions share the time window)",
     )
     ap.add_argument(
         "--light-commits",
@@ -713,7 +785,8 @@ def main(argv: list[str] | None = None) -> int:
         since, source = None, "unknown (all dirty files count as this session's)"
 
     rep = Report(harness=harness, root=root, since=since, since_source=source)
-    scope = None
+    scope: list[str] | None = None
+    declared_worktrees: list[Path] = []
     if args.paths:
         scope = []
         for raw in args.paths:
@@ -722,12 +795,15 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     pth = pth.resolve().relative_to(root.resolve())
                 except ValueError:
+                    declared_worktrees.append(
+                        pth
+                    )  # a linked worktree this session owns
                     continue
             scope.append(pth.as_posix())
     check_dirty(rep, scope)
-    check_commits(rep)
-    rep.add(check_unpushed(rep, root, "unpushed")[0])
-    check_worktrees(rep)
+    check_commits(rep, scope)
+    rep.add(check_unpushed(rep, root, "unpushed", scope)[0])
+    check_worktrees(rep, declared_worktrees, footprint_given=bool(args.paths))
     check_journal(rep)
     if not args.no_prs:
         check_prs(rep)
