@@ -213,7 +213,11 @@ def get_foreign_cascade_claims(repo_root: Path) -> dict[str, str]:
         task_id = str(row["task_id"])
         status = str(row["status"])
         claimer = str(row["claimer"] or "unknown")
-        if status == "claimed" and preselect_holder_pid_is_dead(claimer):
+        if (
+            status == "claimed"
+            and claimer != "unknown"
+            and preselect_holder_pid_is_dead(claimer)
+        ):
             continue
         if status == "completed" and completed_cascade_claim_task_reopened(
             task_id,
