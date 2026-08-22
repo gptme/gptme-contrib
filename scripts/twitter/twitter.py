@@ -293,6 +293,8 @@ def _activate_account_profile(name: str) -> Path:
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"Account profile must be a regular file: {path}")
         path.chmod(0o600)
+    except PermissionError:
+        raise ValueError(f"Account profile is not writable: {path}")
     else:
         with os.fdopen(fd, "w") as profile:
             profile.write(

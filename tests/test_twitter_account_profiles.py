@@ -114,6 +114,26 @@ def test_existing_profile_permissions_are_tightened(
     assert (profile.stat().st_mode & 0o777) == 0o600
 
 
+def test_profile_creation_permission_error_raises_clear_error(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A PermissionError from os.open (e.g. unwritable directory) raises ValueError."""
+    import os as _os
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    real_os_open = _os.open
+
+    def patched_open(path, flags, mode=0o666, *args, **kwargs):
+        if "gptmeorg.env" in str(path) and (_os.O_EXCL & flags):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_os_open(path, flags, mode, *args, **kwargs)
+
+    monkeypatch.setattr(twitter_module.os, "open", patched_open)
+
+    with pytest.raises(ValueError, match="not writable"):
+        twitter_module._activate_account_profile("gptmeorg")
+
+
 def test_cli_account_survives_workspace_dotenv_override(
     twitter_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

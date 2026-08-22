@@ -293,6 +293,11 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     if record.get("announced_at") and (
         args.skip_quote or "bob_quote_id" in record or _org_id_unknown
     ):
+        # Clear stale quote-pending marker when skip_quote is in effect so a
+        # later normal run can post the missing quote without --force.
+        if args.skip_quote and _pending_key("bob_quote_id") in record:
+            record.pop(_pending_key("bob_quote_id"))
+            save_state(state)
         print(f"{key}: already announced ({record.get('org_tweet_id')})")
         return 0
 

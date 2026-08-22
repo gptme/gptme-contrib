@@ -390,6 +390,63 @@ def test_skip_quote_clears_stale_pending_marker(monkeypatch, tmp_path):
     assert ra.load_state()["gptme/gptme#v0.33.0"]["bob_quote_id"] == "103"
 
 
+def test_skip_quote_early_exit_clears_stale_pending_marker(monkeypatch, tmp_path):
+    """--skip-quote early-exit path must also clear stale bob_quote_pending_at.
+
+    Scenario: first run with --skip-quote succeeds (sets announced_at), then a
+    normal run fails the quote and leaves bob_quote_pending_at, then another
+    --skip-quote run hits the early-exit branch.  Without the fix, the marker
+    persists and every subsequent normal run is stuck (refuses blind retry).
+    """
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+
+    # Run 1: --skip-quote succeeds → sets announced_at
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "101"))
+    monkeypatch.setattr(sys, "argv", ["release_announce.py", "--skip-quote"])
+    assert ra.main() == 0
+    state = ra.load_state()["gptme/gptme#v0.33.0"]
+    assert "announced_at" in state
+    assert "bob_quote_id" not in state
+
+    # Run 2: normal run, quote fails → leaves bob_quote_pending_at
+    results2 = iter([(True, "102")])  # org reply already recorded; only quote attempted
+
+    def fake_post2(args, account=None):
+        return next(results2) if "--quote" not in args else (False, None)
+
+    monkeypatch.setattr(ra, "_post", fake_post2)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+    assert ra.main() == 1
+    assert "bob_quote_pending_at" in ra.load_state()["gptme/gptme#v0.33.0"]
+
+    # Run 3: --skip-quote → early-exit must clear bob_quote_pending_at
+    monkeypatch.setattr(
+        ra,
+        "_post",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no post expected")),
+    )
+    monkeypatch.setattr(sys, "argv", ["release_announce.py", "--skip-quote"])
+    assert ra.main() == 0
+    state = ra.load_state()["gptme/gptme#v0.33.0"]
+    assert "bob_quote_pending_at" not in state
+
+    # Run 4: normal run → must succeed (not stuck refusing retry)
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "103"))
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+    assert ra.main() == 0
+    assert ra.load_state()["gptme/gptme#v0.33.0"]["bob_quote_id"] == "103"
+
+
 def test_post_default_account_clears_environment_profile(monkeypatch):
     monkeypatch.setenv("TWITTER_ACCOUNT", "gptmeorg")
     for var in (*ra._USER_CONTEXT_VARS, *ra._AUTOMATION_UNSAFE_OAUTH_VARS):
