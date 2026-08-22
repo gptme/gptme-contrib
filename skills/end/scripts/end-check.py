@@ -240,10 +240,32 @@ def _touched_this_session(path: Path, since: datetime | None) -> bool:
     return mt is None or mt >= since
 
 
+def _in_scope(rel: str, scope: list[str] | None) -> bool:
+    """True when `rel` is under one of the scope paths (or no scope given)."""
+    if not scope:
+        return True
+    rel_n = rel.rstrip("/")
+    for sp in scope:
+        sp_n = sp.rstrip("/")
+        if (
+            rel_n == sp_n
+            or rel_n.startswith(sp_n + "/")
+            or sp_n.startswith(rel_n + "/")
+        ):
+            return True
+    return False
+
+
 def _dirty_entries(
-    root: Path, since: datetime | None
+    root: Path, since: datetime | None, scope: list[str] | None = None
 ) -> tuple[list[str], list[str], list[str], str | None]:
-    """Classify `git status` entries: (this-session, older, submodules, error)."""
+    """Classify `git status` entries: (this-session, older, submodules, error).
+
+    With `scope`, only entries under those repo-relative paths can count as
+    this session's; everything else is "older/other" regardless of mtime.
+    This is the escape hatch for shared worktrees where parallel sessions
+    share the same time window.
+    """
     rc, out = git(["status", "--porcelain", "--untracked-files=normal", "-z"], root)
     if rc != 0:
         return [], [], [], out
@@ -262,15 +284,15 @@ def _dirty_entries(
             submods.append(rel)
             continue
         label = f"{code.strip() or '??'} {rel}"
-        if _touched_this_session(root / rel, since):
+        if _in_scope(rel, scope) and _touched_this_session(root / rel, since):
             mine.append(label)
         else:
             others.append(label)
     return mine, others, submods, None
 
 
-def check_dirty(rep: Report) -> None:
-    mine, others, submods, err = _dirty_entries(rep.root, rep.since)
+def check_dirty(rep: Report, scope: list[str] | None = None) -> None:
+    mine, others, submods, err = _dirty_entries(rep.root, rep.since, scope)
     if err is not None:
         rep.add(Check("uncommitted", "warn", "git status failed", [err]))
         return
@@ -290,7 +312,8 @@ def check_dirty(rep: Report) -> None:
             Check(
                 "uncommitted-other",
                 "info",
-                f"{len(others)} dirty path(s) older than this session (other sessions / pre-existing)",
+                f"{len(others)} dirty path(s) not attributed to this session"
+                + (" (outside --paths)" if scope else " (older / other sessions)"),
                 others[:15],
             )
         )
@@ -654,6 +677,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--no-prs", action="store_true", help="skip the gh PR check")
     ap.add_argument(
+        "--paths",
+        nargs="+",
+        metavar="PATH",
+        help="repo-relative paths this session touched; only dirt under them can block "
+        "(use in shared worktrees where parallel sessions share the time window)",
+    )
+    ap.add_argument(
         "--light-commits",
         type=int,
         default=2,
@@ -683,7 +713,18 @@ def main(argv: list[str] | None = None) -> int:
         since, source = None, "unknown (all dirty files count as this session's)"
 
     rep = Report(harness=harness, root=root, since=since, since_source=source)
-    check_dirty(rep)
+    scope = None
+    if args.paths:
+        scope = []
+        for raw in args.paths:
+            pth = Path(raw)
+            if pth.is_absolute():
+                try:
+                    pth = pth.resolve().relative_to(root.resolve())
+                except ValueError:
+                    continue
+            scope.append(pth.as_posix())
+    check_dirty(rep, scope)
     check_commits(rep)
     rep.add(check_unpushed(rep, root, "unpushed")[0])
     check_worktrees(rep)

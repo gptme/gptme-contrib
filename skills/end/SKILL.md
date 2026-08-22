@@ -61,10 +61,19 @@ one of:
 "This session" = files/commits newer than the harness process start (from
 `/proc`), or commits carrying this session's id. Other sessions' dirt in a
 shared worktree is listed as `info`, not a blocker. Pass `--since 2h` if the
-process-start heuristic is wrong (e.g. a resumed session). On a shared machine
-a *parallel* session's fresh worktree can still show as a blocker (same time
-window); if `git -C <wt> log -1` proves it isn't yours, say so in the closeout
-and treat it as info — don't touch it.
+process-start heuristic is wrong (e.g. a resumed session).
+
+**Shared worktree with parallel sessions** (Bob's brain repo): siblings share
+your time window, so pass the paths *you* touched and only dirt under them can
+block — you know them from the conversation:
+
+```bash
+python3 "$SKILL_DIR/scripts/end-check.py" --paths journal/2026-08-22/my-session.md scripts/foo.py
+```
+
+A parallel session's fresh worktree can still show as a blocker; if
+`git -C <wt> log -1` proves it isn't yours, say so in the closeout and treat
+it as info — don't touch it.
 
 Also do the **judgment checks** the script can't:
 

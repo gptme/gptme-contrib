@@ -118,6 +118,25 @@ def test_old_dirt_is_info_not_block(repo: Path):
     assert _status(rep, "uncommitted-other") == "info"
 
 
+def test_paths_scope_ignores_sibling_dirt(repo: Path):
+    """--paths: dirt outside the declared scope is info even inside the time window."""
+    (repo / "mine.txt").write_text("m\n")
+    (repo / "theirs.txt").write_text("t\n")
+    rc, rep = run_check(repo, "--since", "1h", "--paths", "theirs.txt")
+    assert rc == 2 and _status(rep, "uncommitted") == "block"
+    rc, rep = run_check(repo, "--since", "1h", "--paths", "docs/")
+    assert rc == 0, rep
+    assert _status(rep, "uncommitted") == "ok"
+    assert _status(rep, "uncommitted-other") == "info"
+    # absolute paths inside the repo are accepted too
+    rc, rep = run_check(repo, "--since", "1h", "--paths", str(repo / "mine.txt"))
+    assert rc == 2
+    items = [
+        it for c in rep["checks"] if c["name"] == "uncommitted" for it in c["items"]
+    ]
+    assert items == ["?? mine.txt"]
+
+
 def test_unpushed_commit_blocks(repo: Path):
     (repo / "a.txt").write_text("a\n")
     _git(repo, "add", "a.txt")
