@@ -965,9 +965,15 @@ def _bm25_zscores(scores: list[float]) -> list[float]:
     var = sum((s - mean) ** 2 for s in nonzero) / len(nonzero)
     sd = math.sqrt(var)
     if sd <= 0:
-        # All nonzero scores are identical — give each a nominal z of 1.0 so
-        # the z-gate can admit them rather than silently dropping all of them.
-        return [1.0 if s > 0 else 0.0 for s in scores]
+        # All nonzero scores are identical (zero variance).  Assign the maximum
+        # attainable z for a corpus of this size so that _bm25_min_z(n) is
+        # always satisfied.  A flat nominal of 1.0 fails the gate for n≥4
+        # (where _bm25_min_z(4)≈1.2) and drops all tied lessons silently.
+        # sqrt(n-1) is the theoretical max-z for a single standout in n items,
+        # and it always exceeds 0.8*(n-1)/sqrt(n) (the gate formula).
+        n_nonzero = len(nonzero)
+        nominal_z = math.sqrt(n_nonzero - 1) if n_nonzero > 1 else 0.0
+        return [nominal_z if s > 0 else 0.0 for s in scores]
     return [(s - mean) / sd if s > 0 else 0.0 for s in scores]
 
 

@@ -1103,10 +1103,13 @@ class TestBM25Internals:
         assert zs[2] == 0.0
 
     def test_bm25_zscores_uniform(self):
-        # All equal → sd=0 → nominal z of 1.0 so the z-gate can still admit them
-        # (returning 0.0 would cause bm_z < bm_min_z and silently drop all lessons)
+        # All equal → sd=0 → nominal z of sqrt(n-1) so the z-gate admits them.
+        # For n=3: sqrt(2)≈1.414 always exceeds _bm25_min_z(3)≈0.924.
+        import math
+
         zs = _bm25_zscores([5.0, 5.0, 5.0])
-        assert zs == [1.0, 1.0, 1.0]
+        expected = math.sqrt(2)
+        assert zs == [expected, expected, expected]
 
     def test_bm25_score_zero_for_no_overlap(self):
         index = _build_bm25_index(
@@ -1249,9 +1252,10 @@ class TestScoreLessons:
         """Two lessons with identical BM25 scores should both receive contribution.
 
         When all nonzero BM25 scores are equal, sd=0 so _bm25_zscores used to
-        return [0.0, 0.0].  With bm_min_z≈0.57 for n=2 the z-gate then rejected
-        BOTH lessons — a false negative.  The fix assigns a nominal z of 1.0 to
-        tied lessons so they can still be admitted.
+        return [0.0, 0.0].  With _bm25_min_z(-inf) for n<3 the gate was met,
+        but for n>=4 _bm25_min_z(n)>1.0 would reject tied lessons with a flat
+        nominal-z of 1.0.  The fix assigns nominal_z=sqrt(n-1) which always
+        exceeds the gate value.
         """
         lessons = [
             self._make_lesson("lessons/a.md", [], description="foo bar baz"),
@@ -1264,6 +1268,24 @@ class TestScoreLessons:
         )
         results = score_lessons(lessons, "foo bar baz", use_bm25=True)
         assert len(results) == 2, "Both lessons should be admitted when tied on BM25"
+
+    def test_bm25_tied_scores_n4_admitted(self, monkeypatch):
+        """Four lessons with identical BM25 scores should all be admitted.
+
+        For n=4, _bm25_min_z(4)≈1.2 > 1.0, so a flat nominal z of 1.0 was
+        failing the gate and silently dropping all tied lessons.  The fix uses
+        sqrt(n-1)=sqrt(3)≈1.73 which passes the gate for any n.
+        """
+        lessons = [
+            self._make_lesson(f"lessons/{c}.md", [], description="foo bar baz") for c in "abcd"
+        ]
+        # All four lessons get identical nonzero BM25 scores.
+        monkeypatch.setattr(
+            "gptme_rag.lesson_matcher._bm25_score",
+            lambda _q, doc, _i: 100.0 if doc else 0.0,
+        )
+        results = score_lessons(lessons, "foo bar baz", use_bm25=True)
+        assert len(results) == 4, f"All 4 tied lessons should be admitted, got {len(results)}"
 
     def test_bm25_disabled(self):
         lessons = [
