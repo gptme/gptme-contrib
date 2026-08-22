@@ -166,3 +166,5 @@ bash <this-dir>/install.sh --project   # also .claude/skills/end in the current 
 
 - `skills/autonomous-session-workflow` (Bob) — Phase 5 "Persist" is what this gate enforces.
 - `lessons/workflow/merged-is-not-live` (Bob) — why the closeout has a **Verified** line.
+- `scripts/forward-drive-probe.py` (Bob) — the harness-side sibling: the same invariants checked on every *completion event* fleet-wide, dispatching a full session when a gap is found. Design: `knowledge/technical-designs/forward-drive-completion-reactor.md`.
+- `scripts/closed-loop-check.py` (Bob) — post-hoc session-altitude check; the report-only ancestor of `end-check.py`.
