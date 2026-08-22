@@ -2404,6 +2404,7 @@ def run_post_session(
             )
     elif (
         hooks.delivery_check is not None
+        and resolve_cooldown_dir(config) is not None
         and item.repo
         and item.number is not None
         and item.number_str != "0"
@@ -2419,6 +2420,12 @@ def run_post_session(
         # full event TTL. PR-side state is still valid and promotes on every
         # pass; only mapped notification state is purged while the retry budget
         # remains.
+        #
+        # PM_DISPATCH_COOLDOWN_DIR guard: we only enter this branch when a
+        # durable attempts counter is available. Without it, redelivery_attempts_file()
+        # returns None and rollback_failed_delivery() would retry without any cap.
+        # When the cooldown dir is unset (misconfigured environment), we fall
+        # through to the else branch and promote state directly — safe and bounded.
         rollback_slot_key = resolve_slot_key(config, item)
         if rollback_failed_delivery(
             config,
