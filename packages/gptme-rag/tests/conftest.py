@@ -1,11 +1,19 @@
 import pytest
-import chromadb
+
+try:
+    import chromadb
+
+    _has_chromadb = True
+except ImportError:
+    _has_chromadb = False
 
 
 @pytest.fixture(autouse=True)
 def cleanup_chroma():
     """Clean up ChromaDB between tests."""
     yield
+    if not _has_chromadb:
+        return
     # Reset the ChromaDB client system
     if hasattr(chromadb.api.client.SharedSystemClient, "_identifer_to_system"):
         chromadb.api.client.SharedSystemClient._identifer_to_system = {}
@@ -14,6 +22,8 @@ def cleanup_chroma():
 @pytest.fixture
 def indexer(request, tmp_path):
     """Create an indexer with a unique collection name based on the test name."""
+    if not _has_chromadb:
+        pytest.skip("chromadb not installed")
     from gptme_rag.indexing.indexer import Indexer
     import logging
 
