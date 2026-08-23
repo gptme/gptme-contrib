@@ -563,9 +563,15 @@ class LessonValidator:
         # markdown link text/URL boundary — e.g. in "[knowledge/lessons/foo/bar.md](url)"
         # the intermediate pattern [^/]+/ would match "bar.md](../../knowledge/" as a
         # single component, producing a spurious path that does not exist on disk.
+        # Also exclude \n so the pattern does not greedily match across lines — without
+        # this, a lesson whose Related section has both "[knowledge/lessons/X/file.md](url)"
+        # and a nearby "gptme-contrib/lessons/X/file.md" reference can produce a
+        # spurious multi-line match that spans from the URL to the gptme-contrib line,
+        # resulting in a path like "knowledge/lessons/X/file.md)\n- ...gptme-contrib/X/file.md"
+        # which of course does not exist on disk.
         _companion_link_matches = list(
             re.finditer(
-                rf"(knowledge/lessons/(?:[^\]/]+/)*{re.escape(self.filepath.stem)}\.md)",
+                rf"(knowledge/lessons/(?:[^\]/\n]+/)*{re.escape(self.filepath.stem)}\.md)",
                 self.content,
                 re.IGNORECASE,
             )
