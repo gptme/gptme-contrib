@@ -113,6 +113,7 @@ from gptme_runloops.prompt_templates import (
     render_preheld_claim_block,
 )
 from gptme_runloops.worker_records import (
+    KNOWN_DELIVERY_OUTCOMES,
     append_wait_merge_gate_log,
     append_worker_latency_records,
     build_wait_merge_gate_entry,
@@ -890,7 +891,7 @@ def purge_pending_notif_state(
             continue
         try:
             content = map_file.read_text(encoding="utf-8").strip()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         # bash matches the anchored regex ^repo#number$ against the file body.
         if content != target:
@@ -905,18 +906,19 @@ def purge_pending_notif_state(
 
 
 def rollback_failed_delivery(
-    config: RunItemConfig, repo: str, number: int | str | None, slot_key: str
+    config: RunItemConfig,
+    repo: str,
+    number: int | str | None,
+    slot_key: str,
 ) -> bool:
-    """bash ``rollback_failed_delivery`` (lib.sh:956-1005), in full.
-
-    Three effects, all required — a partial rollback is a no-op:
+    """Bound and apply a failed-delivery rollback.
 
     1. Count the attempt; past ``PM_MAX_REDELIVERY_ATTEMPTS`` reset the
        counter and return False, telling the caller to promote instead (this
        is what stops the re-dispatch treadmill on items where no reply is
        ever appropriate).
     2. Clear the slot's ``.event``/``.event_logged`` fingerprints so the item
-       is not suppressed for the 6h TTL.
+       can re-enter after the dispatcher's normal ``.ts`` cooldown.
     3. Purge this item's pending ``notif-*`` state so the end-of-run blanket
        promotion cannot consume it.
 
@@ -947,10 +949,43 @@ def rollback_failed_delivery(
     return True
 
 
+def _mapped_notif_state_files(pending: Path, repo: str, number: int | str | None):
+    """Yield ``(map_file, state_file)`` for pending notif state mapped to this item.
+
+    Notification state is keyed by GitHub API id (``notif-<id>.state``); the
+    ``.map`` sidecar written by ``activity-gate.sh`` carries the ``repo#number``
+    association. This is the only way to attribute a notif state to an item.
+    """
+    if not pending.is_dir():
+        return
+    target = f"{repo}#{number}"
+    for map_file in pending.glob("notif-*.map"):
+        if not map_file.is_file():
+            continue
+        try:
+            content = map_file.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if content == target:
+            yield map_file, map_file.with_suffix(".state")
+
+
 def promote_item_state(
-    config: RunItemConfig, repo: str, number: int | str | None
+    config: RunItemConfig,
+    repo: str,
+    number: int | str | None,
+    *,
+    reset_redelivery_counter: bool = True,
+    include_master_ci: bool = False,
 ) -> None:
-    """Copy the item's pending activity-gate state files to the real state dir."""
+    """Copy the item's pending activity-gate state files to the real state dir.
+
+    Includes the item's *mapped* ``notif-*.state`` (via the ``.map`` sidecar):
+    notification state is owned by the outcome of the worker that handled the
+    item, not by whichever worker happens to finish next — see
+    :func:`promote_notification_states`. A bounded notification retry may set
+    ``reset_redelivery_counter=False`` while still promoting valid PR-side state.
+    """
     import shutil
 
     # The item advanced, so any redelivery treadmill for it is over — restore
@@ -960,7 +995,7 @@ def promote_item_state(
     # so a later genuine failure gets a full retry budget. Without this the
     # budget degrades monotonically until every failure promotes immediately.
     attempts_file = redelivery_attempts_file(config, repo, number)
-    if attempts_file is not None:
+    if reset_redelivery_counter and attempts_file is not None:
         try:
             attempts_file.unlink()
         except OSError:
@@ -974,25 +1009,61 @@ def promote_item_state(
     repo_safe = str(repo).replace("/", "-")
     is_zero = str(number) == "0"
     if is_zero:
-        patterns = ["notif-*.state"]
+        # A number-0 item cannot own a mapped thread (the gate only writes a
+        # `.map` for number > 0), so it promotes only the unmapped remainder —
+        # the same rule as promote_notification_states(). Copying every
+        # notif-*.state here would consume siblings' emitted-but-unhandled
+        # threads through a side door. It cannot own repo-level master-CI
+        # state either.
+        patterns = []
+        for f in pending.glob("notif-*.state"):
+            if f.is_file() and not f.with_suffix(".map").is_file():
+                shutil.copy(f, state / f.name)
     else:
         patterns = [
             f"{repo_safe}-pr-{number}*.state",
             f"{repo_safe}-issue-{number}*.state",
         ]
-    patterns.append(f"{repo_safe}-master-ci.state")
+        if include_master_ci:
+            patterns.append(f"{repo_safe}-master-ci.state")
     for pattern in patterns:
         for f in pending.glob(pattern):
             if f.is_file():
                 shutil.copy(f, state / f.name)
+    if not is_zero:
+        for map_file, state_file in _mapped_notif_state_files(pending, repo, number):
+            for f in (map_file, state_file):
+                if f.is_file():
+                    shutil.copy(f, state / f.name)
 
 
 def promote_notification_states(config: RunItemConfig) -> None:
-    """Promote ALL pending notif state files at end of run (p-m.sh:695-704).
+    """Promote pending notif state that no item owns, at end of run (p-m.sh:695-704).
 
     Notification state files use GitHub API ids, not repo#number, so the
-    per-item promotion never copies them; without this the gate re-emits the
-    same notifications every cycle.
+    per-item promotion cannot find them by name; the gate writes a ``.map``
+    sidecar (``repo#number``) for every thread it can attribute. Only the
+    *unmapped* remainder is promoted here. A readable empty map is unmapped;
+    an unreadable map remains pending because its ownership is unknown and
+    promoting it could silently consume an unhandled notification.
+
+    History: this used to promote EVERY pending ``notif-*.state`` under the
+    assumption "sessions already ran for every emitted notification". That
+    held when one monolithic session handled the whole sweep. With per-slot
+    transient units it does not: the pending dir is shared, so a sibling
+    worker finishing while another item sits emitted-but-skipped
+    (``skipped_active`` / cooldown / recovery backoff) promoted that item's
+    state too — and a worker that *timed out* promoted its own. Either way
+    the gate never re-emitted the thread (it dedupes on ``updated_at``) and
+    ``pm_dispatch_recovery`` was never consulted, because it only runs for
+    emitted items. ActivityWatch/activitywatch#1402 (2026-08-20): an Erik
+    @mention, one 900s worker killed at exit 124, then silence.
+
+    Mapped state is promoted by :func:`promote_item_state` on the handling
+    worker's success path and purged by :func:`purge_pending_notif_state` on
+    its failure path, so the thread re-emits and the bounded recovery retry
+    applies. Skipped items' pending state is simply left for the next sweep's
+    ``rsync --delete`` to discard, so they re-emit and are re-evaluated.
     """
     import shutil
 
@@ -1001,8 +1072,17 @@ def promote_notification_states(config: RunItemConfig) -> None:
         return
     config.state_dir.mkdir(parents=True, exist_ok=True)
     for f in pending.glob("notif-*.state"):
-        if f.is_file():
-            shutil.copy(f, config.state_dir / f.name)
+        if not f.is_file():
+            continue
+        map_file = f.with_suffix(".map")
+        if map_file.is_file():
+            try:
+                owner = map_file.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                continue  # unknown ownership: fail closed and retry next sweep
+            if owner:
+                continue  # owned by an item; its worker's outcome decides
+        shutil.copy(f, config.state_dir / f.name)
 
 
 # --- Trajectory resolution (worker.sh:196-300; design §4.4) ---
@@ -2052,16 +2132,16 @@ def run_post_session(
                     text=True,
                     cwd=str(config.workspace),
                 )
-                if proc.returncode == 0:
+                check_succeeded = proc.returncode == 0
+                if check_succeeded:
                     raw = proc.stdout
-                    delivery_verified = True
                 else:
                     raw = '{"outcome":"handled"}'
             except (OSError, subprocess.SubprocessError):
+                check_succeeded = False
                 raw = '{"outcome":"handled"}'
-            delivery_outcome = normalize_delivery_outcome(
-                extract_delivery_field(raw, "outcome")
-            )
+            raw_outcome = extract_delivery_field(raw, "outcome")
+            delivery_outcome = normalize_delivery_outcome(raw_outcome)
             needs_fallback = re.sub(
                 r"[ \t\n\r\f\v]+",
                 "",
@@ -2071,6 +2151,12 @@ def run_post_session(
                 r"[ \t\n\r\f\v]+",
                 "",
                 extract_delivery_field(raw, "fallback_reply_posted"),
+            )
+            # normalize_delivery_outcome deliberately maps malformed/unknown
+            # values to the permissive "handled" default. That is safe for
+            # compatibility, but it is not evidence that delivery was observed.
+            delivery_verified = (
+                check_succeeded and raw_outcome.strip() in KNOWN_DELIVERY_OUTCOMES
             )
         except Exception:
             # NOTE(divergence, kept from step 3): total extractor death fails
@@ -2310,9 +2396,73 @@ def run_post_session(
                 f"WARN: PM redelivery cap reached for {item.repo}#{item.number} — "
                 "promoting state to end re-dispatch churn (no reply is likely correct here)"
             )
-            promote_item_state(config, item.repo, item.number)
+            promote_item_state(
+                config,
+                item.repo,
+                item.number,
+                include_master_ci="master_ci_failure" in item.types,
+            )
+    elif (
+        hooks.delivery_check is not None
+        and resolve_cooldown_dir(config) is not None
+        and item.repo
+        and item.number is not None
+        and item.number_str != "0"
+        and THREAD_DELIVERABLE_TYPES & set(item.types)
+        and set(item.types) != {"merge_ready"}
+        and not (delivery_verified and delivery_outcome == "handled")
+    ):
+        # The delivery check did not verify a reply. Count this through the
+        # same bounded rollback as orphan_no_delivery so a permanently broken
+        # check cannot re-emit this thread forever. Clear the launch marker so
+        # the item can re-enter after the dispatcher's normal .ts cooldown;
+        # leaving it stamped suppresses a genuinely unanswered mention for the
+        # full event TTL. PR-side state is still valid and promotes on every
+        # pass; only mapped notification state is purged while the retry budget
+        # remains.
+        #
+        # PM_DISPATCH_COOLDOWN_DIR guard: we only enter this branch when a
+        # durable attempts counter is available. Without it, redelivery_attempts_file()
+        # returns None and rollback_failed_delivery() would retry without any cap.
+        # When the cooldown dir is unset (misconfigured environment), we fall
+        # through to the else branch and promote state directly — safe and bounded.
+        rollback_slot_key = resolve_slot_key(config, item)
+        if rollback_failed_delivery(
+            config,
+            item.repo,
+            item.number,
+            rollback_slot_key,
+        ):
+            promote_item_state(
+                config,
+                item.repo,
+                item.number,
+                reset_redelivery_counter=False,
+                include_master_ci="master_ci_failure" in item.types,
+            )
+            _log(
+                "WARN: PM delivery post-condition was not verified — rolled back "
+                f"pending notif state and event marker for {plan.repo}#{plan.number} "
+                "(item re-enters after the dispatch cooldown)"
+            )
+        else:
+            _log(
+                f"WARN: PM redelivery cap reached for {item.repo}#{item.number} — "
+                "promoting state to end re-dispatch churn"
+            )
+            promote_item_state(
+                config,
+                item.repo,
+                item.number,
+                include_master_ci="master_ci_failure" in item.types,
+            )
     else:
-        promote_item_state(config, item.repo, item.number)
+        promote_item_state(
+            config,
+            item.repo,
+            item.number,
+            include_master_ci="master_ci_failure" in item.types,
+        )
 
     # 9. Observable-effect signal.
     # A clean exit is not evidence the work landed: a worker can commit a fix

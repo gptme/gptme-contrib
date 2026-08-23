@@ -55,6 +55,8 @@ from gptme_runloops.run_item import (
     plan_item,
     predict_cc_trajectory_path,
     promote_item_state,
+    promote_notification_states,
+    purge_pending_notif_state,
     redelivery_attempts_file,
     resolve_backend_trajectory,
     resolve_cc_sub_suffix,
@@ -1493,6 +1495,162 @@ def test_post_session_orphan_delivery_rolls_back_instead_of_promoting(
     assert not (cooldown_dir / "gptme-gptme-contrib-1234.event").exists()
 
 
+def test_post_session_timed_out_worker_does_not_consume_notification_state(
+    tmp_path, cooldown_dir
+) -> None:
+    """A worker killed at its time budget (exit 124) handled nothing; promoting
+    the item's notif state would make the gate treat the mention as done
+    (ActivityWatch/activitywatch#1402, 2026-08-20). PR-side state still
+    promotes; the notification thread must stay re-emittable even after the
+    end-of-run blanket promotion."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=124
+    )
+    outcome.timed_out = True
+    # A killed worker has no verified delivery (the check cannot attribute a reply).
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text(
+        "s"
+    )
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("2026-08-20T09:31:35Z")
+    (config.pending_state_dir / "notif-777.map").write_text("gptme/gptme-contrib#9999")
+    (config.pending_state_dir / "notif-777.state").write_text("other-item")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert (config.state_dir / "gptme-gptme-contrib-pr-1234-update.state").exists()
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not (config.pending_state_dir / "notif-555.state").exists()
+    # a sibling's emitted-but-unhandled thread is left alone, not promoted
+    assert not (config.state_dir / "notif-777.state").exists()
+    assert (config.pending_state_dir / "notif-777.state").exists()
+
+
+def test_post_session_clean_exit_with_unverified_delivery_does_not_consume_notification_state(
+    tmp_path, cooldown_dir
+) -> None:
+    """A clean worker exit cannot compensate for a broken delivery check."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not (config.pending_state_dir / "notif-555.state").exists()
+
+
+def test_post_session_unverified_delivery_honors_redelivery_cap(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    """A persistently broken delivery check must not re-emit forever."""
+    monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme-contrib#1234")
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "1")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    event_marker = cooldown_dir / "gptme-gptme-contrib-1234.event"
+
+    def stage_notification() -> None:
+        config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+        (config.pending_state_dir / "notif-555.map").write_text(
+            "gptme/gptme-contrib#1234"
+        )
+        (config.pending_state_dir / "notif-555.state").write_text("t")
+        event_marker.write_text("fingerprint")
+
+    stage_notification()
+    run_post_session(plan, item, outcome, config, hooks)
+    attempts = redelivery_attempts_file(config, item.repo, item.number)
+    assert attempts is not None
+    assert attempts.read_text() == "1"
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not event_marker.exists(), "failed delivery must not remain suppressed"
+
+    stage_notification()
+    run_post_session(plan, item, outcome, config, hooks)
+    assert not attempts.exists()
+    assert (config.state_dir / "notif-555.state").exists()
+
+
+def test_post_session_failed_exit_with_verified_delivery_still_promotes(
+    tmp_path, cooldown_dir
+) -> None:
+    """A worker that posted its reply and then died non-zero DID handle the
+    thread; purging here would re-emit it and post a duplicate reply."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=1
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert (config.state_dir / "notif-555.state").exists()
+
+
+def test_post_session_unverified_delivery_without_cooldown_dir_promotes_directly(
+    tmp_path, monkeypatch
+) -> None:
+    """Without PM_DISPATCH_COOLDOWN_DIR the redelivery counter cannot be persisted.
+    The elif guard (resolve_cooldown_dir is not None) evaluates False, so we fall
+    through to the else branch and promote state directly — no unbounded retry churn.
+    """
+    from gptme_runloops.run_item import promote_notification_states
+
+    monkeypatch.delenv("PM_DISPATCH_COOLDOWN_DIR", raising=False)
+    monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme-contrib#1234")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    # Notification state is promoted (not churn-purged) because the elif guard
+    # (resolve_cooldown_dir is not None) is False → falls through to else branch.
+    assert (config.state_dir / "notif-555.state").exists()
+
+
+def test_post_session_clean_exit_promotes_mapped_notification_state(
+    tmp_path, cooldown_dir
+) -> None:
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert (config.state_dir / "notif-555.state").exists()
+
+
 def test_post_session_orphan_delivery_promotes_after_redelivery_cap(
     tmp_path, cooldown_dir, monkeypatch
 ) -> None:
@@ -1513,6 +1671,93 @@ def test_post_session_orphan_delivery_promotes_after_redelivery_cap(
     run_post_session(plan, item, outcome, config, hooks)
 
     assert (config.state_dir / "gptme-gptme-contrib-pr-1234-update.state").is_file()
+
+
+def test_post_session_unverified_rollback_promotes_master_ci_state(
+    tmp_path, cooldown_dir
+) -> None:
+    """A mixed thread-deliverable + master_ci_failure item that rolls back for
+    unverified delivery must still promote its master-CI state, so the activity
+    gate does not re-emit the master-CI failure it already handled (AI-review
+    finding 1cf0f59340b8 on gptme/gptme-contrib#1474)."""
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("pr_update", "master_ci_failure")
+    )
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    master_ci = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
+    master_ci.write_text("seen")
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / master_ci.name).is_file(), (
+        "rollback-path promotion must copy the item's master-CI state so the "
+        "activity gate stops re-emitting a handled master-CI failure"
+    )
+    assert not (config.state_dir / "notif-555.state").exists()
+
+
+def test_post_session_orphan_delivery_cap_promotes_master_ci_state(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    """orphan_no_delivery cap-reached path must promote master-CI state for a
+    mixed item (pr_update + master_ci_failure), so the activity gate stops
+    re-emitting the master-CI failure (AI-review finding fp:1cf0f59340b8
+    cap-reached branch on gptme/gptme-contrib#1474)."""
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("pr_update", "master_ci_failure")
+    )
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout='{"outcome": "orphan_no_delivery", "needs_fallback_reply": true, '
+        '"fallback_reply_posted": false}',
+    )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    master_ci = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
+    master_ci.write_text("seen")
+    (config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state").write_text(
+        "s"
+    )
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / master_ci.name).is_file(), (
+        "orphan cap-reached path must promote master-CI state so the activity "
+        "gate stops re-emitting a handled master-CI failure"
+    )
+
+
+def test_post_session_unverified_delivery_cap_promotes_master_ci_state(
+    tmp_path, cooldown_dir, monkeypatch
+) -> None:
+    """unverified-delivery cap-reached path must promote master-CI state for a
+    mixed item (pr_update + master_ci_failure), so the activity gate stops
+    re-emitting the master-CI failure (AI-review finding fp:1cf0f59340b8
+    cap-reached branch on gptme/gptme-contrib#1474)."""
+    monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme-contrib#1234")
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=("pr_update", "master_ci_failure")
+    )
+    run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    master_ci = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
+    master_ci.write_text("seen")
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / master_ci.name).is_file(), (
+        "unverified cap-reached path must promote master-CI state so the activity "
+        "gate stops re-emitting a handled master-CI failure"
+    )
 
 
 def test_post_session_failed_exit_maps_latency_failed(tmp_path) -> None:
@@ -1627,7 +1872,53 @@ def test_post_session_merge_ready_only_merge_without_reply_promotes(tmp_path) ->
     ).exists(), "state must be promoted — rollback would re-queue an already-merged PR"
 
 
-def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
+def test_post_session_failed_exit_without_delivery_hook_preserves_notification(
+    tmp_path,
+) -> None:
+    """Without an observation hook, failure cannot prove no reply was posted."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, _, _ = _post_session_fixture(
+        tmp_path, exit_code=1, types=("notification",)
+    )
+    hooks.delivery_check = None
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert (config.state_dir / "notif-555.state").exists()
+
+
+def test_post_session_malformed_delivery_output_is_not_verified(
+    tmp_path, cooldown_dir
+) -> None:
+    """Exit zero alone is not verification when the output cannot be parsed."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=1
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout="not json")
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("t")
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not (config.pending_state_dir / "notif-555.state").exists()
+
+
+def test_post_session_repo_level_item_skips_delivery_check(
+    tmp_path, cooldown_dir
+) -> None:
     """master_ci_failure has no thread, so the reply post-condition must not run.
 
     Its `number` is a workflow run id, not an issue number, so the check would
@@ -1646,10 +1937,15 @@ def test_post_session_repo_level_item_skips_delivery_check(tmp_path) -> None:
     config.pending_state_dir.mkdir(parents=True, exist_ok=True)
     sentinel = config.pending_state_dir / "gptme-gptme-contrib-master-ci.state"
     sentinel.write_text("promoted")
+    attempts = redelivery_attempts_file(config, item.repo, item.number)
+    assert attempts is not None
+    attempts.parent.mkdir(parents=True, exist_ok=True)
+    attempts.write_text("1")
     run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "orphan_no_delivery"}')
     effect = run_post_session(plan, item, outcome, config, hooks)
     assert run_cmd.find("/fake/check-delivery.py") == []
     assert latency_calls[0]["outcome"] == "handled"
+    assert not attempts.exists(), "a skipped check must not consume retry budget"
     # State must be promoted, not rolled back — otherwise the item re-enters the queue.
     assert (config.state_dir / sentinel.name).exists(), (
         "promote_item_state was not called — state was not promoted from pending; "
@@ -2002,7 +2298,9 @@ def test_pr_observe_types_is_superset_of_pr_state_types() -> None:
     }
 
 
-def test_promote_item_state_copies_matching_files(tmp_path) -> None:
+def test_promote_item_state_copies_only_number_scoped_matching_files(
+    tmp_path,
+) -> None:
     config = make_config(tmp_path)
     pending = config.pending_state_dir
     pending.mkdir(parents=True)
@@ -2015,8 +2313,19 @@ def test_promote_item_state_copies_matching_files(tmp_path) -> None:
     assert names == {
         "gptme-gptme-pr-5-update.state",
         "gptme-gptme-issue-5.state",
-        "gptme-gptme-master-ci.state",
     }
+
+
+def test_promote_item_state_copies_master_ci_only_when_requested(tmp_path) -> None:
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    master_ci = pending / "gptme-gptme-master-ci.state"
+    master_ci.write_text("failed-run")
+
+    promote_item_state(config, "gptme/gptme", 123, include_master_ci=True)
+
+    assert (config.state_dir / master_ci.name).read_text() == "failed-run"
 
 
 # --- Delivery rollback (bash lib.sh:946-995 parity) ---
@@ -2033,6 +2342,7 @@ def cooldown_dir(tmp_path, monkeypatch):
     d = tmp_path / "cooldown"
     d.mkdir()
     monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(d))
+    monkeypatch.delenv("PM_SLOT_KEY", raising=False)
     return d
 
 
@@ -2100,6 +2410,50 @@ def test_rollback_respects_max_attempts_env(
     monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "1")
     assert rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
     assert not rollback_failed_delivery(config, "gptme/gptme", 3468, "gptme/gptme#3468")
+
+
+@pytest.mark.parametrize("map_value", [b"", b" \n"])
+def test_empty_notification_map_is_treated_as_unmapped(tmp_path, map_value) -> None:
+    """A readable empty sidecar does not establish notification ownership."""
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    (pending / "notif-1.map").write_bytes(map_value)
+    (pending / "notif-1.state").write_text("empty-map-state")
+    (pending / "notif-2.map").write_text("gptme/gptme#3468")
+    (pending / "notif-2.state").write_text("valid")
+
+    promote_item_state(config, "gptme/gptme", 3468)
+    assert (config.state_dir / "notif-2.state").read_text() == "valid"
+
+    assert purge_pending_notif_state(config, "gptme/gptme", 3468) == 1
+    assert (pending / "notif-1.map").exists()
+
+    promote_notification_states(config)
+    assert (config.state_dir / "notif-1.state").read_text() == "empty-map-state"
+
+
+def test_unreadable_notification_map_remains_pending(tmp_path, monkeypatch) -> None:
+    """Unknown ownership fails closed so an unhandled notification can retry."""
+    config = make_config(tmp_path)
+    pending = config.pending_state_dir
+    pending.mkdir(parents=True)
+    map_file = pending / "notif-1.map"
+    map_file.write_text("gptme/gptme#3468")
+    (pending / "notif-1.state").write_text("unreadable-map-state")
+    original_read_text = Path.read_text
+
+    def fail_map_read(path, *args, **kwargs):
+        if path == map_file:
+            raise OSError("simulated read failure")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_map_read)
+
+    promote_notification_states(config)
+
+    assert not (config.state_dir / "notif-1.state").exists()
+    assert (pending / "notif-1.state").read_text() == "unreadable-map-state"
 
 
 def test_promote_item_state_resets_redelivery_counter(tmp_path, cooldown_dir) -> None:
