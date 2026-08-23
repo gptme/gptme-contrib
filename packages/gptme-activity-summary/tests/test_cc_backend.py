@@ -907,3 +907,45 @@ def test_call_gptme_timeout_returns_empty(mock_run, mock_which):
     import gptme_activity_summary.gptme_backend as gb
 
     assert gb.call_gptme("hi") == ""
+
+
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run")
+def test_call_gptme_prompt_passed_via_stdin(mock_run, mock_which):
+    """Prompt is passed as stdin input, not as a positional CLI argument."""
+    import gptme_activity_summary.gptme_backend as gb
+
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["gptme"], returncode=0, stdout=_ndjson("result")
+    )
+    gb.call_gptme("my secret prompt")
+
+    _, kwargs = mock_run.call_args
+    # prompt must not appear in the command list
+    assert "my secret prompt" not in mock_run.call_args[0][0]
+    # prompt must be passed via the input kwarg
+    assert kwargs.get("input") == "my secret prompt"
+
+
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run")
+def test_call_gptme_list_content_non_string_text_skipped(mock_run, mock_which):
+    """Non-string text values in list content parts are skipped without raising."""
+    import json as _json
+
+    import gptme_activity_summary.gptme_backend as gb
+
+    # Emit a part with text=None (edge case in malformed gptme output)
+    ndjson = _json.dumps(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": None},
+                {"type": "text", "text": "valid text"},
+            ],
+        }
+    )
+    mock_run.return_value = subprocess.CompletedProcess(args=["gptme"], returncode=0, stdout=ndjson)
+    # Must not raise AttributeError; must return the valid part
+    assert gb.call_gptme("hi") == "valid text"

@@ -289,22 +289,22 @@ def call_claude_code(
                         break
                 if last_non_quota_error is not None:
                     raise last_non_quota_error
+                # All Claude slots failed (quota exhaustion and/or empty responses).
+                # Before surfacing the permanent failure, try the gptme fallback so
+                # summary generation does not hard-fail on quota days (ErikBjare/bob
+                # issue: 5 auto-resolve flips in 8 days). The gptme adapter is
+                # best-effort and returns "" on any failure, so the original error
+                # path is preserved when no fallback is available.
+                gptme_response = call_gptme(prompt, timeout=timeout)
+                if gptme_response:
+                    logger.warning("Claude quota exhausted; gptme fallback produced a summary")
+                    return gptme_response
                 if saw_empty_response:
                     logger.error(
                         "Fallback slots returned empty responses after %d attempts",
                         max_retries,
                     )
                     return ""
-                # All Claude slots are quota-exhausted. Before surfacing the
-                # permanent failure, try the gptme fallback so summary generation
-                # does not hard-fail on quota days (ErikBjare/bob issue: 5
-                # auto-resolve flips in 8 days). The gptme adapter is best-effort
-                # and returns "" on any failure, so we still raise the original
-                # error if it cannot produce a summary.
-                gptme_response = call_gptme(prompt, timeout=timeout)
-                if gptme_response:
-                    logger.warning("Claude quota exhausted; gptme fallback produced a summary")
-                    return gptme_response
                 logger.error(
                     "Claude quota exhausted and gptme fallback produced no summary; raising"
                 )

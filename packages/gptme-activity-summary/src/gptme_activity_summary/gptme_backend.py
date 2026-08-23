@@ -71,7 +71,9 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
         "none",
         "-m",
         model,
-        prompt,
+        # Prompt is passed via stdin (not as a positional arg) to avoid exposing
+        # potentially-sensitive journal content in the process list and to prevent
+        # OSError "Argument list too long" for large journal summaries.
     ]
 
     env = os.environ.copy()
@@ -81,6 +83,7 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
     try:
         result = subprocess.run(
             cmd,
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -124,7 +127,7 @@ def _extract_assistant_text(stdout: str) -> str:
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
                         text = part.get("text", "")
-                        if text.strip():
+                        if isinstance(text, str) and text.strip():
                             contents.append(text)
     if not contents:
         logger.warning("gptme fallback produced no assistant messages")
