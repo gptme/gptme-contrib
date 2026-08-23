@@ -34,12 +34,89 @@ PATHSPEC_COUNT=0
 PATHSPECS=()
 PARSE_AFTER_DASHDASH=0
 SKIP_NEXT_ARG=0
+SKIP_NEXT_OPTIONAL_ARG=0
+PATHSPEC_FROM_FILE_NEXT=0
 FORWARD_ARGS=()
+
+# Returns 0 (true) if the pathspec is exclusion-only (e.g., :(exclude)foo, :!foo, :^foo).
+# Exclusion-only pathspecs don't positively select any files, so they must not be
+# counted toward PATHSPEC_COUNT — otherwise a commit with only exclusion args would
+# bypass the whole-index guard.
+is_exclusion_only_pathspec() {
+    local ps="$1"
+    # Strip C-quoted outer double-quotes, decoding common octal escapes
+    if [[ "$ps" == '"'* && "$ps" == *'"' ]]; then
+        local inner="${ps:1:${#ps}-2}"
+        inner="${inner//\\072/:}"   # \072 (octal) = ':'
+        inner="${inner//\\041/!}"   # \041 (octal) = '!'
+        ps="$inner"
+    fi
+    # Shorthand exclusion prefixes
+    case "$ps" in
+        ':!'*|':^'*) return 0 ;;
+    esac
+    # Long-form :(magic)path — look for 'exclude' in the comma-separated magic list
+    if [[ "$ps" == ':'* ]]; then
+        local rest="${ps:1}"
+        if [[ "$rest" == '('* ]]; then
+            local magic="${rest:1}"
+            magic="${magic%%)*}"
+            local IFS=','
+            for m in $magic; do
+                [[ "$m" == "exclude" ]] && return 0
+            done
+        fi
+    fi
+    return 1
+}
+
+# Returns 0 (true) if the file contains at least one positive (non-exclusion) pathspec.
+# Used for --pathspec-from-file validation: a file of only exclusion lines or blank
+# lines is treated as "no explicit positive pathspecs" for the whole-index guard.
+pathspec_file_has_positive() {
+    local psfile="$1"
+    # /dev/null and empty string explicitly mean "no pathspecs"
+    case "$psfile" in
+        /dev/null|'') return 1 ;;
+    esac
+    # stdin ('-') can't be pre-read; treat it conservatively as having positive entries
+    [ "$psfile" = "-" ] && return 0
+    [ -f "$psfile" ] || return 1
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        if ! is_exclusion_only_pathspec "$line"; then
+            return 0
+        fi
+    done < "$psfile"
+    return 1
+}
 
 for arg in "$@"; do
     if [ "$SKIP_NEXT_ARG" -eq 1 ]; then
         SKIP_NEXT_ARG=0
         FORWARD_ARGS+=("$arg")
+        continue
+    fi
+
+    # -S/--gpg-sign takes an optional value; only consume the next arg as a key
+    # if it doesn't look like a new option flag.
+    if [ "$SKIP_NEXT_OPTIONAL_ARG" -eq 1 ]; then
+        SKIP_NEXT_OPTIONAL_ARG=0
+        if [[ "$arg" != -* ]]; then
+            FORWARD_ARGS+=("$arg")
+            continue
+        fi
+        # Arg starts with '-': it's a new flag, not a value — fall through
+    fi
+
+    # --pathspec-from-file <file>: read the file to check for positive pathspecs
+    if [ "$PATHSPEC_FROM_FILE_NEXT" -eq 1 ]; then
+        PATHSPEC_FROM_FILE_NEXT=0
+        FORWARD_ARGS+=("$arg")
+        if pathspec_file_has_positive "$arg"; then
+            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+        fi
         continue
     fi
 
@@ -59,8 +136,10 @@ for arg in "$@"; do
     FORWARD_ARGS+=("$arg")
 
     if [ "$PARSE_AFTER_DASHDASH" -eq 1 ]; then
-        PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
-        PATHSPECS+=("$arg")
+        if ! is_exclusion_only_pathspec "$arg"; then
+            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            PATHSPECS+=("$arg")
+        fi
         continue
     fi
 
@@ -71,20 +150,32 @@ for arg in "$@"; do
         -m|--message|-F|--file|-c|--reedit-message|-C|--reuse-message|--fixup|--squash|--author|--date|--trailer)
             SKIP_NEXT_ARG=1
             ;;
-        --pathspec-from-file)
-            SKIP_NEXT_ARG=1
-            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+        -S|--gpg-sign)
+            # -S/--gpg-sign has an optional key-id value; use the optional-skip
+            # path so we don't miscount the key as a pathspec.
+            SKIP_NEXT_OPTIONAL_ARG=1
             ;;
-        --message=*|--file=*|--author=*|--date=*|--fixup=*|--squash=*|--trailer=*)
+        --pathspec-from-file)
+            # Value is the next arg; defer counting until we can inspect the file.
+            PATHSPEC_FROM_FILE_NEXT=1
+            ;;
+        --message=*|--file=*|--author=*|--date=*|--fixup=*|--squash=*|--trailer=*|--gpg-sign=*)
             ;;
         --pathspec-from-file=*)
-            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            _psfile="${arg#--pathspec-from-file=}"
+            if pathspec_file_has_positive "$_psfile"; then
+                PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            fi
             ;;
         -*)
             ;;
         *)
-            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
-            PATHSPECS+=("$arg")
+            # Only count positively-selecting pathspecs; exclusion-only pathspecs
+            # (e.g., :(exclude)foo, :!foo) don't name files to include.
+            if ! is_exclusion_only_pathspec "$arg"; then
+                PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+                PATHSPECS+=("$arg")
+            fi
             ;;
     esac
 done
