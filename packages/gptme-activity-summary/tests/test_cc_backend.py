@@ -788,6 +788,7 @@ def _ndjson(msg: str) -> str:
     )
 
 
+@patch.dict("os.environ", {}, clear=True)
 @patch("gptme_activity_summary.cc_backend.call_gptme")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
@@ -805,6 +806,7 @@ def test_call_claude_code_quota_falls_back_to_gptme(mock_run, mock_sleep, mock_g
     mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
+@patch.dict("os.environ", {}, clear=True)
 @patch("gptme_activity_summary.cc_backend.call_gptme")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
@@ -820,6 +822,7 @@ def test_call_claude_code_quota_gptme_failure_raises_original(mock_run, mock_sle
     mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
+@patch.dict("os.environ", {}, clear=True)
 @patch("gptme_activity_summary.cc_backend.call_gptme")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
