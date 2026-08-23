@@ -171,14 +171,16 @@ def test_call_claude_code_nonzero_exit_raises_after_retries(mock_run, mock_sleep
     assert mock_sleep.call_count == 2  # slept between attempts
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_quota_exhausted_raises_immediately(mock_run, mock_sleep):
+def test_call_claude_code_quota_exhausted_raises_immediately(mock_run, mock_sleep, mock_gptme):
     """Weekly quota exhaustion must raise ClaudeQuotaExhaustedError immediately.
 
     Retrying the same slot is futile when it is quota-exhausted; the failure
     should surface on the first attempt so a caller with slot fallback can retry
-    on a different slot instead of burning the full retry window.
+    on a different slot instead of burning the full retry window. (The gptme
+    fallback is attempted, but returns "" so the original error is re-raised.)
     """
     from gptme_activity_summary.cc_backend import ClaudeQuotaExhaustedError
 
@@ -188,13 +190,15 @@ def test_call_claude_code_quota_exhausted_raises_immediately(mock_run, mock_slee
     with pytest.raises(ClaudeQuotaExhaustedError) as exc_info:
         call_claude_code("test prompt", max_retries=3)
     assert exc_info.value.returncode == 1
-    assert mock_run.call_count == 1  # no retries — quota failure is permanent
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    assert mock_run.call_count == 1  # primary tried once; no retry-loop
     assert mock_sleep.call_count == 0  # no backoff sleep burned
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_quota_marker_in_stderr(mock_run, mock_sleep):
+def test_call_claude_code_quota_marker_in_stderr(mock_run, mock_sleep, mock_gptme):
     """Quota marker in stderr (not stdout) must also be detected."""
     from gptme_activity_summary.cc_backend import ClaudeQuotaExhaustedError
 
@@ -203,7 +207,7 @@ def test_call_claude_code_quota_marker_in_stderr(mock_run, mock_sleep):
     )
     with pytest.raises(ClaudeQuotaExhaustedError):
         call_claude_code("test prompt", max_retries=3)
-    assert mock_run.call_count == 1
+    assert mock_run.call_count == 1  # primary only; gptme mocked, no extra run
 
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
@@ -765,3 +769,121 @@ def test_call_claude_code_fallback_creds_not_passed_to_subprocess(mock_run):
     call_claude_code("test prompt")
     subprocess_env = mock_run.call_args.kwargs["env"]
     assert "GPTME_CC_FALLBACK_CREDS" not in subprocess_env
+
+
+# --- Tests for gptme fallback on quota exhaustion ---
+
+
+def _ndjson(msg: str) -> str:
+    """Build a minimal gptme NDJSON stream containing one assistant message."""
+    import json as _json
+
+    return _json.dumps(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": msg,
+            "timestamp": "2026-08-23T00:00:00.000000",
+        }
+    )
+
+
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_falls_back_to_gptme(mock_run, mock_sleep, mock_gptme, tmp_path):
+    """Quota exhaustion on all Claude slots falls back to the gptme backend."""
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_gptme.return_value = '{"ok": "from-gptme"}'
+
+    result = call_claude_code("test prompt", max_retries=3)
+
+    assert result == '{"ok": "from-gptme"}'
+    assert mock_gptme.call_count == 1
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+
+
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_gptme_failure_raises_original(mock_run, mock_sleep, mock_gptme):
+    """If the gptme fallback yields nothing, the original quota error is raised."""
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_gptme.return_value = ""  # fallback failed
+
+    with pytest.raises(ClaudeQuotaExhaustedError):
+        call_claude_code("test prompt", max_retries=3)
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+
+
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_quota_gptme_fallback_passes_timeout(mock_run, mock_sleep, mock_gptme):
+    """The gptme fallback inherits the caller's timeout."""
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_gptme.return_value = '{"ok": 1}'
+    call_claude_code("test prompt", timeout=99, max_retries=1)
+    mock_gptme.assert_called_once_with("test prompt", timeout=99)
+
+
+# --- Tests for gptme_backend module ---
+
+
+def test_call_gptme_disabled_by_env():
+    """Disabling via env short-circuits and does not spawn the binary."""
+    import gptme_activity_summary.gptme_backend as gb
+
+    with patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "0"}, clear=True):
+        with patch.object(gb, "shutil") as mock_shutil:
+            mock_shutil.which.return_value = "/usr/bin/gptme"
+            with patch("subprocess.run") as mock_run:
+                assert gb.call_gptme("hi") == ""
+    mock_run.assert_not_called()
+
+
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value=None)
+def test_call_gptme_missing_binary(mock_which):
+    """Missing gptme binary is handled gracefully."""
+    import gptme_activity_summary.gptme_backend as gb
+
+    assert gb.call_gptme("hi") == ""
+
+
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run")
+def test_call_gptme_extracts_assistant_text(mock_run, mock_which):
+    """NDJSON assistant content is extracted from the gptme output."""
+    import gptme_activity_summary.gptme_backend as gb
+
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["gptme"], returncode=0, stdout=_ndjson('{"result": "ok"}')
+    )
+    assert gb.call_gptme("hi") == '{"result": "ok"}'
+
+
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run")
+def test_call_gptme_nonzero_exit_returns_empty(mock_run, mock_which):
+    """Non-zero gptme exit returns an empty string (no raise)."""
+    import gptme_activity_summary.gptme_backend as gb
+
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["gptme"], returncode=1, stdout="", stderr="boom"
+    )
+    assert gb.call_gptme("hi") == ""
+
+
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gptme", 30))
+def test_call_gptme_timeout_returns_empty(mock_run, mock_which):
+    """A timed-out gptme call returns an empty string (no raise)."""
+    import gptme_activity_summary.gptme_backend as gb
+
+    assert gb.call_gptme("hi") == ""

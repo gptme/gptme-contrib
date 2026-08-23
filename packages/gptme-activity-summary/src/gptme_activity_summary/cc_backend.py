@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from gptme_activity_summary.gptme_backend import call_gptme
+
 logger = logging.getLogger(__name__)
 
 # Retry configuration for empty CC responses (nesting detection, transient failures)
@@ -293,6 +295,19 @@ def call_claude_code(
                         max_retries,
                     )
                     return ""
+                # All Claude slots are quota-exhausted. Before surfacing the
+                # permanent failure, try the gptme fallback so summary generation
+                # does not hard-fail on quota days (ErikBjare/bob issue: 5
+                # auto-resolve flips in 8 days). The gptme adapter is best-effort
+                # and returns "" on any failure, so we still raise the original
+                # error if it cannot produce a summary.
+                gptme_response = call_gptme(prompt, timeout=timeout)
+                if gptme_response:
+                    logger.warning("Claude quota exhausted; gptme fallback produced a summary")
+                    return gptme_response
+                logger.error(
+                    "Claude quota exhausted and gptme fallback produced no summary; raising"
+                )
                 raise ClaudeQuotaExhaustedError(
                     result.returncode, attempt_cmd, result.stdout, result.stderr
                 )
