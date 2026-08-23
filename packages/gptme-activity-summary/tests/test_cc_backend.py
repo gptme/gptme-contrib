@@ -859,12 +859,32 @@ def test_call_gptme_missing_binary(mock_which):
 @patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
 @patch("subprocess.run")
 def test_call_gptme_extracts_assistant_text(mock_run, mock_which):
-    """NDJSON assistant content is extracted from the gptme output."""
+    """NDJSON assistant content is extracted from the gptme output (str form)."""
     import gptme_activity_summary.gptme_backend as gb
 
     mock_run.return_value = subprocess.CompletedProcess(
         args=["gptme"], returncode=0, stdout=_ndjson('{"result": "ok"}')
     )
+    assert gb.call_gptme("hi") == '{"result": "ok"}'
+
+
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run")
+def test_call_gptme_extracts_assistant_text_list_content(mock_run, mock_which):
+    """NDJSON assistant content is extracted when content is a list of parts (real gptme format)."""
+    import json as _json
+
+    import gptme_activity_summary.gptme_backend as gb
+
+    ndjson = _json.dumps(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": '{"result": "ok"}'}],
+            "timestamp": "2026-08-23T00:00:00.000000",
+        }
+    )
+    mock_run.return_value = subprocess.CompletedProcess(args=["gptme"], returncode=0, stdout=ndjson)
     assert gb.call_gptme("hi") == '{"result": "ok"}'
 
 

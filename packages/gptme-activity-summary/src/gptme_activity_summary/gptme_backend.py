@@ -120,6 +120,12 @@ def _extract_assistant_text(stdout: str) -> str:
             content = obj.get("content")
             if isinstance(content, str) and content.strip():
                 contents.append(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text = part.get("text", "")
+                        if text.strip():
+                            contents.append(text)
     if not contents:
         logger.warning("gptme fallback produced no assistant messages")
         return ""
