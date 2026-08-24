@@ -811,34 +811,52 @@ def _ndjson(msg: str) -> str:
     )
 
 
+@pytest.mark.parametrize(
+    "gptme_response",
+    [
+        '{"narrative": "from-gptme"}',
+        '{"month_narrative": "from-gptme"}',
+    ],
+)
 @patch.dict("os.environ", {}, clear=True)
 @patch("gptme_activity_summary.cc_backend.call_gptme")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_quota_falls_back_to_gptme(mock_run, mock_sleep, mock_gptme, tmp_path):
+def test_call_claude_code_quota_falls_back_to_gptme(
+    mock_run, mock_sleep, mock_gptme, gptme_response
+):
     """Quota exhaustion on all Claude slots falls back to the gptme backend."""
     mock_run.return_value = _make_completed_process(
         returncode=1, stdout="You've hit your weekly limit"
     )
-    mock_gptme.return_value = '{"ok": "from-gptme"}'
+    mock_gptme.return_value = gptme_response
 
     result = call_claude_code("test prompt", max_retries=3)
 
-    assert result == '{"ok": "from-gptme"}'
+    assert result == gptme_response
     assert mock_gptme.call_count == 1
     mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
+@pytest.mark.parametrize(
+    "fallback_response",
+    [
+        "I cannot provide JSON.",
+        '{"error": "model overloaded"}',
+    ],
+)
 @patch.dict("os.environ", {}, clear=True)
 @patch("gptme_activity_summary.cc_backend.call_gptme")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_rejects_non_json_gptme_fallback(mock_run, mock_sleep, mock_gptme):
-    """Plain-text gptme responses must preserve the Claude failure signal."""
+def test_call_claude_code_rejects_invalid_gptme_fallback(
+    mock_run, mock_sleep, mock_gptme, fallback_response
+):
+    """Non-summary gptme responses must preserve the Claude failure signal."""
     mock_run.return_value = _make_completed_process(
         returncode=1, stdout="You've hit your weekly limit"
     )
-    mock_gptme.return_value = "I cannot provide JSON."
+    mock_gptme.return_value = fallback_response
 
     with pytest.raises(ClaudeQuotaExhaustedError):
         call_claude_code("test prompt", max_retries=1)
@@ -864,7 +882,7 @@ def test_call_claude_code_disabled_fallback_slots_reach_gptme(
     )
     mock_run.return_value = disabled
     mock_fallback.return_value = disabled
-    mock_gptme.return_value = '{"ok": "from-gptme"}'
+    mock_gptme.return_value = '{"narrative": "from-gptme"}'
 
     with patch.dict(
         os.environ,
@@ -873,7 +891,7 @@ def test_call_claude_code_disabled_fallback_slots_reach_gptme(
     ):
         result = call_claude_code("test prompt")
 
-    assert result == '{"ok": "from-gptme"}'
+    assert result == '{"narrative": "from-gptme"}'
     mock_fallback.assert_called_once()
     mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
@@ -903,7 +921,7 @@ def test_call_claude_code_quota_gptme_fallback_passes_timeout(mock_run, mock_sle
     mock_run.return_value = _make_completed_process(
         returncode=1, stdout="You've hit your weekly limit"
     )
-    mock_gptme.return_value = '{"ok": 1}'
+    mock_gptme.return_value = '{"narrative": "ok"}'
     call_claude_code("test prompt", timeout=99, max_retries=1)
     mock_gptme.assert_called_once_with("test prompt", timeout=99)
 

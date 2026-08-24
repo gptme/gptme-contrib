@@ -35,6 +35,11 @@ _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS = (
     "failed to authenticate: oauth session expired",
 )
 
+# Every structured summary produced by this module has one of these narrative
+# fields. Requiring one prevents a JSON-shaped provider error from being treated
+# as a successful summary and silently filled out with empty defaults.
+_SUMMARY_NARRATIVE_KEYS = ("narrative", "month_narrative")
+
 
 class ClaudeQuotaExhaustedError(subprocess.CalledProcessError):
     """The active Claude Code slot has a permanent subscription failure.
@@ -310,14 +315,15 @@ def call_claude_code(
                 # path is preserved when no fallback is available.
                 gptme_response = call_gptme(prompt, timeout=timeout)
                 if gptme_response:
-                    if extract_json_from_response(gptme_response):
+                    gptme_result = extract_json_from_response(gptme_response)
+                    if any(key in gptme_result for key in _SUMMARY_NARRATIVE_KEYS):
                         logger.warning(
                             "Claude subscriptions unavailable; gptme fallback produced a summary"
                         )
                         return gptme_response
                     logger.warning(
                         "Claude subscriptions unavailable; gptme fallback response did not "
-                        "contain a valid JSON object; ignoring"
+                        "contain a recognized summary schema; ignoring"
                     )
                 if saw_empty_response:
                     logger.error(
