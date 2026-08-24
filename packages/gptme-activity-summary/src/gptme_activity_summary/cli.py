@@ -974,6 +974,9 @@ def smart(ctx: click.Context, date_str: str) -> None:
         else:
             click.echo(f"  {name}: skipped")
 
+    if any(success is False for _, success in results):
+        ctx.exit(1)
+
 
 @cli.command()
 @click.option("--from", "from_date", required=True, help="Start date (YYYY-MM-DD)")
