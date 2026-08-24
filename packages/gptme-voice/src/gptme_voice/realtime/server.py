@@ -160,6 +160,7 @@ class RecentCallRecord:
     subagent_timings: list[dict[str, object]] = field(default_factory=list)
     archive_record_paths: list[str] = field(default_factory=list)
     pending_post_call_unit: str | None = None
+    call_group_id: str | None = None
 
 
 @dataclass
@@ -746,6 +747,7 @@ class VoiceServer:
         self._connections: dict[str, tuple] = {}
         self._pending_post_calls: dict[str, str] = {}
         self._pending_archive_records: dict[str, list[Path]] = {}
+        self._pending_call_groups: dict[str, str] = {}
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
@@ -780,6 +782,9 @@ class VoiceServer:
 
     def _call_archive_dir(self) -> Path:
         return self.state_dir / "archive"
+
+    def _call_group_manifest_dir(self) -> Path:
+        return self.state_dir / "call-groups"
 
     def _handoff_bootstrap_path(self, handoff_id: str) -> Path:
         safe_handoff_id = "".join(
@@ -823,6 +828,8 @@ class VoiceServer:
             payload["subagent_timings"] = record.subagent_timings
         if include_pending_state and record.archive_record_paths:
             payload["archive_record_paths"] = record.archive_record_paths
+        if record.call_group_id:
+            payload["call_group_id"] = record.call_group_id
         if include_pending_state and record.pending_post_call_unit:
             payload["pending_post_call_unit"] = record.pending_post_call_unit
         return payload
@@ -902,6 +909,12 @@ class VoiceServer:
                         and payload.get("pending_post_call_unit")
                         else None
                     ),
+                    call_group_id=(
+                        payload.get("call_group_id")
+                        if isinstance(payload.get("call_group_id"), str)
+                        and payload.get("call_group_id")
+                        else None
+                    ),
                 )
             except Exception as exc:
                 logger.warning(
@@ -920,6 +933,49 @@ class VoiceServer:
             if path.exists():
                 restored_paths.append(path)
         return self._dedupe_record_paths(restored_paths)
+
+    def _call_group_manifest_path(self, call_group_id: str) -> Path:
+        safe_id = "".join(
+            ch for ch in call_group_id if ch.isalnum() or ch in {"-", "_"}
+        )
+        if not safe_id:
+            safe_id = "call-group"
+        return self._call_group_manifest_dir() / f"{safe_id}.json"
+
+    def _build_call_group_id(self, caller_id: str, first_record_path: Path) -> str:
+        digest = hashlib.sha256()
+        digest.update(caller_id.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(first_record_path).encode("utf-8"))
+        return digest.hexdigest()[:16]
+
+    def _write_call_group_manifest(
+        self,
+        *,
+        caller_id: str,
+        call_group_id: str,
+        record_paths: list[Path],
+        closes_at: float,
+    ) -> Path:
+        manifest_path = self._call_group_manifest_path(call_group_id)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "call_group_id": call_group_id,
+                    "status": "open",
+                    "caller_id": caller_id,
+                    "remote_party": caller_id,
+                    "archive_record_paths": [str(path) for path in record_paths],
+                    "closes_at": closes_at,
+                    "updated_at": time.time(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return manifest_path
 
     def _build_post_call_unit_name(
         self, caller_id: str, record_paths: list[Path]
@@ -1229,6 +1285,12 @@ class VoiceServer:
             self._pending_archive_records[caller_id] = restored_archive_paths
         else:
             self._pending_archive_records.pop(caller_id, None)
+            self._pending_call_groups.pop(caller_id, None)
+
+        if recent_call.call_group_id:
+            self._pending_call_groups[caller_id] = recent_call.call_group_id
+        else:
+            self._pending_call_groups.pop(caller_id, None)
 
         # Delete the resume-state file(s) so a crash-resume can't re-inject the old
         # transcript, but keep archived per-call records for post-call analysis.
@@ -1336,10 +1398,23 @@ class VoiceServer:
             return
 
         self._pending_archive_records[caller_id] = deduped_record_paths
+        call_group_id = self._pending_call_groups.get(caller_id)
+        if call_group_id is None:
+            call_group_id = self._build_call_group_id(
+                caller_id, deduped_record_paths[0]
+            )
+            self._pending_call_groups[caller_id] = call_group_id
+        self._write_call_group_manifest(
+            caller_id=caller_id,
+            call_group_id=call_group_id,
+            record_paths=deduped_record_paths,
+            closes_at=time.time() + max(self.post_call_delay_seconds, 0),
+        )
 
         if not self.post_call_command:
             self._pending_post_calls.pop(caller_id, None)
             self._pending_archive_records.pop(caller_id, None)
+            self._pending_call_groups.pop(caller_id, None)
             return
 
         unit_name = self._build_post_call_unit_name(caller_id, deduped_record_paths)
@@ -1516,16 +1591,27 @@ class VoiceServer:
             except Exception as exc:  # defensive: never block archival on telemetry
                 logger.warning("Failed to collect subagent timings: %s", exc)
 
+        pending_record_paths = list(self._pending_archive_records.get(caller_id, []))
+        call_group_id = self._pending_call_groups.get(caller_id)
+        if call_group_id is None:
+            seed_record = pending_record_paths[0] if pending_record_paths else None
+            seed = seed_record or self._recent_call_path(caller_id)
+            call_group_id = self._build_call_group_id(caller_id, seed)
+            self._pending_call_groups[caller_id] = call_group_id
+
         record = RecentCallRecord(
             caller_id=caller_id,
             source=source,
             ended_at=time.time(),
             transcript=transcript,
-            metadata={k: v for k, v in metadata.items() if v},
+            metadata={
+                **({"remote_party": caller_id} if caller_id else {}),
+                **{k: v for k, v in metadata.items() if v},
+            },
             subagent_timings=subagent_timings,
+            call_group_id=call_group_id,
         )
         record_path = self._save_call_record(record)
-        pending_record_paths = list(self._pending_archive_records.get(caller_id, []))
         pending_record_paths.append(record_path)
         deduped_record_paths = self._dedupe_record_paths(pending_record_paths)
         record.archive_record_paths = [str(path) for path in deduped_record_paths]
@@ -1673,11 +1759,13 @@ class VoiceServer:
                     # Inject caller context into instructions (phone + name lookup)
                     custom_params = start.get("customParameters", {})
                     from_number = custom_params.get("from_number", "")
+                    remote_party = custom_params.get("remote_party") or from_number
                     handoff_id = custom_params.get("handoff_id") or None
                     standup_brief = custom_params.get("standup_brief") or None
-                    caller_id = from_number or call_sid or stream_sid
+                    caller_id = remote_party or call_sid or stream_sid
                     metadata = {
                         "from_number": from_number,
+                        "remote_party": remote_party,
                         "call_sid": call_sid,
                         "stream_sid": stream_sid,
                         "provider": self.provider,

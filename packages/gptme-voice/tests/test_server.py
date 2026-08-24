@@ -1017,9 +1017,11 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
             )
             first_path = server._save_call_record(first)
             await server._schedule_post_call(first.caller_id, [first_path])
+            first_group_id = server._pending_call_groups[first.caller_id]
             first_unit = server._pending_post_calls[first.caller_id]
             first.archive_record_paths = [str(first_path)]
             first.pending_post_call_unit = first_unit
+            first.call_group_id = first_group_id
             server._save_recent_call(first)
 
             with pytest.MonkeyPatch.context() as mp:
@@ -1029,6 +1031,7 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
             assert resumed is not None
             assert cancelled_units == [first_unit]
             assert server._pending_archive_records[first.caller_id] == [first_path]
+            assert server._pending_call_groups[first.caller_id] == first_group_id
 
             second = RecentCallRecord(
                 caller_id=first.caller_id,
@@ -1044,9 +1047,43 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
                 first_path,
                 second_path,
             ]
+            assert server._pending_call_groups[first.caller_id] == first_group_id
+            manifest = json.loads(
+                server._call_group_manifest_path(first_group_id).read_text()
+            )
+            assert manifest["status"] == "open"
+            assert manifest["remote_party"] == first.caller_id
+            assert manifest["archive_record_paths"] == [
+                str(first_path),
+                str(second_path),
+            ]
             assert server._pending_post_calls[first.caller_id] != first_unit
 
     asyncio.run(_exercise())
+
+
+def test_call_record_payload_preserves_remote_party_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        record = RecentCallRecord(
+            caller_id="+46700000001",
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="hello")],
+            metadata={
+                "call_sid": "CAoutbound",
+                "from_number": "+15551234567",
+                "remote_party": "+46700000001",
+            },
+        )
+
+        path = server._save_call_record(record)
+        payload = json.loads(path.read_text())
+
+        assert payload["caller_id"] == "+46700000001"
+        assert "call_group_id" not in payload
+        assert payload["metadata"]["remote_party"] == "+46700000001"
 
 
 def test_save_call_record_uses_unique_archive_path_per_call() -> None:
@@ -1201,12 +1238,18 @@ def test_on_call_end_persists_pending_post_call_state() -> None:
 
             recent = server._load_recent_call("+46700000013")
             assert recent is not None
+            assert recent.call_group_id == server._pending_call_groups["+46700000013"]
             assert len(recent.archive_record_paths) == 1
             assert (
                 recent.pending_post_call_unit
                 == server._pending_post_calls["+46700000013"]
             )
             assert Path(recent.archive_record_paths[0]).exists()
+            manifest = json.loads(
+                server._call_group_manifest_path(recent.call_group_id).read_text()
+            )
+            assert manifest["remote_party"] == "+46700000013"
+            assert manifest["archive_record_paths"] == recent.archive_record_paths
 
     asyncio.run(_exercise())
 

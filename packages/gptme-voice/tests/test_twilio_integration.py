@@ -92,6 +92,7 @@ def test_create_outbound_call_uses_twilio_client():
         auth_token="secret",
         from_number="+15551234567",
         stream_url="wss://voice.example/twilio",
+        custom_params={"from_number": "+46701234567"},
     )
 
     sid = create_outbound_call("+46701234567", settings, client_cls=FakeClient)
@@ -102,7 +103,9 @@ def test_create_outbound_call_uses_twilio_client():
         "auth_token": "secret",
         "to": "+46701234567",
         "from_": "+15551234567",
-        "twiml": build_connect_stream_twiml("wss://voice.example/twilio"),
+        "twiml": build_connect_stream_twiml(
+            "wss://voice.example/twilio", {"from_number": "+46701234567"}
+        ),
     }
 
 
@@ -124,3 +127,4 @@ def test_call_cli_dry_run_prints_twiml(monkeypatch):
 
     assert result.exit_code == 0
     assert 'url="wss://voice.example/twilio"' in result.output
+    assert 'name="from_number" value="+46701234567"' in result.output

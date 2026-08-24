@@ -149,9 +149,10 @@ def create_outbound_call(
             ) from exc
 
     client = client_cls(settings.account_sid, settings.auth_token)
+    custom_params = {**(settings.custom_params or {}), "from_number": to_number}
     call = client.calls.create(
         to=to_number,
         from_=settings.from_number,
-        twiml=build_connect_stream_twiml(settings.stream_url, settings.custom_params),
+        twiml=build_connect_stream_twiml(settings.stream_url, custom_params),
     )
     return call.sid

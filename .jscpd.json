@@ -5,6 +5,7 @@
   "ignore": [
     "worktree/**",
     "worktrees/**",
+    "runloops-subscription-disabled-*/**",
     "**/build/**",
     "**/dist/**",
     "**/worktree/**",

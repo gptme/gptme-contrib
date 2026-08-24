@@ -47,7 +47,8 @@ def main(
     except ConfigurationError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    twiml = build_connect_stream_twiml(settings.stream_url)
+    custom_params = {**(settings.custom_params or {}), "from_number": to_number}
+    twiml = build_connect_stream_twiml(settings.stream_url, custom_params)
     if dry_run:
         click.echo(twiml)
         return
