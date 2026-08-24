@@ -133,6 +133,7 @@ def select_ready_tasks(
         # Return waiting tasks whose time gates have elapsed and have no remaining blocker.
         # A task with waiting_for still set is blocked on a human/external condition even
         # if its date gate passed — exclude it so agents don't pick up stalled work.
+        # A task with a probe field still needs probe resolution before it is actionable.
         return [
             task
             for task in filtered_tasks
@@ -140,6 +141,7 @@ def select_ready_tasks(
             if task.wait is not None
             if not task_is_waiting_for_date(task)
             if not task.metadata.get("waiting_for")
+            if not task.metadata.get("probe")
         ]
     if state == "actionable":
         from dataclasses import replace
@@ -153,6 +155,7 @@ def select_ready_tasks(
                 and task.wait is not None
                 and not task_is_waiting_for_date(task)
                 and not task.metadata.get("waiting_for")
+                and not task.metadata.get("probe")
             )
             or (
                 task.state in ["backlog", "todo", "active"]
