@@ -712,6 +712,60 @@ def test_run_work_file_counts_failures(tmp_path) -> None:
     assert completed["failures"] == 1 and completed["successes"] == 0
 
 
+def test_run_work_file_records_subscription_disabled_as_cc_auth(tmp_path) -> None:
+    """A disabled CC subscription is slot infra, not failed PR work."""
+    item = make_item(types=["notification"], number=0)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    session_ref: Path | None = None
+
+    def run_cmd(argv, **kwargs):
+        nonlocal session_ref
+        argv = [str(arg) for arg in argv]
+        if "/fake/run.sh" in argv:
+            session_id = kwargs["env"]["CC_SESSION_ID"]
+            log = tmp_path / "subscription-disabled.jsonl"
+            log.write_text(
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": True,
+                        "terminal_reason": "api_error",
+                        "api_error_status": 403,
+                        "result": (
+                            "Your organization has disabled Claude subscription "
+                            "access for Claude Code · Use an Anthropic API key "
+                            "instead, or ask your admin to enable access"
+                        ),
+                        "num_turns": 1,
+                        "total_cost_usd": 0,
+                    }
+                )
+                + "\n"
+            )
+            session_ref = Path("/tmp") / f"cc-session-log-ref-{session_id}.txt"
+            session_ref.write_text(str(log))
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        stdout = "abc123\n" if "rev-parse" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    try:
+        rc = run_work_file(
+            work_file,
+            config,
+            make_hooks(run_cmd=run_cmd),
+            backend="claude-code",
+        )
+    finally:
+        if session_ref is not None:
+            session_ref.unlink(missing_ok=True)
+
+    assert rc == 1
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["infra_failure"] == "cc_auth"
+
+
 # --- Outcome-verification invariant (symptom tests) ---
 #
 # The failure class: a worker exits non-zero while its ledger row says
