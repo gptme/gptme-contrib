@@ -25,18 +25,23 @@ logger = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
 
-# Claude Code stdout marker for weekly quota exhaustion on the active slot. When
-# present, retrying on the same slot is futile — every attempt fails identically
-# until the quota resets. Callers with slot fallback should catch
-# ClaudeQuotaExhaustedError and retry on a different slot instead.
-_QUOTA_EXHAUSTED_MARKERS = ("you've hit your weekly limit",)
+# Claude Code output markers for permanent subscription failures on the active
+# slot. Retrying the same slot is futile; callers should try a fallback slot or
+# backend instead. Keep the exact observed prefixes narrow so transient errors
+# still use the normal retry path.
+_PERMANENT_SUBSCRIPTION_FAILURE_MARKERS = (
+    "you've hit your weekly limit",
+    "your organization has disabled claude subscription access",
+    "failed to authenticate: oauth session expired",
+)
 
 
 class ClaudeQuotaExhaustedError(subprocess.CalledProcessError):
-    """The active Claude Code slot has exhausted its weekly quota.
+    """The active Claude Code slot has a permanent subscription failure.
 
-    Raised immediately (without the usual retry loop) when ``claude -p`` prints a
-    weekly-quota-exhaustion marker, since retrying the same slot is futile.
+    Raised immediately (without the usual retry loop) when ``claude -p`` prints
+    a known quota- or subscription-access marker, since retrying the same slot
+    is futile. The historical name is retained for compatibility.
     Subclasses :class:`subprocess.CalledProcessError` so existing callers that
     catch the base type keep working; callers that can switch to a different slot
     should catch this subtype specifically.
@@ -127,10 +132,10 @@ def call_claude_code(
     # subprocess sessions (the generic cross-agent signal).
     env["GPTME_SUBPROCESS"] = "1"
 
-    # Fallback credential paths for quota exhaustion recovery.  When the active
-    # slot is exhausted, call_claude_code tries each path in order via a temp
-    # CLAUDE_CONFIG_DIR.  Extract here (before the subprocess env is locked) and
-    # strip from the env so the subprocess never sees it (prevents recursion).
+    # Fallback credential paths for permanent subscription failures. When the
+    # active slot is unavailable, call_claude_code tries each path in order via
+    # a temp CLAUDE_CONFIG_DIR. Extract here (before the subprocess env is locked)
+    # and strip from the env so the subprocess never sees it (prevents recursion).
     # Format: colon-separated absolute paths to credential files.
     # Example: /home/bob/.claude/.credentials.json.alice:/home/bob/.claude/.credentials.json.erik
     _fallback_creds_env = env.pop("GPTME_CC_FALLBACK_CREDS", "").strip()
@@ -214,25 +219,27 @@ def call_claude_code(
                     plain_retry_pending = True
             combined_out = (result.stdout or "") + (result.stderr or "")
             combined_out_lower = combined_out.lower()
-            # Weekly quota exhaustion is a permanent, slot-scoped failure: retrying
-            # the same slot is futile and just burns ~N*delay seconds + token budget.
-            # Signal it distinctly so a caller that can switch slots can retry there.
-            if any(marker.lower() in combined_out_lower for marker in _QUOTA_EXHAUSTED_MARKERS):
+            # Subscription failures are permanent and slot-scoped: retrying the
+            # same slot is futile and just burns ~N*delay seconds + token budget.
+            # Signal them distinctly so a caller can switch slots or backends.
+            if any(
+                marker in combined_out_lower for marker in _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS
+            ):
                 logger.warning(
-                    "claude -p weekly quota exhausted (attempt %d/%d): %s",
+                    "claude -p subscription unavailable (attempt %d/%d): %s",
                     attempt,
                     max_retries,
                     result.stdout.strip()[:200] if result.stdout else result.stderr.strip()[:200],
                 )
                 # Attempt fallback slots (GPTME_CC_FALLBACK_CREDS) before raising.
-                last_non_quota_error: subprocess.CalledProcessError | None = None
+                last_non_subscription_error: subprocess.CalledProcessError | None = None
                 saw_empty_response = False
                 for fb_cred in _fallback_cred_paths:
                     if not fb_cred.exists():
                         logger.debug("Fallback cred file %s not found, skipping", fb_cred)
                         continue
                     logger.info(
-                        "Active slot quota exhausted; trying fallback slot: %s",
+                        "Active slot subscription unavailable; trying fallback slot: %s",
                         fb_cred.name,
                     )
                     for fb_attempt in range(1, max_retries + 1):
@@ -259,14 +266,20 @@ def call_claude_code(
                                 time.sleep(_RETRY_DELAY_S * fb_attempt)
                                 continue
                             break
-                        # Check if this fallback slot is also quota-exhausted.
+                        # Check whether this fallback slot is also unavailable.
                         fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
-                        if any(m.lower() in fb_combined.lower() for m in _QUOTA_EXHAUSTED_MARKERS):
-                            logger.warning("Fallback slot %s also quota-exhausted", fb_cred.name)
-                            # Clear any prior non-quota error so the caller receives
+                        if any(
+                            marker in fb_combined.lower()
+                            for marker in _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS
+                        ):
+                            logger.warning(
+                                "Fallback slot %s also has a subscription failure",
+                                fb_cred.name,
+                            )
+                            # Clear any prior non-subscription error so the caller receives
                             # ClaudeQuotaExhaustedError rather than a stale error from
                             # an earlier fallback that failed for a different reason.
-                            last_non_quota_error = None
+                            last_non_subscription_error = None
                             break
                         logger.warning(
                             "Fallback slot %s failed (rc=%d, attempt %d/%d): stdout=%s stderr=%s",
@@ -277,7 +290,7 @@ def call_claude_code(
                             (fb_result.stdout or "")[:200],
                             (fb_result.stderr or "")[:200],
                         )
-                        last_non_quota_error = subprocess.CalledProcessError(
+                        last_non_subscription_error = subprocess.CalledProcessError(
                             fb_result.returncode,
                             cmd,
                             fb_result.stdout,
@@ -287,9 +300,9 @@ def call_claude_code(
                             time.sleep(_RETRY_DELAY_S * fb_attempt)
                             continue
                         break
-                if last_non_quota_error is not None:
-                    raise last_non_quota_error
-                # All Claude slots failed (quota exhaustion and/or empty responses).
+                if last_non_subscription_error is not None:
+                    raise last_non_subscription_error
+                # All Claude slots failed (subscription failures and/or empty responses).
                 # Before surfacing the permanent failure, try the gptme fallback so
                 # summary generation does not hard-fail on quota days (ErikBjare/bob
                 # issue: 5 auto-resolve flips in 8 days). The gptme adapter is
@@ -297,7 +310,9 @@ def call_claude_code(
                 # path is preserved when no fallback is available.
                 gptme_response = call_gptme(prompt, timeout=timeout)
                 if gptme_response:
-                    logger.warning("Claude quota exhausted; gptme fallback produced a summary")
+                    logger.warning(
+                        "Claude subscriptions unavailable; gptme fallback produced a summary"
+                    )
                     return gptme_response
                 if saw_empty_response:
                     logger.error(
@@ -306,7 +321,8 @@ def call_claude_code(
                     )
                     return ""
                 logger.error(
-                    "Claude quota exhausted and gptme fallback produced no summary; raising"
+                    "Claude subscriptions unavailable and gptme fallback produced no summary; "
+                    "raising"
                 )
                 raise ClaudeQuotaExhaustedError(
                     result.returncode, attempt_cmd, result.stdout, result.stderr

@@ -501,17 +501,28 @@ def test_summarize_journal_no_failed_flag_on_success(mock_cc):
 # --- Tests for GPTME_CC_FALLBACK_CREDS slot fallback ---
 
 
+@pytest.mark.parametrize(
+    "primary_failure",
+    [
+        "You've hit your weekly limit · resets 4pm",
+        (
+            "Your organization has disabled Claude subscription access for Claude Code · "
+            "Use an Anthropic API key instead, or ask your admin to enable access"
+        ),
+        "Failed to authenticate: OAuth session expired",
+    ],
+)
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_quota_fallback_success(mock_run, mock_sleep, mock_fallback, tmp_path):
-    """Quota exhaustion on primary slot triggers fallback; first healthy slot wins."""
+def test_call_claude_code_slot_failure_fallback_success(
+    mock_run, mock_sleep, mock_fallback, tmp_path, primary_failure
+):
+    """Permanent subscription failures trigger fallback; first healthy slot wins."""
     fb_cred = tmp_path / ".credentials.json.alice"
     fb_cred.write_text("{}")
 
-    mock_run.return_value = _make_completed_process(
-        returncode=1, stdout="You've hit your weekly limit · resets 4pm"
-    )
+    mock_run.return_value = _make_completed_process(returncode=1, stdout=primary_failure)
     mock_fallback.return_value = _make_completed_process(stdout='{"ok": true}')
 
     import os
@@ -803,6 +814,38 @@ def test_call_claude_code_quota_falls_back_to_gptme(mock_run, mock_sleep, mock_g
 
     assert result == '{"ok": "from-gptme"}'
     assert mock_gptme.call_count == 1
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+
+
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_disabled_fallback_slots_reach_gptme(
+    mock_run, mock_sleep, mock_fallback, mock_gptme, tmp_path
+):
+    """Subscription-disabled fallback slots still fall through to gptme."""
+    import os
+
+    fb_cred = tmp_path / ".credentials.json.alice"
+    fb_cred.write_text("{}")
+    disabled = _make_completed_process(
+        returncode=1,
+        stdout="Your organization has disabled Claude subscription access for Claude Code",
+    )
+    mock_run.return_value = disabled
+    mock_fallback.return_value = disabled
+    mock_gptme.return_value = '{"ok": "from-gptme"}'
+
+    with patch.dict(
+        os.environ,
+        {"GPTME_CC_FALLBACK_CREDS": str(fb_cred)},
+        clear=True,
+    ):
+        result = call_claude_code("test prompt")
+
+    assert result == '{"ok": "from-gptme"}'
+    mock_fallback.assert_called_once()
     mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
