@@ -440,6 +440,80 @@ def test_safe_commit_allows_positive_stdin_pathspec(git_repo: Path):
     assert "test: stdin pathspec" in log.stdout
 
 
+def test_safe_commit_refuses_nul_separated_exclusion_only_pathspec_file(
+    git_repo: Path,
+):
+    """--pathspec-file-nul exclusion-only entries must not count as a selector."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs"
+    psfile.write_bytes(b":!test.txt\0:!other.txt\0")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            "--pathspec-file-nul",
+            f"--pathspec-from-file={psfile}",
+            "-m",
+            "should refuse",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_refuses_nul_exclusions_when_nul_flag_follows_file(
+    git_repo: Path,
+):
+    """--pathspec-file-nul must apply even when it appears after the file arg."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs"
+    psfile.write_bytes(b":(exclude)test.txt\0")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            f"--pathspec-from-file={psfile}",
+            "--pathspec-file-nul",
+            "-m",
+            "should refuse",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_allows_nul_separated_positive_pathspec_file(git_repo: Path):
+    """NUL-separated file naming a real path is a positive selector."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs"
+    psfile.write_bytes(b"test.txt\0")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            "--pathspec-file-nul",
+            f"--pathspec-from-file={psfile}",
+            "-m",
+            "test: nul pathspec",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "test: nul pathspec" in log.stdout
+
+
 def test_safe_commit_valueless_gpg_sign_does_not_count_message_as_pathspec(
     git_repo: Path,
 ):

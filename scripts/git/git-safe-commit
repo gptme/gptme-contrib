@@ -36,6 +36,8 @@ PARSE_AFTER_DASHDASH=0
 SKIP_NEXT_ARG=0
 SKIP_NEXT_OPTIONAL_ARG=0
 PATHSPEC_FROM_FILE_NEXT=0
+PATHSPEC_FROM_FILE=""
+PATHSPEC_FILE_NUL=0
 FORWARD_ARGS=()
 PATHSPEC_STDIN_TMP=""
 MATERIALIZED_PATHSPEC_FILE=""
@@ -118,6 +120,15 @@ pathspec_file_has_positive() {
     esac
     [ -f "$psfile" ] || return 1
     local line
+    if [ "${PATHSPEC_FILE_NUL:-0}" -eq 1 ]; then
+        while IFS= read -r -d '' line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            if ! is_exclusion_only_pathspec "$line"; then
+                return 0
+            fi
+        done < "$psfile"
+        return 1
+    fi
     while IFS= read -r line || [ -n "$line" ]; do
         [ -z "$line" ] && continue
         if ! is_exclusion_only_pathspec "$line"; then
@@ -125,6 +136,34 @@ pathspec_file_has_positive() {
         fi
     done < "$psfile"
     return 1
+}
+
+# Rewrite FORWARD_ARGS so a materialized stdin pathspec file replaces '-'
+# (equals form or the following argument of --pathspec-from-file).
+rewrite_forward_pathspec_file() {
+    local original="$1"
+    local materialized="$2"
+    local fa skip_replace
+    local new_args=()
+    skip_replace=0
+    for fa in "${FORWARD_ARGS[@]}"; do
+        if [ "$skip_replace" -eq 1 ]; then
+            new_args+=("$materialized")
+            skip_replace=0
+            continue
+        fi
+        if [ "$fa" = "--pathspec-from-file" ]; then
+            new_args+=("$fa")
+            skip_replace=1
+            continue
+        fi
+        if [ "$fa" = "--pathspec-from-file=${original}" ]; then
+            new_args+=("--pathspec-from-file=${materialized}")
+            continue
+        fi
+        new_args+=("$fa")
+    done
+    FORWARD_ARGS=("${new_args[@]}")
 }
 
 for arg in "$@"; do
@@ -145,15 +184,12 @@ for arg in "$@"; do
         # Arg starts with '-': it's a new flag, not a value — fall through
     fi
 
-    # --pathspec-from-file <file>: read the file to check for positive pathspecs
+    # --pathspec-from-file <file>: record the path; validate after all flags
+    # so --pathspec-file-nul can appear before or after the file argument.
     if [ "$PATHSPEC_FROM_FILE_NEXT" -eq 1 ]; then
         PATHSPEC_FROM_FILE_NEXT=0
-        materialize_pathspec_file "$arg"
-        arg="$MATERIALIZED_PATHSPEC_FILE"
+        PATHSPEC_FROM_FILE="$arg"
         FORWARD_ARGS+=("$arg")
-        if pathspec_file_has_positive "$arg"; then
-            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
-        fi
         continue
     fi
 
@@ -193,20 +229,16 @@ for arg in "$@"; do
             SKIP_NEXT_OPTIONAL_ARG=1
             ;;
         --pathspec-from-file)
-            # Value is the next arg; defer counting until we can inspect the file.
+            # Value is the next arg; defer counting until all flags are known.
             PATHSPEC_FROM_FILE_NEXT=1
+            ;;
+        --pathspec-file-nul)
+            PATHSPEC_FILE_NUL=1
             ;;
         --message=*|--file=*|--author=*|--date=*|--fixup=*|--squash=*|--trailer=*|--gpg-sign=*)
             ;;
         --pathspec-from-file=*)
-            _psfile="${arg#--pathspec-from-file=}"
-            materialize_pathspec_file "$_psfile"
-            if [ "$MATERIALIZED_PATHSPEC_FILE" != "$_psfile" ]; then
-                FORWARD_ARGS[-1]="--pathspec-from-file=${MATERIALIZED_PATHSPEC_FILE}"
-            fi
-            if pathspec_file_has_positive "$MATERIALIZED_PATHSPEC_FILE"; then
-                PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
-            fi
+            PATHSPEC_FROM_FILE="${arg#--pathspec-from-file=}"
             ;;
         -*)
             ;;
@@ -220,6 +252,19 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Validate --pathspec-from-file after the full parse so --pathspec-file-nul
+# is honored regardless of flag order.
+if [ -n "$PATHSPEC_FROM_FILE" ]; then
+    _original_psfile="$PATHSPEC_FROM_FILE"
+    materialize_pathspec_file "$PATHSPEC_FROM_FILE"
+    if [ "$MATERIALIZED_PATHSPEC_FILE" != "$_original_psfile" ]; then
+        rewrite_forward_pathspec_file "$_original_psfile" "$MATERIALIZED_PATHSPEC_FILE"
+    fi
+    if pathspec_file_has_positive "$MATERIALIZED_PATHSPEC_FILE"; then
+        PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+    fi
+fi
 
 if [ "$PATHSPEC_COUNT" -eq 0 ] && [ "$ALLOW_ALL_STAGED" -ne 1 ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
     echo "🚫 Refusing implicit whole-index commit in shared repo" >&2
