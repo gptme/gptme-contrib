@@ -54,6 +54,10 @@ gptme-sessions show a1b2 --json
 gptme-sessions query --model opus --since 7d
 gptme-sessions query --run-type autonomous --outcome productive --json
 
+# Structured export (JSON or CSV) — backups, audit trails, data portability
+gptme-sessions export --format json --since 7d
+gptme-sessions export --format csv --category code --model opus -o sessions.csv
+
 # --since accepts sub-day windows and natural phrasing (units: s, m, h, d, w).
 # Sub-day windows filter precisely (no rounding up to a whole day).
 gptme-sessions query --since 2h               # last 2 hours

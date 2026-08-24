@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 import json
+from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -159,6 +162,121 @@ class TestQueryCommand:
         data = json.loads(out)
         assert len(data) == 1
         assert data[0]["outcome"] == "productive"
+
+
+# -- export ------------------------------------------------------------------
+
+
+class TestExportCommand:
+    def test_export_json_is_valid_array(self, tmp_path: Path):
+        """export --format json emits a JSON array of records."""
+        _seed_store(tmp_path)
+        rc, out = _invoke(["export", "--format", "json"], tmp_path)
+        assert rc == 0
+        data = json.loads(out)
+        assert isinstance(data, list)
+        assert len(data) == 5
+        assert {row["session_id"] for row in data}
+
+    def test_export_json_since_7d(self, tmp_path: Path):
+        """export --format json --since 7d drops records older than the window."""
+        store = _seed_store(tmp_path)
+        old = SessionRecord(
+            harness="claude-code",
+            model="opus",
+            category="code",
+            outcome="productive",
+            timestamp=(datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
+        )
+        store.append(old)
+        rc, out = _invoke(["export", "--format", "json", "--since", "7d"], tmp_path)
+        assert rc == 0
+        data = json.loads(out)
+        ids = {row["session_id"] for row in data}
+        assert old.session_id not in ids
+        assert len(data) == 5
+
+    def test_export_csv_has_record_columns(self, tmp_path: Path):
+        """export --format csv emits a header with the record columns."""
+        _seed_store(tmp_path)
+        rc, out = _invoke(["export", "--format", "csv"], tmp_path)
+        assert rc == 0
+        rows = list(csv.DictReader(StringIO(out)))
+        assert len(rows) == 5
+        header = rows[0].keys()
+        for column in (
+            "session_id",
+            "timestamp",
+            "harness",
+            "model",
+            "model_normalized",
+            "category",
+            "outcome",
+            "duration_seconds",
+            "deliverables",
+        ):
+            assert column in header
+        assert all(row["harness"] == "claude-code" for row in rows)
+
+    def test_export_csv_serializes_nested_fields(self, tmp_path: Path):
+        """CSV cells for list fields stay JSON so structure survives a spreadsheet."""
+        _seed_store(tmp_path, n=1)
+        rc, out = _invoke(["export", "--format", "csv"], tmp_path)
+        assert rc == 0
+        row = next(csv.DictReader(StringIO(out)))
+        deliverables = json.loads(row["deliverables"])
+        assert deliverables == ["abc0000"]
+
+    def test_export_honors_category_and_model_filters(self, tmp_path: Path):
+        """Shared --category/--model filters apply to export."""
+        _seed_store(tmp_path)
+        rc, out = _invoke(
+            ["export", "--format", "json", "--category", "code", "--model", "opus"],
+            tmp_path,
+        )
+        assert rc == 0
+        data = json.loads(out)
+        assert data
+        assert all(row.get("category") == "code" for row in data)
+        assert all(
+            row.get("model_normalized") == "opus" or row.get("model") == "opus" for row in data
+        )
+
+    def test_export_writes_output_file(self, tmp_path: Path):
+        """export -o writes JSON to the given path."""
+        _seed_store(tmp_path)
+        dest = tmp_path / "sessions.json"
+        rc, out = _invoke(["export", "--format", "json", "-o", str(dest)], tmp_path)
+        assert rc == 0
+        assert out == ""
+        data = json.loads(dest.read_text(encoding="utf-8"))
+        assert isinstance(data, list)
+        assert len(data) == 5
+
+    def test_export_empty_store_json(self, tmp_path: Path):
+        """export on an empty store emits an empty JSON array."""
+        SessionStore(sessions_dir=tmp_path)
+        rc, out = _invoke(["export", "--format", "json"], tmp_path)
+        assert rc == 0
+        assert json.loads(out) == []
+
+    def test_export_empty_store_csv_header_only(self, tmp_path: Path):
+        """export --format csv on an empty store still emits the record header."""
+        SessionStore(sessions_dir=tmp_path)
+        rc, out = _invoke(["export", "--format", "csv"], tmp_path)
+        assert rc == 0
+        reader = csv.DictReader(StringIO(out))
+        assert reader.fieldnames is not None
+        assert "session_id" in reader.fieldnames
+        assert "category" in reader.fieldnames
+        assert list(reader) == []
+
+    def test_export_rejects_unknown_format(self, tmp_path: Path):
+        """export --format xml is rejected by Click."""
+        _seed_store(tmp_path)
+        rc, out = _invoke(["export", "--format", "xml"], tmp_path)
+        assert rc != 0
+        assert "invalid choice" in out.lower() or "xml" in out.lower()
 
 
 # -- show --------------------------------------------------------------------

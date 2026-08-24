@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import math
@@ -10,7 +11,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TextIO, cast
 
 import click
 
@@ -662,11 +663,11 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
                 click.echo("\nTip: Run 'gptme-sessions sync' to keep the store up to date.")
 
 
-# -- Shared filter options for query/stats -----------------------------------
+# -- Shared filter options for query/stats/export ----------------------------
 
 
-def _filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
-    """Decorator adding common filter options to a command."""
+def _query_filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
+    """Decorator adding shared query filters (no output format)."""
     for option in reversed(
         [
             click.option("--model", default=None, help="Filter by model (e.g. opus, sonnet)"),
@@ -682,11 +683,16 @@ def _filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
                 default=None,
                 help="Filter by recency (e.g. 90s, 30m, 2h, 7d, 2w, '2 hours ago', or 'all')",
             ),
-            click.option("--json", "as_json", is_flag=True, help="Output as JSON"),
         ]
     ):
         func = option(func)
     return func
+
+
+def _filter_options(func):  # type: ignore[no-untyped-def,unused-ignore]
+    """Decorator adding common filter options including JSON output."""
+    func = click.option("--json", "as_json", is_flag=True, help="Output as JSON")(func)
+    return _query_filter_options(func)
 
 
 # -- query -------------------------------------------------------------------
@@ -758,6 +764,117 @@ def query(
                 f"{cat:14s}  {dur}  {proj}"
             )
         click.echo(f"\n{len(records)} records")
+
+
+# -- export ------------------------------------------------------------------
+
+
+def _export_record_dict(record: SessionRecord) -> dict[str, Any]:
+    """Serialize a record for export, including the computed model alias."""
+    row = record.to_dict()
+    row["model_normalized"] = record.model_normalized
+    return row
+
+
+def _csv_cell(value: object) -> str:
+    """Render a record field as a CSV cell.
+
+    Nested lists/dicts stay JSON so a spreadsheet round-trip keeps structure.
+    ``None`` becomes empty (not the string ``"None"``).
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
+def _csv_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    """Stable CSV header: dataclass field order + model_normalized, then extras."""
+    names = [name for name in SessionRecord.__dataclass_fields__ if not name.startswith("_")]
+    if "model" in names:
+        names.insert(names.index("model") + 1, "model_normalized")
+    else:
+        names.append("model_normalized")
+    extras = sorted({key for row in rows for key in row} - set(names))
+    return names + extras
+
+
+def _write_export(records: list[SessionRecord], fmt: str, dest: TextIO) -> None:
+    """Write session records to *dest* as JSON or CSV."""
+    rows = [_export_record_dict(record) for record in records]
+    if fmt == "json":
+        dest.write(json.dumps(rows, indent=2) + "\n")
+        return
+    if fmt == "csv":
+        fieldnames = _csv_fieldnames(rows)
+        writer = csv.DictWriter(
+            dest,
+            fieldnames=fieldnames,
+            extrasaction="ignore",
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
+        return
+    raise ValueError(f"unsupported export format: {fmt}")
+
+
+@cli.command()
+@_query_filter_options
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["json", "csv"], case_sensitive=False),
+    default="json",
+    show_default=True,
+    help="Export format",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.File("w", encoding="utf-8"),
+    default="-",
+    help="Output path (default: stdout)",
+)
+@click.pass_context
+def export(
+    ctx: click.Context,
+    model: str | None,
+    run_type: str | None,
+    category: str | None,
+    harness: str | None,
+    outcome: str | None,
+    project: str | None,
+    since: str | None,
+    fmt: str,
+    output: TextIO,
+) -> None:
+    """Export session records as JSON or CSV.
+
+    Structured export for backups, audit trails, and data-portability requests.
+    Defaults to all records; pass --since 7d (and the shared --category /
+    --model filters) to narrow the set.
+
+    \b
+        gptme sessions export --format json --since 7d
+        gptme sessions export --format csv --category code --model opus
+        gptme sessions export --format json -o sessions.json
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.query(
+        model=model,
+        run_type=run_type,
+        category=category,
+        harness=harness,
+        outcome=outcome,
+        since_days=_parse_since(since),
+        project=project,
+    )
+    _write_export(records, fmt.lower(), output)
 
 
 # -- show --------------------------------------------------------------------
