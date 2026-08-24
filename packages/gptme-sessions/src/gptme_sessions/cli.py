@@ -788,8 +788,9 @@ def _csv_cell(value: object) -> str:
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    # OWASP's trigger set includes these controls and full-width variants, but not space.
     if isinstance(value, str) and value.startswith(
-        ("=", "+", "-", "@", "\t", "\r", "\n", " ", "＝", "＋", "－", "＠")
+        ("=", "+", "-", "@", "\t", "\r", "\n", "＝", "＋", "－", "＠")
     ):
         return "'" + value
     return str(value)
@@ -819,6 +820,7 @@ def _write_export(records: list[SessionRecord], fmt: str, dest: TextIO) -> None:
             fieldnames=fieldnames,
             extrasaction="ignore",
             lineterminator="\n",
+            quoting=csv.QUOTE_ALL,
         )
         writer.writeheader()
         for row in rows:

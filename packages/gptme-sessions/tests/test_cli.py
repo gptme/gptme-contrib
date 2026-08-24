@@ -229,7 +229,7 @@ class TestExportCommand:
 
     @pytest.mark.parametrize(
         "prefix",
-        ["=", "+", "-", "@", "\t", "\r", "\n", " ", "＝", "＋", "－", "＠"],
+        ["=", "+", "-", "@", "\t", "\r", "\n", "＝", "＋", "－", "＠"],
     )
     def test_export_csv_neutralizes_spreadsheet_formulas(self, tmp_path: Path, prefix: str) -> None:
         """String cells cannot become formulas when opened in a spreadsheet."""
@@ -245,8 +245,25 @@ class TestExportCommand:
         rc, out = _invoke(["export", "--format", "csv"], tmp_path)
 
         assert rc == 0
-        row = next(csv.DictReader(StringIO(out)))
+        row = next(csv.DictReader(StringIO(out, newline="")))
         assert row["project"] == f"'{prefix}1+1"
+
+    def test_export_csv_preserves_leading_space(self, tmp_path: Path) -> None:
+        """A normal leading space is data, not a spreadsheet formula trigger."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                harness="claude-code",
+                outcome="productive",
+                project=" myproject",
+            )
+        )
+
+        rc, out = _invoke(["export", "--format", "csv"], tmp_path)
+
+        assert rc == 0
+        row = next(csv.DictReader(StringIO(out, newline="")))
+        assert row["project"] == " myproject"
 
     def test_export_honors_category_and_model_filters(self, tmp_path: Path):
         """Shared --category/--model filters apply to export."""
