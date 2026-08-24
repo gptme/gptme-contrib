@@ -57,6 +57,17 @@ DEFAULT_SESSION_ENV_VARS: tuple[str, ...] = (
 #: How far up the process tree :func:`detect_harness` will walk.
 _MAX_PROC_WALK = 8
 
+#: Worse status wins. A missing slice must not be masked by a stale global
+#: count the way a missing slice used to be masked by a healthy one.
+_STATUS_RANK = {"ok": 0, "stale": 1, "missing": 2}
+
+
+def _worse_status(current: str, candidate: str) -> str:
+    """Return the more severe of two health statuses."""
+    if _STATUS_RANK.get(candidate, 0) > _STATUS_RANK.get(current, 0):
+        return candidate
+    return current
+
 
 def detect_harness() -> str:
     """Best-effort identification of the agent harness that invoked us.
@@ -391,10 +402,9 @@ def assess_index_health(
         health.slices[name] = SliceHealth(
             name=name, indexed=indexed, on_disk=on_disk, status=slice_status
         )
-        # A dead slice must not be masked by a healthy global count -- that
-        # masking is precisely the rot this function exists to surface.
-        if slice_status != "ok" and health.status == "ok":
-            health.status = slice_status
+        # A dead slice must not be masked by a healthier global status --
+        # missing-while-stale is the same rot as missing-while-ok.
+        health.status = _worse_status(health.status, slice_status)
 
     return health
 

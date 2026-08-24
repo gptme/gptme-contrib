@@ -306,6 +306,34 @@ def test_health_skips_completeness_check_without_disk_count():
     assert health.delta is None
 
 
+def test_missing_slice_dominates_stale_global():
+    """A vanished document type is worse than mere age — don't report stale."""
+    health = assess_index_health(
+        built_at=NOW - timedelta(hours=5),
+        indexed_count=100,
+        slices={"task": (0, 10)},
+        max_age_hours=2.0,
+        now=NOW,
+    )
+    assert health.slices["task"].status == "missing"
+    assert health.status == "missing"
+    assert any("empty" in r for r in health.reasons)
+    assert any("age" in r for r in health.reasons)
+
+
+def test_missing_slice_dominates_even_after_a_stale_slice():
+    health = assess_index_health(
+        built_at=NOW,
+        indexed_count=100,
+        slices={"journal": (100, 200), "task": (0, 10)},
+        slice_delta_tolerance=25,
+        now=NOW,
+    )
+    assert health.slices["journal"].status == "stale"
+    assert health.slices["task"].status == "missing"
+    assert health.status == "missing"
+
+
 def test_empty_slice_is_flagged_even_when_index_looks_healthy():
     """The rot that matters: one document type silently gone from a big index."""
     health = assess_index_health(
