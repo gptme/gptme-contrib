@@ -37,6 +37,42 @@ SKIP_NEXT_ARG=0
 SKIP_NEXT_OPTIONAL_ARG=0
 PATHSPEC_FROM_FILE_NEXT=0
 FORWARD_ARGS=()
+PATHSPEC_STDIN_TMP=""
+MATERIALIZED_PATHSPEC_FILE=""
+
+# Invoked via trap; shellcheck cannot see the indirect call.
+# shellcheck disable=SC2317
+cleanup_pathspec_stdin_tmp() {
+    if [ -n "${PATHSPEC_STDIN_TMP}" ]; then
+        rm -f "${PATHSPEC_STDIN_TMP}"
+    fi
+}
+trap cleanup_pathspec_stdin_tmp EXIT
+
+# Copy stdin to a seekable temp file so we can both validate contents and
+# rewrite --pathspec-from-file=- for git commit (stdin cannot be rewound).
+# TTY stdin is treated as empty (/dev/null) so we never hang waiting for input.
+#
+# Writes the result to MATERIALIZED_PATHSPEC_FILE — must NOT use command
+# substitution, or PATHSPEC_STDIN_TMP (and the EXIT trap) would be lost
+# in the subshell.
+materialize_pathspec_file() {
+    local psfile="$1"
+    MATERIALIZED_PATHSPEC_FILE="$psfile"
+    if [ "$psfile" != "-" ]; then
+        return 0
+    fi
+    if [ -t 0 ]; then
+        MATERIALIZED_PATHSPEC_FILE="/dev/null"
+        return 0
+    fi
+    PATHSPEC_STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/git-safe-commit-pathspec.XXXXXX")" || {
+        echo "error: could not create temp file for --pathspec-from-file=-" >&2
+        exit 1
+    }
+    cat > "$PATHSPEC_STDIN_TMP"
+    MATERIALIZED_PATHSPEC_FILE="$PATHSPEC_STDIN_TMP"
+}
 
 # Returns 0 (true) if the pathspec is exclusion-only (e.g., :(exclude)foo, :!foo, :^foo).
 # Exclusion-only pathspecs don't positively select any files, so they must not be
@@ -75,12 +111,11 @@ is_exclusion_only_pathspec() {
 # lines is treated as "no explicit positive pathspecs" for the whole-index guard.
 pathspec_file_has_positive() {
     local psfile="$1"
-    # /dev/null and empty string explicitly mean "no pathspecs"
+    # /dev/null, empty string, and unresolved stdin ('-') mean "no pathspecs".
+    # Callers should materialize '-' first; this is a safety net if they don't.
     case "$psfile" in
-        /dev/null|'') return 1 ;;
+        /dev/null|''|-) return 1 ;;
     esac
-    # stdin ('-') can't be pre-read; treat it conservatively as having positive entries
-    [ "$psfile" = "-" ] && return 0
     [ -f "$psfile" ] || return 1
     local line
     while IFS= read -r line || [ -n "$line" ]; do
@@ -113,6 +148,8 @@ for arg in "$@"; do
     # --pathspec-from-file <file>: read the file to check for positive pathspecs
     if [ "$PATHSPEC_FROM_FILE_NEXT" -eq 1 ]; then
         PATHSPEC_FROM_FILE_NEXT=0
+        materialize_pathspec_file "$arg"
+        arg="$MATERIALIZED_PATHSPEC_FILE"
         FORWARD_ARGS+=("$arg")
         if pathspec_file_has_positive "$arg"; then
             PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
@@ -163,7 +200,11 @@ for arg in "$@"; do
             ;;
         --pathspec-from-file=*)
             _psfile="${arg#--pathspec-from-file=}"
-            if pathspec_file_has_positive "$_psfile"; then
+            materialize_pathspec_file "$_psfile"
+            if [ "$MATERIALIZED_PATHSPEC_FILE" != "$_psfile" ]; then
+                FORWARD_ARGS[-1]="--pathspec-from-file=${MATERIALIZED_PATHSPEC_FILE}"
+            fi
+            if pathspec_file_has_positive "$MATERIALIZED_PATHSPEC_FILE"; then
                 PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
             fi
             ;;
