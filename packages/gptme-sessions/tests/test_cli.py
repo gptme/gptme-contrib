@@ -227,6 +227,24 @@ class TestExportCommand:
         deliverables = json.loads(row["deliverables"])
         assert deliverables == ["abc0000"]
 
+    @pytest.mark.parametrize("prefix", ["=", "+", "-", "@"])
+    def test_export_csv_neutralizes_spreadsheet_formulas(self, tmp_path: Path, prefix: str) -> None:
+        """String cells cannot become formulas when opened in a spreadsheet."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                harness="claude-code",
+                outcome="productive",
+                project=f"{prefix}1+1",
+            )
+        )
+
+        rc, out = _invoke(["export", "--format", "csv"], tmp_path)
+
+        assert rc == 0
+        row = next(csv.DictReader(StringIO(out)))
+        assert row["project"] == f"'{prefix}1+1"
+
     def test_export_honors_category_and_model_filters(self, tmp_path: Path):
         """Shared --category/--model filters apply to export."""
         _seed_store(tmp_path)
