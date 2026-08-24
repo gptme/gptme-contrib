@@ -102,6 +102,16 @@ def detect_session_id(env_vars: Sequence[str] = DEFAULT_SESSION_ENV_VARS) -> str
     return "unknown"
 
 
+def _as_score(value: Any) -> float:
+    """Coerce a hit score to float; unusable values become 0.0 rather than raise."""
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def log_injection(
     log_file: Path,
     query: str,
@@ -144,11 +154,11 @@ def log_injection(
         "query_len": len(query),
         "num_hits": len(hits),
         "num_injected": injected,
-        "top_score": float(hits[0].get(score_key, 0.0)) if hits else 0.0,
+        "top_score": _as_score(hits[0].get(score_key)) if hits else 0.0,
         "hits": [
             {
                 **{f: hit[f] for f in hit_fields if hit.get(f)},
-                "score": float(hit.get(score_key, 0.0)),
+                "score": _as_score(hit.get(score_key)),
             }
             for hit in hits[:injected]
         ],
@@ -211,12 +221,18 @@ def summarize_injections(log_file: Path) -> InjectionStats:
             if not isinstance(rec, dict):
                 stats.malformed += 1
                 continue
+            try:
+                num_hits = int(rec.get("num_hits", 0) or 0)
+                top_score = float(rec.get("top_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                # Same contract as a partial trailing line: skip, don't raise.
+                stats.malformed += 1
+                continue
             stats.total += 1
-            num_hits = int(rec.get("num_hits", 0) or 0)
             sum_hits += num_hits
             if num_hits > 0:
                 stats.nonzero += 1
-                sum_top += float(rec.get("top_score", 0.0) or 0.0)
+                sum_top += top_score
             sessions.add(str(rec.get("session_id", "unknown")))
             harness = str(rec.get("harness", "unknown"))
             stats.by_harness[harness] = stats.by_harness.get(harness, 0) + 1
@@ -321,6 +337,8 @@ def assess_index_health(
     ``stale`` or ``missing``, with ``reasons`` naming every failed check.
     """
     now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     if built_at is None:
         return IndexHealth(status="missing", reasons=["no index"])
 

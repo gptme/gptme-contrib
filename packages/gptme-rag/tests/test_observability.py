@@ -1,6 +1,7 @@
 """Tests for injection logging and index-health reporting."""
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from gptme_rag.observability import (
     IndexHealth,
     assess_index_health,
+    detect_harness,
     detect_session_id,
     log_injection,
     summarize_injections,
@@ -126,6 +128,22 @@ def test_log_injection_honours_custom_score_key(tmp_path):
     assert record["top_score"] == pytest.approx(4.2)
 
 
+def test_log_injection_treats_unusable_scores_as_zero(tmp_path):
+    log = tmp_path / "injections.jsonl"
+
+    record = log_injection(
+        log,
+        "q",
+        [{"id": "d", "similarity": None}, {"id": "e", "similarity": "n/a"}],
+        backend="tfidf",
+        session_id="s",
+        harness="test",
+    )
+
+    assert record["top_score"] == 0.0
+    assert [h["score"] for h in record["hits"]] == [0.0, 0.0]
+
+
 def test_log_injection_never_raises_on_unwritable_path(tmp_path):
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("")
@@ -189,6 +207,22 @@ def test_summarize_ignores_blank_and_non_object_lines(tmp_path):
 
     assert stats.total == 1
     assert stats.malformed == 1
+
+
+def test_summarize_skips_non_numeric_fields(tmp_path):
+    """A bad typed field must not crash the aggregator — same skip contract."""
+    log = tmp_path / "injections.jsonl"
+    log.write_text(
+        '{"num_hits": "nope", "top_score": 0.5}\n'
+        '{"num_hits": 2, "top_score": "bad"}\n'
+        '{"num_hits": 1, "top_score": 0.5}\n'
+    )
+
+    stats = summarize_injections(log)
+
+    assert stats.total == 1
+    assert stats.malformed == 2
+    assert stats.avg_top_score == pytest.approx(0.5)
 
 
 # --- assess_index_health ---------------------------------------------------
@@ -297,6 +331,16 @@ def test_naive_built_at_is_treated_as_utc():
     assert health.age_hours == pytest.approx(0.5)
 
 
+def test_naive_now_is_treated_as_utc():
+    health = assess_index_health(
+        built_at=NOW,
+        indexed_count=10,
+        now=datetime(2026, 8, 24, 13, 0),
+    )
+    assert health.ok
+    assert health.age_hours == pytest.approx(1.0)
+
+
 def test_future_built_at_clamps_age_to_zero():
     health = assess_index_health(built_at=NOW + timedelta(hours=3), indexed_count=10, now=NOW)
     assert health.age_hours == 0.0
@@ -326,3 +370,74 @@ def test_to_dict_is_json_serializable_and_includes_slices():
 
 def test_index_health_dataclass_defaults_are_conservative():
     assert IndexHealth(status="missing").ok is False
+
+
+# --- detect_harness --------------------------------------------------------
+
+
+def _patch_proc(monkeypatch, parent_pid: int, tree: dict[int, tuple[str, int | str]]) -> None:
+    """Install a fake /proc tree: pid -> (comm, ppid-or-sentinel)."""
+    monkeypatch.setattr(os, "getppid", lambda: parent_pid)
+
+    class FakePath:
+        def __init__(self, path: str) -> None:
+            self._path = str(path)
+
+        def __truediv__(self, other: object) -> "FakePath":
+            return FakePath(self._path.rstrip("/") + "/" + str(other).lstrip("/"))
+
+        def read_text(self, encoding: str | None = None) -> str:
+            parts = self._path.strip("/").split("/")
+            if len(parts) != 3 or parts[0] != "proc":
+                raise OSError(self._path)
+            try:
+                pid = int(parts[1])
+            except ValueError as exc:
+                raise OSError(self._path) from exc
+            if pid not in tree:
+                raise OSError("no such pid")
+            comm, ppid = tree[pid]
+            kind = parts[2]
+            if kind == "comm":
+                if comm == "OSERROR":
+                    raise OSError("comm vanished")
+                return f"{comm}\n"
+            if kind == "status":
+                if ppid == "OSERROR":
+                    raise OSError("status vanished")
+                if ppid == "MALFORMED":
+                    return "PPid:\n"
+                return f"Name:\t{comm}\nPPid:\t{ppid}\n"
+            raise OSError(kind)
+
+    monkeypatch.setattr("gptme_rag.observability.Path", FakePath)
+
+
+def test_detect_harness_returns_matching_ancestor(monkeypatch):
+    _patch_proc(monkeypatch, 100, {100: ("python", 50), 50: ("gptme", 1)})
+    assert detect_harness() == "gptme"
+
+
+def test_detect_harness_maps_claude_comm(monkeypatch):
+    _patch_proc(monkeypatch, 7, {7: ("claude", 1)})
+    assert detect_harness() == "claude-code"
+
+
+def test_detect_harness_unknown_when_nothing_matches(monkeypatch):
+    _patch_proc(monkeypatch, 3, {3: ("bash", 1)})
+    assert detect_harness() == "unknown"
+
+
+def test_detect_harness_breaks_on_malformed_ppid(monkeypatch):
+    _patch_proc(monkeypatch, 9, {9: ("python", "MALFORMED")})
+    assert detect_harness() == "unknown"
+
+
+def test_detect_harness_breaks_on_unreadable_proc(monkeypatch):
+    _patch_proc(monkeypatch, 4, {4: ("OSERROR", 1)})
+    assert detect_harness() == "unknown"
+
+
+def test_detect_harness_breaks_on_pid_cycle(monkeypatch):
+    _patch_proc(monkeypatch, 11, {11: ("python", 11)})
+    assert detect_harness() == "unknown"
