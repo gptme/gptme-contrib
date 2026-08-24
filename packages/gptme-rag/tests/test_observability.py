@@ -171,6 +171,41 @@ def test_log_injection_never_raises_on_unwritable_path(tmp_path):
     assert log_injection(blocker / "x.jsonl", "q", [], backend="tfidf") is None
 
 
+def test_log_injection_never_raises_on_unserializable_hit(tmp_path):
+    log = tmp_path / "injections.jsonl"
+
+    assert (
+        log_injection(
+            log,
+            "q",
+            [{"id": object(), "similarity": 0.5}],
+            backend="tfidf",
+            session_id="s",
+            harness="test",
+        )
+        is None
+    )
+    assert not log.exists()
+
+
+def test_log_injection_clamps_negative_max_injected(tmp_path):
+    log = tmp_path / "injections.jsonl"
+
+    record = log_injection(
+        log,
+        "q",
+        _hits(0.9, 0.8, 0.7),
+        backend="tfidf",
+        max_injected=-1,
+        session_id="s",
+        harness="test",
+    )
+
+    assert record["num_hits"] == 3
+    assert record["num_injected"] == 0
+    assert record["hits"] == []
+
+
 def test_detect_session_id_prefers_first_set_var(monkeypatch):
     monkeypatch.delenv("A", raising=False)
     monkeypatch.setenv("B", "session-b")

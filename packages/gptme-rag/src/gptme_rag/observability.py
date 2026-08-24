@@ -161,7 +161,7 @@ def log_injection(
     Returns the record written, or ``None`` if the write failed. Logging is
     best-effort by design: a full disk must never break injection.
     """
-    injected = len(hits) if max_injected is None else min(len(hits), max_injected)
+    injected = len(hits) if max_injected is None else max(0, min(len(hits), max_injected))
     record: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "session_id": session_id or detect_session_id(),
@@ -184,10 +184,12 @@ def log_injection(
         record.update(extra)
 
     try:
+        payload = json.dumps(record) + "\n"
         log_file.parent.mkdir(parents=True, exist_ok=True)
         with open(log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-    except OSError as exc:
+            f.write(payload)
+    except (OSError, TypeError, ValueError) as exc:
+        # Best-effort: a full disk or an unserializable hit must never break injection.
         logger.debug("injection log write failed (%s): %s", log_file, exc)
         return None
     return record
