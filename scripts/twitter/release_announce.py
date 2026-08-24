@@ -12,6 +12,19 @@ Flow (idempotent, state-ledgered):
 
 Designed to run from a timer: exits 0 quickly when there is nothing new.
 
+State file schema (one record per ``"<repo>#<tag>"`` key):
+  ``org_tweet_id``          id of the org announcement (None = posted, id lost)
+  ``link_reply_id``         id of the release-URL reply
+  ``bob_quote_id``          id of Bob's quote-tweet, or None when skipped
+  ``bob_quote_skip_reason`` why the quote was skipped (only when skipped)
+  ``announced_at``          ISO timestamp; presence means "do not re-announce"
+  ``*_pending_at``          in-flight marker; blocks blind retry until cleared
+
+Bob can only quote a post he authored or is mentioned in, so cross-account
+announcements (Bob quoting @gptmeorg / @ActivityWatchIt) are rejected by X.
+That is permanent for the lane, so the quote step records the skip and the
+run still exits 0 rather than looping on the pending marker.
+
 Usage:
     release_announce.py                       # announce latest stable, if new
     release_announce.py --tag v0.33.0         # announce a specific tag
@@ -77,6 +90,19 @@ _RELEASE_URL_TRAIL_RE = re.compile(
 )
 
 MAX_TWEET = 270  # headroom under 280
+
+# X rejects a quote-tweet when the quoting account is neither the author of nor
+# mentioned in the quoted post. Every cross-account announcement hits this, so
+# it is a permanent property of the lane rather than a transient failure.
+_UNQUOTABLE_RE = re.compile(
+    r"you can only reply to or quote posts where you are mentioned or are the author",
+    re.IGNORECASE,
+)
+
+
+def _is_unquotable(output: str) -> bool:
+    """True when twitter.py failed because Bob may not quote that post."""
+    return bool(_UNQUOTABLE_RE.search(output))
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -197,8 +223,12 @@ def compose_quote(tag: str, repo: str) -> str:
     )
 
 
-def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None]:
-    """Run twitter.py post ... and return success plus the created tweet id."""
+def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None, str]:
+    """Run twitter.py post ... and return success, the tweet id, and the output.
+
+    The combined stdout+stderr is returned so callers can distinguish a
+    permanent API rejection (see ``_is_unquotable``) from a transient failure.
+    """
     cmd = [sys.executable, str(TWITTER_CLI)]
     env = os.environ.copy()
     for var in _AUTOMATION_UNSAFE_OAUTH_VARS:
@@ -226,7 +256,7 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
     out = r.stdout + r.stderr
     if r.returncode != 0:
         print(f"twitter.py failed ({r.returncode}):\n{out}", file=sys.stderr)
-        return False, None
+        return False, None, out
     # Strip ANSI so a Rich-colored "Tweet ID: N" still matches. Line-anchored
     # last match wins: tweet text containing "Tweet ID: 123" must not steal
     # the created id (the CLI prints the id on its own line after the body).
@@ -238,8 +268,8 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
             "recording the step as posted and refusing to retry",
             file=sys.stderr,
         )
-        return True, None
-    return True, ids[-1]
+        return True, None, out
+    return True, ids[-1], out
 
 
 def _pending_key(step: str) -> str:
@@ -317,7 +347,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     if "org_tweet_id" not in record:
         if not _begin_post(state, key, record, "org_tweet_id"):
             return 1
-        posted, org_id = _post(["post", announcement], account=args.org_account)
+        posted, org_id, _ = _post(["post", announcement], account=args.org_account)
         if not posted:
             # Keep the pending marker so a later run refuses blind retry.
             # Use --force to reset if certain no tweet was posted.
@@ -344,7 +374,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     if "link_reply_id" not in record:
         if not _begin_post(state, key, record, "link_reply_id"):
             return 1
-        posted, link_reply_id = _post(
+        posted, link_reply_id, _ = _post(
             ["post", link_reply, "--reply-to", org_id], account=args.org_account
         )
         if not posted:
@@ -356,8 +386,19 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     if not args.skip_quote and "bob_quote_id" not in record:
         if not _begin_post(state, key, record, "bob_quote_id"):
             return 1
-        posted, quote_id = _post(["post", quote_text, "--quote", org_id])
-        if not posted:
+        posted, quote_id, out = _post(["post", quote_text, "--quote", org_id])
+        if not posted and _is_unquotable(out):
+            # Permanent for this lane, not an ambiguous side effect: no tweet
+            # was created, and retrying will fail identically forever. Record
+            # the skip so the pending marker clears and later runs exit 0.
+            reason = (
+                "X API rejects the quote: Bob is neither the author of nor "
+                f"mentioned in the @{args.org_account} announcement"
+            )
+            print(f"{key}: bob_quote skipped — {reason}", file=sys.stderr)
+            record["bob_quote_skip_reason"] = reason
+            quote_id = None
+        elif not posted:
             # Keep the pending marker so a later run refuses blind retry.
             return 1
         _finish_post(state, record, "bob_quote_id", quote_id)
@@ -368,7 +409,10 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
         record.pop(_pending_key("bob_quote_id"), None)
     record["announced_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
-    print(f"announced {key}: org={org_id} quote={quote_id}")
+    quote_note = quote_id
+    if quote_id is None and record.get("bob_quote_skip_reason"):
+        quote_note = "skipped"
+    print(f"announced {key}: org={org_id} quote={quote_note}")
     return 0
 
 

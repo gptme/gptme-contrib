@@ -100,7 +100,7 @@ def test_post_places_double_dash_before_tweet_text(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "Tweet ID: 42", "")
 
     monkeypatch.setattr(ra, "_run", fake_run)
-    ok, tid = ra._post(["post", "-f, --force option-like text"])
+    ok, tid, _ = ra._post(["post", "-f, --force option-like text"])
     assert ok
     assert tid == "42"
     cmd = captured[0]
@@ -164,7 +164,7 @@ def test_post_ignores_tweet_id_substring_in_body(monkeypatch):
         )
 
     monkeypatch.setattr(ra, "_run", fake_run)
-    assert ra._post(["post", "hello"]) == (True, "42")
+    assert ra._post(["post", "hello"])[:2] == (True, "42")
 
 
 def test_post_distinguishes_failure_from_success_without_id(monkeypatch):
@@ -173,14 +173,14 @@ def test_post_distinguishes_failure_from_success_without_id(monkeypatch):
         "_run",
         lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, "", "failed"),
     )
-    assert ra._post(["post", "hello"]) == (False, None)
+    assert ra._post(["post", "hello"])[:2] == (False, None)
 
     monkeypatch.setattr(
         ra,
         "_run",
         lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, "posted", ""),
     )
-    assert ra._post(["post", "hello"]) == (True, None)
+    assert ra._post(["post", "hello"])[:2] == (True, None)
 
 
 def test_main_skips_prerelease(monkeypatch, capsys, tmp_path):
@@ -216,7 +216,7 @@ def test_main_posts_org_reply_and_quote(monkeypatch, tmp_path):
 
     def fake_post(args, account=None):
         calls.append((account, args))
-        return True, str(100 + len(calls))
+        return True, str(100 + len(calls)), ""
 
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -253,7 +253,7 @@ def test_main_resumes_after_link_reply_failure(monkeypatch, tmp_path):
         },
     )
     calls: list[tuple] = []
-    results = iter([(True, "101"), (False, None)])
+    results = iter([(True, "101", ""), (False, None, "boom")])
 
     def fake_post(args, account=None):
         calls.append((account, args))
@@ -289,7 +289,7 @@ def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
         },
     )
     calls: list[tuple] = []
-    results = iter([(True, "101"), (True, "102"), (False, None)])
+    results = iter([(True, "101", ""), (True, "102", ""), (False, None, "boom")])
 
     def fake_post(args, account=None):
         calls.append((account, args))
@@ -327,7 +327,7 @@ def test_main_adds_quote_after_skip_quote_run(monkeypatch, tmp_path):
 
     def fake_post(args, account=None):
         calls.append((account, args))
-        return True, str(100 + len(calls))
+        return True, str(100 + len(calls)), ""
 
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py", "--skip-quote"])
@@ -360,7 +360,7 @@ def test_skip_quote_clears_stale_pending_marker(monkeypatch, tmp_path):
     )
     calls: list[tuple] = []
     # Run 1: org + reply succeed, quote fails → leaves bob_quote_pending_at
-    results1 = iter([(True, "101"), (True, "102"), (False, None)])
+    results1 = iter([(True, "101", ""), (True, "102", ""), (False, None, "boom")])
 
     def fake_post1(args, account=None):
         calls.append((account, args))
@@ -372,7 +372,7 @@ def test_skip_quote_clears_stale_pending_marker(monkeypatch, tmp_path):
     assert "bob_quote_pending_at" in ra.load_state()["gptme/gptme#v0.33.0"]
 
     # Run 2: --skip-quote → must clear bob_quote_pending_at and set announced_at
-    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "999"))
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "999", ""))
     monkeypatch.setattr(sys, "argv", ["release_announce.py", "--skip-quote"])
     assert ra.main() == 0
     state = ra.load_state()["gptme/gptme#v0.33.0"]
@@ -382,7 +382,7 @@ def test_skip_quote_clears_stale_pending_marker(monkeypatch, tmp_path):
     # Run 3: normal run → must be able to post the quote (not stuck at 1)
     def fake_post3(args, account=None):
         calls.append((account, args))
-        return True, "103"
+        return True, "103", ""
 
     monkeypatch.setattr(ra, "_post", fake_post3)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -411,7 +411,7 @@ def test_skip_quote_early_exit_clears_stale_pending_marker(monkeypatch, tmp_path
     )
 
     # Run 1: --skip-quote succeeds → sets announced_at
-    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "101"))
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "101", ""))
     monkeypatch.setattr(sys, "argv", ["release_announce.py", "--skip-quote"])
     assert ra.main() == 0
     state = ra.load_state()["gptme/gptme#v0.33.0"]
@@ -419,10 +419,10 @@ def test_skip_quote_early_exit_clears_stale_pending_marker(monkeypatch, tmp_path
     assert "bob_quote_id" not in state
 
     # Run 2: normal run, quote fails → leaves bob_quote_pending_at
-    results2 = iter([(True, "102")])  # org reply already recorded; only quote attempted
+    results2 = iter([(True, "102", "")])  # org reply recorded; only quote attempted
 
     def fake_post2(args, account=None):
-        return next(results2) if "--quote" not in args else (False, None)
+        return next(results2) if "--quote" not in args else (False, None, "boom")
 
     monkeypatch.setattr(ra, "_post", fake_post2)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -441,7 +441,7 @@ def test_skip_quote_early_exit_clears_stale_pending_marker(monkeypatch, tmp_path
     assert "bob_quote_pending_at" not in state
 
     # Run 4: normal run → must succeed (not stuck refusing retry)
-    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "103"))
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "103", ""))
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
     assert ra.main() == 0
     assert ra.load_state()["gptme/gptme#v0.33.0"]["bob_quote_id"] == "103"
@@ -460,7 +460,7 @@ def test_post_default_account_clears_environment_profile(monkeypatch):
 
     monkeypatch.setattr(ra, "_run", fake_run)
 
-    assert ra._post(["post", "hello"]) == (True, "123")
+    assert ra._post(["post", "hello"])[:2] == (True, "123")
     assert "--headless" in seen["cmd"]
     assert seen["env"]["TWITTER_ACCOUNT"] == ""
     stripped = {*ra._USER_CONTEXT_VARS, *ra._AUTOMATION_UNSAFE_OAUTH_VARS}
@@ -480,7 +480,7 @@ def test_post_named_account_keeps_inherited_environment(monkeypatch):
 
     monkeypatch.setattr(ra, "_run", fake_run)
 
-    assert ra._post(["post", "hello"], account="gptmeorg") == (True, "123")
+    assert ra._post(["post", "hello"], account="gptmeorg")[:2] == (True, "123")
     assert seen["cmd"][2:4] == ["--account", "gptmeorg"]
     assert "--headless" in seen["cmd"]
     assert seen["env"]["TWITTER_ACCOUNT"] == "default"
@@ -506,7 +506,7 @@ def test_main_does_not_retry_success_without_tweet_id(monkeypatch, tmp_path):
     def fake_post(args, account=None):
         nonlocal calls
         calls += 1
-        return True, None
+        return True, None, ""
 
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -534,7 +534,7 @@ def test_main_does_not_retry_reply_success_without_tweet_id(monkeypatch, tmp_pat
         },
     )
     calls: list[tuple] = []
-    results = iter([(True, "101"), (True, None), (True, "103")])
+    results = iter([(True, "101", ""), (True, None, ""), (True, "103", "")])
 
     def fake_post(args, account=None):
         calls.append((account, args))
@@ -574,7 +574,7 @@ def test_main_holds_state_lock_while_posting(monkeypatch, tmp_path):
 
     def fake_post(args, account=None):
         events.append("post")
-        return True, str(len(events))
+        return True, str(len(events)), ""
 
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -607,7 +607,7 @@ def test_main_writes_intent_before_each_post(monkeypatch, tmp_path):
         marker = next(expected_markers)
         record = ra.load_state()["gptme/gptme#v0.33.0"]
         assert marker in record
-        return True, str(100 + len(record))
+        return True, str(100 + len(record)), ""
 
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -663,7 +663,7 @@ def test_main_keeps_intent_after_post_failure_prevents_retry(
     def fake_post(args, account=None):
         nonlocal calls
         calls += 1
-        return False, None  # every attempt fails
+        return False, None, ""  # every attempt fails
 
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -705,7 +705,7 @@ def test_main_force_clears_pending_markers(monkeypatch, tmp_path):
 
     def fake_post(args, account=None):
         calls.append((account, args))
-        return True, str(100 + len(calls))
+        return True, str(100 + len(calls)), ""
 
     monkeypatch.setattr(ra, "_post", fake_post)
     monkeypatch.setattr(sys, "argv", ["release_announce.py", "--force"])
@@ -716,3 +716,118 @@ def test_main_force_clears_pending_markers(monkeypatch, tmp_path):
     record = ra.load_state()["gptme/gptme#v0.33.0"]
     assert record["org_tweet_id"] == "101"
     assert "announced_at" in record
+
+
+UNQUOTABLE_ERR = (
+    "twitter.py failed (1):\n"
+    "Traceback (most recent call last):\n"
+    "    raise Forbidden(response)\n"
+    "tweepy.errors.Forbidden: 403 Forbidden\n"
+    "You can only reply to or quote posts where you are mentioned or are the author.\n"
+)
+
+
+def test_is_unquotable_matches_the_api_rejection_only():
+    assert ra._is_unquotable(UNQUOTABLE_ERR)
+    assert ra._is_unquotable(UNQUOTABLE_ERR.upper())
+    assert not ra._is_unquotable("429 Too Many Requests")
+    assert not ra._is_unquotable("tweepy.errors.Forbidden: 403 Forbidden\nDuplicate.")
+
+
+def _release_stub(monkeypatch):
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.13.2",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/ActivityWatch/activitywatch/releases/tag/v0.13.2",
+        },
+    )
+
+
+def test_main_skips_cross_account_quote_and_exits_zero(monkeypatch, tmp_path, capsys):
+    """Bob cannot quote an org tweet he is not mentioned in: skip, don't loop."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    _release_stub(monkeypatch)
+    calls: list[tuple] = []
+
+    def fake_post(args, account=None):
+        calls.append((account, args))
+        if "--quote" in args:
+            return False, None, UNQUOTABLE_ERR
+        return True, str(100 + len(calls)), ""
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(
+        sys, "argv", ["release_announce.py", "--repo", "ActivityWatch/activitywatch"]
+    )
+
+    # First run: org tweet + link reply post, quote is rejected but the run succeeds.
+    assert ra.main() == 0
+    record = json.loads(ra.STATE_FILE.read_text())[
+        "ActivityWatch/activitywatch#v0.13.2"
+    ]
+    assert record["org_tweet_id"] == "101"
+    assert record["link_reply_id"] == "102"
+    assert record["bob_quote_id"] is None
+    assert "gptmeorg" in record["bob_quote_skip_reason"]
+    assert "bob_quote_pending_at" not in record
+    assert record["announced_at"]
+    assert len(calls) == 3
+    assert "quote=skipped" in capsys.readouterr().out
+
+    # Second run: already announced, no pending-marker loop, no new posts.
+    assert ra.main() == 0
+    assert len(calls) == 3
+
+
+def test_main_still_refuses_retry_on_transient_quote_failure(monkeypatch, tmp_path):
+    """A non-API-rule quote failure keeps the pending marker (no blind retry)."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    _release_stub(monkeypatch)
+    calls: list[tuple] = []
+
+    def fake_post(args, account=None):
+        calls.append((account, args))
+        if "--quote" in args:
+            return False, None, "twitter.py failed (1):\n429 Too Many Requests\n"
+        return True, str(100 + len(calls)), ""
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(
+        sys, "argv", ["release_announce.py", "--repo", "ActivityWatch/activitywatch"]
+    )
+
+    assert ra.main() == 1
+    record = json.loads(ra.STATE_FILE.read_text())[
+        "ActivityWatch/activitywatch#v0.13.2"
+    ]
+    assert "bob_quote_pending_at" in record
+    assert "bob_quote_id" not in record
+    assert "bob_quote_skip_reason" not in record
+    assert ra.main() == 1
+    assert len(calls) == 3  # no blind retry
+
+
+def test_main_quote_still_succeeds_when_bob_is_mentioned(monkeypatch, tmp_path):
+    """No regression on the gptme lane, where the org tweet mentions Bob."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+        },
+    )
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "777", ""))
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    assert ra.main() == 0
+    record = json.loads(ra.STATE_FILE.read_text())["gptme/gptme#v0.33.0"]
+    assert record["bob_quote_id"] == "777"
+    assert "bob_quote_skip_reason" not in record
