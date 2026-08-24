@@ -18,7 +18,7 @@ jobs:
       - name: Fetch community plugins
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python3 scripts/fetch-community-plugins.py
+        run: python3 scripts/fetch-community-plugins.py --output community_plugins.json
 
       - name: Commit if changed
         env:
