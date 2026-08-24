@@ -523,3 +523,44 @@ def test_detect_harness_breaks_on_unreadable_proc(monkeypatch):
 def test_detect_harness_breaks_on_pid_cycle(monkeypatch):
     _patch_proc(monkeypatch, 11, {11: ("python", 11)})
     assert detect_harness() == "unknown"
+
+
+def test_as_score_handles_overflow(tmp_path):
+    """log_injection must not raise when a hit carries an overflow-scale integer score."""
+    log = tmp_path / "injections.jsonl"
+    record = log_injection(
+        log,
+        "q",
+        [{"id": "x", "similarity": 10**1000}],
+        backend="tfidf",
+        session_id="s",
+        harness="test",
+    )
+    assert record is not None
+    assert record["top_score"] == 0.0
+
+
+def test_summarize_treats_null_session_and_harness_as_unknown(tmp_path):
+    """str(None) must not appear as a bucket label in summarize_injections."""
+    log = tmp_path / "injections.jsonl"
+    import json
+
+    log.write_text(
+        json.dumps(
+            {
+                "query": "q",
+                "backend": "tfidf",
+                "num_hits": 1,
+                "num_injected": 1,
+                "top_score": 0.5,
+                "session_id": None,
+                "harness": None,
+                "hits": [],
+            }
+        )
+        + "\n"
+    )
+    stats = summarize_injections(log)
+    assert "None" not in stats.by_harness
+    assert stats.by_harness.get("unknown", 0) == 1
+    assert stats.unique_sessions == 1

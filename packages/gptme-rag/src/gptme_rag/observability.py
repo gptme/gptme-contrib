@@ -119,7 +119,7 @@ def _as_score(value: Any) -> float:
         return 0.0
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
 
 
@@ -252,8 +252,8 @@ def summarize_injections(log_file: Path) -> InjectionStats:
             if num_hits > 0:
                 stats.nonzero += 1
                 sum_top += top_score
-            sessions.add(str(rec.get("session_id", "unknown")))
-            harness = str(rec.get("harness", "unknown"))
+            sessions.add(str(rec.get("session_id") or "unknown"))
+            harness = str(rec.get("harness") or "unknown")
             stats.by_harness[harness] = stats.by_harness.get(harness, 0) + 1
 
     stats.unique_sessions = len(sessions)
