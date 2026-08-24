@@ -310,10 +310,15 @@ def call_claude_code(
                 # path is preserved when no fallback is available.
                 gptme_response = call_gptme(prompt, timeout=timeout)
                 if gptme_response:
+                    if extract_json_from_response(gptme_response):
+                        logger.warning(
+                            "Claude subscriptions unavailable; gptme fallback produced a summary"
+                        )
+                        return gptme_response
                     logger.warning(
-                        "Claude subscriptions unavailable; gptme fallback produced a summary"
+                        "Claude subscriptions unavailable; gptme fallback response did not "
+                        "contain a valid JSON object; ignoring"
                     )
-                    return gptme_response
                 if saw_empty_response:
                     logger.error(
                         "Fallback slots returned empty responses after %d attempts",

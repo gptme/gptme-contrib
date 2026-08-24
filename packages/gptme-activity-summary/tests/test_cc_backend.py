@@ -210,9 +210,10 @@ def test_call_claude_code_quota_marker_in_stderr(mock_run, mock_sleep, mock_gptm
     assert mock_run.call_count == 1  # primary only; gptme mocked, no extra run
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_quota_is_called_process_error_subtype(mock_run, mock_sleep):
+def test_call_claude_code_quota_is_called_process_error_subtype(mock_run, mock_sleep, mock_gptme):
     """ClaudeQuotaExhaustedError must be catchable as CalledProcessError."""
     from gptme_activity_summary.cc_backend import ClaudeQuotaExhaustedError
 
@@ -224,6 +225,7 @@ def test_call_claude_code_quota_is_called_process_error_subtype(mock_run, mock_s
         assert False, "Should have raised ClaudeQuotaExhaustedError"
     except subprocess.CalledProcessError as e:
         assert isinstance(e, ClaudeQuotaExhaustedError)
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
 @patch.dict(
@@ -597,11 +599,12 @@ def test_call_claude_code_quota_fallback_retries_empty_response(
     mock_sleep.assert_called_once()
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
 def test_call_claude_code_quota_fallback_empty_exhaustion_returns_empty(
-    mock_run, mock_sleep, mock_fallback, tmp_path
+    mock_run, mock_sleep, mock_fallback, mock_gptme, tmp_path
 ):
     """Repeated empty responses retain the main path's graceful-empty contract."""
     fb_cred = tmp_path / ".credentials.json.alice"
@@ -620,13 +623,15 @@ def test_call_claude_code_quota_fallback_empty_exhaustion_returns_empty(
 
     assert mock_fallback.call_count == 2
     mock_sleep.assert_called_once()
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
 def test_call_claude_code_quota_fallback_all_exhausted(
-    mock_run, mock_sleep, mock_fallback, tmp_path
+    mock_run, mock_sleep, mock_fallback, mock_gptme, tmp_path
 ):
     """If all fallback slots are also exhausted, raise ClaudeQuotaExhaustedError."""
     fb_cred = tmp_path / ".credentials.json.erik"
@@ -646,6 +651,7 @@ def test_call_claude_code_quota_fallback_all_exhausted(
     ):
         with pytest.raises(ClaudeQuotaExhaustedError):
             call_claude_code("test prompt")
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
@@ -705,11 +711,12 @@ def test_call_claude_code_quota_fallback_preserves_non_quota_error(
     mock_sleep.assert_called_once_with(5)
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
 def test_call_claude_code_quota_fallback_non_quota_then_quota_raises_quota_error(
-    mock_run, mock_sleep, mock_fallback, tmp_path
+    mock_run, mock_sleep, mock_fallback, mock_gptme, tmp_path
 ):
     """Non-quota error on slot A then quota-exhaustion on slot B → ClaudeQuotaExhaustedError.
 
@@ -739,12 +746,16 @@ def test_call_claude_code_quota_fallback_non_quota_then_quota_raises_quota_error
     ):
         with pytest.raises(ClaudeQuotaExhaustedError):
             call_claude_code("test prompt", max_retries=1)
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_quota_fallback_missing_file_skipped(mock_run, mock_sleep, mock_fallback):
+def test_call_claude_code_quota_fallback_missing_file_skipped(
+    mock_run, mock_sleep, mock_fallback, mock_gptme
+):
     """A fallback cred path that does not exist on disk is silently skipped."""
     import os
 
@@ -767,6 +778,7 @@ def test_call_claude_code_quota_fallback_missing_file_skipped(mock_run, mock_sle
             os.environ["GPTME_CC_FALLBACK_CREDS"] = prev
 
     mock_fallback.assert_not_called()  # missing file never attempted
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
 @patch.dict("os.environ", {}, clear=True)
@@ -814,6 +826,23 @@ def test_call_claude_code_quota_falls_back_to_gptme(mock_run, mock_sleep, mock_g
 
     assert result == '{"ok": "from-gptme"}'
     assert mock_gptme.call_count == 1
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+
+
+@patch.dict("os.environ", {}, clear=True)
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_rejects_non_json_gptme_fallback(mock_run, mock_sleep, mock_gptme):
+    """Plain-text gptme responses must preserve the Claude failure signal."""
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_gptme.return_value = "I cannot provide JSON."
+
+    with pytest.raises(ClaudeQuotaExhaustedError):
+        call_claude_code("test prompt", max_retries=1)
+
     mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
