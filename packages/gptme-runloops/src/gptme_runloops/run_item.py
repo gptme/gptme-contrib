@@ -1812,6 +1812,7 @@ CC_AUTH_FAILURE_MARKERS: tuple[str, ...] = (
     "OAuth session expired",
     "Failed to authenticate",
     "could not be refreshed",
+    "disabled Claude subscription access",
 )
 
 INFRA_FAILURE_CC_RATE_LIMIT = "cc_rate_limit"
