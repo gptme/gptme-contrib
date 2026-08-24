@@ -1,12 +1,5 @@
 """gptme-backoff — retry decorators and utilities built on tenacity."""
 
-from .circuit_breaker import (
-    CircuitBreaker,
-    CircuitBreakerOpen,
-)
-from .circuit_breaker import (
-    State as CircuitBreakerState,
-)
 from .error_classification import (
     DEFAULT_STRATEGY_CONFIGS,
     ErrorClassifier,
@@ -18,10 +11,6 @@ from .error_classification import (
 from .retry import retry_api_call, retry_async, retry_file_op, retry_sync
 
 __all__ = [
-    # Circuit breaker
-    "CircuitBreaker",
-    "CircuitBreakerOpen",
-    "CircuitBreakerState",
     # Retry decorators
     "retry_api_call",
     "retry_async",
