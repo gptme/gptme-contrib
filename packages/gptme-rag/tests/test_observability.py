@@ -88,6 +88,25 @@ def test_log_injection_omits_empty_hit_fields(tmp_path):
     assert "path" not in hit  # absent key must not become a null column
 
 
+def test_log_injection_keeps_falsy_but_present_hit_fields(tmp_path):
+    """0/False are values; only None and empty string are omitted."""
+    log = tmp_path / "injections.jsonl"
+
+    record = log_injection(
+        log,
+        "q",
+        [{"id": "t1", "type": "task", "state": 0, "path": "", "date": None, "similarity": 0.3}],
+        backend="tfidf",
+        session_id="s",
+        harness="test",
+    )
+
+    hit = record["hits"][0]
+    assert hit["state"] == 0
+    assert "path" not in hit
+    assert "date" not in hit
+
+
 def test_log_injection_empty_hits_has_zero_top_score(tmp_path):
     log = tmp_path / "injections.jsonl"
 

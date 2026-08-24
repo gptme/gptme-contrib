@@ -112,6 +112,11 @@ def _as_score(value: Any) -> float:
         return 0.0
 
 
+def _copyable_hit_field(value: Any) -> bool:
+    """Keep present values including 0/False; drop None and empty strings."""
+    return value is not None and value != ""
+
+
 def log_injection(
     log_file: Path,
     query: str,
@@ -138,7 +143,8 @@ def log_injection(
         session_id: Overrides :func:`detect_session_id`.
         harness: Overrides :func:`detect_harness`.
         score_key: Key holding each hit's score.
-        hit_fields: Hit keys copied into the record when present and non-empty.
+        hit_fields: Hit keys copied into the record when present. ``None`` and
+            ``""`` are omitted; ``0`` / ``False`` are kept.
         extra: Additional top-level fields merged into the record.
 
     Returns the record written, or ``None`` if the write failed. Logging is
@@ -157,7 +163,7 @@ def log_injection(
         "top_score": _as_score(hits[0].get(score_key)) if hits else 0.0,
         "hits": [
             {
-                **{f: hit[f] for f in hit_fields if hit.get(f)},
+                **{f: hit[f] for f in hit_fields if f in hit and _copyable_hit_field(hit[f])},
                 "score": _as_score(hit.get(score_key)),
             }
             for hit in hits[:injected]
