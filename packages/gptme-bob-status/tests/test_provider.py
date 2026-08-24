@@ -75,7 +75,7 @@ def test_narrative_sections_non_empty_in_bob_workspace(monkeypatch):
         mod, "_active_tasks", lambda n=3: [{"id": "t1", "title": "Test task"}]
     )
     monkeypatch.setattr(
-        mod, "_pr_queue", lambda: [{"repo": "gptme/gptme", "count": 2, "cap": 10}]
+        mod, "_pr_queue", lambda: [{"repo": "gptme/gptme", "count": 2, "watermark": 10}]
     )
     monkeypatch.setattr(
         mod,
@@ -116,3 +116,18 @@ def test_collect_keys_use_bob_prefix(monkeypatch):
     result = provider.collect()
     for key in result:
         assert key.startswith("bob_"), f"Key {key!r} does not use bob_ prefix"
+
+
+def test_pr_queue_display_marks_watermark_for_triage_not_blocking():
+    """Crossing the watermark reads as triage pressure, never as a cap.
+
+    Queue depth is a rot-attention signal: a deep queue means "triage stale /
+    CI-red / duplicate PRs", not "stop opening PRs".
+    """
+    from gptme_bob_status.provider import _pr_queue_display
+
+    assert _pr_queue_display(2, 10) == "2/10"
+    assert _pr_queue_display(10, 10) == "10/10 ⚠ triage"
+    assert _pr_queue_display(16, 10) == "16/10 ⚠ triage"
+    # No watermark configured → bare count, no pressure marker.
+    assert _pr_queue_display(7, None) == "7"

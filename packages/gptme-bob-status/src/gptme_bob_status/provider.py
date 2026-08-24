@@ -48,6 +48,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# (repo, attention watermark). The watermark is a *rot-attention* threshold, not a
+# cap: crossing it means "triage this queue for stale/red/duplicate PRs", never
+# "stop opening PRs". Queue depth must never gate work.
 _TRACKED_REPOS: list[tuple[str, int | None]] = [
     ("gptme/gptme", 10),
     ("gptme/gptme-contrib", None),
@@ -102,7 +105,7 @@ def _pr_queue() -> list[dict]:
     if not author:
         return []
     rows: list[dict] = []
-    for repo, cap in _TRACKED_REPOS:
+    for repo, watermark in _TRACKED_REPOS:
         prs_json = _run(
             [
                 "gh",
@@ -125,7 +128,7 @@ def _pr_queue() -> list[dict]:
             prs = json.loads(prs_json)
         except json.JSONDecodeError:
             continue
-        rows.append({"repo": repo, "count": len(prs), "cap": cap})
+        rows.append({"repo": repo, "count": len(prs), "watermark": watermark})
     return rows
 
 
@@ -231,9 +234,15 @@ def _journal_entries(limit: int = 5) -> list[str]:
     return [str(e) for e in entries[:limit]]
 
 
-def _pr_queue_display(count: int, cap: int | None) -> str:
-    if cap is not None:
-        return f"{count}/{cap}" + (" ⚠ at limit" if count >= cap else "")
+def _pr_queue_display(count: int, watermark: int | None) -> str:
+    """Render open-PR depth against its attention watermark.
+
+    Crossing the watermark is a rot-attention signal — triage the queue for
+    stale, CI-red, or duplicate PRs. It never means "stop opening PRs".
+    """
+    if watermark is not None:
+        suffix = " ⚠ triage" if count >= watermark else ""
+        return f"{count}/{watermark}{suffix}"
     return str(count)
 
 
@@ -276,7 +285,7 @@ class BobStatusProvider:
         if rows:
             lines = ["## PR Queue", "| Repo | Open |", "|------|------|"]
             for row in rows:
-                display = _pr_queue_display(row["count"], row["cap"])
+                display = _pr_queue_display(row["count"], row["watermark"])
                 lines.append(f"| {row['repo']} | {display} |")
             sections.append("\n".join(lines))
 
