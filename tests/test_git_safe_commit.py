@@ -262,6 +262,273 @@ def test_safe_commit_allows_explicit_all_staged_opt_in(git_repo: Path):
     assert "test: explicit all staged" in log.stdout
 
 
+def _stage_file(git_repo: Path, name: str, content: str = "hello") -> None:
+    (git_repo / name).write_text(content)
+    subprocess.run(["git", "add", name], cwd=git_repo, check=True, capture_output=True)
+
+
+def test_safe_commit_refuses_exclusion_only_pathspec(git_repo: Path):
+    """Exclusion-only args are not a positive selector — refuse whole-index commit."""
+    _stage_file(git_repo, "test.txt")
+    result = subprocess.run(
+        [str(SAFE_COMMIT), ":(exclude)test.txt", "-m", "should refuse"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "pathspec",
+    [
+        ":!test.txt",
+        ":^test.txt",
+        ":(exclude)test.txt",
+        ":(icase,exclude)test.txt",
+        '":!test.txt"',
+        '"\\072!test.txt"',
+    ],
+)
+def test_safe_commit_refuses_exclusion_pathspec_variants(git_repo: Path, pathspec: str):
+    """All exclusion-only spellings must fail the whole-index guard."""
+    _stage_file(git_repo, "test.txt")
+    result = subprocess.run(
+        [str(SAFE_COMMIT), pathspec, "-m", "should refuse"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_refuses_empty_pathspec_file(git_repo: Path):
+    """--pathspec-from-file with no positive entries is not an explicit selector."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs.txt"
+    psfile.write_text("")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            f"--pathspec-from-file={psfile}",
+            "-m",
+            "should refuse",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_refuses_exclusion_only_pathspec_file(git_repo: Path):
+    """A pathspec file of only exclusions / blanks is not a positive selector."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs.txt"
+    psfile.write_text("\n:(exclude)test.txt\n\n:!other.txt\n")
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "--pathspec-from-file", str(psfile), "-m", "should refuse"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_refuses_dev_null_pathspec_file(git_repo: Path):
+    """/dev/null is an empty pathspec source."""
+    _stage_file(git_repo, "test.txt")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            "--pathspec-from-file=/dev/null",
+            "-m",
+            "should refuse",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_allows_positive_pathspec_file(git_repo: Path):
+    """A pathspec file naming a real file is a positive selector."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs.txt"
+    psfile.write_text("test.txt\n")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            f"--pathspec-from-file={psfile}",
+            "-m",
+            "test: pathspec file",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "test: pathspec file" in log.stdout
+
+
+def test_safe_commit_refuses_exclusion_only_stdin_pathspec(git_repo: Path):
+    """Stdin pathspecs must be inspected, not treated as inherently positive."""
+    _stage_file(git_repo, "test.txt")
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "--pathspec-from-file=-", "-m", "should refuse"],
+        cwd=git_repo,
+        input=":(exclude)test.txt\n",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_refuses_exclusion_only_stdin_pathspec_space_form(
+    git_repo: Path,
+):
+    """Space-separated --pathspec-from-file - must inspect stdin too."""
+    _stage_file(git_repo, "test.txt")
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "--pathspec-from-file", "-", "-m", "should refuse"],
+        cwd=git_repo,
+        input=":!test.txt\n",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_allows_positive_stdin_pathspec(git_repo: Path):
+    """Stdin with a real file name is a positive selector after materializing."""
+    _stage_file(git_repo, "test.txt")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            "--pathspec-from-file=-",
+            "-m",
+            "test: stdin pathspec",
+        ],
+        cwd=git_repo,
+        input="test.txt\n",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "test: stdin pathspec" in log.stdout
+
+
+def test_safe_commit_refuses_nul_separated_exclusion_only_pathspec_file(
+    git_repo: Path,
+):
+    """--pathspec-file-nul exclusion-only entries must not count as a selector."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs"
+    psfile.write_bytes(b":!test.txt\0:!other.txt\0")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            "--pathspec-file-nul",
+            f"--pathspec-from-file={psfile}",
+            "-m",
+            "should refuse",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_refuses_nul_exclusions_when_nul_flag_follows_file(
+    git_repo: Path,
+):
+    """--pathspec-file-nul must apply even when it appears after the file arg."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs"
+    psfile.write_bytes(b":(exclude)test.txt\0")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            f"--pathspec-from-file={psfile}",
+            "--pathspec-file-nul",
+            "-m",
+            "should refuse",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
+def test_safe_commit_allows_nul_separated_positive_pathspec_file(git_repo: Path):
+    """NUL-separated file naming a real path is a positive selector."""
+    _stage_file(git_repo, "test.txt")
+    psfile = git_repo / "pathspecs"
+    psfile.write_bytes(b"test.txt\0")
+    result = subprocess.run(
+        [
+            str(SAFE_COMMIT),
+            "--pathspec-file-nul",
+            f"--pathspec-from-file={psfile}",
+            "-m",
+            "test: nul pathspec",
+        ],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "test: nul pathspec" in log.stdout
+
+
+def test_safe_commit_valueless_gpg_sign_does_not_count_message_as_pathspec(
+    git_repo: Path,
+):
+    """-S without a key must not swallow -m and treat the message as a pathspec."""
+    _stage_file(git_repo, "test.txt")
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "-S", "-m", "should refuse"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "implicit whole-index commit" in result.stderr.lower()
+
+
 def test_safe_commit_refuses_dirty_worktree_without_no_verify(git_repo: Path):
     """Tracked dirty worktrees are blocked before prek can stash unrelated files."""
     (git_repo / "dirty.txt").write_text("tracked\n")

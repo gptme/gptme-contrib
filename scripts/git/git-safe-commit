@@ -34,11 +34,161 @@ PATHSPEC_COUNT=0
 PATHSPECS=()
 PARSE_AFTER_DASHDASH=0
 SKIP_NEXT_ARG=0
+SKIP_NEXT_OPTIONAL_ARG=0
+PATHSPEC_FROM_FILE_NEXT=0
+PATHSPEC_FROM_FILE=""
+PATHSPEC_FILE_NUL=0
 FORWARD_ARGS=()
+PATHSPEC_STDIN_TMP=""
+MATERIALIZED_PATHSPEC_FILE=""
+
+# Invoked via trap; shellcheck cannot see the indirect call.
+# shellcheck disable=SC2317
+cleanup_pathspec_stdin_tmp() {
+    if [ -n "${PATHSPEC_STDIN_TMP}" ]; then
+        rm -f "${PATHSPEC_STDIN_TMP}"
+    fi
+}
+trap cleanup_pathspec_stdin_tmp EXIT
+
+# Copy stdin to a seekable temp file so we can both validate contents and
+# rewrite --pathspec-from-file=- for git commit (stdin cannot be rewound).
+# TTY stdin is treated as empty (/dev/null) so we never hang waiting for input.
+#
+# Writes the result to MATERIALIZED_PATHSPEC_FILE — must NOT use command
+# substitution, or PATHSPEC_STDIN_TMP (and the EXIT trap) would be lost
+# in the subshell.
+materialize_pathspec_file() {
+    local psfile="$1"
+    MATERIALIZED_PATHSPEC_FILE="$psfile"
+    if [ "$psfile" != "-" ]; then
+        return 0
+    fi
+    if [ -t 0 ]; then
+        MATERIALIZED_PATHSPEC_FILE="/dev/null"
+        return 0
+    fi
+    PATHSPEC_STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/git-safe-commit-pathspec.XXXXXX")" || {
+        echo "error: could not create temp file for --pathspec-from-file=-" >&2
+        exit 1
+    }
+    cat > "$PATHSPEC_STDIN_TMP"
+    MATERIALIZED_PATHSPEC_FILE="$PATHSPEC_STDIN_TMP"
+}
+
+# Returns 0 (true) if the pathspec is exclusion-only (e.g., :(exclude)foo, :!foo, :^foo).
+# Exclusion-only pathspecs don't positively select any files, so they must not be
+# counted toward PATHSPEC_COUNT — otherwise a commit with only exclusion args would
+# bypass the whole-index guard.
+is_exclusion_only_pathspec() {
+    local ps="$1"
+    # Strip C-quoted outer double-quotes, decoding common octal escapes
+    if [[ "$ps" == '"'* && "$ps" == *'"' ]]; then
+        local inner="${ps:1:${#ps}-2}"
+        inner="${inner//\\072/:}"   # \072 (octal) = ':'
+        inner="${inner//\\041/!}"   # \041 (octal) = '!'
+        ps="$inner"
+    fi
+    # Shorthand exclusion prefixes
+    case "$ps" in
+        ':!'*|':^'*) return 0 ;;
+    esac
+    # Long-form :(magic)path — look for 'exclude' in the comma-separated magic list
+    if [[ "$ps" == ':'* ]]; then
+        local rest="${ps:1}"
+        if [[ "$rest" == '('* ]]; then
+            local magic="${rest:1}"
+            magic="${magic%%)*}"
+            local IFS=','
+            for m in $magic; do
+                [[ "$m" == "exclude" ]] && return 0
+            done
+        fi
+    fi
+    return 1
+}
+
+# Returns 0 (true) if the file contains at least one positive (non-exclusion) pathspec.
+# Used for --pathspec-from-file validation: a file of only exclusion lines or blank
+# lines is treated as "no explicit positive pathspecs" for the whole-index guard.
+pathspec_file_has_positive() {
+    local psfile="$1"
+    # /dev/null, empty string, and unresolved stdin ('-') mean "no pathspecs".
+    # Callers should materialize '-' first; this is a safety net if they don't.
+    case "$psfile" in
+        /dev/null|''|-) return 1 ;;
+    esac
+    [ -f "$psfile" ] || return 1
+    local line
+    if [ "${PATHSPEC_FILE_NUL:-0}" -eq 1 ]; then
+        while IFS= read -r -d '' line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            if ! is_exclusion_only_pathspec "$line"; then
+                return 0
+            fi
+        done < "$psfile"
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        if ! is_exclusion_only_pathspec "$line"; then
+            return 0
+        fi
+    done < "$psfile"
+    return 1
+}
+
+# Rewrite FORWARD_ARGS so a materialized stdin pathspec file replaces '-'
+# (equals form or the following argument of --pathspec-from-file).
+rewrite_forward_pathspec_file() {
+    local original="$1"
+    local materialized="$2"
+    local fa skip_replace
+    local new_args=()
+    skip_replace=0
+    for fa in "${FORWARD_ARGS[@]}"; do
+        if [ "$skip_replace" -eq 1 ]; then
+            new_args+=("$materialized")
+            skip_replace=0
+            continue
+        fi
+        if [ "$fa" = "--pathspec-from-file" ]; then
+            new_args+=("$fa")
+            skip_replace=1
+            continue
+        fi
+        if [ "$fa" = "--pathspec-from-file=${original}" ]; then
+            new_args+=("--pathspec-from-file=${materialized}")
+            continue
+        fi
+        new_args+=("$fa")
+    done
+    FORWARD_ARGS=("${new_args[@]}")
+}
 
 for arg in "$@"; do
     if [ "$SKIP_NEXT_ARG" -eq 1 ]; then
         SKIP_NEXT_ARG=0
+        FORWARD_ARGS+=("$arg")
+        continue
+    fi
+
+    # -S/--gpg-sign takes an optional value; only consume the next arg as a key
+    # if it doesn't look like a new option flag.
+    if [ "$SKIP_NEXT_OPTIONAL_ARG" -eq 1 ]; then
+        SKIP_NEXT_OPTIONAL_ARG=0
+        if [[ "$arg" != -* ]]; then
+            FORWARD_ARGS+=("$arg")
+            continue
+        fi
+        # Arg starts with '-': it's a new flag, not a value — fall through
+    fi
+
+    # --pathspec-from-file <file>: record the path; validate after all flags
+    # so --pathspec-file-nul can appear before or after the file argument.
+    if [ "$PATHSPEC_FROM_FILE_NEXT" -eq 1 ]; then
+        PATHSPEC_FROM_FILE_NEXT=0
+        PATHSPEC_FROM_FILE="$arg"
         FORWARD_ARGS+=("$arg")
         continue
     fi
@@ -59,8 +209,10 @@ for arg in "$@"; do
     FORWARD_ARGS+=("$arg")
 
     if [ "$PARSE_AFTER_DASHDASH" -eq 1 ]; then
-        PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
-        PATHSPECS+=("$arg")
+        if ! is_exclusion_only_pathspec "$arg"; then
+            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            PATHSPECS+=("$arg")
+        fi
         continue
     fi
 
@@ -71,23 +223,48 @@ for arg in "$@"; do
         -m|--message|-F|--file|-c|--reedit-message|-C|--reuse-message|--fixup|--squash|--author|--date|--trailer)
             SKIP_NEXT_ARG=1
             ;;
-        --pathspec-from-file)
-            SKIP_NEXT_ARG=1
-            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+        -S|--gpg-sign)
+            # -S/--gpg-sign has an optional key-id value; use the optional-skip
+            # path so we don't miscount the key as a pathspec.
+            SKIP_NEXT_OPTIONAL_ARG=1
             ;;
-        --message=*|--file=*|--author=*|--date=*|--fixup=*|--squash=*|--trailer=*)
+        --pathspec-from-file)
+            # Value is the next arg; defer counting until all flags are known.
+            PATHSPEC_FROM_FILE_NEXT=1
+            ;;
+        --pathspec-file-nul)
+            PATHSPEC_FILE_NUL=1
+            ;;
+        --message=*|--file=*|--author=*|--date=*|--fixup=*|--squash=*|--trailer=*|--gpg-sign=*)
             ;;
         --pathspec-from-file=*)
-            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+            PATHSPEC_FROM_FILE="${arg#--pathspec-from-file=}"
             ;;
         -*)
             ;;
         *)
-            PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
-            PATHSPECS+=("$arg")
+            # Only count positively-selecting pathspecs; exclusion-only pathspecs
+            # (e.g., :(exclude)foo, :!foo) don't name files to include.
+            if ! is_exclusion_only_pathspec "$arg"; then
+                PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+                PATHSPECS+=("$arg")
+            fi
             ;;
     esac
 done
+
+# Validate --pathspec-from-file after the full parse so --pathspec-file-nul
+# is honored regardless of flag order.
+if [ -n "$PATHSPEC_FROM_FILE" ]; then
+    _original_psfile="$PATHSPEC_FROM_FILE"
+    materialize_pathspec_file "$PATHSPEC_FROM_FILE"
+    if [ "$MATERIALIZED_PATHSPEC_FILE" != "$_original_psfile" ]; then
+        rewrite_forward_pathspec_file "$_original_psfile" "$MATERIALIZED_PATHSPEC_FILE"
+    fi
+    if pathspec_file_has_positive "$MATERIALIZED_PATHSPEC_FILE"; then
+        PATHSPEC_COUNT=$((PATHSPEC_COUNT + 1))
+    fi
+fi
 
 if [ "$PATHSPEC_COUNT" -eq 0 ] && [ "$ALLOW_ALL_STAGED" -ne 1 ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
     echo "🚫 Refusing implicit whole-index commit in shared repo" >&2
