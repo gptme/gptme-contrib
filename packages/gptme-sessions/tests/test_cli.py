@@ -227,7 +227,10 @@ class TestExportCommand:
         deliverables = json.loads(row["deliverables"])
         assert deliverables == ["abc0000"]
 
-    @pytest.mark.parametrize("prefix", ["=", "+", "-", "@"])
+    @pytest.mark.parametrize(
+        "prefix",
+        ["=", "+", "-", "@", "\t", "\r", "\n", " ", "＝", "＋", "－", "＠"],
+    )
     def test_export_csv_neutralizes_spreadsheet_formulas(self, tmp_path: Path, prefix: str) -> None:
         """String cells cannot become formulas when opened in a spreadsheet."""
         store = SessionStore(sessions_dir=tmp_path)

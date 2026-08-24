@@ -788,7 +788,9 @@ def _csv_cell(value: object) -> str:
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+    if isinstance(value, str) and value.startswith(
+        ("=", "+", "-", "@", "\t", "\r", "\n", " ", "＝", "＋", "－", "＠")
+    ):
         return "'" + value
     return str(value)
 
