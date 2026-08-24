@@ -140,6 +140,8 @@ Archived: [gptme-rag](https://github.com/gptme/gptme-rag) (upstreamed into [pack
 
 ### Discover more
 
+Looking for a good place to start? The **[gptme.org Skills Gallery](https://gptme.org/docs/skills-gallery.html)** curates a handful of battle-tested skills from this registry with install commands and social proof — a quick one-page picker instead of reading the full index below.
+
 To make your own plugin or skill discoverable, add a GitHub topic to your repo:
 
 | Topic | For | Browse |
