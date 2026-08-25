@@ -136,7 +136,12 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
         # Only treat bracket content as a real ref if it is a `ref=...`
         # attribute (e.g. "ref=e1").  Other bracket attributes like
         # "[level=2]" must be ignored per the README spec.
-        actual_ref = ref if ref.startswith("ref=") else ""
+        # Also handle multi-attribute brackets like "[ref=e5, level=1]" — extract
+        # only the "ref=VALUE" token and discard the rest.
+        actual_ref = next(
+            (tok.strip() for tok in ref.split(",") if tok.strip().startswith("ref=")),
+            "",
+        )
         selector = f"[{actual_ref}]" if actual_ref else f"role={role}[name='{name}']"
         elements.append(
             {
@@ -241,6 +246,7 @@ def _dispatch_action(
     method: str,
     arguments: list[str],
     t0: float,
+    element_method: str = "click",
 ) -> ActResult:
     """Run one deterministic dispatch through gptme's browser primitives.
 
@@ -262,7 +268,12 @@ def _dispatch_action(
             fill_element(sel, arguments[0])
         elif method == "press":
             assert arguments, "press requires arguments=[key]"
-            click_element(sel)  # focus the element before pressing
+            # Focus the element before pressing — but only for input-type elements
+            # (textbox, searchbox, combobox) where a click merely moves cursor focus.
+            # For button/link/checkbox/etc. (element_method=="click") a click already
+            # activates the element, so calling click_element here would double-fire it.
+            if element_method != "click":
+                click_element(sel)
             press_key(arguments[0])
         elif method == "select":
             assert arguments, "select requires arguments=[value]"
@@ -338,7 +349,8 @@ def browser_act(
     method = method or best.method
     arguments = arguments or best.arguments
 
-    result = _dispatch_action(sel, method, arguments, t0)
+    element_method = best.method
+    result = _dispatch_action(sel, method, arguments, t0, element_method=element_method)
     if result.success or not retry_on_stale:
         return result
 
@@ -362,7 +374,9 @@ def browser_act(
 
     fresh = browser_observe(reobserve_query, top_k=1)
     if fresh and fresh[0].selector != sel:
-        result = _dispatch_action(fresh[0].selector, method, arguments, t0)
+        result = _dispatch_action(
+            fresh[0].selector, method, arguments, t0, element_method=fresh[0].method
+        )
     return result
 
 

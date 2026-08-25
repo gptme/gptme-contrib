@@ -347,6 +347,33 @@ def test_no_ref_element_uses_role_name_selector(
     assert link_results[0].selector == "role=link[name='Home']"
 
 
+SNAPSHOT_MIXED_ATTRS = """\
+- button "Submit" [ref=e5, level=1]
+- heading "Title" [ref=e6, expanded]
+"""
+
+
+@pytest.fixture
+def mixed_attr_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
+    stub = BrowserStub([SNAPSHOT_MIXED_ATTRS])
+    _wire_stub(stub, monkeypatch)
+    return stub
+
+
+def test_multi_attr_bracket_extracts_only_ref(
+    mixed_attr_browser_stub: BrowserStub,
+) -> None:
+    # When a snapshot line has multiple bracket attributes like "[ref=e5, level=1]",
+    # only the ref=VALUE token must appear in the selector. "[ref=e5, level=1]" is
+    # not a valid Playwright selector and would break click_element/fill_element.
+    results = browser_observe("submit button", top_k=1)
+    assert results, "expected a match"
+    r = results[0]
+    assert r.selector == "[ref=e5]", f"expected only ref token, got {r.selector!r}"
+    assert "level" not in r.selector
+    assert "," not in r.selector
+
+
 # ---------------------------------------------------------------------------
 # browser_extract
 # ---------------------------------------------------------------------------
@@ -397,18 +424,36 @@ def test_extract_snapshot_failure_returns_failed_result(
 
 
 # ---------------------------------------------------------------------------
-# P2 fix: press focuses the element before pressing the key
+# P2 fix: press focuses input elements before pressing the key
+# P1 fix: press does NOT click button/link elements (avoids double-activation)
 # ---------------------------------------------------------------------------
 
 
-def test_act_press_focuses_element_before_pressing(browser_stub: BrowserStub) -> None:
-    # Verify that the press dispatch clicks (focuses) the target selector
-    # before issuing the key press so the key lands on the intended element.
-    observed = browser_observe("submit button", top_k=1)[0]
+def test_act_press_focuses_input_element_before_pressing(
+    browser_stub: BrowserStub,
+) -> None:
+    # For input-type elements (textbox → element_method="fill"), click to focus
+    # before pressing so the key lands on the correct element.
+    observed = browser_observe("search the news", top_k=1)[0]
+    assert observed.method == "fill", "expected textbox with fill method"
     result = browser_act(observed, method="press", arguments=["Enter"])
     assert result.success
-    # click_element(sel) must have been called to focus the element first.
+    # click_element(sel) must have been called to focus the input element.
     assert observed.selector in browser_stub.clicks
+
+
+def test_act_press_does_not_click_button_before_pressing(
+    browser_stub: BrowserStub,
+) -> None:
+    # For button/link elements (element_method="click"), clicking before pressing
+    # would fire the button's handler AND THEN press the key — a double action.
+    # The fix skips click_element for these elements.
+    observed = browser_observe("submit button", top_k=1)[0]
+    assert observed.method == "click", "expected button with click method"
+    result = browser_act(observed, method="press", arguments=["Enter"])
+    assert result.success
+    # click_element must NOT have been called (would double-activate the button).
+    assert observed.selector not in browser_stub.clicks
 
 
 # ---------------------------------------------------------------------------
