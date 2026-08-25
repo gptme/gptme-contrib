@@ -353,6 +353,12 @@ def call_claude_code(
                         "contain a recognized summary schema; ignoring"
                     )
                 if last_non_subscription_error is not None:
+                    # Preserve the auth-expiry signal from the primary slot even
+                    # when a fallback slot produced a non-subscription error.
+                    if any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS):
+                        raise ClaudeAuthExpiredError(
+                            result.returncode, attempt_cmd, result.stdout, result.stderr
+                        )
                     raise last_non_subscription_error
                 if saw_empty_response:
                     logger.error(

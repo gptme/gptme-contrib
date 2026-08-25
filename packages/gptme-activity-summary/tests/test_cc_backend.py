@@ -1090,3 +1090,33 @@ def test_call_gptme_list_content_non_string_text_skipped(mock_run, mock_which):
     mock_run.return_value = subprocess.CompletedProcess(args=["gptme"], returncode=0, stdout=ndjson)
     # Must not raise AttributeError; must return the valid part
     assert gb.call_gptme("hi") == "valid text"
+
+
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_oauth_expiry_preserved_when_fallback_has_non_sub_error(
+    mock_run, mock_sleep, mock_fallback, mock_gptme, tmp_path
+):
+    """Auth-expiry from the primary slot is raised even when a fallback slot produces a
+    non-subscription error (last_non_subscription_error is set).
+
+    Regression: previously ClaudeAuthExpiredError was only raised on the
+    last_non_subscription_error is None path, so a stale-auth fallback slot
+    could mask the primary's OAuth expiry with a generic CalledProcessError.
+    """
+    fb_cred = tmp_path / ".credentials.json.invalid"
+    fb_cred.write_text("{}")
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="Failed to authenticate: OAuth session expired"
+    )
+    mock_fallback.return_value = _make_completed_process(returncode=2, stderr="invalid credentials")
+
+    with patch.dict(
+        "os.environ",
+        {"GPTME_CC_FALLBACK_CREDS": str(fb_cred)},
+        clear=True,
+    ):
+        with pytest.raises(ClaudeAuthExpiredError):
+            call_claude_code("test prompt", max_retries=2)
