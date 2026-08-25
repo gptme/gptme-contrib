@@ -2725,17 +2725,6 @@ def run_work_file(
     sysprompt_path: Path | None = None
     temp_records: tempfile.TemporaryDirectory[str] | None = None
 
-    # Stage 1: Shadow-mode bandit for data accumulation (BOB_PM_BANDIT_SHADOW=1)
-    bandit: PmModelBandit | None = None
-    use_bandit_shadow = os.environ.get("BOB_PM_BANDIT_SHADOW") == "1"
-    if use_bandit_shadow:
-        try:
-            bandit = PmModelBandit(state_dir=config.workspace / "state" / "pm-dispatch")
-            _log("PM bandit shadow mode enabled: logging model choices and outcomes")
-        except Exception as exc:
-            _log(f"WARN: Failed to initialize PM bandit: {exc}")
-            bandit = None
-
     try:
         if hooks.git_pull is not None:
             try:
