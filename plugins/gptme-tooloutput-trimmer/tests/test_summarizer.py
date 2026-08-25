@@ -484,3 +484,39 @@ def test_call_summarizer_memoize_is_source_scoped() -> None:
             _call_summarizer("source-two")  # different source -> re-call
 
     assert calls == ["call", "call"]
+
+
+def test_call_summarizer_whitespace_response_not_cached() -> None:
+    """A whitespace-only LLM response must not be cached.
+
+    A transient whitespace response (e.g. '\\n') must not permanently poison the
+    cache: the next call for the same source must still invoke the LLM and can
+    recover with a real summary.
+    """
+    calls: list[str] = []
+    responses = ["\n", "- Real summary: result found"]
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append("call")
+        return responses.pop(0), None
+
+    with patch(
+        "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+        return_value=SimpleNamespace(full="openai/gpt-4o"),
+    ):
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer._chat_complete",
+            side_effect=fake_chat_complete,
+        ):
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE",
+                {},
+            ):
+                first = _call_summarizer("source")  # whitespace → None, not cached
+                second = _call_summarizer("source")  # re-calls LLM → real summary
+
+    assert first is None  # whitespace response must not be returned
+    assert second == "- Real summary: result found"
+    assert len(calls) == 2  # LLM invoked twice — cache was not poisoned

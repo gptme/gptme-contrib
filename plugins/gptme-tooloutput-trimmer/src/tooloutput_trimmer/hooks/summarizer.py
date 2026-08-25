@@ -227,11 +227,14 @@ def _call_summarizer(context: str) -> str | None:
         if not summary:
             logger.warning("summarizer: LLM returned empty summary")
             return None
+        summary = summary.strip()
+        if not summary:
+            logger.warning("summarizer: LLM returned whitespace-only summary")
+            return None
         logger.debug(
             "summarizer: produced %d chars",
             len(summary),
         )
-        summary = summary.strip()
         _cache_summary(context, model.full, summary)
         return summary
     except Exception:
