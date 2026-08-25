@@ -12,15 +12,27 @@ import sys
 
 def test_plain_import_does_not_pull_chromadb() -> None:
     """``import gptme_rag`` must not import chromadb or sentence_transformers."""
-    # Remove any prior import so the test is isolated
-    mods_to_drop = [k for k in sys.modules if k.startswith("gptme_rag")]
-    for mod in mods_to_drop:
-        del sys.modules[mod]
+    _HEAVY = ("chromadb", "sentence_transformers")
 
-    import gptme_rag  # noqa: F401
+    # Snapshot and evict all gptme_rag submodules AND heavy deps so this test
+    # measures what a fresh process would see, not what prior tests already loaded.
+    saved: dict[str, object] = {}
+    for k in list(sys.modules):
+        if k.startswith("gptme_rag") or any(k == h or k.startswith(h + ".") for h in _HEAVY):
+            saved[k] = sys.modules.pop(k)
 
-    heavy = [m for m in sys.modules if m in ("chromadb", "sentence_transformers")]
-    assert not heavy, f"Heavy deps imported after plain import: {heavy}"
+    try:
+        import gptme_rag  # noqa: F401
+
+        heavy = [m for m in sys.modules if any(m == h or m.startswith(h + ".") for h in _HEAVY)]
+        assert not heavy, f"Heavy deps imported after plain import: {heavy}"
+    finally:
+        # Restore original module state so later tests are not affected by
+        # the transient eviction above.
+        for k in list(sys.modules):
+            if k.startswith("gptme_rag") or any(k == h or k.startswith(h + ".") for h in _HEAVY):
+                del sys.modules[k]
+        sys.modules.update(saved)
 
 
 def test_lesson_matcher_functions_eagerly_importable() -> None:
