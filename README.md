@@ -25,6 +25,7 @@ A capability-oriented map of this repo. Each entry links to a plugin (`plugins/`
 | **Email** | [gptmail](./packages/gptmail/) — universal email for agents, incl. agent-to-agent messaging |
 | **Chat & social** | [gptme-whatsapp](./packages/gptme-whatsapp/), [gptme-forum](./packages/gptme-forum/) (git-native agent forum), [discord](./scripts/discord/) / [telegram](./scripts/telegram/) / [twitter](./scripts/twitter/) / [bluesky](./scripts/bluesky/) scripts |
 | **Voice** | [gptme-voice](./packages/gptme-voice/) (real-time voice via OpenAI/Grok Realtime APIs), [gptme-tts](./plugins/gptme-tts/) (local Kokoro TTS) |
+| **Computer use** | [gptme-browser-semantic](./packages/gptme-browser-semantic/) (observe/act/extract over gptme's ARIA snapshot; no stagehand) |
 | **GitHub** | [github](./scripts/github/) scripts (context, notifications), [github_hygiene](./scripts/github_hygiene/), [github_resolver](./scripts/github_resolver/); core's `gh` tool |
 | **Autonomous operation** | [gptme-runloops](./packages/gptme-runloops/) (run loop framework), [gptme-gupp](./plugins/gptme-gupp/) (work persistence), [gptme-ralph](./plugins/gptme-ralph/) (iterate with context reset), [gptme-coordination](./packages/gptme-coordination/) (work claims, message bus), [credential-slots](./packages/credential-slots/) + [gptme-subscription](./packages/gptme-subscription/) (credential rotation, capacity-aware routing), [gptme-backoff](./packages/gptme-backoff/) |
 | **Context management** | [gptme-ace](./plugins/gptme-ace/), [gptme-attention-tracker](./plugins/gptme-attention-tracker/), [gptme-headroom-compressor](./plugins/gptme-headroom-compressor/), [gptme-tooloutput-trimmer](./plugins/gptme-tooloutput-trimmer/) |
@@ -81,6 +82,7 @@ Reusable Python packages, installable individually. See [packages/README.md](./p
 | [gptme-activity-summary](./packages/gptme-activity-summary/) | Activity summarization — journals, GitHub, sessions, tweets, email |
 | [gptme-backoff](./packages/gptme-backoff/) | Retry utilities: exponential backoff, jitter, async/sync decorators |
 | [gptme-bob-status](./packages/gptme-bob-status/) | Bob-specific StatusProvider for `gptme-util status` |
+| [gptme-browser-semantic](./packages/gptme-browser-semantic/) | Semantic observe/act/extract primitives over gptme's existing Playwright ARIA snapshot (Path A; no stagehand) |
 | [gptme-cc-memory](./packages/gptme-cc-memory/) | Typed, git-tracked, hook-injected session memory for Claude Code |
 | [gptme-codegraph](./packages/gptme-codegraph/) | Structural code retrieval with tree-sitter (call graph, blast/impact analysis, MCP tools) |
 | [gptme-contrib-lib](./packages/gptme-contrib-lib/) | Shared utilities |

@@ -1,0 +1,37 @@
+[project]
+name = "gptme-browser-semantic"
+version = "0.1.0"
+description = "Semantic browser primitives (observe/act/extract) for gptme computer-use — Path A: ARIA-snapshot scoring over gptme's existing Playwright tools, no stagehand dependency"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["browser", "computer-use", "gptme", "playwright", "aria"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/gptme/gptme-contrib"
+Repository = "https://github.com/gptme/gptme-contrib"
+Issues = "https://github.com/gptme/gptme-contrib/issues"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_browser_semantic"]

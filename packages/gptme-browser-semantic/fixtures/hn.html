@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hacker News (fixture)</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 800px; margin: 2em auto; padding: 0 1em; }
+  .story { padding: 0.4em 0; border-bottom: 1px solid #eee; }
+  .story .title { font-weight: 600; text-decoration: none; color: #000; }
+  .story .meta { color: #666; font-size: 0.9em; }
+  form.search { margin: 2em 0; }
+  form.search input { padding: 0.4em; width: 60%; }
+  form.search button { padding: 0.4em 0.8em; }
+  button.more { background: none; border: 1px solid #ccc; padding: 0.2em 0.6em; cursor: pointer; }
+  button.submit { background: #ff6600; color: #fff; border: 0; padding: 0.5em 1em; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Hacker News</h1>
+  <nav>
+    <a href="/new">new</a> |
+    <a href="/past">past</a> |
+    <a href="/comments">comments</a> |
+    <a href="/ask">ask</a> |
+    <a href="/show">show</a> |
+    <a href="/jobs">jobs</a> |
+    <button class="more">more</button>
+  </nav>
+</header>
+
+<form class="search" action="/search">
+  <input type="text" name="q" placeholder="Search">
+  <button type="submit">Search</button>
+</form>
+
+<main>
+  <div class="story">
+    <a class="title" href="/item/1">First story</a>
+    <span class="meta">120 points by alice 2h ago | <a href="/item/1#comments">42 comments</a></span>
+  </div>
+  <div class="story">
+    <a class="title" href="/item/2">Second story about async rust</a>
+    <span class="meta">85 points by bob 4h ago | <a href="/item/2#comments">17 comments</a></span>
+  </div>
+  <div class="story">
+    <a class="title" href="/item/3">Third story</a>
+    <span class="meta">63 points by carol 6h ago | <a href="/item/3#comments">8 comments</a></span>
+  </div>
+  <div class="story">
+    <a class="title" href="/item/4">Fourth story</a>
+    <span class="meta">41 points by dave 8h ago | <a href="/item/4#comments">3 comments</a></span>
+  </div>
+  <div class="story">
+    <a class="title" href="/item/5">Fifth story</a>
+    <span class="meta">22 points by eve 12h ago | <a href="/item/5#comments">1 comment</a></span>
+  </div>
+</main>
+
+<form>
+  <input type="text" name="comment" placeholder="Write a comment">
+  <button type="submit" class="submit">Submit</button>
+</form>
+
+</body>
+</html>
