@@ -246,9 +246,20 @@ def cli(verbose, tasks_dir):
     logging.basicConfig(level=log_level)
 
     # Set GPTODO_TASKS_DIR if provided via CLI
-    # This allows find_repo_root to pick it up
+    # This allows find_repo_root to pick it up.
+    # Restore the old value on context close to avoid leaking into subsequent
+    # in-process CliRunner calls in tests.
     if tasks_dir:
+        _old_tasks_dir = os.environ.get("GPTODO_TASKS_DIR")
         os.environ["GPTODO_TASKS_DIR"] = tasks_dir
+
+        def _restore_tasks_dir_env() -> None:
+            if _old_tasks_dir is None:
+                os.environ.pop("GPTODO_TASKS_DIR", None)
+            else:
+                os.environ["GPTODO_TASKS_DIR"] = _old_tasks_dir
+
+        click.get_current_context().call_on_close(_restore_tasks_dir_env)
 
 
 @cli.command("show")
