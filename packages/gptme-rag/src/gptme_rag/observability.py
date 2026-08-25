@@ -164,8 +164,8 @@ def log_injection(
     injected = len(hits) if max_injected is None else max(0, min(len(hits), max_injected))
     record: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "session_id": session_id or detect_session_id(),
-        "harness": harness or detect_harness(),
+        "session_id": session_id if session_id is not None else detect_session_id(),
+        "harness": harness if harness is not None else detect_harness(),
         "backend": backend,
         "query": query,
         "query_len": len(query),
@@ -243,7 +243,7 @@ def summarize_injections(log_file: Path) -> InjectionStats:
             try:
                 num_hits = int(rec.get("num_hits", 0) or 0)
                 top_score = float(rec.get("top_score", 0.0) or 0.0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 # Same contract as a partial trailing line: skip, don't raise.
                 stats.malformed += 1
                 continue
@@ -398,6 +398,10 @@ def assess_index_health(
             if abs(delta) > slice_delta_tolerance:
                 health.reasons.append(
                     f"slice {name!r} delta {delta:+d} > tolerance {slice_delta_tolerance}"
+                )
+            else:
+                health.reasons.append(
+                    f"slice {name!r} stale (age {age_hours:.1f}h > {max_age_hours}h)"
                 )
         else:
             slice_status = "ok"

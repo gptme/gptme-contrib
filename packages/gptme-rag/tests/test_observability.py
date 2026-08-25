@@ -564,3 +564,49 @@ def test_summarize_treats_null_session_and_harness_as_unknown(tmp_path):
     assert "None" not in stats.by_harness
     assert stats.by_harness.get("unknown", 0) == 1
     assert stats.unique_sessions == 1
+
+
+def test_summarize_skips_overflow_top_score(tmp_path):
+    """An overflow-scale top_score in a log record must be skipped, not crash."""
+    log = tmp_path / "injections.jsonl"
+    log.write_text(
+        json.dumps({"num_hits": 1, "top_score": 10**1000})
+        + "\n"
+        + json.dumps({"num_hits": 2, "top_score": 0.8})
+        + "\n"
+    )
+    stats = summarize_injections(log)
+    assert stats.malformed == 1
+    assert stats.total == 1
+    assert stats.avg_top_score == pytest.approx(0.8)
+
+
+def test_log_injection_empty_string_session_and_harness_kept(tmp_path):
+    """Explicitly passing session_id='' or harness='' must be written as-is."""
+    log = tmp_path / "injections.jsonl"
+    record = log_injection(
+        log,
+        "q",
+        [],
+        backend="tfidf",
+        session_id="",
+        harness="",
+    )
+    assert record is not None
+    assert record["session_id"] == ""
+    assert record["harness"] == ""
+
+
+def test_slice_age_only_stale_has_per_slice_reason():
+    """When a slice is stale solely because the index is old, a per-slice reason must appear."""
+    health = assess_index_health(
+        built_at=NOW - timedelta(hours=5),
+        indexed_count=100,
+        slices={"task": (100, 100)},
+        max_age_hours=2.0,
+        slice_delta_tolerance=25,
+        now=NOW,
+    )
+    assert health.slices["task"].status == "stale"
+    slice_reasons = [r for r in health.reasons if "task" in r]
+    assert slice_reasons, f"expected per-slice reason for 'task', got: {health.reasons}"
