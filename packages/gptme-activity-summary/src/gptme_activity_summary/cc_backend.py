@@ -350,7 +350,7 @@ def call_claude_code(
                     # accepting "narrative" when the caller wants "month_narrative"
                     # lets the validation pass but the caller then defaults the
                     # narrative to "" — a silent empty summary on quota days.
-                    if narrative_key and narrative_key not in gptme_result:
+                    if narrative_key and not gptme_result.get(narrative_key):
                         for alt_key in _SUMMARY_NARRATIVE_KEYS:
                             if alt_key in gptme_result:
                                 gptme_result[narrative_key] = gptme_result.pop(alt_key)

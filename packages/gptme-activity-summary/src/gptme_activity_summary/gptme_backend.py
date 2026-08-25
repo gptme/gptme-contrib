@@ -144,10 +144,19 @@ def _extract_assistant_text(stdout: str) -> str:
     if not contents:
         logger.warning("gptme fallback produced no assistant messages")
         return ""
-    if len(contents) > 1:
-        logger.debug(
-            "gptme fallback produced %d assistant messages; using first only to avoid "
-            "multi-JSON concatenation that breaks extract_json_from_response",
-            len(contents),
-        )
-    return contents[0]
+    # Reasoning models (e.g. deepseek) emit a thinking/preamble message first
+    # followed by the real JSON answer.  Return the first content that parses as
+    # JSON; fall back to the last content so callers can still attempt extraction
+    # and surface a useful warning instead of silently discarding the summary.
+    for candidate in contents:
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            continue
+    logger.debug(
+        "gptme fallback: no assistant message parsed as JSON (%d messages); "
+        "returning last message for caller to attempt extraction",
+        len(contents),
+    )
+    return contents[-1]
