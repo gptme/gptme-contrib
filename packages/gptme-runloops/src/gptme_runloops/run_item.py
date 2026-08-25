@@ -2849,7 +2849,9 @@ def run_work_file(
                 try:
                     from gptme_runloops.pm_dispatch import classify_item_work_type
 
-                    work_type = classify_item_work_type(item.types, repo=item.repo)
+                    work_type = classify_item_work_type(
+                        list(item.types), repo=item.repo
+                    )
                     available = [m for m in [model] if m]
                     if available:
                         bandit_model = bandit.resolve_model(work_type, available)
@@ -2908,7 +2910,9 @@ def run_work_file(
                     try:
                         from gptme_runloops.pm_dispatch import classify_item_work_type
 
-                        work_type = classify_item_work_type(item.types, repo=item.repo)
+                        work_type = classify_item_work_type(
+                            list(item.types), repo=item.repo
+                        )
                         # Map outcome to reward: 1.0 for productive, 0.0 otherwise
                         reward = (
                             1.0
