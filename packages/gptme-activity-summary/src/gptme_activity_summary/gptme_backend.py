@@ -61,6 +61,11 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
         return ""
 
     model = os.environ.get(_MODEL_ENV, _DEFAULT_MODEL).strip()
+    logger.warning(
+        "gptme fallback: sending prompt to external model %r. " "Set %s=0 to disable.",
+        model,
+        _DISABLE_ENV,
+    )
     cmd = [
         "gptme",
         "-n",  # non-interactive; implies --no-confirm

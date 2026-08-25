@@ -320,14 +320,19 @@ def call_claude_code(
                             time.sleep(_RETRY_DELAY_S * fb_attempt)
                             continue
                         break
-                if last_non_subscription_error is not None:
-                    raise last_non_subscription_error
-                # All Claude slots failed (subscription failures and/or empty responses).
-                # Before surfacing the permanent failure, try the gptme fallback so
-                # summary generation does not hard-fail on quota days (ErikBjare/bob
-                # issue: 5 auto-resolve flips in 8 days). The gptme adapter is
-                # best-effort and returns "" on any failure, so the original error
-                # path is preserved when no fallback is available.
+                # All Claude slots failed (subscription failures, non-subscription
+                # errors, and/or empty responses). Before surfacing any permanent
+                # failure, try the gptme fallback so summary generation does not
+                # hard-fail on quota days (ErikBjare/bob issue: 5 auto-resolve
+                # flips in 8 days). The gptme adapter is best-effort and returns
+                # "" on any failure, so the original error path is preserved when
+                # no fallback is available.
+                #
+                # The gptme fallback is attempted BEFORE raising
+                # last_non_subscription_error so that a misconfigured fallback
+                # credential slot (e.g. stale auth, returncode=2) does not
+                # prevent gptme from producing a summary when the primary slot is
+                # subscription-exhausted.
                 gptme_response = call_gptme(prompt, timeout=timeout)
                 if gptme_response:
                     gptme_result = extract_json_from_response(gptme_response)
@@ -340,6 +345,8 @@ def call_claude_code(
                         "Claude subscriptions unavailable; gptme fallback response did not "
                         "contain a recognized summary schema; ignoring"
                     )
+                if last_non_subscription_error is not None:
+                    raise last_non_subscription_error
                 if saw_empty_response:
                     logger.error(
                         "Fallback slots returned empty responses after %d attempts",

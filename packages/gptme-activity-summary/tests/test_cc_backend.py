@@ -705,13 +705,18 @@ def test_call_claude_code_quota_fallback_retries_non_quota_error(
     mock_sleep.assert_called_once_with(5)
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
 def test_call_claude_code_quota_fallback_preserves_non_quota_error(
-    mock_run, mock_sleep, mock_fallback, tmp_path
+    mock_run, mock_sleep, mock_fallback, mock_gptme, tmp_path
 ):
-    """An exhausted fallback retry window preserves the last non-quota failure."""
+    """An exhausted fallback retry window preserves the last non-quota failure.
+
+    gptme fallback is attempted first (and produces nothing), then the
+    non-subscription error from the credential slot is re-raised.
+    """
     fb_cred = tmp_path / ".credentials.json.invalid"
     fb_cred.write_text("{}")
     mock_run.return_value = _make_completed_process(
@@ -732,6 +737,7 @@ def test_call_claude_code_quota_fallback_preserves_non_quota_error(
     assert exc_info.value.stderr == "invalid credentials"
     assert mock_fallback.call_count == 2
     mock_sleep.assert_called_once_with(5)
+    mock_gptme.assert_called_once()  # gptme is tried before raising
 
 
 @patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
