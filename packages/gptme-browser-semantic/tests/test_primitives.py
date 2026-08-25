@@ -43,6 +43,10 @@ class BrowserStub:
     ``snapshots`` is a queue: every ``snapshot_page()`` call pops the next
     snapshot, and the last one sticks once the queue is exhausted (models a
     stable page).
+
+    ``custom_errors`` maps a selector to a specific exception to raise instead
+    of the default ``TimeoutError("locator '...' not found")``.  Use this to
+    test failure types that should NOT trigger the stale-selector retry.
     """
 
     def __init__(
@@ -53,6 +57,7 @@ class BrowserStub:
         self.clicks: list[str] = []
         self.fills: list[tuple[str, str]] = []
         self.fail_selectors: set[str] = set()
+        self.custom_errors: dict[str, Exception] = {}
         self.raise_on_snapshot = raise_on_snapshot
 
     def snapshot_page(self) -> str:
@@ -66,6 +71,8 @@ class BrowserStub:
         # Record the attempt *before* the failure check: tests assert on the
         # dispatch sequence, including the stale attempt that raised.
         self.clicks.append(selector)
+        if selector in self.custom_errors:
+            raise self.custom_errors[selector]
         if selector in self.fail_selectors:
             raise TimeoutError(f"locator '{selector}' not found")
 
@@ -432,3 +439,35 @@ def test_stale_selector_retry_uses_original_instruction(
 
     assert result.success
     assert result.selector_used == "[ref=e9]"
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: non-locator failures must not trigger stale-selector retry
+# (avoids double-acting on partially-executed non-idempotent actions)
+# ---------------------------------------------------------------------------
+
+
+def test_stale_selector_retry_skipped_on_non_locator_failure(
+    browser_stub: BrowserStub,
+) -> None:
+    """A navigation timeout (no 'locator' in the message) must NOT be retried.
+
+    If a click triggered navigation and then timed out, the action may have
+    already executed.  Retrying would double-act (double form submission, double
+    navigation).  The guard must recognise that "Timeout: navigation to '...'"
+    is not a locator-not-found failure and return the first result immediately.
+    """
+    observed = browser_observe("submit button", top_k=1)[0]
+    assert observed.selector == "[ref=e5]"
+
+    # Page re-renders so retry *would* find a different selector — but should not.
+    browser_stub.snapshots = [SNAPSHOT_SUBMIT_MOVED]
+    browser_stub.custom_errors["[ref=e5]"] = TimeoutError(
+        "Timeout: navigation to 'https://example.com/' exceeded 30000ms"
+    )
+
+    result = browser_act(observed)
+
+    assert not result.success
+    # Only one dispatch — no retry.
+    assert browser_stub.clicks == ["[ref=e5]"]
