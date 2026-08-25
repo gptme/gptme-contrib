@@ -408,16 +408,17 @@ def test_call_summarizer_memoizes_unchanged_source() -> None:
         calls.append(model)
         return "- Executed command: found result\n- Task-level progress: done", None
 
-    with patch(
-        "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
-        return_value=SimpleNamespace(full="openai/gpt-4o"),
-    ):
+    with patch("tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE", {}):
         with patch(
-            "tooloutput_trimmer.hooks.summarizer._chat_complete",
-            side_effect=fake_chat_complete,
+            "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+            return_value=SimpleNamespace(full="openai/gpt-4o"),
         ):
-            first = _call_summarizer("unchanged-context-source")
-            second = _call_summarizer("unchanged-context-source")
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._chat_complete",
+                side_effect=fake_chat_complete,
+            ):
+                first = _call_summarizer("unchanged-context-source")
+                second = _call_summarizer("unchanged-context-source")
 
     assert first == second
     assert first == "- Executed command: found result\n- Task-level progress: done"

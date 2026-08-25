@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any
@@ -91,22 +92,25 @@ Summary of previous tool calls:
 # tool-output blob is not held in memory and membership is O(1).
 _SUMMARY_CACHE: dict[tuple[str, str], str] = {}
 _SUMMARY_CACHE_MAX = 64
+_SUMMARY_CACHE_LOCK = threading.Lock()
 
 
 def _cache_summary(context: str, model: str, summary: str) -> None:
     """Store a summary under (context-hash, model), bounding cache size."""
     key = (hashlib.sha256(context.encode()).hexdigest(), model)
-    if len(_SUMMARY_CACHE) >= _SUMMARY_CACHE_MAX and key not in _SUMMARY_CACHE:
-        # Evict an arbitrary entry to keep the cache bounded. This is a plain
-        # memo, not an LRU: correctness is unaffected by which entry goes.
-        _SUMMARY_CACHE.pop(next(iter(_SUMMARY_CACHE)))
-    _SUMMARY_CACHE[key] = summary
+    with _SUMMARY_CACHE_LOCK:
+        if len(_SUMMARY_CACHE) >= _SUMMARY_CACHE_MAX and key not in _SUMMARY_CACHE:
+            # Evict an arbitrary entry to keep the cache bounded. This is a plain
+            # memo, not an LRU: correctness is unaffected by which entry goes.
+            _SUMMARY_CACHE.pop(next(iter(_SUMMARY_CACHE)))
+        _SUMMARY_CACHE[key] = summary
 
 
 def _cached_summary(context: str, model: str) -> str | None:
     """Return a cached summary for (context-hash, model), or None."""
     key = (hashlib.sha256(context.encode()).hexdigest(), model)
-    return _SUMMARY_CACHE.get(key)
+    with _SUMMARY_CACHE_LOCK:
+        return _SUMMARY_CACHE.get(key)
 
 
 @dataclass
