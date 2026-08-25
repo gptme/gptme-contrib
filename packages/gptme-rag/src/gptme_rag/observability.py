@@ -174,7 +174,11 @@ def log_injection(
         "top_score": _as_score(hits[0].get(score_key)) if hits else 0.0,
         "hits": [
             {
-                **{f: hit[f] for f in hit_fields if f in hit and _copyable_hit_field(hit[f])},
+                **{
+                    f: hit[f].isoformat() if isinstance(hit[f], datetime) else hit[f]
+                    for f in hit_fields
+                    if f in hit and _copyable_hit_field(hit[f])
+                },
                 "score": _as_score(hit.get(score_key)),
             }
             for hit in hits[:injected]

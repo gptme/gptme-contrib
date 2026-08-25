@@ -566,6 +566,24 @@ def test_summarize_treats_null_session_and_harness_as_unknown(tmp_path):
     assert stats.unique_sessions == 1
 
 
+def test_log_injection_coerces_datetime_hit_fields(tmp_path):
+    """A datetime value in a hit field must be serialized, not silently drop the record."""
+    log = tmp_path / "injections.jsonl"
+    from datetime import datetime, timezone
+
+    ts = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    record = log_injection(
+        log,
+        "q",
+        [{"id": "d1", "date": ts, "similarity": 0.5}],
+        backend="tfidf",
+        session_id="s",
+        harness="test",
+    )
+    assert record is not None, "record must not be silently discarded on datetime hit field"
+    assert record["hits"][0]["date"] == ts.isoformat()
+
+
 def test_summarize_skips_overflow_top_score(tmp_path):
     """An overflow-scale top_score in a log record must be skipped, not crash."""
     log = tmp_path / "injections.jsonl"
