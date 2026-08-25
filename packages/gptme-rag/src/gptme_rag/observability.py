@@ -84,11 +84,12 @@ def detect_harness() -> str:
     for _ in range(_MAX_PROC_WALK):
         if pid <= 1:
             break
+        comm: str | None = None
         try:
             comm = (Path("/proc") / str(pid) / "comm").read_text().strip()
         except OSError:
-            break
-        if comm in HARNESS_COMMS:
+            pass
+        if comm is not None and comm in HARNESS_COMMS:
             return HARNESS_COMMS[comm]
         try:
             status = (Path("/proc") / str(pid) / "status").read_text()
@@ -165,7 +166,7 @@ def log_injection(
     Returns the record written, or ``None`` if the write failed. Logging is
     best-effort by design: a full disk must never break injection.
     """
-    injected = len(hits) if max_injected is None else max(0, min(len(hits), max_injected))
+    injected = len(hits) if max_injected is None else max(0, min(len(hits), int(max_injected)))
     record: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "session_id": session_id if session_id is not None else detect_session_id(),
@@ -377,7 +378,7 @@ def assess_index_health(
 
     health = IndexHealth(
         status="ok",
-        age_hours=round(age_hours, 2),
+        age_hours=age_hours,
         built_at=built_at.isoformat(),
         indexed_count=indexed_count,
         on_disk_count=on_disk_count,
