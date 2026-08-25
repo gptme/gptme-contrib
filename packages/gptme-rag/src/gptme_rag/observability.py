@@ -76,7 +76,11 @@ def detect_harness() -> str:
     ``"unknown"`` when nothing matches or ``/proc`` is unavailable — this is
     diagnostic metadata, never a control-flow input.
     """
-    pid = os.getppid()
+    try:
+        pid = os.getppid()
+    except AttributeError:
+        # os.getppid is not available on Windows
+        return "unknown"
     for _ in range(_MAX_PROC_WALK):
         if pid <= 1:
             break
@@ -231,7 +235,7 @@ def summarize_injections(log_file: Path) -> InjectionStats:
     sessions: set[str] = set()
     sum_hits = 0
     sum_top = 0.0
-    with open(log_file, encoding="utf-8") as f:
+    with open(log_file, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
