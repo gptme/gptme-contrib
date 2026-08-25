@@ -3184,14 +3184,29 @@ def stamp_attempt_kind(ctx: click.Context, session_id: str, attempt_kind: str) -
     if not session_id:
         raise click.UsageError("SESSION_ID must not be empty.")
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
-    try:
-        record = resolve_session_record_prefix(store.load_all(), session_id)
-    except ValueError as exc:
-        raise click.ClickException(str(exc))
-    if store.stamp_attempt_kind(record.session_id, attempt_kind):
-        click.echo(f"stamped attempt_kind={attempt_kind} on session {record.session_id}")
+    records = store.load_all()
+    # Deduplicate by unique session_id before checking for ambiguity — the
+    # store may hold duplicate rows for the same session_id (e.g. if
+    # post_session() ran twice), and stamp_attempt_kind is designed to stamp
+    # all of them; resolve_session_record_prefix would falsely raise on those.
+    matches = [r for r in records if r.session_id.startswith(session_id)]
+    unique_ids = list(dict.fromkeys(r.session_id for r in matches))
+    if not unique_ids:
+        raise click.ClickException(
+            f"No session found matching {session_id!r}. "
+            "Run 'gptme-sessions query' to list available session IDs."
+        )
+    if len(unique_ids) > 1:
+        raise click.ClickException(
+            f"Ambiguous prefix {session_id!r} matches {len(unique_ids)} sessions: "
+            + ", ".join(unique_ids)
+            + ". Run 'gptme-sessions query' to list available session IDs."
+        )
+    full_id = unique_ids[0]
+    if store.stamp_attempt_kind(full_id, attempt_kind):
+        click.echo(f"stamped attempt_kind={attempt_kind} on session {full_id}")
     else:
-        raise click.ClickException(f"no session record found for session_id={session_id!r}")
+        raise click.ClickException(f"no session record found for session_id={full_id!r}")
 
 
 def main() -> int:

@@ -13,8 +13,10 @@ import json
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 from gptme_sessions import SessionRecord, SessionStore
+from gptme_sessions.cli import cli
 from gptme_sessions.record import ATTEMPT_KINDS
 
 
@@ -117,3 +119,63 @@ def test_valid_attempt_kind_preserved_at_load_time() -> None:
             {"session_id": "s1", "outcome": "productive", "attempt_kind": kind}
         )
         assert record.attempt_kind == kind
+
+
+def test_stamp_handles_duplicate_rows(tmp_path: Path) -> None:
+    """stamp_attempt_kind must stamp all rows when a session_id appears twice."""
+    store = _store(tmp_path)
+    store.append(SessionRecord(session_id="dup", outcome="failed", duration_seconds=5))
+    store.append(SessionRecord(session_id="dup", outcome="failed", duration_seconds=5))
+
+    assert store.stamp_attempt_kind("dup", "infra_retry") is True
+
+    records = store.load_all()
+    assert len(records) == 2
+    assert all(r.attempt_kind == "infra_retry" for r in records)
+
+
+def test_cli_stamp_handles_duplicate_rows(tmp_path: Path) -> None:
+    """CLI stamp-attempt-kind must succeed even when the store has duplicate rows."""
+    store = _store(tmp_path)
+    store.append(SessionRecord(session_id="dup", outcome="failed", duration_seconds=5))
+    store.append(SessionRecord(session_id="dup", outcome="failed", duration_seconds=5))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(tmp_path), "stamp-attempt-kind", "dup", "infra_retry"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "infra_retry" in result.output
+
+    records = store.load_all()
+    assert all(r.attempt_kind == "infra_retry" for r in records)
+
+
+def test_cli_stamp_prefix_resolution(tmp_path: Path) -> None:
+    """CLI stamp-attempt-kind resolves partial session ID prefixes."""
+    store = _store(tmp_path)
+    store.append(SessionRecord(session_id="abcdef", outcome="productive"))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(tmp_path), "stamp-attempt-kind", "abc", "repetition"],
+    )
+    assert result.exit_code == 0, result.output
+    assert store.load_all()[0].attempt_kind == "repetition"
+
+
+def test_cli_stamp_ambiguous_prefix_raises(tmp_path: Path) -> None:
+    """CLI stamp-attempt-kind raises on a prefix matching two different session IDs."""
+    store = _store(tmp_path)
+    store.append(SessionRecord(session_id="abc1", outcome="productive"))
+    store.append(SessionRecord(session_id="abc2", outcome="failed"))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--sessions-dir", str(tmp_path), "stamp-attempt-kind", "abc", "repetition"],
+    )
+    assert result.exit_code != 0
+    assert "Ambiguous" in result.output
