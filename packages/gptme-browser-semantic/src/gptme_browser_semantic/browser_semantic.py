@@ -133,16 +133,29 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
         ref = m.group("ref") or ""
         if not name:
             continue
-        # `ref` captures the full bracket content (e.g. "ref=e1"), so the
-        # selector is the bracket itself: "[ref=e1]".
+        # Only treat bracket content as a real ref if it is a `ref=...`
+        # attribute (e.g. "ref=e1").  Other bracket attributes like
+        # "[level=2]" must be ignored per the README spec.
+        actual_ref = ref if ref.startswith("ref=") else ""
+        selector = f"[{actual_ref}]" if actual_ref else f"role={role}[name='{name}']"
         elements.append(
             {
                 "role": role,
                 "name": name,
-                "selector": f"[{ref}]" if ref else f"text={name!r}",
+                "selector": selector,
             }
         )
     return elements
+
+
+def _method_for_role(role: str) -> str:
+    """Return the default interaction method for an ARIA role."""
+    r = role.lower()
+    if r in {"textbox", "searchbox", "combobox"}:
+        return "fill"
+    if r in {"select", "listbox"}:
+        return "select"
+    return "click"
 
 
 def _score_match(query: str, element: dict[str, str]) -> float:
@@ -216,7 +229,7 @@ def browser_observe(
         ObserveResult(
             description=f"{e['role']} {e['name']!r}",
             selector=e["selector"],
-            method="click",
+            method=_method_for_role(e["role"]),
             instruction=instruction,
         )
         for _, e in scored

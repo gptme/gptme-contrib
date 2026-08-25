@@ -279,6 +279,68 @@ def test_stale_selector_retry_uses_method_and_arguments_override(
 
 
 # ---------------------------------------------------------------------------
+# P1 fix: method inferred from role, not hardcoded to "click"
+# ---------------------------------------------------------------------------
+
+
+def test_observe_textbox_returns_fill_method(browser_stub: BrowserStub) -> None:
+    # SNAPSHOT_V1 has '- textbox "Search the news" [ref=e2]' and
+    # '- textbox "Email" [ref=e7]'. Observing either must return method="fill".
+    results = browser_observe("type into the search box")
+    assert results, "expected at least one match"
+    textbox_results = [r for r in results if r.selector in ("[ref=e2]", "[ref=e7]")]
+    assert textbox_results, "expected textbox results"
+    for r in textbox_results:
+        assert (
+            r.method == "fill"
+        ), f"textbox should yield method='fill', got {r.method!r}"
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: non-ref bracket attributes are ignored; fallback uses role-name format
+# ---------------------------------------------------------------------------
+
+SNAPSHOT_NO_REFS = """\
+- heading "Welcome" [level=1]
+- link "Home"
+- textbox "Search"
+- button "Submit"
+"""
+
+
+@pytest.fixture
+def no_ref_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
+    stub = BrowserStub([SNAPSHOT_NO_REFS])
+    _wire_stub(stub, monkeypatch)
+    return stub
+
+
+def test_non_ref_bracket_ignored_uses_role_name_selector(
+    no_ref_browser_stub: BrowserStub,
+) -> None:
+    # The heading has [level=1] — that is NOT a ref= attribute and must be
+    # ignored. The fallback selector must be role=heading[name='Welcome'].
+    results = browser_observe("welcome heading", top_k=5)
+    heading_results = [r for r in results if "Welcome" in r.description]
+    assert heading_results, "expected a match for the heading"
+    r = heading_results[0]
+    assert (
+        r.selector == "role=heading[name='Welcome']"
+    ), f"non-ref bracket should produce role-name selector, got {r.selector!r}"
+    assert "[level=" not in r.selector
+
+
+def test_no_ref_element_uses_role_name_selector(
+    no_ref_browser_stub: BrowserStub,
+) -> None:
+    # Elements without any bracket content also fall back to role-name format.
+    results = browser_observe("home link", top_k=5)
+    link_results = [r for r in results if "Home" in r.description]
+    assert link_results, "expected a match for the Home link"
+    assert link_results[0].selector == "role=link[name='Home']"
+
+
+# ---------------------------------------------------------------------------
 # browser_extract
 # ---------------------------------------------------------------------------
 
