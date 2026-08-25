@@ -349,6 +349,20 @@ def browser_act(
     method = method or best.method
     arguments = arguments or best.arguments
 
+    # Detect the common mistake: string-form act matched a fill element but the
+    # caller provided no value. The instruction has no structured value to extract,
+    # so we surface a clear error instead of an opaque AssertionError later.
+    if method == "fill" and not arguments and isinstance(action_or_observed, str):
+        return ActResult(
+            success=False,
+            message=(
+                f"element '{best.description}' needs a fill value; "
+                "use browser_act(observed, arguments=['value']) or pass arguments=['value']"
+            ),
+            selector_used=sel,
+            elapsed_ms=int((time.monotonic() - t0) * 1000),
+        )
+
     element_method = best.method
     result = _dispatch_action(sel, method, arguments, t0, element_method=element_method)
     if result.success or not retry_on_stale:
@@ -367,6 +381,8 @@ def browser_act(
         "locator",
         "strict mode",
         "target closed",
+        "not attached",
+        "detached",
     )
     msg_lower = result.message.lower()
     if not any(phrase in msg_lower for phrase in _locator_fail_phrases):

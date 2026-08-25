@@ -516,3 +516,56 @@ def test_stale_selector_retry_skipped_on_non_locator_failure(
     assert not result.success
     # Only one dispatch — no retry.
     assert browser_stub.clicks == ["[ref=e5]"]
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: DOM-detach phrases trigger stale-selector retry
+# ---------------------------------------------------------------------------
+
+
+def test_stale_selector_retry_triggered_on_dom_detach(
+    browser_stub: BrowserStub,
+) -> None:
+    """'Element is not attached to the DOM' must trigger the stale-selector retry.
+
+    A Playwright error like 'not attached to the DOM' or 'detached from the DOM'
+    means the element existed but was removed by a re-render — a classic stale
+    selector.  The guard must recognise these phrases and re-observe.
+    """
+    observed = browser_observe("submit button", top_k=1)[0]
+    assert observed.selector == "[ref=e5]"
+    # Page re-renders: old ref detaches, button moves to e9.
+    browser_stub.snapshots = [SNAPSHOT_SUBMIT_MOVED]
+    browser_stub.custom_errors["[ref=e5]"] = RuntimeError(
+        "Element is not attached to the DOM"
+    )
+
+    result = browser_act(observed)
+
+    assert result.success
+    assert result.selector_used == "[ref=e9]"
+    assert browser_stub.clicks == ["[ref=e5]", "[ref=e9]"]
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: string-form browser_act with fill element returns clear error
+# ---------------------------------------------------------------------------
+
+
+def test_act_string_form_fill_without_value_returns_clear_error(
+    browser_stub: BrowserStub,
+) -> None:
+    """browser_act(str) matching a fill element must return a helpful error.
+
+    When the instruction matches a textbox (method='fill') but no value was
+    provided via arguments=, the code has no value to fill in.  It must return
+    a clear message instructing the caller to use explicit arguments= instead
+    of propagating an opaque AssertionError.
+    """
+    # "type into the search box" matches the textbox [ref=e2] with method=fill.
+    result = browser_act("type into the search box")
+    assert not result.success
+    assert "fill" in result.message.lower()
+    assert "arguments" in result.message.lower()
+    # Must not have dispatched to fill_element at all (no value to fill).
+    assert browser_stub.fills == []
