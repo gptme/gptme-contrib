@@ -298,9 +298,9 @@ def test_observe_textbox_returns_fill_method(browser_stub: BrowserStub) -> None:
     textbox_results = [r for r in results if r.selector in ("[ref=e2]", "[ref=e7]")]
     assert textbox_results, "expected textbox results"
     for r in textbox_results:
-        assert (
-            r.method == "fill"
-        ), f"textbox should yield method='fill', got {r.method!r}"
+        assert r.method == "fill", (
+            f"textbox should yield method='fill', got {r.method!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -331,9 +331,9 @@ def test_non_ref_bracket_ignored_uses_role_name_selector(
     heading_results = [r for r in results if "Welcome" in r.description]
     assert heading_results, "expected a match for the heading"
     r = heading_results[0]
-    assert (
-        r.selector == "role=heading[name='Welcome']"
-    ), f"non-ref bracket should produce role-name selector, got {r.selector!r}"
+    assert r.selector == "role=heading[name='Welcome']", (
+        f"non-ref bracket should produce role-name selector, got {r.selector!r}"
+    )
     assert "[level=" not in r.selector
 
 
@@ -442,16 +442,18 @@ def test_act_press_focuses_input_element_before_pressing(
     assert observed.selector in browser_stub.clicks
 
 
-def test_act_press_does_not_click_button_before_pressing(
+def test_act_press_on_button_returns_clear_failure(
     browser_stub: BrowserStub,
 ) -> None:
-    # For button/link elements (element_method="click"), clicking before pressing
-    # would fire the button's handler AND THEN press the key — a double action.
-    # The fix skips click_element for these elements.
+    # For button/link elements (element_method="click"), gptme's browser has no
+    # focus-without-activate primitive.  Pressing a key on an unfocused button is
+    # a silent no-op in a real browser.  browser_act must return a clear failure
+    # with a helpful message rather than claiming success when nothing happened.
     observed = browser_observe("submit button", top_k=1)[0]
     assert observed.method == "click", "expected button with click method"
     result = browser_act(observed, method="press", arguments=["Enter"])
-    assert result.success
+    assert not result.success
+    assert "input-type" in result.message
     # click_element must NOT have been called (would double-activate the button).
     assert observed.selector not in browser_stub.clicks
 

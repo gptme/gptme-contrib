@@ -170,7 +170,11 @@ def _score_match(query: str, element: dict[str, str]) -> float:
     the common case. Returns 0.0..1.0.
     """
     q_tokens = {t.lower() for t in re.findall(r"\w+", query)}
-    e_tokens = {t.lower() for t in re.findall(r"\w+", element["name"])}
+    # Include the element's ARIA role so a query like "button" or "link" matches
+    # elements by role, not only by name token overlap.
+    e_tokens = {t.lower() for t in re.findall(r"\w+", element["name"])} | {
+        element["role"].lower()
+    }
     if not q_tokens or not e_tokens:
         return 0.0
     overlap = q_tokens & e_tokens
@@ -268,12 +272,23 @@ def _dispatch_action(
             fill_element(sel, arguments[0])
         elif method == "press":
             assert arguments, "press requires arguments=[key]"
-            # Focus the element before pressing — but only for input-type elements
-            # (textbox, searchbox, combobox) where a click merely moves cursor focus.
-            # For button/link/checkbox/etc. (element_method=="click") a click already
-            # activates the element, so calling click_element here would double-fire it.
-            if element_method != "click":
-                click_element(sel)
+            if element_method == "click":
+                # gptme's browser tool has no focus-without-activate primitive.
+                # Pressing a key on a button/link without first focusing it is a
+                # silent no-op in a real browser.  Return a clear failure rather
+                # than claiming success when nothing happened.
+                return ActResult(
+                    success=False,
+                    message=(
+                        "press is only valid for input-type elements"
+                        " (textbox, searchbox, combobox);"
+                        " use method='click' to activate buttons and links"
+                    ),
+                    selector_used=sel,
+                    elapsed_ms=int((time.monotonic() - t0) * 1000),
+                )
+            # For input-type elements, click to focus first, then press.
+            click_element(sel)
             press_key(arguments[0])
         elif method == "select":
             assert arguments, "select requires arguments=[value]"
@@ -367,6 +382,8 @@ def browser_act(
         "locator",
         "strict mode",
         "target closed",
+        "not attached",
+        "detached",
     )
     msg_lower = result.message.lower()
     if not any(phrase in msg_lower for phrase in _locator_fail_phrases):
@@ -393,6 +410,15 @@ def browser_extract(
     in Path A — strict Pydantic validation is a Path-B feature.
     """
     t0 = time.monotonic()
+    if schema is not None:
+        return ExtractResult(
+            success=False,
+            data={
+                "error": "schema-aware extraction is not implemented in Path A",
+                "hint": "see design doc browser-tool-act-observe-extract.md (Path B)",
+            },
+            elapsed_ms=0,
+        )
     try:
         snapshot = _aria_snapshot()
     except Exception as exc:
