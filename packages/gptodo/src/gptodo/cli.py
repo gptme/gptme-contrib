@@ -1000,16 +1000,16 @@ exec "${EDITOR:-nano}" "$1" </dev/tty >/dev/tty 2>/dev/tty
 sort=$(cat "{sd}/sort" 2>/dev/null || echo date)
 state=$(cat "{sd}/state" 2>/dev/null || echo "")
 project=$(cat "{sd}/project" 2>/dev/null || echo "")
-args="--sort $sort"
+set -- --sort "$sort"
 if [ "$state" = "all" ]; then
-    args="$args --all"
+    set -- "$@" --all
 elif [ -n "$state" ]; then
-    args="$args --state $state"
+    set -- "$@" --state "$state"
 fi
 if [ -n "$project" ]; then
-    args="$args --project $project"
+    set -- "$@" --project "$project"
 fi
-gptodo browse-list $args
+gptodo browse-list "$@"
 """
     )
 
@@ -1078,8 +1078,6 @@ action=$(printf '%s\\n' \\
   'Edit in $EDITOR' \\
   'Git blame' \\
   'Git log (file history)' \\
-  'Preview: raw markdown (^R)' \\
-  'Preview: rendered (^P)' \\
   | fzf --no-sort --header 'Command Palette')
 
 task="$1"
@@ -1282,8 +1280,8 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
             "ctrl-w:change-preview-window(right:60%:wrap|down:75%:wrap)+refresh-preview",
             "ctrl-/:toggle-preview",
         ]
-        # resize event requires fzf >= 0.42.0
-        if _fzf_version() >= (0, 42, 0):
+        # resize event requires fzf >= 0.46.0
+        if _fzf_version() >= (0, 46, 0):
             bind_list.append("resize:refresh-preview")
         bindings = ",".join(bind_list)
 
