@@ -3181,6 +3181,8 @@ def stamp_attempt_kind(ctx: click.Context, session_id: str, attempt_kind: str) -
     \b
         gptme-sessions stamp-attempt-kind a1b2 infra_retry
     """
+    if not session_id:
+        raise click.UsageError("SESSION_ID must not be empty.")
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     if store.stamp_attempt_kind(session_id, attempt_kind):
         click.echo(f"stamped attempt_kind={attempt_kind} on session {session_id}")

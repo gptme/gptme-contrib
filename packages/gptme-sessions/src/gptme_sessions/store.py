@@ -282,13 +282,13 @@ class SessionStore:
 
         with self.lock():
             records = self.load_all()
-            target = next((r for r in reversed(records) if r.session_id == session_id), None)
-            if target is None:
+            targets = [r for r in records if r.session_id == session_id]
+            if not targets:
                 return False
-            target.attempt_kind = attempt_kind
-            # Rewrite the full list, not just the target: rewrite() upserts by
-            # session_id, so passing the single record would collapse any
-            # duplicate rows sharing that id.
+            for target in targets:
+                target.attempt_kind = attempt_kind
+            # Rewrite the full list so all duplicate rows for this session_id
+            # are stamped, not just the most recent one.
             self.rewrite(records)
         return True
 
