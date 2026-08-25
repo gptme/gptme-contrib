@@ -3506,11 +3506,11 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     # Filter out tasks claimed by another session in the coordination DB.
     if skip_claim_held:
         try:
-            from gptme_coordination.db import resolve_coordination_db_path
+            from gptme_coordination.db import CoordinationDB, resolve_coordination_db_path
             from gptme_coordination.work import WorkClaimManager
 
             db_path = resolve_coordination_db_path(repo_root=repo_root)
-            mgr = WorkClaimManager(db_path)
+            mgr = WorkClaimManager(CoordinationDB(db_path))
             # Collect all live cascade:task:<name> claims held by other sessions.
             claimed_keys: set[str] = set()
             for claim in mgr.list_claimed():
