@@ -3383,7 +3383,7 @@ def _get_claimed_task_ids(repo_root: Path) -> set[str]:
             rows = conn.execute(
                 """SELECT task_id FROM work
                 WHERE task_id LIKE 'cascade:task:%'
-                  AND status IN ('claimed', 'completed')
+                  AND status = 'claimed'
                   AND expires_at >= datetime('now')
                   AND (? = '' OR claimer != ?)""",
                 (my_agent, my_agent),
