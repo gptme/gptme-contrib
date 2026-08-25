@@ -342,7 +342,14 @@ def call_claude_code(
                 gptme_response = call_gptme(prompt, timeout=timeout)
                 if gptme_response:
                     gptme_result = extract_json_from_response(gptme_response)
-                    _keys = (narrative_key,) if narrative_key else _SUMMARY_NARRATIVE_KEYS
+                    # Accept the specific requested key first, then any other recognised keys
+                    # so a gptme model returning "narrative" instead of "month_narrative" is
+                    # not silently discarded.
+                    _keys = (
+                        tuple(dict.fromkeys([narrative_key] + list(_SUMMARY_NARRATIVE_KEYS)))
+                        if narrative_key
+                        else _SUMMARY_NARRATIVE_KEYS
+                    )
                     if any(key in gptme_result for key in _keys):
                         logger.warning(
                             "Claude subscriptions unavailable; gptme fallback produced a summary"
