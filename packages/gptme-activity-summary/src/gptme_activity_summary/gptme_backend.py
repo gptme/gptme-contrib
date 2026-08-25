@@ -144,4 +144,10 @@ def _extract_assistant_text(stdout: str) -> str:
     if not contents:
         logger.warning("gptme fallback produced no assistant messages")
         return ""
-    return "\n".join(contents)
+    if len(contents) > 1:
+        logger.debug(
+            "gptme fallback produced %d assistant messages; using first only to avoid "
+            "multi-JSON concatenation that breaks extract_json_from_response",
+            len(contents),
+        )
+    return contents[0]

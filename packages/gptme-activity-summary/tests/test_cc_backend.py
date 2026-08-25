@@ -1092,6 +1092,74 @@ def test_call_gptme_list_content_non_string_text_skipped(mock_run, mock_which):
     assert gb.call_gptme("hi") == "valid text"
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run")
+def test_call_gptme_multiple_assistant_messages_returns_first_only(mock_run, mock_which):
+    """When gptme emits multiple assistant messages, only the first is returned.
+
+    Joining them with newlines produces a multi-JSON string — the greedy regex
+    in extract_json_from_response then spans across both objects and fails to
+    parse any valid JSON, so the fallback silently yields nothing.
+    """
+    import json as _json
+
+    import gptme_activity_summary.gptme_backend as gb
+
+    first_msg = _json.dumps(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": '{"narrative": "first"}',
+            "timestamp": "2026-08-23T00:00:00.000000",
+        }
+    )
+    second_msg = _json.dumps(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": "No tool call detected.",
+            "timestamp": "2026-08-23T00:00:01.000000",
+        }
+    )
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["gptme"], returncode=0, stdout=f"{first_msg}\n{second_msg}"
+    )
+    result = gb.call_gptme("hi")
+    assert result == '{"narrative": "first"}', "only the first assistant message must be returned"
+
+
+@patch.dict("os.environ", {}, clear=True)
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_gptme_fallback_remaps_alternate_narrative_key(
+    mock_run, mock_sleep, mock_gptme
+):
+    """When gptme returns an alternate recognised key instead of the exact requested one,
+    the key is remapped so the caller always finds narrative_key in the returned JSON.
+
+    Without remapping, a monthly summary call (narrative_key='month_narrative') that
+    receives '{"narrative": "..."}' passes schema validation but leaves the caller
+    reading gptme_result.get('month_narrative', '') — which defaults to '' and
+    silently produces an empty narrative on quota days.
+    """
+    import json as _json
+
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    # gptme returns "narrative" but the caller expects "month_narrative"
+    mock_gptme.return_value = '{"narrative": "monthly stuff"}'
+
+    result = call_claude_code("test prompt", max_retries=1, narrative_key="month_narrative")
+
+    parsed = _json.loads(result)
+    assert "month_narrative" in parsed, "caller-expected key must be present after remap"
+    assert parsed["month_narrative"] == "monthly stuff"
+    assert "narrative" not in parsed, "original alternate key must be replaced by remap"
+
+
 @patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")

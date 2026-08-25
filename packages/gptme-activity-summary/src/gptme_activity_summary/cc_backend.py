@@ -130,9 +130,11 @@ def call_claude_code(
             temporary directory so scheduled failures retain diagnostics.
         narrative_key: Expected top-level JSON key for the narrative field in
             the response (e.g. ``"narrative"`` or ``"month_narrative"``). When
-            set, the gptme fallback only accepts responses that contain this
-            exact key; when ``None``, any key from ``_SUMMARY_NARRATIVE_KEYS``
-            is accepted.
+            set, the gptme fallback accepts this exact key or any other key in
+            ``_SUMMARY_NARRATIVE_KEYS``, remapping alternate keys to
+            ``narrative_key`` before returning so the caller always finds the
+            key it expects; when ``None``, any key from
+            ``_SUMMARY_NARRATIVE_KEYS`` is accepted without remapping.
 
     Returns:
         The response text from Claude Code
@@ -342,14 +344,19 @@ def call_claude_code(
                 gptme_response = call_gptme(prompt, timeout=timeout)
                 if gptme_response:
                     gptme_result = extract_json_from_response(gptme_response)
-                    # Accept the specific requested key first, then any other recognised keys
-                    # so a gptme model returning "narrative" instead of "month_narrative" is
-                    # not silently discarded.
-                    _keys = (
-                        tuple(dict.fromkeys([narrative_key] + list(_SUMMARY_NARRATIVE_KEYS)))
-                        if narrative_key
-                        else _SUMMARY_NARRATIVE_KEYS
-                    )
+                    # Check for the exact requested key first.  If an alternate
+                    # recognised key is present instead, remap it so the caller
+                    # always finds the key it asked for.  Without the remap,
+                    # accepting "narrative" when the caller wants "month_narrative"
+                    # lets the validation pass but the caller then defaults the
+                    # narrative to "" — a silent empty summary on quota days.
+                    if narrative_key and narrative_key not in gptme_result:
+                        for alt_key in _SUMMARY_NARRATIVE_KEYS:
+                            if alt_key in gptme_result:
+                                gptme_result[narrative_key] = gptme_result.pop(alt_key)
+                                gptme_response = json.dumps(gptme_result)
+                                break
+                    _keys = (narrative_key,) if narrative_key else _SUMMARY_NARRATIVE_KEYS
                     if any(key in gptme_result for key in _keys):
                         logger.warning(
                             "Claude subscriptions unavailable; gptme fallback produced a summary"
