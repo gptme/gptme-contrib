@@ -3184,8 +3184,12 @@ def stamp_attempt_kind(ctx: click.Context, session_id: str, attempt_kind: str) -
     if not session_id:
         raise click.UsageError("SESSION_ID must not be empty.")
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
-    if store.stamp_attempt_kind(session_id, attempt_kind):
-        click.echo(f"stamped attempt_kind={attempt_kind} on session {session_id}")
+    try:
+        record = resolve_session_record_prefix(store.load_all(), session_id)
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+    if store.stamp_attempt_kind(record.session_id, attempt_kind):
+        click.echo(f"stamped attempt_kind={attempt_kind} on session {record.session_id}")
     else:
         raise click.ClickException(f"no session record found for session_id={session_id!r}")
 

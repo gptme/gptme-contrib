@@ -100,3 +100,20 @@ def test_stamp_requires_session_id(tmp_path: Path) -> None:
 
 def test_attempt_kinds_vocabulary_is_closed() -> None:
     assert ATTEMPT_KINDS == frozenset({"repetition", "infra_retry", "unknown"})
+
+
+def test_invalid_attempt_kind_discarded_at_load_time() -> None:
+    """A hand-edited or buggy JSONL with an invalid attempt_kind must not reach consumers."""
+    record = SessionRecord.from_dict(
+        {"session_id": "s1", "outcome": "productive", "attempt_kind": "infra-retry"}
+    )
+    assert record.attempt_kind is None
+
+
+def test_valid_attempt_kind_preserved_at_load_time() -> None:
+    """A valid attempt_kind must survive the round-trip through from_dict."""
+    for kind in ATTEMPT_KINDS:
+        record = SessionRecord.from_dict(
+            {"session_id": "s1", "outcome": "productive", "attempt_kind": kind}
+        )
+        assert record.attempt_kind == kind

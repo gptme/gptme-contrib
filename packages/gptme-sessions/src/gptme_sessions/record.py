@@ -350,6 +350,10 @@ class SessionRecord:
         # Discard unrecognized dropout_depth values so typos don't silently reach consumers.
         if self.dropout_depth is not None and self.dropout_depth not in DROPOUT_DEPTH_VALUES:
             self.dropout_depth = None
+        # Discard unrecognized attempt_kind values so hand-edited JSONL or a buggy writer
+        # cannot persist an invalid value that consumers would silently misclassify.
+        if self.attempt_kind is not None and self.attempt_kind not in ATTEMPT_KINDS:
+            self.attempt_kind = None
         # Cross-field consistency: when explicitly not selected (False), the detail fields
         # have no meaning — clear them to prevent downstream consumers from reading an
         # inconsistent combination (e.g. dropout_selected=False, dropout_depth="deep").
