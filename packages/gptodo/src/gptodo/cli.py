@@ -3394,7 +3394,17 @@ def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
     default=None,
     help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
 )
-def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool):
+@click.option(
+    "--skip-claim-held",
+    "skip_claim_held",
+    is_flag=True,
+    default=False,
+    help=(
+        "Filter out tasks whose cascade:task:<name> key is currently claimed "
+        "by another session in the coordination DB. Requires gptme-coordination."
+    ),
+)
+def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool, skip_claim_held):
     """List all ready (unblocked) tasks.
 
     Shows tasks that have no dependencies or whose dependencies are all completed.
@@ -3405,6 +3415,7 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     Use --use-cache to also check URL-based 'requires' against cached issue states.
     Use --pool to filter by work pool; default hides non-default pools (e.g. frontier).
     Use --pool all to see every pool; --pool frontier for frontier only.
+    Use --skip-claim-held to exclude tasks claimed by concurrent sessions (requires gptme-coordination).
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -3491,6 +3502,33 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
         ready_tasks = [
             task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)
         ]
+
+    # Filter out tasks claimed by another session in the coordination DB.
+    if skip_claim_held:
+        try:
+            from gptme_coordination.db import resolve_coordination_db_path
+            from gptme_coordination.work import WorkClaimManager
+
+            db_path = resolve_coordination_db_path(repo_root=repo_root)
+            mgr = WorkClaimManager(db_path)
+            # Collect all live cascade:task:<name> claims held by other sessions.
+            claimed_keys: set[str] = set()
+            for claim in mgr.list_claimed():
+                if claim.task_id.startswith("cascade:task:"):
+                    claimed_keys.add(claim.task_id[len("cascade:task:") :])
+            if claimed_keys:
+                before = len(ready_tasks)
+                ready_tasks = [t for t in ready_tasks if t.name not in claimed_keys]
+                skipped = before - len(ready_tasks)
+                if skipped and not output_json and not output_jsonl:
+                    console.print(
+                        f"[dim]  ({skipped} task(s) skipped — claimed by concurrent session)[/]"
+                    )
+        except ImportError:
+            if not output_json and not output_jsonl:
+                console.print(
+                    "[yellow]Warning: gptme-coordination not installed; --skip-claim-held ignored.[/]"
+                )
 
     if not ready_tasks:
         if output_json:
