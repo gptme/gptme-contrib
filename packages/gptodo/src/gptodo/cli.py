@@ -3384,8 +3384,8 @@ def _get_claimed_task_ids(repo_root: Path) -> set[str]:
                 """SELECT task_id FROM work
                 WHERE task_id LIKE 'cascade:task:%'
                   AND status = 'claimed'
-                  AND expires_at >= datetime('now')
-                  AND (? = '' OR claimer != ?)""",
+                  AND (expires_at IS NULL OR expires_at >= datetime('now'))
+                  AND (? = '' OR claimer IS NULL OR claimer != ?)""",
                 (my_agent, my_agent),
             ).fetchall()
     except Exception:

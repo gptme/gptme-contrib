@@ -81,6 +81,40 @@ class TestGetClaimedTaskIds:
         )
         assert _get_claimed_task_ids(tmp_path) == set()
 
+    def test_includes_null_expiry_claims(self, tmp_path: Path) -> None:
+        """Claims with NULL expires_at are treated as non-expiring — still blocked."""
+        db_path = tmp_path / "state" / "coordination" / "coord.db"
+        write_coord_db(
+            db_path,
+            [
+                {
+                    "task_id": "cascade:task:no-expiry-task",
+                    "status": "claimed",
+                    "expires_at": None,  # type: ignore[arg-type]
+                }
+            ],
+        )
+        result = _get_claimed_task_ids(tmp_path)
+        assert "no-expiry-task" in result
+
+    def test_includes_null_claimer_claims(self, tmp_path: Path, monkeypatch) -> None:
+        """Claims with NULL claimer are blocked (unknown owner — treat as external)."""
+        monkeypatch.setenv("AGENT_ID", "me")
+        db_path = tmp_path / "state" / "coordination" / "coord.db"
+        write_coord_db(
+            db_path,
+            [
+                {
+                    "task_id": "cascade:task:unknown-claimer-task",
+                    "claimer": None,  # type: ignore[arg-type]
+                    "status": "claimed",
+                    "expires_at": "2099-01-01 00:00:00",
+                }
+            ],
+        )
+        result = _get_claimed_task_ids(tmp_path)
+        assert "unknown-claimer-task" in result
+
     def test_excludes_own_agent_claims(self, tmp_path: Path, monkeypatch) -> None:
         db_path = tmp_path / "state" / "coordination" / "coord.db"
         monkeypatch.setenv("AGENT_ID", "me")
