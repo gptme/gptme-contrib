@@ -204,7 +204,7 @@ def get_foreign_cascade_claims(repo_root: Path) -> dict[str, str]:
                 WHERE task_id LIKE 'cascade:task:%'
                   AND status IN ('claimed', 'completed')
                   AND expires_at >= datetime('now')
-                  AND (? = '' OR claimer != ?)""",
+                  AND (claimer IS NULL OR ? = '' OR claimer != ?)""",
                 (my_agent, my_agent),
             ).fetchall()
     except Exception as exc:
@@ -226,11 +226,12 @@ def get_foreign_cascade_claims(repo_root: Path) -> dict[str, str]:
                     continue
             except Exception:
                 pass  # conservatively treat as live (keep claim in blocked set)
-        if status == "completed" and completed_cascade_claim_task_reopened(
-            task_id,
-            repo_root=repo_root,
-        ):
-            continue
+        if status == "completed":
+            try:
+                if completed_cascade_claim_task_reopened(task_id, repo_root=repo_root):
+                    continue
+            except Exception:
+                pass  # conservatively treat as live (keep claim in blocked set)
         stripped_task_id = (
             task_id[len(prefix) :] if task_id.startswith(prefix) else task_id
         )
