@@ -16,18 +16,12 @@ Or with a custom config path:
     python3 gptme-contrib/scripts/precommit/validators/validate_root_structure_yaml.py \\
       --config my-root-allowlist.yaml
 
-As a pre-commit hook in .pre-commit-config.yaml:
+As a pre-commit hook in .pre-commit-config.yaml (language and dependencies
+are declared in .pre-commit-hooks.yaml and do not need repeating here):
     - repo: https://github.com/gptme/gptme-contrib
       rev: <SHA or tag>
       hooks:
       - id: validate-root-structure
-        name: Check root directory structure
-        entry: python3 scripts/precommit/validators/validate_root_structure_yaml.py
-        language: system
-        pass_filenames: false
-        always_run: true
-        args:
-          - --config=root-structure-allowlist.yaml
 
 Config file format (YAML, one entry per line):
     ---
