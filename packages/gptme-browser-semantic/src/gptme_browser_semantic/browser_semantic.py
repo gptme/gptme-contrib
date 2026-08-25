@@ -448,23 +448,12 @@ def browser_extract(
             data={"error": f"browser snapshot failed: {type(exc).__name__}: {exc}"},
             elapsed_ms=int((time.monotonic() - t0) * 1000),
         )
-    if instruction is None:
-        # Zero-LLM text extraction.
-        return ExtractResult(
-            success=True,
-            data=snapshot,
-            llm_calls=0,
-            elapsed_ms=int((time.monotonic() - t0) * 1000),
-        )
-    # Path A: no LLM available in this prototype, return the raw snapshot
-    # with a note. Path B will fill this in via the LLM router.
+    # Path A always returns the raw ARIA snapshot regardless of instruction.
+    # Instruction-based LLM extraction is a Path-B feature; Path A ignores the
+    # instruction and returns the full snapshot so callers can filter it themselves.
     return ExtractResult(
-        success=False,
-        data={
-            "error": "schema-aware extract requires the LLM-backed path",
-            "hint": "see design doc browser-tool-act-observe-extract.md (Path B)",
-            "raw_snapshot_excerpt": snapshot[:500],
-        },
+        success=True,
+        data=snapshot,
         llm_calls=0,
         elapsed_ms=int((time.monotonic() - t0) * 1000),
     )

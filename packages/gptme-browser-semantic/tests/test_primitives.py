@@ -415,13 +415,14 @@ def test_extract_without_instruction_returns_raw_snapshot(
     assert result.llm_calls == 0
 
 
-def test_extract_with_instruction_is_path_a_noop_with_hint(
+def test_extract_with_instruction_returns_raw_snapshot_in_path_a(
     browser_stub: BrowserStub,
 ) -> None:
+    # Path A ignores the instruction and always returns the raw ARIA snapshot.
+    # LLM-backed instruction-based extraction is a Path-B feature.
     result = browser_extract("all comment counts")
-    assert not result.success
-    assert isinstance(result.data, dict)
-    assert "error" in result.data
+    assert result.success
+    assert isinstance(result.data, str)
     assert result.llm_calls == 0
 
 
