@@ -113,6 +113,7 @@ def call_claude_code(
     timeout: int = 120,
     max_retries: int = _MAX_RETRIES,
     diagnostic_dir: Path | None = None,
+    narrative_key: str | None = None,
 ) -> str:
     """
     Call Claude Code CLI with a prompt, retrying on non-zero exit or empty responses.
@@ -127,6 +128,11 @@ def call_claude_code(
         max_retries: Maximum number of retry attempts per failure type
         diagnostic_dir: Directory for Claude debug logs. Defaults to a stable
             temporary directory so scheduled failures retain diagnostics.
+        narrative_key: Expected top-level JSON key for the narrative field in
+            the response (e.g. ``"narrative"`` or ``"month_narrative"``). When
+            set, the gptme fallback only accepts responses that contain this
+            exact key; when ``None``, any key from ``_SUMMARY_NARRATIVE_KEYS``
+            is accepted.
 
     Returns:
         The response text from Claude Code
@@ -336,7 +342,8 @@ def call_claude_code(
                 gptme_response = call_gptme(prompt, timeout=timeout)
                 if gptme_response:
                     gptme_result = extract_json_from_response(gptme_response)
-                    if any(key in gptme_result for key in _SUMMARY_NARRATIVE_KEYS):
+                    _keys = (narrative_key,) if narrative_key else _SUMMARY_NARRATIVE_KEYS
+                    if any(key in gptme_result for key in _keys):
                         logger.warning(
                             "Claude subscriptions unavailable; gptme fallback produced a summary"
                         )
@@ -522,7 +529,7 @@ Journal Entry:
 
 Return ONLY the JSON, no additional text."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning("CC returned empty for journal summary (%s), using defaults", entry_date)
     result = extract_json_from_response(response)
@@ -631,7 +638,7 @@ Journal Entries ({len(entries)} total):
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning("CC returned empty for daily summary (%s), using defaults", target_date)
     result = extract_json_from_response(response)
@@ -735,7 +742,7 @@ Daily Summaries:
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning("CC returned empty for weekly summary (%s), using defaults", week_id)
     result = extract_json_from_response(response)
@@ -806,7 +813,7 @@ Guidelines:
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning(
             "CC returned empty for GitHub summary (%s/%s), using defaults", username, period
@@ -874,7 +881,7 @@ Guidelines:
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning(
             "CC returned empty for human day summary (%s/%s), using defaults", username, day
@@ -975,7 +982,7 @@ Weekly Summaries:
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="month_narrative")
     if not response:
         logger.warning("CC returned empty for monthly summary (%s), using defaults", month)
     result = extract_json_from_response(response)

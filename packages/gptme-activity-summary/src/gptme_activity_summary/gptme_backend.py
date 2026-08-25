@@ -19,8 +19,11 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
-# Env switches so operators can disable the fallback or pin a specific model.
-_DISABLE_ENV = "GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK"  # set to "0" to disable
+# Env switches to enable the fallback or pin a specific model.
+# The fallback is OFF by default because it sends journal content (potentially
+# sensitive personal data) to an external model via OpenRouter. Operators must
+# explicitly opt in by setting _ENABLE_ENV=1.
+_ENABLE_ENV = "GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK"  # set to "1" to enable
 _MODEL_ENV = "GPTME_ACTIVITY_SUMMARY_GPTME_MODEL"  # override the default model
 _DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash-0731@deepseek"
 
@@ -34,9 +37,14 @@ _OUTPUT_FORMAT = "json"
 
 
 def is_enabled() -> bool:
-    """Whether the gptme fallback is enabled (on by default, off via env)."""
-    val = os.environ.get(_DISABLE_ENV, "1").strip().lower()
-    return val not in ("0", "false", "no", "off")
+    """Whether the gptme fallback is enabled (off by default, on via env).
+
+    Set GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK=1 to enable. The fallback sends
+    journal content to an external model via OpenRouter; it is disabled by
+    default to avoid unintended data exfiltration.
+    """
+    val = os.environ.get(_ENABLE_ENV, "0").strip().lower()
+    return val in ("1", "true", "yes", "on")
 
 
 def call_gptme(prompt: str, timeout: int = 120) -> str:
@@ -54,7 +62,7 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
         The raw assistant response text, or ``""`` if the call failed.
     """
     if not is_enabled():
-        logger.debug("gptme fallback disabled via %s", _DISABLE_ENV)
+        logger.debug("gptme fallback disabled; set %s=1 to enable", _ENABLE_ENV)
         return ""
     if shutil.which("gptme") is None:
         logger.debug("gptme binary not found on PATH; skipping fallback")
@@ -62,9 +70,8 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
 
     model = os.environ.get(_MODEL_ENV, _DEFAULT_MODEL).strip()
     logger.warning(
-        "gptme fallback: sending prompt to external model %r. " "Set %s=0 to disable.",
+        "gptme fallback: sending prompt to external model %r via OpenRouter.",
         model,
-        _DISABLE_ENV,
     )
     cmd = [
         "gptme",

@@ -958,8 +958,20 @@ def test_call_claude_code_quota_gptme_fallback_passes_timeout(mock_run, mock_sle
 # --- Tests for gptme_backend module ---
 
 
+def test_call_gptme_disabled_by_default():
+    """Fallback is off by default (no env var set); does not spawn the binary."""
+    import gptme_activity_summary.gptme_backend as gb
+
+    with patch.dict("os.environ", {}, clear=True):
+        with patch.object(gb, "shutil") as mock_shutil:
+            mock_shutil.which.return_value = "/usr/bin/gptme"
+            with patch("subprocess.run") as mock_run:
+                assert gb.call_gptme("hi") == ""
+    mock_run.assert_not_called()
+
+
 def test_call_gptme_disabled_by_env():
-    """Disabling via env short-circuits and does not spawn the binary."""
+    """Explicitly disabling via env (=0) short-circuits and does not spawn the binary."""
     import gptme_activity_summary.gptme_backend as gb
 
     with patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "0"}, clear=True):
@@ -970,14 +982,16 @@ def test_call_gptme_disabled_by_env():
     mock_run.assert_not_called()
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
 @patch("gptme_activity_summary.gptme_backend.shutil.which", return_value=None)
 def test_call_gptme_missing_binary(mock_which):
-    """Missing gptme binary is handled gracefully."""
+    """Missing gptme binary is handled gracefully (fallback enabled but binary absent)."""
     import gptme_activity_summary.gptme_backend as gb
 
     assert gb.call_gptme("hi") == ""
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
 @patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
 @patch("subprocess.run")
 def test_call_gptme_extracts_assistant_text(mock_run, mock_which):
@@ -990,6 +1004,7 @@ def test_call_gptme_extracts_assistant_text(mock_run, mock_which):
     assert gb.call_gptme("hi") == '{"result": "ok"}'
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
 @patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
 @patch("subprocess.run")
 def test_call_gptme_extracts_assistant_text_list_content(mock_run, mock_which):
@@ -1010,6 +1025,7 @@ def test_call_gptme_extracts_assistant_text_list_content(mock_run, mock_which):
     assert gb.call_gptme("hi") == '{"result": "ok"}'
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
 @patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
 @patch("subprocess.run")
 def test_call_gptme_nonzero_exit_returns_empty(mock_run, mock_which):
@@ -1022,6 +1038,7 @@ def test_call_gptme_nonzero_exit_returns_empty(mock_run, mock_which):
     assert gb.call_gptme("hi") == ""
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
 @patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
 @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gptme", 30))
 def test_call_gptme_timeout_returns_empty(mock_run, mock_which):
@@ -1031,6 +1048,7 @@ def test_call_gptme_timeout_returns_empty(mock_run, mock_which):
     assert gb.call_gptme("hi") == ""
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
 @patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
 @patch("subprocess.run")
 def test_call_gptme_prompt_passed_via_stdin(mock_run, mock_which):
@@ -1049,6 +1067,7 @@ def test_call_gptme_prompt_passed_via_stdin(mock_run, mock_which):
     assert kwargs.get("input") == "my secret prompt"
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
 @patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
 @patch("subprocess.run")
 def test_call_gptme_list_content_non_string_text_skipped(mock_run, mock_which):
