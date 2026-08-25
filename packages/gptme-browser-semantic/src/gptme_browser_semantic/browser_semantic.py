@@ -142,7 +142,12 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
             (tok.strip() for tok in ref.split(",") if tok.strip().startswith("ref=")),
             "",
         )
-        selector = f"[{actual_ref}]" if actual_ref else f"role={role}[name='{name}']"
+        # Escape single and double quotes so the role-name selector stays valid
+        # for names like "John's" or 'say "hello"'.
+        escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
+        selector = (
+            f"[{actual_ref}]" if actual_ref else f"role={role}[name='{escaped_name}']"
+        )
         elements.append(
             {
                 "role": role,
@@ -386,15 +391,16 @@ def browser_act(
     # Only retry when the failure message indicates the locator didn't resolve
     # (e.g. element not found, strict mode violation). A timeout/navigation
     # error can mean the action already executed — retrying would double it.
+    # Only retry on errors that clearly indicate the locator never resolved.
+    # "target closed", "not attached", and "detached" are intentionally absent:
+    # a click that triggers navigation produces these errors AFTER the action
+    # already executed — retrying would double-submit the form or double-navigate.
     _locator_fail_phrases = (
         "no element",
         "not found",
         "did not find",
         "locator",
         "strict mode",
-        "target closed",
-        "not attached",
-        "detached",
     )
     msg_lower = result.message.lower()
     if not any(phrase in msg_lower for phrase in _locator_fail_phrases):

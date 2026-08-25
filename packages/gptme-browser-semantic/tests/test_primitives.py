@@ -347,6 +347,33 @@ def test_no_ref_element_uses_role_name_selector(
     assert link_results[0].selector == "role=link[name='Home']"
 
 
+SNAPSHOT_APOSTROPHE = """\
+- button "What's new"
+- link "John's story"
+"""
+
+
+@pytest.fixture
+def apostrophe_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
+    stub = BrowserStub([SNAPSHOT_APOSTROPHE])
+    _wire_stub(stub, monkeypatch)
+    return stub
+
+
+def test_selector_escapes_single_quotes_in_name(
+    apostrophe_browser_stub: BrowserStub,
+) -> None:
+    # Names with apostrophes must produce valid Playwright selectors.
+    # "role=button[name='What's new']" is invalid — apostrophe breaks the
+    # CSS attribute selector. The selector must escape it.
+    results = browser_observe("new button", top_k=5)
+    matches = [r for r in results if "What" in r.description]
+    assert matches, "expected a match for the apostrophe button"
+    sel = matches[0].selector
+    # Must not contain an unescaped bare ' that would break the selector.
+    assert "\\'" in sel, f"apostrophe must be escaped in selector: {sel!r}"
+
+
 SNAPSHOT_MIXED_ATTRS = """\
 - button "Submit" [ref=e5, level=1]
 - heading "Title" [ref=e6, expanded]
@@ -539,32 +566,34 @@ def test_stale_selector_retry_skipped_on_non_locator_failure(
 
 
 # ---------------------------------------------------------------------------
-# P1 fix: DOM-detach phrases trigger stale-selector retry
+# P1 fix: DOM-detach phrases do NOT trigger stale-selector retry (double-action
+# guard: a click that triggers navigation produces "not attached" AFTER the
+# action already executed; retrying would double-submit the form).
 # ---------------------------------------------------------------------------
 
 
-def test_stale_selector_retry_triggered_on_dom_detach(
+def test_stale_selector_retry_skipped_on_dom_detach(
     browser_stub: BrowserStub,
 ) -> None:
-    """'Element is not attached to the DOM' must trigger the stale-selector retry.
+    """'Element is not attached to the DOM' must NOT trigger the stale-selector retry.
 
-    A Playwright error like 'not attached to the DOM' or 'detached from the DOM'
-    means the element existed but was removed by a re-render — a classic stale
-    selector.  The guard must recognise these phrases and re-observe.
+    A click that triggers a page navigation causes the old element to detach
+    AFTER the click already executed.  Retrying would double-submit the form or
+    double-navigate.  The guard must treat this as a non-locator failure and
+    return the original failure immediately.
     """
     observed = browser_observe("submit button", top_k=1)[0]
     assert observed.selector == "[ref=e5]"
-    # Page re-renders: old ref detaches, button moves to e9.
-    browser_stub.snapshots = [SNAPSHOT_SUBMIT_MOVED]
+    # Action executes (navigation), then the element detaches.
     browser_stub.custom_errors["[ref=e5]"] = RuntimeError(
         "Element is not attached to the DOM"
     )
 
     result = browser_act(observed)
 
-    assert result.success
-    assert result.selector_used == "[ref=e9]"
-    assert browser_stub.clicks == ["[ref=e5]", "[ref=e9]"]
+    # Must not retry — only the original click attempt, no second click.
+    assert not result.success
+    assert browser_stub.clicks == ["[ref=e5]"]
 
 
 # ---------------------------------------------------------------------------
