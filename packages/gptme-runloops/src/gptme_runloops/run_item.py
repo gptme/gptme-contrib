@@ -2932,6 +2932,11 @@ def run_work_file(
                             _log(
                                 f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
                             )
+                        else:
+                            _log(
+                                f"BOB_PM_BANDIT_SHADOW: outcome skipped (no model): "
+                                f"work_type={work_type}, effect={item_effect}"
+                            )
                     except Exception as exc:
                         _log(f"WARN: bandit outcome recording failed: {exc}")
             finally:
