@@ -101,6 +101,7 @@ from gptme_runloops.pm_dispatch import (
     EFFECT_OBSERVED,
     EFFECT_UNKNOWN,
     append_full_ledger_entry,
+    classify_item_work_type,
     derive_slot_key,
     is_direct_mention,
 )
@@ -2723,6 +2724,18 @@ def run_work_file(
     run_start = int(time.time())
     sysprompt_path: Path | None = None
     temp_records: tempfile.TemporaryDirectory[str] | None = None
+
+    # Stage 1: Shadow-mode bandit for data accumulation (BOB_PM_BANDIT_SHADOW=1)
+    bandit: PmModelBandit | None = None
+    use_bandit_shadow = os.environ.get("BOB_PM_BANDIT_SHADOW") == "1"
+    if use_bandit_shadow:
+        try:
+            bandit = PmModelBandit(state_dir=config.workspace / "state" / "pm-dispatch")
+            _log("PM bandit shadow mode enabled: logging model choices and outcomes")
+        except Exception as exc:
+            _log(f"WARN: Failed to initialize PM bandit: {exc}")
+            bandit = None
+
     try:
         if hooks.git_pull is not None:
             try:
@@ -2916,15 +2929,20 @@ def run_work_file(
                         work_type = classify_item_work_type(
                             list(item.types), repo=item.repo
                         )
-                        # Use the observable-effect signal as the reward: a
-                        # clean exit is not evidence work landed (gptme/gptme#3468,
-                        # 2026-08-10). effect=observed means commits/replies were
-                        # actually delivered; anything else maps to 0.0.
-                        reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
-                        bandit.record_outcome(work_type, model, reward)
-                        _log(
-                            f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
-                        )
+                        # Skip EFFECT_UNKNOWN: no signal is better than a biased
+                        # zero that would penalise models on work types (e.g.
+                        # master_ci_failure) where observability is structurally absent.
+                        if item_effect == EFFECT_UNKNOWN:
+                            _log(
+                                f"BOB_PM_BANDIT_SHADOW: outcome skipped (unknown effect): "
+                                f"work_type={work_type}, model={model}"
+                            )
+                        elif model:
+                            reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
+                            bandit.record_outcome(work_type, model, reward)
+                            _log(
+                                f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
+                            )
                     except Exception as exc:
                         _log(f"WARN: bandit outcome recording failed: {exc}")
             finally:
