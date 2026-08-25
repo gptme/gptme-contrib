@@ -17,6 +17,7 @@ This is the **vector search** complement to [`gptme-wisdom`](https://github.com/
 - 👀 File watching and auto-indexing
 - 🔌 MCP server for agent integration (`gptme-rag mcp`)
 - 🛠️ CLI interface (`gptme-rag index`, `gptme-rag search`)
+- 📊 Injection logging and index-health/rot reporting (`gptme_rag.observability`)
 
 ## Quick Start
 
