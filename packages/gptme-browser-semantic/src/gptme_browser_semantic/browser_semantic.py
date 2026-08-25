@@ -175,7 +175,11 @@ def _score_match(query: str, element: dict[str, str]) -> float:
     the common case. Returns 0.0..1.0.
     """
     q_tokens = {t.lower() for t in re.findall(r"\w+", query)}
-    e_tokens = {t.lower() for t in re.findall(r"\w+", element["name"])}
+    # Include the element's ARIA role so a query like "button" or "link" matches
+    # elements by role, not only by name token overlap.
+    e_tokens = {t.lower() for t in re.findall(r"\w+", element["name"])} | {
+        element["role"].lower()
+    }
     if not q_tokens or not e_tokens:
         return 0.0
     overlap = q_tokens & e_tokens
