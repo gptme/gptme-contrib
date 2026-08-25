@@ -688,6 +688,25 @@ class TestGetBrowseLines:
         assert "t-active" in names
         assert "t-done" in names
 
+    def test_task_with_single_quote_in_name_is_excluded(self, tmp_path, monkeypatch, capsys):
+        """Tasks with single quotes in name must be silently dropped (shell-injection guard)."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        safe_task = create_task(tasks_dir, "safe-task", "active")  # noqa: F841
+        # Manually create a task file with a single quote in the name; gptodo
+        # won't create such names but they can be added by hand or imported.
+        bad_file = tasks_dir / "bad'task.md"
+        bad_file.write_text(safe_task.read_text())
+        monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
+
+        lines = _get_browse_lines(tasks_dir, show_all=True)
+        names = [line.split()[0] for line in lines[1:]]  # skip header
+        assert "safe-task" in names
+        assert not any("'" in n for n in names), "task with single quote must be excluded"
+        # A warning should have been printed to stderr
+        captured = capsys.readouterr()
+        assert "single quote" in captured.err
+
 
 class TestBrowseFzfPreviewLabel:
     """Test that fzf preview has a label."""

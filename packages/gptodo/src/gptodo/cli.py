@@ -946,6 +946,20 @@ def _get_browse_lines(tasks_dir, sort_key="date", filter_state=None, project=Non
     if project:
         tasks = [t for t in tasks if t.metadata.get("project") == project]
 
+    # Drop tasks whose names contain single quotes — such names cannot be safely
+    # embedded in fzf's '{1}' quoting context and are not valid per the task schema.
+    unsafe_quote = [t for t in tasks if "'" in t.name]
+    if unsafe_quote:
+        import sys
+
+        print(
+            f"[browse] warning: {len(unsafe_quote)} task(s) skipped — "
+            f"name contains a single quote (shell-unsafe in fzf TUI): "
+            + ", ".join(t.name for t in unsafe_quote),
+            file=sys.stderr,
+        )
+        tasks = [t for t in tasks if "'" not in t.name]
+
     # Sort
     if sort_key == "priority":
         tasks.sort(key=lambda t: (-t.priority_rank, t.name))
@@ -1280,8 +1294,8 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
 
         # Build keybindings.
         # Task names are passed as '{1}' (single-quoted) so shell metacharacters
-        # in task names cannot be evaluated by sh -c (safe for names without
-        # single quotes, which gptodo never creates).
+        # in task names cannot be evaluated by sh -c.  Tasks whose names contain
+        # single quotes are filtered out by _get_browse_lines before reaching here.
         bind_list = [
             f"?:execute(sh {sd_q}/palette.sh '{{1}}')+reload({reload_cmd})",
             f"ctrl-s:execute(sh {sd_q}/sort-picker.sh)+reload({reload_cmd})",
