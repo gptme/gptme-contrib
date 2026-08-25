@@ -615,6 +615,60 @@ def test_log_injection_empty_string_session_and_harness_kept(tmp_path):
     assert record["harness"] == ""
 
 
+def test_log_injection_coerces_date_hit_fields(tmp_path):
+    """A datetime.date value in a hit field must be serialized, not silently drop the record."""
+    from datetime import date
+
+    d = date(2026, 8, 25)
+    log = tmp_path / "injections.jsonl"
+    record = log_injection(
+        log,
+        "q",
+        [{"id": "d1", "date": d, "similarity": 0.5}],
+        backend="tfidf",
+        session_id="s",
+        harness="test",
+    )
+    assert record is not None, "record must not be silently discarded on date hit field"
+    assert record["hits"][0]["date"] == d.isoformat()
+
+
+def test_log_injection_zero_max_injected_has_zero_top_score(tmp_path):
+    """top_score must be 0.0 when max_injected=0, not the score of the first hit."""
+    log = tmp_path / "injections.jsonl"
+    record = log_injection(
+        log,
+        "q",
+        [{"id": "x", "similarity": 0.9}],
+        backend="tfidf",
+        max_injected=0,
+        session_id="s",
+        harness="test",
+    )
+    assert record is not None
+    assert record["num_injected"] == 0
+    assert record["hits"] == []
+    assert record["top_score"] == 0.0, "top_score must reflect that nothing was injected"
+
+
+def test_summarize_preserves_empty_string_session_and_harness(tmp_path):
+    """summarize_injections must not map empty-string session_id/harness to 'unknown'."""
+    log = tmp_path / "injections.jsonl"
+    log.write_text(
+        json.dumps({"num_hits": 1, "top_score": 0.5, "session_id": "", "harness": ""}) + "\n"
+    )
+    stats = summarize_injections(log)
+    assert stats.total == 1
+    assert "" in stats.by_harness, "empty-string harness must not be collapsed to 'unknown'"
+
+
+def test_summarize_returns_empty_stats_for_directory(tmp_path):
+    """summarize_injections must not crash when given a path that is a directory."""
+    stats = summarize_injections(tmp_path)
+    assert stats.total == 0
+    assert stats.malformed == 0
+
+
 def test_slice_age_only_stale_has_per_slice_reason():
     """When a slice is stale solely because the index is old, a per-slice reason must appear."""
     health = assess_index_health(

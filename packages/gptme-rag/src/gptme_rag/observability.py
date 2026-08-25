@@ -27,7 +27,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from collections.abc import Mapping, Sequence
@@ -55,7 +55,7 @@ DEFAULT_SESSION_ENV_VARS: tuple[str, ...] = (
 )
 
 #: How far up the process tree :func:`detect_harness` will walk.
-_MAX_PROC_WALK = 8
+_MAX_PROC_WALK = 32
 
 #: Worse status wins. A missing slice must not be masked by a stale global
 #: count the way a missing slice used to be masked by a healthy one.
@@ -175,11 +175,11 @@ def log_injection(
         "query_len": len(query),
         "num_hits": len(hits),
         "num_injected": injected,
-        "top_score": _as_score(hits[0].get(score_key)) if hits else 0.0,
+        "top_score": _as_score(hits[0].get(score_key)) if hits and injected > 0 else 0.0,
         "hits": [
             {
                 **{
-                    f: hit[f].isoformat() if isinstance(hit[f], datetime) else hit[f]
+                    f: hit[f].isoformat() if isinstance(hit[f], datetime | date) else hit[f]
                     for f in hit_fields
                     if f in hit and _copyable_hit_field(hit[f])
                 },
@@ -229,7 +229,7 @@ def summarize_injections(log_file: Path) -> InjectionStats:
     than raising.
     """
     stats = InjectionStats()
-    if not log_file.exists():
+    if not log_file.exists() or log_file.is_dir():
         return stats
 
     sessions: set[str] = set()
@@ -260,8 +260,10 @@ def summarize_injections(log_file: Path) -> InjectionStats:
             if num_hits > 0:
                 stats.nonzero += 1
                 sum_top += top_score
-            sessions.add(str(rec.get("session_id") or "unknown"))
-            harness = str(rec.get("harness") or "unknown")
+            _sid = rec.get("session_id")
+            sessions.add(str(_sid) if _sid is not None else "unknown")
+            _h = rec.get("harness")
+            harness = str(_h) if _h is not None else "unknown"
             stats.by_harness[harness] = stats.by_harness.get(harness, 0) + 1
 
     stats.unique_sessions = len(sessions)
