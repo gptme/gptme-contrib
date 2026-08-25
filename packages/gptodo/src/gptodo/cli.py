@@ -3350,6 +3350,39 @@ def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
     )
 
 
+def _get_claimed_task_ids(repo_root: Path) -> set[str]:
+    """Return task IDs actively claimed by another agent in the coordination DB.
+
+    Queries ``state/coordination/coord.db`` using stdlib sqlite3 — no coordination
+    package dependency.  Returns an empty set if the DB is absent or unreadable.
+    """
+    import sqlite3
+
+    db_path = repo_root / "state" / "coordination" / "coord.db"
+    if not db_path.exists():
+        return set()
+
+    prefix = "cascade:task:"
+    my_agent = (
+        os.environ.get("CASCADE_COORDINATION_AGENT") or os.environ.get("AGENT_ID") or ""
+    ).strip()
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            rows = conn.execute(
+                """SELECT task_id FROM work
+                WHERE task_id LIKE 'cascade:task:%'
+                  AND status IN ('claimed', 'completed')
+                  AND expires_at >= datetime('now')
+                  AND (? = '' OR claimer != ?)""",
+                (my_agent, my_agent),
+            ).fetchall()
+    except Exception:
+        return set()
+
+    return {r[0][len(prefix) :] if r[0].startswith(prefix) else r[0] for r in rows}
+
+
 @cli.command("ready")
 @click.option(
     "--state",
@@ -3394,7 +3427,16 @@ def tags(state: str | None, show_tasks: bool, filter_tags: tuple[str, ...]):
     default=None,
     help="Exclude tasks in this pool (e.g. '--exclude-pool frontier')",
 )
-def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool):
+@click.option(
+    "--skip-claimed",
+    "skip_claimed",
+    is_flag=True,
+    help=(
+        "Skip tasks already claimed by another coordination session. "
+        "Reads state/coordination/coord.db; silently degrades if absent."
+    ),
+)
+def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool, skip_claimed):
     """List all ready (unblocked) tasks.
 
     Shows tasks that have no dependencies or whose dependencies are all completed.
@@ -3405,6 +3447,7 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     Use --use-cache to also check URL-based 'requires' against cached issue states.
     Use --pool to filter by work pool; default hides non-default pools (e.g. frontier).
     Use --pool all to see every pool; --pool frontier for frontier only.
+    Use --skip-claimed to hide tasks claimed by a concurrent coordination session.
     """
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -3511,6 +3554,22 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
             t.created,
         )
     )
+
+    # Filter out tasks claimed by another coordination session
+    if skip_claimed:
+        claimed = _get_claimed_task_ids(repo_root)
+        if claimed:
+            ready_tasks = [t for t in ready_tasks if t.name not in claimed]
+        if not ready_tasks:
+            if output_json:
+                print("No ready tasks found", file=sys.stderr)
+                print(json.dumps({"ready_tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                print("No ready tasks found", file=sys.stderr)
+                return
+            console.print("[yellow]No ready tasks found (all claimed by concurrent sessions)![/]")
+            return
 
     # JSONL output - one task per line (compact for LLM consumption)
     if output_jsonl:
