@@ -982,3 +982,211 @@ class TestBrowseFzfHeaderLines:
             fzf_cmd = fzf_calls[0][0][0]
             preview = _get_fzf_arg(fzf_cmd, "--preview")
             assert "gptodo show --render" in preview
+
+
+class TestBrowseFzfVersionGate:
+    """Regression tests for the fzf version gate on the ``resize`` event.
+
+    The ``resize`` event was added in fzf 0.46.0. An earlier gate of
+    ``(0, 42, 0)`` let the binding through on fzf 0.42-0.45, where fzf
+    rejects the unknown event with exit code 2 and ``browse`` dies. The
+    old test suite filtered ``fzf --version`` calls out of the recorded
+    subprocess calls, so the gate value was never asserted.
+    """
+
+    @staticmethod
+    def _bindings_with_version(tmp_path, monkeypatch, version):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        create_task(tasks_dir, "my-task", "active")
+        monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
+
+        mock_result = MagicMock()
+        mock_result.returncode = 130
+        mock_result.stdout = ""
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("gptodo.cli._fzf_version", return_value=version),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
+            runner = CliRunner()
+            runner.invoke(cli, ["browse"])
+            fzf_cmd = _get_fzf_calls(mock_run)[0][0][0]
+            return _get_fzf_arg(fzf_cmd, "--bind")
+
+    def test_resize_binding_present_at_0_46_0(self, tmp_path, monkeypatch):
+        """fzf >= 0.46.0 supports the resize event, so the binding is added."""
+        bindings = self._bindings_with_version(tmp_path, monkeypatch, (0, 46, 0))
+        assert "resize:refresh-preview" in bindings
+
+    def test_resize_binding_present_on_newer_fzf(self, tmp_path, monkeypatch):
+        """Any version above the floor keeps the binding."""
+        bindings = self._bindings_with_version(tmp_path, monkeypatch, (0, 54, 3))
+        assert "resize:refresh-preview" in bindings
+
+    def test_resize_binding_absent_at_0_44_1(self, tmp_path, monkeypatch):
+        """Ubuntu 24.04 ships fzf 0.44.1; the resize binding must be omitted."""
+        bindings = self._bindings_with_version(tmp_path, monkeypatch, (0, 44, 1))
+        assert "resize:" not in bindings
+
+    def test_resize_binding_absent_at_0_42_0(self, tmp_path, monkeypatch):
+        """The old (wrong) gate value must not enable the binding."""
+        bindings = self._bindings_with_version(tmp_path, monkeypatch, (0, 42, 0))
+        assert "resize:" not in bindings
+
+    def test_resize_binding_absent_when_version_unknown(self, tmp_path, monkeypatch):
+        """_fzf_version() returns (0, 0, 0) on failure; the gate must degrade safely."""
+        bindings = self._bindings_with_version(tmp_path, monkeypatch, (0, 0, 0))
+        assert "resize:" not in bindings
+
+    def test_fzf_version_parses_distro_suffix(self):
+        """'0.38.0 (debian)' -> (0, 38, 0)."""
+        from gptodo.cli import _fzf_version
+
+        with patch("subprocess.check_output", return_value="0.38.0 (debian)\n"):
+            assert _fzf_version() == (0, 38, 0)
+
+    def test_fzf_version_returns_zero_tuple_on_failure(self):
+        """A missing or broken fzf must not raise."""
+        from gptodo.cli import _fzf_version
+
+        with patch("subprocess.check_output", side_effect=FileNotFoundError):
+            assert _fzf_version() == (0, 0, 0)
+
+
+class TestBrowseReloadScript:
+    """Regression tests for reload.sh argument handling.
+
+    The reload helper builds the browse-list argv from state files. An
+    earlier version accumulated args in a plain string, which word-split
+    values containing spaces (e.g. a project name) into several argv
+    elements. The fixed version uses ``set --`` positional params.
+    """
+
+    @staticmethod
+    def _run_reload(tmp_path, *, sort=None, state=None, project=None):
+        state_dir = tmp_path / "browse-state"
+        state_dir.mkdir()
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "tasks").mkdir()
+        _write_browse_scripts(state_dir, repo_root)
+
+        if sort is not None:
+            (state_dir / "sort").write_text(sort)
+        if state is not None:
+            (state_dir / "state").write_text(state)
+        if project is not None:
+            (state_dir / "project").write_text(project)
+
+        # Shim `gptodo` on PATH: print each argv element on its own line so
+        # the test can see exactly how the shell split the arguments.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "gptodo"
+        shim.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        shim.chmod(0o755)
+
+        import os
+
+        env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        result = subprocess.run(
+            ["sh", str(state_dir / "reload.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        return result.stdout.splitlines()
+
+    def test_reload_project_with_space_is_single_argv(self, tmp_path):
+        """A project name containing a space must reach browse-list as one argument."""
+        argv = self._run_reload(tmp_path, sort="date", project="my project")
+        assert argv == ["browse-list", "--sort", "date", "--project", "my project"]
+
+    def test_reload_defaults_when_state_files_missing(self, tmp_path):
+        """No state files -> sort defaults to date, no state/project flags."""
+        argv = self._run_reload(tmp_path)
+        assert argv == ["browse-list", "--sort", "date"]
+
+    def test_reload_all_state(self, tmp_path):
+        """state file 'all' -> --all flag, not --state all."""
+        argv = self._run_reload(tmp_path, sort="priority", state="all")
+        assert argv == ["browse-list", "--sort", "priority", "--all"]
+
+    def test_reload_specific_state_and_project(self, tmp_path):
+        """Named state -> --state <name>; project appended after."""
+        argv = self._run_reload(tmp_path, sort="name", state="active", project="qs")
+        assert argv == ["browse-list", "--sort", "name", "--state", "active", "--project", "qs"]
+
+
+class TestBrowsePaletteConsistency:
+    """Structural regression test for palette.sh.
+
+    Every selectable menu entry must be handled by a ``case`` arm.
+    Two entries (``Toggle preview``, ``Raw markdown``) once existed in
+    the menu with no arm - selecting them silently did nothing, because
+    ``change-preview`` is an fzf action that cannot be driven from an
+    ``execute()`` subshell. This test catches any future dead entry, not
+    just those two.
+    """
+
+    @staticmethod
+    def _palette_menu_and_arms(tmp_path):
+        import re
+        from fnmatch import fnmatchcase
+
+        state_dir = tmp_path / "browse-state"
+        state_dir.mkdir()
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "tasks").mkdir()
+        _write_browse_scripts(state_dir, repo_root)
+        script = (state_dir / "palette.sh").read_text()
+
+        # Menu: the single-quoted continuation lines between printf and | fzf.
+        menu_block = script.split("printf '%s\\n'", 1)[1].split("| fzf", 1)[0]
+        entries = re.findall(r"^\s*'([^']*)'\s*\\$", menu_block, flags=re.M)
+        separators = {e for e in entries if set(e) <= {"─"}}
+        selectable = [e for e in entries if e not in separators]
+        assert selectable, "failed to parse palette menu entries"
+
+        # Arms: lines of the form  "literal"*"literal") ... ;;
+        arms = re.findall(r'^\s*((?:"[^"]*"|\*)+)\)', script, flags=re.M)
+        patterns = [a.replace('"', "") for a in arms]
+        assert patterns, "failed to parse palette case arms"
+
+        return selectable, patterns, fnmatchcase
+
+    def test_every_menu_entry_has_case_arm(self, tmp_path):
+        selectable, patterns, match = self._palette_menu_and_arms(tmp_path)
+        dead = [e for e in selectable if not any(match(e, p) for p in patterns)]
+        assert dead == [], f"palette entries with no case arm: {dead}"
+
+    def test_every_case_arm_is_reachable(self, tmp_path):
+        """Conversely, no arm should exist without a menu entry that selects it."""
+        selectable, patterns, match = self._palette_menu_and_arms(tmp_path)
+        orphan = [p for p in patterns if not any(match(e, p) for e in selectable)]
+        assert orphan == [], f"case arms no menu entry can reach: {orphan}"
+
+    def test_removed_dead_entries_stay_removed(self, tmp_path):
+        selectable, _, _ = self._palette_menu_and_arms(tmp_path)
+        assert not any("Toggle preview" in e or "Raw markdown" in e for e in selectable)
+
+
+class TestBrowseHelpDocumentsFzfFloor:
+    """`browse --help` must state the real fzf minimum.
+
+    The unconditional flags/actions pin the floor: `--border-label` and
+    `--preview-label` need fzf 0.35.0, and `change-preview-label` (used
+    in the ctrl-b/l/p/r bindings) needs 0.37.0. Only the `resize` event
+    (0.46.0) is feature-gated.
+    """
+
+    def test_browse_help_mentions_fzf_floor(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["browse", "--help"])
+        assert result.exit_code == 0
+        assert "fzf 0.37" in result.output
+        assert "0.46" in result.output
