@@ -1,4 +1,3 @@
-from .indexing.indexer import Indexer
 from .lesson_matcher import (
     filter_by_session_category,
     keyword_to_regex,
@@ -13,7 +12,6 @@ from .observability import (
     log_injection,
     summarize_injections,
 )
-from .query.context_assembler import ContextAssembler
 
 __all__ = [
     "ContextAssembler",
@@ -29,3 +27,15 @@ __all__ = [
     "score_lessons",
     "summarize_injections",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "Indexer":
+        from .indexing.indexer import Indexer
+
+        return Indexer
+    if name == "ContextAssembler":
+        from .query.context_assembler import ContextAssembler
+
+        return ContextAssembler
+    raise AttributeError(f"module 'gptme_rag' has no attribute {name!r}")
