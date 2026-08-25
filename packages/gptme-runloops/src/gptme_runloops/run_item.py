@@ -2723,6 +2723,7 @@ def run_work_file(
     run_start = int(time.time())
     sysprompt_path: Path | None = None
     temp_records: tempfile.TemporaryDirectory[str] | None = None
+
     try:
         if hooks.git_pull is not None:
             try:
@@ -2916,15 +2917,25 @@ def run_work_file(
                         work_type = classify_item_work_type(
                             list(item.types), repo=item.repo
                         )
-                        # Use the observable-effect signal as the reward: a
-                        # clean exit is not evidence work landed (gptme/gptme#3468,
-                        # 2026-08-10). effect=observed means commits/replies were
-                        # actually delivered; anything else maps to 0.0.
-                        reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
-                        bandit.record_outcome(work_type, model, reward)
-                        _log(
-                            f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
-                        )
+                        # Skip EFFECT_UNKNOWN: no signal is better than a biased
+                        # zero that would penalise models on work types (e.g.
+                        # master_ci_failure) where observability is structurally absent.
+                        if item_effect == EFFECT_UNKNOWN:
+                            _log(
+                                f"BOB_PM_BANDIT_SHADOW: outcome skipped (unknown effect): "
+                                f"work_type={work_type}, model={model}"
+                            )
+                        elif model:
+                            reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
+                            bandit.record_outcome(work_type, model, reward)
+                            _log(
+                                f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
+                            )
+                        else:
+                            _log(
+                                f"BOB_PM_BANDIT_SHADOW: outcome skipped (no model): "
+                                f"work_type={work_type}, effect={item_effect}"
+                            )
                     except Exception as exc:
                         _log(f"WARN: bandit outcome recording failed: {exc}")
             finally:
