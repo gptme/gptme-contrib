@@ -23,6 +23,19 @@ HARM_CATEGORY_TAXONOMY: dict[str, str] = {
 }
 HARM_CATEGORY_LABELS: list[str] = list(HARM_CATEGORY_TAXONOMY.keys())
 
+# Valid values for the attempt_kind field (eval attempt classification).
+#
+#   repetition  — a normal measurable sample: whatever the session produced is
+#                 quality signal and may feed grades/bandits.
+#   infra_retry — the attempt was replaced/lost to capacity or harness failure
+#                 (rate limit, auth, dead backend, zero-token exit).  It carries
+#                 no quality signal and must be excluded from quality analytics.
+#   unknown     — classification was attempted but could not be determined.
+#
+# A record with ``attempt_kind is None`` predates the field; it is *not* the
+# same as ``"unknown"`` and consumers should fall back to their own heuristic.
+ATTEMPT_KINDS: frozenset[str] = frozenset(["repetition", "infra_retry", "unknown"])
+
 # Valid values for the dropout_depth field.
 DROPOUT_DEPTH_VALUES: frozenset[str] = frozenset(["shallow", "deep"])
 
@@ -206,6 +219,12 @@ class SessionRecord:
     exit_code: int | None = None  # process exit code (124 = timeout)
     failure_reason: str | None = None  # coarse harness failure class (see failure_capture.py)
     error: str | None = None  # stderr tail or trajectory error snippet when harness failed
+    # Eval attempt classification, written once by the session runner which
+    # already computes it (see ``ATTEMPT_KINDS``).  ``None`` on every record
+    # written before this field existed, so consumers must treat ``None`` as
+    # "unrecorded" and fall back to their own heuristic rather than assuming
+    # ``repetition``.
+    attempt_kind: str | None = None
     duration_seconds: int = 0
     token_count: int | None = None
     input_tokens: int | None = None

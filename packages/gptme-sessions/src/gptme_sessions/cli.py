@@ -34,7 +34,7 @@ from .replay import (
     resolve_replay_target,
     resolve_session_record_prefix,
 )
-from .record import SessionRecord, normalize_run_type
+from .record import ATTEMPT_KINDS, SessionRecord, normalize_run_type
 from .signals import extract_from_path
 from .store import (
     SessionStore,
@@ -3165,6 +3165,27 @@ def blame(
         raise click.ClickException(str(exc)) from exc
 
     click.echo(render_json(result) if as_json else render_text(result))
+
+
+@cli.command("stamp-attempt-kind")
+@click.argument("session_id")
+@click.argument("attempt_kind", type=click.Choice(sorted(ATTEMPT_KINDS)))
+@click.pass_context
+def stamp_attempt_kind(ctx: click.Context, session_id: str, attempt_kind: str) -> None:
+    """Record the eval attempt classification on an existing session record.
+
+    Called by the session runner after its infra-failure guards have run —
+    those guards need the final exit code, tokens and failure_reason, so the
+    verdict is only known after post_session() appended the record.
+
+    \b
+        gptme-sessions stamp-attempt-kind a1b2 infra_retry
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    if store.stamp_attempt_kind(session_id, attempt_kind):
+        click.echo(f"stamped attempt_kind={attempt_kind} on session {session_id}")
+    else:
+        raise click.ClickException(f"no session record found for session_id={session_id!r}")
 
 
 def main() -> int:
