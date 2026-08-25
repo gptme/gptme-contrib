@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from gptme_activity_summary.cc_backend import (
+    ClaudeAuthExpiredError,
     ClaudeQuotaExhaustedError,
     call_claude_code,
     extract_json_from_response,
@@ -652,6 +653,28 @@ def test_call_claude_code_quota_fallback_all_exhausted(
         with pytest.raises(ClaudeQuotaExhaustedError):
             call_claude_code("test prompt")
     mock_gptme.assert_called_once_with("test prompt", timeout=120)
+
+
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_oauth_expiry_raises_auth_error(
+    mock_run, mock_sleep, mock_fallback, mock_gptme
+):
+    """OAuth session expiry raises ClaudeAuthExpiredError (a subtype of ClaudeQuotaExhaustedError).
+
+    ClaudeAuthExpiredError indicates a recoverable auth failure (re-auth via /login)
+    rather than a permanent quota exhaustion, while still inheriting from
+    ClaudeQuotaExhaustedError so existing callers that catch the base type keep working.
+    """
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="Failed to authenticate: OAuth session expired"
+    )
+    with patch.dict("os.environ", {}, clear=True):
+        with pytest.raises(ClaudeAuthExpiredError) as exc_info:
+            call_claude_code("test prompt")
+    assert isinstance(exc_info.value, ClaudeQuotaExhaustedError)
 
 
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")

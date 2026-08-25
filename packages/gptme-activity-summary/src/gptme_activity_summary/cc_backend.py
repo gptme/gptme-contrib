@@ -25,15 +25,24 @@ logger = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
 
-# Claude Code output markers for permanent subscription failures on the active
-# slot. Retrying the same slot is futile; callers should try a fallback slot or
-# backend instead. Keep the exact observed prefixes narrow so transient errors
-# still use the normal retry path.
+# Truly permanent subscription failures — quota resets require waiting until
+# the next billing period; org blocks require admin action. Retrying the same
+# slot is futile. Keep prefixes narrow so transient errors use the normal retry path.
 _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS = (
     "you've hit your weekly limit",
     "your organization has disabled claude subscription access",
-    "failed to authenticate: oauth session expired",
 )
+
+# OAuth session expiry is distinct from permanent failures: the session CAN be
+# refreshed via /login. In automated contexts that cannot re-authenticate
+# interactively, retrying the same slot is still futile — but the distinction
+# is preserved so callers that can trigger re-auth may catch
+# ClaudeAuthExpiredError specifically rather than being forced into the
+# ClaudeQuotaExhaustedError path.
+_AUTH_FAILURE_MARKERS = ("failed to authenticate: oauth session expired",)
+
+# Combined set used for skip-retry detection.
+_ALL_SKIP_RETRY_MARKERS = _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS + _AUTH_FAILURE_MARKERS
 
 # Every structured summary produced by this module has one of these narrative
 # fields. Requiring one prevents a JSON-shaped provider error from being treated
@@ -50,6 +59,17 @@ class ClaudeQuotaExhaustedError(subprocess.CalledProcessError):
     Subclasses :class:`subprocess.CalledProcessError` so existing callers that
     catch the base type keep working; callers that can switch to a different slot
     should catch this subtype specifically.
+    """
+
+
+class ClaudeAuthExpiredError(ClaudeQuotaExhaustedError):
+    """OAuth session has expired on the active Claude Code slot.
+
+    Unlike quota exhaustion (which requires waiting for a reset period), auth
+    expiry can be resolved by re-authenticating via ``/login`` or similar.
+    Automated invocations cannot re-authenticate interactively, so retries on
+    the same slot are skipped — but callers that can trigger re-auth should
+    catch this subtype specifically and attempt recovery before falling back.
     """
 
 
@@ -227,9 +247,7 @@ def call_claude_code(
             # Subscription failures are permanent and slot-scoped: retrying the
             # same slot is futile and just burns ~N*delay seconds + token budget.
             # Signal them distinctly so a caller can switch slots or backends.
-            if any(
-                marker in combined_out_lower for marker in _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS
-            ):
+            if any(marker in combined_out_lower for marker in _ALL_SKIP_RETRY_MARKERS):
                 logger.warning(
                     "claude -p subscription unavailable (attempt %d/%d): %s",
                     attempt,
@@ -273,10 +291,7 @@ def call_claude_code(
                             break
                         # Check whether this fallback slot is also unavailable.
                         fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
-                        if any(
-                            marker in fb_combined.lower()
-                            for marker in _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS
-                        ):
+                        if any(marker in fb_combined.lower() for marker in _ALL_SKIP_RETRY_MARKERS):
                             logger.warning(
                                 "Fallback slot %s also has a subscription failure",
                                 fb_cred.name,
@@ -335,9 +350,12 @@ def call_claude_code(
                     "Claude subscriptions unavailable and gptme fallback produced no summary; "
                     "raising"
                 )
-                raise ClaudeQuotaExhaustedError(
-                    result.returncode, attempt_cmd, result.stdout, result.stderr
+                _exc_cls = (
+                    ClaudeAuthExpiredError
+                    if any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS)
+                    else ClaudeQuotaExhaustedError
                 )
+                raise _exc_cls(result.returncode, attempt_cmd, result.stdout, result.stderr)
             stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
             stdout_preview = result.stdout.strip()[:500] if result.stdout else "(none)"
             logger.warning(
