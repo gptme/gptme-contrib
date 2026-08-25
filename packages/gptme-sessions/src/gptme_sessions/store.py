@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from .record import SessionRecord
+from .record import ATTEMPT_KINDS, SessionRecord
 
 try:
     import fcntl as _fcntl
@@ -253,6 +253,44 @@ class SessionStore:
                 tmp_path.unlink(missing_ok=True)
                 raise
         return self.path
+
+    def stamp_attempt_kind(self, session_id: str, attempt_kind: str) -> bool:
+        """Stamp the eval attempt classification onto an already-written record.
+
+        The session runner can only classify the attempt *after* the record has
+        been appended: the infra-failure guards need the final exit code, token
+        count and ``failure_reason``, all of which post_session() itself
+        produces.  So the classification is a second pass over the store rather
+        than a field set at record-creation time.
+
+        Writing it once here is the point — every read-side consumer would
+        otherwise re-derive infra-ness from duration/token heuristics, and each
+        new consumer is another chance to forget and silently report
+        contaminated numbers.
+
+        Returns ``True`` when a record was stamped, ``False`` when no record
+        with ``session_id`` exists (the runner may be recording a session whose
+        post_session() call failed).  Raises ``ValueError`` on an unknown kind:
+        a typo would persist as an unread value forever.
+        """
+        if attempt_kind not in ATTEMPT_KINDS:
+            raise ValueError(
+                f"unknown attempt_kind {attempt_kind!r}; expected one of {sorted(ATTEMPT_KINDS)}"
+            )
+        if not session_id:
+            raise ValueError("session_id is required to stamp attempt_kind")
+
+        with self.lock():
+            records = self.load_all()
+            targets = [r for r in records if r.session_id == session_id]
+            if not targets:
+                return False
+            for target in targets:
+                target.attempt_kind = attempt_kind
+            # Rewrite the full list so all duplicate rows for this session_id
+            # are stamped, not just the most recent one.
+            self.rewrite(records)
+        return True
 
     def query(
         self,

@@ -34,7 +34,7 @@ from .replay import (
     resolve_replay_target,
     resolve_session_record_prefix,
 )
-from .record import SessionRecord, normalize_run_type
+from .record import ATTEMPT_KINDS, SessionRecord, normalize_run_type
 from .signals import extract_from_path
 from .store import (
     SessionStore,
@@ -3165,6 +3165,48 @@ def blame(
         raise click.ClickException(str(exc)) from exc
 
     click.echo(render_json(result) if as_json else render_text(result))
+
+
+@cli.command("stamp-attempt-kind")
+@click.argument("session_id")
+@click.argument("attempt_kind", type=click.Choice(sorted(ATTEMPT_KINDS)))
+@click.pass_context
+def stamp_attempt_kind(ctx: click.Context, session_id: str, attempt_kind: str) -> None:
+    """Record the eval attempt classification on an existing session record.
+
+    Called by the session runner after its infra-failure guards have run —
+    those guards need the final exit code, tokens and failure_reason, so the
+    verdict is only known after post_session() appended the record.
+
+    \b
+        gptme-sessions stamp-attempt-kind a1b2 infra_retry
+    """
+    if not session_id:
+        raise click.UsageError("SESSION_ID must not be empty.")
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.load_all()
+    # Deduplicate by unique session_id before checking for ambiguity — the
+    # store may hold duplicate rows for the same session_id (e.g. if
+    # post_session() ran twice), and stamp_attempt_kind is designed to stamp
+    # all of them; resolve_session_record_prefix would falsely raise on those.
+    matches = [r for r in records if r.session_id.startswith(session_id)]
+    unique_ids = list(dict.fromkeys(r.session_id for r in matches))
+    if not unique_ids:
+        raise click.ClickException(
+            f"No session found matching {session_id!r}. "
+            "Run 'gptme-sessions query' to list available session IDs."
+        )
+    if len(unique_ids) > 1:
+        raise click.ClickException(
+            f"Ambiguous prefix {session_id!r} matches {len(unique_ids)} sessions: "
+            + ", ".join(unique_ids)
+            + ". Run 'gptme-sessions query' to list available session IDs."
+        )
+    full_id = unique_ids[0]
+    if store.stamp_attempt_kind(full_id, attempt_kind):
+        click.echo(f"stamped attempt_kind={attempt_kind} on session {full_id}")
+    else:
+        raise click.ClickException(f"no session record found for session_id={full_id!r}")
 
 
 def main() -> int:
