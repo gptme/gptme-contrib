@@ -133,10 +133,14 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
         ref = m.group("ref") or ""
         if not name:
             continue
-        # Only treat bracket content as a real ref if it is a `ref=...`
-        # attribute (e.g. "ref=e1").  Other bracket attributes like
-        # "[level=2]" must be ignored per the README spec.
-        actual_ref = ref if ref.startswith("ref=") else ""
+        # Extract only the `ref=...` token — bracket may contain multiple
+        # comma-separated attributes (e.g. "[ref=e5, level=1]").  We take only
+        # the part that starts with "ref=", which is a valid Playwright selector
+        # attribute.  Other attributes like "[level=2]" are ignored per spec.
+        actual_ref = next(
+            (p.strip() for p in ref.split(",") if p.strip().startswith("ref=")),
+            "",
+        )
         selector = f"[{actual_ref}]" if actual_ref else f"role={role}[name='{name}']"
         elements.append(
             {
@@ -344,6 +348,22 @@ def browser_act(
 
     # Stale selector: re-observe once with the same query. If the fresh top
     # match is the same selector, retrying is pointless — return the failure.
+    #
+    # Only retry when the failure message indicates the locator didn't resolve
+    # (e.g. element not found, strict mode violation). A timeout/navigation
+    # error can mean the action already executed — retrying would double it.
+    _locator_fail_phrases = (
+        "no element",
+        "not found",
+        "did not find",
+        "locator",
+        "strict mode",
+        "target closed",
+    )
+    msg_lower = result.message.lower()
+    if not any(phrase in msg_lower for phrase in _locator_fail_phrases):
+        return result  # non-locator failure — don't retry (avoid double-acting)
+
     fresh = browser_observe(reobserve_query, top_k=1)
     if fresh and fresh[0].selector != sel:
         result = _dispatch_action(fresh[0].selector, method, arguments, t0)

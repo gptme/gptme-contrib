@@ -43,6 +43,10 @@ class BrowserStub:
     ``snapshots`` is a queue: every ``snapshot_page()`` call pops the next
     snapshot, and the last one sticks once the queue is exhausted (models a
     stable page).
+
+    ``custom_errors`` maps a selector to a specific exception to raise instead
+    of the default ``TimeoutError("locator '...' not found")``.  Use this to
+    test failure types that should NOT trigger the stale-selector retry.
     """
 
     def __init__(
@@ -53,6 +57,7 @@ class BrowserStub:
         self.clicks: list[str] = []
         self.fills: list[tuple[str, str]] = []
         self.fail_selectors: set[str] = set()
+        self.custom_errors: dict[str, Exception] = {}
         self.raise_on_snapshot = raise_on_snapshot
 
     def snapshot_page(self) -> str:
@@ -66,6 +71,8 @@ class BrowserStub:
         # Record the attempt *before* the failure check: tests assert on the
         # dispatch sequence, including the stale attempt that raised.
         self.clicks.append(selector)
+        if selector in self.custom_errors:
+            raise self.custom_errors[selector]
         if selector in self.fail_selectors:
             raise TimeoutError(f"locator '{selector}' not found")
 
@@ -307,6 +314,14 @@ SNAPSHOT_NO_REFS = """\
 - button "Submit"
 """
 
+# Snapshot where a ref and a second attribute appear in the same bracket.
+# The selector must extract only the ref= part, not "[ref=e5, level=1]".
+SNAPSHOT_MULTI_ATTR = """\
+- heading "Section" [ref=e3, level=2]
+- button "Submit" [ref=e5, level=1]
+- link "Home"
+"""
+
 
 @pytest.fixture
 def no_ref_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
@@ -338,6 +353,24 @@ def test_no_ref_element_uses_role_name_selector(
     link_results = [r for r in results if "Home" in r.description]
     assert link_results, "expected a match for the Home link"
     assert link_results[0].selector == "role=link[name='Home']"
+
+
+def test_multi_attr_bracket_extracts_only_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When a bracket contains both a ref and another attribute (e.g.
+    # "[ref=e5, level=1]"), the selector must be "[ref=e5]", not the
+    # invalid Playwright selector "[ref=e5, level=1]".
+    stub = BrowserStub([SNAPSHOT_MULTI_ATTR])
+    _wire_stub(stub, monkeypatch)
+    results = browser_observe("submit button", top_k=5)
+    submit = [r for r in results if "Submit" in r.description]
+    assert submit, "expected a match for Submit"
+    assert (
+        submit[0].selector == "[ref=e5]"
+    ), f"multi-attr bracket should yield only '[ref=e5]', got {submit[0].selector!r}"
+    # The second-attribute content must not appear in the selector.
+    assert "level" not in submit[0].selector
 
 
 # ---------------------------------------------------------------------------
@@ -432,3 +465,35 @@ def test_stale_selector_retry_uses_original_instruction(
 
     assert result.success
     assert result.selector_used == "[ref=e9]"
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: non-locator failures must not trigger stale-selector retry
+# (avoids double-acting on partially-executed non-idempotent actions)
+# ---------------------------------------------------------------------------
+
+
+def test_stale_selector_retry_skipped_on_non_locator_failure(
+    browser_stub: BrowserStub,
+) -> None:
+    """A navigation timeout (no 'locator' in the message) must NOT be retried.
+
+    If a click triggered navigation and then timed out, the action may have
+    already executed.  Retrying would double-act (double form submission, double
+    navigation).  The guard must recognise that "Timeout: navigation to '...'"
+    is not a locator-not-found failure and return the first result immediately.
+    """
+    observed = browser_observe("submit button", top_k=1)[0]
+    assert observed.selector == "[ref=e5]"
+
+    # Page re-renders so retry *would* find a different selector — but should not.
+    browser_stub.snapshots = [SNAPSHOT_SUBMIT_MOVED]
+    browser_stub.custom_errors["[ref=e5]"] = TimeoutError(
+        "Timeout: navigation to 'https://example.com/' exceeded 30000ms"
+    )
+
+    result = browser_act(observed)
+
+    assert not result.success
+    # Only one dispatch — no retry.
+    assert browser_stub.clicks == ["[ref=e5]"]
