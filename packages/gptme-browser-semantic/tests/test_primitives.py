@@ -398,6 +398,22 @@ def test_extract_with_instruction_is_path_a_noop_with_hint(
     assert result.llm_calls == 0
 
 
+def test_extract_with_schema_returns_clear_path_b_error(
+    browser_stub: BrowserStub,
+) -> None:
+    # Passing schema= in Path A must return a clear error, not silently return
+    # raw untyped data while the caller believes schema validation ran.
+    class FakeSchema:
+        pass
+
+    result = browser_extract(schema=FakeSchema)
+    assert not result.success
+    assert isinstance(result.data, dict)
+    assert "error" in result.data
+    # Must not have fetched a snapshot (schema check is before I/O).
+    assert browser_stub.snapshot_calls == 0
+
+
 # ---------------------------------------------------------------------------
 # P1 fix: snapshot failures return graceful results, not unhandled exceptions
 # ---------------------------------------------------------------------------
@@ -442,16 +458,20 @@ def test_act_press_focuses_input_element_before_pressing(
     assert observed.selector in browser_stub.clicks
 
 
-def test_act_press_does_not_click_button_before_pressing(
+def test_act_press_on_button_returns_clear_error(
     browser_stub: BrowserStub,
 ) -> None:
-    # For button/link elements (element_method="click"), clicking before pressing
-    # would fire the button's handler AND THEN press the key — a double action.
-    # The fix skips click_element for these elements.
+    # For button/link elements (element_method="click"), pressing a key requires
+    # focusing the element first — but gptme's browser tool has no focus-only
+    # primitive. Calling click_element would activate the button (double-action).
+    # The correct behaviour is to return a clear error directing the caller to
+    # use method='click' instead.
     observed = browser_observe("submit button", top_k=1)[0]
     assert observed.method == "click", "expected button with click method"
     result = browser_act(observed, method="press", arguments=["Enter"])
-    assert result.success
+    assert not result.success
+    assert "press" in result.message.lower()
+    assert "click" in result.message.lower()
     # click_element must NOT have been called (would double-activate the button).
     assert observed.selector not in browser_stub.clicks
 

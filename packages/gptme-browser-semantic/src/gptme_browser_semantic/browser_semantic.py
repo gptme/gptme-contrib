@@ -268,12 +268,24 @@ def _dispatch_action(
             fill_element(sel, arguments[0])
         elif method == "press":
             assert arguments, "press requires arguments=[key]"
-            # Focus the element before pressing — but only for input-type elements
+            # Focus the element before pressing — only valid for input-type elements
             # (textbox, searchbox, combobox) where a click merely moves cursor focus.
-            # For button/link/checkbox/etc. (element_method=="click") a click already
-            # activates the element, so calling click_element here would double-fire it.
-            if element_method != "click":
-                click_element(sel)
+            # Button/link elements (element_method=="click") cannot be focused without
+            # activating them: gptme's browser tool has no focus-only primitive, and
+            # calling click_element would double-fire the activation. Use method='click'
+            # to activate those elements instead.
+            if element_method == "click":
+                return ActResult(
+                    success=False,
+                    message=(
+                        f"press is not supported for {element_method!r}-type elements "
+                        "(no focus-only primitive in gptme browser tool); "
+                        "use method='click' to activate buttons/links"
+                    ),
+                    selector_used=sel,
+                    elapsed_ms=int((time.monotonic() - t0) * 1000),
+                )
+            click_element(sel)
             press_key(arguments[0])
         elif method == "select":
             assert arguments, "select requires arguments=[value]"
@@ -405,10 +417,19 @@ def browser_extract(
 
     `instruction=None` extracts the visible text content (zero-LLM).
     `instruction` set without `schema` extracts a JSON-shaped dict via
-    LLM (one call). `schema` is accepted as a typing hint but not enforced
-    in Path A — strict Pydantic validation is a Path-B feature.
+    LLM (one call). `schema` is rejected in Path A with a clear error —
+    strict Pydantic validation is a Path-B feature only.
     """
     t0 = time.monotonic()
+    if schema is not None:
+        return ExtractResult(
+            success=False,
+            data={
+                "error": "schema-aware extraction is a Path-B feature and not available in Path A",
+                "hint": "remove schema= and parse the raw snapshot yourself, or wait for Path B",
+            },
+            elapsed_ms=int((time.monotonic() - t0) * 1000),
+        )
     try:
         snapshot = _aria_snapshot()
     except Exception as exc:
