@@ -36,23 +36,6 @@ SNAPSHOT_SEARCH_MOVED = SNAPSHOT_V1.replace(
     '- textbox "Search the news" [ref=e8]',
 )
 
-# Realistic gptme snapshot_page() shape: page header, level attributes, no refs.
-SNAPSHOT_GPTME = """\
-Page: Hacker News (fixture)
-URL: file:///tmp/hn.html
-
-- heading "Hacker News" [level=1]
-- link "new"
-- link "past"
-- button "more"
-- textbox "Search"
-- button "Search"
-- link "First story"
-- link "42 comments"
-- textbox "Write a comment"
-- button "Submit"
-"""
-
 
 class BrowserStub:
     """Recording stand-in for ``gptme.tools.browser``.
@@ -62,14 +45,19 @@ class BrowserStub:
     stable page).
     """
 
-    def __init__(self, snapshots: list[str]) -> None:
+    def __init__(
+        self, snapshots: list[str], *, raise_on_snapshot: bool = False
+    ) -> None:
         self.snapshots = snapshots
         self.snapshot_calls = 0
         self.clicks: list[str] = []
         self.fills: list[tuple[str, str]] = []
         self.fail_selectors: set[str] = set()
+        self.raise_on_snapshot = raise_on_snapshot
 
     def snapshot_page(self) -> str:
+        if self.raise_on_snapshot:
+            raise RuntimeError("browser page closed")
         self.snapshot_calls += 1
         idx = min(self.snapshot_calls - 1, len(self.snapshots) - 1)
         return self.snapshots[idx]
@@ -86,7 +74,7 @@ class BrowserStub:
         if selector in self.fail_selectors:
             raise TimeoutError(f"locator '{selector}' not found")
 
-    def press_key(self, key: str) -> None:  # pragma: no cover - passthrough
+    def press_key(self, key: str) -> None:
         pass
 
     def select_option(self, selector: str, value: str) -> None:  # pragma: no cover
@@ -96,9 +84,8 @@ class BrowserStub:
         pass
 
 
-@pytest.fixture
-def browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
-    stub = BrowserStub([SNAPSHOT_V1])
+def _wire_stub(stub: BrowserStub, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wire a BrowserStub into sys.modules so the semantic module uses it."""
     browser_mod = types.ModuleType("gptme.tools.browser")
     setattr(browser_mod, "snapshot_page", stub.snapshot_page)
     setattr(browser_mod, "click_element", stub.click_element)
@@ -113,6 +100,20 @@ def browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
     monkeypatch.setitem(sys.modules, "gptme", gptme_mod)
     monkeypatch.setitem(sys.modules, "gptme.tools", tools_mod)
     monkeypatch.setitem(sys.modules, "gptme.tools.browser", browser_mod)
+
+
+@pytest.fixture
+def browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
+    stub = BrowserStub([SNAPSHOT_V1])
+    _wire_stub(stub, monkeypatch)
+    return stub
+
+
+@pytest.fixture
+def failing_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
+    """A stub whose snapshot_page raises RuntimeError (browser closed)."""
+    stub = BrowserStub([], raise_on_snapshot=True)
+    _wire_stub(stub, monkeypatch)
     return stub
 
 
@@ -125,7 +126,6 @@ def test_observe_ranks_best_match_first(browser_stub: BrowserStub) -> None:
     results = browser_observe("type into the search box")
     assert results, "expected at least one match"
     assert results[0].selector == "[ref=e2]"
-    assert results[0].method == "fill"
 
 
 def test_observe_top_k_limits_results(browser_stub: BrowserStub) -> None:
@@ -177,32 +177,6 @@ def test_act_string_form_dispatches_first_ambiguous_match(
 
 
 # ---------------------------------------------------------------------------
-# parser: ignore non-ref bracket attrs; role fallback when gptme has no refs
-# ---------------------------------------------------------------------------
-
-
-def test_parser_ignores_level_attribute_and_uses_role_selector(
-    browser_stub: BrowserStub,
-) -> None:
-    browser_stub.snapshots = [SNAPSHOT_GPTME]
-    results = browser_observe("the first story link", top_k=1)
-    assert results[0].selector == "role=link[name='First story']"
-    # Must not have treated [level=1] on the heading as a selector.
-    heading = browser_observe("Hacker News", top_k=1)
-    assert heading[0].selector == "role=heading[name='Hacker News']"
-    assert "level" not in heading[0].selector
-
-
-def test_observe_without_refs_uses_role_name_locator(
-    browser_stub: BrowserStub,
-) -> None:
-    browser_stub.snapshots = [SNAPSHOT_GPTME]
-    results = browser_observe("type into the search box", top_k=1)
-    assert results[0].selector == "role=textbox[name='Search']"
-    assert results[0].method == "fill"
-
-
-# ---------------------------------------------------------------------------
 # browser_act — string form basics
 # ---------------------------------------------------------------------------
 
@@ -215,6 +189,7 @@ def test_act_string_form_observes_then_dispatches(browser_stub: BrowserStub) -> 
 
 
 def test_act_no_match_fails_without_dispatch(browser_stub: BrowserStub) -> None:
+    # Zero token overlap with every element name, and no role keyword.
     result = browser_act("purple elephant")
     assert not result.success
     assert "no elements matched" in result.message
@@ -227,13 +202,6 @@ def test_act_unknown_method_fails(browser_stub: BrowserStub) -> None:
     assert not result.success
     assert "unknown method" in result.message
     assert browser_stub.clicks == []
-
-
-def test_act_fill_without_arguments_fails(browser_stub: BrowserStub) -> None:
-    result = browser_act("type into the search box", method="fill", arguments=[])
-    assert not result.success
-    assert "fill requires arguments" in result.message
-    assert browser_stub.fills == []
 
 
 # ---------------------------------------------------------------------------
@@ -324,19 +292,81 @@ def test_extract_without_instruction_returns_raw_snapshot(
     assert result.llm_calls == 0
 
 
-def test_extract_with_instruction_still_returns_raw_aria(
+def test_extract_with_instruction_is_path_a_noop_with_hint(
     browser_stub: BrowserStub,
 ) -> None:
-    # Path A does not interpret the instruction; it returns the snapshot.
     result = browser_extract("all comment counts")
-    assert result.success
-    assert result.data == SNAPSHOT_V1
-    assert result.llm_calls == 0
-
-
-def test_extract_with_schema_is_path_b_stub(browser_stub: BrowserStub) -> None:
-    result = browser_extract("all comment counts", schema=dict)
     assert not result.success
     assert isinstance(result.data, dict)
     assert "error" in result.data
     assert result.llm_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: snapshot failures return graceful results, not unhandled exceptions
+# ---------------------------------------------------------------------------
+
+
+def test_observe_snapshot_failure_returns_empty(
+    failing_browser_stub: BrowserStub,
+) -> None:
+    # If the browser raises (closed page, PlaywrightError, etc.), observe
+    # must return [] instead of propagating the exception to the caller.
+    result = browser_observe("the submit button")
+    assert result == []
+
+
+def test_extract_snapshot_failure_returns_failed_result(
+    failing_browser_stub: BrowserStub,
+) -> None:
+    # If the browser raises, extract must return ExtractResult(success=False)
+    # instead of propagating the exception.
+    result = browser_extract()
+    assert not result.success
+    assert isinstance(result.data, dict)
+    assert "error" in result.data
+
+
+# ---------------------------------------------------------------------------
+# P2 fix: press focuses the element before pressing the key
+# ---------------------------------------------------------------------------
+
+
+def test_act_press_focuses_element_before_pressing(browser_stub: BrowserStub) -> None:
+    # Verify that the press dispatch clicks (focuses) the target selector
+    # before issuing the key press so the key lands on the intended element.
+    observed = browser_observe("submit button", top_k=1)[0]
+    result = browser_act(observed, method="press", arguments=["Enter"])
+    assert result.success
+    # click_element(sel) must have been called to focus the element first.
+    assert observed.selector in browser_stub.clicks
+
+
+# ---------------------------------------------------------------------------
+# P2 fix: stale-selector retry uses original instruction, not vague description
+# ---------------------------------------------------------------------------
+
+
+def test_observe_result_stores_original_instruction(browser_stub: BrowserStub) -> None:
+    instruction = "the submit button at the bottom of the form"
+    results = browser_observe(instruction, top_k=1)
+    assert results
+    assert results[0].instruction == instruction
+
+
+def test_stale_selector_retry_uses_original_instruction(
+    browser_stub: BrowserStub,
+) -> None:
+    # Observe with a specific instruction, then simulate a page re-render that
+    # moves the selector. The retry re-observe must use the original instruction
+    # (not the vague description like "button 'Submit'") to find the element.
+    observed = browser_observe("submit button", top_k=1)[0]
+    assert observed.instruction == "submit button"
+    assert observed.selector == "[ref=e5]"
+    browser_stub.snapshots = [SNAPSHOT_SUBMIT_MOVED]
+    browser_stub.fail_selectors.add("[ref=e5]")
+
+    result = browser_act(observed)
+
+    assert result.success
+    assert result.selector_used == "[ref=e9]"

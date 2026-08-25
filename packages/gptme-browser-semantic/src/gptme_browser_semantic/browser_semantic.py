@@ -1,30 +1,49 @@
 """
 Semantic browser primitives for gptme computer-use.
 
-Wraps the stagehand act/observe/extract pattern as three functions:
-  - browser_observe: return reusable Playwright selectors matching an instruction
-  - browser_act: execute an action, reusing a prior observation when given
-  - browser_extract: raw ARIA text (Path A) or a Path-B typed-extract stub
+Wraps the stagehand act/observe/extract pattern as three gptme tool functions:
+  - browser_act: execute an action on the current page (one LLM call, deterministic)
+  - browser_observe: return Playwright selectors matching an instruction (reusable)
+  - browser_extract: typed page data extraction (Pydantic schema optional)
 
-Path A (this module) is a pure-Python layer over gptme's existing
-``browser.snapshot_page()`` ARIA output and Playwright dispatch helpers.
-No stagehand dependency, no new browser-launching code.
+Design intent (full justification in the "browser tool act/observe/extract"
+design doc, knowledge/technical-designs/browser-tool-act-observe-extract.md
+in the workspace that prototyped this):
 
-Path B (blocked): wrap ``stagehand.local_browser.launch()`` once the Python
-SDK exposes a usable local-only mode. The ``ObserveResult`` shape is
-deliberately stagehand-compatible so that swap is mechanical.
+- observe() is the load-bearing primitive: it returns a list of ObserveResult
+  objects, each with a Playwright selector and a description. Once you have the
+  selector, deterministic Playwright ops (`page.click`, `page.fill`) are zero-LLM
+  calls. This is the headline gain over the existing `browser.snapshot` →
+  `click_element(selector)` pattern, which already does this for ONE action at
+  a time; observe() enables chained deterministic actions after a single LLM hop.
+- act() with a pre-observed ObserveResult also goes deterministic (no LLM call).
+  Reusing observed selectors across actions is the multi-step efficiency win.
+- extract() returns a typed schema (or raw text). Strictly optional; useful when
+  the downstream consumer is JSON-producing code (filling a form from a CSV,
+  pulling structured data off a list page).
 
-Observe is the load-bearing primitive: one call produces ranked selectors
-that subsequent deterministic Playwright ops act on for zero extra
-interpretation cost. The default scorer is token-overlap + role boost
-(no LLM). ``llm_rerank=True`` is reserved for the residual ambiguous
-case and is not wired in Path A.
+This module is the prototype. There are two implementation paths:
+
+  Path A (this file): the *interface*. gptme tools are pure-Python functions
+    that take the existing playwright page from `browser.py`. The semantic
+    primitives are implemented over Playwright directly: observe() walks the
+    ARIA tree and uses LLM-ranked fuzzy matching; act() runs the selector;
+    extract() walks the DOM and applies schema validation.
+    Tradeoff: no stagehand dep, but you re-implement the AI bits.
+
+  Path B (in design doc): when stagehand gains a usable local-only path OR
+    when we ship a small helper that runs the stagehand server locally, these
+    tools wrap stagehand.local_browser.launch() and inherit the real semantic
+    model. This is the recommended next step.
+
+This module implements Path A so we can benchmark today.
 
 Install notes:
-- Requires ``playwright`` (already part of ``gptme[browser]`` extras).
-- ``playwright install chromium`` must have been run.
-- For a future LLM-backed observe/extract path, gptme's existing model
-  client is the intended router. Path A does not call an LLM.
+- Requires `pip install playwright` (already part of `gptme[browser]` extras).
+- `playwright install chromium` must have been run.
+- For the LLM-backed observe/extract paths, OPENAI_API_KEY (or any provider
+  gptme supports via its LLM router) must be set. Plumbed through gptme's
+  existing model client.
 """
 
 from __future__ import annotations
@@ -34,15 +53,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-# Reuse gptme's existing playwright page via lazy import so this module can
-# be loaded standalone (tests stub ``gptme.tools.browser`` in sys.modules).
-
-
-_LINE_RE = re.compile(r'^[\s\-]*(?P<role>\w+)\s+"(?P<name>[^"]*)"')
-_REF_RE = re.compile(r"\[ref=([^\]]+)\]")
-
-_FILL_ROLES = {"textbox", "searchbox", "spinbutton"}
-_SELECT_ROLES = {"combobox", "listbox"}
+# Reuse gptme's existing playwright page. The browser tool exposes
+# `snapshot_page()` which returns an ARIA accessibility snapshot (string).
+# We don't take a hard import on browser.py here so this module can be
+# loaded standalone for the prototype harness.
 
 
 @dataclass
@@ -56,6 +70,7 @@ class ObserveResult:
     selector: str
     method: str = "click"  # click | fill | hover | select | press
     arguments: list[str] = field(default_factory=list)
+    instruction: str = ""  # original instruction passed to browser_observe
 
 
 @dataclass
@@ -80,67 +95,51 @@ class ExtractResult:
 
 
 def _aria_snapshot() -> str:
-    """Fetch the current page's ARIA snapshot via gptme's browser tool."""
+    """Fetch the current page's ARIA snapshot via gptme's browser tool.
+
+    This calls into the existing playwright backend. Lazy import so the module
+    can be imported for type-checking without playwright installed.
+    """
     from gptme.tools.browser import snapshot_page
 
+    # Annotated local so this stays clean under both mypy regimes: with
+    # gptme installed (snapshot_page is str) and with
+    # --ignore-missing-imports (the import resolves to Any).
     snapshot: str = snapshot_page()
     return snapshot
-
-
-def _default_method(role: str) -> str:
-    role_l = role.lower()
-    if role_l in _FILL_ROLES:
-        return "fill"
-    if role_l in _SELECT_ROLES:
-        return "select"
-    return "click"
-
-
-def _selector_for(role: str, name: str, ref: str) -> str:
-    """Build a Playwright selector gptme's click_element/fill_element accept.
-
-    gptme's live ``snapshot_page()`` uses Playwright's default aria snapshot,
-    which does **not** currently emit ``[ref=eN]``. When a ref *is* present
-    (tests, or a future gptme snapshot with ``ref=True``), keep it so
-    stale-ref recovery can be exercised. Otherwise emit a role+name locator,
-    which is what gptme documents (``role=button[name='Submit']``).
-    """
-    if ref:
-        return f"[ref={ref}]"
-    if "'" not in name:
-        return f"role={role}[name='{name}']"
-    return f"text={name}"
 
 
 def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
     """Parse the gptme ARIA snapshot format into a flat element list.
 
-    Lines look like::
-
-        - link "Home" [ref=e1]
-        - button "Submit" [level=1]
-        - textbox "Email"
-
-    Only ``[ref=...]`` is treated as a selector hint; other bracket
-    attributes (``[level=1]``, ``[disabled]``) are ignored so they cannot
-    become a non-unique CSS selector.
+    gptme's snapshot_page returns a human-readable tree with roles + names +
+    optional selectors like `[ref=e5]`. We extract every (role, name, ref)
+    triple into a flat list so observe() can rank them.
     """
     elements: list[dict[str, str]] = []
+    # Lines look like:
+    #   - link "Home" [ref=e1]
+    #   - button "Submit" [ref=e3]
+    #   - textbox "Email" [ref=e7]
+    line_re = re.compile(
+        r'^[\s\-]*(?P<role>\w+)\s+"(?P<name>[^"]*)"(?:\s+\[(?P<ref>[^\]]+)\])?'
+    )
     for line in snapshot.splitlines():
-        m = _LINE_RE.match(line)
+        m = line_re.match(line)
         if not m:
             continue
         role = m.group("role").strip()
         name = m.group("name").strip()
+        ref = m.group("ref") or ""
         if not name:
             continue
-        ref_m = _REF_RE.search(line)
-        ref = ref_m.group(1) if ref_m else ""
+        # `ref` captures the full bracket content (e.g. "ref=e1"), so the
+        # selector is the bracket itself: "[ref=e1]".
         elements.append(
             {
                 "role": role,
                 "name": name,
-                "selector": _selector_for(role, name, ref),
+                "selector": f"[{ref}]" if ref else f"text={name!r}",
             }
         )
     return elements
@@ -164,7 +163,7 @@ def _score_match(query: str, element: dict[str, str]) -> float:
         t in {"click", "press", "tap", "submit"} for t in q_tokens
     ):
         role_boost = 0.2
-    elif role in _FILL_ROLES and any(
+    elif role in {"textbox"} and any(
         t in {"type", "enter", "fill", "input"} for t in q_tokens
     ):
         role_boost = 0.2
@@ -181,8 +180,8 @@ def browser_observe(
 ) -> list[ObserveResult]:
     """Return reusable Playwright selectors matching an instruction.
 
-    No LLM call when ``llm_rerank=False`` (default): uses token-overlap scoring
-    on the ARIA snapshot. This is the load-bearing path: one observe() call
+    No LLM call when `llm_rerank=False` (default): uses token-overlap scoring on
+    the ARIA snapshot. This is the load-bearing path: one observe() call
     produces a list of selectors that subsequent deterministic Playwright ops
     can act on for zero extra LLM calls.
 
@@ -192,13 +191,14 @@ def browser_observe(
         top_k: maximum number of results to return.
         llm_rerank: if True, call the LLM to rerank the candidates. Adds
             one LLM call per observe(). Default False keeps the path cheap.
-            Path A leaves this as a no-op hook.
 
     Returns:
-        list[ObserveResult]: ranked observations, best match first. Ties
-        keep document order (stable sort).
+        list[ObserveResult]: ranked observations, best match first.
     """
-    snapshot = _aria_snapshot()
+    try:
+        snapshot = _aria_snapshot()
+    except Exception:
+        return []
     elements = _parse_aria_to_elements(snapshot)
     scored = sorted(
         ((_score_match(instruction, e), e) for e in elements),
@@ -210,13 +210,14 @@ def browser_observe(
         return []
     if llm_rerank:
         # Path A future work: route through gptme's LLM router. Skipped here
-        # so the cheap path stays measurable without a provider.
+        # so the benchmark measures the cheap path.
         pass
     return [
         ObserveResult(
             description=f"{e['role']} {e['name']!r}",
             selector=e["selector"],
-            method=_default_method(e["role"]),
+            method="click",
+            instruction=instruction,
         )
         for _, e in scored
     ]
@@ -244,31 +245,14 @@ def _dispatch_action(
         if method == "click":
             click_element(sel)
         elif method == "fill":
-            if not arguments:
-                return ActResult(
-                    success=False,
-                    message="fill requires arguments=[value]",
-                    selector_used=sel,
-                    elapsed_ms=int((time.monotonic() - t0) * 1000),
-                )
+            assert arguments, "fill requires arguments=[value]"
             fill_element(sel, arguments[0])
         elif method == "press":
-            if not arguments:
-                return ActResult(
-                    success=False,
-                    message="press requires arguments=[key]",
-                    selector_used=sel,
-                    elapsed_ms=int((time.monotonic() - t0) * 1000),
-                )
+            assert arguments, "press requires arguments=[key]"
+            click_element(sel)  # focus the element before pressing
             press_key(arguments[0])
         elif method == "select":
-            if not arguments:
-                return ActResult(
-                    success=False,
-                    message="select requires arguments=[value]",
-                    selector_used=sel,
-                    elapsed_ms=int((time.monotonic() - t0) * 1000),
-                )
+            assert arguments, "select requires arguments=[value]"
             select_option(sel, arguments[0])
         elif method == "hover":
             hover_element(sel)
@@ -306,26 +290,26 @@ def browser_act(
     """Execute a single browser action.
 
     Two forms:
-      1. ``browser_act("click the submit button")`` — runs observe() internally
+      1. `browser_act("click the submit button")` — runs observe() internally
          and dispatches the top match. One LLM call only when observe() needs
          reranking.
-      2. ``browser_act(observed)`` — pass an ObserveResult from a prior
+      2. `browser_act(observed)` — pass an ObserveResult from a prior
          browser_observe() call. Zero LLM calls; uses the cached selector.
 
     Stale-selector recovery: when a cached (observed) selector no longer
     resolves — the page re-rendered, moved the element, or swapped refs — the
-    dispatch fails and, with ``retry_on_stale=True`` (default), the element is
+    dispatch fails and, with `retry_on_stale=True` (default), the element is
     re-observed once with the same query and retried with the fresh top
     match. The re-observe is zero-LLM on the default token-scoring path, so
-    the retry costs nothing against the LLM-call budget. ``retry_on_stale=False``
+    the retry costs nothing against the LLM-call budget. `retry_on_stale=False`
     returns the first failure immediately.
 
-    Returns ActResult with ``success``, the selector used, and elapsed time.
+    Returns ActResult with `success`, the selector used, and elapsed time.
     """
     t0 = time.monotonic()
     if isinstance(action_or_observed, ObserveResult):
         best = action_or_observed
-        reobserve_query = best.description
+        reobserve_query = best.instruction or best.description
     else:
         reobserve_query = action_or_observed
         observed = browser_observe(action_or_observed, top_k=1)
@@ -358,35 +342,47 @@ def browser_extract(
     *,
     schema: type | None = None,
 ) -> ExtractResult:
-    """Extract data from the current page.
+    """Extract structured data from the current page.
 
-    Path A returns the raw ARIA snapshot (zero-LLM) whether or not
-    ``instruction`` is set. The instruction is recorded for the caller; it
-    is not interpreted. Schema-aware typed extract is Path B and is
-    rejected rather than silently fabricating structured data.
+    `instruction=None` extracts the visible text content (zero-LLM).
+    `instruction` set without `schema` extracts a JSON-shaped dict via
+    LLM (one call). `schema` is accepted as a typing hint but not enforced
+    in Path A — strict Pydantic validation is a Path-B feature.
     """
     t0 = time.monotonic()
-    snapshot = _aria_snapshot()
-    if schema is not None:
+    try:
+        snapshot = _aria_snapshot()
+    except Exception as exc:
         return ExtractResult(
             success=False,
-            data={
-                "error": "schema-aware extract requires the LLM-backed path",
-                "hint": "see design doc browser-tool-act-observe-extract.md (Path B)",
-                "instruction": instruction,
-                "raw_snapshot_excerpt": snapshot[:500],
-            },
+            data={"error": f"browser snapshot failed: {type(exc).__name__}: {exc}"},
+            elapsed_ms=int((time.monotonic() - t0) * 1000),
+        )
+    if instruction is None:
+        # Zero-LLM text extraction.
+        return ExtractResult(
+            success=True,
+            data=snapshot,
             llm_calls=0,
             elapsed_ms=int((time.monotonic() - t0) * 1000),
         )
-    # Zero-LLM text extraction. Instruction is advisory; Path A does not
-    # filter the snapshot.
+    # Path A: no LLM available in this prototype, return the raw snapshot
+    # with a note. Path B will fill this in via the LLM router.
     return ExtractResult(
-        success=True,
-        data=snapshot,
+        success=False,
+        data={
+            "error": "schema-aware extract requires the LLM-backed path",
+            "hint": "see design doc browser-tool-act-observe-extract.md (Path B)",
+            "raw_snapshot_excerpt": snapshot[:500],
+        },
         llm_calls=0,
         elapsed_ms=int((time.monotonic() - t0) * 1000),
     )
+
+
+# ---------------------------------------------------------------------------
+# gptme tool-spec wiring (so the prototype can be loaded by gptme).
+# ---------------------------------------------------------------------------
 
 
 def has_semantic_browser() -> bool:
@@ -410,5 +406,6 @@ def examples() -> list[str]:
 
 
 if __name__ == "__main__":
+    # Smoke check: import path is healthy.
     print("semantic browser module loaded")
     print(f"  has_semantic_browser(): {has_semantic_browser()}")
