@@ -101,7 +101,6 @@ from gptme_runloops.pm_dispatch import (
     EFFECT_OBSERVED,
     EFFECT_UNKNOWN,
     append_full_ledger_entry,
-    classify_item_work_type,
     derive_slot_key,
     is_direct_mention,
 )
