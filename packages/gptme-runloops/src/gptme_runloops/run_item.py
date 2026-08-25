@@ -94,6 +94,7 @@ from gptme_runloops.merge_lifecycle import (
     WorkItem,
     run_merge_lifecycle,
 )
+from gptme_runloops.pm_bandit import PmModelBandit
 from gptme_runloops.pm_dispatch import (
     DISPATCH_COOLDOWN_DIR_ENV,
     EFFECT_NONE,
@@ -2743,6 +2744,25 @@ def run_work_file(
             pass
 
         ambient = _ambient_env(config, backend, model)
+
+        # Stage 1 (shadow mode): Load bandit but don't use it for routing yet
+        bandit_shadow = os.getenv("BOB_PM_BANDIT_SHADOW", "").lower() in ("1", "true")
+        bandit: PmModelBandit | None = None
+        if bandit_shadow:
+            try:
+                pm_state_dir = (
+                    config.state_dir / "pm-dispatch"
+                    if config.state_dir
+                    else Path("state/pm-dispatch")
+                )
+                bandit = PmModelBandit(state_dir=str(pm_state_dir))
+                _log(
+                    "BOB_PM_BANDIT_SHADOW=1: bandit loaded (recording observations only)"
+                )
+            except Exception as exc:
+                _log(f"WARN: failed to load bandit: {exc}")
+                bandit = None
+
         if hooks.sysprompt_builder is not None:
             _log("Building system prompt...")
             env = os.environ.copy()
@@ -2824,6 +2844,23 @@ def run_work_file(
             )
             _log(f"Prompt: {len(plan.prompt)} chars")
 
+            # Stage 1 shadow logging: what would the bandit choose?
+            if bandit_shadow and bandit is not None:
+                try:
+                    from gptme_runloops.pm_dispatch import classify_item_work_type
+
+                    work_type = classify_item_work_type(
+                        list(item.types), repo=item.repo
+                    )
+                    available = [m for m in [model] if m]
+                    if available:
+                        bandit_model = bandit.resolve_model(work_type, available)
+                        _log(
+                            f"BOB_PM_BANDIT_SHADOW: work_type={work_type} bandit_model={bandit_model}"
+                        )
+                except Exception as exc:
+                    _log(f"WARN: bandit shadow logging failed: {exc}")
+
             if rate_limited:
                 _log(f"Rate-limited: skipping item {index} and remaining items")
                 break
@@ -2867,9 +2904,29 @@ def run_work_file(
                     infra_failure = item_outcome.infra_failure
                 if item_outcome.exit_code != 0 and overall_exit == 0:
                     overall_exit = item_outcome.exit_code
-                item_effects.append(
-                    run_post_session(plan, item, item_outcome, config, hooks)
-                )
+
+                item_effect = run_post_session(plan, item, item_outcome, config, hooks)
+                item_effects.append(item_effect)
+
+                # Stage 1 shadow: record outcome for later analysis
+                if bandit_shadow and bandit is not None:
+                    try:
+                        from gptme_runloops.pm_dispatch import classify_item_work_type
+
+                        work_type = classify_item_work_type(
+                            list(item.types), repo=item.repo
+                        )
+                        # Use the observable-effect signal as the reward: a
+                        # clean exit is not evidence work landed (gptme/gptme#3468,
+                        # 2026-08-10). effect=observed means commits/replies were
+                        # actually delivered; anything else maps to 0.0.
+                        reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
+                        bandit.record_outcome(work_type, model, reward)
+                        _log(
+                            f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
+                        )
+                    except Exception as exc:
+                        _log(f"WARN: bandit outcome recording failed: {exc}")
             finally:
                 # bash EXIT-trap parity: the claim is abandoned on every exit
                 # path, including SIGTERM (the CLI converts it to SystemExit
