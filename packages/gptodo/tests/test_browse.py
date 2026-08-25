@@ -783,7 +783,7 @@ class TestBrowseFzfRawBinding:
             fzf_calls = _get_fzf_calls(mock_run)
             fzf_cmd = fzf_calls[0][0][0]
             bindings = _get_fzf_arg(fzf_cmd, "--bind")
-            assert "ctrl-r:change-preview(gptodo show {1})" in bindings
+            assert "ctrl-r:change-preview(gptodo show '{1}')" in bindings
             assert "change-preview-label( Raw Markdown )" in bindings
 
 

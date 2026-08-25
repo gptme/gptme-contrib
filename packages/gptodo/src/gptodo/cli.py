@@ -296,6 +296,7 @@ def show(task_id, render=False):
     task = None
     if not task_id.isdigit():
         task_name = task_id[:-3] if task_id.endswith(".md") else task_id
+        task_name = Path(task_name).name  # prevent path traversal via ../
         direct_path = tasks_dir / f"{task_name}.md"
         if direct_path.is_file():
             direct_tasks = load_tasks(tasks_dir, single_file=direct_path)
@@ -989,8 +990,20 @@ def _write_browse_scripts(state_dir, repo_root):
     rr = repo_root
 
     Path(sd, "edit-task.sh").write_text(
-        """#!/bin/sh
-exec "${EDITOR:-nano}" "$1" </dev/tty >/dev/tty 2>/dev/tty
+        f"""#!/bin/sh
+exec "${{EDITOR:-nano}}" "{rr}/tasks/$1.md" </dev/tty >/dev/tty 2>/dev/tty
+"""
+    )
+
+    Path(sd, "git-blame.sh").write_text(
+        f"""#!/bin/sh
+git -C "{rr}" blame --date=short -- "tasks/$1.md"
+"""
+    )
+
+    Path(sd, "git-log.sh").write_text(
+        f"""#!/bin/sh
+git -C "{rr}" log --follow --oneline --color -- "tasks/$1.md"
 """
     )
 
@@ -1103,9 +1116,9 @@ case "$action" in
   "Change state"*"ready_for_review") gptodo edit "$task" --set state ready_for_review;;
   "Change state"*"done") gptodo edit "$task" --set state done;;
   "Change state"*"cancelled") gptodo edit "$task" --set state cancelled;;
-  "Edit in"*) sh "{sd}/edit-task.sh" "{rr}/tasks/$task.md";;
-  "Git blame") git -C "{rr}" blame --date=short -- tasks/"$task".md | ${{PAGER:-less}};;
-  "Git log"*) git -C "{rr}" log --follow --oneline --color -- tasks/"$task".md | ${{PAGER:-less -R}};;
+  "Edit in"*) sh "{sd}/edit-task.sh" "$task";;
+  "Git blame") sh "{sd}/git-blame.sh" "$task" | ${{PAGER:-less}};;
+  "Git log"*) sh "{sd}/git-log.sh" "$task" | ${{PAGER:-less -R}};;
 esac
 """
     )
@@ -1259,24 +1272,26 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
         # Keyboard hints in border label (spans full window width)
         border_label = " ? Actions │ ^S Sort │ ^F Filter │ ^T State │ ^E Edit │ ^B Blame │ ^L Log │ ^P Preview │ ^R Raw │ ^W Layout "
 
-        # Shell-quoted path aliases for embedding in fzf bind commands
+        # Shell-quoted path alias for embedding in fzf bind commands
         sd_q = f'"{state_dir}"'
-        rr_q = f'"{repo_root}"'
 
         # Reload command (reads state files, calls browse-list)
         reload_cmd = f"sh {sd_q}/reload.sh"
 
-        # Build keybindings
+        # Build keybindings.
+        # Task names are passed as '{1}' (single-quoted) so shell metacharacters
+        # in task names cannot be evaluated by sh -c (safe for names without
+        # single quotes, which gptodo never creates).
         bind_list = [
-            f"?:execute(sh {sd_q}/palette.sh {{1}})+reload({reload_cmd})",
+            f"?:execute(sh {sd_q}/palette.sh '{{1}}')+reload({reload_cmd})",
             f"ctrl-s:execute(sh {sd_q}/sort-picker.sh)+reload({reload_cmd})",
             f"ctrl-f:execute(sh {sd_q}/filter-picker.sh)+reload({reload_cmd})",
-            f"ctrl-t:execute(sh {sd_q}/state-change.sh {{1}})+reload({reload_cmd})",
-            f"ctrl-e:execute(sh {sd_q}/edit-task.sh {rr_q}/tasks/{{1}}.md)+reload({reload_cmd})",
-            f"ctrl-b:change-preview(git -C {rr_q} blame --date=short -- tasks/{{1}}.md)+change-preview-label( Git Blame )",
-            f"ctrl-l:change-preview(git -C {rr_q} log --follow --oneline --color -- tasks/{{1}}.md)+change-preview-label( Git Log )",
-            "ctrl-p:change-preview(gptodo show --render {1})+change-preview-label( Task Preview )",
-            "ctrl-r:change-preview(gptodo show {1})+change-preview-label( Raw Markdown )",
+            f"ctrl-t:execute(sh {sd_q}/state-change.sh '{{1}}')+reload({reload_cmd})",
+            f"ctrl-e:execute(sh {sd_q}/edit-task.sh '{{1}}')+reload({reload_cmd})",
+            f"ctrl-b:change-preview(sh {sd_q}/git-blame.sh '{{1}}')+change-preview-label( Git Blame )",
+            f"ctrl-l:change-preview(sh {sd_q}/git-log.sh '{{1}}')+change-preview-label( Git Log )",
+            "ctrl-p:change-preview(gptodo show --render '{1}')+change-preview-label( Task Preview )",
+            "ctrl-r:change-preview(gptodo show '{1}')+change-preview-label( Raw Markdown )",
             "ctrl-w:change-preview-window(right:60%:wrap|down:75%:wrap)+refresh-preview",
             "ctrl-/:toggle-preview",
         ]
@@ -1292,7 +1307,7 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
             [
                 "fzf",
                 "--preview",
-                "gptodo show --render {1}",
+                "gptodo show --render '{1}'",
                 "--preview-window",
                 "down:75%:wrap",
                 "--preview-label",
