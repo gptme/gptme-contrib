@@ -2,6 +2,8 @@
 
 This directory contains **skills** - enhanced lessons that bundle workflows, scripts, and utilities for gptme.
 
+> **Not sure what to install?** See the curated **[Skills Gallery](https://gptme.org/docs/skills-gallery.html)** on gptme.org for a shortlist of battle-tested skills with install commands and social proof.
+
 ## Overview
 
 Skills extend gptme's lesson system by providing executable components alongside instructional content. While lessons teach patterns and best practices, skills provide ready-to-use workflows with supporting tools.
