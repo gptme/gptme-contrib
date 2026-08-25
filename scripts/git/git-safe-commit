@@ -122,7 +122,7 @@ pathspec_file_has_positive() {
     local line
     if [ "${PATHSPEC_FILE_NUL:-0}" -eq 1 ]; then
         while IFS= read -r -d '' line || [ -n "$line" ]; do
-            [ -z "$line" ] && continue
+            [ -z "${line//[[:space:]]/}" ] && continue
             if ! is_exclusion_only_pathspec "$line"; then
                 return 0
             fi
@@ -130,7 +130,7 @@ pathspec_file_has_positive() {
         return 1
     fi
     while IFS= read -r line || [ -n "$line" ]; do
-        [ -z "$line" ] && continue
+        [ -z "${line//[[:space:]]/}" ] && continue
         if ! is_exclusion_only_pathspec "$line"; then
             return 0
         fi
