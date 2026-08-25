@@ -2905,6 +2905,9 @@ def run_work_file(
                 if item_outcome.exit_code != 0 and overall_exit == 0:
                     overall_exit = item_outcome.exit_code
 
+                item_effect = run_post_session(plan, item, item_outcome, config, hooks)
+                item_effects.append(item_effect)
+
                 # Stage 1 shadow: record outcome for later analysis
                 if bandit_shadow and bandit is not None:
                     try:
@@ -2913,25 +2916,17 @@ def run_work_file(
                         work_type = classify_item_work_type(
                             list(item.types), repo=item.repo
                         )
-                        # Map outcome to reward: 1.0 for productive, 0.0 otherwise
-                        reward = (
-                            1.0
-                            if (
-                                item_outcome.exit_code == 0
-                                and not item_outcome.counted_failure
-                            )
-                            else 0.0
-                        )
+                        # Use the observable-effect signal as the reward: a
+                        # clean exit is not evidence work landed (gptme/gptme#3468,
+                        # 2026-08-10). effect=observed means commits/replies were
+                        # actually delivered; anything else maps to 0.0.
+                        reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
                         bandit.record_outcome(work_type, model, reward)
                         _log(
                             f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
                         )
                     except Exception as exc:
                         _log(f"WARN: bandit outcome recording failed: {exc}")
-
-                item_effects.append(
-                    run_post_session(plan, item, item_outcome, config, hooks)
-                )
             finally:
                 # bash EXIT-trap parity: the claim is abandoned on every exit
                 # path, including SIGTERM (the CLI converts it to SystemExit
