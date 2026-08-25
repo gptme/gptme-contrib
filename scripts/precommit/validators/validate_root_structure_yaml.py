@@ -97,7 +97,7 @@ def load_allowlist(config_path: Path) -> "frozenset[str] | None":
         return None
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8", errors="surrogateescape") as f:
             data = yaml.safe_load(f)
 
         if not isinstance(data, dict) or "allowed_entries" not in data:
