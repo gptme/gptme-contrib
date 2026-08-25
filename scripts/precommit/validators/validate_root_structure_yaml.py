@@ -29,6 +29,7 @@ Config file format (YAML, one entry per line):
       - .github
       - .gitignore
       - README.md
+      - root-structure-allowlist.yaml  # the config file itself must be listed
       - src
       - tests
 """

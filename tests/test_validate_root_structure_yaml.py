@@ -100,6 +100,26 @@ def test_non_list_allowed_entries_fails(tmp_path, capsys):
     assert "must be a list" in capsys.readouterr().err
 
 
+def test_config_file_itself_must_be_in_allowlist(tmp_path, capsys):
+    """The config file lives at the repo root and must be listed in the allowlist.
+
+    Bootstrap requirement: when a consumer creates root-structure-allowlist.yaml,
+    that file becomes a tracked top-level entry. It must appear in allowed_entries
+    or the hook immediately reports it as unexpected.
+    """
+    config = write_config(tmp_path, "allowed_entries:\n  - README.md\n")
+    with (
+        patch.object(validator, "get_repo_root", return_value=tmp_path),
+        patch.object(
+            validator,
+            "get_tracked_root_entries",
+            return_value={"README.md", "root-structure-allowlist.yaml"},
+        ),
+    ):
+        assert validator.main(["--config", str(config)]) == 1
+    assert "root-structure-allowlist.yaml" in capsys.readouterr().out
+
+
 def test_relative_config_resolves_against_repo_root(tmp_path):
     """A relative --config path is resolved from the repo root, not the cwd."""
     write_config(tmp_path, "allowed_entries:\n  - README.md\n")
