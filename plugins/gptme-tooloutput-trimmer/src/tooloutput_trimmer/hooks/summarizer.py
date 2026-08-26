@@ -288,7 +288,7 @@ def apply_summarization(
         if idx > 0 and messages[idx - 1].role == "assistant":
             full_content_parts.append(messages[idx - 1].content)
         full_content_parts.append(messages[idx].content)
-    cache_key_data = "\x00".join(full_content_parts)
+    cache_key_data = repr(full_content_parts)
 
     # Call summarizer with full-content cache key
     summary = _call_summarizer(context, cache_key_data=cache_key_data)
