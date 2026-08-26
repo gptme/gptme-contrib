@@ -95,9 +95,11 @@ def _active_tasks(lines: int = 3) -> list[dict]:
         parts = line.split(None, 1)
         if len(parts) >= 2:
             task_id = parts[0]
-            # gptodo compact recency is "(5m ago)" / "(<1m ago)", not "(5 m ago)".
-            # A \d+\s+\w+ pattern never matches the real output.
-            title = re.sub(r"\s+\([^()]*\bago\)\s*$", "", parts[1]).strip()
+            # gptodo compact recency is "(5m ago)" / "(<1m ago)": digit+unit then
+            # "ago" with no space between number and unit letter.  Anchor on that
+            # digit+unit shape so broader parentheticals like "(approved 2 days ago)"
+            # are left intact.
+            title = re.sub(r"\s+\(<?\d+\w+\s+ago\)\s*$", "", parts[1]).strip()
             tasks.append({"id": task_id, "title": title})
     return tasks[:lines]
 

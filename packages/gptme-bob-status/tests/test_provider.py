@@ -151,3 +151,25 @@ def test_active_tasks_strips_compact_recency_without_space_before_unit(monkeypat
         {"id": "my-task", "title": "Do the thing"},
         {"id": "other-task", "title": "Second thing"},
     ]
+
+
+def test_active_tasks_preserves_parenthetical_ago_in_title(monkeypatch):
+    """Task titles ending with a broad '(... ago)' phrase must NOT be stripped."""
+    import gptme_bob_status.provider as mod
+
+    compact = (
+        "📋 Tasks Status\n"
+        "  review-pr  Review PR (approved 2 days ago)\n"
+        "  normal-task  Do thing  (3m ago)\n"
+        "📋 Summary: 2 total\n"
+    )
+    monkeypatch.setattr(
+        mod, "_run", lambda cmd, **k: compact if cmd[0] == "gptodo" else ""
+    )
+    tasks = mod._active_tasks(3)
+    # The broad parenthetical in the first title must survive; the compact
+    # recency marker in the second must be stripped.
+    assert tasks == [
+        {"id": "review-pr", "title": "Review PR (approved 2 days ago)"},
+        {"id": "normal-task", "title": "Do thing"},
+    ]
