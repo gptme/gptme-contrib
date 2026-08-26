@@ -33,8 +33,7 @@ def test_agent_cli_imports_no_email_stack() -> None:
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, (
-        f"agent_cli pulled in the email stack.\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"agent_cli pulled in the email stack.\nstdout: {result.stdout}\nstderr: {result.stderr}"
     assert "CLEAN" in result.stdout

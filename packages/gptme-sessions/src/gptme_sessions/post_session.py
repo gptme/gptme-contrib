@@ -702,8 +702,7 @@ def post_session(
             len(caller_deliverables),
         )
         outcome_flip_reason = (
-            f"no_trajectory_caller_deliverables:{outcome}"
-            f"->productive:n={len(caller_deliverables)}"
+            f"no_trajectory_caller_deliverables:{outcome}->productive:n={len(caller_deliverables)}"
         )
         outcome = "productive"
 

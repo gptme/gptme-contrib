@@ -2859,7 +2859,7 @@ def test_make_excerpt_strips_thematic_breaks():
     """Thematic break lines (---) must not appear in the excerpt."""
     from gptme_dashboard.server import _make_excerpt
 
-    body = "First prose paragraph.\n\n" "---\n\n" "Second prose paragraph.\n"
+    body = "First prose paragraph.\n\n---\n\nSecond prose paragraph.\n"
     excerpt = _make_excerpt(body)
     assert "---" not in excerpt, f"Thematic break leaked into excerpt: {excerpt!r}"
     assert "First prose" in excerpt, f"Prose missing from excerpt: {excerpt!r}"

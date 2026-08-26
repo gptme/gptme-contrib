@@ -128,7 +128,7 @@ def test_collect_waiting_tasks_parses_frontmatter(tmp_path: Path) -> None:
         "# A task\n"
     )
     (tasks / "active.md").write_text(
-        "---\n" "state: active\n" "created: 2026-04-29T00:00:00+00:00\n" "---\n" "# Another task\n"
+        "---\nstate: active\ncreated: 2026-04-29T00:00:00+00:00\n---\n# Another task\n"
     )
     (tasks / "waiting-no-blocker.md").write_text(
         "---\nstate: waiting\ncreated: 2026-04-29T00:00:00+00:00\n---\n"
@@ -145,11 +145,7 @@ def test_collect_waiting_tasks_truncates_long_blocker(tmp_path: Path) -> None:
     tasks.mkdir()
     big = "x" * 500
     (tasks / "long.md").write_text(
-        "---\n"
-        "state: waiting\n"
-        f"waiting_for: {big}\n"
-        "created: 2026-04-29T00:00:00+00:00\n"
-        "---\n"
+        f"---\nstate: waiting\nwaiting_for: {big}\ncreated: 2026-04-29T00:00:00+00:00\n---\n"
     )
     out = collect_waiting_tasks(tmp_path)
     assert len(out) == 1

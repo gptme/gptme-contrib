@@ -30,7 +30,7 @@ def test_summarizer_fired_false_when_no_summary() -> None:
 def test_summarizer_fired_true_when_marker_present() -> None:
     """summarizer_fired is True when a system message starts with the marker."""
     summary_content = (
-        f"{_SUMMARIZATION_MARKER}\n" "Summary of previous tool calls:\n" "- ls: listed files"
+        f"{_SUMMARIZATION_MARKER}\nSummary of previous tool calls:\n- ls: listed files"
     )
     msgs = [
         _msg("user", "Run ls", _ts(0)),
@@ -77,7 +77,7 @@ def test_summarizer_fired_false_when_marker_not_at_start() -> None:
 def test_summarizer_fired_true_even_with_other_signals() -> None:
     """summarizer_fired is True alongside normal productivity signals (commits, writes)."""
     summary_content = (
-        f"{_SUMMARIZATION_MARKER}\n" "Summary of previous tool calls:\n" "- patch: wrote foo.py"
+        f"{_SUMMARIZATION_MARKER}\nSummary of previous tool calls:\n- patch: wrote foo.py"
     )
     commit_output = "[master abc1234] feat: add foo (abc1234)"
     msgs = [

@@ -302,7 +302,7 @@ def main():
                 time_left = info.get("time_left", "")
                 resets = info.get("resets", "unknown")
                 print(
-                    f"  {label:20s} [{bar}] {util*100:4.0f}% used ({remaining*100:.0f}% left)"
+                    f"  {label:20s} [{bar}] {util * 100:4.0f}% used ({remaining * 100:.0f}% left)"
                 )
                 print(f"  {'':20s} resets {resets}  ({time_left})")
             else:

@@ -159,9 +159,9 @@ def test_first_sight_seeds_state_without_emitting() -> None:
         assert result.returncode in (0, 1), result.stderr
 
         emitted = _emitted_notifications(result.stdout)
-        assert emitted == [], (
-            "first-sight notifications must seed, not emit; got: " f"{emitted}"
-        )
+        assert (
+            emitted == []
+        ), f"first-sight notifications must seed, not emit; got: {emitted}"
 
         state_file = state_dir / f"notif-{NOTIF_ID}.state"
         assert state_file.exists()
@@ -191,9 +191,9 @@ def test_first_seen_thread_emits_when_state_established() -> None:
         assert result.returncode in (0, 1), result.stderr
 
         emitted = _emitted_notifications(result.stdout)
-        assert len(emitted) == 1, (
-            "first-seen thread with established state must emit; got: " f"{emitted}"
-        )
+        assert (
+            len(emitted) == 1
+        ), f"first-seen thread with established state must emit; got: {emitted}"
         assert emitted[0]["number"] == NOTIF_NUMBER
 
         # Emit-before-persist: state rolled forward to the seen timestamp.
@@ -214,9 +214,9 @@ def test_same_updated_at_does_not_reemit() -> None:
         assert result.returncode in (0, 1), result.stderr
 
         emitted = _emitted_notifications(result.stdout)
-        assert emitted == [], (
-            "Expected no re-emit when updated_at unchanged, got: " f"{emitted}"
-        )
+        assert (
+            emitted == []
+        ), f"Expected no re-emit when updated_at unchanged, got: {emitted}"
 
 
 def test_advanced_updated_at_reemits_followup() -> None:
@@ -234,9 +234,9 @@ def test_advanced_updated_at_reemits_followup() -> None:
         assert result.returncode in (0, 1), result.stderr
 
         emitted = _emitted_notifications(result.stdout)
-        assert len(emitted) == 1, (
-            "Expected re-emit when updated_at advances, got: " f"{emitted}"
-        )
+        assert (
+            len(emitted) == 1
+        ), f"Expected re-emit when updated_at advances, got: {emitted}"
         assert emitted[0]["number"] == NOTIF_NUMBER
 
         # State file rolled forward to the newer timestamp.

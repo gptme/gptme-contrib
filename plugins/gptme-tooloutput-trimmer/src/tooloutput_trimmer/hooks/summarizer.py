@@ -238,7 +238,7 @@ def apply_summarization(
     # Take the W most recently evicted pairs
     recent_evicted = evictable[-config.window :]
     # Build the summary message content
-    summary_content = f"{SUMMARIZATION_MARKER}\n" f"{summary}"
+    summary_content = f"{SUMMARIZATION_MARKER}\n{summary}"
     summary_msg = messages[recent_evicted[0]].replace(content=summary_content)
 
     # Rebuild message list: replace the first evicted position with summary,

@@ -253,14 +253,14 @@ def format_pending_updates(result: ExtractionResult) -> str:
     if result.corrections:
         lines.append(f"## Pending — {now} (corrections)")
         for c in result.corrections:
-            lines.append(f"- **{c['type']}**: \"{c['matched']}\"")
+            lines.append(f'- **{c["type"]}**: "{c["matched"]}"')
             lines.append(f"  > {c['context'][:200]}")
         lines.append("")
 
     if result.confirmations:
         lines.append("### Confirmations")
         for c in result.confirmations:
-            lines.append(f"- **{c['type']}**: \"{c['full_text'][:120]}\"")
+            lines.append(f'- **{c["type"]}**: "{c["full_text"][:120]}"')
         lines.append("")
 
     if result.guidance_blocks:

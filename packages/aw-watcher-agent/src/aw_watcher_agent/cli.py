@@ -137,10 +137,7 @@ def cmd_emit_activity(args: argparse.Namespace) -> int:
         data=core.activity_data(vars(args)),
     )
     event_id = client.heartbeat(bid, event, pulsetime=float(args.pulsetime))
-    print(
-        f"activity emitted: {bid} event_id={event_id} "
-        f"tool={args.tool} duration_ms={duration_ms}"
-    )
+    print(f"activity emitted: {bid} event_id={event_id} tool={args.tool} duration_ms={duration_ms}")
     return 0
 
 

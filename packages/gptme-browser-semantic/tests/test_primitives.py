@@ -310,9 +310,9 @@ def test_observe_textbox_returns_fill_method(browser_stub: BrowserStub) -> None:
     textbox_results = [r for r in results if r.selector in ("[ref=e2]", "[ref=e7]")]
     assert textbox_results, "expected textbox results"
     for r in textbox_results:
-        assert r.method == "fill", (
-            f"textbox should yield method='fill', got {r.method!r}"
-        )
+        assert (
+            r.method == "fill"
+        ), f"textbox should yield method='fill', got {r.method!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -343,9 +343,9 @@ def test_non_ref_bracket_ignored_uses_role_name_selector(
     heading_results = [r for r in results if "Welcome" in r.description]
     assert heading_results, "expected a match for the heading"
     r = heading_results[0]
-    assert r.selector == "role=heading[name='Welcome']", (
-        f"non-ref bracket should produce role-name selector, got {r.selector!r}"
-    )
+    assert (
+        r.selector == "role=heading[name='Welcome']"
+    ), f"non-ref bracket should produce role-name selector, got {r.selector!r}"
     assert "[level=" not in r.selector
 
 

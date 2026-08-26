@@ -148,8 +148,7 @@ def validate_memory_file(metadata: dict[str, Any], body: str) -> list[str]:
     if not mem_type or mem_type not in MEMORY_TYPES:
         valid_types = ", ".join(sorted(MEMORY_TYPES))
         errors.append(
-            f"Invalid or missing 'metadata.type': got {mem_type!r}, "
-            f"expected one of: {valid_types}"
+            f"Invalid or missing 'metadata.type': got {mem_type!r}, expected one of: {valid_types}"
         )
 
     if not body or not body.strip():
