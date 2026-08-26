@@ -1427,6 +1427,20 @@ class TestEffectiveStatus:
         assert effective_status({"metadata": "not-a-dict"}) == "active"
         assert effective_status({"metadata": ["a"]}) == "active"
 
+    def test_non_string_status_fails_closed(self):
+        """A malformed non-string status must NOT be treated as active.
+
+        PyYAML parses `status: false` as a bool and `status: [deprecated]` as a
+        list.  Only the exact string "active" may enable injection, otherwise a
+        typo silently re-enables a deprecated lesson/skill.
+        """
+        assert effective_status({"status": False}) != "active"
+        assert effective_status({"status": ["deprecated"]}) != "active"
+        assert effective_status({"metadata": {"status": False}}) != "active"
+        # An empty/whitespace status is "unset", not a deprecation.
+        assert effective_status({"status": ""}) == "active"
+        assert effective_status({"status": "  "}) == "active"
+
     def test_scan_lessons_skips_skill_with_only_nested_status(self, tmp_path: Path):
         skill_dir = tmp_path / "lifecycle-phase-index"
         skill_dir.mkdir()

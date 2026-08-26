@@ -1060,6 +1060,20 @@ def test_effective_status_prefers_non_active_from_either_location(hook):
     assert hook.effective_status({"metadata": "not-a-dict"}) == "active"
 
 
+def test_effective_status_non_string_fails_closed(hook):
+    """Non-string status values must not be treated as active.
+
+    Mirrors the gptme-rag matcher: only the exact string "active" enables
+    injection, so `status: false` (bool) or `status: [deprecated]` (list) cannot
+    silently re-enable a deprecated lesson or skill.
+    """
+    assert hook.effective_status({"status": False}) != "active"
+    assert hook.effective_status({"status": ["deprecated"]}) != "active"
+    assert hook.effective_status({"metadata": {"status": False}}) != "active"
+    assert hook.effective_status({"status": ""}) == "active"
+    assert hook.effective_status({"status": "  "}) == "active"
+
+
 def test_extract_frontmatter_regex_fallback_sees_nested_status(hook, monkeypatch):
     """Without PyYAML the regex fallback must still see a nested deprecation,
     even when an earlier top-level `status: active` precedes it."""

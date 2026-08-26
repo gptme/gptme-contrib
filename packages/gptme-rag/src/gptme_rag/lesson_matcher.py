@@ -178,8 +178,17 @@ def effective_status(fm: dict) -> str:
     if isinstance(metadata, dict):
         candidates.append(metadata.get("status"))
     for value in candidates:
-        if isinstance(value, str) and value.strip() and value.strip() != "active":
-            return value.strip()
+        if value is None:
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and stripped != "active":
+                return stripped
+            continue
+        # Malformed non-string status (bool, list, int).  Fail closed: only the
+        # exact string "active" enables injection, so a `status: false` or
+        # `status: [deprecated]` typo cannot silently re-enable a deprecation.
+        return str(value)
     return "active"
 
 
