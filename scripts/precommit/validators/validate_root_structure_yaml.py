@@ -142,7 +142,7 @@ def main(argv: "list[str] | None" = None) -> int:
 
     try:
         repo_root = get_repo_root()
-    except subprocess.CalledProcessError as error:
+    except (subprocess.CalledProcessError, OSError) as error:
         print(
             f"validate-root-structure: unable to find git repo root: {error}",
             file=sys.stderr,
@@ -166,7 +166,7 @@ def main(argv: "list[str] | None" = None) -> int:
 
     try:
         entries = get_tracked_root_entries(repo_root)
-    except subprocess.CalledProcessError as error:
+    except (subprocess.CalledProcessError, OSError) as error:
         print(
             f"validate-root-structure: git ls-files failed: {error}",
             file=sys.stderr,
