@@ -548,3 +548,65 @@ def test_cache_summary_evicts_when_full() -> None:
             from tooloutput_trimmer.hooks.summarizer import _SUMMARY_CACHE
 
             assert len(_SUMMARY_CACHE) <= 2
+
+
+def test_apply_summarization_cache_misses_when_tail_changes() -> None:
+    """Cache must miss when full content changes beyond the truncated preview.
+
+    P1 regression: if a tool output grows past the 1000-char preview boundary,
+    the truncated context string is identical, so a naive hash of context alone
+    returns a stale cached summary. The cache key must be derived from the full
+    message content so any change in the tail triggers a re-call.
+    """
+    calls: list[str] = []
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append("call")
+        return f"- summary #{len(calls)}", None
+
+    # Build tool outputs that share the first 1000 chars but differ in the tail.
+    # _build_summarization_context only uses output_preview[:1000], so the naive
+    # cache key would treat them as identical. We want to prove the full-content
+    # key distinguishes them correctly.
+    # Requires content > max_output_chars (200) so the message is evictable, AND
+    # > 1000 chars so the tail-difference falls outside the truncation boundary.
+    shared_body = "\n".join(f"line-{i:04d}" for i in range(150))  # ~1500 chars
+    content_a = f"Ran command: `ls`\n{shared_body}\nTAIL=AAA"
+    content_b = f"Ran command: `ls`\n{shared_body}\nTAIL=BBB"
+
+    # _default_trimmer_config uses max_output_chars=200 — content exceeds this
+    tc = _default_trimmer_config()
+
+    def _run(tool_content: str) -> None:
+        messages = [
+            _msg("user", "u"),
+            _msg("assistant", "a0"),
+            _msg("system", tool_content),
+            _msg("user", "u1"),
+            _msg("assistant", "a1"),
+        ]
+        apply_summarization(messages, trimmer_config=tc)
+
+    with patch("tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE", {}):
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+            return_value=SimpleNamespace(full="openai/gpt-4o"),
+        ):
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._chat_complete",
+                side_effect=fake_chat_complete,
+            ):
+                with patch(
+                    "tooloutput_trimmer.hooks.summarizer.get_config",
+                    return_value=_make_config(summarize_enabled=True),
+                ):
+                    _run(content_a)  # first call — populates cache
+                    _run(content_a)  # same full content — cache hit, no LLM call
+                    _run(
+                        content_b
+                    )  # tail differs — full-content key differs → cache miss
+
+    # LLM should have been called twice: once for content_a, once for content_b
+    assert len(calls) == 2, f"expected 2 LLM calls, got {len(calls)}"
