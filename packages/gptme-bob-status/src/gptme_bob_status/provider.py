@@ -85,7 +85,12 @@ def _active_tasks(lines: int = 3) -> list[dict]:
     tasks: list[dict] = []
     for line in raw.splitlines():
         line = line.strip()
-        if not line or line.startswith("📋") or "Summary" in line or "0 tasks" in line:
+        if (
+            not line
+            or line.startswith("📋")
+            or line.startswith("Summary")
+            or line == "0 tasks"
+        ):
             continue
         parts = line.split(None, 1)
         if len(parts) >= 2:
