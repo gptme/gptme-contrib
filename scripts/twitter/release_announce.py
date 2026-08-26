@@ -461,7 +461,7 @@ def main() -> int:
             age_days = (
                 datetime.now(timezone.utc)
                 - datetime.fromisoformat(published.replace("Z", "+00:00"))
-            ).days
+            ).total_seconds() / 86400
         except ValueError:
             age_days = None
         if age_days is None or age_days > args.max_age_days:
