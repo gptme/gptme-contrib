@@ -15,7 +15,6 @@ match:
     - "/output-clarity"
     - "output clarity mode"
     - "output-clarity mode"
-    - "clarity mode"
     - "neurodivergent formatting"
     - "ADHD formatting"
     - "i-have-adhd plugin"
