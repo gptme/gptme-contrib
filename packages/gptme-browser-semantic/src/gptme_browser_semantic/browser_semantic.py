@@ -224,6 +224,10 @@ def browser_observe(
     Returns:
         list[ObserveResult]: ranked observations, best match first.
     """
+    if llm_rerank:
+        raise NotImplementedError(
+            "llm_rerank is a Path-B feature; not available in Path A"
+        )
     try:
         snapshot = _aria_snapshot()
     except Exception:
@@ -237,10 +241,6 @@ def browser_observe(
     scored = [(s, e) for s, e in scored if s > 0.0][:top_k]
     if not scored:
         return []
-    if llm_rerank:
-        raise NotImplementedError(
-            "llm_rerank is a Path-B feature; not available in Path A"
-        )
     return [
         ObserveResult(
             description=f"{e['role']} {e['name']!r}",
