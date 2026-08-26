@@ -14,7 +14,7 @@ match:
   keywords:
     - "/output-clarity"
     - "output clarity mode"
-    - "clarity mode"
+    - "enable clarity mode"
     - "output-clarity mode"
     - "neurodivergent formatting"
     - "ADHD formatting"
