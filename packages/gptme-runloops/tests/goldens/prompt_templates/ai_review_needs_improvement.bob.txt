@@ -10,6 +10,35 @@ gh api repos/gptme/gptme-contrib/pulls/1234/comments \
 This PR scored 4/5 from our AI reviewer — minor issues. Address them if quick; leave it untouched if trivial.
 Do NOT re-trigger the reviewer just because you looked at it.
 
+**Closing the loop — required, and NOT the same thing as a PR comment.**
+
+An inline finding lives on a *review thread*. Posting to the PR conversation
+(`issues/1234/comments`) does not touch it: the thread stays open, and the
+self-merge gate counts unresolved threads. Every finding you address needs a
+reply **on its own thread**, and then a resolution.
+
+- **Fixed in code** — reply on the thread with the fix SHA, then let the
+  reviewer resolve it. Re-running the review verifies the finding no longer
+  reproduces and resolves the thread itself; that is evidence-based and
+  stronger than resolving by hand.
+  ```bash
+  # root comment ids: gh api repos/gptme/gptme-contrib/pulls/1234/comments --jq '.[] | {id, path, line}'
+  gh api repos/gptme/gptme-contrib/pulls/1234/comments/COMMENT_ID/replies -f body="Fixed in SHA — ..."
+  ```
+- **False positive, won't-fix, or an accepted trade-off** — no code change will
+  ever settle it, so reply AND resolve in one step. A reasoned rejection with
+  code citations IS a resolution; it is not a reason to leave the thread open.
+  ```bash
+  python3 /home/bob/bob/scripts/github/ai-review-dispose.py gptme/gptme-contrib 1234 --list
+  python3 /home/bob/bob/scripts/github/ai-review-dispose.py gptme/gptme-contrib 1234 \
+      --fingerprint FP --reason rejected --reply-file /tmp/why.md
+  ```
+  It is idempotent (a second run is a no-op) and can only ever touch threads our
+  own reviewer opened — never a human's.
+
+⚠️ Never resolve a human's review thread. Burying a person's comment is far
+worse than leaving a thread open.
+
 Warning: **Never push trivial changes just to chase 5/5.**
 If you do fix something, push via the in-band wrapper so the re-review happens in-session:
 ```bash

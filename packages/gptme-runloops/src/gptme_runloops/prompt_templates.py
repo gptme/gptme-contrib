@@ -472,7 +472,8 @@ _AI_REVIEW_NEEDS_FIX_SECTIONS: dict[str, str] = {
         "```bash\n"
         "uv run python3 {pm_review_and_push}\n"
         "```\n"
-        "If it reports P0/P1 findings, fix them and re-run it; once clean it pushes."
+        "If it reports P0/P1 findings, fix them and re-run it; once clean it pushes.\n"
+        "\n" + _CLOSE_THE_LOOP
     ),
     "warnings": (
         "Warning: **This is an AI-reviewer dispatch, not Greptile.**"
@@ -495,7 +496,8 @@ _AI_REVIEW_NEEDS_IMPROVEMENT_SECTIONS: dict[str, str] = {
     "assessment": (
         "This PR scored 4/5 from our AI reviewer — minor issues."
         " Address them if quick; leave it untouched if trivial.\n"
-        "Do NOT re-trigger the reviewer just because you looked at it."
+        "Do NOT re-trigger the reviewer just because you looked at it.\n"
+        "\n" + _CLOSE_THE_LOOP
     ),
     "warnings": (
         "Warning: **Never push trivial changes just to chase 5/5.**\n"

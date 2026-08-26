@@ -18,6 +18,35 @@ uv run python3 /srv/agents/alice/workspace/scripts/github/pm-review-and-push.py
 ```
 If it reports P0/P1 findings, fix them and re-run it; once clean it pushes.
 
+**Closing the loop — required, and NOT the same thing as a PR comment.**
+
+An inline finding lives on a *review thread*. Posting to the PR conversation
+(`issues/7/comments`) does not touch it: the thread stays open, and the
+self-merge gate counts unresolved threads. Every finding you address needs a
+reply **on its own thread**, and then a resolution.
+
+- **Fixed in code** — reply on the thread with the fix SHA, then let the
+  reviewer resolve it. Re-running the review verifies the finding no longer
+  reproduces and resolves the thread itself; that is evidence-based and
+  stronger than resolving by hand.
+  ```bash
+  # root comment ids: gh api repos/ErikBjare/alice/pulls/7/comments --jq '.[] | {id, path, line}'
+  gh api repos/ErikBjare/alice/pulls/7/comments/COMMENT_ID/replies -f body="Fixed in SHA — ..."
+  ```
+- **False positive, won't-fix, or an accepted trade-off** — no code change will
+  ever settle it, so reply AND resolve in one step. A reasoned rejection with
+  code citations IS a resolution; it is not a reason to leave the thread open.
+  ```bash
+  python3 /srv/agents/alice/workspace/scripts/github/ai-review-dispose.py ErikBjare/alice 7 --list
+  python3 /srv/agents/alice/workspace/scripts/github/ai-review-dispose.py ErikBjare/alice 7 \
+      --fingerprint FP --reason rejected --reply-file /tmp/why.md
+  ```
+  It is idempotent (a second run is a no-op) and can only ever touch threads our
+  own reviewer opened — never a human's.
+
+⚠️ Never resolve a human's review thread. Burying a person's comment is far
+worse than leaving a thread open.
+
 Warning: **This is an AI-reviewer dispatch, not Greptile.** Do NOT trigger Greptile to clear it.
 The reviewer still runs automatically on the push the wrapper makes — no manual trigger needed or wanted.
 If you cannot fix the issues in this session, leave it for the next cycle.

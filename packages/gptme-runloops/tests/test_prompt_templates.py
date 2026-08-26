@@ -231,3 +231,38 @@ def test_local_fix_never_names_the_greptile_helper() -> None:
     cross = render_instruction(InstructionKind.CROSS_REPO_GREPTILE_REFRESH, ctx)
     assert "greptile-helper.sh" not in local
     assert f"greptile-helper.sh trigger {ctx.repo} {ctx.number}" in cross
+
+
+# --- Disposition path must exist on every AI-review arm ---
+#
+# Regression guard for the gptme/gptme#3615 loop (2026-08-26): the
+# `reviewer_needs_fix` arm told the worker to FIX and PUSH but gave it no way to
+# dispose of a finding it judged a false positive. The worker did the only thing
+# left — a top-level PR comment — which PM's `--require-inline-thread-reply`
+# delivery check correctly refuses to count. Two dispatches graded effect=none,
+# the retry budget burned down, and a stuck-PR escalation task was filed for a
+# PR whose findings had actually been adjudicated. A golden alone does not guard
+# this: goldens get regenerated. Assert the capability, not the bytes.
+
+_AI_REVIEW_KINDS = tuple(k for k in InstructionKind if k.value.startswith("ai_review"))
+
+
+@pytest.mark.parametrize("kind", _AI_REVIEW_KINDS, ids=lambda k: k.value)
+def test_ai_review_arms_offer_a_disposition_path(kind: InstructionKind) -> None:
+    """Every AI-review arm must name the reply-AND-resolve disposition tool."""
+    rendered = render_instruction(kind, CONTEXTS["bob"])
+    assert "ai-review-dispose.py" in rendered, (
+        f"{kind.value} gives a worker no way to dispose of a false-positive "
+        "finding; it will fall back to a top-level comment, which the PM "
+        "delivery check grades as no effect"
+    )
+
+
+@pytest.mark.parametrize("kind", _AI_REVIEW_KINDS, ids=lambda k: k.value)
+def test_ai_review_arms_warn_that_pr_comments_do_not_close_threads(
+    kind: InstructionKind,
+) -> None:
+    """The distinction that caused the loop must be stated, not implied."""
+    rendered = render_instruction(kind, CONTEXTS["bob"])
+    assert "does not touch it" in rendered
+    assert "Never resolve a human's review thread" in rendered
