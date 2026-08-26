@@ -506,19 +506,39 @@ def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     if keywords:
         fm["match"] = {"keywords": keywords}
 
-    # Any `status:` line (top-level or nested under `metadata:`) counts; a
-    # non-active value wins so a nested deprecation is not masked by an earlier
-    # top-level `status: active`.  Only consider real YAML key lines — filter
-    # comment lines (starting with #) first, then anchor to line starts, so a
-    # `status:` that appears inside a description value or a YAML comment is
-    # not mistaken for a lifecycle status.
-    fm_yaml_lines = "\n".join(
+    # Resolve lifecycle status without PyYAML.  Two independent lookups avoid
+    # false positives from block scalars (e.g. `description: |` whose
+    # continuation lines can contain `status: deprecated` with leading
+    # whitespace and would fool a single anchored-but-not-scoped regex):
+    #
+    # 1. Top-level `status:` — must start at column 0 (no leading whitespace).
+    # 2. `metadata.status` — only within the `metadata:` block's indented body.
+    #
+    # Comment lines are stripped first; the patterns never match them because
+    # the real guard is structural (column-0 vs. metadata-block scope).
+    fm_no_comments = "\n".join(
         line for line in fm_str.splitlines() if not line.strip().startswith("#")
     )
-    statuses = re.findall(r"^[^\S\n]*status:\s*(\w+)", fm_yaml_lines, re.MULTILINE)
-    if statuses:
-        non_active = [s for s in statuses if s != "active"]
-        fm["status"] = non_active[0] if non_active else statuses[0]
+    # (1) Top-level: `^status:` with no leading whitespace.
+    top_statuses = re.findall(r"^status:\s*(\w+)", fm_no_comments, re.MULTILINE)
+    # (2) metadata.status: capture the indented body after `^metadata:` and
+    # search for `status:` within it.  The capture stops at the first
+    # non-indented line, so a `status:` in a sibling block scalar is not
+    # mistakenly included.
+    meta_statuses: list[str] = []
+    meta_m = re.search(
+        r"^metadata:\s*\n((?:[ \t]+\S[^\n]*\n?)*)",
+        fm_no_comments,
+        re.MULTILINE,
+    )
+    if meta_m:
+        meta_statuses = re.findall(
+            r"^[ \t]+status:\s*(\w+)", meta_m.group(1), re.MULTILINE
+        )
+    all_statuses = top_statuses + meta_statuses
+    if all_statuses:
+        non_active = [s for s in all_statuses if s != "active"]
+        fm["status"] = non_active[0] if non_active else all_statuses[0]
 
     for field in ("name", "description", "when_to_use"):
         value = _extract_scalar_frontmatter_field(fm_str, field)

@@ -1108,3 +1108,39 @@ def test_extract_frontmatter_regex_fallback_ignores_status_in_comments(
     assert (
         hook.effective_status(fm2) == "active"
     ), "description text must not override real status"
+
+
+def test_extract_frontmatter_regex_fallback_ignores_status_in_block_scalar(
+    hook, monkeypatch
+):
+    """The regex fallback must not be fooled by `status: deprecated` that appears
+    as a content line inside a YAML block scalar (e.g. `description: |`).
+
+    Block scalar content lines are indented, so `^[^\\S\\n]*status:` would match
+    them even though they are not YAML keys.  The fix scopes the indented lookup
+    to the `metadata:` block body only, so a block scalar sibling is invisible.
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    # A block scalar where the content happens to contain `status: deprecated`
+    # on its own line.  The lesson itself is `status: active`.
+    frontmatter = (
+        "---\n"
+        "status: active\n"
+        "description: |\n"
+        "  This lesson explains status: deprecated handling.\n"
+        "  status: deprecated lessons are skipped by the matcher.\n"
+        "---\n"
+        "# Title\n"
+    )
+    fm, _ = hook.extract_frontmatter(frontmatter)
+    assert (
+        hook.effective_status(fm) == "active"
+    ), "block scalar content must not override the real top-level status"
