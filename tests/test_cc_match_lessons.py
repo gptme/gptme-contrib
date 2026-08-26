@@ -1190,3 +1190,38 @@ def test_extract_frontmatter_regex_fallback_non_word_status_fails_closed(
     assert (
         hook.effective_status(fm2) != "active"
     ), "metadata.status: [deprecated] in regex fallback must not be treated as active"
+
+
+def test_extract_frontmatter_regex_fallback_quoted_active_not_dropped(
+    hook, monkeypatch
+):
+    """Regex fallback: ``status: "active"`` (quoted) must still inject the lesson.
+
+    ``\\S+`` captures surrounding quotes, so the raw captured value is ``"active"``
+    (with quotes) instead of ``active``.  Without quote-stripping the comparison
+    ``s != "active"`` evaluates true and the lesson is silently dropped — a
+    regression vs. the prior ``\\w+`` pattern which simply never matched quoted
+    values and left status absent (defaulting to active).
+
+    The fix strips ``"`` and ``'`` from captured values before comparison.
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    fm, _ = hook.extract_frontmatter('---\nstatus: "active"\n---\n# Title\n')
+    assert (
+        hook.effective_status(fm) == "active"
+    ), 'status: "active" (quoted) must not be silently dropped by regex fallback'
+
+    fm2, _ = hook.extract_frontmatter(
+        "---\nmetadata:\n  status: 'active'\n---\n# Title\n"
+    )
+    assert (
+        hook.effective_status(fm2) == "active"
+    ), "metadata.status: 'active' (single-quoted) must not be silently dropped"
