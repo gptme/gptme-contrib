@@ -159,11 +159,15 @@ def _extract_assistant_text(stdout: str) -> str:
         except json.JSONDecodeError:
             continue
     if json_candidates:
-        for candidate in json_candidates:
+        # Iterate in reverse so the last (final answer) wins over an earlier
+        # JSON-shaped thinking preamble that may also contain a summary key.
+        # Reasoning models (e.g. deepseek) emit a preamble first, then the
+        # real answer; scanning forward would return the preamble instead.
+        for candidate in reversed(json_candidates):
             parsed = json.loads(candidate)
             if isinstance(parsed, dict) and any(parsed.get(k) for k in _SUMMARY_KEYS):
                 return candidate
-        return json_candidates[0]
+        return json_candidates[-1]
     logger.debug(
         "gptme fallback: no assistant message parsed as JSON (%d messages); "
         "returning last message for caller to attempt extraction",

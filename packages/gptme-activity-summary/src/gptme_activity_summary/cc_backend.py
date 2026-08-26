@@ -392,9 +392,15 @@ def call_claude_code(
                     raise last_non_subscription_error
                 if saw_empty_response:
                     # Even when a fallback slot returned empty, surface the
-                    # auth-expiry signal from the primary so callers can trigger
-                    # re-auth instead of silently falling back to empty defaults.
-                    if any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS):
+                    # auth-expiry signal from the primary OR any fallback slot so
+                    # callers can trigger re-auth instead of silently falling back
+                    # to empty defaults.  saw_fallback_auth_failure covers the case
+                    # where the auth marker appeared in a fallback slot's output
+                    # (combined_out_lower only holds the primary's output).
+                    if (
+                        any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS)
+                        or saw_fallback_auth_failure
+                    ):
                         raise ClaudeAuthExpiredError(
                             result.returncode, attempt_cmd, result.stdout, result.stderr
                         )
