@@ -200,9 +200,9 @@ def test_meta_of_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
     )
     meta = meta_of(msg_path)
     assert meta is not None
-    assert (
-        meta["in_reply_to"] == tricky_id
-    ), f"in_reply_to was truncated: {meta.get('in_reply_to')!r}"
+    assert meta["in_reply_to"] == tricky_id, (
+        f"in_reply_to was truncated: {meta.get('in_reply_to')!r}"
+    )
     assert meta["from"] == "bob"
 
 
@@ -218,9 +218,9 @@ def test_delivery_failure_stamp_survives_dashes_in_in_reply_to(tmp_path: Path) -
     )
     t._stamp_delivery_failed(out_path)
     meta = _frontmatter(out_path)
-    assert (
-        meta["in_reply_to"] == tricky_id
-    ), f"in_reply_to was corrupted: {meta.get('in_reply_to')!r}"
+    assert meta["in_reply_to"] == tricky_id, (
+        f"in_reply_to was corrupted: {meta.get('in_reply_to')!r}"
+    )
     assert meta["delivered"] is False
 
 
@@ -238,6 +238,6 @@ def test_mark_read_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
     assert "body" in content
     meta = _frontmatter(inbox_path)
     assert meta["read"] is True
-    assert (
-        meta["in_reply_to"] == tricky_id
-    ), f"in_reply_to was corrupted: {meta.get('in_reply_to')!r}"
+    assert meta["in_reply_to"] == tricky_id, (
+        f"in_reply_to was corrupted: {meta.get('in_reply_to')!r}"
+    )

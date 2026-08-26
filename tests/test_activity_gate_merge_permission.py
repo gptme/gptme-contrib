@@ -187,7 +187,9 @@ def test_markdown_mode_does_not_write_state_file() -> None:
 
         # No state file should be written — the next jsonl pass must still fire
         state_files = list(state_dir.glob("*-merge-ready.state"))
-        assert not state_files, f"state file written during markdown pass; next jsonl run would skip the PR: {state_files}"
+        assert not state_files, (
+            f"state file written during markdown pass; next jsonl run would skip the PR: {state_files}"
+        )
 
         # Second pass: jsonl mode — NOW the comment should be posted
         result2 = _run_gate(

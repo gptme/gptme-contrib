@@ -156,9 +156,9 @@ def test_reply_reports_delivery_failure_and_keeps_pending(
     # The ConversationTracker must NOT mark the original as COMPLETED — delivery never happened.
     tracker = ConversationTracker(workspace / "messages" / ".tracking")
     state = tracker.get_message_state("agent:alice|bob", name)
-    assert (
-        state is None or state.state != MessageState.COMPLETED
-    ), "tracker must not mark original as COMPLETED when delivery failed"
+    assert state is None or state.state != MessageState.COMPLETED, (
+        "tracker must not mark original as COMPLETED when delivery failed"
+    )
 
 
 def test_reply_to_unknown_sender_does_not_remain_pending(

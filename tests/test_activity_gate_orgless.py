@@ -117,15 +117,15 @@ def test_orgless_repo_mode_is_a_valid_invocation() -> None:
             f"org-less --repo invocation must be valid (exit 0/1), got "
             f"{result.returncode}; stderr: {result.stderr!r}"
         )
-        assert (
-            "required" not in result.stderr
-        ), f"must not report a usage error: {result.stderr!r}"
+        assert "required" not in result.stderr, (
+            f"must not report a usage error: {result.stderr!r}"
+        )
         # Both explicit repos were scanned (PR data fetched for EACH repo,
         # not one repo scanned twice).
         scanned = {c.split()[-1] for c in calls if c.startswith("pr list ")}
-        assert (
-            {"owner/repo-x", "owner/repo-y"} <= scanned
-        ), f"every explicit --repo must be scanned; scanned={scanned}, calls: {calls}"
+        assert {"owner/repo-x", "owner/repo-y"} <= scanned, (
+            f"every explicit --repo must be scanned; scanned={scanned}, calls: {calls}"
+        )
 
 
 def test_orgless_repo_mode_skips_org_enumeration() -> None:
@@ -162,13 +162,13 @@ def test_org_mode_still_enumerates_org() -> None:
         )
 
         assert result.returncode in (0, 1), result.stderr
-        assert any(
-            c.startswith("repo list") for c in calls
-        ), f"--org mode must enumerate org repos via gh repo list; calls: {calls}"
+        assert any(c.startswith("repo list") for c in calls), (
+            f"--org mode must enumerate org repos via gh repo list; calls: {calls}"
+        )
         # Enumerated repos are then scanned.
-        assert any(
-            c.startswith("pr list") for c in calls
-        ), f"org repos must be scanned; calls: {calls}"
+        assert any(c.startswith("pr list") for c in calls), (
+            f"org repos must be scanned; calls: {calls}"
+        )
 
 
 def test_orgless_output_is_well_formed_jsonl_when_work_found() -> None:

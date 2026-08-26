@@ -99,9 +99,9 @@ def test_confidence_field_now_warned():
         validator = LessonValidator(path)
         validator.validate()
         confidence_warnings = [w for w in validator.warnings if "confidence" in w]
-        assert (
-            len(confidence_warnings) > 0
-        ), "confidence field should produce a warning (store scores in state files, not frontmatter)"
+        assert len(confidence_warnings) > 0, (
+            "confidence field should produce a warning (store scores in state files, not frontmatter)"
+        )
 
 
 def test_description_field_not_warned():
@@ -114,9 +114,9 @@ def test_description_field_not_warned():
         validator = LessonValidator(path)
         validator.validate()
         desc_warnings = [w for w in validator.warnings if "description" in w]
-        assert (
-            len(desc_warnings) == 0
-        ), "description field is load-bearing for semantic matching and should not warn"
+        assert len(desc_warnings) == 0, (
+            "description field is load-bearing for semantic matching and should not warn"
+        )
 
 
 def test_metadata_field_not_warned():
@@ -129,9 +129,9 @@ def test_metadata_field_not_warned():
         validator = LessonValidator(path)
         validator.validate()
         meta_warnings = [w for w in validator.warnings if "metadata" in w]
-        assert (
-            len(meta_warnings) == 0
-        ), "metadata field is structural categorisation and should not warn"
+        assert len(meta_warnings) == 0, (
+            "metadata field is structural categorisation and should not warn"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -235,9 +235,9 @@ def test_target_grade_single_dim_accepted():
         validator.validate()
         assert not validator.errors, f"Unexpected errors: {validator.errors}"
         target_warnings = [w for w in validator.warnings if "target_grade" in w]
-        assert (
-            not target_warnings
-        ), f"Unexpected target_grade warnings: {target_warnings}"
+        assert not target_warnings, (
+            f"Unexpected target_grade warnings: {target_warnings}"
+        )
 
 
 def test_target_grade_list_accepted():
@@ -296,9 +296,9 @@ def test_automation_field_accepted():
         validator.validate()
         assert not validator.errors, f"Unexpected errors: {validator.errors}"
         automation_warnings = [w for w in validator.warnings if "automation" in w]
-        assert (
-            not automation_warnings
-        ), f"Unexpected automation warnings: {automation_warnings}"
+        assert not automation_warnings, (
+            f"Unexpected automation warnings: {automation_warnings}"
+        )
 
 
 def test_automation_enforcement_error_accepted():
@@ -321,9 +321,9 @@ def test_automation_invalid_enforcement_rejected():
         validator = LessonValidator(path)
         validator.validate()
         automation_errors = [e for e in validator.errors if "automation" in e]
-        assert (
-            automation_errors
-        ), "Invalid automation.enforcement should produce an error"
+        assert automation_errors, (
+            "Invalid automation.enforcement should produce an error"
+        )
 
 
 def test_automation_unknown_subfield_warns():
@@ -335,9 +335,9 @@ def test_automation_unknown_subfield_warns():
         path = _write_lesson(Path(tmp), content)
         validator = LessonValidator(path)
         validator.validate()
-        assert not [
-            e for e in validator.errors if "automation" in e
-        ], f"Unknown sub-fields should warn, not error: {validator.errors}"
+        assert not [e for e in validator.errors if "automation" in e], (
+            f"Unknown sub-fields should warn, not error: {validator.errors}"
+        )
         warnings = [
             w for w in validator.warnings if "automation" in w and "weirdfield" in w
         ]
@@ -367,9 +367,9 @@ def test_automation_coexists_with_flat_fields_warns():
         coexist_warnings = [
             w for w in validator.warnings if "automation" in w and "automated_by" in w
         ]
-        assert (
-            coexist_warnings
-        ), "Coexisting 'automation' block and flat automated_by field should warn"
+        assert coexist_warnings, (
+            "Coexisting 'automation' block and flat automated_by field should warn"
+        )
 
 
 # confound_note field tests
@@ -385,9 +385,9 @@ def test_confound_note_string_accepted():
         validator = LessonValidator(path)
         validator.validate()
         confound_errors = [e for e in validator.errors if "confound_note" in e]
-        assert (
-            not confound_errors
-        ), f"Valid confound_note should not produce errors: {confound_errors}"
+        assert not confound_errors, (
+            f"Valid confound_note should not produce errors: {confound_errors}"
+        )
 
 
 def test_confound_note_empty_string_rejected():
@@ -475,9 +475,9 @@ def test_archived_lesson_skips_companion_warning():
         validator = LessonValidator(path)
         validator.validate()
         companion_warnings = [w for w in validator.warnings if "companion" in w.lower()]
-        assert (
-            not companion_warnings
-        ), f"Unexpected companion warnings: {companion_warnings}"
+        assert not companion_warnings, (
+            f"Unexpected companion warnings: {companion_warnings}"
+        )
 
 
 def test_active_long_lesson_still_warns():
@@ -531,9 +531,9 @@ def test_dead_companion_link_raises_error():
         validator = LessonValidator(path)
         validator.validate()
         companion_errors = [e for e in validator.errors if "companion" in e.lower()]
-        assert (
-            companion_errors
-        ), "Lesson linking a nonexistent companion doc should raise an error"
+        assert companion_errors, (
+            "Lesson linking a nonexistent companion doc should raise an error"
+        )
 
 
 def test_dead_companion_link_archived_skips():
@@ -546,9 +546,9 @@ def test_dead_companion_link_archived_skips():
         validator = LessonValidator(path)
         validator.validate()
         companion_errors = [e for e in validator.errors if "companion" in e.lower()]
-        assert (
-            not companion_errors
-        ), f"Archived lesson should not flag dead companion link: {companion_errors}"
+        assert not companion_errors, (
+            f"Archived lesson should not flag dead companion link: {companion_errors}"
+        )
 
 
 # A concise lesson with no companion link at all — used to check that the
@@ -733,12 +733,12 @@ def test_missing_companion_suggestion_mirrors_full_nested_category():
         errors = [e for e in validator.errors if "companion" in e.lower()]
         assert errors, "Dead companion link should error for nested lesson"
         # Must suggest the full nested path, not just the immediate parent
-        assert (
-            "knowledge/lessons/outer/inner/test-lesson.md" in errors[0]
-        ), f"Expected full nested path in suggestion, got: {errors[0]}"
-        assert (
-            "knowledge/lessons/inner/test-lesson.md" not in errors[0]
-        ), f"Must not use only immediate parent name: {errors[0]}"
+        assert "knowledge/lessons/outer/inner/test-lesson.md" in errors[0], (
+            f"Expected full nested path in suggestion, got: {errors[0]}"
+        )
+        assert "knowledge/lessons/inner/test-lesson.md" not in errors[0], (
+            f"Must not use only immediate parent name: {errors[0]}"
+        )
 
 
 def test_nested_companion_link_detected_as_live():
@@ -995,9 +995,9 @@ def test_own_companion_linked_but_dead_prose_mention_reports_dead_path():
         "Error should name the specific dead path, not tell the author to update "
         f"the correct Related link. Got: {error!r}"
     )
-    assert (
-        "remove or fix" in error.lower()
-    ), f"Error should say 'remove or fix the dead reference', got: {error!r}"
+    assert "remove or fix" in error.lower(), (
+        f"Error should say 'remove or fix the dead reference', got: {error!r}"
+    )
     # Must NOT tell the author to update/remove the correct own-companion link
     assert "update the related link" not in error.lower(), (
         "Error must not instruct author to change the correctly-linked own companion. "

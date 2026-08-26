@@ -42,9 +42,9 @@ class TestOpenaiToTwilio:
         result = converter.openai_to_twilio(pcm)
         # All-zero PCM encodes as μ-law positive silence (0xFF only)
         unique = set(result)
-        assert unique == {
-            0xFF
-        }, f"Expected only μ-law positive silence (0xFF), got: {unique}"
+        assert unique == {0xFF}, (
+            f"Expected only μ-law positive silence (0xFF), got: {unique}"
+        )
 
     def test_valid_mulaw_output(self):
         """Output can be decoded back to PCM without error."""

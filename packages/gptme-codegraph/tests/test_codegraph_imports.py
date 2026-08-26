@@ -50,9 +50,9 @@ def test_module_alias_resolves_dotted_call(tmp_path: Path):
     callees, callers = build_cross_file_call_graph(index, tmp_path)
 
     # Graph keys are qualified IDs (calc::add, main::run)
-    assert (
-        "calc::add" in callees.get("main::run", set())
-    ), f"Expected `run` to call `add` via aliased module import; got {callees.get('main::run')}"
+    assert "calc::add" in callees.get("main::run", set()), (
+        f"Expected `run` to call `add` via aliased module import; got {callees.get('main::run')}"
+    )
     assert "main::run" in callers.get("calc::add", set())
 
 
@@ -64,9 +64,9 @@ def test_from_import_alias_resolves_call(tmp_path: Path):
     index = build_index(tmp_path)
     callees, callers = build_cross_file_call_graph(index, tmp_path)
 
-    assert (
-        "utils::add" in callees.get("main::run", set())
-    ), f"Expected `run` to call `add` via from-import alias; got {callees.get('main::run')}"
+    assert "utils::add" in callees.get("main::run", set()), (
+        f"Expected `run` to call `add` via from-import alias; got {callees.get('main::run')}"
+    )
     assert "main::run" in callers.get("utils::add", set())
 
 
@@ -136,9 +136,9 @@ def test_relative_import_extracted(tmp_path: Path):
     imports = _extract_imports(root)
     # We don't yet require absolute resolution — just that the import is captured.
     names = [imp.name for imp in imports]
-    assert (
-        "add" in names
-    ), f"Expected `add` to be extracted from relative import; got {names}"
+    assert "add" in names, (
+        f"Expected `add` to be extracted from relative import; got {names}"
+    )
 
 
 def test_relative_import_resolves_within_package(tmp_path: Path):
@@ -159,9 +159,9 @@ def test_relative_import_resolves_within_package(tmp_path: Path):
     # Graph keys are qualified IDs (main::run, utils::add) — module_path is
     # relative to the indexed directory (pkg/), so files at the root get
     # bare module paths: main.py → main, utils.py → utils.
-    assert (
-        "utils::add" in callees.get("main::run", set())
-    ), f"Expected `run` to call `add` via relative import; got {callees.get('main::run')}"
+    assert "utils::add" in callees.get("main::run", set()), (
+        f"Expected `run` to call `add` via relative import; got {callees.get('main::run')}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +261,9 @@ def test_subpackage_init_py_module_path(tmp_path: Path):
     # Verify the module path for a function in __init__.py
     entries = index.lookup("deep_func")
     assert len(entries) == 1
-    assert (
-        entries[0].module_path == "a.b.c"
-    ), f"Expected 'a.b.c' for nested __init__.py; got {entries[0].module_path!r}"
+    assert entries[0].module_path == "a.b.c", (
+        f"Expected 'a.b.c' for nested __init__.py; got {entries[0].module_path!r}"
+    )
 
 
 def test_namespace_package_without_top_init(tmp_path: Path):
@@ -281,9 +281,9 @@ def test_namespace_package_without_top_init(tmp_path: Path):
     index = build_index(ns)
     callees, callers = build_cross_file_call_graph(index, ns)
 
-    assert (
-        "main::run" in callees
-    ), f"Expected 'main::run' in callees; got {sorted(callees.keys())}"
+    assert "main::run" in callees, (
+        f"Expected 'main::run' in callees; got {sorted(callees.keys())}"
+    )
     assert "pkg.sub.mod::func" in callees.get("main::run", set()), (
         f"Expected run→func via cross-file resolution in namespace package; "
         f"got {callees.get('main::run', set())}"

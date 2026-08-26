@@ -201,9 +201,9 @@ def test_sqlite_cache_prunes_oldest_entries_when_over_max_rows(tmp_path: Path):
     cache.put_many(model, [(h_extra, [99.0])])
 
     row_count = cache.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-    assert (
-        row_count <= max_rows
-    ), f"Cache should not exceed max_rows={max_rows} after prune, got {row_count}"
+    assert row_count <= max_rows, (
+        f"Cache should not exceed max_rows={max_rows} after prune, got {row_count}"
+    )
     # The freshly-inserted entry must survive (it was just written).
     hit = cache.get_many(model, [h_extra])
     assert h_extra in hit, "Freshly inserted entry was pruned — recency ordering is wrong"

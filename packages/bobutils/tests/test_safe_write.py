@@ -237,9 +237,9 @@ def test_naive_replace_would_clobber(tmp_path: Path) -> None:
     os.replace(tmp_name, link)  # This clobbers the symlink!
 
     # Link is now a regular file — the clobber happened
-    assert (
-        not link.is_symlink()
-    ), "expected clobber did NOT happen — test assumption wrong"
+    assert not link.is_symlink(), (
+        "expected clobber did NOT happen — test assumption wrong"
+    )
     # And real is untouched (orphaned)
     assert real.read_text() == "original"
 

@@ -376,9 +376,9 @@ def test_should_post_comment_concurrent_first_time(workspace):
     t2.join()
 
     # Exactly one session should have won the race and posted.
-    assert (
-        results.count(True) == 1
-    ), f"Expected exactly 1 True (one poster), got {results}"
+    assert results.count(True) == 1, (
+        f"Expected exactly 1 True (one poster), got {results}"
+    )
 
 
 @patch("gptme_runloops.project_monitoring.subprocess.run")

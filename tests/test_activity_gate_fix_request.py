@@ -296,9 +296,9 @@ def test_single_trigger_emits_exactly_once_across_runs() -> None:
             "a served trigger comment re-emitted — this is the 29x greptile spam "
             f"shape. stdout: {second.stdout}"
         )
-        assert (
-            posts2 == []
-        ), f"no reaction should be posted on a served trigger: {posts2}"
+        assert posts2 == [], (
+            f"no reaction should be posted on a served trigger: {posts2}"
+        )
 
 
 def test_watermark_on_a_later_reactions_page_still_suppresses() -> None:
@@ -353,9 +353,9 @@ def test_two_pending_triggers_collapse_to_one_dispatch() -> None:
             state_dir=state_dir,
             gh_log=tmp / "gh.log",
         )
-        assert (
-            len(_fix_items(result)) == 1
-        ), f"two triggers must collapse to one dispatch, got: {result.stdout}"
+        assert len(_fix_items(result)) == 1, (
+            f"two triggers must collapse to one dispatch, got: {result.stdout}"
+        )
         assert len(posts) == 1, f"exactly one watermark should be posted: {posts}"
         assert "222" in posts[0]["endpoint"], (
             "the newest trigger should carry the watermark, so a maintainer's "

@@ -957,9 +957,9 @@ def test_prewarm_connect_failure_preserves_resume_state() -> None:
             bootstrap = asyncio.run(
                 server._build_session_bootstrap(caller_id="+46700000099")
             )
-        assert (
-            not bootstrap.should_greet_first
-        ), "Cold-path bootstrap should resume (no greeting) after failed prewarm"
+        assert not bootstrap.should_greet_first, (
+            "Cold-path bootstrap should resume (no greeting) after failed prewarm"
+        )
 
 
 def test_consume_recent_call_keeps_archived_record() -> None:
@@ -1854,9 +1854,9 @@ def test_asr_same_item_id_shorter_text_is_ignored() -> None:
     # Provider retransmits a shorter version for the same item — must be ignored.
     _append_transcript_turn(transcript, "user", "Hello, I'd", item_id="item-001")
     assert len(transcript) == 1, "shorter retransmission must not create a new entry"
-    assert (
-        transcript[0].text == "Hello, I'd like to order a pizza"
-    ), "longer stored text must not be truncated"
+    assert transcript[0].text == "Hello, I'd like to order a pizza", (
+        "longer stored text must not be truncated"
+    )
 
 
 def test_asr_prefix_collision_without_item_id_collapses() -> None:
@@ -1912,8 +1912,8 @@ def test_assistant_turns_with_shared_prefix_are_not_collapsed() -> None:
     _append_transcript_turn(
         transcript, "assistant", "Sure, let me check", allow_continuation=False
     )
-    assert (
-        len(transcript) == 2
-    ), "Two distinct assistant turns must remain separate even when the second starts with the first"
+    assert len(transcript) == 2, (
+        "Two distinct assistant turns must remain separate even when the second starts with the first"
+    )
     assert transcript[0].text == "Sure"
     assert transcript[1].text == "Sure, let me check"

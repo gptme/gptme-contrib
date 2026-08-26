@@ -215,7 +215,7 @@ Archived: git workflow. Archived: pytest. Archived: code review. Archived: CI/CD
 
         entries = discover_memory_files(mem_dir)
         names = [e.name for e in entries]
-        assert (
-            "archived-memories" not in names
-        ), "MEMORY-archive.md was discovered as a recall candidate but must be excluded"
+        assert "archived-memories" not in names, (
+            "MEMORY-archive.md was discovered as a recall candidate but must be excluded"
+        )
         assert len(entries) == 1  # only the real feedback entry

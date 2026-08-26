@@ -194,9 +194,9 @@ def test_classify_auth_not_triggered_by_lesson_name():
         has_assistant_turn=False,
         error_text=error_text,
     )
-    assert (
-        result != FAILURE_REASON_AUTH
-    ), "lesson name 'Auth Blueprint' must not trigger auth classification"
+    assert result != FAILURE_REASON_AUTH, (
+        "lesson name 'Auth Blueprint' must not trigger auth classification"
+    )
 
 
 def test_classify_invalid_request_deepseek_tool_calls():

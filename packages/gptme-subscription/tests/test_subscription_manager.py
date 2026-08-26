@@ -84,9 +84,9 @@ def test_check_usage_stale_cache_fallback_on_script_failure(tmp_path: Path) -> N
     result = sm.check_usage(stale_cache=stale_cache)
     assert result is not None
     assert result["seven_day"]["utilization"] == pytest.approx(0.3)
-    assert (
-        result.get("_stale") is True
-    ), "stale fallback must be flagged with _stale=True"
+    assert result.get("_stale") is True, (
+        "stale fallback must be flagged with _stale=True"
+    )
 
 
 def test_check_usage_stale_cache_rejected_when_too_old(tmp_path: Path) -> None:
@@ -402,9 +402,9 @@ def test_evaluate_does_not_record_observation_for_stale_usage(
 
     sm.evaluate(usage, "bob")
 
-    assert (
-        not sm.config.reset_times_file.exists()
-    ), "record_sub_reset_time must not be called when usage._stale=True"
+    assert not sm.config.reset_times_file.exists(), (
+        "record_sub_reset_time must not be called when usage._stale=True"
+    )
 
 
 def test_evaluate_skips_stale_fallback_picks_fresh(tmp_path: Path) -> None:

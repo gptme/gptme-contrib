@@ -1454,9 +1454,9 @@ def test_parse_csharp_calls(csharp_module: Path):
     result = parse_file(csharp_module)
     from_list = next((s for s in result.symbols if s.name == "FromList"), None)
     assert from_list is not None
-    assert any(
-        "WriteLine" in c for c in from_list.calls
-    ), f"Expected a WriteLine call, got: {from_list.calls}"
+    assert any("WriteLine" in c for c in from_list.calls), (
+        f"Expected a WriteLine call, got: {from_list.calls}"
+    )
 
 
 @_skip_no_csharp
@@ -1691,12 +1691,12 @@ def test_parse_c_calls(c_module: Path):
     result = parse_file(c_module)
     multiply_sym = next((s for s in result.symbols if s.name == "multiply"), None)
     assert multiply_sym is not None
-    assert any(
-        "add" in c for c in multiply_sym.calls
-    ), f"Expected 'add' in calls, got: {multiply_sym.calls}"
-    assert any(
-        "printf" in c for c in multiply_sym.calls
-    ), f"Expected 'printf' in calls, got: {multiply_sym.calls}"
+    assert any("add" in c for c in multiply_sym.calls), (
+        f"Expected 'add' in calls, got: {multiply_sym.calls}"
+    )
+    assert any("printf" in c for c in multiply_sym.calls), (
+        f"Expected 'printf' in calls, got: {multiply_sym.calls}"
+    )
 
 
 @_skip_no_c
@@ -1935,9 +1935,9 @@ def test_parse_c_parenthesized_declarator(c_conditional_module: Path):
         path = Path(f.name)
     try:
         result = parse_file(path)
-        assert any(
-            s.name == "inner_func" for s in result.symbols
-        ), f"Expected inner_func in symbols, got: {[s.name for s in result.symbols]}"
+        assert any(s.name == "inner_func" for s in result.symbols), (
+            f"Expected inner_func in symbols, got: {[s.name for s in result.symbols]}"
+        )
     finally:
         path.unlink(missing_ok=True)
 
@@ -2016,9 +2016,9 @@ def test_parse_php_class(php_module: Path):
     classes = [s for s in result.symbols if s.kind == "class"]
     class_names = {s.name for s in classes}
     assert "Calculator" in class_names, f"Expected Calculator class, got {class_names}"
-    assert (
-        "Describable" in class_names
-    ), f"Expected Describable interface, got {class_names}"
+    assert "Describable" in class_names, (
+        f"Expected Describable interface, got {class_names}"
+    )
     assert "Loggable" in class_names, f"Expected Loggable trait, got {class_names}"
     calc = next(s for s in classes if s.name == "Calculator")
     assert calc.parent_class is None
@@ -2071,9 +2071,9 @@ def test_parse_php_function_imports(php_module: Path):
     """PHP: use function declarations are extracted."""
     result = parse_file(php_module)
     func_imports = [imp for imp in result.imports if imp.name == "array_map"]
-    assert (
-        len(func_imports) >= 1
-    ), f"Expected use function array_map, got {[(imp.name, imp.module) for imp in result.imports]}"
+    assert len(func_imports) >= 1, (
+        f"Expected use function array_map, got {[(imp.name, imp.module) for imp in result.imports]}"
+    )
 
 
 @_skip_no_php
@@ -2081,9 +2081,9 @@ def test_parse_php_const_imports(php_module: Path):
     """PHP: use const declarations are extracted."""
     result = parse_file(php_module)
     const_imports = [imp for imp in result.imports if imp.name == "PHP_EOL"]
-    assert (
-        len(const_imports) >= 1
-    ), f"Expected use const PHP_EOL, got {[(imp.name, imp.module) for imp in result.imports]}"
+    assert len(const_imports) >= 1, (
+        f"Expected use const PHP_EOL, got {[(imp.name, imp.module) for imp in result.imports]}"
+    )
 
 
 @_skip_no_php
@@ -2116,17 +2116,17 @@ def test_parse_php_line_numbers(php_module: Path):
     calc = next(
         s for s in result.symbols if s.name == "Calculator" and s.kind == "class"
     )
-    assert (
-        calc.start_line == 10
-    ), f"Expected Calculator at line 10, got {calc.start_line}"
+    assert calc.start_line == 10, (
+        f"Expected Calculator at line 10, got {calc.start_line}"
+    )
     add = next(
         s for s in result.symbols if s.name == "add" and s.parent_class == "Calculator"
     )
     assert add.start_line == 17, f"Expected add at line 17, got {add.start_line}"
     helper = next(s for s in result.symbols if s.name == "helper")
-    assert (
-        helper.start_line == 41
-    ), f"Expected helper at line 42, got {helper.start_line}"
+    assert helper.start_line == 41, (
+        f"Expected helper at line 42, got {helper.start_line}"
+    )
 
 
 @_skip_no_php
@@ -2160,12 +2160,12 @@ class Worker {
     result = parse_file(php_file)
     run_method = next(s for s in result.symbols if s.name == "run")
     assert "add" in run_method.calls, f"Expected 'add' in calls, got {run_method.calls}"
-    assert (
-        "getValue" in run_method.calls
-    ), f"Expected 'getValue' in calls, got {run_method.calls}"
-    assert (
-        "create" in run_method.calls
-    ), f"Expected 'create' in calls, got {run_method.calls}"
+    assert "getValue" in run_method.calls, (
+        f"Expected 'getValue' in calls, got {run_method.calls}"
+    )
+    assert "create" in run_method.calls, (
+        f"Expected 'create' in calls, got {run_method.calls}"
+    )
 
 
 @_skip_no_php
@@ -2226,9 +2226,9 @@ function processItems(array $items): void {
     proc = next(s for s in result.symbols if s.name == "processItems")
     assert "array_map" in proc.calls, f"Expected 'array_map' in calls, got {proc.calls}"
     assert "sort" in proc.calls, f"Expected 'sort' in calls, got {proc.calls}"
-    assert (
-        "doSomethingElse" in proc.calls
-    ), f"Expected 'doSomethingElse' in calls, got {proc.calls}"
+    assert "doSomethingElse" in proc.calls, (
+        f"Expected 'doSomethingElse' in calls, got {proc.calls}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2360,9 +2360,9 @@ def test_parse_kotlin_expression_body_calls(kotlin_module: Path):
     """Kotlin: calls in expression-body functions (fun f() = expr) are captured."""
     result = parse_file(kotlin_module)
     clamped = next(s for s in result.symbols if s.name == "clamped")
-    assert (
-        "max" in clamped.calls
-    ), f"expression-body call 'max' not captured; got calls={clamped.calls!r}"
+    assert "max" in clamped.calls, (
+        f"expression-body call 'max' not captured; got calls={clamped.calls!r}"
+    )
 
 
 @_skip_no_kotlin

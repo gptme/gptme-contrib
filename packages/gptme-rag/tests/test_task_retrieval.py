@@ -176,9 +176,9 @@ class TestRankTasks:
         ]
         idx = _build_index(closed_docs + open_docs)
         hits = rank_tasks(idx, "deploy server monitoring", n_results=3, include_closed=False)
-        assert (
-            len(hits) == 3
-        ), f"Expected 3 open hits even with 25 closed tasks dominating scores, got {len(hits)}"
+        assert len(hits) == 3, (
+            f"Expected 3 open hits even with 25 closed tasks dominating scores, got {len(hits)}"
+        )
         for h in hits:
             assert not h.closed, f"Closed task leaked through filter: {h.path}"
 
@@ -410,9 +410,9 @@ class TestLoadTaskDocuments:
         docs = load_task_documents(tmp_path)
         assert len(docs) == 1
         doc = docs[0]
-        assert (
-            doc.metadata["task_state"] == "done"
-        ), f"Quoted state should be stripped to 'done', got {doc.metadata['task_state']!r}"
+        assert doc.metadata["task_state"] == "done", (
+            f"Quoted state should be stripped to 'done', got {doc.metadata['task_state']!r}"
+        )
         # Verify TaskHit correctly marks it as closed
         hit = TaskHit(
             document=doc,

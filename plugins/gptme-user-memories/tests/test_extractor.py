@@ -630,9 +630,9 @@ class TestExtractFactsNoNewFacts:
             from gptme_user_memories.extractor import extract_facts
 
             facts = extract_facts("some conversation text " * 10)
-        assert any(
-            "NO_NEW_FACTS" in f for f in facts
-        ), f"Expected fact containing NO_NEW_FACTS to be kept, got: {facts}"
+        assert any("NO_NEW_FACTS" in f for f in facts), (
+            f"Expected fact containing NO_NEW_FACTS to be kept, got: {facts}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1215,9 +1215,7 @@ class TestProcessLogdir:
         with patch("gptme_user_memories.extractor.extract_facts", return_value=None):
             result = process_logdir(log_dir)
         assert result is None, "API failure should return None (not count toward limit)"
-        assert not (
-            log_dir / SENTINEL_FILENAME
-        ).exists(), (
+        assert not (log_dir / SENTINEL_FILENAME).exists(), (
             "sentinel must NOT be touched on API failure — session must be retried"
         )
 
@@ -1317,12 +1315,12 @@ class TestProcessCCLogfile:
         ):
             process_cc_logfile(jsonl_file)
         sentinel = self._sentinel_for(jsonl_file, cc_logs_dir, cc_sentinel_dir)
-        assert (
-            sentinel.exists()
-        ), "sentinel must be under CC_SENTINEL_DIR, not alongside jsonl"
-        assert not jsonl_file.with_suffix(
-            ".memories-extracted"
-        ).exists(), "sentinel must NOT be placed in CC's own directory"
+        assert sentinel.exists(), (
+            "sentinel must be under CC_SENTINEL_DIR, not alongside jsonl"
+        )
+        assert not jsonl_file.with_suffix(".memories-extracted").exists(), (
+            "sentinel must NOT be placed in CC's own directory"
+        )
 
     def test_dry_run_does_not_touch_sentinel(self, tmp_path: Path) -> None:
         cc_logs_dir = tmp_path / "cc-logs"
@@ -1360,9 +1358,9 @@ class TestProcessCCLogfile:
             result = process_cc_logfile(jsonl_file)
         assert result is None, "API failure should return None (not count toward limit)"
         sentinel = self._sentinel_for(jsonl_file, cc_logs_dir, cc_sentinel_dir)
-        assert (
-            not sentinel.exists()
-        ), "sentinel must NOT be touched on API failure — session must be retried"
+        assert not sentinel.exists(), (
+            "sentinel must NOT be touched on API failure — session must be retried"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1461,9 +1459,9 @@ class TestMain:
 
             main()
 
-        assert (
-            captured_model == ["claude-haiku-3-5"]
-        ), f"Expected model 'claude-haiku-3-5' forwarded to run_batch, got {captured_model}"
+        assert captured_model == ["claude-haiku-3-5"], (
+            f"Expected model 'claude-haiku-3-5' forwarded to run_batch, got {captured_model}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1580,9 +1578,9 @@ class TestSessionEndHook:
         ):
             list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
 
-        assert (
-            log_dir / SENTINEL_FILENAME
-        ).exists(), "sentinel must be touched after a successful save"
+        assert (log_dir / SENTINEL_FILENAME).exists(), (
+            "sentinel must be touched after a successful save"
+        )
 
     def test_hook_api_failure_does_not_touch_sentinel(self, tmp_path: Path) -> None:
         """Regression: API failure in extract_facts must not permanently skip the session.
@@ -1686,13 +1684,13 @@ class TestSessionEndHook:
         ):
             list(session_end_user_memories_hook(MagicMock(), logdir=log_dir))
 
-        assert (
-            log_dir / SENTINEL_FILENAME
-        ).exists(), "sentinel must be touched after successful extraction"
+        assert (log_dir / SENTINEL_FILENAME).exists(), (
+            "sentinel must be touched after successful extraction"
+        )
         content = memories_file.read_text()
-        assert (
-            "user is a software engineer at Acme Corp" in content
-        ), "extracted fact must be written to memories file"
+        assert "user is a software engineer at Acme Corp" in content, (
+            "extracted fact must be written to memories file"
+        )
 
     def test_merge_facts_deduplicates_existing(self) -> None:
         """merge_facts must clean up duplicates already present in existing, not just new ones."""
@@ -1703,12 +1701,12 @@ class TestSessionEndHook:
 
         result = merge_facts(existing, new_facts)
 
-        assert (
-            result.count("user likes Python") == 1
-        ), "duplicates in existing must be deduplicated"
-        assert (
-            result.count("user works at Acme") == 1
-        ), "facts present in both existing and new must appear only once"
+        assert result.count("user likes Python") == 1, (
+            "duplicates in existing must be deduplicated"
+        )
+        assert result.count("user works at Acme") == 1, (
+            "facts present in both existing and new must appear only once"
+        )
         assert "user uses vim" in result, "new non-duplicate facts must be added"
         assert len(result) == 3
 
@@ -1754,9 +1752,9 @@ class TestSessionEndHook:
 
         content = memories_file.read_text()
         # The duplicate "user likes Python" must be removed from the on-disk file
-        assert (
-            content.count("user likes Python") == 1
-        ), "hook must persist dedup-within-existing even when no new facts were added"
+        assert content.count("user likes Python") == 1, (
+            "hook must persist dedup-within-existing even when no new facts were added"
+        )
         assert "user works at Acme" in content, "existing facts must be preserved"
 
 
@@ -1890,9 +1888,9 @@ class TestSaveCategorizedMemories:
     def test_deduplicates_facts(self, tmp_path: Path) -> None:
         save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
         counts = save_categorized_memories(tmp_path, {"preferences": ["Uses Vim"]})
-        assert (
-            counts == {}
-        ), "second call should be a no-op when all facts already exist"
+        assert counts == {}, (
+            "second call should be a no-op when all facts already exist"
+        )
         content = (tmp_path / "preferences.md").read_text()
         assert content.count("Uses Vim") == 1
 

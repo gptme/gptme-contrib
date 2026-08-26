@@ -293,9 +293,9 @@ def test_recur_reset_strips_preexisting_waiting_for(
     post = fm.load(tasks_dir / "human-wait-recur.md")
     assert post.metadata["state"] == "waiting", "recurring task must reset to waiting"
     assert post.metadata.get("wait_kind") == "machine"
-    assert (
-        "waiting_for" not in post.metadata
-    ), "recur reset must strip waiting_for so the task can auto-surface when the time gate expires"
+    assert "waiting_for" not in post.metadata, (
+        "recur reset must strip waiting_for so the task can auto-surface when the time gate expires"
+    )
     assert "waiting_since" not in post.metadata, "recur reset must strip waiting_since"
 
 
@@ -327,9 +327,9 @@ def test_edit_done_with_subday_recur_stores_datetime(
     post = fm.load(tasks_dir / "frequent-check.md")
     assert post.metadata["state"] == "waiting"
     wait_val = str(post.metadata["wait"])
-    assert (
-        "T" in wait_val or " " in wait_val
-    ), f"sub-24h recur should store a datetime string with time component, got: {wait_val!r}"
+    assert "T" in wait_val or " " in wait_val, (
+        f"sub-24h recur should store a datetime string with time component, got: {wait_val!r}"
+    )
     # Verify it's actually in the future
     next_dt = datetime.fromisoformat(wait_val.replace(" ", "T"))
     assert next_dt > datetime.now(), "next wait must be in the future"

@@ -198,6 +198,6 @@ class TestMutualExclusion:
         for key, epoch in events:
             by_key.setdefault(key, []).append(epoch)
         for key, epochs in by_key.items():
-            assert sorted(epochs) == list(
-                range(1, len(epochs) + 1)
-            ), f"{key}: epochs not gapless: {sorted(epochs)}"
+            assert sorted(epochs) == list(range(1, len(epochs) + 1)), (
+                f"{key}: epochs not gapless: {sorted(epochs)}"
+            )

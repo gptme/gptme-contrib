@@ -387,9 +387,9 @@ def test_voice_postcall_explicit_negative_branch() -> None:
         "voice_postcall arm is missing the explicit negative-case message — "
         "the worker cannot distinguish empty grep output from a missing terminal row"
     )
-    assert (
-        "printf" in rendered
-    ), "voice_postcall arm should use printf to display matched rows on success"
+    assert "printf" in rendered, (
+        "voice_postcall arm should use printf to display matched rows on success"
+    )
     assert rendered.index("printf") < rendered.index("NO TERMINAL ROW"), (
         "voice_postcall arm has wrong branch ordering — "
         "printf (success path) must appear before 'NO TERMINAL ROW' (failure path); "
@@ -443,9 +443,9 @@ def test_voice_postcall_positive_record_path() -> None:
         "voice_postcall grep command does not contain the extracted record path — "
         "check ItemPromptParams._record_path regex and _tokens() registration"
     )
-    assert (
-        "__RECORD_PATH_MISSING__" not in rendered
-    ), "voice_postcall rendered the missing-path sentinel even though detail contained record="
+    assert "__RECORD_PATH_MISSING__" not in rendered, (
+        "voice_postcall rendered the missing-path sentinel even though detail contained record="
+    )
 
 
 def test_voice_postcall_spaced_record_path() -> None:
@@ -468,9 +468,9 @@ def test_voice_postcall_spaced_record_path() -> None:
         "voice_postcall truncated a spaced record path — "
         "the regex must capture until the next key= token or end of string"
     )
-    assert (
-        "__RECORD_PATH_MISSING__" not in rendered
-    ), "voice_postcall rendered the missing-path sentinel for a spaced path"
+    assert "__RECORD_PATH_MISSING__" not in rendered, (
+        "voice_postcall rendered the missing-path sentinel for a spaced path"
+    )
 
 
 def test_voice_postcall_digit_key_in_path_not_truncated() -> None:

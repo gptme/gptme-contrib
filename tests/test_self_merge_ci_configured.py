@@ -302,9 +302,9 @@ def test_branch_scoped_silence_widens_before_failing_closed(
     monkeypatch.setattr(subprocess, "run", _run)
     assert smc.repo_gates_prs_with_checks("o/r", "dev") is False
     assert any("--base" in c for c in calls), "scoped sample was never taken"
-    assert any(
-        c[:3] == ["gh", "pr", "list"] and "--base" not in c for c in calls
-    ), "silent scoped sample was not widened"
+    assert any(c[:3] == ["gh", "pr", "list"] and "--base" not in c for c in calls), (
+        "silent scoped sample was not widened"
+    )
 
 
 def test_branch_scoped_silence_still_fails_closed_when_repo_is_silent_too(

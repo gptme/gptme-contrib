@@ -69,9 +69,9 @@ def test_edit_state_waiting_auto_sets_waiting_since(tmp_path: Path, monkeypatch)
     injected = datetime.fromisoformat(str(task.metadata["waiting_since"]))
     if injected.tzinfo is None:
         injected = injected.replace(tzinfo=timezone.utc)
-    assert (
-        before <= injected <= after
-    ), f"waiting_since {injected!r} not between {before!r} and {after!r}"
+    assert before <= injected <= after, (
+        f"waiting_since {injected!r} not between {before!r} and {after!r}"
+    )
 
 
 def test_edit_state_waiting_without_waiting_for_does_not_inject_waiting_since(
@@ -96,9 +96,9 @@ def test_edit_state_waiting_without_waiting_for_does_not_inject_waiting_since(
 
     tasks = load_tasks(tasks_dir)
     assert len(tasks) == 1
-    assert (
-        "waiting_since" not in tasks[0].metadata
-    ), "waiting_since must not be injected when waiting_for is absent"
+    assert "waiting_since" not in tasks[0].metadata, (
+        "waiting_since must not be injected when waiting_for is absent"
+    )
 
 
 def test_edit_unrelated_field_on_waiting_task_does_not_inject_waiting_since(
@@ -119,9 +119,9 @@ def test_edit_unrelated_field_on_waiting_task_does_not_inject_waiting_since(
 
     tasks = load_tasks(tasks_dir)
     assert len(tasks) == 1
-    assert (
-        "waiting_since" not in tasks[0].metadata
-    ), "waiting_since must not be injected when only editing an unrelated field"
+    assert "waiting_since" not in tasks[0].metadata, (
+        "waiting_since must not be injected when only editing an unrelated field"
+    )
 
 
 def test_edit_state_waiting_does_not_override_existing_waiting_since(
@@ -144,9 +144,9 @@ def test_edit_state_waiting_does_not_override_existing_waiting_since(
     tasks = load_tasks(tasks_dir)
     assert len(tasks) == 1
     # YAML parses bare date strings as datetime.date objects; compare via str()
-    assert (
-        str(tasks[0].metadata["waiting_since"]) == "2026-06-01"
-    ), "pre-existing date must not change"
+    assert str(tasks[0].metadata["waiting_since"]) == "2026-06-01", (
+        "pre-existing date must not change"
+    )
 
 
 def test_edit_state_waiting_explicit_waiting_since_wins(tmp_path: Path, monkeypatch) -> None:
@@ -203,6 +203,6 @@ def test_edit_clearing_waiting_for_does_not_inject_waiting_since(
 
     tasks = load_tasks(tasks_dir)
     assert len(tasks) == 1
-    assert (
-        "waiting_since" not in tasks[0].metadata
-    ), "clearing waiting_for must not trigger waiting_since injection"
+    assert "waiting_since" not in tasks[0].metadata, (
+        "clearing waiting_for must not trigger waiting_since injection"
+    )

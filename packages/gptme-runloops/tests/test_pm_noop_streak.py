@@ -175,9 +175,9 @@ def test_noop_after_expired_backoff_resets_streak(state_file: Path) -> None:
     assert skip is False
     # Record a NOOP — should reset streak to 0 first, then increment to 1
     new_state = d.record_noop()
-    assert (
-        new_state["streak_count"] == 1
-    ), "NOOP after expired backoff must start fresh at streak=1, not re-arm at streak=3"
+    assert new_state["streak_count"] == 1, (
+        "NOOP after expired backoff must start fresh at streak=1, not re-arm at streak=3"
+    )
     assert "backoff_until" not in new_state or not new_state["backoff_until"]
 
 

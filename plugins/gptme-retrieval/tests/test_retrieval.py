@@ -227,9 +227,9 @@ def test_step_pre_hook_none_name_shared_default_bucket():
             # — both are bucketed under "default", so the second is a no-op.
             # This is acceptable: nameless convs share a bucket, not unrelated named convs.
             msgs2 = list(step_pre_hook(manager2))
-            assert (
-                len(msgs2) == 0
-            ), "Same bucket (both None->default) deduplicates correctly"
+            assert len(msgs2) == 0, (
+                "Same bucket (both None->default) deduplicates correctly"
+            )
     finally:
         _injected_per_conv.pop("default", None)
 
@@ -309,9 +309,9 @@ def test_injected_per_conv_lru_move_to_end():
 
         # early-conv should now be last (most-recently-used), not evicted
         keys = list(_injected_per_conv.keys())
-        assert (
-            keys[-1] == "early-conv"
-        ), "Re-entered conv should be at end after move_to_end"
+        assert keys[-1] == "early-conv", (
+            "Re-entered conv should be at end after move_to_end"
+        )
 
         # Adding one more new conversation should evict filler-0 (oldest), not early-conv
         mock_result.stdout = (
@@ -326,9 +326,9 @@ def test_injected_per_conv_lru_move_to_end():
         ):
             list(step_pre_hook(m))
 
-        assert (
-            "early-conv" in _injected_per_conv
-        ), "early-conv must survive eviction after LRU refresh"
+        assert "early-conv" in _injected_per_conv, (
+            "early-conv must survive eviction after LRU refresh"
+        )
         assert "filler-0" not in _injected_per_conv, "Oldest filler should be evicted"
     finally:
         _injected_per_conv.clear()

@@ -118,9 +118,9 @@ def test_scan_lessons_skips_node_modules(hook, tmp_path):
     )
     result = hook.scan_lessons([lessons_dir])
     paths = [r["path"] for r in result]
-    assert all(
-        "node_modules" not in p for p in paths
-    ), f"node_modules file leaked into scan: {paths}"
+    assert all("node_modules" not in p for p in paths), (
+        f"node_modules file leaked into scan: {paths}"
+    )
     assert len(result) == 1
     assert result[0]["title"] == "Real Skill"
 
@@ -543,9 +543,9 @@ def test_filter_by_session_category_case_insensitive(hook, tmp_path):
     lessons = hook.scan_lessons([lessons_dir])
     # detect_session_category always returns lowercase; YAML "Code" must still match
     kept = hook.filter_by_session_category(lessons, "code")
-    assert (
-        len(kept) == 1
-    ), "Mixed-case YAML category should match lowercase env-var category"
+    assert len(kept) == 1, (
+        "Mixed-case YAML category should match lowercase env-var category"
+    )
     dropped = hook.filter_by_session_category(lessons, "cleanup")
     assert len(dropped) == 0
 
@@ -758,9 +758,9 @@ def test_bm25_ranking_preserved_with_two_scoring_lessons(hook, tmp_path):
         f"{[r['path'].rsplit('/', 1)[-1] for r in results]}"
     )
     scores = {r["path"].rsplit("/", 1)[-1]: r["score"] for r in results}
-    assert (
-        scores["strong.md"] > scores["weak.md"]
-    ), f"strong.md should outrank weak.md but scores were {scores}"
+    assert scores["strong.md"] > scores["weak.md"], (
+        f"strong.md should outrank weak.md but scores were {scores}"
+    )
 
 
 def test_bm25_contribution_does_not_swamp_keyword_matches(hook, tmp_path):

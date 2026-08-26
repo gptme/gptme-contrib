@@ -136,9 +136,9 @@ def test_non_bob_repo_is_noop(tmp_path: Path, origin: str | None) -> None:
     """Hook exits 0 for any repo that isn't ErikBjare/bob on GitHub."""
     repo = _make_repo(tmp_path, origin)
     proc = _run_hook(repo)
-    assert (
-        proc.returncode == 0
-    ), f"unexpected exit {proc.returncode} for origin={origin!r}\n{proc.stderr}"
+    assert proc.returncode == 0, (
+        f"unexpected exit {proc.returncode} for origin={origin!r}\n{proc.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +166,9 @@ def test_non_bob_repo_with_active_merge_is_noop(tmp_path: Path) -> None:
         # Simulate an active merge — the old glob *ErikBjare/bob* wrongly blocked this.
         (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
         proc = _run_hook(repo)
-        assert (
-            proc.returncode == 0
-        ), f"false positive: hook blocked merge in {origin!r}\n{proc.stderr}"
+        assert proc.returncode == 0, (
+            f"false positive: hook blocked merge in {origin!r}\n{proc.stderr}"
+        )
 
 
 def test_bob_repo_not_on_master_is_noop(tmp_path: Path) -> None:
@@ -211,9 +211,9 @@ def test_bob_repo_merge_on_master_is_blocked(tmp_path: Path, origin: str) -> Non
     repo = _make_repo(tmp_path, origin)
     (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
     proc = _run_hook(repo)
-    assert (
-        proc.returncode == 1
-    ), f"merge was not blocked for origin={origin!r}\n{proc.stderr}"
+    assert proc.returncode == 1, (
+        f"merge was not blocked for origin={origin!r}\n{proc.stderr}"
+    )
     assert "Refusing" in proc.stderr or "🚫" in proc.stderr
 
 
@@ -406,9 +406,9 @@ def test_pre_commit_blocks_conflicted_merge_on_master_in_brain_repo(
     repo = _make_repo(tmp_path, origin)
     (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
     proc = _run_pre_commit_hook(repo)
-    assert (
-        proc.returncode == 1
-    ), f"pre-commit did not block conflicted merge for origin={origin!r}\n{proc.stderr}"
+    assert proc.returncode == 1, (
+        f"pre-commit did not block conflicted merge for origin={origin!r}\n{proc.stderr}"
+    )
     assert "Refusing" in proc.stderr or "🚫" in proc.stderr, proc.stderr
 
 

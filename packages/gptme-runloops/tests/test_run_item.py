@@ -1921,9 +1921,9 @@ def test_post_session_merge_ready_only_merge_without_reply_promotes(tmp_path) ->
     effect = run_post_session(plan, item, outcome, config, hooks)
 
     assert effect == "observed"
-    assert (
-        config.state_dir / sentinel.name
-    ).exists(), "state must be promoted — rollback would re-queue an already-merged PR"
+    assert (config.state_dir / sentinel.name).exists(), (
+        "state must be promoted — rollback would re-queue an already-merged PR"
+    )
 
 
 def test_post_session_failed_exit_without_delivery_hook_preserves_notification(
@@ -2042,9 +2042,9 @@ def test_post_session_agent_msg_reply_skips_delivery_check(tmp_path) -> None:
 
     effect = run_post_session(plan, item, outcome, config, hooks)
 
-    assert (
-        run_cmd.find("/fake/check-delivery.py") == []
-    ), "delivery check must not run for item types with no GitHub thread"
+    assert run_cmd.find("/fake/check-delivery.py") == [], (
+        "delivery check must not run for item types with no GitHub thread"
+    )
     # Skipping the delivery check means no delivery signal is verified.  The
     # record also carries no PR state diff (number=0 is not a real issue).
     # EFFECT_UNKNOWN is correct: we have no mechanism to observe whether
@@ -2078,9 +2078,9 @@ def test_post_session_notification_zero_number_skips_delivery_check(tmp_path) ->
 
     effect = run_post_session(plan, item, outcome, config, hooks)
 
-    assert (
-        run_cmd.find("/fake/check-delivery.py") == []
-    ), "delivery check must not run for notification items with number=0"
+    assert run_cmd.find("/fake/check-delivery.py") == [], (
+        "delivery check must not run for notification items with number=0"
+    )
     assert effect == "unknown", (
         f"notification with number=0 must score effect='unknown', not {effect!r}; "
         "EFFECT_NONE would incorrectly fire the no-effect WARN."
@@ -2111,9 +2111,9 @@ def test_post_session_string_zero_number_skips_delivery_check(tmp_path) -> None:
 
     effect = run_post_session(plan, item, outcome, config, hooks)
 
-    assert (
-        run_cmd.find("/fake/check-delivery.py") == []
-    ), 'delivery check must not run for items with number="0" (string sentinel)'
+    assert run_cmd.find("/fake/check-delivery.py") == [], (
+        'delivery check must not run for items with number="0" (string sentinel)'
+    )
     assert effect == "unknown", (
         f"notification with number=\"0\" must score effect='unknown', not {effect!r}; "
         "EFFECT_NONE would incorrectly fire the no-effect WARN."
@@ -2210,9 +2210,9 @@ def test_post_session_crashed_delivery_check_does_not_claim_observed_effect(
     # Without verified delivery, the PR head+state match (no_change) and the
     # effect signal must NOT report observed. Before the fix, this was
     # "observed" via the crashed-check fallback masquerading as a verified reply.
-    assert (
-        completed["effect"] != "observed"
-    ), f"crashed delivery check must not claim observed effect, got {completed['effect']!r}"
+    assert completed["effect"] != "observed", (
+        f"crashed delivery check must not claim observed effect, got {completed['effect']!r}"
+    )
     assert completed["outcome"] in {"no_effect", "unknown"}
 
 
@@ -2328,12 +2328,12 @@ def test_execute_plan_pr_before_snapshot_for_every_pr_scoped_type(
         sysprompt_file="",
     )
     outcome = execute_plan(plan, item, config, hooks)
-    assert (
-        outcome.pr_before_json != ""
-    ), f"{item_type} is in PR_OBSERVE_TYPES but took no before-snapshot"
-    assert any(
-        c["argv"][:3] == ["gh", "pr", "view"] for c in run_cmd.calls
-    ), f"{item_type} did not call `gh pr view`"
+    assert outcome.pr_before_json != "", (
+        f"{item_type} is in PR_OBSERVE_TYPES but took no before-snapshot"
+    )
+    assert any(c["argv"][:3] == ["gh", "pr", "view"] for c in run_cmd.calls), (
+        f"{item_type} did not call `gh pr view`"
+    )
 
 
 def test_pr_observe_types_is_superset_of_pr_state_types() -> None:

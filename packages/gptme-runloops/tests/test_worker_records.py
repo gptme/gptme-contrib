@@ -1032,9 +1032,9 @@ def test_augment_skips_non_productive(tmp_path: Path) -> None:
     for outcome in ("failed", "unknown", "noop", ""):
         payload: dict[str, Any] = {"outcome": outcome}
         augment_with_outcome_subtype(payload, traj)
-        assert (
-            "outcome_subtype" not in payload
-        ), f"should not annotate outcome={outcome!r}"
+        assert "outcome_subtype" not in payload, (
+            f"should not annotate outcome={outcome!r}"
+        )
 
 
 def test_augment_observe_when_no_trajectory() -> None:

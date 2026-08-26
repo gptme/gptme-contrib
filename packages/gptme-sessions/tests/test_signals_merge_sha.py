@@ -238,12 +238,12 @@ def test_extract_signals_cc_includes_resolved_merge_sha():
     assert sigs["prs_submitted"] == ["PR #42"]
 
     # Fake merge SHA now appears in git_commits AND deliverables.
-    assert any(
-        FAKE_SHA in c for c in sigs["git_commits"]
-    ), f"expected {FAKE_SHA} in git_commits, got {sigs['git_commits']}"
-    assert any(
-        FAKE_SHA in d for d in sigs["deliverables"]
-    ), f"expected {FAKE_SHA} in deliverables, got {sigs['deliverables']}"
+    assert any(FAKE_SHA in c for c in sigs["git_commits"]), (
+        f"expected {FAKE_SHA} in git_commits, got {sigs['git_commits']}"
+    )
+    assert any(FAKE_SHA in d for d in sigs["deliverables"]), (
+        f"expected {FAKE_SHA} in deliverables, got {sigs['deliverables']}"
+    )
     assert any(
         detail["value"] == "merge PR #42"
         and detail["kind"] == "pull_request"

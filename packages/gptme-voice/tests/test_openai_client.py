@@ -922,9 +922,9 @@ def test_one_arg_on_user_transcript_callback_is_wrapped_for_backward_compat() ->
         await client._call_callback(client.on_user_transcript, "hello", "item-001")
 
     asyncio.run(_run())
-    assert received == [
-        "hello"
-    ], "1-arg callback should receive transcript and ignore item_id"
+    assert received == ["hello"], (
+        "1-arg callback should receive transcript and ignore item_id"
+    )
 
 
 def test_async_one_arg_on_user_transcript_callback_is_awaited() -> None:
@@ -950,9 +950,9 @@ def test_async_one_arg_on_user_transcript_callback_is_awaited() -> None:
         await client._call_callback(client.on_user_transcript, "hello", "item-001")
 
     asyncio.run(_run())
-    assert received == [
-        "hello"
-    ], "async 1-arg callback must be awaited; received was empty (coroutine dropped)"
+    assert received == ["hello"], (
+        "async 1-arg callback must be awaited; received was empty (coroutine dropped)"
+    )
 
 
 def test_two_arg_on_user_transcript_callback_receives_item_id() -> None:
@@ -970,9 +970,9 @@ def test_two_arg_on_user_transcript_callback_receives_item_id() -> None:
         await client._call_callback(client.on_user_transcript, "hello", "item-001")
 
     asyncio.run(_run())
-    assert received == [
-        ("hello", "item-001")
-    ], "2-arg callback should receive both args"
+    assert received == [("hello", "item-001")], (
+        "2-arg callback should receive both args"
+    )
 
 
 def test_non_introspectable_callback_is_wrapped_conservatively() -> None:
@@ -1011,9 +1011,9 @@ def test_non_introspectable_callback_is_wrapped_conservatively() -> None:
         await client._call_callback(client.on_user_transcript, "hello", "item-001")
 
     asyncio.run(_run())
-    assert received == [
-        "hello"
-    ], "Non-introspectable 1-arg callback should work via conservative wrap"
+    assert received == ["hello"], (
+        "Non-introspectable 1-arg callback should work via conservative wrap"
+    )
 
 
 def test_non_introspectable_two_arg_callback_receives_item_id() -> None:
@@ -1048,9 +1048,9 @@ def test_non_introspectable_two_arg_callback_receives_item_id() -> None:
         await client._call_callback(client.on_user_transcript, "hello", "item-001")
 
     asyncio.run(_run())
-    assert received == [
-        ("hello", "item-001")
-    ], "Non-introspectable 2-arg callback should receive both text and item_id"
+    assert received == [("hello", "item-001")], (
+        "Non-introspectable 2-arg callback should receive both text and item_id"
+    )
 
 
 def test_non_introspectable_callback_internal_typeerror_propagates() -> None:

@@ -186,9 +186,9 @@ def test_fresh_cache_skips_api_call() -> None:
             0,
             1,
         ), f"Script crashed (rc={result.returncode}): {result.stderr}"
-        assert (
-            call_count == 0
-        ), f"Expected 0 API calls (cache hit, same SHA, fresh), got {call_count}"
+        assert call_count == 0, (
+            f"Expected 0 API calls (cache hit, same SHA, fresh), got {call_count}"
+        )
 
 
 def test_new_head_sha_calls_api() -> None:
@@ -207,9 +207,9 @@ def test_new_head_sha_calls_api() -> None:
             0,
             1,
         ), f"Script crashed (rc={result.returncode}): {result.stderr}"
-        assert (
-            call_count >= 1
-        ), f"Expected API call (cache miss: SHA mismatch), got {call_count}"
+        assert call_count >= 1, (
+            f"Expected API call (cache miss: SHA mismatch), got {call_count}"
+        )
 
 
 def test_stale_cache_calls_api() -> None:
@@ -228,9 +228,9 @@ def test_stale_cache_calls_api() -> None:
             0,
             1,
         ), f"Script crashed (rc={result.returncode}): {result.stderr}"
-        assert (
-            call_count >= 1
-        ), f"Expected API call (cache miss: stale TTL), got {call_count}"
+        assert call_count >= 1, (
+            f"Expected API call (cache miss: stale TTL), got {call_count}"
+        )
 
 
 def test_no_state_file_calls_api() -> None:
@@ -248,9 +248,9 @@ def test_no_state_file_calls_api() -> None:
         ), f"Script crashed (rc={result.returncode}): {result.stderr}"
         assert call_count >= 1, f"Expected API call (no state file), got {call_count}"
         # State file should be seeded now
-        assert _state_file(
-            state_dir
-        ).exists(), "State file should be created on first run"
+        assert _state_file(state_dir).exists(), (
+            "State file should be created on first run"
+        )
 
 
 def test_dirty_ai_verdict_keeps_real_greptile_score_and_is_cached() -> None:

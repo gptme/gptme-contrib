@@ -446,9 +446,9 @@ def test_main_reclassifies_status_when_two_identical_write_errors_despite_dirty_
     rc, comments, draft_prs = _run_resolver(monkeypatch, repo, out_dir, gptme_stdout)
     assert rc == 0
     # 2 write calls, 2 identical errors → guard must fire, no bogus draft PR.
-    assert (
-        draft_prs == []
-    ), f"Unexpected draft PR opened (dedup guard bug?): {draft_prs}"
+    assert draft_prs == [], (
+        f"Unexpected draft PR opened (dedup guard bug?): {draft_prs}"
+    )
     assert len(comments) == 1
     assert "2 write tool call" in comments[0]
     assert "Patch failed" in comments[0]

@@ -81,9 +81,9 @@ def test_null_required_field_rejected():
     for fname in ("type", "protocol", "event_id", "invocation_id", "agent_id"):
         result = _check(_valid_event(**{fname: None}))
         assert not result.ok, f"null {fname!r} should be rejected"
-        assert any(
-            fname in e for e in result.errors
-        ), f"expected error mentioning {fname!r}"
+        assert any(fname in e for e in result.errors), (
+            f"expected error mentioning {fname!r}"
+        )
 
 
 def test_wrong_protocol_rejected():

@@ -71,6 +71,6 @@ __all__ = [
     "partition_items",
 ]
 
-assert (
-    _PM_DISPATCH_EXPORTS <= frozenset(__all__)
-), f"_PM_DISPATCH_EXPORTS has names not in __all__: {_PM_DISPATCH_EXPORTS - frozenset(__all__)}"
+assert _PM_DISPATCH_EXPORTS <= frozenset(__all__), (
+    f"_PM_DISPATCH_EXPORTS has names not in __all__: {_PM_DISPATCH_EXPORTS - frozenset(__all__)}"
+)

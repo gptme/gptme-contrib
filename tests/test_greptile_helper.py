@@ -317,9 +317,9 @@ def test_check_retries_acknowledged_trigger_after_timeout():
         "bot_reaction_count": 1,
     }
     result = _run_helper("check", fixture)
-    assert (
-        result.returncode == 1
-    ), f"Should skip (no review yet, never trigger initial). stderr: {result.stderr}"
+    assert result.returncode == 1, (
+        f"Should skip (no review yet, never trigger initial). stderr: {result.stderr}"
+    )
 
     status = _run_helper("status", fixture)
     assert status.stdout.strip() == "awaiting-initial-review"
@@ -395,9 +395,9 @@ def test_spent_trigger_with_backdated_commit_does_not_suppress():
     )
 
     status = _run_helper("status", fixture)
-    assert (
-        status.stdout.strip() == "needs-re-review"
-    ), f"Expected needs-re-review, got: {status.stdout.strip()}"
+    assert status.stdout.strip() == "needs-re-review", (
+        f"Expected needs-re-review, got: {status.stdout.strip()}"
+    )
 
     # Trigger must also succeed: spent trigger + no in-cycle trigger → allow
     result, log = _run_helper("trigger", fixture, capture_gh_log=True)
@@ -405,9 +405,9 @@ def test_spent_trigger_with_backdated_commit_does_not_suppress():
         f"Spent trigger with backdated commit must allow re-trigger. "
         f"stdout: {result.stdout}, stderr: {result.stderr}"
     )
-    assert (
-        "@greptileai review" in log
-    ), f"Trigger must post a review comment. log: {log}"
+    assert "@greptileai review" in log, (
+        f"Trigger must post a review comment. log: {log}"
+    )
 
 
 def _make_greptile_review(commit_id: str, submitted_at: str) -> dict:
@@ -496,9 +496,9 @@ def test_inplace_comment_response_to_marker_trigger_suppresses_re_review():
     )
 
     status = _run_helper("status", fixture)
-    assert (
-        status.stdout.strip() == "already-reviewed"
-    ), f"Expected already-reviewed, got: {status.stdout.strip()}"
+    assert status.stdout.strip() == "already-reviewed", (
+        f"Expected already-reviewed, got: {status.stdout.strip()}"
+    )
 
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -530,9 +530,9 @@ def test_marker_trigger_does_not_mask_new_backdated_head():
         "bot_reaction_count": 0,
     }
     status = _run_helper("status", fixture)
-    assert (
-        status.stdout.strip() == "needs-re-review"
-    ), f"New head must not be masked by comment timestamp, got: {status.stdout.strip()}"
+    assert status.stdout.strip() == "needs-re-review", (
+        f"New head must not be masked by comment timestamp, got: {status.stdout.strip()}"
+    )
 
 
 def test_marker_trigger_without_response_does_not_suppress():
@@ -589,9 +589,9 @@ def test_trigger_embeds_head_sha_marker():
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "Re-triggered successfully" in result.stdout
     assert "@greptileai review" in gh_log
-    assert (
-        "greptile-helper head-sha: beef1234" in gh_log
-    ), f"Trigger body must embed the head SHA marker. log: {gh_log}"
+    assert "greptile-helper head-sha: beef1234" in gh_log, (
+        f"Trigger body must embed the head SHA marker. log: {gh_log}"
+    )
 
 
 def test_no_pr_review_object_falls_back_to_date_heuristic():
@@ -641,9 +641,9 @@ def test_old_pr_without_review_awaits_initial_review():
     assert status.stdout.strip() == "awaiting-initial-review"
 
     result = _run_helper("check", fixture)
-    assert (
-        result.returncode == 1
-    ), f"Should skip (never trigger initial review). stderr: {result.stderr}"
+    assert result.returncode == 1, (
+        f"Should skip (never trigger initial review). stderr: {result.stderr}"
+    )
 
 
 def test_score_5_is_already_reviewed():
@@ -703,9 +703,9 @@ def test_trigger_waits_for_auto_review_within_grace():
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "Awaiting" in result.stdout
-    assert (
-        not gh_log
-    ), "gh pr comment should NOT have been called inside the grace window"
+    assert not gh_log, (
+        "gh pr comment should NOT have been called inside the grace window"
+    )
 
 
 def test_trigger_falls_back_to_initial_review_after_grace():
@@ -1047,9 +1047,9 @@ def test_trigger_fallback_stale_local_timestamp_still_allows_first_trigger():
         repo="gptme/gptme-contrib",
     )
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert (
-        gh_log
-    ), "stale local TS + no trigger comment in API should still trigger once"
+    assert gh_log, (
+        "stale local TS + no trigger comment in API should still trigger once"
+    )
 
 
 def test_trigger_skips_fresh_pr():
@@ -1087,9 +1087,9 @@ def test_trigger_re_reviews_on_low_score_with_new_commits():
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "Re-triggered successfully" in result.stdout
-    assert (
-        gh_log
-    ), "comment was never posted (neither gh pr comment nor gh api REST call)"
+    assert gh_log, (
+        "comment was never posted (neither gh pr comment nor gh api REST call)"
+    )
     assert "@greptileai review" in gh_log
 
 
@@ -1141,15 +1141,15 @@ def test_max_retries_guard_blocks_after_repeated_triggers():
     }
     # check: should block (max retries reached)
     result = _run_helper("check", fixture)
-    assert (
-        result.returncode == 1
-    ), f"Should block after max retries. stderr: {result.stderr}"
+    assert result.returncode == 1, (
+        f"Should block after max retries. stderr: {result.stderr}"
+    )
 
     # status: should report in-progress (trigger loop blocked)
     status = _run_helper("status", fixture)
-    assert (
-        status.stdout.strip() == "in-progress"
-    ), f"Expected in-progress, got: {status.stdout.strip()}"
+    assert status.stdout.strip() == "in-progress", (
+        f"Expected in-progress, got: {status.stdout.strip()}"
+    )
 
     # trigger: should NOT post a new comment
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
@@ -1179,9 +1179,9 @@ def test_max_retries_guard_allows_below_threshold():
     }
     # status: should NOT be in-progress (guard not fired yet)
     status = _run_helper("status", fixture)
-    assert (
-        status.stdout.strip() != "in-progress"
-    ), f"Should NOT block at count=2 (< MAX_RE_TRIGGERS=3), got: {status.stdout.strip()}"
+    assert status.stdout.strip() != "in-progress", (
+        f"Should NOT block at count=2 (< MAX_RE_TRIGGERS=3), got: {status.stdout.strip()}"
+    )
 
 
 # --- Tests for local trigger-timestamp file (API propagation delay guard) ---
@@ -1246,9 +1246,9 @@ def test_failed_trigger_does_not_write_timestamp():
         f"Expected 'Trigger failed' in stdout to confirm failure branch was reached,"
         f" got: {result.stdout!r}"
     )
-    assert (
-        ts_content is None
-    ), f"TS file must NOT be written after a failed API call, got: {ts_content!r}"
+    assert ts_content is None, (
+        f"TS file must NOT be written after a failed API call, got: {ts_content!r}"
+    )
 
 
 def test_local_timestamp_blocks_sequential_retrigger():
@@ -1279,9 +1279,9 @@ def test_local_timestamp_blocks_sequential_retrigger():
         repo="gptme/gptme-contrib",
     )
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert (
-        not gh_log
-    ), f"Should NOT have posted trigger (local TS shows recent trigger), got: {gh_log}"
+    assert not gh_log, (
+        f"Should NOT have posted trigger (local TS shows recent trigger), got: {gh_log}"
+    )
     # result.returncode==0 and empty gh_log confirm the trigger was blocked;
     # we intentionally avoid asserting exact stdout message text (fragile)
 
@@ -1302,9 +1302,9 @@ def test_local_timestamp_status_returns_in_progress():
     status = _run_helper(
         "status", fixture, pre_trigger_ts=pre_ts, repo="gptme/gptme-contrib"
     )
-    assert (
-        status.stdout.strip() == "in-progress"
-    ), f"Expected in-progress (local TS < 15min), got: {status.stdout.strip()}"
+    assert status.stdout.strip() == "in-progress", (
+        f"Expected in-progress (local TS < 15min), got: {status.stdout.strip()}"
+    )
 
 
 def test_stale_local_timestamp_does_not_block():
@@ -1327,9 +1327,9 @@ def test_stale_local_timestamp_does_not_block():
     pre_ts = _iso_ago(minutes=20)
     status = _run_helper("status", fixture, pre_trigger_ts=pre_ts, repo="gptme/gptme")
     # Should NOT be in-progress (old TS doesn't block)
-    assert (
-        status.stdout.strip() != "in-progress"
-    ), f"Stale local TS (20min) should not report in-progress, got: {status.stdout.strip()}"
+    assert status.stdout.strip() != "in-progress", (
+        f"Stale local TS (20min) should not report in-progress, got: {status.stdout.strip()}"
+    )
 
 
 def test_local_timestamp_from_previous_cycle_does_not_block():
@@ -1353,9 +1353,9 @@ def test_local_timestamp_from_previous_cycle_does_not_block():
     pre_ts = _iso_ago(minutes=35)
     status = _run_helper("status", fixture, pre_trigger_ts=pre_ts, repo="gptme/gptme")
     # Should NOT be in-progress — the stale cycle TS is before the review
-    assert (
-        status.stdout.strip() != "in-progress"
-    ), f"Pre-review local TS should not block re-review, got: {status.stdout.strip()}"
+    assert status.stdout.strip() != "in-progress", (
+        f"Pre-review local TS should not block re-review, got: {status.stdout.strip()}"
+    )
 
 
 def test_stale_unacked_trigger_no_new_commits_does_not_retrigger():
@@ -1409,9 +1409,9 @@ def test_stale_unacked_trigger_no_new_commits_does_not_retrigger():
 
     # trigger: must NOT post a new comment
     result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
-    assert (
-        result.returncode == 0
-    ), f"trigger must exit 0 (skipped), stderr: {result.stderr}"
+    assert result.returncode == 0, (
+        f"trigger must exit 0 (skipped), stderr: {result.stderr}"
+    )
     assert not gh_log, (
         f"trigger must NOT post @greptileai review comment on stale+no-new-commits. "
         f"Got log: {gh_log!r}"

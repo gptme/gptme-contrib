@@ -166,13 +166,13 @@ def test_query_returns_ranked_results(tmp_path):
     assert len(hits) == 2
 
     # Ordering: gptme.md is more relevant to "gptme assistant" than the lazy-dog doc.
-    assert hits[0]["source"].endswith(
-        "gptme.md"
-    ), f"Expected gptme.md ranked first, got {hits[0]['source']}"
+    assert hits[0]["source"].endswith("gptme.md"), (
+        f"Expected gptme.md ranked first, got {hits[0]['source']}"
+    )
     assert hits[1]["source"].endswith("hello.md")
-    assert (
-        hits[0]["score"] > hits[1]["score"]
-    ), f"Expected gptme.md score > hello.md score; got {hits[0]['score']} vs {hits[1]['score']}"
+    assert hits[0]["score"] > hits[1]["score"], (
+        f"Expected gptme.md score > hello.md score; got {hits[0]['score']} vs {hits[1]['score']}"
+    )
 
     # Result shape contract.
     for h in hits:

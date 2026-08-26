@@ -360,9 +360,9 @@ def test_force_reset_guard_fails_closed_when_origin_pushurl_differs(
         "origin",
         "https://github.com/org/push-repo.git",
     )
-    assert (
-        proc.returncode == 1
-    ), f"expected exit 1 (fail closed), got {proc.returncode}\n{proc.stderr}"
+    assert proc.returncode == 1, (
+        f"expected exit 1 (fail closed), got {proc.returncode}\n{proc.stderr}"
+    )
     assert "pushurl" in proc.stderr or "push" in proc.stderr.lower(), proc.stderr
 
 

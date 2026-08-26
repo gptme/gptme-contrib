@@ -80,9 +80,9 @@ def test_edit_state_done_auto_sets_completed(tmp_path: Path, monkeypatch) -> Non
     injected = datetime.fromisoformat(str(task.metadata["completed"]))
     if injected.tzinfo is None:
         injected = injected.replace(tzinfo=timezone.utc)
-    assert (
-        before <= injected <= after
-    ), f"completed {injected!r} not between {before!r} and {after!r}"
+    assert before <= injected <= after, (
+        f"completed {injected!r} not between {before!r} and {after!r}"
+    )
     raw_frontmatter = (tasks_dir / "my-task.md").read_text().split("---", maxsplit=2)[1]
     assert validate_timestamp_syntax(raw_frontmatter) == []
 
@@ -141,9 +141,9 @@ def test_edit_unrelated_field_does_not_inject_completed(tmp_path: Path, monkeypa
 
     tasks = load_tasks(tasks_dir)
     assert len(tasks) == 1
-    assert (
-        "completed" not in tasks[0].metadata
-    ), "completed must not be injected when only editing an unrelated field"
+    assert "completed" not in tasks[0].metadata, (
+        "completed must not be injected when only editing an unrelated field"
+    )
 
 
 def test_edit_state_done_recurring_does_not_set_completed(tmp_path: Path, monkeypatch) -> None:
@@ -162,9 +162,9 @@ def test_edit_state_done_recurring_does_not_set_completed(tmp_path: Path, monkey
     task = tasks[0]
     # Recurring tasks reset to waiting — completed should not be stamped on reset
     assert task.metadata["state"] == "waiting", "recurring task must reset to waiting"
-    assert (
-        "completed" not in task.metadata
-    ), "recurring done tasks must not carry a completed stamp into the next cycle"
+    assert "completed" not in task.metadata, (
+        "recurring done tasks must not carry a completed stamp into the next cycle"
+    )
 
 
 def test_reopening_terminal_task_clears_completed_for_next_cycle(
@@ -336,9 +336,9 @@ def test_recurring_reset_preserves_explicitly_set_completed(tmp_path: Path, monk
     assert result.exit_code == 0, result.output
     task = load_tasks(tasks_dir)[0]
     assert task.metadata["state"] == "waiting", "7d recur must still reset to waiting"
-    assert (
-        str(task.metadata.get("completed")) == "2026-05-01T00:00:00+00:00"
-    ), "an explicit --set completed must not be silently deleted by the recurrence reset"
+    assert str(task.metadata.get("completed")) == "2026-05-01T00:00:00+00:00", (
+        "an explicit --set completed must not be silently deleted by the recurrence reset"
+    )
 
 
 def test_explicit_completed_clear_wins_over_auto_stamp(tmp_path: Path, monkeypatch) -> None:
@@ -423,9 +423,9 @@ def test_forward_transition_preserves_completed(
     assert result.exit_code == 0, result.output
     task = load_tasks(tasks_dir)[0]
     assert task.metadata["state"] == to_state
-    assert (
-        "completed" in task.metadata
-    ), f"{from_state} → {to_state} is not a reopen; completed must survive"
+    assert "completed" in task.metadata, (
+        f"{from_state} → {to_state} is not a reopen; completed must survive"
+    )
     stored = datetime.fromisoformat(str(task.metadata["completed"]))
     if stored.tzinfo is None:
         stored = stored.replace(tzinfo=timezone.utc)

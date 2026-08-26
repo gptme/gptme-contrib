@@ -1444,9 +1444,9 @@ def test_extract_signals_cc_pr_merge_no_false_positive_from_file_read():
         "cat packages/gptme-sessions/tests/test_sessions.py", fixture_content
     )
     sigs = extract_signals_cc(msgs)
-    assert (
-        sigs["pr_merges"] == []
-    ), f"Reading test fixtures must not credit pr_merges: got {sigs['pr_merges']}"
+    assert sigs["pr_merges"] == [], (
+        f"Reading test fixtures must not credit pr_merges: got {sigs['pr_merges']}"
+    )
 
 
 def test_extract_signals_cc_git_commits_deduplicated_across_tool_calls():
@@ -1468,9 +1468,9 @@ def test_extract_signals_cc_git_commits_deduplicated_across_tool_calls():
     second_call = _make_bash_exchange("git show HEAD --stat", commit_line, bash_id="bash_002")
     msgs = first_call + second_call
     sigs = extract_signals_cc(msgs)
-    assert sigs["git_commits"] == [
-        f"{commit_msg} ({hash_val})"
-    ], f"Expected exactly 1 commit entry, got: {sigs['git_commits']}"
+    assert sigs["git_commits"] == [f"{commit_msg} ({hash_val})"], (
+        f"Expected exactly 1 commit entry, got: {sigs['git_commits']}"
+    )
 
 
 def test_grade_signals_dead_session():
@@ -6723,9 +6723,9 @@ def test_sync_dry_run_signals_skips_extraction_for_new_records(tmp_path: Path, c
     )
     rc = main()
     assert rc == 0
-    assert (
-        extraction_called == []
-    ), "extract_from_path should not be called for new records in dry-run mode"
+    assert extraction_called == [], (
+        "extract_from_path should not be called for new records in dry-run mode"
+    )
     captured = capsys.readouterr()
     assert "would import" in captured.out
 
@@ -8248,9 +8248,9 @@ def test_extract_signals_cc_background_commit_no_duplicate(tmp_path: Path):
     ]
     sigs = extract_signals_cc(msgs)
     # Must be exactly 1, not 2
-    assert (
-        len(sigs["git_commits"]) == 1
-    ), f"Expected 1 commit, got {len(sigs['git_commits'])}: {sigs['git_commits']}"
+    assert len(sigs["git_commits"]) == 1, (
+        f"Expected 1 commit, got {len(sigs['git_commits'])}: {sigs['git_commits']}"
+    )
     assert "feat(test): add background dedup test" in sigs["git_commits"][0]
     assert "a1b2c3d" in sigs["git_commits"][0]
 

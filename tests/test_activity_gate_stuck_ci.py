@@ -64,9 +64,9 @@ def _extract_classifier() -> str:
     """Pull the jq program out of activity-gate.sh so the test can't drift from it."""
     src = GATE.read_text()
     marker = 'ci_state=$(echo "$pr_data" | jq -r \''
-    assert (
-        marker in src
-    ), "ci_state classifier not found — did check_ci_failures change shape?"
+    assert marker in src, (
+        "ci_state classifier not found — did check_ci_failures change shape?"
+    )
     body = src.split(marker, 1)[1]
     return body.split("')", 1)[0]
 
@@ -257,9 +257,9 @@ check_ci_failures "o/r" '{json.dumps([pr])}'
 """
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     emitted = "EMIT" in proc.stdout
-    assert (
-        emitted is should_emit
-    ), f"stdout={proc.stdout!r} stderr={proc.stderr[-400:]!r}"
+    assert emitted is should_emit, (
+        f"stdout={proc.stdout!r} stderr={proc.stderr[-400:]!r}"
+    )
     if should_emit:
         assert "CI stuck" in proc.stdout
 

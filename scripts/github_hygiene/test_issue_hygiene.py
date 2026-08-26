@@ -158,9 +158,9 @@ def test_model_arg_comes_before_stdin_dash():
     # Verify `-` is appended last (after any --model extension)
     append_dash_pos = src.rfind('append("-")')
     extend_model_pos = src.rfind('cmd.extend(["--model"')
-    assert (
-        append_dash_pos > extend_model_pos
-    ), "--model must be added to cmd before the positional '-' is appended"
+    assert append_dash_pos > extend_model_pos, (
+        "--model must be added to cmd before the positional '-' is appended"
+    )
 
 
 if __name__ == "__main__":

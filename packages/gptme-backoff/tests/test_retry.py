@@ -181,9 +181,9 @@ def test_retry_api_call_timeout_stops_retries():
     with pytest.raises(_TemporaryError, match="transient"):
         always_fails()
     # Should stop retrying after ~0.02s, not attempt all 10
-    assert (
-        call_count[0] < 10
-    ), "timeout should stop retries before exhausting max_attempts"
+    assert call_count[0] < 10, (
+        "timeout should stop retries before exhausting max_attempts"
+    )
 
 
 # ---- Preset: File operation ----

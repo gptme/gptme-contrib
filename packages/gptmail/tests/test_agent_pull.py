@@ -746,9 +746,9 @@ def test_pull_json_failed_agents_populated_on_scp_failure(
     assert json_line is not None, f"No JSON in output: {result.output!r}"
     payload = json.loads(json_line)
     assert "gordon" in payload["failed_agents"]
-    assert (
-        "gordon" in payload["agents_polled"]
-    ), f"SCP-failed agent was reachable and should appear in agents_polled: {payload}"
+    assert "gordon" in payload["agents_polled"], (
+        f"SCP-failed agent was reachable and should appear in agents_polled: {payload}"
+    )
     assert payload["new_count"] == 0
 
 
@@ -777,10 +777,10 @@ def test_pull_json_failed_agents_populated_on_ssh_failure(
     )
     assert json_line is not None, f"No JSON in output: {result.output!r}"
     payload = json.loads(json_line)
-    assert (
-        "gordon" in payload["failed_agents"]
-    ), f"SSH-unreachable agent missing from failed_agents: {payload}"
-    assert (
-        "gordon" not in payload["agents_polled"]
-    ), f"SSH-unreachable agent should not appear in agents_polled: {payload}"
+    assert "gordon" in payload["failed_agents"], (
+        f"SSH-unreachable agent missing from failed_agents: {payload}"
+    )
+    assert "gordon" not in payload["agents_polled"], (
+        f"SSH-unreachable agent should not appear in agents_polled: {payload}"
+    )
     assert payload["new_count"] == 0

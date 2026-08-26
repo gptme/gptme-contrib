@@ -247,9 +247,9 @@ def test_merge_conflict_check_bypasses_pr_cache() -> None:
             tmp, state_dir, FAKE_GH_CONFLICT_REGRESSION, extra_env=live_uncached
         )
         assert second.returncode in (0, 1), second.stderr
-        assert (
-            second_count == 3
-        ), "second run should skip cached producer but still do one live PR fetch"
+        assert second_count == 3, (
+            "second run should skip cached producer but still do one live PR fetch"
+        )
         assert '"type":"merge_conflict"' in second.stdout, second.stdout
 
 
@@ -307,7 +307,7 @@ def test_empty_repo_live_pr_fetch_uses_shared_cache() -> None:
         # Second run: both lanes hit fresh cache -> no calls.
         second, second_count = _run_gate_jsonl(tmp, state_dir, FAKE_GH_EMPTY_PRS)
         assert second.returncode in (0, 1), second.stderr
-        assert (
-            second_count == 1
-        ), "second run should add no actual PR fetches for empty repo"
+        assert second_count == 1, (
+            "second run should add no actual PR fetches for empty repo"
+        )
         assert "merge_conflict" not in second.stdout, second.stdout

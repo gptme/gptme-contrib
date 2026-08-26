@@ -239,12 +239,12 @@ def test_no_score_state_write_uses_dark_score_field() -> None:
         "dark_score goes in field 5); found writes: " + str(writes)
     )
     for w in dark_writes:
-        assert (
-            "${ai_verdict}" in w
-        ), f"no-score branch write missing the verdict field: {w!r}"
-        assert (
-            "${dark_score}" in w
-        ), f"no-score branch write missing dark_score (expected in field 5): {w!r}"
+        assert "${ai_verdict}" in w, (
+            f"no-score branch write missing the verdict field: {w!r}"
+        )
+        assert "${dark_score}" in w, (
+            f"no-score branch write missing dark_score (expected in field 5): {w!r}"
+        )
 
 
 def test_dark_branch_calls_ai_review_verdict_unconditionally() -> None:
@@ -310,9 +310,9 @@ def test_no_greptile_score_dirty_ai_review_emits_needs_fix() -> None:
             f"got: {items[0]}"
         )
         assert items[0]["number"] == TEST_PR
-        assert "Greptile dark" in (
-            items[0].get("detail") or ""
-        ), f"detail must mention 'Greptile dark': {items[0]}"
+        assert "Greptile dark" in (items[0].get("detail") or ""), (
+            f"detail must mention 'Greptile dark': {items[0]}"
+        )
 
 
 def test_no_greptile_score_first_discovery_seeds_state_no_emit() -> None:
@@ -337,9 +337,9 @@ def test_no_greptile_score_first_discovery_seeds_state_no_emit() -> None:
         assert result.returncode in (0, 1), result.stderr
 
         items = _greptile_items(result)
-        assert (
-            items == []
-        ), f"first discovery must not emit; got {items}\nstdout: {result.stdout}"
+        assert items == [], (
+            f"first discovery must not emit; got {items}\nstdout: {result.stdout}"
+        )
 
         # State file must be seeded with an empty first field.
         state_file = _state_file(state_dir)
@@ -695,9 +695,9 @@ def test_dark_branch_high_dark_score_dirty_ai_emits_needs_fix() -> None:
             if i.get("type")
             in ("greptile_needs_improvement", "reviewer_needs_improvement")
         ]
-        assert (
-            improvement_items == []
-        ), f"no improvement item expected when AI verdict is dirty; got: {improvement_items}"
+        assert improvement_items == [], (
+            f"no improvement item expected when AI verdict is dirty; got: {improvement_items}"
+        )
 
 
 def test_dark_branch_pending_ai_verdict_does_not_emit() -> None:
@@ -835,9 +835,9 @@ def test_ai_review_verdict_call_has_error_handling() -> None:
     dark_body = src[dark_branch_start:dark_branch_end]
 
     # The call must be followed by a || fallback on the same or next line.
-    assert (
-        "ai_review_verdict" in dark_body
-    ), "ai_review_verdict not found in dark branch of check_greptile_scores"
+    assert "ai_review_verdict" in dark_body, (
+        "ai_review_verdict not found in dark branch of check_greptile_scores"
+    )
     # Require either "|| ai_verdict=" or "|| true" immediately after the call.
     assert "|| ai_verdict=" in dark_body or "|| true" in dark_body, (
         "Dark branch must have error handling (|| ai_verdict=... or || true) after "
@@ -868,9 +868,9 @@ def test_check_merge_ready_field5_fallback_before_emit() -> None:
         "file (dark-state format: ':fetched_at:sha:verdict:preserved_score'). "
         "The fallback 'cut -d: -f5' was not found in the function body."
     )
-    assert (
-        'emit_item "merge_ready"' in func_body
-    ), "emit_item merge_ready not found in check_merge_ready (test precondition)"
+    assert 'emit_item "merge_ready"' in func_body, (
+        "emit_item merge_ready not found in check_merge_ready (test precondition)"
+    )
 
     fallback_pos = func_body.index("cut -d: -f5")
     emit_pos = func_body.index('emit_item "merge_ready"')
@@ -962,9 +962,9 @@ def test_check_own_pr_review_state_field5_fallback_before_emit() -> None:
         "file (dark-state format: ':fetched_at:sha:verdict:preserved_score'). "
         "The fallback 'cut -d: -f5' was not found in the function body."
     )
-    assert (
-        "emit_item" in func_body
-    ), "emit_item not found in check_own_pr_review_state (test precondition)"
+    assert "emit_item" in func_body, (
+        "emit_item not found in check_own_pr_review_state (test precondition)"
+    )
 
     fallback_pos = func_body.index("cut -d: -f5")
     emit_pos = func_body.index("emit_item")

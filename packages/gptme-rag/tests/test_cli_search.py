@@ -293,9 +293,9 @@ def test_search_json_truncated_on_dedup(tmp_path):
         f"got total_results={data['total_results']}"
     )
     # assemble_context sees identical content and drops the second doc
-    assert (
-        ctx["results_in_context"] == 1
-    ), f"Expected dedup to keep only 1 doc, got results_in_context={ctx['results_in_context']}"
+    assert ctx["results_in_context"] == 1, (
+        f"Expected dedup to keep only 1 doc, got results_in_context={ctx['results_in_context']}"
+    )
     # The fix: truncated must be True when dedup dropped results
     assert ctx["truncated"] is True, (
         f"results_in_context={ctx['results_in_context']} < "
@@ -417,9 +417,9 @@ def test_search_json_emits_error_object_on_invalid_weights(tmp_path):
     assert result.output.strip(), "Expected JSON error object on stdout, got empty output"
     data = json.loads(result.output.strip())
     assert "error" in data, f"Expected 'error' key in JSON output, got: {data}"
-    assert (
-        "weights" in data["error"].lower() or "json" in data["error"].lower()
-    ), f"Expected error to mention weights/JSON, got: {data['error']}"
+    assert "weights" in data["error"].lower() or "json" in data["error"].lower(), (
+        f"Expected error to mention weights/JSON, got: {data['error']}"
+    )
 
 
 def test_search_json_emits_error_object_on_get_expanded_content_failure(tmp_path):

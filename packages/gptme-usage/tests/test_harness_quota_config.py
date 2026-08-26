@@ -141,9 +141,9 @@ def test_estimate_session_cost_config_overrides_price(toml_path: Path) -> None:
         "claude-code", "opus", cache_read_tokens=1_000_000, config=cfg_2x
     )
     assert cost_base is not None and cost_2x is not None
-    assert (
-        abs(cost_2x / cost_base - 2.0) < 0.01
-    ), f"expected 2x ratio, got {cost_2x}/{cost_base}"
+    assert abs(cost_2x / cost_base - 2.0) < 0.01, (
+        f"expected 2x ratio, got {cost_2x}/{cost_base}"
+    )
 
 
 def test_config_price_table_replaces_not_merges(toml_path: Path) -> None:
@@ -361,9 +361,9 @@ def test_merge_with_module_defaults_does_not_mutate_input() -> None:
     ],
 )
 def test_resolve_cc_version(input_model: str, expected: str) -> None:
-    assert (
-        resolve_cc_version(input_model) == expected
-    ), f"resolve_cc_version({input_model!r}) -> {resolve_cc_version(input_model)!r}, want {expected!r}"
+    assert resolve_cc_version(input_model) == expected, (
+        f"resolve_cc_version({input_model!r}) -> {resolve_cc_version(input_model)!r}, want {expected!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -381,9 +381,9 @@ def test_is_post_agent_sdk_credit_change_paused() -> None:
     at_cutover = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
     after = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
     for ts in (before, at_cutover, after, None):
-        assert not is_post_agent_sdk_credit_change(
-            ts
-        ), f"Expected False while paused, got True for ts={ts!r}"
+        assert not is_post_agent_sdk_credit_change(ts), (
+            f"Expected False while paused, got True for ts={ts!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -568,9 +568,9 @@ def test_resolve_gptme_model_config_unknown_passthrough(toml_path: Path) -> None
     ],
 )
 def test_resolve_copilot_version(model: str, expected: str) -> None:
-    assert (
-        resolve_copilot_version(model) == expected
-    ), f"resolve_copilot_version({model!r}) -> {resolve_copilot_version(model)!r}, want {expected!r}"
+    assert resolve_copilot_version(model) == expected, (
+        f"resolve_copilot_version({model!r}) -> {resolve_copilot_version(model)!r}, want {expected!r}"
+    )
 
 
 FABLE_TOML_FIXTURE = """\
@@ -618,9 +618,9 @@ def test_estimate_session_cost_fable_alias_resolves(fable_toml_path: Path) -> No
         "claude-code", "fable-5", cache_read_tokens=1_000_000, config=cfg
     )
     assert cost_alias is not None and cost_versioned is not None
-    assert (
-        abs(cost_alias - cost_versioned) < 0.000001
-    ), f"'fable' and 'fable-5' should resolve to the same cost; got {cost_alias} vs {cost_versioned}"
+    assert abs(cost_alias - cost_versioned) < 0.000001, (
+        f"'fable' and 'fable-5' should resolve to the same cost; got {cost_alias} vs {cost_versioned}"
+    )
 
 
 # Skeleton tests to restore when CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED is set back to False.

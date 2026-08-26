@@ -796,16 +796,16 @@ def test_hangup_tool_advertised_in_openai_session_config() -> None:
     from gptme_voice.realtime import openai_client
 
     source = inspect.getsource(openai_client.OpenAIRealtimeClient.connect)
-    assert (
-        '"name": "hangup"' in source
-    ), "hangup tool must be declared in OpenAIRealtimeClient.connect() tools list"
+    assert '"name": "hangup"' in source, (
+        "hangup tool must be declared in OpenAIRealtimeClient.connect() tools list"
+    )
     assert '"name": "subagent"' in source, "subagent tool must also still be declared"
-    assert (
-        '"name": "subagent_status"' in source
-    ), "subagent_status tool must be declared so the model can check pending tasks"
-    assert (
-        '"name": "subagent_cancel"' in source
-    ), "subagent_cancel tool must be declared so the model can cancel pending tasks"
+    assert '"name": "subagent_status"' in source, (
+        "subagent_status tool must be declared so the model can check pending tasks"
+    )
+    assert '"name": "subagent_cancel"' in source, (
+        "subagent_cancel tool must be declared so the model can cancel pending tasks"
+    )
 
 
 def test_subagent_status_empty_when_no_tasks() -> None:
@@ -973,9 +973,9 @@ def test_subagent_status_shows_asyncio_timeout() -> None:
             assert len(recent) == 1
             entry = recent[0]
             assert entry["task_id"] == task_id
-            assert (
-                entry["status"] == "timed_out"
-            ), f"expected timed_out, got {entry['status']}"
+            assert entry["status"] == "timed_out", (
+                f"expected timed_out, got {entry['status']}"
+            )
             assert entry["returncode"] == 124
 
     asyncio.run(_exercise())

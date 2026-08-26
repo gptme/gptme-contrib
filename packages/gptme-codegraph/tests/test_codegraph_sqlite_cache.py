@@ -211,7 +211,7 @@ def test_sqlite_invalidates_on_schema_bump(sample_dir, monkeypatch):
     # First call after the bump must observe an empty data store.
     bumped._init_schema()
     reloaded = bumped.load()
-    assert reloaded is None or not reloaded.has(
-        "add"
-    ), "Expected cache to be invalidated after SCHEMA_VERSION bump"
+    assert reloaded is None or not reloaded.has("add"), (
+        "Expected cache to be invalidated after SCHEMA_VERSION bump"
+    )
     bumped.close()

@@ -15,9 +15,9 @@ def test_allowed_entries_pass():
 
     # A partial subset — real repos don't always have every allowed entry present.
     partial_subset = frozenset(["scripts", "tests", "lessons", "README.md"])
-    assert (
-        partial_subset <= check_root_structure.ALLOWED_ROOT_ENTRIES
-    ), "test precondition"
+    assert partial_subset <= check_root_structure.ALLOWED_ROOT_ENTRIES, (
+        "test precondition"
+    )
     with (
         patch.object(check_root_structure, "get_repo_root", return_value=REPO_ROOT),
         patch.object(

@@ -2135,9 +2135,9 @@ class TestSlotCooldownHelpers:
             with caplog.at_level(logging.WARNING, logger="gptme_runloops.pm_dispatch"):
                 result = _write_slot_dispatch_marker("slot-z", ro_dir)
             assert result is False
-            assert any(
-                "slot-z" in r.message for r in caplog.records
-            ), "Expected warning mentioning slot name"
+            assert any("slot-z" in r.message for r in caplog.records), (
+                "Expected warning mentioning slot name"
+            )
         finally:
             ro_dir.chmod(0o755)
 

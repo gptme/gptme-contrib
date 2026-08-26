@@ -107,9 +107,9 @@ def test_hash_in_trailing_comment_not_an_error():
     # loss.  Must NOT be a hard schema error.  warn_inline_hash() may still
     # emit a softer warning about the ambiguity.
     raw = "state: active  # current\n"
-    assert (
-        validate_unquoted_hash_scalars(raw) == []
-    ), "trailing comment on a complete scalar value must not be a hard error"
+    assert validate_unquoted_hash_scalars(raw) == [], (
+        "trailing comment on a complete scalar value must not be a hard error"
+    )
     # warn_inline_hash CAN surface this as a warning (intentionally softer).
     warnings = warn_inline_hash(raw)
     assert len(warnings) == 1
@@ -214,9 +214,9 @@ def test_owner_field_rejected(tmp_path):
     )
     # validate_schema covers structural errors — `owner` passes structural checks.
     schema_errors = validate_schema(p)
-    assert not any(
-        "owner" in e for e in schema_errors
-    ), "owner should not be a structural schema error"
+    assert not any("owner" in e for e in schema_errors), (
+        "owner should not be a structural schema error"
+    )
     # lint_frontmatter_fields() catches it as a deprecation warning.
     findings = lint_frontmatter_fields({"state": "backlog", "owner": "bob"})
     assert any("owner" in f[1] for f in findings), "owner should be flagged as deprecated"
@@ -256,12 +256,12 @@ def test_inline_hash_surfaced_as_warning_by_schema(tmp_path):
     )
     warnings: list[str] = []
     errors = validate_schema(p, collect_warnings=warnings)
-    assert not any(
-        "#" in e or "hash" in e.lower() for e in errors
-    ), "inline ' #' must not be a hard schema error"
-    assert any(
-        "waiting_for" in w for w in warnings
-    ), "inline ' #' must surface as a warning via collect_warnings"
+    assert not any("#" in e or "hash" in e.lower() for e in errors), (
+        "inline ' #' must not be a hard schema error"
+    )
+    assert any("waiting_for" in w for w in warnings), (
+        "inline ' #' must surface as a warning via collect_warnings"
+    )
 
 
 def test_placement_form_passes_schema(tmp_path):

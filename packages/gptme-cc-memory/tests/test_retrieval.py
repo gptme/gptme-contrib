@@ -246,9 +246,9 @@ Archived: CI/CD pipeline deployment monitoring. Archived: code review authentica
             limit=5,
         )
         names = [r["name"] for r in results]
-        assert (
-            "archived-memories" not in names
-        ), "MEMORY-archive.md must be excluded from recall but was returned as a result"
+        assert "archived-memories" not in names, (
+            "MEMORY-archive.md must be excluded from recall but was returned as a result"
+        )
 
     def test_real_memories_still_recalled_with_archive_present(
         self, memory_dir: Path, state_file: Path
@@ -262,9 +262,9 @@ Archived: CI/CD pipeline deployment monitoring. Archived: code review authentica
             limit=5,
         )
         names = [r["name"] for r in results]
-        assert (
-            "never-skip-precommit" in names
-        ), "Real memories should still be recalled when MEMORY-archive.md is present"
+        assert "never-skip-precommit" in names, (
+            "Real memories should still be recalled when MEMORY-archive.md is present"
+        )
 
 
 class TestInjectionCooldown:

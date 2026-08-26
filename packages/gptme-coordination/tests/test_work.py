@@ -198,9 +198,9 @@ class TestHMACStaleOnReclaim:
         # Reclaim without a secret — stale HMAC must be cleared
         reclaimed = work.claim("agent-b", "task-1")
         assert reclaimed is not None
-        assert (
-            reclaimed.hmac is None
-        ), "stale HMAC should be cleared on secretless reclaim"
+        assert reclaimed.hmac is None, (
+            "stale HMAC should be cleared on secretless reclaim"
+        )
         assert reclaimed.verified is False
 
     def test_reclaim_with_secret_refreshes_hmac(self, work: WorkClaimManager) -> None:
@@ -222,9 +222,9 @@ class TestHMACStaleOnReclaim:
         # Extend without a secret
         extended = work.claim("agent-a", "task-1")
         assert extended is not None
-        assert (
-            extended.hmac is None
-        ), "stale HMAC should be cleared on secretless extend"
+        assert extended.hmac is None, (
+            "stale HMAC should be cleared on secretless extend"
+        )
 
     def test_verified_false_on_read(self, work: WorkClaimManager) -> None:
         """Claims read from DB are never marked verified=True; only verify_claim() does that."""

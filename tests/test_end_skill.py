@@ -353,9 +353,9 @@ def test_root_commit_files_changed_counted(tmp_path: Path):
     _git(work, "push", "-q", "-u", "origin", "HEAD:master")
     rc, rep = run_check(work, "--since", "1h")
     assert rc == 0, rep
-    assert (
-        rep["files_changed"] >= 15
-    ), "root commit files must be counted via empty-tree diff"
+    assert rep["files_changed"] >= 15, (
+        "root commit files must be counted via empty-tree diff"
+    )
     assert rep["verdict"] == "CLEAN_SUBSTANTIAL"
 
 

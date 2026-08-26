@@ -445,9 +445,9 @@ class TestStatsCommand:
             rc, out = _invoke(["stats"], tmp_path)
         assert rc == 0
         # Exactly one sync recommendation — not two
-        assert (
-            out.count("gptme-sessions sync") == 1
-        ), f"Expected exactly one sync recommendation, got:\n{out}"
+        assert out.count("gptme-sessions sync") == 1, (
+            f"Expected exactly one sync recommendation, got:\n{out}"
+        )
 
     def test_stats_no_matches_with_filter(self, tmp_path: Path):
         """stats with filter that matches nothing shows appropriate message."""

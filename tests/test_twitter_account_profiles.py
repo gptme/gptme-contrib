@@ -287,9 +287,9 @@ def test_wait_for_callback_file_preserves_file_for_caller_cleanup(
     code, url = twitter_module._wait_for_callback_file(f, timeout=5)
     assert code == "xyz"
     # File still present — caller's responsibility to clean up after CSRF check.
-    assert (
-        f.exists()
-    ), "callback file must not be deleted inside _wait_for_callback_file"
+    assert f.exists(), (
+        "callback file must not be deleted inside _wait_for_callback_file"
+    )
 
 
 def test_wait_for_callback_file_handles_file_disappearing_before_read(

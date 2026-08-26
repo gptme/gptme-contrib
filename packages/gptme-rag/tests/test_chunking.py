@@ -121,9 +121,9 @@ def test_chunk_retrieval(test_file, indexer):
     # Check chunks
     assert len(chunks) > 1, "Document should be split into multiple chunks"
     assert all(chunk.is_chunk for chunk in chunks), "All items should be chunks"
-    assert all(
-        chunk.doc_id is not None and chunk.doc_id.startswith(doc_id) for chunk in chunks
-    ), "All chunks should belong to the same document"
+    assert all(chunk.doc_id is not None and chunk.doc_id.startswith(doc_id) for chunk in chunks), (
+        "All chunks should belong to the same document"
+    )
 
     # Check chunks are in order
     chunk_indices = [chunk.chunk_index or 0 for chunk in chunks]

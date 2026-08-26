@@ -210,9 +210,9 @@ class TestCapacityAwareFallbackOrder:
         _write_obs(tmp_path, "bob", "seven_day", (now - timedelta(days=6)).isoformat())
 
         result = capacity_aware_fallback_order(["bob", "alice"], tmp_path, now=now)
-        assert (
-            result[0] == "alice"
-        ), f"alice (low pressure) should sort first; got {result}"
+        assert result[0] == "alice", (
+            f"alice (low pressure) should sort first; got {result}"
+        )
         assert result[1] == "bob"
 
     def test_unknown_sub_ranks_by_unknown_pressure(self, tmp_path: Path) -> None:
@@ -225,9 +225,9 @@ class TestCapacityAwareFallbackOrder:
         # bob has no observation → gets unknown_pressure = 0.5
 
         result = capacity_aware_fallback_order(["alice", "bob"], tmp_path, now=now)
-        assert (
-            result[0] == "bob"
-        ), "bob (unknown=0.5) < alice (~0.71); should sort first"
+        assert result[0] == "bob", (
+            "bob (unknown=0.5) < alice (~0.71); should sort first"
+        )
 
 
 class TestSoonestResettingFallback:

@@ -199,6 +199,6 @@ def test_token_refresh_lock_is_exclusive(tmp_path: Path) -> None:
     t2.join()
 
     # second-in must come after first-out (i.e., lock was actually exclusive)
-    assert order.index("first-out") < order.index(
-        "second-in"
-    ), f"Lock was not exclusive; order: {order}"
+    assert order.index("first-out") < order.index("second-in"), (
+        f"Lock was not exclusive; order: {order}"
+    )

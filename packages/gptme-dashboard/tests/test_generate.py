@@ -2987,9 +2987,9 @@ def test_generate_no_sitemap_when_suppressed(workspace: Path, tmp_path: Path):
     template_dir = Path(__file__).parent.parent / "src" / "gptme_dashboard" / "templates"
     generate(workspace, output, template_dir, base_url="-")
 
-    assert not (
-        output / "sitemap.xml"
-    ).exists(), "sitemap.xml should be suppressed with base_url='-'"
+    assert not (output / "sitemap.xml").exists(), (
+        "sitemap.xml should be suppressed with base_url='-'"
+    )
 
 
 def test_generate_no_sitemap_when_no_github_remote(tmp_path: Path):
@@ -3001,9 +3001,9 @@ def test_generate_no_sitemap_when_no_github_remote(tmp_path: Path):
     with patch("gptme_dashboard.generate.detect_github_url", return_value=""):
         generate(tmp_path, output, template_dir)
 
-    assert not (
-        output / "sitemap.xml"
-    ).exists(), "sitemap.xml should not be generated without a base URL"
+    assert not (output / "sitemap.xml").exists(), (
+        "sitemap.xml should not be generated without a base URL"
+    )
 
 
 # --- Description normalisation tests ---
@@ -3334,9 +3334,9 @@ def test_generate_dashboard_readme_section_label(workspace: Path, tmp_path: Path
     # Nav link must reference #about and show "Core Files" label
     about_nav_idx = html.index('href="#about"')
     nav_snippet = html[about_nav_idx : about_nav_idx + 60]
-    assert (
-        "Core Files" in nav_snippet
-    ), f"Nav link for #about should show Core Files: {nav_snippet!r}"
+    assert "Core Files" in nav_snippet, (
+        f"Nav link for #about should show Core Files: {nav_snippet!r}"
+    )
 
 
 def test_generate_dashboard_section_order_matches_nav(workspace: Path, tmp_path: Path):
@@ -3390,9 +3390,9 @@ def test_generate_dashboard_content_nav_group_hidden_when_no_content(
     html = (output / "index.html").read_text()
 
     # The "Content" nav group heading must not appear
-    assert (
-        "Content</h3>" not in html
-    ), "Content nav group should be hidden on a sparse workspace with no content data"
+    assert "Content</h3>" not in html, (
+        "Content nav group should be hidden on a sparse workspace with no content data"
+    )
     # The Workspace group is always present (packages/plugins/guidance are unconditional)
     assert "Workspace</h3>" in html
 
@@ -3984,9 +3984,9 @@ def test_static_search_initdynamic_sets_api_flag(workspace: Path, tmp_path: Path
         r"catch\s*\(e\)\s*\{[^}]*No backend[^}]*_apiAvailable\s*=\s*false[^}]*await\s+_loadStaticSearchIndex\(\)",
         re.DOTALL,
     )
-    assert catch_block.search(
-        html
-    ), "initDynamic catch block must set _apiAvailable=false and await _loadStaticSearchIndex()"
+    assert catch_block.search(html), (
+        "initDynamic catch block must set _apiAvailable=false and await _loadStaticSearchIndex()"
+    )
 
 
 def test_search_button_always_present(workspace: Path, tmp_path: Path):
@@ -4026,9 +4026,9 @@ def test_static_search_null_api_available_shows_loading(workspace: Path, tmp_pat
     generate(workspace, output)
     html = (output / "index.html").read_text()
     # Guard for the null window must appear before the false guard
-    assert (
-        "_apiAvailable === null" in html
-    ), "runSearch must guard on null to prevent 404 before initDynamic resolves"
+    assert "_apiAvailable === null" in html, (
+        "runSearch must guard on null to prevent 404 before initDynamic resolves"
+    )
     assert "Loading search index" in html, "null guard must show a loading placeholder to the user"
 
 
@@ -4039,9 +4039,9 @@ def test_static_search_plugin_enabled_nullable(workspace: Path, tmp_path: Path):
     html = (output / "index.html").read_text()
     # p.enabled == null ? '' : ... — null check must come first so absent field → ''
     # A plain p.enabled ? 'enabled' : 'disabled' would make undefined → 'disabled'
-    assert (
-        "p.enabled == null" in html
-    ), "_buildClientIndex must treat absent p.enabled as empty string, not 'disabled'"
+    assert "p.enabled == null" in html, (
+        "_buildClientIndex must treat absent p.enabled as empty string, not 'disabled'"
+    )
 
 
 def test_static_search_broken_url_guard(workspace: Path, tmp_path: Path):
@@ -4058,13 +4058,13 @@ def test_static_search_failed_load_sentinel(workspace: Path, tmp_path: Path):
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
-    assert (
-        "_staticSearchIndex = false" in html
-    ), "_loadStaticSearchIndex must set false sentinel on failure"
+    assert "_staticSearchIndex = false" in html, (
+        "_loadStaticSearchIndex must set false sentinel on failure"
+    )
     assert "_staticSearchIndex === false" in html, "runSearch must branch on false sentinel"
-    assert (
-        "Search unavailable" in html
-    ), "user must see an error message when static index load failed"
+    assert "Search unavailable" in html, (
+        "user must see an error message when static index load failed"
+    )
 
 
 def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
@@ -4141,9 +4141,9 @@ def test_static_search_has_page_skips_bodyless_packages(workspace: Path, tmp_pat
     )
     # Same guard for plugins
     plugin_loop_idx = html.index("data.plugins", build_idx)
-    assert (
-        "p.has_page" in html[plugin_loop_idx : plugin_loop_idx + 200]
-    ), "_buildClientIndex must check p.has_page before indexing plugins"
+    assert "p.has_page" in html[plugin_loop_idx : plugin_loop_idx + 200], (
+        "_buildClientIndex must check p.has_page before indexing plugins"
+    )
 
 
 def test_generate_json_has_page_field(workspace: Path):
@@ -4159,13 +4159,13 @@ def test_generate_json_has_page_field(workspace: Path):
     parsed = json_mod.loads(json_str)
     for pkg in parsed.get("packages", []):
         assert "has_page" in pkg, f"Package {pkg.get('name')} missing has_page field in data.json"
-        assert isinstance(
-            pkg["has_page"], bool
-        ), f"has_page must be a bool, got {type(pkg['has_page'])}"
+        assert isinstance(pkg["has_page"], bool), (
+            f"has_page must be a bool, got {type(pkg['has_page'])}"
+        )
     for plugin in parsed.get("plugins", []):
-        assert (
-            "has_page" in plugin
-        ), f"Plugin {plugin.get('name')} missing has_page field in data.json"
-        assert isinstance(
-            plugin["has_page"], bool
-        ), f"has_page must be a bool, got {type(plugin['has_page'])}"
+        assert "has_page" in plugin, (
+            f"Plugin {plugin.get('name')} missing has_page field in data.json"
+        )
+        assert isinstance(plugin["has_page"], bool), (
+            f"has_page must be a bool, got {type(plugin['has_page'])}"
+        )

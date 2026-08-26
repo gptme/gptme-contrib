@@ -127,7 +127,7 @@ def test_merge_ready_is_blocked_by_a_dirty_ai_verdict() -> None:
     dispatcher could merge exactly what the fix arm is queued to repair.
     """
     body = _extract_function("check_merge_ready")
-    assert (
-        "cut -d: -f4" in body
-    ), "check_merge_ready must read the verdict field from the greptile state file"
+    assert "cut -d: -f4" in body, (
+        "check_merge_ready must read the verdict field from the greptile state file"
+    )
     assert '= "dirty"' in body, "…and skip the PR when that verdict is dirty"

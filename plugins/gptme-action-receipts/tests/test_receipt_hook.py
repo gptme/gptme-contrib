@@ -182,9 +182,9 @@ class TestDefaultLedgerPath:
         import gptme_action_receipts.hooks.receipt_hook as mod
 
         importlib.reload(mod)
-        assert (
-            mod._DEFAULT_LEDGER.is_absolute()
-        ), f"Expected absolute path, got: {mod._DEFAULT_LEDGER}"
+        assert mod._DEFAULT_LEDGER.is_absolute(), (
+            f"Expected absolute path, got: {mod._DEFAULT_LEDGER}"
+        )
         assert str(mod._DEFAULT_LEDGER).endswith("gptme/receipts.jsonl")
 
     def test_set_xdg_data_home_is_used(self, tmp_path, monkeypatch):

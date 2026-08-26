@@ -568,9 +568,9 @@ def test_api_sessions_basic_fallback_timestamp(tmp_path: Path):
         assert session["timestamp"] != "", "timestamp must not be empty when using basic fallback"
         assert session["timestamp"].startswith(today)
         # Verify outcome is preserved from basic fallback (not overwritten to "noop" via grade=0)
-        assert (
-            session["outcome"] == "unknown"
-        ), "basic fallback outcome must be preserved, not overridden"
+        assert session["outcome"] == "unknown", (
+            "basic fallback outcome must be preserved, not overridden"
+        )
 
 
 def test_api_session_stats_basic_fallback_unknown_not_noop(tmp_path: Path):
@@ -612,9 +612,9 @@ def test_api_session_stats_basic_fallback_unknown_not_noop(tmp_path: Path):
         assert data.get("unknown", 0) == 1, "basic-fallback sessions should be counted as unknown"
         assert data["noop"] == 0, "unknown sessions must not be classified as noop"
         # success_rate must be null (not 0%) when all sessions are unknown (no data ≠ failure)
-        assert (
-            data["success_rate"] is None
-        ), "success_rate must be null when no known-outcome sessions"
+        assert data["success_rate"] is None, (
+            "success_rate must be null when no known-outcome sessions"
+        )
         assert data["productive"] == 0
 
 
@@ -2766,12 +2766,12 @@ def test_api_search_indexes_submodule_lessons(tmp_path: Path):
         # Filter to lessons with source set (not all lessons may be from submodules).
         all_lesson_results = [r for r in data["results"] if r["type"] == "lesson"]
         sourced_lessons = [r for r in all_lesson_results if r.get("source")]
-        assert (
-            len(sourced_lessons) >= 1
-        ), "At least one submodule lesson must have source attribution"
-        assert all(
-            r["source"] == "gptme-contrib" for r in sourced_lessons
-        ), "All sourced lessons must carry the correct submodule name"
+        assert len(sourced_lessons) >= 1, (
+            "At least one submodule lesson must have source attribution"
+        )
+        assert all(r["source"] == "gptme-contrib" for r in sourced_lessons), (
+            "All sourced lessons must carry the correct submodule name"
+        )
 
 
 def test_make_excerpt_strips_fenced_code_block_content():
@@ -2850,9 +2850,9 @@ def test_make_excerpt_via_search(tmp_path: Path):
         # Excerpt should not start with a heading marker
         assert not excerpt.startswith("#"), f"Excerpt should not start with '#': {excerpt!r}"
         # Should contain the Rule content
-        assert (
-            "uniquexyz" in excerpt or "Rule" in excerpt or excerpt == ""
-        ), f"Unexpected excerpt: {excerpt!r}"
+        assert "uniquexyz" in excerpt or "Rule" in excerpt or excerpt == "", (
+            f"Unexpected excerpt: {excerpt!r}"
+        )
 
 
 def test_make_excerpt_strips_thematic_breaks():

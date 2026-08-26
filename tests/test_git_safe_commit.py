@@ -1293,9 +1293,9 @@ def test_safe_commit_detects_index_corruption(large_git_repo: Path):
     )
 
     # Should abort (exit 1) with corruption warning
-    assert (
-        result.returncode == 1
-    ), f"Expected corruption detection, got:\n{result.stdout}\n{result.stderr}"
+    assert result.returncode == 1, (
+        f"Expected corruption detection, got:\n{result.stdout}\n{result.stderr}"
+    )
     assert "corruption" in result.stderr.lower()
     # Index should be auto-rebuilt
     tracked_after = subprocess.run(
@@ -1306,9 +1306,9 @@ def test_safe_commit_detects_index_corruption(large_git_repo: Path):
         check=True,
     )
     tracked_count = len(tracked_after.stdout.strip().splitlines())
-    assert (
-        tracked_count >= 1100
-    ), f"Expected index rebuild to restore ~1100 files, got {tracked_count}"
+    assert tracked_count >= 1100, (
+        f"Expected index rebuild to restore ~1100 files, got {tracked_count}"
+    )
 
 
 def test_safe_commit_detects_partial_index_corruption_above_old_threshold(
@@ -1346,9 +1346,9 @@ def test_safe_commit_detects_partial_index_corruption_above_old_threshold(
         text=True,
     )
 
-    assert (
-        result.returncode == 1
-    ), f"Expected partial corruption detection, got:\n{result.stdout}\n{result.stderr}"
+    assert result.returncode == 1, (
+        f"Expected partial corruption detection, got:\n{result.stdout}\n{result.stderr}"
+    )
     assert "corruption" in result.stderr.lower()
     assert "missing from index but still on disk" in result.stderr
 
@@ -1360,9 +1360,9 @@ def test_safe_commit_detects_partial_index_corruption_above_old_threshold(
         check=True,
     )
     tracked_count = len(tracked_after.stdout.strip().splitlines())
-    assert (
-        tracked_count >= 1300
-    ), f"Expected index rebuild to restore ~1300 files, got {tracked_count}"
+    assert tracked_count >= 1300, (
+        f"Expected index rebuild to restore ~1300 files, got {tracked_count}"
+    )
 
 
 def test_safe_commit_reverts_catastrophic_deletion(huge_git_repo: Path):
@@ -1398,12 +1398,12 @@ def test_safe_commit_reverts_catastrophic_deletion(huge_git_repo: Path):
     )
 
     # Should exit non-zero after auto-revert
-    assert (
-        result.returncode != 0
-    ), f"Expected auto-revert, got:\n{result.stdout}\n{result.stderr}"
-    assert (
-        "CATASTROPHIC" in result.stdout or "reverted" in result.stdout.lower()
-    ), f"Expected post-commit revert message, got stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode != 0, (
+        f"Expected auto-revert, got:\n{result.stdout}\n{result.stderr}"
+    )
+    assert "CATASTROPHIC" in result.stdout or "reverted" in result.stdout.lower(), (
+        f"Expected post-commit revert message, got stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
 
     # HEAD should be unchanged (soft revert)
     sha_after = subprocess.run(
@@ -1413,9 +1413,9 @@ def test_safe_commit_reverts_catastrophic_deletion(huge_git_repo: Path):
         text=True,
         check=True,
     ).stdout.strip()
-    assert (
-        sha_before == sha_after
-    ), f"Expected HEAD unchanged after revert, was {sha_before[:8]}, now {sha_after[:8]}"
+    assert sha_before == sha_after, (
+        f"Expected HEAD unchanged after revert, was {sha_before[:8]}, now {sha_after[:8]}"
+    )
 
     # Changes should remain staged (soft reset)
     staged = subprocess.run(
@@ -1426,9 +1426,9 @@ def test_safe_commit_reverts_catastrophic_deletion(huge_git_repo: Path):
         check=True,
     )
     staged_count = len(staged.stdout.strip().splitlines())
-    assert (
-        staged_count >= 200
-    ), f"Expected ~200 staged deletions after soft reset, got {staged_count}"
+    assert staged_count >= 200, (
+        f"Expected ~200 staged deletions after soft reset, got {staged_count}"
+    )
 
 
 def test_safe_commit_allows_normal_small_repo_commit(git_repo: Path):
