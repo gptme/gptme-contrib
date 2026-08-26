@@ -451,6 +451,24 @@ def _dedupe_strings(values: list[object]) -> list[str]:
     return deduped
 
 
+def effective_status(fm: dict) -> str:
+    """Resolve a lesson/skill lifecycle status from top-level or nested metadata.
+
+    The Agent Skills schema has no top-level ``status``, so a deprecated
+    SKILL.md can only record it as ``metadata.status``. Treat either location as
+    authoritative and let any non-active value win, so a deprecation is never
+    silently dropped.
+    """
+    candidates = [fm.get("status")]
+    metadata = fm.get("metadata")
+    if isinstance(metadata, dict):
+        candidates.append(metadata.get("status"))
+    for value in candidates:
+        if isinstance(value, str) and value.strip() and value.strip() != "active":
+            return value.strip()
+    return "active"
+
+
 def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     """Extract YAML frontmatter and body from markdown."""
     if not content.startswith("---"):
@@ -488,9 +506,13 @@ def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     if keywords:
         fm["match"] = {"keywords": keywords}
 
-    m = re.search(r"status:\s*(\w+)", fm_str)
-    if m:
-        fm["status"] = m.group(1)
+    # Any `status:` line (top-level or nested under `metadata:`) counts; a
+    # non-active value wins so a nested deprecation is not masked by an earlier
+    # top-level `status: active`.
+    statuses = re.findall(r"status:\s*(\w+)", fm_str)
+    if statuses:
+        non_active = [s for s in statuses if s != "active"]
+        fm["status"] = non_active[0] if non_active else statuses[0]
 
     for field in ("name", "description", "when_to_use"):
         value = _extract_scalar_frontmatter_field(fm_str, field)
@@ -635,8 +657,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
 
             fm, body = extract_frontmatter(content)
 
-            status = fm.get("status", "active")
-            if status != "active":
+            if effective_status(fm) != "active":
                 continue
 
             match_data = fm.get("match", {})

@@ -1008,3 +1008,72 @@ def test_classify_lesson_present_manifest_missing_holdout_key_returns_unknown(ho
         "'unknown', not spuriously 'holdout'."
     )
     assert version == 2
+
+
+# --- metadata.status (Agent Skills lifecycle) ---
+
+
+def _write_skill_md(tmp_path: Path, name: str, frontmatter: str) -> Path:
+    skill_dir = tmp_path / name
+    skill_dir.mkdir(parents=True)
+    path = skill_dir / "SKILL.md"
+    path.write_text(f"---\n{frontmatter}---\n\n# {name}\n\nBody.\n")
+    return path
+
+
+def test_scan_lessons_skips_skill_with_only_nested_metadata_status(hook, tmp_path):
+    """Agent Skills frontmatter has no top-level `status`, so a deprecated skill
+    can only record it under `metadata.status`. It must still be filtered out."""
+    lessons_dir = tmp_path / "skills"
+    _write_skill_md(
+        lessons_dir,
+        "lifecycle-phase-index",
+        'name: lifecycle-phase-index\ndescription: "Route work through phases."\nmetadata:\n  status: deprecated\n',
+    )
+
+    assert hook.scan_lessons([lessons_dir]) == []
+
+
+def test_scan_lessons_keeps_skill_with_nested_active_status(hook, tmp_path):
+    lessons_dir = tmp_path / "skills"
+    path = _write_skill_md(
+        lessons_dir,
+        "still-live",
+        'name: still-live\ndescription: "Do the live thing."\nmetadata:\n  status: active\n',
+    )
+
+    assert [entry["path"] for entry in hook.scan_lessons([lessons_dir])] == [str(path)]
+
+
+def test_effective_status_prefers_non_active_from_either_location(hook):
+    assert hook.effective_status({}) == "active"
+    assert hook.effective_status({"status": "active"}) == "active"
+    assert hook.effective_status({"metadata": {"status": "archived"}}) == "archived"
+    # A stale top-level `active` must not mask a nested deprecation.
+    assert (
+        hook.effective_status(
+            {"status": "active", "metadata": {"status": "deprecated"}}
+        )
+        == "deprecated"
+    )
+    # Non-dict metadata must not raise.
+    assert hook.effective_status({"metadata": "not-a-dict"}) == "active"
+
+
+def test_extract_frontmatter_regex_fallback_sees_nested_status(hook, monkeypatch):
+    """Without PyYAML the regex fallback must still see a nested deprecation,
+    even when an earlier top-level `status: active` precedes it."""
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    fm, _ = hook.extract_frontmatter(
+        "---\nstatus: active\nmetadata:\n  status: deprecated\n---\n# Title\n"
+    )
+
+    assert hook.effective_status(fm) == "deprecated"

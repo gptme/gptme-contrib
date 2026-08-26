@@ -165,6 +165,24 @@ def _clean_plain_scalar(raw: str) -> str:
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
 
 
+def effective_status(fm: dict) -> str:
+    """Resolve a lesson/skill lifecycle status from top-level or nested metadata.
+
+    The Agent Skills schema has no top-level ``status`` key, so a deprecated
+    ``SKILL.md`` can only record its lifecycle as ``metadata.status``. Treat
+    both locations as authoritative and let any non-active value win, so a
+    deprecation is never silently dropped because of where it was written.
+    """
+    candidates = [fm.get("status")]
+    metadata = fm.get("metadata")
+    if isinstance(metadata, dict):
+        candidates.append(metadata.get("status"))
+    for value in candidates:
+        if isinstance(value, str) and value.strip() and value.strip() != "active":
+            return value.strip()
+    return "active"
+
+
 def _extract_scalar_frontmatter_field(
     fm_str: str, field: str, *, allow_indented: bool = False
 ) -> str | None:
@@ -408,6 +426,16 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     status = _extract_scalar_frontmatter_field(fm_str, "status")
     if status is not None:
         fm["status"] = status
+
+    # Agent Skills store lifecycle under ``metadata.status``; scope the lookup to
+    # the metadata block so an unrelated nested ``status:`` is not hoisted.
+    metadata_status_block = _extract_mapping_block(fm_str, "metadata")
+    if metadata_status_block:
+        nested_status = _extract_scalar_frontmatter_field(
+            metadata_status_block, "status", allow_indented=True
+        )
+        if nested_status is not None:
+            fm.setdefault("metadata", {})["status"] = nested_status
 
     for field in ("id", "name", "description", "when_to_use"):
         scalar_value = _extract_scalar_frontmatter_field(fm_str, field)
@@ -658,7 +686,9 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
 
     ``SKILL.md`` files are never deduplicated by name.
 
-    Lessons with ``status`` other than ``"active"`` are skipped.
+    Lessons with a ``status`` other than ``"active"`` are skipped, whether the
+    status is written top-level or as ``metadata.status`` (see
+    :func:`effective_status`).
     Lessons with no keywords, patterns, or skill name are skipped.
     """
     lessons: list[dict[str, Any]] = []
@@ -707,8 +737,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
 
             fm, body = extract_frontmatter(content)
 
-            status = fm.get("status", "active")
-            if status != "active":
+            if effective_status(fm) != "active":
                 continue
 
             match_data = fm.get("match", {})
