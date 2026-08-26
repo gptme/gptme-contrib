@@ -112,7 +112,19 @@ def load_allowlist(config_path: Path) -> "frozenset[str] | None":
             )
             return None
 
-        return frozenset(str(entry) for entry in entries)
+        normalized: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, str):
+                print(
+                    f"validate-root-structure: non-string entry in 'allowed_entries': {entry!r}",
+                    file=sys.stderr,
+                )
+                return None
+            # Normalize: strip leading ./ and trailing / so "src/" and "./src/" both match "src"
+            s = entry[2:] if entry.startswith("./") else entry
+            s = s.rstrip("/")
+            normalized.append(s)
+        return frozenset(normalized)
     except yaml.YAMLError as e:
         print(
             f"validate-root-structure: failed to parse YAML config: {e}",

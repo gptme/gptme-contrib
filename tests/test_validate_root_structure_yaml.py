@@ -146,6 +146,42 @@ def test_get_repo_root_preserves_non_utf8_path_bytes():
     assert str(repo_root).encode("utf-8", errors="surrogateescape") == b"/tmp/repo-\xff"
 
 
+def test_allowlist_entries_with_trailing_slash_match(tmp_path):
+    """Allowlist entries written with a trailing slash match the normalized tracked entry."""
+    config = write_config(tmp_path, "allowed_entries:\n  - src/\n  - README.md\n")
+    with (
+        patch.object(validator, "get_repo_root", return_value=tmp_path),
+        patch.object(
+            validator,
+            "get_tracked_root_entries",
+            return_value={"src", "README.md"},
+        ),
+    ):
+        assert validator.main(["--config", str(config)]) == 0
+
+
+def test_allowlist_entries_with_dot_slash_prefix_match(tmp_path):
+    """Allowlist entries written with a leading ./ match the normalized tracked entry."""
+    config = write_config(tmp_path, "allowed_entries:\n  - ./src\n  - README.md\n")
+    with (
+        patch.object(validator, "get_repo_root", return_value=tmp_path),
+        patch.object(
+            validator,
+            "get_tracked_root_entries",
+            return_value={"src", "README.md"},
+        ),
+    ):
+        assert validator.main(["--config", str(config)]) == 0
+
+
+def test_non_string_entry_in_allowlist_fails(tmp_path, capsys):
+    """A non-string entry in allowed_entries exits 1 with a clear error."""
+    config = write_config(tmp_path, "allowed_entries:\n  - README.md\n  - [foo]\n")
+    with patch.object(validator, "get_repo_root", return_value=tmp_path):
+        assert validator.main(["--config", str(config)]) == 1
+    assert "non-string entry" in capsys.readouterr().err
+
+
 def test_get_tracked_root_entries_takes_first_path_component():
     """Nested paths collapse to their top-level entry."""
     with patch("subprocess.run") as run:
