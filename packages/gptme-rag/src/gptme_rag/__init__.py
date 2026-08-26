@@ -13,6 +13,10 @@ from .observability import (
     summarize_injections,
 )
 
+# Note: Indexer and ContextAssembler are lazy-loaded via __getattr__ below.
+# They require the full install (gptme-rag[full]) with chromadb + sentence_transformers.
+# ``from gptme_rag import *`` will raise AttributeError for these names when the
+# heavy deps are absent; prefer explicit imports or hasattr() guards at call sites.
 __all__ = [
     "ContextAssembler",
     "IndexHealth",
@@ -34,6 +38,8 @@ def __getattr__(name: str) -> object:
         try:
             from .indexing.indexer import Indexer
 
+            # Cache in module namespace so subsequent accesses skip __getattr__.
+            globals()["Indexer"] = Indexer
             return Indexer
         except ImportError as e:
             raise AttributeError(
@@ -44,6 +50,8 @@ def __getattr__(name: str) -> object:
         try:
             from .query.context_assembler import ContextAssembler
 
+            # Cache in module namespace so subsequent accesses skip __getattr__.
+            globals()["ContextAssembler"] = ContextAssembler
             return ContextAssembler
         except ImportError as e:
             raise AttributeError(
@@ -54,4 +62,5 @@ def __getattr__(name: str) -> object:
 
 
 def __dir__() -> list[str]:
-    return __all__
+    # Include standard module attributes (from __dict__) plus lazy names from __all__.
+    return sorted(set(globals().keys()) | set(__all__))

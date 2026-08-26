@@ -63,6 +63,10 @@ def test_lazy_classes_in_all() -> None:
 
 def test_lazy_indexer_resolves() -> None:
     """gptme_rag.Indexer must resolve to the real class via __getattr__."""
+    import pytest
+
+    pytest.importorskip("chromadb", reason="heavy deps not installed")
+
     import gptme_rag
 
     cls = gptme_rag.Indexer
@@ -91,19 +95,27 @@ def test_missing_dep_raises_attribute_error_not_import_error() -> None:
     import gptme_rag
     import pytest
 
-    # Block only the indexer submodule (None → ImportError).  Do NOT evict
-    # gptme_rag.indexing.* broadly — that clobbers gptme_rag.indexing.document,
-    # causing Document class-identity mismatches and pickling failures in sibling
-    # tests that share Document instances across the session.
-    with patch.dict(sys.modules, {"gptme_rag.indexing.indexer": None}):
-        # hasattr must return False, not bubble up an ImportError.
-        assert not hasattr(gptme_rag, "Indexer")
-        # getattr with a default must return the default.
-        sentinel = object()
-        assert getattr(gptme_rag, "Indexer", sentinel) is sentinel
-        # Direct access must raise AttributeError (not ImportError).
-        with pytest.raises(AttributeError):
-            _ = gptme_rag.Indexer
+    # If a prior test already resolved and cached Indexer in the module namespace,
+    # clear it so __getattr__ is exercised rather than the cached value being returned.
+    cached = gptme_rag.__dict__.pop("Indexer", None)
+    try:
+        # Block only the indexer submodule (None → ImportError).  Do NOT evict
+        # gptme_rag.indexing.* broadly — that clobbers gptme_rag.indexing.document,
+        # causing Document class-identity mismatches and pickling failures in sibling
+        # tests that share Document instances across the session.
+        with patch.dict(sys.modules, {"gptme_rag.indexing.indexer": None}):
+            # hasattr must return False, not bubble up an ImportError.
+            assert not hasattr(gptme_rag, "Indexer")
+            # getattr with a default must return the default.
+            sentinel = object()
+            assert getattr(gptme_rag, "Indexer", sentinel) is sentinel
+            # Direct access must raise AttributeError (not ImportError).
+            with pytest.raises(AttributeError):
+                _ = gptme_rag.Indexer
+    finally:
+        # Restore cached value if it was present, so subsequent tests still work.
+        if cached is not None:
+            gptme_rag.__dict__["Indexer"] = cached
 
 
 def test_dir_includes_lazy_names() -> None:
