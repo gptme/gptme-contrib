@@ -893,6 +893,36 @@ def test_call_claude_code_rejects_invalid_gptme_fallback(
     mock_gptme.assert_called_once_with("test prompt", timeout=120)
 
 
+@pytest.mark.parametrize(
+    "fallback_response",
+    [
+        # narrative value is a list, not a string
+        '{"narrative": ["some text"]}',
+        # narrative value is a number
+        '{"narrative": 42}',
+        # narrative key exists but maps to None
+        '{"narrative": null}',
+    ],
+)
+@patch.dict("os.environ", {}, clear=True)
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_rejects_non_string_narrative_in_gptme_fallback(
+    mock_run, mock_sleep, mock_gptme, fallback_response
+):
+    """gptme fallback must be rejected when the narrative value is not a string."""
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    mock_gptme.return_value = fallback_response
+
+    with pytest.raises(ClaudeQuotaExhaustedError):
+        call_claude_code("test prompt", max_retries=1)
+
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+
+
 @patch("gptme_activity_summary.cc_backend.call_gptme")
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
