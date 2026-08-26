@@ -618,52 +618,69 @@ def fetch_unresolved_thread_count(
     "not observed" — so the effect verdict degrades to exactly the
     pre-thread-signal behaviour rather than inventing one. Unresolved
     threads are GraphQL-only; ``gh pr view --json`` cannot report them.
+    Paginates through all pages so PRs with more than 100 threads are
+    counted correctly.
     """
     query = (
-        "query($owner:String!,$name:String!,$number:Int!){"
+        "query($owner:String!,$name:String!,$number:Int!,$after:String){"
         "repository(owner:$owner,name:$name){"
         "pullRequest(number:$number){"
-        "reviewThreads(first:100){nodes{isResolved}}}}}"
+        "reviewThreads(first:100,after:$after){"
+        "nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}"
     )
     owner, _, name = str(repo).partition("/")
     if not owner or not name:
         return None
-    try:
-        result = runner(
-            [
-                "gh",
-                "api",
-                "graphql",
-                "-f",
-                f"query={query}",
-                "-F",
-                f"owner={owner}",
-                "-F",
-                f"name={name}",
-                "-F",
-                f"number={int(number)}",
-            ],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+    total = 0
+    after: str | None = None
+    while True:
+        cmd = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={int(number)}",
+        ]
+        if after is not None:
+            cmd += ["-F", f"after={after}"]
+        try:
+            result = runner(
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            threads_obj = json.loads(result.stdout)["data"]["repository"][
+                "pullRequest"
+            ]["reviewThreads"]
+            nodes = threads_obj["nodes"]
+            page_info = threads_obj["pageInfo"]
+        except Exception:
+            return None
+        if not isinstance(nodes, list):
+            return None
+        total += sum(
+            1 for node in nodes if isinstance(node, dict) and not node.get("isResolved")
         )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        nodes = json.loads(result.stdout)["data"]["repository"]["pullRequest"][
-            "reviewThreads"
-        ]["nodes"]
-    except Exception:
-        return None
-    if not isinstance(nodes, list):
-        return None
-    return sum(
-        1 for node in nodes if isinstance(node, dict) and not node.get("isResolved")
-    )
+        if not page_info.get("hasNextPage"):
+            break
+        after = page_info.get("endCursor")
+        if not after:
+            break
+    return total
 
 
 def fetch_pr_snapshot(

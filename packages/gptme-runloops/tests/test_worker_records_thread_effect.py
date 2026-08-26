@@ -82,6 +82,19 @@ def test_apply_pr_state_diff_records_both_sides():
     assert derive_effect_signal(payload) == "observed"
 
 
+_PAGE_INFO_LAST = '"pageInfo":{"hasNextPage":false,"endCursor":null}'
+
+
+def _wrap_threads(nodes_json: str, page_info: str = _PAGE_INFO_LAST) -> str:
+    return (
+        '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":'
+        + nodes_json
+        + ","
+        + page_info
+        + "}}}}}"
+    )
+
+
 def _runner(graphql_stdout: str, graphql_rc: int = 0):
     def run(cmd, **kwargs):
         if cmd[:3] == ["gh", "api", "graphql"]:
@@ -93,10 +106,25 @@ def _runner(graphql_stdout: str, graphql_rc: int = 0):
     return run
 
 
+def _paginated_runner(pages: list[str]):
+    """Return pages in sequence; subsequent calls past the list repeat the last."""
+    state = {"i": 0}
+
+    def run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "api", "graphql"]:
+            i = min(state["i"], len(pages) - 1)
+            state["i"] += 1
+            return subprocess.CompletedProcess(cmd, 0, pages[i], "")
+        return subprocess.CompletedProcess(
+            cmd, 0, '{"state":"OPEN","headRefOid":"' + HEAD + '"}', ""
+        )
+
+    return run
+
+
 def test_fetch_counts_only_unresolved_threads():
-    body = (
-        '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":'
-        '[{"isResolved":true},{"isResolved":false},{"isResolved":false}]}}}}}'
+    body = _wrap_threads(
+        '[{"isResolved":true},{"isResolved":false},{"isResolved":false}]'
     )
     assert (
         fetch_unresolved_thread_count(
@@ -128,10 +156,44 @@ def test_fetch_rejects_malformed_repo():
 
 
 def test_snapshot_carries_thread_count_when_available():
-    body = (
-        '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":'
-        '[{"isResolved":false}]}}}}}'
-    )
+    body = _wrap_threads('[{"isResolved":false}]')
     snapshot = fetch_pr_snapshot("gptme/gptme", 3613, cwd=".", runner=_runner(body))
     assert snapshot is not None
     assert snapshot["unresolvedThreads"] == "1"
+
+
+def test_fetch_paginates_beyond_first_page():
+    """Thread counts accumulate across paginated responses."""
+    page1 = _wrap_threads(
+        '[{"isResolved":false},{"isResolved":true}]',
+        '"pageInfo":{"hasNextPage":true,"endCursor":"cursor1"}',
+    )
+    page2 = _wrap_threads('[{"isResolved":false}]')
+    assert (
+        fetch_unresolved_thread_count(
+            "gptme/gptme", 3613, cwd=".", runner=_paginated_runner([page1, page2])
+        )
+        == 2  # 1 unresolved from page1 + 1 from page2
+    )
+
+
+def test_fetch_stops_on_pagination_failure():
+    """A failed page returns None (best-effort degrades cleanly)."""
+    page1 = _wrap_threads(
+        '[{"isResolved":false}]',
+        '"pageInfo":{"hasNextPage":true,"endCursor":"cursor1"}',
+    )
+
+    def failing_runner(cmd, **kwargs):
+        # First call returns page1, second call fails
+        if not hasattr(failing_runner, "_called"):
+            failing_runner._called = True
+            return subprocess.CompletedProcess(cmd, 0, page1, "")
+        return subprocess.CompletedProcess(cmd, 1, "", "error")
+
+    assert (
+        fetch_unresolved_thread_count(
+            "gptme/gptme", 3613, cwd=".", runner=failing_runner
+        )
+        is None
+    )
