@@ -566,15 +566,40 @@ def test_stale_selector_retry_uses_original_instruction(
 # ---------------------------------------------------------------------------
 
 
+def test_stale_selector_retry_triggered_on_pure_timeout(
+    browser_stub: BrowserStub,
+) -> None:
+    """A plain 'Timeout Xms exceeded.' without navigation/detach markers MUST retry.
+
+    Playwright raises 'Timeout 30000ms exceeded.' when a locator never resolved
+    and gptme's browser backend only surfaces the first exception line (stripping
+    the 'waiting for locator(...)' call log). The inverted guard must not block
+    the retry for this case.
+    """
+    observed = browser_observe("submit button", top_k=1)[0]
+    assert observed.selector == "[ref=e5]"
+
+    # Simulate Playwright's first-line-only locator-not-found timeout.
+    browser_stub.custom_errors["[ref=e5]"] = TimeoutError("Timeout 30000ms exceeded.")
+    # Page re-renders with the submit button at a fresh ref.
+    browser_stub.snapshots = [SNAPSHOT_SUBMIT_MOVED]
+
+    result = browser_act(observed)
+
+    # Original attempt + retry on the fresh selector — both dispatches must fire.
+    assert browser_stub.clicks == ["[ref=e5]", "[ref=e9]"]
+    assert result.success  # retry on [ref=e9] succeeds
+
+
 def test_stale_selector_retry_skipped_on_non_locator_failure(
     browser_stub: BrowserStub,
 ) -> None:
-    """A navigation timeout (no 'locator' in the message) must NOT be retried.
+    """A navigation timeout (with 'navigation' in the message) must NOT be retried.
 
     If a click triggered navigation and then timed out, the action may have
     already executed.  Retrying would double-act (double form submission, double
     navigation).  The guard must recognise that "Timeout: navigation to '...'"
-    is not a locator-not-found failure and return the first result immediately.
+    is a post-action failure and return the first result immediately.
     """
     observed = browser_observe("submit button", top_k=1)[0]
     assert observed.selector == "[ref=e5]"

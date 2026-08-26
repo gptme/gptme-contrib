@@ -393,23 +393,24 @@ def browser_act(
     # Stale selector: re-observe once with the same query. If the fresh top
     # match is the same selector, retrying is pointless — return the failure.
     #
-    # Only retry when the failure message indicates the locator didn't resolve
-    # (e.g. element not found, strict mode violation). A timeout/navigation
-    # error can mean the action already executed — retrying would double it.
-    # Only retry on errors that clearly indicate the locator never resolved.
-    # "target closed", "not attached", and "detached" are intentionally absent:
-    # a click that triggers navigation produces these errors AFTER the action
-    # already executed — retrying would double-submit the form or double-navigate.
-    _locator_fail_phrases = (
-        "no element",
-        "not found",
-        "did not find",
-        "locator",
-        "strict mode",
+    # Block retry only when the error signals that the action already executed
+    # (navigation or detach after click). Any other failure — including a plain
+    # "Timeout Xms exceeded." where Playwright omits the call log — means the
+    # locator never resolved, so retrying is safe.
+    #
+    # Inverted guard: exclude known post-action phrases rather than requiring
+    # locator-specific phrases. gptme's browser backend may surface only the first
+    # line of Playwright's TimeoutError, dropping "waiting for locator(...)" from
+    # the message, so whitelist-based phrase matching misses those cases.
+    _no_retry_phrases = (
+        "not attached",
+        "detached",
+        "target closed",
+        "navigation",
     )
     msg_lower = result.message.lower()
-    if not any(phrase in msg_lower for phrase in _locator_fail_phrases):
-        return result  # non-locator failure — don't retry (avoid double-acting)
+    if any(phrase in msg_lower for phrase in _no_retry_phrases):
+        return result  # post-action failure — don't retry (avoid double-acting)
 
     fresh = browser_observe(reobserve_query, top_k=1)
     if fresh:
