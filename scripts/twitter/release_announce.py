@@ -453,7 +453,10 @@ def main() -> int:
     # 2026-08-24: announced ActivityWatch v0.13.2, a June-2024 release, as new
     # from @ActivityWatchIt; deleted 2026-08-26). Only announce releases
     # published within --max-age-days unless a --tag was given explicitly.
-    if not args.tag:
+    # Also skip the gate when --force is used: force is the documented recovery
+    # path for clearing stale pending markers (handles crashed runs), and it
+    # must reach _main regardless of release age.
+    if not args.tag and not args.force:
         from datetime import datetime, timezone
 
         published = rel.get("publishedAt") or ""

@@ -913,3 +913,33 @@ def test_explicit_tag_bypasses_freshness(monkeypatch, tmp_path):
     )
     assert ra.main() == 0
     assert calls  # posted despite age
+
+
+def test_force_bypasses_freshness_gate(monkeypatch, capsys, tmp_path):
+    """--force without --tag must reach _main even when the latest release is stale.
+    This is the documented recovery path for clearing pending markers from crashed runs."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.13.2",
+            "isPrerelease": False,
+            "body": "* feat: old thing",
+            "url": "u",
+            "publishedAt": "2024-06-16T12:00:00Z",  # stale: > 14 days old
+        },
+    )
+    calls: list = []
+
+    def _stub_post(a, account=None):
+        calls.append(a)
+        return True, "1", ""
+
+    monkeypatch.setattr(ra, "_post", _stub_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py", "--force", "--skip-quote"])
+    result = ra.main()
+    # --force must bypass the freshness gate and attempt to post
+    assert "exceeds --max-age-days" not in capsys.readouterr().out
+    assert calls, "--force should have reached _main and attempted to post"
+    assert result == 0
