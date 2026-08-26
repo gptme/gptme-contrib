@@ -265,6 +265,7 @@ def call_claude_code(
                 # Attempt fallback slots (GPTME_CC_FALLBACK_CREDS) before raising.
                 last_non_subscription_error: subprocess.CalledProcessError | None = None
                 saw_empty_response = False
+                saw_fallback_auth_failure = False
                 for fb_cred in _fallback_cred_paths:
                     if not fb_cred.exists():
                         logger.debug("Fallback cred file %s not found, skipping", fb_cred)
@@ -299,14 +300,22 @@ def call_claude_code(
                             break
                         # Check whether this fallback slot is also unavailable.
                         fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
-                        if any(marker in fb_combined.lower() for marker in _ALL_SKIP_RETRY_MARKERS):
+                        fb_combined_lower = fb_combined.lower()
+                        if any(marker in fb_combined_lower for marker in _ALL_SKIP_RETRY_MARKERS):
                             logger.warning(
                                 "Fallback slot %s also has a subscription failure",
                                 fb_cred.name,
                             )
+                            # Track auth failures from fallback slots so the signal is not
+                            # lost when the primary slot failed with a different (quota)
+                            # error — callers catching ClaudeAuthExpiredError to trigger
+                            # re-auth must see the correct exception type.
+                            if any(marker in fb_combined_lower for marker in _AUTH_FAILURE_MARKERS):
+                                saw_fallback_auth_failure = True
                             # Clear any prior non-subscription error so the caller receives
-                            # ClaudeQuotaExhaustedError rather than a stale error from
-                            # an earlier fallback that failed for a different reason.
+                            # ClaudeQuotaExhaustedError (or ClaudeAuthExpiredError, if the
+                            # fallback also expired) rather than a stale CalledProcessError
+                            # from an earlier fallback that failed for a different reason.
                             last_non_subscription_error = None
                             break
                         logger.warning(
@@ -393,7 +402,10 @@ def call_claude_code(
                 )
                 _exc_cls = (
                     ClaudeAuthExpiredError
-                    if any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS)
+                    if (
+                        any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS)
+                        or saw_fallback_auth_failure
+                    )
                     else ClaudeQuotaExhaustedError
                 )
                 raise _exc_cls(result.returncode, attempt_cmd, result.stdout, result.stderr)

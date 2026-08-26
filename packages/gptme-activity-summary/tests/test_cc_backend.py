@@ -987,6 +987,38 @@ def test_auth_expiry_raised_when_fallback_slot_returns_empty(
             call_claude_code("test prompt", max_retries=1)
 
 
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_auth_expiry_raised_when_fallback_slot_auth_expires(
+    mock_run, mock_sleep, mock_fallback, mock_gptme, tmp_path
+):
+    """Auth-expiry from a fallback slot must surface even when the primary was quota-exhausted."""
+    import os
+
+    fb_cred = tmp_path / ".credentials.json.alice"
+    fb_cred.write_text("{}")
+    # Primary fails with quota exhaustion.
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    # Fallback credential slot is also auth-expired (non-empty error output).
+    mock_fallback.return_value = _make_completed_process(
+        returncode=1, stdout="Failed to authenticate: OAuth session expired"
+    )
+    # gptme fallback also yields nothing.
+    mock_gptme.return_value = ""
+
+    with patch.dict(
+        os.environ,
+        {"GPTME_CC_FALLBACK_CREDS": str(fb_cred)},
+        clear=True,
+    ):
+        with pytest.raises(ClaudeAuthExpiredError):
+            call_claude_code("test prompt", max_retries=1)
+
+
 # --- Tests for gptme_backend module ---
 
 
