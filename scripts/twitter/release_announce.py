@@ -424,6 +424,13 @@ def main() -> int:
     ap.add_argument("--skip-quote", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
+        "--max-age-days",
+        type=int,
+        default=14,
+        help="skip releases published more than this many days ago (default 14; "
+        "ignored when --tag is given explicitly)",
+    )
+    ap.add_argument(
         "--force",
         action="store_true",
         help=(
@@ -441,6 +448,28 @@ def main() -> int:
     if rel.get("isPrerelease"):
         print(f"{tag}: prerelease — skipping")
         return 0
+    # Freshness gate: gh's "latest release" is the newest NON-prerelease, which
+    # for repos whose recent releases are all betas can be YEARS old (incident
+    # 2026-08-24: announced ActivityWatch v0.13.2, a June-2024 release, as new
+    # from @ActivityWatchIt; deleted 2026-08-26). Only announce releases
+    # published within --max-age-days unless a --tag was given explicitly.
+    if not args.tag:
+        from datetime import datetime, timezone
+
+        published = rel.get("publishedAt") or ""
+        try:
+            age_days = (
+                datetime.now(timezone.utc)
+                - datetime.fromisoformat(published.replace("Z", "+00:00"))
+            ).days
+        except ValueError:
+            age_days = None
+        if age_days is None or age_days > args.max_age_days:
+            print(
+                f"{tag}: published {published or 'unknown'} ({age_days} days old) "
+                f"exceeds --max-age-days={args.max_age_days} — skipping"
+            )
+            return 0
     if not STABLE_TAG_RE.match(tag):
         print(f"{tag}: not a stable vX.Y.Z tag — skipping")
         return 0

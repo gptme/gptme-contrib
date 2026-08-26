@@ -17,6 +17,17 @@ ra = importlib.util.module_from_spec(_spec)
 sys.modules.setdefault("release_announce", ra)
 _spec.loader.exec_module(ra)
 
+
+def _fresh_published_at() -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (
+        (datetime.now(timezone.utc) - timedelta(days=1))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 NOTES = """## What's Changed
 * feat(cli): add `gptme explain` for offline concept answers by @Bob in https://github.com/gptme/gptme/pull/3542
 * feat(tools): add read-only audit preset by @Bob in #3543
@@ -193,6 +204,7 @@ def test_main_skips_prerelease(monkeypatch, capsys, tmp_path):
             "isPrerelease": True,
             "body": "",
             "url": "u",
+            "publishedAt": _fresh_published_at(),
         },
     )
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
@@ -210,6 +222,7 @@ def test_main_posts_org_reply_and_quote(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     calls: list[tuple] = []
@@ -250,6 +263,7 @@ def test_main_resumes_after_link_reply_failure(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     calls: list[tuple] = []
@@ -286,6 +300,7 @@ def test_main_resumes_after_quote_failure(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     calls: list[tuple] = []
@@ -321,6 +336,7 @@ def test_main_adds_quote_after_skip_quote_run(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     calls: list[tuple] = []
@@ -356,6 +372,7 @@ def test_skip_quote_clears_stale_pending_marker(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     calls: list[tuple] = []
@@ -407,6 +424,7 @@ def test_skip_quote_early_exit_clears_stale_pending_marker(monkeypatch, tmp_path
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
 
@@ -499,6 +517,7 @@ def test_main_does_not_retry_success_without_tweet_id(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     calls = 0
@@ -531,6 +550,7 @@ def test_main_does_not_retry_reply_success_without_tweet_id(monkeypatch, tmp_pat
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     calls: list[tuple] = []
@@ -559,6 +579,7 @@ def test_main_holds_state_lock_while_posting(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     events: list[str] = []
@@ -593,6 +614,7 @@ def test_main_writes_intent_before_each_post(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     expected_markers = iter(
@@ -627,6 +649,7 @@ def test_main_refuses_to_retry_ambiguous_post(monkeypatch, tmp_path, capsys):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     ra.save_state(
@@ -656,6 +679,7 @@ def test_main_keeps_intent_after_post_failure_prevents_retry(
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     calls = 0
@@ -691,6 +715,7 @@ def test_main_force_clears_pending_markers(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     # Seed a stale pending marker from a hypothetical crashed run.
@@ -743,6 +768,7 @@ def _release_stub(monkeypatch):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/ActivityWatch/activitywatch/releases/tag/v0.13.2",
+            "publishedAt": _fresh_published_at(),
         },
     )
 
@@ -822,6 +848,7 @@ def test_main_quote_still_succeeds_when_bob_is_mentioned(monkeypatch, tmp_path):
             "isPrerelease": False,
             "body": NOTES,
             "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
         },
     )
     monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "777", ""))
@@ -831,3 +858,58 @@ def test_main_quote_still_succeeds_when_bob_is_mentioned(monkeypatch, tmp_path):
     record = json.loads(ra.STATE_FILE.read_text())["gptme/gptme#v0.33.0"]
     assert record["bob_quote_id"] == "777"
     assert "bob_quote_skip_reason" not in record
+
+
+def test_stale_latest_release_skipped(monkeypatch, capsys, tmp_path):
+    """gh 'latest' can be a years-old stable when recent releases are betas
+    (2026-08-24 incident: announced AW v0.13.2 from 2024 as new)."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.13.2",
+            "isPrerelease": False,
+            "body": "* feat: old thing",
+            "url": "u",
+            "publishedAt": "2024-06-16T12:00:00Z",
+        },
+    )
+    posted = []
+
+    def _stub_post(a, account=None):
+        posted.append(a)
+        return True, "1", ""
+
+    monkeypatch.setattr(ra, "_post", _stub_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+    assert ra.main() == 0
+    assert posted == []
+    assert "exceeds --max-age-days" in capsys.readouterr().out
+
+
+def test_explicit_tag_bypasses_freshness(monkeypatch, tmp_path):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.13.2",
+            "isPrerelease": False,
+            "body": "",
+            "url": "u",
+            "publishedAt": "2024-06-16T12:00:00Z",
+        },
+    )
+    calls = []
+
+    def _stub_post(a, account=None):
+        calls.append(a)
+        return True, "9", ""
+
+    monkeypatch.setattr(ra, "_post", _stub_post)
+    monkeypatch.setattr(
+        sys, "argv", ["release_announce.py", "--tag", "v0.13.2", "--skip-quote"]
+    )
+    assert ra.main() == 0
+    assert calls  # posted despite age
