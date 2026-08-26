@@ -288,7 +288,15 @@ def apply_summarization(
         if idx > 0 and messages[idx - 1].role == "assistant":
             full_content_parts.append(messages[idx - 1].content)
         full_content_parts.append(messages[idx].content)
-    cache_key_data = repr(full_content_parts)
+    # Hash each part incrementally to avoid a large intermediate repr() string
+    # for big tool outputs. Length-prefix each encoded part so ["a","bc"] and
+    # ["ab","c"] produce different digests.
+    _key_hasher = hashlib.sha256()
+    for part in full_content_parts:
+        _encoded = part.encode()
+        _key_hasher.update(len(_encoded).to_bytes(4, "big"))
+        _key_hasher.update(_encoded)
+    cache_key_data = _key_hasher.hexdigest()
 
     # Call summarizer with full-content cache key
     summary = _call_summarizer(context, cache_key_data=cache_key_data)
