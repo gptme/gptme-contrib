@@ -1234,6 +1234,33 @@ def test_call_claude_code_gptme_fallback_remaps_when_requested_key_empty(
     ), "empty requested key must be replaced with the alternate key's value"
 
 
+@patch.dict("os.environ", {}, clear=True)
+@patch("gptme_activity_summary.cc_backend.call_gptme")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_call_claude_code_gptme_fallback_rejects_empty_requested_key_no_alternate(
+    mock_run, mock_sleep, mock_gptme
+):
+    """When gptme returns the requested key present but empty and no alternate key
+    has content, the fallback must be rejected — not returned as a 'successful'
+    empty summary.
+
+    Regression: the remap loop previously did a no-op self-assignment
+    (gptme_result[k] = gptme_result.pop(k)) when alt_key == narrative_key, then
+    the validation at line 360 used `key in gptme_result` (existence) rather than
+    `gptme_result.get(key)` (content), so an empty month_narrative was accepted and
+    returned as a successful fallback — producing a silent empty narrative on quota days.
+    """
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    # gptme returns the requested key but empty — no alternate key present
+    mock_gptme.return_value = '{"month_narrative": ""}'
+
+    with pytest.raises(ClaudeQuotaExhaustedError):
+        call_claude_code("test prompt", max_retries=1, narrative_key="month_narrative")
+
+
 @patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend._try_with_credential_file")
 @patch("gptme_activity_summary.cc_backend.time.sleep")

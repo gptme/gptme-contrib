@@ -352,12 +352,12 @@ def call_claude_code(
                     # narrative to "" — a silent empty summary on quota days.
                     if narrative_key and not gptme_result.get(narrative_key):
                         for alt_key in _SUMMARY_NARRATIVE_KEYS:
-                            if alt_key in gptme_result:
+                            if alt_key != narrative_key and gptme_result.get(alt_key):
                                 gptme_result[narrative_key] = gptme_result.pop(alt_key)
                                 gptme_response = json.dumps(gptme_result)
                                 break
                     _keys = (narrative_key,) if narrative_key else _SUMMARY_NARRATIVE_KEYS
-                    if any(key in gptme_result for key in _keys):
+                    if any(gptme_result.get(key) for key in _keys):
                         logger.warning(
                             "Claude subscriptions unavailable; gptme fallback produced a summary"
                         )
