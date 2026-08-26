@@ -129,8 +129,9 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
         if not m:
             continue
         role = m.group("role").strip()
-        # Unescape backslash-escaped characters (e.g. \" → ") from the ARIA snapshot.
-        name = re.sub(r"\\(.)", r"\1", m.group("name")).strip()
+        # Unescape only the two escape sequences the ARIA snapshot uses: \" and \\.
+        # A broad r"\\(.)" would corrupt names with literal \n, Windows paths, etc.
+        name = re.sub(r'\\("|\\)', r"\1", m.group("name")).strip()
         ref = m.group("ref") or ""
         if not name:
             continue
@@ -237,9 +238,9 @@ def browser_observe(
     if not scored:
         return []
     if llm_rerank:
-        # Path A future work: route through gptme's LLM router. Skipped here
-        # so the benchmark measures the cheap path.
-        pass
+        raise NotImplementedError(
+            "llm_rerank is a Path-B feature; not available in Path A"
+        )
     return [
         ObserveResult(
             description=f"{e['role']} {e['name']!r}",
