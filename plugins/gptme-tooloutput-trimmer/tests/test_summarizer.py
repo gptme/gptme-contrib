@@ -473,16 +473,20 @@ def test_call_summarizer_memoize_is_source_scoped() -> None:
         return "- summary", None
 
     with patch(
-        "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
-        return_value=SimpleNamespace(full="openai/gpt-4o"),
+        "tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE",
+        {},
     ):
         with patch(
-            "tooloutput_trimmer.hooks.summarizer._chat_complete",
-            side_effect=fake_chat_complete,
+            "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+            return_value=SimpleNamespace(full="openai/gpt-4o"),
         ):
-            _call_summarizer("source-one")
-            _call_summarizer("source-one")  # cached
-            _call_summarizer("source-two")  # different source -> re-call
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._chat_complete",
+                side_effect=fake_chat_complete,
+            ):
+                _call_summarizer("source-one")
+                _call_summarizer("source-one")  # cached
+                _call_summarizer("source-two")  # different source -> re-call
 
     assert calls == ["call", "call"]
 
