@@ -21,8 +21,6 @@ match:
     - "i-have-adhd plugin"
     - "ayghri formatting"
     - "action-first formatting"
-    - "stop clarity mode"
-    - "/stop-clarity"
 ---
 
 # Output Clarity Skill
