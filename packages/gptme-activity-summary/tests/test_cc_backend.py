@@ -1234,6 +1234,45 @@ def test_call_gptme_reasoning_model_preamble_skipped(mock_run, mock_which):
     ), "must skip non-JSON preamble and return the JSON answer message"
 
 
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run")
+def test_call_gptme_json_preamble_not_returned(mock_run, mock_which):
+    """Reasoning models may emit a JSON-shaped thinking block before the real summary.
+
+    When the first assistant message is valid JSON but contains no recognised
+    summary key (e.g. {"thinking": "..."}), _extract_assistant_text must skip it
+    and return the later message that contains the summary key.
+    """
+    import json as _json
+
+    import gptme_activity_summary.gptme_backend as gb
+
+    thinking_msg = _json.dumps(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": '{"thinking": "let me summarize the entries..."}',
+            "timestamp": "2026-08-26T00:00:00.000000",
+        }
+    )
+    answer_msg = _json.dumps(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": '{"narrative": "actual summary", "title": "Daily Summary"}',
+            "timestamp": "2026-08-26T00:00:01.000000",
+        }
+    )
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["gptme"], returncode=0, stdout=f"{thinking_msg}\n{answer_msg}"
+    )
+    result = gb.call_gptme("summarize")
+    assert (
+        result == '{"narrative": "actual summary", "title": "Daily Summary"}'
+    ), "must prefer message containing a summary key over JSON-shaped thinking preamble"
+
+
 @patch.dict("os.environ", {}, clear=True)
 @patch("gptme_activity_summary.cc_backend.call_gptme")
 @patch("gptme_activity_summary.cc_backend.time.sleep")

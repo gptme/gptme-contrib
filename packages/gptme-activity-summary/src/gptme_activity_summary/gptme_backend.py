@@ -144,16 +144,26 @@ def _extract_assistant_text(stdout: str) -> str:
     if not contents:
         logger.warning("gptme fallback produced no assistant messages")
         return ""
-    # Reasoning models (e.g. deepseek) emit a thinking/preamble message first
-    # followed by the real JSON answer.  Return the first content that parses as
-    # JSON; fall back to the last content so callers can still attempt extraction
-    # and surface a useful warning instead of silently discarding the summary.
+    # Reasoning models (e.g. deepseek) emit a thinking/preamble first, which
+    # may itself be valid JSON (e.g. {"thinking": "..."}).  Collect all
+    # JSON-parseable candidates, then prefer the one that contains a recognised
+    # summary key so that a JSON-shaped preamble is not returned instead of the
+    # real answer; only fall back to the first JSON-parseable if none contain a
+    # recognised key.
+    _SUMMARY_KEYS = ("narrative", "month_narrative")
+    json_candidates: list[str] = []
     for candidate in contents:
         try:
             json.loads(candidate)
-            return candidate
+            json_candidates.append(candidate)
         except json.JSONDecodeError:
             continue
+    if json_candidates:
+        for candidate in json_candidates:
+            parsed = json.loads(candidate)
+            if any(parsed.get(k) for k in _SUMMARY_KEYS):
+                return candidate
+        return json_candidates[0]
     logger.debug(
         "gptme fallback: no assistant message parsed as JSON (%d messages); "
         "returning last message for caller to attempt extraction",
