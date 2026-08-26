@@ -10,3 +10,16 @@
   pass_filenames: false
   always_run: true
   additional_dependencies: []
+
+- id: validate-root-structure
+  name: Check root directory structure (config-driven)
+  description: >
+    Config-driven variant of ``check-root-structure``. Reads the allowlist from
+    a per-repo YAML file (default ``root-structure-allowlist.yaml``) instead of
+    repeated ``--allow`` args, so consuming repos own a data file rather than a
+    copy of the checker.
+  entry: scripts/precommit/validators/validate_root_structure_yaml.py
+  language: python
+  pass_filenames: false
+  always_run: true
+  additional_dependencies: [PyYAML]
