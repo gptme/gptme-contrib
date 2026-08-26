@@ -529,7 +529,7 @@ def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
         line for line in fm_str.splitlines() if not line.strip().startswith("#")
     )
     # (1) Top-level: `^status:` with no leading whitespace.
-    top_statuses = re.findall(r"^status:\s*(\w+)", fm_no_comments, re.MULTILINE)
+    top_statuses = re.findall(r"^status:\s*(\S+)", fm_no_comments, re.MULTILINE)
     # (2) metadata.status: capture the indented body after `^metadata:` and
     # search for `status:` within it.  The capture stops at the first
     # non-indented line, so a `status:` in a sibling block scalar is not
@@ -542,7 +542,7 @@ def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     )
     if meta_m:
         meta_statuses = re.findall(
-            r"^[ \t]+status:\s*(\w+)", meta_m.group(1), re.MULTILINE
+            r"^[ \t]+status:\s*(\S+)", meta_m.group(1), re.MULTILINE
         )
     all_statuses = top_statuses + meta_statuses
     if all_statuses:

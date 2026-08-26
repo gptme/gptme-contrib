@@ -1158,3 +1158,35 @@ def test_extract_frontmatter_regex_fallback_ignores_status_in_block_scalar(
     assert (
         hook.effective_status(fm) == "active"
     ), "block scalar content must not override the real top-level status"
+
+
+def test_extract_frontmatter_regex_fallback_non_word_status_fails_closed(
+    hook, monkeypatch
+):
+    """Regex fallback: `status: [deprecated]` (list value) must not be treated as active.
+
+    The ``\\w+`` pattern only captures word characters, so ``[deprecated]`` was
+    silently dropped — leaving the status absent from fm and effective_status()
+    returning "active".  The fix uses ``\\S+`` to capture any non-whitespace value
+    so the list syntax reaches effective_status() as a non-active string.
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    fm, _ = hook.extract_frontmatter("---\nstatus: [deprecated]\n---\n# Title\n")
+    assert (
+        hook.effective_status(fm) != "active"
+    ), "status: [deprecated] in regex fallback must not be treated as active"
+
+    fm2, _ = hook.extract_frontmatter(
+        "---\nmetadata:\n  status: [deprecated]\n---\n# Title\n"
+    )
+    assert (
+        hook.effective_status(fm2) != "active"
+    ), "metadata.status: [deprecated] in regex fallback must not be treated as active"
