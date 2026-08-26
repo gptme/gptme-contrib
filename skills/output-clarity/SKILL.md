@@ -14,6 +14,7 @@ match:
   keywords:
     - "/output-clarity"
     - "output clarity mode"
+    - "clarity mode"
     - "enable clarity mode"
     - "use clarity mode"
     - "start clarity mode"
