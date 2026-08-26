@@ -584,7 +584,7 @@ def apply_pr_state_diff(
         payload["pr_head_oid_before"] = before_head
     if before.get("mergeCommit"):
         payload["pr_merge_commit_before"] = before["mergeCommit"]
-    if before.get("unresolvedThreads"):
+    if before.get("unresolvedThreads") is not None:
         payload["pr_unresolved_threads_before"] = before["unresolvedThreads"]
 
     if after.get("state"):
@@ -593,7 +593,7 @@ def apply_pr_state_diff(
         payload["pr_head_oid_after"] = after_head
     if after.get("mergeCommit"):
         payload["pr_merge_commit_after"] = after["mergeCommit"]
-    if after.get("unresolvedThreads"):
+    if after.get("unresolvedThreads") is not None:
         payload["pr_unresolved_threads_after"] = after["unresolvedThreads"]
 
     if before_head and after_head and before_head != after_head:
@@ -631,6 +631,10 @@ def fetch_unresolved_thread_count(
     owner, _, name = str(repo).partition("/")
     if not owner or not name:
         return None
+    try:
+        number_int = int(number)
+    except (ValueError, TypeError):
+        return None
     total = 0
     after: str | None = None
     while True:
@@ -645,7 +649,7 @@ def fetch_unresolved_thread_count(
             "-F",
             f"name={name}",
             "-F",
-            f"number={int(number)}",
+            f"number={number_int}",
         ]
         if after is not None:
             cmd += ["-F", f"after={after}"]

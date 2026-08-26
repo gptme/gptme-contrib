@@ -177,6 +177,29 @@ def test_fetch_paginates_beyond_first_page():
     )
 
 
+def test_apply_pr_state_diff_stores_integer_zero_unresolved_threads():
+    """Integer 0 is falsy but is a real observation — it must be stored, not dropped."""
+    payload = apply_pr_state_diff(
+        {},
+        {"headRefOid": HEAD, "unresolvedThreads": 0},
+        {"headRefOid": HEAD, "unresolvedThreads": 0},
+    )
+    assert "pr_unresolved_threads_before" in payload
+    assert "pr_unresolved_threads_after" in payload
+    assert payload["pr_unresolved_threads_before"] == 0
+    assert payload["pr_unresolved_threads_after"] == 0
+
+
+def test_fetch_returns_none_for_non_integer_number():
+    """'null' (from RunItem.number_str on a None number) must degrade gracefully."""
+    assert (
+        fetch_unresolved_thread_count(
+            "gptme/gptme", "null", cwd=".", runner=_runner("{}")
+        )
+        is None
+    )
+
+
 def test_fetch_stops_on_pagination_failure():
     """A failed page returns None (best-effort degrades cleanly)."""
     page1 = _wrap_threads(
