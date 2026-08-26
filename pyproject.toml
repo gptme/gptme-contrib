@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Community contributions and utilities for gptme agents"
 requires-python = ">=3.10"
 
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
 [project.scripts]
 validate-root-structure = "validate_root_structure_yaml:main"
 
