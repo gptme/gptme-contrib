@@ -508,8 +508,14 @@ def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
 
     # Any `status:` line (top-level or nested under `metadata:`) counts; a
     # non-active value wins so a nested deprecation is not masked by an earlier
-    # top-level `status: active`.
-    statuses = re.findall(r"status:\s*(\w+)", fm_str)
+    # top-level `status: active`.  Only consider real YAML key lines — filter
+    # comment lines (starting with #) first, then anchor to line starts, so a
+    # `status:` that appears inside a description value or a YAML comment is
+    # not mistaken for a lifecycle status.
+    fm_yaml_lines = "\n".join(
+        line for line in fm_str.splitlines() if not line.strip().startswith("#")
+    )
+    statuses = re.findall(r"^[^\S\n]*status:\s*(\w+)", fm_yaml_lines, re.MULTILINE)
     if statuses:
         non_active = [s for s in statuses if s != "active"]
         fm["status"] = non_active[0] if non_active else statuses[0]

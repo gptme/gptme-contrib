@@ -1077,3 +1077,34 @@ def test_extract_frontmatter_regex_fallback_sees_nested_status(hook, monkeypatch
     )
 
     assert hook.effective_status(fm) == "deprecated"
+
+
+def test_extract_frontmatter_regex_fallback_ignores_status_in_comments(
+    hook, monkeypatch
+):
+    """The regex fallback must not pick up `status: deprecated` from YAML comments
+    or from a description field value — only real YAML key lines count."""
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    # A comment containing `status: deprecated` must not override the real active status.
+    fm, _ = hook.extract_frontmatter(
+        "---\nstatus: active\n# status: deprecated\n---\n# Title\n"
+    )
+    assert (
+        hook.effective_status(fm) == "active"
+    ), "comment line must not override real status"
+
+    # A description value mentioning `status: deprecated` must not override active.
+    fm2, _ = hook.extract_frontmatter(
+        "---\nstatus: active\ndescription: Fix status: deprecated handling\n---\n# Title\n"
+    )
+    assert (
+        hook.effective_status(fm2) == "active"
+    ), "description text must not override real status"
