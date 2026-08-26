@@ -1392,3 +1392,83 @@ def test_call_claude_code_oauth_expiry_preserved_when_fallback_has_non_sub_error
     ):
         with pytest.raises(ClaudeAuthExpiredError):
             call_claude_code("test prompt", max_retries=2)
+
+
+@patch.dict("os.environ", {"GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK": "1"})
+@patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme")
+@patch("subprocess.run")
+def test_extract_assistant_text_non_dict_json_does_not_raise(mock_run, mock_which):
+    """_extract_assistant_text must not raise when json.loads produces a non-dict.
+
+    Regression: parsed.get(k) raises AttributeError when the assistant content
+    is valid JSON but not an object (e.g. an array, string, or number).  The fix
+    wraps the key-presence check with isinstance(parsed, dict), so non-object
+    candidates fall through to the first-JSON-parseable fallback without crashing.
+    """
+    import json as _json
+
+    import gptme_activity_summary.gptme_backend as gb
+
+    # First message is valid JSON but an array — not a dict
+    array_msg = _json.dumps(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": '["item1", "item2"]',
+            "timestamp": "2026-08-26T00:00:00.000000",
+        }
+    )
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["gptme"], returncode=0, stdout=array_msg
+    )
+    # Must not raise; falls back to returning the (only) JSON candidate
+    result = gb.call_gptme("hi")
+    assert result == '["item1", "item2"]'
+
+
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
+@patch("gptme_activity_summary.cc_backend._try_with_credential_file")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
+def test_auth_expiry_raised_when_first_fallback_auth_expires_and_second_fallback_non_sub_error(
+    mock_run, mock_sleep, mock_fallback, mock_gptme, tmp_path
+):
+    """saw_fallback_auth_failure must gate ClaudeAuthExpiredError in the last_non_subscription_error branch.
+
+    Scenario:
+    - Primary slot: quota-exhausted (hits weekly limit)
+    - Fallback slot A: OAuth-expired -> saw_fallback_auth_failure = True, last_non_subscription_error cleared
+    - Fallback slot B: non-subscription rc=2 -> last_non_subscription_error set
+
+    Without the fix, the last_non_subscription_error branch only checked
+    combined_out_lower (the primary's output, which has no auth marker), so
+    ClaudeAuthExpiredError was never raised and a generic CalledProcessError
+    escaped instead — callers catching the subtype to trigger re-auth never saw it.
+    """
+    import os
+
+    fb_auth_cred = tmp_path / ".credentials.json.auth_expired"
+    fb_auth_cred.write_text("{}")
+    fb_badsub_cred = tmp_path / ".credentials.json.bad_sub"
+    fb_badsub_cred.write_text("{}")
+
+    # Primary is quota-exhausted (not auth-expired)
+    mock_run.return_value = _make_completed_process(
+        returncode=1, stdout="You've hit your weekly limit"
+    )
+    # Fallback A: auth-expired -> sets saw_fallback_auth_failure, clears last_non_subscription_error
+    # Fallback B: non-subscription error rc=2 -> sets last_non_subscription_error
+    mock_fallback.side_effect = [
+        _make_completed_process(
+            returncode=1, stdout="Failed to authenticate: OAuth session expired"
+        ),
+        _make_completed_process(returncode=2, stderr="bad credentials"),
+    ]
+
+    with patch.dict(
+        os.environ,
+        {"GPTME_CC_FALLBACK_CREDS": os.pathsep.join([str(fb_auth_cred), str(fb_badsub_cred)])},
+        clear=True,
+    ):
+        with pytest.raises(ClaudeAuthExpiredError):
+            call_claude_code("test prompt", max_retries=1)

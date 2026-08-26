@@ -378,7 +378,14 @@ def call_claude_code(
                 if last_non_subscription_error is not None:
                     # Preserve the auth-expiry signal from the primary slot even
                     # when a fallback slot produced a non-subscription error.
-                    if any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS):
+                    # Also check saw_fallback_auth_failure: if a fallback slot hit
+                    # OAuth-expiry before another fallback slot hit a non-subscription
+                    # error, the combined_out_lower only holds the primary's output
+                    # and would miss the fallback's auth marker.
+                    if (
+                        any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS)
+                        or saw_fallback_auth_failure
+                    ):
                         raise ClaudeAuthExpiredError(
                             result.returncode, attempt_cmd, result.stdout, result.stderr
                         )

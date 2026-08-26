@@ -161,7 +161,7 @@ def _extract_assistant_text(stdout: str) -> str:
     if json_candidates:
         for candidate in json_candidates:
             parsed = json.loads(candidate)
-            if any(parsed.get(k) for k in _SUMMARY_KEYS):
+            if isinstance(parsed, dict) and any(parsed.get(k) for k in _SUMMARY_KEYS):
                 return candidate
         return json_candidates[0]
     logger.debug(
