@@ -85,17 +85,14 @@ def _active_tasks(lines: int = 3) -> list[dict]:
     tasks: list[dict] = []
     for line in raw.splitlines():
         line = line.strip()
-        if (
-            not line
-            or line.startswith("📋")
-            or line.startswith("Summary")
-            or line == "0 tasks"
-        ):
+        if not line or line.startswith("📋") or "Summary" in line or "0 tasks" in line:
             continue
         parts = line.split(None, 1)
         if len(parts) >= 2:
             task_id = parts[0]
-            title = re.sub(r"\s+\(\d+\s+\w+\s+ago\)\s*$", "", parts[1]).strip()
+            # gptodo compact recency is "(5m ago)" / "(<1m ago)", not "(5 m ago)".
+            # A \d+\s+\w+ pattern never matches the real output.
+            title = re.sub(r"\s+\([^()]*\bago\)\s*$", "", parts[1]).strip()
             tasks.append({"id": task_id, "title": title})
     return tasks[:lines]
 

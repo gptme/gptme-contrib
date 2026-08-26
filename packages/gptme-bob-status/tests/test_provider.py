@@ -131,3 +131,23 @@ def test_pr_queue_display_marks_watermark_for_triage_not_blocking():
     assert _pr_queue_display(16, 10) == "16/10 ⚠ triage"
     # No watermark configured → bare count, no pressure marker.
     assert _pr_queue_display(7, None) == "7"
+
+
+def test_active_tasks_strips_compact_recency_without_space_before_unit(monkeypatch):
+    """gptodo compact recency is '(5m ago)' / '(<1m ago)', not '(5 m ago)'."""
+    import gptme_bob_status.provider as mod
+
+    compact = (
+        "📋 Tasks Status\n"
+        "  my-task  Do the thing  (5m ago)\n"
+        "  other-task  Second thing  (<1m ago)\n"
+        "📋 Summary: 2 total\n"
+    )
+    monkeypatch.setattr(
+        mod, "_run", lambda cmd, **k: compact if cmd[0] == "gptodo" else ""
+    )
+    tasks = mod._active_tasks(3)
+    assert tasks == [
+        {"id": "my-task", "title": "Do the thing"},
+        {"id": "other-task", "title": "Second thing"},
+    ]
