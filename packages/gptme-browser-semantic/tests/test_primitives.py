@@ -252,18 +252,22 @@ def test_stale_selector_retry_disabled_returns_first_failure(
     assert browser_stub.clicks == ["[ref=e5]"]
 
 
-def test_stale_selector_retry_is_skipped_when_match_unchanged(
+def test_stale_selector_retry_fires_when_element_reappears_with_same_selector(
     browser_stub: BrowserStub,
 ) -> None:
     observed = _observe_submit(browser_stub)
-    # No re-render: the re-observe would return the same (still-dead) ref, so
-    # a pointless re-dispatch must be avoided.
+    # The snapshot still shows [ref=e5], so re-observe returns the same selector.
+    # The element may have been transiently absent (DOM flicker) — since re-observe
+    # confirms it exists, the code must retry even when the selector is unchanged.
+    # Here the element still fails in dispatch (permanently in fail_selectors),
+    # so result is False, but both the original and retry dispatches must fire.
     browser_stub.fail_selectors.add("[ref=e5]")
 
     result = browser_act(observed)
 
     assert not result.success
-    assert browser_stub.clicks == ["[ref=e5]"]
+    # Original attempt + retry with the same selector.
+    assert browser_stub.clicks == ["[ref=e5]", "[ref=e5]"]
 
 
 def test_stale_selector_retry_uses_method_and_arguments_override(
@@ -372,6 +376,28 @@ def test_selector_escapes_single_quotes_in_name(
     sel = matches[0].selector
     # Must not contain an unescaped bare ' that would break the selector.
     assert "\\'" in sel, f"apostrophe must be escaped in selector: {sel!r}"
+
+
+SNAPSHOT_DQUOTE = '- button "Say \\"Hello\\""\n- link "Normal"\n'
+# The above string value is: - button "Say \"Hello\""
+# Representing a button whose accessible name is: Say "Hello"
+
+
+@pytest.fixture
+def dquote_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
+    stub = BrowserStub([SNAPSHOT_DQUOTE])
+    _wire_stub(stub, monkeypatch)
+    return stub
+
+
+def test_observe_handles_double_quote_in_element_name(
+    dquote_browser_stub: BrowserStub,
+) -> None:
+    # An element whose ARIA name contains a double quote (escaped as \" in the
+    # snapshot) must not be silently dropped by the parser.
+    results = browser_observe("say hello button", top_k=5)
+    assert results, "button with double-quoted name must not be silently dropped"
+    assert any("Hello" in r.description for r in results)
 
 
 SNAPSHOT_MIXED_ATTRS = """\

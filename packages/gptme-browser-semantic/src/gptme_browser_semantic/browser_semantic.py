@@ -122,14 +122,15 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
     #   - button "Submit" [ref=e3]
     #   - textbox "Email" [ref=e7]
     line_re = re.compile(
-        r'^[\s\-]*(?P<role>\w+)\s+"(?P<name>[^"]*)"(?:\s+\[(?P<ref>[^\]]+)\])?'
+        r'^[\s\-]*(?P<role>\w+)\s+"(?P<name>(?:[^"\\]|\\.)*)"(?:\s+\[(?P<ref>[^\]]+)\])?'
     )
     for line in snapshot.splitlines():
         m = line_re.match(line)
         if not m:
             continue
         role = m.group("role").strip()
-        name = m.group("name").strip()
+        # Unescape backslash-escaped characters (e.g. \" → ") from the ARIA snapshot.
+        name = re.sub(r"\\(.)", r"\1", m.group("name")).strip()
         ref = m.group("ref") or ""
         if not name:
             continue
@@ -411,7 +412,11 @@ def browser_act(
         return result  # non-locator failure — don't retry (avoid double-acting)
 
     fresh = browser_observe(reobserve_query, top_k=1)
-    if fresh and fresh[0].selector != sel:
+    if fresh:
+        # Retry with the fresh selector. When the selector is unchanged the element
+        # was temporarily absent (transient DOM change) and is visible again per the
+        # snapshot — retrying is correct. When fresh is empty, the element is truly
+        # absent and there is nothing to retry against.
         result = _dispatch_action(
             fresh[0].selector, method, arguments, t0, element_method=fresh[0].method
         )
@@ -425,10 +430,9 @@ def browser_extract(
 ) -> ExtractResult:
     """Extract structured data from the current page.
 
-    `instruction=None` extracts the visible text content (zero-LLM).
-    `instruction` set without `schema` extracts a JSON-shaped dict via
-    LLM (one call). `schema` is rejected in Path A with a clear error —
-    strict Pydantic validation is a Path-B feature only.
+    In Path A, `instruction` is always ignored and the raw ARIA snapshot is
+    returned regardless. LLM-backed instruction-based extraction is a Path-B
+    feature only. `schema` is rejected in Path A with a clear error.
     """
     t0 = time.monotonic()
     if schema is not None:
