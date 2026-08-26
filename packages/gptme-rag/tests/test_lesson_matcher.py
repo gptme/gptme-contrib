@@ -1474,3 +1474,19 @@ class TestEffectiveStatus:
         fm, _ = extract_frontmatter(content)
 
         assert effective_status(fm) == "deprecated"
+
+    def test_regex_fallback_ignores_status_inside_description_block_scalar(self, monkeypatch):
+        """status: inside a description block scalar must not override metadata.status."""
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        content = (
+            "---\nname: skill\n"
+            "metadata:\n"
+            "  description: |\n"
+            "    status: deprecated\n"
+            "  status: active\n"
+            "---\n# Title\nBody.\n"
+        )
+
+        fm, _ = extract_frontmatter(content)
+
+        assert effective_status(fm) == "active"

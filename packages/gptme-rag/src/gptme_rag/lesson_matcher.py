@@ -199,10 +199,31 @@ def _extract_scalar_frontmatter_field(
     lines = fm_str.splitlines()
     indent = r"[ \t]*" if allow_indented else ""
     field_pattern = re.compile(rf"^{indent}{re.escape(field)}:\s*(.*)$")
+    # Detects any mapping key whose value is a block scalar indicator (| or >).
+    # Used to skip the body so a "field:" appearing inside a block value (e.g.
+    # "status: deprecated" in a "description: |" body) is not hoisted.
+    _block_key = re.compile(r"^([ \t]*)\S+:\s*[|>][ \t]*(?:#.*)?$")
+
+    skip_until_indent: int | None = None  # column of the active block scalar key
 
     for index, line in enumerate(lines):
+        # Skip lines inside another field's block scalar body.
+        if skip_until_indent is not None:
+            stripped = line.lstrip()
+            if not stripped:
+                continue  # blank lines may appear inside a block scalar
+            cur_indent = len(line) - len(stripped)
+            if cur_indent > skip_until_indent:
+                continue  # still inside block scalar content
+            skip_until_indent = None  # dedented — end of block scalar body
+
         match = field_pattern.match(line)
         if not match:
+            # Track block scalars introduced by other keys so their bodies are
+            # skipped on subsequent iterations.
+            bs_match = _block_key.match(line)
+            if bs_match:
+                skip_until_indent = len(bs_match.group(1))
             continue
         raw_value = match.group(1).strip()
         if raw_value and raw_value[0] in "|>":
