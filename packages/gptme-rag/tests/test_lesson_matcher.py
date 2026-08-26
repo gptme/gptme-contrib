@@ -11,6 +11,7 @@ from gptme_rag.lesson_matcher import (
     BM25_MIN_Z,
     _extract_list_frontmatter_field,
     BM25_STANDOUT_FRACTION,
+    effective_status,
     extract_frontmatter,
     filter_by_harness,
     filter_by_session_category,
@@ -1405,3 +1406,87 @@ class TestDescriptorStopwords:
             "template",
             "onboarding",
         }
+
+
+class TestEffectiveStatus:
+    """Agent Skills frontmatter has no top-level ``status``, so a deprecated
+    SKILL.md can only record its lifecycle as ``metadata.status``."""
+
+    def test_defaults_to_active(self):
+        assert effective_status({}) == "active"
+        assert effective_status({"status": "active"}) == "active"
+
+    def test_nested_metadata_status_is_honored(self):
+        assert effective_status({"metadata": {"status": "archived"}}) == "archived"
+
+    def test_stale_top_level_active_does_not_mask_nested_deprecation(self):
+        fm = {"status": "active", "metadata": {"status": "deprecated"}}
+        assert effective_status(fm) == "deprecated"
+
+    def test_non_dict_metadata_does_not_raise(self):
+        assert effective_status({"metadata": "not-a-dict"}) == "active"
+        assert effective_status({"metadata": ["a"]}) == "active"
+
+    def test_non_string_status_fails_closed(self):
+        """A malformed non-string status must NOT be treated as active.
+
+        PyYAML parses `status: false` as a bool and `status: [deprecated]` as a
+        list.  Only the exact string "active" may enable injection, otherwise a
+        typo silently re-enables a deprecated lesson/skill.
+        """
+        assert effective_status({"status": False}) != "active"
+        assert effective_status({"status": ["deprecated"]}) != "active"
+        assert effective_status({"metadata": {"status": False}}) != "active"
+        # An empty/whitespace status is "unset", not a deprecation.
+        assert effective_status({"status": ""}) == "active"
+        assert effective_status({"status": "  "}) == "active"
+
+    def test_scan_lessons_skips_skill_with_only_nested_status(self, tmp_path: Path):
+        skill_dir = tmp_path / "lifecycle-phase-index"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: lifecycle-phase-index\n"
+            'description: "Route work through the lifecycle phases."\n'
+            "metadata:\n  status: deprecated\n---\n# Deprecated\n"
+        )
+
+        assert scan_lessons([tmp_path]) == []
+
+    def test_scan_lessons_keeps_skill_with_nested_active_status(self, tmp_path: Path):
+        skill_dir = tmp_path / "still-live"
+        skill_dir.mkdir()
+        skill_path = skill_dir / "SKILL.md"
+        skill_path.write_text(
+            "---\nname: still-live\n"
+            'description: "Do the live thing."\n'
+            "metadata:\n  status: active\n---\n# Live\n"
+        )
+
+        assert [lesson["path"] for lesson in scan_lessons([tmp_path])] == [str(skill_path)]
+
+    def test_regex_fallback_extracts_nested_metadata_status(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        content = (
+            "---\nname: skill\nstatus: active\n"
+            "metadata:\n  status: deprecated\n---\n# Title\nBody.\n"
+        )
+
+        fm, _ = extract_frontmatter(content)
+
+        assert effective_status(fm) == "deprecated"
+
+    def test_regex_fallback_ignores_status_inside_description_block_scalar(self, monkeypatch):
+        """status: inside a description block scalar must not override metadata.status."""
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        content = (
+            "---\nname: skill\n"
+            "metadata:\n"
+            "  description: |\n"
+            "    status: deprecated\n"
+            "  status: active\n"
+            "---\n# Title\nBody.\n"
+        )
+
+        fm, _ = extract_frontmatter(content)
+
+        assert effective_status(fm) == "active"

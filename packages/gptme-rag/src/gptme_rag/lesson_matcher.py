@@ -165,6 +165,33 @@ def _clean_plain_scalar(raw: str) -> str:
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
 
 
+def effective_status(fm: dict) -> str:
+    """Resolve a lesson/skill lifecycle status from top-level or nested metadata.
+
+    The Agent Skills schema has no top-level ``status`` key, so a deprecated
+    ``SKILL.md`` can only record its lifecycle as ``metadata.status``. Treat
+    both locations as authoritative and let any non-active value win, so a
+    deprecation is never silently dropped because of where it was written.
+    """
+    candidates = [fm.get("status")]
+    metadata = fm.get("metadata")
+    if isinstance(metadata, dict):
+        candidates.append(metadata.get("status"))
+    for value in candidates:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and stripped != "active":
+                return stripped
+            continue
+        # Malformed non-string status (bool, list, int).  Fail closed: only the
+        # exact string "active" enables injection, so a `status: false` or
+        # `status: [deprecated]` typo cannot silently re-enable a deprecation.
+        return str(value)
+    return "active"
+
+
 def _extract_scalar_frontmatter_field(
     fm_str: str, field: str, *, allow_indented: bool = False
 ) -> str | None:
@@ -172,10 +199,31 @@ def _extract_scalar_frontmatter_field(
     lines = fm_str.splitlines()
     indent = r"[ \t]*" if allow_indented else ""
     field_pattern = re.compile(rf"^{indent}{re.escape(field)}:\s*(.*)$")
+    # Detects any mapping key whose value is a block scalar indicator (| or >).
+    # Used to skip the body so a "field:" appearing inside a block value (e.g.
+    # "status: deprecated" in a "description: |" body) is not hoisted.
+    _block_key = re.compile(r"^([ \t]*)\S+:\s*[|>][ \t]*(?:#.*)?$")
+
+    skip_until_indent: int | None = None  # column of the active block scalar key
 
     for index, line in enumerate(lines):
+        # Skip lines inside another field's block scalar body.
+        if skip_until_indent is not None:
+            stripped = line.lstrip()
+            if not stripped:
+                continue  # blank lines may appear inside a block scalar
+            cur_indent = len(line) - len(stripped)
+            if cur_indent > skip_until_indent:
+                continue  # still inside block scalar content
+            skip_until_indent = None  # dedented — end of block scalar body
+
         match = field_pattern.match(line)
         if not match:
+            # Track block scalars introduced by other keys so their bodies are
+            # skipped on subsequent iterations.
+            bs_match = _block_key.match(line)
+            if bs_match:
+                skip_until_indent = len(bs_match.group(1))
             continue
         raw_value = match.group(1).strip()
         if raw_value and raw_value[0] in "|>":
@@ -408,6 +456,16 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     status = _extract_scalar_frontmatter_field(fm_str, "status")
     if status is not None:
         fm["status"] = status
+
+    # Agent Skills store lifecycle under ``metadata.status``; scope the lookup to
+    # the metadata block so an unrelated nested ``status:`` is not hoisted.
+    metadata_status_block = _extract_mapping_block(fm_str, "metadata")
+    if metadata_status_block:
+        nested_status = _extract_scalar_frontmatter_field(
+            metadata_status_block, "status", allow_indented=True
+        )
+        if nested_status is not None:
+            fm.setdefault("metadata", {})["status"] = nested_status
 
     for field in ("id", "name", "description", "when_to_use"):
         scalar_value = _extract_scalar_frontmatter_field(fm_str, field)
@@ -658,7 +716,9 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
 
     ``SKILL.md`` files are never deduplicated by name.
 
-    Lessons with ``status`` other than ``"active"`` are skipped.
+    Lessons with a ``status`` other than ``"active"`` are skipped, whether the
+    status is written top-level or as ``metadata.status`` (see
+    :func:`effective_status`).
     Lessons with no keywords, patterns, or skill name are skipped.
     """
     lessons: list[dict[str, Any]] = []
@@ -707,8 +767,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
 
             fm, body = extract_frontmatter(content)
 
-            status = fm.get("status", "active")
-            if status != "active":
+            if effective_status(fm) != "active":
                 continue
 
             match_data = fm.get("match", {})

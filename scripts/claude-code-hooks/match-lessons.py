@@ -451,6 +451,33 @@ def _dedupe_strings(values: list[object]) -> list[str]:
     return deduped
 
 
+def effective_status(fm: dict) -> str:
+    """Resolve a lesson/skill lifecycle status from top-level or nested metadata.
+
+    The Agent Skills schema has no top-level ``status``, so a deprecated
+    SKILL.md can only record it as ``metadata.status``. Treat either location as
+    authoritative and let any non-active value win, so a deprecation is never
+    silently dropped.
+    """
+    candidates = [fm.get("status")]
+    metadata = fm.get("metadata")
+    if isinstance(metadata, dict):
+        candidates.append(metadata.get("status"))
+    for value in candidates:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and stripped != "active":
+                return stripped
+            continue
+        # Malformed non-string status (bool, list, int).  Fail closed: only the
+        # exact string "active" enables injection, so a `status: false` or
+        # `status: [deprecated]` typo cannot silently re-enable a deprecation.
+        return str(value)
+    return "active"
+
+
 def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     """Extract YAML frontmatter and body from markdown."""
     if not content.startswith("---"):
@@ -488,9 +515,46 @@ def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
     if keywords:
         fm["match"] = {"keywords": keywords}
 
-    m = re.search(r"status:\s*(\w+)", fm_str)
-    if m:
-        fm["status"] = m.group(1)
+    # Resolve lifecycle status without PyYAML.  Two independent lookups avoid
+    # false positives from block scalars (e.g. `description: |` whose
+    # continuation lines can contain `status: deprecated` with leading
+    # whitespace and would fool a single anchored-but-not-scoped regex):
+    #
+    # 1. Top-level `status:` — must start at column 0 (no leading whitespace).
+    # 2. `metadata.status` — only within the `metadata:` block's indented body.
+    #
+    # Comment lines are stripped first; the patterns never match them because
+    # the real guard is structural (column-0 vs. metadata-block scope).
+    fm_no_comments = "\n".join(
+        line for line in fm_str.splitlines() if not line.strip().startswith("#")
+    )
+    # (1) Top-level: `^status:` with no leading whitespace.
+    # Strip surrounding quotes so `status: "active"` equals `status: active`.
+    top_statuses = [
+        s.strip("\"'")
+        for s in re.findall(r"^status:\s*(\S+)", fm_no_comments, re.MULTILINE)
+    ]
+    # (2) metadata.status: capture the indented body after `^metadata:` and
+    # search for `status:` within it.  The capture stops at the first
+    # non-indented line, so a `status:` in a sibling block scalar is not
+    # mistakenly included.
+    meta_statuses: list[str] = []
+    meta_m = re.search(
+        r"^metadata:\s*\n((?:[ \t]+\S[^\n]*\n?)*)",
+        fm_no_comments,
+        re.MULTILINE,
+    )
+    if meta_m:
+        meta_statuses = [
+            s.strip("\"'")
+            for s in re.findall(
+                r"^[ \t]+status:\s*(\S+)", meta_m.group(1), re.MULTILINE
+            )
+        ]
+    all_statuses = top_statuses + meta_statuses
+    if all_statuses:
+        non_active = [s for s in all_statuses if s != "active"]
+        fm["status"] = non_active[0] if non_active else all_statuses[0]
 
     for field in ("name", "description", "when_to_use"):
         value = _extract_scalar_frontmatter_field(fm_str, field)
@@ -635,8 +699,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
 
             fm, body = extract_frontmatter(content)
 
-            status = fm.get("status", "active")
-            if status != "active":
+            if effective_status(fm) != "active":
                 continue
 
             match_data = fm.get("match", {})

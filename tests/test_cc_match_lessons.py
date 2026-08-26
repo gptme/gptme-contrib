@@ -1008,3 +1008,220 @@ def test_classify_lesson_present_manifest_missing_holdout_key_returns_unknown(ho
         "'unknown', not spuriously 'holdout'."
     )
     assert version == 2
+
+
+# --- metadata.status (Agent Skills lifecycle) ---
+
+
+def _write_skill_md(tmp_path: Path, name: str, frontmatter: str) -> Path:
+    skill_dir = tmp_path / name
+    skill_dir.mkdir(parents=True)
+    path = skill_dir / "SKILL.md"
+    path.write_text(f"---\n{frontmatter}---\n\n# {name}\n\nBody.\n")
+    return path
+
+
+def test_scan_lessons_skips_skill_with_only_nested_metadata_status(hook, tmp_path):
+    """Agent Skills frontmatter has no top-level `status`, so a deprecated skill
+    can only record it under `metadata.status`. It must still be filtered out."""
+    lessons_dir = tmp_path / "skills"
+    _write_skill_md(
+        lessons_dir,
+        "lifecycle-phase-index",
+        'name: lifecycle-phase-index\ndescription: "Route work through phases."\nmetadata:\n  status: deprecated\n',
+    )
+
+    assert hook.scan_lessons([lessons_dir]) == []
+
+
+def test_scan_lessons_keeps_skill_with_nested_active_status(hook, tmp_path):
+    lessons_dir = tmp_path / "skills"
+    path = _write_skill_md(
+        lessons_dir,
+        "still-live",
+        'name: still-live\ndescription: "Do the live thing."\nmetadata:\n  status: active\n',
+    )
+
+    assert [entry["path"] for entry in hook.scan_lessons([lessons_dir])] == [str(path)]
+
+
+def test_effective_status_prefers_non_active_from_either_location(hook):
+    assert hook.effective_status({}) == "active"
+    assert hook.effective_status({"status": "active"}) == "active"
+    assert hook.effective_status({"metadata": {"status": "archived"}}) == "archived"
+    # A stale top-level `active` must not mask a nested deprecation.
+    assert (
+        hook.effective_status(
+            {"status": "active", "metadata": {"status": "deprecated"}}
+        )
+        == "deprecated"
+    )
+    # Non-dict metadata must not raise.
+    assert hook.effective_status({"metadata": "not-a-dict"}) == "active"
+
+
+def test_effective_status_non_string_fails_closed(hook):
+    """Non-string status values must not be treated as active.
+
+    Mirrors the gptme-rag matcher: only the exact string "active" enables
+    injection, so `status: false` (bool) or `status: [deprecated]` (list) cannot
+    silently re-enable a deprecated lesson or skill.
+    """
+    assert hook.effective_status({"status": False}) != "active"
+    assert hook.effective_status({"status": ["deprecated"]}) != "active"
+    assert hook.effective_status({"metadata": {"status": False}}) != "active"
+    assert hook.effective_status({"status": ""}) == "active"
+    assert hook.effective_status({"status": "  "}) == "active"
+
+
+def test_extract_frontmatter_regex_fallback_sees_nested_status(hook, monkeypatch):
+    """Without PyYAML the regex fallback must still see a nested deprecation,
+    even when an earlier top-level `status: active` precedes it."""
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    fm, _ = hook.extract_frontmatter(
+        "---\nstatus: active\nmetadata:\n  status: deprecated\n---\n# Title\n"
+    )
+
+    assert hook.effective_status(fm) == "deprecated"
+
+
+def test_extract_frontmatter_regex_fallback_ignores_status_in_comments(
+    hook, monkeypatch
+):
+    """The regex fallback must not pick up `status: deprecated` from YAML comments
+    or from a description field value — only real YAML key lines count."""
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    # A comment containing `status: deprecated` must not override the real active status.
+    fm, _ = hook.extract_frontmatter(
+        "---\nstatus: active\n# status: deprecated\n---\n# Title\n"
+    )
+    assert (
+        hook.effective_status(fm) == "active"
+    ), "comment line must not override real status"
+
+    # A description value mentioning `status: deprecated` must not override active.
+    fm2, _ = hook.extract_frontmatter(
+        "---\nstatus: active\ndescription: Fix status: deprecated handling\n---\n# Title\n"
+    )
+    assert (
+        hook.effective_status(fm2) == "active"
+    ), "description text must not override real status"
+
+
+def test_extract_frontmatter_regex_fallback_ignores_status_in_block_scalar(
+    hook, monkeypatch
+):
+    """The regex fallback must not be fooled by `status: deprecated` that appears
+    as a content line inside a YAML block scalar (e.g. `description: |`).
+
+    Block scalar content lines are indented, so `^[^\\S\\n]*status:` would match
+    them even though they are not YAML keys.  The fix scopes the indented lookup
+    to the `metadata:` block body only, so a block scalar sibling is invisible.
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    # A block scalar where the content happens to contain `status: deprecated`
+    # on its own line.  The lesson itself is `status: active`.
+    frontmatter = (
+        "---\n"
+        "status: active\n"
+        "description: |\n"
+        "  This lesson explains status: deprecated handling.\n"
+        "  status: deprecated lessons are skipped by the matcher.\n"
+        "---\n"
+        "# Title\n"
+    )
+    fm, _ = hook.extract_frontmatter(frontmatter)
+    assert (
+        hook.effective_status(fm) == "active"
+    ), "block scalar content must not override the real top-level status"
+
+
+def test_extract_frontmatter_regex_fallback_non_word_status_fails_closed(
+    hook, monkeypatch
+):
+    """Regex fallback: `status: [deprecated]` (list value) must not be treated as active.
+
+    The ``\\w+`` pattern only captures word characters, so ``[deprecated]`` was
+    silently dropped — leaving the status absent from fm and effective_status()
+    returning "active".  The fix uses ``\\S+`` to capture any non-whitespace value
+    so the list syntax reaches effective_status() as a non-active string.
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    fm, _ = hook.extract_frontmatter("---\nstatus: [deprecated]\n---\n# Title\n")
+    assert (
+        hook.effective_status(fm) != "active"
+    ), "status: [deprecated] in regex fallback must not be treated as active"
+
+    fm2, _ = hook.extract_frontmatter(
+        "---\nmetadata:\n  status: [deprecated]\n---\n# Title\n"
+    )
+    assert (
+        hook.effective_status(fm2) != "active"
+    ), "metadata.status: [deprecated] in regex fallback must not be treated as active"
+
+
+def test_extract_frontmatter_regex_fallback_quoted_active_not_dropped(
+    hook, monkeypatch
+):
+    """Regex fallback: ``status: "active"`` (quoted) must still inject the lesson.
+
+    ``\\S+`` captures surrounding quotes, so the raw captured value is ``"active"``
+    (with quotes) instead of ``active``.  Without quote-stripping the comparison
+    ``s != "active"`` evaluates true and the lesson is silently dropped — a
+    regression vs. the prior ``\\w+`` pattern which simply never matched quoted
+    values and left status absent (defaulting to active).
+
+    The fix strips ``"`` and ``'`` from captured values before comparison.
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    fm, _ = hook.extract_frontmatter('---\nstatus: "active"\n---\n# Title\n')
+    assert (
+        hook.effective_status(fm) == "active"
+    ), 'status: "active" (quoted) must not be silently dropped by regex fallback'
+
+    fm2, _ = hook.extract_frontmatter(
+        "---\nmetadata:\n  status: 'active'\n---\n# Title\n"
+    )
+    assert (
+        hook.effective_status(fm2) == "active"
+    ), "metadata.status: 'active' (single-quoted) must not be silently dropped"
