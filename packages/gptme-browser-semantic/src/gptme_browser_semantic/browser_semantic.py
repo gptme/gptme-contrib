@@ -380,10 +380,10 @@ def browser_act(
     method = method or best.method
     arguments = arguments or best.arguments
 
-    # Detect the common mistake: string-form act matched a fill element but the
-    # caller provided no value. The instruction has no structured value to extract,
-    # so we surface a clear error instead of an opaque AssertionError later.
-    if method == "fill" and not arguments and isinstance(action_or_observed, str):
+    # Detect the common mistake: a fill element was selected (string-form or
+    # ObserveResult) but the caller provided no value. Surface a clear error
+    # instead of the opaque AssertionError from `_dispatch_action`.
+    if method == "fill" and not arguments:
         return ActResult(
             success=False,
             message=(

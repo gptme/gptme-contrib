@@ -670,3 +670,23 @@ def test_act_string_form_fill_without_value_returns_clear_error(
     assert "arguments" in result.message.lower()
     # Must not have dispatched to fill_element at all (no value to fill).
     assert browser_stub.fills == []
+
+
+def test_act_observed_form_fill_without_value_returns_clear_error(
+    browser_stub: BrowserStub,
+) -> None:
+    """browser_act(ObserveResult) with method=fill and no value must not assert.
+
+    The string-form guard used to be exclusive to `isinstance(..., str)`, so
+    callers who correctly reused an observed textbox selector without
+    arguments=['value'] got an opaque AssertionError from _dispatch_action.
+    Both invocation forms must share the same clear error contract.
+    """
+    observed = browser_observe("type into the search box", top_k=1)[0]
+    assert observed.method == "fill"
+    result = browser_act(observed)
+    assert not result.success
+    assert "fill" in result.message.lower()
+    assert "arguments" in result.message.lower()
+    assert "AssertionError" not in result.message
+    assert browser_stub.fills == []
