@@ -76,3 +76,46 @@ def test_unknown_attr_raises() -> None:
 
     with pytest.raises(AttributeError, match="gptme_rag"):
         _ = gptme_rag.NonExistentClass
+
+
+def test_missing_dep_raises_attribute_error_not_import_error() -> None:
+    """When a heavy dep is absent, __getattr__ must raise AttributeError, not ImportError.
+
+    hasattr() and getattr(..., default) only catch AttributeError.  If __getattr__
+    propagates ImportError, code that probes for optional Indexer will crash
+    instead of gracefully falling back.
+    """
+    import sys
+    from unittest.mock import patch
+
+    import gptme_rag
+    import pytest
+
+    # Evict any cached resolution of the indexer submodule.
+    for key in list(sys.modules):
+        if "gptme_rag.indexing" in key:
+            del sys.modules[key]
+
+    # Block the submodule as if chromadb were not installed (None → ImportError).
+    blocking = {
+        "gptme_rag.indexing": None,
+        "gptme_rag.indexing.indexer": None,
+    }
+    with patch.dict(sys.modules, blocking):
+        # hasattr must return False, not bubble up an ImportError.
+        assert not hasattr(gptme_rag, "Indexer")
+        # getattr with a default must return the default.
+        sentinel = object()
+        assert getattr(gptme_rag, "Indexer", sentinel) is sentinel
+        # Direct access must raise AttributeError (not ImportError).
+        with pytest.raises(AttributeError):
+            _ = gptme_rag.Indexer
+
+
+def test_dir_includes_lazy_names() -> None:
+    """Lazy names (Indexer, ContextAssembler) must appear in dir(gptme_rag)."""
+    import gptme_rag
+
+    d = dir(gptme_rag)
+    assert "Indexer" in d
+    assert "ContextAssembler" in d

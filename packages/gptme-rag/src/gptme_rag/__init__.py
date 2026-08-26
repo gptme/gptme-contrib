@@ -31,11 +31,27 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     if name == "Indexer":
-        from .indexing.indexer import Indexer
+        try:
+            from .indexing.indexer import Indexer
 
-        return Indexer
+            return Indexer
+        except ImportError as e:
+            raise AttributeError(
+                f"module 'gptme_rag' has no attribute {name!r} "
+                "(heavy deps not installed; install gptme-rag[full])"
+            ) from e
     if name == "ContextAssembler":
-        from .query.context_assembler import ContextAssembler
+        try:
+            from .query.context_assembler import ContextAssembler
 
-        return ContextAssembler
+            return ContextAssembler
+        except ImportError as e:
+            raise AttributeError(
+                f"module 'gptme_rag' has no attribute {name!r} "
+                "(heavy deps not installed; install gptme-rag[full])"
+            ) from e
     raise AttributeError(f"module 'gptme_rag' has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return __all__
