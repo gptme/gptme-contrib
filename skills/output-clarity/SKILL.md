@@ -5,11 +5,25 @@ license: MIT
 compatibility: "Works with all gptme backends and modes"
 metadata:
   author: bob
-  version: "1.0.0"
+  version: "1.1.0"
   tags: [accessibility, output-clarity, neurodivergent, action-first, structured-output]
   requires_tools: []
   requires_skills: []
   source: "Adapted from ayghri/i-have-adhd (https://github.com/ayghri/i-have-adhd)"
+match:
+  keywords:
+    - "/output-clarity"
+    - "output clarity mode"
+    - "enable clarity mode"
+    - "use clarity mode"
+    - "start clarity mode"
+    - "activate clarity mode"
+    - "output-clarity mode"
+    - "neurodivergent formatting"
+    - "ADHD formatting"
+    - "i-have-adhd plugin"
+    - "ayghri formatting"
+    - "action-first formatting"
 ---
 
 # Output Clarity Skill
