@@ -122,7 +122,7 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
     #   - button "Submit" [ref=e3]
     #   - textbox "Email" [ref=e7]
     line_re = re.compile(
-        r'^[\s\-]*(?P<role>\w+)\s+"(?P<name>(?:[^"\\]|\\.)*)"(?:\s+\[(?P<ref>[^\]]+)\])?'
+        r'^[\s\-]*(?P<role>[\w-]+)\s+"(?P<name>(?:[^"\\]|\\.)*)"(?:\s+\[(?P<ref>[^\]]+)\])?'
     )
     for line in snapshot.splitlines():
         m = line_re.match(line)
@@ -263,13 +263,21 @@ def _dispatch_action(
 
     Each of these is zero-LLM.
     """
-    from gptme.tools.browser import (
-        click_element,
-        fill_element,
-        hover_element,
-        press_key,
-        select_option,
-    )
+    try:
+        from gptme.tools.browser import (
+            click_element,
+            fill_element,
+            hover_element,
+            press_key,
+            select_option,
+        )
+    except ImportError as exc:
+        return ActResult(
+            success=False,
+            message=f"gptme browser backend not available: {exc}",
+            selector_used=sel,
+            elapsed_ms=int((time.monotonic() - t0) * 1000),
+        )
 
     try:
         if method == "click":
