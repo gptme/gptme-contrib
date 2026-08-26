@@ -91,17 +91,11 @@ def test_missing_dep_raises_attribute_error_not_import_error() -> None:
     import gptme_rag
     import pytest
 
-    # Evict any cached resolution of the indexer submodule.
-    for key in list(sys.modules):
-        if "gptme_rag.indexing" in key:
-            del sys.modules[key]
-
-    # Block the submodule as if chromadb were not installed (None → ImportError).
-    blocking = {
-        "gptme_rag.indexing": None,
-        "gptme_rag.indexing.indexer": None,
-    }
-    with patch.dict(sys.modules, blocking):
+    # Block only the indexer submodule (None → ImportError).  Do NOT evict
+    # gptme_rag.indexing.* broadly — that clobbers gptme_rag.indexing.document,
+    # causing Document class-identity mismatches and pickling failures in sibling
+    # tests that share Document instances across the session.
+    with patch.dict(sys.modules, {"gptme_rag.indexing.indexer": None}):
         # hasattr must return False, not bubble up an ImportError.
         assert not hasattr(gptme_rag, "Indexer")
         # getattr with a default must return the default.
