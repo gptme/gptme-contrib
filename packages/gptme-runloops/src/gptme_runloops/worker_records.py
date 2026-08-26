@@ -499,6 +499,9 @@ def normalize_oid(value: Any) -> str:
 def normalize_pr_snapshot(payload: Any) -> dict[str, str]:
     """Normalize a ``gh pr view --json state,headRefOid,mergeCommit`` payload.
 
+    Also preserves ``unresolvedThreads`` when the caller has enriched the
+    payload with it (see :func:`capture_pr_snapshot_json`).
+
     Mirrors worker.sh:389-399: non-dict payloads → ``{}``; ``mergeCommit``
     may be the gh object form (``{"oid": ...}``) or a bare value; state is
     uppercased, oids lowercased.
@@ -508,11 +511,17 @@ def normalize_pr_snapshot(payload: Any) -> dict[str, str]:
     merge_commit = payload.get("mergeCommit")
     if isinstance(merge_commit, dict):
         merge_commit = merge_commit.get("oid")
-    return {
+    snapshot = {
         "state": str(payload.get("state") or "").strip().upper(),
         "headRefOid": normalize_oid(payload.get("headRefOid")),
         "mergeCommit": normalize_oid(merge_commit),
     }
+    # Preserved only when present: gh pr view cannot report it, so its
+    # absence must stay distinguishable from an observed count of 0.
+    threads = _parse_thread_count(payload.get("unresolvedThreads"))
+    if threads is not None:
+        snapshot["unresolvedThreads"] = str(threads)
+    return snapshot
 
 
 def parse_pr_snapshot(raw: str) -> dict[str, str]:
@@ -575,6 +584,8 @@ def apply_pr_state_diff(
         payload["pr_head_oid_before"] = before_head
     if before.get("mergeCommit"):
         payload["pr_merge_commit_before"] = before["mergeCommit"]
+    if before.get("unresolvedThreads") is not None:
+        payload["pr_unresolved_threads_before"] = before["unresolvedThreads"]
 
     if after.get("state"):
         payload["pr_state_after"] = after["state"]
@@ -582,12 +593,98 @@ def apply_pr_state_diff(
         payload["pr_head_oid_after"] = after_head
     if after.get("mergeCommit"):
         payload["pr_merge_commit_after"] = after["mergeCommit"]
+    if after.get("unresolvedThreads") is not None:
+        payload["pr_unresolved_threads_after"] = after["unresolvedThreads"]
 
     if before_head and after_head and before_head != after_head:
         deliverables.append(after_head)
 
     payload["deliverables"] = dedupe_deliverables(deliverables)
     return payload
+
+
+def fetch_unresolved_thread_count(
+    repo: str,
+    number: int | str,
+    *,
+    cwd: str | Path,
+    timeout: float = 20,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> int | None:
+    """Count unresolved review threads on a PR, or ``None`` if unobservable.
+
+    Best-effort by design: any failure (gh error, timeout, unparseable
+    output) returns ``None``, which :func:`derive_effect_signal` treats as
+    "not observed" — so the effect verdict degrades to exactly the
+    pre-thread-signal behaviour rather than inventing one. Unresolved
+    threads are GraphQL-only; ``gh pr view --json`` cannot report them.
+    Paginates through all pages so PRs with more than 100 threads are
+    counted correctly.
+    """
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!,$after:String){"
+        "repository(owner:$owner,name:$name){"
+        "pullRequest(number:$number){"
+        "reviewThreads(first:100,after:$after){"
+        "nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}"
+    )
+    owner, _, name = str(repo).partition("/")
+    if not owner or not name:
+        return None
+    try:
+        number_int = int(number)
+    except (ValueError, TypeError):
+        return None
+    total = 0
+    after: str | None = None
+    while True:
+        cmd = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={number_int}",
+        ]
+        if after is not None:
+            cmd += ["-F", f"after={after}"]
+        try:
+            result = runner(
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            threads_obj = json.loads(result.stdout)["data"]["repository"][
+                "pullRequest"
+            ]["reviewThreads"]
+            nodes = threads_obj["nodes"]
+            page_info = threads_obj["pageInfo"]
+        except Exception:
+            return None
+        if not isinstance(nodes, list):
+            return None
+        total += sum(
+            1 for node in nodes if isinstance(node, dict) and not node.get("isResolved")
+        )
+        if not page_info.get("hasNextPage"):
+            break
+        after = page_info.get("endCursor")
+        if not after:
+            break
+    return total
 
 
 def fetch_pr_snapshot(
@@ -626,7 +723,34 @@ def fetch_pr_snapshot(
     )
     if result.returncode != 0:
         return None
-    return parse_pr_snapshot(result.stdout)
+    snapshot = parse_pr_snapshot(result.stdout)
+    threads = fetch_unresolved_thread_count(
+        repo, number, cwd=cwd, timeout=timeout, runner=runner
+    )
+    if threads is not None:
+        snapshot["unresolvedThreads"] = str(threads)
+    return snapshot
+
+
+def capture_pr_snapshot_json(
+    repo: str,
+    number: int | str,
+    *,
+    cwd: str | Path,
+    timeout: float = 20,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str:
+    """JSON for a *before* snapshot, including the unresolved-thread count.
+
+    The before and after snapshots must be captured the same way or the
+    thread signal is inert: a count present on only one side is never
+    compared (see :func:`derive_effect_signal`). Returns ``""`` when the PR
+    could not be read, which callers already treat as "no before state".
+    """
+    snapshot = fetch_pr_snapshot(repo, number, cwd=cwd, timeout=timeout, runner=runner)
+    if snapshot is None:
+        return ""
+    return json.dumps(snapshot)
 
 
 def update_record_pr_state(
@@ -1076,6 +1200,22 @@ EFFECT_UNKNOWN = "unknown"
 EFFECT_FETCH_FAILED = "fetch_failed"
 
 
+def _parse_thread_count(value: object) -> int | None:
+    """Non-negative int from a snapshot thread count, else ``None``.
+
+    ``None`` means "not observed" and must never be conflated with ``0``
+    ("observed, and there are none left") — that distinction is what keeps
+    an unfetched count from reading as a resolution.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return count if count >= 0 else None
+
+
 def derive_effect_signal(
     payload: Mapping[str, Any],
     *,
@@ -1089,6 +1229,7 @@ def derive_effect_signal(
     - head OID advanced        → a push landed              → ``observed``
     - PR state transitioned    → merged/closed              → ``observed``
     - merge commit appeared    → merged                     → ``observed``
+    - unresolved threads fell  → an adjudication landed     → ``observed``
     - delivery outcome handled → a reply was posted         → ``observed``
     - ``orphan_no_delivery``   → session ended with no reply → ``none``
     - before/after both known and identical → nothing moved → ``none``
@@ -1126,6 +1267,8 @@ def derive_effect_signal(
     after_state = str(payload.get("pr_state_after") or "").strip().upper()
     merge_before = normalize_oid(payload.get("pr_merge_commit_before"))
     merge_after = normalize_oid(payload.get("pr_merge_commit_after"))
+    before_threads = _parse_thread_count(payload.get("pr_unresolved_threads_before"))
+    after_threads = _parse_thread_count(payload.get("pr_unresolved_threads_after"))
 
     if before_head and after_head and before_head != after_head:
         return EFFECT_OBSERVED
@@ -1134,9 +1277,26 @@ def derive_effect_signal(
     if merge_after and merge_after != merge_before:
         return EFFECT_OBSERVED
 
+    # Resolving a review thread is a real, complete action that leaves no
+    # commit and needs no reply — it is the *correct* resolution for a
+    # "needs adjudication: N unresolved thread(s)" item whose fix already
+    # landed. Without this signal such a dispatch reads as `none`, burns the
+    # ineffective retry budget, and escalates (real instance:
+    # gptme/gptme#3613, re-armed twice as `retry_budget_exhausted:ineffective`
+    # while its only outstanding work was one already-fixed thread).
+    # Only a *decrease* counts: threads can be reopened or newly filed by a
+    # reviewer mid-dispatch, and neither is an effect this session produced.
+    if before_threads is not None and after_threads is not None:
+        if after_threads < before_threads:
+            return EFFECT_OBSERVED
+
     # Nothing moved — but only call that "none" when we actually observed
     # both sides of at least one signal.
-    if (before_head and after_head) or (before_state and after_state):
+    if (
+        (before_head and after_head)
+        or (before_state and after_state)
+        or (before_threads is not None and after_threads is not None)
+    ):
         return EFFECT_NONE
     return EFFECT_UNKNOWN
 

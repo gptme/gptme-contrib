@@ -94,7 +94,6 @@ from gptme_runloops.merge_lifecycle import (
     WorkItem,
     run_merge_lifecycle,
 )
-from gptme_runloops.pm_bandit import PmModelBandit
 from gptme_runloops.pm_dispatch import (
     DISPATCH_COOLDOWN_DIR_ENV,
     EFFECT_NONE,
@@ -118,6 +117,7 @@ from gptme_runloops.worker_records import (
     append_wait_merge_gate_log,
     append_worker_latency_records,
     build_wait_merge_gate_entry,
+    capture_pr_snapshot_json,
     compute_latency_outcome,
     extract_delivery_field,
     fallback_outcome,
@@ -1718,22 +1718,15 @@ def execute_plan(
     pr_before_json = ""
     if PR_OBSERVE_TYPES & set(item.types):
         try:
-            proc = hooks.run_cmd(
-                [
-                    "gh",
-                    "pr",
-                    "view",
-                    plan.number,
-                    "--repo",
-                    plan.repo,
-                    "--json",
-                    "state,headRefOid,mergeCommit",
-                ],
-                capture_output=True,
-                text=True,
+            # Captured via the shared helper so the before snapshot carries
+            # the unresolved-thread count the after snapshot also collects —
+            # a count on only one side is never compared.
+            pr_before_json = capture_pr_snapshot_json(
+                plan.repo,
+                plan.number,
                 cwd=str(config.workspace),
+                runner=hooks.run_cmd,
             )
-            pr_before_json = proc.stdout if proc.returncode == 0 else ""
         except (OSError, subprocess.SubprocessError):
             pr_before_json = ""
 
@@ -2723,7 +2716,6 @@ def run_work_file(
     run_start = int(time.time())
     sysprompt_path: Path | None = None
     temp_records: tempfile.TemporaryDirectory[str] | None = None
-
     try:
         if hooks.git_pull is not None:
             try:
@@ -2745,25 +2737,6 @@ def run_work_file(
             pass
 
         ambient = _ambient_env(config, backend, model)
-
-        # Stage 1 (shadow mode): Load bandit but don't use it for routing yet
-        bandit_shadow = os.getenv("BOB_PM_BANDIT_SHADOW", "").lower() in ("1", "true")
-        bandit: PmModelBandit | None = None
-        if bandit_shadow:
-            try:
-                pm_state_dir = (
-                    config.state_dir / "pm-dispatch"
-                    if config.state_dir
-                    else Path("state/pm-dispatch")
-                )
-                bandit = PmModelBandit(state_dir=str(pm_state_dir))
-                _log(
-                    "BOB_PM_BANDIT_SHADOW=1: bandit loaded (recording observations only)"
-                )
-            except Exception as exc:
-                _log(f"WARN: failed to load bandit: {exc}")
-                bandit = None
-
         if hooks.sysprompt_builder is not None:
             _log("Building system prompt...")
             env = os.environ.copy()
@@ -2845,23 +2818,6 @@ def run_work_file(
             )
             _log(f"Prompt: {len(plan.prompt)} chars")
 
-            # Stage 1 shadow logging: what would the bandit choose?
-            if bandit_shadow and bandit is not None:
-                try:
-                    from gptme_runloops.pm_dispatch import classify_item_work_type
-
-                    work_type = classify_item_work_type(
-                        list(item.types), repo=item.repo
-                    )
-                    available = [m for m in [model] if m]
-                    if available:
-                        bandit_model = bandit.resolve_model(work_type, available)
-                        _log(
-                            f"BOB_PM_BANDIT_SHADOW: work_type={work_type} bandit_model={bandit_model}"
-                        )
-                except Exception as exc:
-                    _log(f"WARN: bandit shadow logging failed: {exc}")
-
             if rate_limited:
                 _log(f"Rate-limited: skipping item {index} and remaining items")
                 break
@@ -2905,39 +2861,9 @@ def run_work_file(
                     infra_failure = item_outcome.infra_failure
                 if item_outcome.exit_code != 0 and overall_exit == 0:
                     overall_exit = item_outcome.exit_code
-
-                item_effect = run_post_session(plan, item, item_outcome, config, hooks)
-                item_effects.append(item_effect)
-
-                # Stage 1 shadow: record outcome for later analysis
-                if bandit_shadow and bandit is not None:
-                    try:
-                        from gptme_runloops.pm_dispatch import classify_item_work_type
-
-                        work_type = classify_item_work_type(
-                            list(item.types), repo=item.repo
-                        )
-                        # Skip EFFECT_UNKNOWN: no signal is better than a biased
-                        # zero that would penalise models on work types (e.g.
-                        # master_ci_failure) where observability is structurally absent.
-                        if item_effect == EFFECT_UNKNOWN:
-                            _log(
-                                f"BOB_PM_BANDIT_SHADOW: outcome skipped (unknown effect): "
-                                f"work_type={work_type}, model={model}"
-                            )
-                        elif model:
-                            reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
-                            bandit.record_outcome(work_type, model, reward)
-                            _log(
-                                f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
-                            )
-                        else:
-                            _log(
-                                f"BOB_PM_BANDIT_SHADOW: outcome skipped (no model): "
-                                f"work_type={work_type}, effect={item_effect}"
-                            )
-                    except Exception as exc:
-                        _log(f"WARN: bandit outcome recording failed: {exc}")
+                item_effects.append(
+                    run_post_session(plan, item, item_outcome, config, hooks)
+                )
             finally:
                 # bash EXIT-trap parity: the claim is abandoned on every exit
                 # path, including SIGTERM (the CLI converts it to SystemExit
