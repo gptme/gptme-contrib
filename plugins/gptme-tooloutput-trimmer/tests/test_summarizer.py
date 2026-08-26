@@ -525,3 +525,26 @@ def test_call_summarizer_whitespace_response_not_cached() -> None:
     assert first is None  # whitespace response must not be returned
     assert second == "- Real summary: result found"
     assert len(calls) == 2  # LLM invoked twice — cache was not poisoned
+
+
+def test_cache_summary_evicts_when_full() -> None:
+    """When the cache is at capacity, inserting a new key evicts one entry.
+
+    Exercises the eviction branch in _cache_summary (line 105) which is
+    unreachable under normal test conditions because _SUMMARY_CACHE_MAX is 64.
+    """
+    from tooloutput_trimmer.hooks.summarizer import _cache_summary, _cached_summary
+
+    with patch("tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE", {}):
+        with patch("tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE_MAX", 2):
+            _cache_summary("ctx-a", "model", "summary-a")
+            _cache_summary("ctx-b", "model", "summary-b")
+            # Cache is now full; inserting a third key must evict one entry.
+            _cache_summary("ctx-c", "model", "summary-c")
+
+            # The new entry must be present.
+            assert _cached_summary("ctx-c", "model") == "summary-c"
+            # Total entries must not exceed the (patched) max.
+            from tooloutput_trimmer.hooks.summarizer import _SUMMARY_CACHE
+
+            assert len(_SUMMARY_CACHE) <= 2
