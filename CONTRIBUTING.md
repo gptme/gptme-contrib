@@ -26,8 +26,10 @@ Example script tool in Python, using `uv` script dependencies:
 import sys
 from rich import print
 
+
 def main():
     print("[bold green]Hello from a script tool![/bold green]")
+
 
 if __name__ == "__main__":
     main()
@@ -80,8 +82,11 @@ easier testability.
 ```python
 import click
 
+
 @click.command()
-@click.option("--workspace", type=click.Path(path_type=Path), default=".", show_default=True)
+@click.option(
+    "--workspace", type=click.Path(path_type=Path), default=".", show_default=True
+)
 def main(workspace: Path) -> None:
     """Short description shown in --help."""
     ...
