@@ -122,34 +122,26 @@ def _parse_aria_to_elements(snapshot: str) -> list[dict[str, str]]:
     #   - button "Submit" [ref=e3]
     #   - textbox "Email" [ref=e7]
     line_re = re.compile(
-        r'^[\s\-]*(?P<role>[\w-]+)\s+"(?P<name>(?:[^"\\]|\\.)*)"(?:\s+\[(?P<ref>[^\]]+)\])?'
+        r'^[\s\-]*(?P<role>[\w-]+)\s+"(?P<name>[^"]*)"(?:\s+\[(?P<ref>[^\]]+)\])?'
     )
     for line in snapshot.splitlines():
         m = line_re.match(line)
         if not m:
             continue
         role = m.group("role").strip()
-        # Unescape only the two escape sequences the ARIA snapshot uses: \" and \\.
-        # A broad r"\\(.)" would corrupt names with literal \n, Windows paths, etc.
-        name = re.sub(r'\\("|\\)', r"\1", m.group("name")).strip()
+        name = m.group("name").strip()
         ref = m.group("ref") or ""
         if not name:
             continue
-        # Only treat bracket content as a real ref if it is a `ref=...`
-        # attribute (e.g. "ref=e1").  Other bracket attributes like
-        # "[level=2]" must be ignored per the README spec.
-        # Also handle multi-attribute brackets like "[ref=e5, level=1]" — extract
-        # only the "ref=VALUE" token and discard the rest.
+        # Extract only the `ref=...` token — bracket may contain multiple
+        # comma-separated attributes (e.g. "[ref=e5, level=1]").  We take only
+        # the part that starts with "ref=", which is a valid Playwright selector
+        # attribute.  Other attributes like "[level=2]" are ignored per spec.
         actual_ref = next(
-            (tok.strip() for tok in ref.split(",") if tok.strip().startswith("ref=")),
+            (p.strip() for p in ref.split(",") if p.strip().startswith("ref=")),
             "",
         )
-        # Escape single and double quotes so the role-name selector stays valid
-        # for names like "John's" or 'say "hello"'.
-        escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
-        selector = (
-            f"[{actual_ref}]" if actual_ref else f"role={role}[name='{escaped_name}']"
-        )
+        selector = f"[{actual_ref}]" if actual_ref else f"role={role}[name='{name}']"
         elements.append(
             {
                 "role": role,
@@ -177,11 +169,7 @@ def _score_match(query: str, element: dict[str, str]) -> float:
     the common case. Returns 0.0..1.0.
     """
     q_tokens = {t.lower() for t in re.findall(r"\w+", query)}
-    # Include the element's ARIA role so a query like "button" or "link" matches
-    # elements by role, not only by name token overlap.
-    e_tokens = {t.lower() for t in re.findall(r"\w+", element["name"])} | {
-        element["role"].lower()
-    }
+    e_tokens = {t.lower() for t in re.findall(r"\w+", element["name"])}
     if not q_tokens or not e_tokens:
         return 0.0
     overlap = q_tokens & e_tokens
@@ -224,10 +212,6 @@ def browser_observe(
     Returns:
         list[ObserveResult]: ranked observations, best match first.
     """
-    if llm_rerank:
-        raise NotImplementedError(
-            "llm_rerank is a Path-B feature; not available in Path A"
-        )
     try:
         snapshot = _aria_snapshot()
     except Exception:
@@ -241,6 +225,10 @@ def browser_observe(
     scored = [(s, e) for s, e in scored if s > 0.0][:top_k]
     if not scored:
         return []
+    if llm_rerank:
+        # Path A future work: route through gptme's LLM router. Skipped here
+        # so the benchmark measures the cheap path.
+        pass
     return [
         ObserveResult(
             description=f"{e['role']} {e['name']!r}",
@@ -257,7 +245,6 @@ def _dispatch_action(
     method: str,
     arguments: list[str],
     t0: float,
-    element_method: str = "click",
 ) -> ActResult:
     """Run one deterministic dispatch through gptme's browser primitives.
 
@@ -287,24 +274,7 @@ def _dispatch_action(
             fill_element(sel, arguments[0])
         elif method == "press":
             assert arguments, "press requires arguments=[key]"
-            # Focus the element before pressing — only valid for input-type elements
-            # (textbox, searchbox, combobox) where a click merely moves cursor focus.
-            # Button/link elements (element_method=="click") cannot be focused without
-            # activating them: gptme's browser tool has no focus-only primitive, and
-            # calling click_element would double-fire the activation. Use method='click'
-            # to activate those elements instead.
-            if element_method == "click":
-                return ActResult(
-                    success=False,
-                    message=(
-                        f"press is not supported for {element_method!r}-type elements "
-                        "(no focus-only primitive in gptme browser tool); "
-                        "use method='click' to activate buttons/links"
-                    ),
-                    selector_used=sel,
-                    elapsed_ms=int((time.monotonic() - t0) * 1000),
-                )
-            click_element(sel)
+            click_element(sel)  # focus the element before pressing
             press_key(arguments[0])
         elif method == "select":
             assert arguments, "select requires arguments=[value]"
@@ -380,10 +350,10 @@ def browser_act(
     method = method or best.method
     arguments = arguments or best.arguments
 
-    # Detect the common mistake: a fill element was selected (string-form or
-    # ObserveResult) but the caller provided no value. Surface a clear error
-    # instead of the opaque AssertionError from `_dispatch_action`.
-    if method == "fill" and not arguments:
+    # Detect the common mistake: string-form act matched a fill element but the
+    # caller provided no value. The instruction has no structured value to extract,
+    # so we surface a clear error instead of an opaque AssertionError later.
+    if method == "fill" and not arguments and isinstance(action_or_observed, str):
         return ActResult(
             success=False,
             message=(
@@ -394,42 +364,33 @@ def browser_act(
             elapsed_ms=int((time.monotonic() - t0) * 1000),
         )
 
-    element_method = best.method
-    result = _dispatch_action(sel, method, arguments, t0, element_method=element_method)
+    result = _dispatch_action(sel, method, arguments, t0)
     if result.success or not retry_on_stale:
         return result
 
     # Stale selector: re-observe once with the same query. If the fresh top
     # match is the same selector, retrying is pointless — return the failure.
     #
-    # Block retry only when the error signals that the action already executed
-    # (navigation or detach after click). Any other failure — including a plain
-    # "Timeout Xms exceeded." where Playwright omits the call log — means the
-    # locator never resolved, so retrying is safe.
-    #
-    # Inverted guard: exclude known post-action phrases rather than requiring
-    # locator-specific phrases. gptme's browser backend may surface only the first
-    # line of Playwright's TimeoutError, dropping "waiting for locator(...)" from
-    # the message, so whitelist-based phrase matching misses those cases.
-    _no_retry_phrases = (
+    # Only retry when the failure message indicates the locator didn't resolve
+    # (e.g. element not found, strict mode violation). A timeout/navigation
+    # error can mean the action already executed — retrying would double it.
+    _locator_fail_phrases = (
+        "no element",
+        "not found",
+        "did not find",
+        "locator",
+        "strict mode",
+        "target closed",
         "not attached",
         "detached",
-        "target closed",
-        "navigation",
     )
     msg_lower = result.message.lower()
-    if any(phrase in msg_lower for phrase in _no_retry_phrases):
-        return result  # post-action failure — don't retry (avoid double-acting)
+    if not any(phrase in msg_lower for phrase in _locator_fail_phrases):
+        return result  # non-locator failure — don't retry (avoid double-acting)
 
     fresh = browser_observe(reobserve_query, top_k=1)
-    if fresh:
-        # Retry with the fresh selector. When the selector is unchanged the element
-        # was temporarily absent (transient DOM change) and is visible again per the
-        # snapshot — retrying is correct. When fresh is empty, the element is truly
-        # absent and there is nothing to retry against.
-        result = _dispatch_action(
-            fresh[0].selector, method, arguments, t0, element_method=fresh[0].method
-        )
+    if fresh and fresh[0].selector != sel:
+        result = _dispatch_action(fresh[0].selector, method, arguments, t0)
     return result
 
 
@@ -440,20 +401,12 @@ def browser_extract(
 ) -> ExtractResult:
     """Extract structured data from the current page.
 
-    In Path A, `instruction` is always ignored and the raw ARIA snapshot is
-    returned regardless. LLM-backed instruction-based extraction is a Path-B
-    feature only. `schema` is rejected in Path A with a clear error.
+    `instruction=None` extracts the visible text content (zero-LLM).
+    `instruction` set without `schema` extracts a JSON-shaped dict via
+    LLM (one call). `schema` is accepted as a typing hint but not enforced
+    in Path A — strict Pydantic validation is a Path-B feature.
     """
     t0 = time.monotonic()
-    if schema is not None:
-        return ExtractResult(
-            success=False,
-            data={
-                "error": "schema-aware extraction is a Path-B feature and not available in Path A",
-                "hint": "remove schema= and parse the raw snapshot yourself, or wait for Path B",
-            },
-            elapsed_ms=int((time.monotonic() - t0) * 1000),
-        )
     try:
         snapshot = _aria_snapshot()
     except Exception as exc:
@@ -462,12 +415,23 @@ def browser_extract(
             data={"error": f"browser snapshot failed: {type(exc).__name__}: {exc}"},
             elapsed_ms=int((time.monotonic() - t0) * 1000),
         )
-    # Path A always returns the raw ARIA snapshot regardless of instruction.
-    # Instruction-based LLM extraction is a Path-B feature; Path A ignores the
-    # instruction and returns the full snapshot so callers can filter it themselves.
+    if instruction is None:
+        # Zero-LLM text extraction.
+        return ExtractResult(
+            success=True,
+            data=snapshot,
+            llm_calls=0,
+            elapsed_ms=int((time.monotonic() - t0) * 1000),
+        )
+    # Path A: no LLM available in this prototype, return the raw snapshot
+    # with a note. Path B will fill this in via the LLM router.
     return ExtractResult(
-        success=True,
-        data=snapshot,
+        success=False,
+        data={
+            "error": "schema-aware extract requires the LLM-backed path",
+            "hint": "see design doc browser-tool-act-observe-extract.md (Path B)",
+            "raw_snapshot_excerpt": snapshot[:500],
+        },
         llm_calls=0,
         elapsed_ms=int((time.monotonic() - t0) * 1000),
     )

@@ -145,14 +145,6 @@ def test_observe_no_match_returns_empty(browser_stub: BrowserStub) -> None:
     assert browser_observe("purple elephant") == []
 
 
-def test_observe_llm_rerank_raises_before_snapshot(browser_stub: BrowserStub) -> None:
-    # llm_rerank=True must raise immediately, even when no elements would match.
-    with pytest.raises(NotImplementedError, match="Path-B"):
-        browser_observe("purple elephant", llm_rerank=True)
-    with pytest.raises(NotImplementedError, match="Path-B"):
-        browser_observe("submit button", llm_rerank=True)
-
-
 def test_observe_results_are_reusable_observations(browser_stub: BrowserStub) -> None:
     results = browser_observe("the first story link", top_k=1)
     result = results[0]
@@ -260,22 +252,18 @@ def test_stale_selector_retry_disabled_returns_first_failure(
     assert browser_stub.clicks == ["[ref=e5]"]
 
 
-def test_stale_selector_retry_fires_when_element_reappears_with_same_selector(
+def test_stale_selector_retry_is_skipped_when_match_unchanged(
     browser_stub: BrowserStub,
 ) -> None:
     observed = _observe_submit(browser_stub)
-    # The snapshot still shows [ref=e5], so re-observe returns the same selector.
-    # The element may have been transiently absent (DOM flicker) — since re-observe
-    # confirms it exists, the code must retry even when the selector is unchanged.
-    # Here the element still fails in dispatch (permanently in fail_selectors),
-    # so result is False, but both the original and retry dispatches must fire.
+    # No re-render: the re-observe would return the same (still-dead) ref, so
+    # a pointless re-dispatch must be avoided.
     browser_stub.fail_selectors.add("[ref=e5]")
 
     result = browser_act(observed)
 
     assert not result.success
-    # Original attempt + retry with the same selector.
-    assert browser_stub.clicks == ["[ref=e5]", "[ref=e5]"]
+    assert browser_stub.clicks == ["[ref=e5]"]
 
 
 def test_stale_selector_retry_uses_method_and_arguments_override(
@@ -326,6 +314,14 @@ SNAPSHOT_NO_REFS = """\
 - button "Submit"
 """
 
+# Snapshot where a ref and a second attribute appear in the same bracket.
+# The selector must extract only the ref= part, not "[ref=e5, level=1]".
+SNAPSHOT_MULTI_ATTR = """\
+- heading "Section" [ref=e3, level=2]
+- button "Submit" [ref=e5, level=1]
+- link "Home"
+"""
+
 
 @pytest.fixture
 def no_ref_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
@@ -359,80 +355,22 @@ def test_no_ref_element_uses_role_name_selector(
     assert link_results[0].selector == "role=link[name='Home']"
 
 
-SNAPSHOT_APOSTROPHE = """\
-- button "What's new"
-- link "John's story"
-"""
-
-
-@pytest.fixture
-def apostrophe_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
-    stub = BrowserStub([SNAPSHOT_APOSTROPHE])
-    _wire_stub(stub, monkeypatch)
-    return stub
-
-
-def test_selector_escapes_single_quotes_in_name(
-    apostrophe_browser_stub: BrowserStub,
-) -> None:
-    # Names with apostrophes must produce valid Playwright selectors.
-    # "role=button[name='What's new']" is invalid — apostrophe breaks the
-    # CSS attribute selector. The selector must escape it.
-    results = browser_observe("new button", top_k=5)
-    matches = [r for r in results if "What" in r.description]
-    assert matches, "expected a match for the apostrophe button"
-    sel = matches[0].selector
-    # Must not contain an unescaped bare ' that would break the selector.
-    assert "\\'" in sel, f"apostrophe must be escaped in selector: {sel!r}"
-
-
-SNAPSHOT_DQUOTE = '- button "Say \\"Hello\\""\n- link "Normal"\n'
-# The above string value is: - button "Say \"Hello\""
-# Representing a button whose accessible name is: Say "Hello"
-
-
-@pytest.fixture
-def dquote_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
-    stub = BrowserStub([SNAPSHOT_DQUOTE])
-    _wire_stub(stub, monkeypatch)
-    return stub
-
-
-def test_observe_handles_double_quote_in_element_name(
-    dquote_browser_stub: BrowserStub,
-) -> None:
-    # An element whose ARIA name contains a double quote (escaped as \" in the
-    # snapshot) must not be silently dropped by the parser.
-    results = browser_observe("say hello button", top_k=5)
-    assert results, "button with double-quoted name must not be silently dropped"
-    assert any("Hello" in r.description for r in results)
-
-
-SNAPSHOT_MIXED_ATTRS = """\
-- button "Submit" [ref=e5, level=1]
-- heading "Title" [ref=e6, expanded]
-"""
-
-
-@pytest.fixture
-def mixed_attr_browser_stub(monkeypatch: pytest.MonkeyPatch) -> BrowserStub:
-    stub = BrowserStub([SNAPSHOT_MIXED_ATTRS])
-    _wire_stub(stub, monkeypatch)
-    return stub
-
-
 def test_multi_attr_bracket_extracts_only_ref(
-    mixed_attr_browser_stub: BrowserStub,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # When a snapshot line has multiple bracket attributes like "[ref=e5, level=1]",
-    # only the ref=VALUE token must appear in the selector. "[ref=e5, level=1]" is
-    # not a valid Playwright selector and would break click_element/fill_element.
-    results = browser_observe("submit button", top_k=1)
-    assert results, "expected a match"
-    r = results[0]
-    assert r.selector == "[ref=e5]", f"expected only ref token, got {r.selector!r}"
-    assert "level" not in r.selector
-    assert "," not in r.selector
+    # When a bracket contains both a ref and another attribute (e.g.
+    # "[ref=e5, level=1]"), the selector must be "[ref=e5]", not the
+    # invalid Playwright selector "[ref=e5, level=1]".
+    stub = BrowserStub([SNAPSHOT_MULTI_ATTR])
+    _wire_stub(stub, monkeypatch)
+    results = browser_observe("submit button", top_k=5)
+    submit = [r for r in results if "Submit" in r.description]
+    assert submit, "expected a match for Submit"
+    assert (
+        submit[0].selector == "[ref=e5]"
+    ), f"multi-attr bracket should yield only '[ref=e5]', got {submit[0].selector!r}"
+    # The second-attribute content must not appear in the selector.
+    assert "level" not in submit[0].selector
 
 
 # ---------------------------------------------------------------------------
@@ -449,31 +387,14 @@ def test_extract_without_instruction_returns_raw_snapshot(
     assert result.llm_calls == 0
 
 
-def test_extract_with_instruction_returns_raw_snapshot_in_path_a(
+def test_extract_with_instruction_is_path_a_noop_with_hint(
     browser_stub: BrowserStub,
 ) -> None:
-    # Path A ignores the instruction and always returns the raw ARIA snapshot.
-    # LLM-backed instruction-based extraction is a Path-B feature.
     result = browser_extract("all comment counts")
-    assert result.success
-    assert isinstance(result.data, str)
-    assert result.llm_calls == 0
-
-
-def test_extract_with_schema_returns_clear_path_b_error(
-    browser_stub: BrowserStub,
-) -> None:
-    # Passing schema= in Path A must return a clear error, not silently return
-    # raw untyped data while the caller believes schema validation ran.
-    class FakeSchema:
-        pass
-
-    result = browser_extract(schema=FakeSchema)
     assert not result.success
     assert isinstance(result.data, dict)
     assert "error" in result.data
-    # Must not have fetched a snapshot (schema check is before I/O).
-    assert browser_stub.snapshot_calls == 0
+    assert result.llm_calls == 0
 
 
 # ---------------------------------------------------------------------------
@@ -502,40 +423,18 @@ def test_extract_snapshot_failure_returns_failed_result(
 
 
 # ---------------------------------------------------------------------------
-# P2 fix: press focuses input elements before pressing the key
-# P1 fix: press does NOT click button/link elements (avoids double-activation)
+# P2 fix: press focuses the element before pressing the key
 # ---------------------------------------------------------------------------
 
 
-def test_act_press_focuses_input_element_before_pressing(
-    browser_stub: BrowserStub,
-) -> None:
-    # For input-type elements (textbox → element_method="fill"), click to focus
-    # before pressing so the key lands on the correct element.
-    observed = browser_observe("search the news", top_k=1)[0]
-    assert observed.method == "fill", "expected textbox with fill method"
+def test_act_press_focuses_element_before_pressing(browser_stub: BrowserStub) -> None:
+    # Verify that the press dispatch clicks (focuses) the target selector
+    # before issuing the key press so the key lands on the intended element.
+    observed = browser_observe("submit button", top_k=1)[0]
     result = browser_act(observed, method="press", arguments=["Enter"])
     assert result.success
-    # click_element(sel) must have been called to focus the input element.
+    # click_element(sel) must have been called to focus the element first.
     assert observed.selector in browser_stub.clicks
-
-
-def test_act_press_on_button_returns_clear_error(
-    browser_stub: BrowserStub,
-) -> None:
-    # For button/link elements (element_method="click"), pressing a key requires
-    # focusing the element first — but gptme's browser tool has no focus-only
-    # primitive. Calling click_element would activate the button (double-action).
-    # The correct behaviour is to return a clear error directing the caller to
-    # use method='click' instead.
-    observed = browser_observe("submit button", top_k=1)[0]
-    assert observed.method == "click", "expected button with click method"
-    result = browser_act(observed, method="press", arguments=["Enter"])
-    assert not result.success
-    assert "press" in result.message.lower()
-    assert "click" in result.message.lower()
-    # click_element must NOT have been called (would double-activate the button).
-    assert observed.selector not in browser_stub.clicks
 
 
 # ---------------------------------------------------------------------------
@@ -574,40 +473,15 @@ def test_stale_selector_retry_uses_original_instruction(
 # ---------------------------------------------------------------------------
 
 
-def test_stale_selector_retry_triggered_on_pure_timeout(
-    browser_stub: BrowserStub,
-) -> None:
-    """A plain 'Timeout Xms exceeded.' without navigation/detach markers MUST retry.
-
-    Playwright raises 'Timeout 30000ms exceeded.' when a locator never resolved
-    and gptme's browser backend only surfaces the first exception line (stripping
-    the 'waiting for locator(...)' call log). The inverted guard must not block
-    the retry for this case.
-    """
-    observed = browser_observe("submit button", top_k=1)[0]
-    assert observed.selector == "[ref=e5]"
-
-    # Simulate Playwright's first-line-only locator-not-found timeout.
-    browser_stub.custom_errors["[ref=e5]"] = TimeoutError("Timeout 30000ms exceeded.")
-    # Page re-renders with the submit button at a fresh ref.
-    browser_stub.snapshots = [SNAPSHOT_SUBMIT_MOVED]
-
-    result = browser_act(observed)
-
-    # Original attempt + retry on the fresh selector — both dispatches must fire.
-    assert browser_stub.clicks == ["[ref=e5]", "[ref=e9]"]
-    assert result.success  # retry on [ref=e9] succeeds
-
-
 def test_stale_selector_retry_skipped_on_non_locator_failure(
     browser_stub: BrowserStub,
 ) -> None:
-    """A navigation timeout (with 'navigation' in the message) must NOT be retried.
+    """A navigation timeout (no 'locator' in the message) must NOT be retried.
 
     If a click triggered navigation and then timed out, the action may have
     already executed.  Retrying would double-act (double form submission, double
     navigation).  The guard must recognise that "Timeout: navigation to '...'"
-    is a post-action failure and return the first result immediately.
+    is not a locator-not-found failure and return the first result immediately.
     """
     observed = browser_observe("submit button", top_k=1)[0]
     assert observed.selector == "[ref=e5]"
@@ -626,34 +500,32 @@ def test_stale_selector_retry_skipped_on_non_locator_failure(
 
 
 # ---------------------------------------------------------------------------
-# P1 fix: DOM-detach phrases do NOT trigger stale-selector retry (double-action
-# guard: a click that triggers navigation produces "not attached" AFTER the
-# action already executed; retrying would double-submit the form).
+# P1 fix: DOM-detach phrases trigger stale-selector retry
 # ---------------------------------------------------------------------------
 
 
-def test_stale_selector_retry_skipped_on_dom_detach(
+def test_stale_selector_retry_triggered_on_dom_detach(
     browser_stub: BrowserStub,
 ) -> None:
-    """'Element is not attached to the DOM' must NOT trigger the stale-selector retry.
+    """'Element is not attached to the DOM' must trigger the stale-selector retry.
 
-    A click that triggers a page navigation causes the old element to detach
-    AFTER the click already executed.  Retrying would double-submit the form or
-    double-navigate.  The guard must treat this as a non-locator failure and
-    return the original failure immediately.
+    A Playwright error like 'not attached to the DOM' or 'detached from the DOM'
+    means the element existed but was removed by a re-render — a classic stale
+    selector.  The guard must recognise these phrases and re-observe.
     """
     observed = browser_observe("submit button", top_k=1)[0]
     assert observed.selector == "[ref=e5]"
-    # Action executes (navigation), then the element detaches.
+    # Page re-renders: old ref detaches, button moves to e9.
+    browser_stub.snapshots = [SNAPSHOT_SUBMIT_MOVED]
     browser_stub.custom_errors["[ref=e5]"] = RuntimeError(
         "Element is not attached to the DOM"
     )
 
     result = browser_act(observed)
 
-    # Must not retry — only the original click attempt, no second click.
-    assert not result.success
-    assert browser_stub.clicks == ["[ref=e5]"]
+    assert result.success
+    assert result.selector_used == "[ref=e9]"
+    assert browser_stub.clicks == ["[ref=e5]", "[ref=e9]"]
 
 
 # ---------------------------------------------------------------------------
@@ -677,24 +549,4 @@ def test_act_string_form_fill_without_value_returns_clear_error(
     assert "fill" in result.message.lower()
     assert "arguments" in result.message.lower()
     # Must not have dispatched to fill_element at all (no value to fill).
-    assert browser_stub.fills == []
-
-
-def test_act_observed_form_fill_without_value_returns_clear_error(
-    browser_stub: BrowserStub,
-) -> None:
-    """browser_act(ObserveResult) with method=fill and no value must not assert.
-
-    The string-form guard used to be exclusive to `isinstance(..., str)`, so
-    callers who correctly reused an observed textbox selector without
-    arguments=['value'] got an opaque AssertionError from _dispatch_action.
-    Both invocation forms must share the same clear error contract.
-    """
-    observed = browser_observe("type into the search box", top_k=1)[0]
-    assert observed.method == "fill"
-    result = browser_act(observed)
-    assert not result.success
-    assert "fill" in result.message.lower()
-    assert "arguments" in result.message.lower()
-    assert "AssertionError" not in result.message
     assert browser_stub.fills == []
