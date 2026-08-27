@@ -287,6 +287,9 @@ class WorkItem:
     number: int | str
     types: tuple[str, ...] = ()
     source: str = ""  # e.g. "greptile" or "ai-review"; empty = legacy/unknown
+    # GitHub notification reason (author/mention/assign/review_requested).
+    # Empty for non-notification items and legacy items that predate this field.
+    notification_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -423,8 +426,8 @@ def is_pull_only_handoff_skip(item: WorkItem, reasons: Sequence[str]) -> bool:
     ``pm_reasons_justify_pull_only_handoff`` in the brain's
     ``project-monitoring-lib.sh``. merge_ready present → skip on
     "lacks merge permission" alone. notification-only → skip only when
-    permission is the sole reason, so a CI-red author notification still
-    dispatches.
+    permission is the sole reason AND the notification is an author-reason
+    (or legacy unknown), so mention/assign/review_requested still dispatch.
     """
     types = set(item.types)
     if not types or not types <= PULL_ONLY_HANDOFF_TYPES:
@@ -434,7 +437,11 @@ def is_pull_only_handoff_skip(item: WorkItem, reasons: Sequence[str]) -> bool:
     if "merge_ready" in types:
         return True
     extra = [reason for reason in reasons if "lacks merge permission" not in reason]
-    return not extra
+    if extra:
+        return False
+    # notification-only: skip only for author-reason or legacy (empty reason).
+    # mention/assign/review_requested are human asks — they must not be silently dropped.
+    return item.notification_reason in ("", "author")
 
 
 def decide_self_merge_gate(

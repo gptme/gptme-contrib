@@ -311,6 +311,11 @@ class RunItem:
             number=self.number if self.number is not None else "",
             types=self.types,
             source=str(self.raw.get("source", "") or ""),
+            # For notification items, detail carries the GitHub notification reason
+            # (author/mention/assign/review_requested) from activity-gate.sh line 1854.
+            notification_reason=(
+                str(self.detail or "") if "notification" in self.types else ""
+            ),
         )
 
 

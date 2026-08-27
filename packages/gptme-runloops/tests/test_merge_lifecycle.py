@@ -55,8 +55,11 @@ def make_item(
     repo: str = "gptme/gptme",
     number: int = 123,
     types: tuple[str, ...] = ("pr_update",),
+    notification_reason: str = "",
 ) -> WorkItem:
-    return WorkItem(repo=repo, number=number, types=types)
+    return WorkItem(
+        repo=repo, number=number, types=types, notification_reason=notification_reason
+    )
 
 
 # --- FakeIO: records the call sequence, returns scripted responses ---
@@ -368,6 +371,23 @@ def test_pull_only_handoff_skip_classifier() -> None:
     )
     assert not is_pull_only_handoff_skip(
         make_item(types=("merge_ready",)), ("Greptile score 3/5 below floor 5/5",)
+    )
+    # notification_reason=author (or empty/legacy) → skip; mention/assign/review_requested → dispatch
+    assert is_pull_only_handoff_skip(
+        make_item(types=("notification",), notification_reason="author"),
+        (PULL_ONLY_REASON,),
+    )
+    assert not is_pull_only_handoff_skip(
+        make_item(types=("notification",), notification_reason="mention"),
+        (PULL_ONLY_REASON,),
+    )
+    assert not is_pull_only_handoff_skip(
+        make_item(types=("notification",), notification_reason="review_requested"),
+        (PULL_ONLY_REASON,),
+    )
+    assert not is_pull_only_handoff_skip(
+        make_item(types=("notification",), notification_reason="assign"),
+        (PULL_ONLY_REASON,),
     )
 
 
