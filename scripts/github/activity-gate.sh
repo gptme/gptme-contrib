@@ -1553,42 +1553,39 @@ has_maintainer_waiting_comment() {
     return 1
 }
 
-# Return 0 if the MOST RECENT comment on the PR is the bot's waiting-for-maintainer
-# comment. Returns 1 if any human (or other commenter) has replied after the waiting
-# comment — their message must not be suppressed.
-#
-# This is stricter than has_maintainer_waiting_comment (which checks whether any bot
-# waiting comment exists). The distinction matters for notification suppression:
-# if a maintainer comments "please update the docs" after the bot's waiting comment,
-# GitHub sends an 'author' notification (the bot is the PR author). That human request
-# must reach the dispatcher, so we only suppress when the bot's comment is still the
-# most recent one.
+# Return 0 when the PR has a bot-authored waiting-for-maintainer handoff and no
+# human has commented after it. Later automation comments (Codecov, Greptile,
+# etc.) do not reopen the handoff; a later human comment does.
 latest_comment_is_bot_waiting() {
     local repo=$1 number=$2
     local bot="${BOT_USERNAME:-TimeToBuildBob}"
 
-    # Fetch every page before selecting the last comment. GitHub returns issue
-    # comments oldest-first, so the last item of only page 1 is not necessarily
-    # the newest comment. ``--slurp`` wraps pages in an outer array.
-    local last_json last_login last_body
-    last_json=$(gh api --paginate --slurp \
+    # Fetch every page before finding the latest handoff. GitHub returns issue
+    # comments oldest-first; ``--slurp`` wraps pages in an outer array.
+    local comments_json
+    comments_json=$(gh api --paginate --slurp \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
-        "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq 'flatten | last | {login: .user.login, body: .body}' 2>/dev/null) || return 1
-    last_login=$(printf '%s' "$last_json" | jq -r '.login // ""')
-    last_body=$(printf '%s' "$last_json" | jq -r '.body // ""' | tr '[:upper:]' '[:lower:]')
+        "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || return 1
 
-    [ "$last_login" = "$bot" ] || return 1
-
-    case "$last_body" in
-        *"waiting only on a maintainer click"*) return 0 ;;
-        *"waiting only on a maintainer merge click"*) return 0 ;;
-        *"ready to merge when convenient"*) return 0 ;;
-        *"blocked by missing mergepullrequest permission"*) return 0 ;;
-    esac
-    printf '%s' "$last_body" | grep -qE 'ready (to|for) merge @[a-z0-9_-]+' && return 0
-    return 1
+    printf '%s' "$comments_json" | jq -e --arg bot "$bot" '
+        def is_waiting_handoff:
+            (.user.login == $bot)
+            and ((.body // "") | ascii_downcase | (
+                contains("waiting only on a maintainer click")
+                or contains("waiting only on a maintainer merge click")
+                or contains("ready to merge when convenient")
+                or contains("blocked by missing mergepullrequest permission")
+                or test("ready (to|for) merge @[a-z0-9_-]+")
+            ));
+        def is_human:
+            (.user.type // "") == "User"
+            and ((.user.login // "") != $bot);
+        flatten as $comments
+        | ($comments | to_entries | map(select(.value | is_waiting_handoff)) | last) as $handoff
+        | $handoff != null
+          and ([ $comments[($handoff.key + 1):][] | select(is_human) ] | length == 0)
+    ' >/dev/null 2>&1
 }
 
 # Return 0 if $repo#$number has at least one UNRESOLVED review thread whose

@@ -39,6 +39,7 @@ subject_type = os.environ.get("TEST_SUBJECT_TYPE", "PullRequest")
 waiting_comment = os.environ.get("TEST_WAITING_COMMENT", "1")
 # Human comment after the bot's waiting comment: the human's message is now latest.
 human_after_waiting = os.environ.get("TEST_HUMAN_AFTER_WAITING", "0")
+bot_after_waiting = os.environ.get("TEST_BOT_AFTER_WAITING", "0")
 comment_count = int(os.environ.get("TEST_COMMENT_COUNT", "1"))
 
 
@@ -99,22 +100,27 @@ if argv[0] == "api":
     if "comments" in endpoint:
         if waiting_comment == "1":
             comments = [{
-                "user": {"login": "TimeToBuildBob"},
+                "user": {"login": "TimeToBuildBob", "type": "User"},
                 "body": "CI-green and mergeable — waiting only on a maintainer click.",
             }]
             comments.extend(
                 {
-                    "user": {"login": "codecov[bot]"},
+                    "user": {"login": "codecov[bot]", "type": "Bot"},
                     "body": f"Coverage report {index}",
                 }
                 for index in range(1, comment_count)
             )
+            if bot_after_waiting == "1":
+                comments.append({
+                    "user": {"login": "codecov[bot]", "type": "Bot"},
+                    "body": "Coverage report",
+                })
             if human_after_waiting == "1":
                 # A maintainer replied after the bot's waiting comment, e.g. asking
                 # for a docs update.  The human's comment is now the latest — the
                 # notification must NOT be suppressed.
                 comments.append({
-                    "user": {"login": "ErikBjare"},
+                    "user": {"login": "ErikBjare", "type": "User"},
                     "body": "Please also update the changelog before merging.",
                 })
         else:
@@ -141,6 +147,7 @@ def _run_gate(
     subject_type: str = "PullRequest",
     waiting: str = "1",
     human_after_waiting: str = "0",
+    bot_after_waiting: str = "0",
     comment_count: int = 1,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
@@ -155,6 +162,7 @@ def _run_gate(
     env["TEST_SUBJECT_TYPE"] = subject_type
     env["TEST_WAITING_COMMENT"] = waiting
     env["TEST_HUMAN_AFTER_WAITING"] = human_after_waiting
+    env["TEST_BOT_AFTER_WAITING"] = bot_after_waiting
     env["TEST_COMMENT_COUNT"] = str(comment_count)
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
@@ -232,6 +240,17 @@ def test_author_pr_emits_without_waiting_comment() -> None:
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
         assert emitted[0]["detail"] == "author"
+
+
+def test_author_pr_notification_suppressed_when_bot_commented_after_waiting() -> None:
+    """A later automation comment must not reopen a completed handoff."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(tmp, state_dir, bot_after_waiting="1")
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
 
 
 def test_author_pr_emits_when_human_commented_after_waiting() -> None:
