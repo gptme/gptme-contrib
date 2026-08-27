@@ -740,12 +740,19 @@ _LESSON_LIST_FIELDS = (
     "harness_restrict",
     "session_categories",
 )
+_LESSON_STRING_FIELDS = ("path", "title", "description", "when_to_use", "body")
 
 
 def _valid_cached_lesson(lesson: object) -> bool:
-    """Return whether a persisted lesson has the shape cloning requires."""
-    return isinstance(lesson, dict) and all(
-        isinstance(lesson.get(field), list) for field in _LESSON_LIST_FIELDS
+    """Return whether a persisted lesson has the shape downstream consumers require."""
+    return (
+        isinstance(lesson, dict)
+        and all(isinstance(lesson.get(field), list) for field in _LESSON_LIST_FIELDS)
+        and all(isinstance(lesson.get(field), str) for field in _LESSON_STRING_FIELDS)
+        and (lesson.get("id") is None or isinstance(lesson.get("id"), str))
+        and (lesson.get("skill_name") is None or isinstance(lesson.get("skill_name"), str))
+        and isinstance(lesson.get("is_skill"), bool)
+        and isinstance(lesson.get("n_keywords"), int)
     )
 
 
@@ -1007,7 +1014,6 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             resolved = str(f.resolve())
             if resolved in seen_paths:
                 continue
-            seen_paths.add(resolved)
 
             relative_path = f.relative_to(lesson_dir)
             is_skill_file = f.name == "SKILL.md"
@@ -1026,6 +1032,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             if not is_skill_file and f.name in seen_names:
                 continue
 
+            seen_paths.add(resolved)
             readable, lesson = _cached_parse_lesson_file(f)
             if not readable:
                 continue

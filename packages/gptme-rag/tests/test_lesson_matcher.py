@@ -1106,6 +1106,41 @@ class TestScanLessonsCache:
         assert calls["n"] == 1
         assert lessons[0]["keywords"] == ["reparsed"]
 
+    def test_disk_entry_missing_scalar_fields_is_reparsed(self, tmp_path, monkeypatch):
+        path = tmp_path / "foo.md"
+        _write_lesson(path, _basic_lesson(["reparsed"]))
+        stat = path.stat()
+        cache_file = Path(os.environ["GPTME_LESSON_SCAN_CACHE"]) / "scan-v1.json"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "files": {
+                        str(path.resolve()): {
+                            "mtime_ns": stat.st_mtime_ns,
+                            "size": stat.st_size,
+                            "lesson": {
+                                "keywords": ["stale"],
+                                "patterns": [],
+                                "tags": [],
+                                "harness_restrict": [],
+                                "session_categories": [],
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        clear_scan_cache()
+        calls = _count_parses(monkeypatch)
+
+        lessons = scan_lessons([tmp_path])
+
+        assert calls["n"] == 1
+        assert lessons[0]["keywords"] == ["reparsed"]
+
     def test_session_categories_round_trip_through_cache(self, tmp_path):
         content = (
             "---\nmatch:\n  keywords:\n    - foo\n"
@@ -1132,7 +1167,7 @@ class TestScanLessonsCache:
         second = scan_lessons([tmp_path])
         assert second[0]["keywords"] == ["original"]
 
-    def test_permission_change_invalidates_cached_lesson(self, tmp_path):
+    def test_permission_change_invalidates_cached_lesson(self, tmp_path, monkeypatch):
         dir_a = tmp_path / "a"
         dir_b = tmp_path / "b"
         cached_file = dir_a / "foo.md"
@@ -1140,11 +1175,14 @@ class TestScanLessonsCache:
         _write_lesson(dir_b / "foo.md", _basic_lesson(["readable-fallback"]))
         assert scan_lessons([dir_a, dir_b])[0]["keywords"] == ["cached-but-now-unreadable"]
 
-        cached_file.chmod(0o000)
-        try:
-            assert scan_lessons([dir_a, dir_b])[0]["keywords"] == ["readable-fallback"]
-        finally:
-            cached_file.chmod(0o644)
+        real_access = os.access
+        monkeypatch.setattr(
+            os,
+            "access",
+            lambda path, mode: False if Path(path) == cached_file else real_access(path, mode),
+        )
+
+        assert scan_lessons([dir_a, dir_b])[0]["keywords"] == ["readable-fallback"]
 
     def test_scan_evicts_entries_from_abandoned_roots(self, tmp_path):
         old_root = tmp_path / "old"
@@ -1160,6 +1198,21 @@ class TestScanLessonsCache:
         scan_lessons([current_root])
         assert str(old_file.resolve()) not in lesson_matcher_mod._parse_cache
         assert str(current_file.resolve()) in lesson_matcher_mod._parse_cache
+
+    def test_scan_evicts_entry_shadowed_by_earlier_directory(self, tmp_path):
+        earlier_root = tmp_path / "earlier"
+        later_root = tmp_path / "later"
+        later_file = later_root / "foo.md"
+        _write_lesson(later_file, _basic_lesson(["later"]))
+
+        scan_lessons([later_root])
+        assert str(later_file.resolve()) in lesson_matcher_mod._parse_cache
+
+        _write_lesson(earlier_root / "foo.md", _basic_lesson(["earlier"]))
+        lessons = scan_lessons([earlier_root, later_root])
+
+        assert lessons[0]["keywords"] == ["earlier"]
+        assert str(later_file.resolve()) not in lesson_matcher_mod._parse_cache
 
 
 # ---------------------------------------------------------------------------
