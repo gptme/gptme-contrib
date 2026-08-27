@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from gptme_bob_status.provider import BobStatusProvider, make_provider
 
+_TASK_JSON = {
+    "id": "compact-task",
+    "name": "Compact task title",
+    "priority": "high",
+    "body": "A large markdown body that must not leak into a table cell.",
+    "tags": ["status", "test"],
+    "created": "2026-08-27T20:00:00+00:00",
+}
+
 
 def test_provider_satisfies_protocol():
     """BobStatusProvider satisfies the StatusProvider protocol."""
@@ -172,4 +181,41 @@ def test_active_tasks_preserves_parenthetical_ago_in_title(monkeypatch):
     assert tasks == [
         {"id": "review-pr", "title": "Review PR (approved 2 days ago)"},
         {"id": "normal-task", "title": "Do thing"},
+    ]
+
+
+def test_ready_tasks_returns_compact_summaries(monkeypatch):
+    """Ready-task cells exclude bodies and other full-task metadata."""
+    import json
+
+    import gptme_bob_status.provider as mod
+
+    monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(_TASK_JSON))
+
+    assert mod._ready_tasks() == [
+        {"id": "compact-task", "title": "Compact task title", "priority": "high"}
+    ]
+
+
+def test_blockers_return_compact_summaries_with_narrative_fields(monkeypatch):
+    """Blocker cells stay compact while retaining fields used by narratives."""
+    import json
+
+    import gptme_bob_status.provider as mod
+
+    task = {
+        **_TASK_JSON,
+        "waiting_for": "A blocker explanation that stays available\ninternal detail",
+        "waiting_since": "2026-08-27T20:30:00+00:00",
+    }
+    monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(task))
+
+    assert mod._blockers() == [
+        {
+            "id": "compact-task",
+            "title": "Compact task title",
+            "priority": "high",
+            "waiting_for": "A blocker explanation that stays available",
+            "waiting_since": "2026-08-27T20:30:00+00:00",
+        }
     ]

@@ -185,6 +185,19 @@ def _dead_timers() -> int:
     return count
 
 
+def _task_summary(t: dict) -> dict:
+    """Return a compact summary of a task for use in status table cells.
+
+    Full task objects from ``gptodo --jsonl`` are ~30+ fields; table cells only
+    need id/title/priority for at-a-glance status.  Narrative sections have
+    their own rendering (they call ``t.get(...)`` directly) and are not affected.
+    """
+    summary: dict = {"id": t.get("id", "?"), "title": t.get("name", t.get("id", ""))}
+    if t.get("priority"):
+        summary["priority"] = t["priority"]
+    return summary
+
+
 def _blockers(limit: int = 3) -> list[dict]:
     raw = _run(["gptodo", "ready", "--state", "waiting", "--jsonl"], timeout=15)
     if not raw:
@@ -196,7 +209,13 @@ def _blockers(limit: int = 3) -> list[dict]:
         except json.JSONDecodeError:
             continue
         if t.get("waiting_for"):
-            blockers.append(t)
+            s = _task_summary(t)
+            wf = str(t.get("waiting_for", "")).split("\n")[0][:70]
+            if wf:
+                s["waiting_for"] = wf
+            if t.get("waiting_since"):
+                s["waiting_since"] = t["waiting_since"]
+            blockers.append(s)
     return blockers[:limit]
 
 
@@ -212,7 +231,7 @@ def _ready_tasks(limit: int = 3) -> list[dict]:
             continue
         if t.get("waiting_for") or t.get("wait"):
             continue
-        tasks.append(t)
+        tasks.append(_task_summary(t))
     return tasks[:limit]
 
 
