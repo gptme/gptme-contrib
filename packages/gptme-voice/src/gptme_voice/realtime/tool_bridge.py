@@ -20,7 +20,10 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
+
+if TYPE_CHECKING:
+    from ..body import BodyAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,7 @@ class GptmeToolBridge:
         on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
         on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
         transcript_provider: Callable[[], Sequence[object]] | None = None,
+        body_adapter: "BodyAdapter | None" = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
@@ -134,6 +138,13 @@ class GptmeToolBridge:
         self.on_hangup = on_hangup
         self.on_handoff = on_handoff
         self.transcript_provider = transcript_provider
+        self.body_adapter = body_adapter
+        self.body_max_altitude_m = float(
+            os.environ.get("GPTME_VOICE_BODY_MAX_ALT_M", "30")
+        )
+        self.body_max_move_m = float(
+            os.environ.get("GPTME_VOICE_BODY_MAX_MOVE_M", "50")
+        )
         legacy_env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
         env_model_fast = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_FAST")
         env_model_smart = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_SMART")
@@ -911,4 +922,85 @@ class GptmeToolBridge:
             result = await self.on_handoff(to_agent, reason, context_summary)
             return result
 
+        if name.startswith("body_"):
+            return await self._handle_body_call(name, arguments)
+
         return {"error": f"Unknown function: {name}"}
+
+    @staticmethod
+    def _clamp(value: float, limit: float) -> float:
+        return max(-limit, min(limit, value))
+
+    async def _handle_body_call(self, name: str, arguments: dict) -> dict:
+        """Route body_* tools to the configured body adapter.
+
+        Direct, low-latency path by design: motion goals (especially
+        body_stop) must not round-trip through subagent dispatch. Numeric
+        inputs are clamped to conservative envelopes here so a confused
+        model cannot request a 500 m climb; the autopilot's own failsafes
+        and geofence remain the final safety authority.
+        """
+        adapter = self.body_adapter
+        if adapter is None:
+            return {
+                "error": (
+                    "No body is connected to this session, so there is "
+                    "nothing to move."
+                )
+            }
+        try:
+            await adapter.ensure_connected()
+        except Exception as e:
+            logger.error("Body adapter connect failed: %s", e)
+            return {"error": f"Could not reach the body: {e}"}
+
+        caps = adapter.capabilities
+        try:
+            if name == "body_status":
+                return {"status": "ok", "telemetry": adapter.telemetry()}
+            if name == "body_stop" and "move" in caps:
+                return await adapter.stop()
+            if name == "body_return_home" and "move" in caps:
+                return await adapter.return_home()
+            if name == "body_takeoff" and "altitude" in caps:
+                altitude = float(arguments.get("altitude_m", 2.5))
+                altitude = max(1.0, min(self.body_max_altitude_m, altitude))
+                return await adapter.takeoff(altitude)
+            if name == "body_land" and "altitude" in caps:
+                return await adapter.land()
+            if name == "body_move" and "move" in caps:
+                forward = self._clamp(
+                    float(arguments.get("forward_m", 0.0)), self.body_max_move_m
+                )
+                right = self._clamp(
+                    float(arguments.get("right_m", 0.0)), self.body_max_move_m
+                )
+                up = self._clamp(
+                    float(arguments.get("up_m", 0.0)), self.body_max_altitude_m
+                )
+                return await adapter.move(forward, right, up)
+            if name == "body_goto" and "move" in caps:
+                lat = float(arguments["latitude_deg"])
+                lon = float(arguments["longitude_deg"])
+                altitude_arg = arguments.get("altitude_m")
+                goto_alt: float | None = None
+                if altitude_arg is not None:
+                    goto_alt = max(
+                        1.0, min(self.body_max_altitude_m, float(altitude_arg))
+                    )
+                return await adapter.goto(lat, lon, goto_alt)
+            if name == "body_turn" and "rotate" in caps:
+                yaw = self._clamp(float(arguments.get("yaw_deg", 0.0)), 180.0)
+                return await adapter.turn(yaw)
+        except (KeyError, TypeError, ValueError) as e:
+            return {"error": f"Invalid arguments for {name}: {e}"}
+        except Exception as e:  # noqa: BLE001 - report body errors to the model
+            logger.error("Body call %s failed: %s", name, e)
+            return {"error": f"{name} failed: {e}"}
+
+        return {
+            "error": (
+                f"{name} is not available on this body "
+                f"(capabilities: {sorted(caps) or 'none'})."
+            )
+        }

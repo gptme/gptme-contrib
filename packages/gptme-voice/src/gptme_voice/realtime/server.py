@@ -31,6 +31,7 @@ from starlette.responses import FileResponse, PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
+from ..body import body_adapter_from_env, body_tool_schemas
 from ..handoff import HandoffWriter
 from .audio import AudioConverter
 from .openai_client import (
@@ -721,6 +722,15 @@ class VoiceServer:
             if handoff_agents_env
             else _default_agents
         )
+        # Optional physical body (BobBrain): registers capability-gated
+        # body_* tools when GPTME_VOICE_BODY_URL is set.
+        self.body_adapter = body_adapter_from_env()
+        if self.body_adapter is not None:
+            logger.info(
+                "Body adapter configured: %s (capabilities: %s)",
+                self.body_adapter.name,
+                sorted(self.body_adapter.capabilities) or "none",
+            )
         if handoff_dir_env:
             if not handoff_secret_env:
                 logger.warning(
@@ -1780,6 +1790,7 @@ class VoiceServer:
                         on_hangup=_twilio_hangup,
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
                         transcript_provider=lambda: transcript,
+                        body_adapter=self.body_adapter,
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -1874,6 +1885,8 @@ class VoiceServer:
             kwargs["output_speed"] = self.output_speed
         if self.openai_g711_passthrough:
             kwargs["g711_passthrough"] = True
+        if self.body_adapter is not None:
+            kwargs["extra_tools"] = body_tool_schemas(self.body_adapter)
         return SessionConfig(**kwargs)
 
     def _make_client(
@@ -2009,6 +2022,7 @@ class VoiceServer:
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
+                body_adapter=self.body_adapter,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2099,6 +2113,7 @@ class VoiceServer:
                 on_hangup=_browser_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
+                body_adapter=self.body_adapter,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 

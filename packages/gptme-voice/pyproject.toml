@@ -22,6 +22,9 @@ test = [
 local = [
     "pyaudio>=0.2.13",
 ]
+body = [
+    "mavsdk>=2.0",
+]
 
 [project.scripts]
 gptme-voice-server = "gptme_voice.realtime.server:main"
