@@ -68,6 +68,25 @@ def test_collect_documents_honors_file_limit(tmp_path):
     assert len(sources) == 3
 
 
+def test_index_cli_threads_pattern_to_collect_documents(tmp_path, monkeypatch):
+    """The index command passes --pattern to document collection."""
+    observed_patterns = []
+
+    monkeypatch.setattr(Indexer, "get_all_documents", lambda self: [])
+
+    def collect_documents(self, path, glob_pattern="**/*.*", file_limit=100_000):
+        observed_patterns.append(glob_pattern)
+        return []
+
+    monkeypatch.setattr(Indexer, "collect_documents", collect_documents)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["index", "--pattern", "*.md", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert observed_patterns == ["*.md"]
+
+
 def test_index_cli_exposes_file_limit_flag():
     runner = CliRunner()
     result = runner.invoke(cli, ["index", "--help"])

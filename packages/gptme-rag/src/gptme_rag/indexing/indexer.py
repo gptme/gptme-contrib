@@ -1660,7 +1660,7 @@ class Indexer:
         if len(valid_files) > file_limit:
             logger.error(
                 f"File limit ({file_limit}) reached, was {len(valid_files)}. "
-                f"Pass a higher --file-limit or use a more specific glob pattern than '{glob_pattern}'."
+                f"Raise file_limit or use a more specific glob pattern than '{glob_pattern}'."
             )
             # Sort before slicing so truncation is deterministic. Set iteration
             # order is arbitrary; without a sort, a corpus over the cap would
