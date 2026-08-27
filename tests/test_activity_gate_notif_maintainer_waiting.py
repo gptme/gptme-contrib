@@ -39,6 +39,7 @@ subject_type = os.environ.get("TEST_SUBJECT_TYPE", "PullRequest")
 waiting_comment = os.environ.get("TEST_WAITING_COMMENT", "1")
 # Human comment after the bot's waiting comment: the human's message is now latest.
 human_after_waiting = os.environ.get("TEST_HUMAN_AFTER_WAITING", "0")
+comment_count = int(os.environ.get("TEST_COMMENT_COUNT", "1"))
 
 
 def apply_jq(data, jq_expr):
@@ -101,6 +102,13 @@ if argv[0] == "api":
                 "user": {"login": "TimeToBuildBob"},
                 "body": "CI-green and mergeable — waiting only on a maintainer click.",
             }]
+            comments.extend(
+                {
+                    "user": {"login": "codecov[bot]"},
+                    "body": f"Coverage report {index}",
+                }
+                for index in range(1, comment_count)
+            )
             if human_after_waiting == "1":
                 # A maintainer replied after the bot's waiting comment, e.g. asking
                 # for a docs update.  The human's comment is now the latest — the
@@ -111,7 +119,12 @@ if argv[0] == "api":
                 })
         else:
             comments = []
-        print(apply_jq(comments, jq_expr) if jq_expr else json.dumps(comments))
+        if "--paginate" in argv:
+            pages = [comments[index:index + 100] for index in range(0, len(comments), 100)]
+            print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
+        else:
+            page = comments[:100]
+            print(apply_jq(page, jq_expr) if jq_expr else json.dumps(page))
         sys.exit(0)
     print("[]")
     sys.exit(0)
@@ -128,6 +141,7 @@ def _run_gate(
     subject_type: str = "PullRequest",
     waiting: str = "1",
     human_after_waiting: str = "0",
+    comment_count: int = 1,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -141,6 +155,7 @@ def _run_gate(
     env["TEST_SUBJECT_TYPE"] = subject_type
     env["TEST_WAITING_COMMENT"] = waiting
     env["TEST_HUMAN_AFTER_WAITING"] = human_after_waiting
+    env["TEST_COMMENT_COUNT"] = str(comment_count)
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     # Established state dir: seed a sibling so first-sight emits.
@@ -232,6 +247,25 @@ def test_author_pr_emits_when_human_commented_after_waiting() -> None:
         state_dir = tmp / "state"
         state_dir.mkdir()
         result = _run_gate(tmp, state_dir, waiting="1", human_after_waiting="1")
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author"
+
+
+def test_author_pr_emits_when_human_comment_is_after_page_one() -> None:
+    """The newest comment must be selected across all paginated results."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            waiting="1",
+            human_after_waiting="1",
+            comment_count=100,
+        )
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout

@@ -36,7 +36,6 @@ from gptme_runloops.merge_lifecycle import (
     decide_greptile_attempt,
     decide_self_merge_gate,
     head_advanced,
-    is_pull_only_handoff_skip,
     parse_greptile_score,
     run_merge_lifecycle,
     self_merge_gate_applicable,
@@ -55,11 +54,8 @@ def make_item(
     repo: str = "gptme/gptme",
     number: int = 123,
     types: tuple[str, ...] = ("pr_update",),
-    notification_reason: str = "",
 ) -> WorkItem:
-    return WorkItem(
-        repo=repo, number=number, types=types, notification_reason=notification_reason
-    )
+    return WorkItem(repo=repo, number=number, types=types)
 
 
 # --- FakeIO: records the call sequence, returns scripted responses ---
@@ -255,7 +251,6 @@ def test_self_merge_check_result_from_json(
 def test_phase_a_gating_by_types() -> None:
     assert self_merge_gate_applicable(make_item(types=("pr_update",)))
     assert self_merge_gate_applicable(make_item(types=("merge_ready",)))
-    assert self_merge_gate_applicable(make_item(types=("notification",)))
     assert self_merge_gate_applicable(make_item(types=("pr_update", "ci_failure")))
     assert not self_merge_gate_applicable(make_item(types=("assigned_issue",)))
     assert not self_merge_gate_applicable(make_item(types=()))
@@ -343,95 +338,6 @@ def test_phase_a_proceed_reason_carries_first_reason_line() -> None:
     # lib.sh:572 logs `head -1` of the reasons.
     assert "PR is still a draft" in decision.reason
     assert "CI is not fully green" not in decision.reason
-
-
-PULL_ONLY_REASON = (
-    "Authenticated user lacks merge permission on ActivityWatch/aw-android "
-    "(pull-only access; merge would fail). Open a PR for a maintainer to merge."
-)
-
-
-def test_pull_only_handoff_skip_classifier() -> None:
-    item = make_item(
-        repo="ActivityWatch/aw-android", number=231, types=("merge_ready",)
-    )
-    assert is_pull_only_handoff_skip(item, (PULL_ONLY_REASON,))
-    assert is_pull_only_handoff_skip(
-        make_item(types=("notification",)), (PULL_ONLY_REASON,)
-    )
-    assert is_pull_only_handoff_skip(
-        make_item(types=("merge_ready", "notification")), (PULL_ONLY_REASON,)
-    )
-    assert not is_pull_only_handoff_skip(
-        make_item(types=("notification",)),
-        (PULL_ONLY_REASON, "CI is not fully green"),
-    )
-    assert not is_pull_only_handoff_skip(
-        make_item(types=("merge_ready", "ci_failure")), (PULL_ONLY_REASON,)
-    )
-    assert not is_pull_only_handoff_skip(
-        make_item(types=("merge_ready",)), ("Greptile score 3/5 below floor 5/5",)
-    )
-    # notification_reason=author (or empty/legacy) → skip; mention/assign/review_requested → dispatch
-    assert is_pull_only_handoff_skip(
-        make_item(types=("notification",), notification_reason="author"),
-        (PULL_ONLY_REASON,),
-    )
-    assert not is_pull_only_handoff_skip(
-        make_item(types=("notification",), notification_reason="mention"),
-        (PULL_ONLY_REASON,),
-    )
-    assert not is_pull_only_handoff_skip(
-        make_item(types=("notification",), notification_reason="review_requested"),
-        (PULL_ONLY_REASON,),
-    )
-    assert not is_pull_only_handoff_skip(
-        make_item(types=("notification",), notification_reason="assign"),
-        (PULL_ONLY_REASON,),
-    )
-
-
-def test_phase_a_pull_only_merge_ready_skips_session() -> None:
-    """Regression: ActivityWatch/aw-android#231 / aw-server-rust#660.
-
-    A pull-only merge_ready or notification-only item used to proceed to an
-    LLM session, exit 0 with effect=none, and exhaust the retry budget.
-    """
-    check = SelfMergeCheckResult(False, (PULL_ONLY_REASON,))
-    decision = decide_self_merge_gate(make_item(types=("merge_ready",)), check)
-    assert decision.action is MergeLifecycleAction.SKIP_ITEM
-    decision = decide_self_merge_gate(make_item(types=("notification",)), check)
-    assert decision.action is MergeLifecycleAction.SKIP_ITEM
-    decision = decide_self_merge_gate(
-        make_item(types=("merge_ready", "ci_failure")), check
-    )
-    assert decision.action is MergeLifecycleAction.PROCEED
-
-
-def test_notification_only_eligible_does_not_auto_merge() -> None:
-    """Regression: notification-only items must not auto-merge even when gate is eligible.
-
-    A maintainer comment on a bot-authored PR triggers an 'author' notification.
-    The self-merge gate evaluates PR state (CI, Greptile, conflicts) — it cannot
-    inspect comment intent — and may return eligible even while a human change
-    request is pending.  Returning SELF_MERGE would auto-merge the PR, skipping
-    the pending request.  PROCEED dispatches a session that can read comments.
-    """
-    check = SelfMergeCheckResult(True, ())
-    # pr_update item: eligible → SELF_MERGE (existing behavior, unaffected).
-    decision = decide_self_merge_gate(make_item(types=("pr_update",)), check)
-    assert decision.action is MergeLifecycleAction.SELF_MERGE
-    # merge_ready item: eligible → SELF_MERGE (existing behavior, unaffected).
-    decision = decide_self_merge_gate(make_item(types=("merge_ready",)), check)
-    assert decision.action is MergeLifecycleAction.SELF_MERGE
-    # notification-only item: eligible → PROCEED, not SELF_MERGE.
-    decision = decide_self_merge_gate(make_item(types=("notification",)), check)
-    assert decision.action is MergeLifecycleAction.PROCEED
-    # Mixed pr_update + notification: eligible → SELF_MERGE (pr_update present).
-    decision = decide_self_merge_gate(
-        make_item(types=("pr_update", "notification")), check
-    )
-    assert decision.action is MergeLifecycleAction.SELF_MERGE
 
 
 # --- Phase B gating (lib.sh:579) ---
@@ -542,20 +448,6 @@ def test_self_merge_success_skips_session_and_promotes_state() -> None:
         "promote_item_state",
     ]
     # Phase B never runs after a successful self-merge (bash `return 1`).
-    assert io.called("greptile_status") == 0
-
-
-def test_pull_only_handoff_skips_session_and_promotes_state() -> None:
-    io = FakeIO(check=SelfMergeCheckResult(False, (PULL_ONLY_REASON,)))
-    result = run_merge_lifecycle(
-        make_item(repo="ActivityWatch/aw-android", number=231, types=("merge_ready",)),
-        BOB_CONFIG,
-        io,
-    )
-    assert result.skip_item is True
-    assert result.instructions is None
-    assert [c[0] for c in io.calls] == ["self_merge_check", "promote_item_state"]
-    assert io.called("self_merge") == 0
     assert io.called("greptile_status") == 0
 
 

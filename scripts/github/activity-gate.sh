@@ -1567,11 +1567,15 @@ latest_comment_is_bot_waiting() {
     local repo=$1 number=$2
     local bot="${BOT_USERNAME:-TimeToBuildBob}"
 
-    # Fetch the last comment as a {login, body} object.  jq on an empty array
-    # returns "null" for both fields — treat as not-a-waiting-comment.
+    # Fetch every page before selecting the last comment. GitHub returns issue
+    # comments oldest-first, so the last item of only page 1 is not necessarily
+    # the newest comment. ``--slurp`` wraps pages in an outer array.
     local last_json last_login last_body
-    last_json=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq 'last | {login: .user.login, body: .body}' 2>/dev/null) || return 1
+    last_json=$(gh api --paginate --slurp \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "repos/$repo/issues/$number/comments?per_page=100" \
+        --jq 'flatten | last | {login: .user.login, body: .body}' 2>/dev/null) || return 1
     last_login=$(printf '%s' "$last_json" | jq -r '.login // ""')
     last_body=$(printf '%s' "$last_json" | jq -r '.body // ""' | tr '[:upper:]' '[:lower:]')
 

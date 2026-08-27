@@ -73,18 +73,7 @@ from typing import Any, Protocol
 logger = logging.getLogger(__name__)
 
 # Item types that enable the self-merge fast path (lib.sh:534).
-# ``notification`` is included so a pull-only author-notification on an
-# already-handoff'd PR hits the same skip as merge_ready (aw-server-rust#660)
-# instead of burning an LLM session. Eligible notification items on repos
-# the actor CAN merge still take the self-merge path.
-SELF_MERGE_TYPES: frozenset[str] = frozenset(
-    {"pr_update", "merge_ready", "notification"}
-)
-
-# Types that, *by themselves*, mean the only remaining action is a maintainer
-# merge click. A co-occurring ci_failure / greptile_* / pr_update still has
-# real work and must not skip.
-PULL_ONLY_HANDOFF_TYPES: frozenset[str] = frozenset({"merge_ready", "notification"})
+SELF_MERGE_TYPES: frozenset[str] = frozenset({"pr_update", "merge_ready"})
 
 # Item type that enables the cross-repo Greptile status check (lib.sh:579).
 CROSS_REPO_REVIEW_TYPE = "pr_update"
@@ -287,9 +276,6 @@ class WorkItem:
     number: int | str
     types: tuple[str, ...] = ()
     source: str = ""  # e.g. "greptile" or "ai-review"; empty = legacy/unknown
-    # GitHub notification reason (author/mention/assign/review_requested).
-    # Empty for non-notification items and legacy items that predate this field.
-    notification_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -415,33 +401,8 @@ def classify_self_merge_reasons(reasons: Sequence[str]) -> SelfMergeBlockClass:
 
 
 def self_merge_gate_applicable(item: WorkItem, *, gate_available: bool = True) -> bool:
-    """Phase-A gating (lib.sh:534): gate script present + pr_update/merge_ready/notification."""
+    """Phase-A gating (lib.sh:534): gate script present + pr_update/merge_ready."""
     return gate_available and bool(SELF_MERGE_TYPES & set(item.types))
-
-
-def is_pull_only_handoff_skip(item: WorkItem, reasons: Sequence[str]) -> bool:
-    """True when a pull-only item has no remaining dispatchable work.
-
-    Mirrors ``pm_item_types_are_pull_only_handoff`` +
-    ``pm_reasons_justify_pull_only_handoff`` in the brain's
-    ``project-monitoring-lib.sh``. merge_ready present → skip on
-    "lacks merge permission" alone. notification-only → skip only when
-    permission is the sole reason AND the notification is an author-reason
-    (or legacy unknown), so mention/assign/review_requested still dispatch.
-    """
-    types = set(item.types)
-    if not types or not types <= PULL_ONLY_HANDOFF_TYPES:
-        return False
-    if not any("lacks merge permission" in reason for reason in reasons):
-        return False
-    if "merge_ready" in types:
-        return True
-    extra = [reason for reason in reasons if "lacks merge permission" not in reason]
-    if extra:
-        return False
-    # notification-only: skip only for author-reason or legacy (empty reason).
-    # mention/assign/review_requested are human asks — they must not be silently dropped.
-    return item.notification_reason in ("", "author")
 
 
 def decide_self_merge_gate(
@@ -459,36 +420,16 @@ def decide_self_merge_gate(
         return LifecycleDecision(
             MergeLifecycleAction.NOT_APPLICABLE,
             "self-merge phase skipped: gate script missing or item types "
-            "lack pr_update/merge_ready/notification",
+            "lack pr_update/merge_ready",
         )
     if check is None:
         raise ValueError("self-merge phase applicable but no gate result provided")
     if check.eligible:
         # §7b invariant: self-merge only via the gate — SELF_MERGE is only
         # reachable through an eligible gate verdict.
-        # Exception: notification-only items must NOT auto-merge. A notification
-        # can be triggered by a human change request (e.g. a maintainer comments
-        # "please update the docs" on a bot-authored PR — the bot is the author,
-        # so GitHub sends an 'author' notification). The self-merge gate evaluates
-        # PR state (CI, Greptile, conflicts) and cannot see comment intent, so it
-        # may return eligible even while a human request is pending. Returning
-        # PROCEED dispatches a session that can read comments and act on them.
-        if set(item.types) <= frozenset({"notification"}):
-            return LifecycleDecision(
-                MergeLifecycleAction.PROCEED,
-                "gate eligible but notification-only — dispatching session "
-                "(notification may carry a human change request)",
-            )
         return LifecycleDecision(
             MergeLifecycleAction.SELF_MERGE,
             "self-merge gate reports eligible",
-        )
-    if is_pull_only_handoff_skip(item, check.reasons):
-        return LifecycleDecision(
-            MergeLifecycleAction.SKIP_ITEM,
-            f"Pull-only repo ({item.repo}) and types are a human-only merge "
-            "handoff — no dispatch can merge this PR. Awaiting a human "
-            "maintainer.",
         )
     block = classify_self_merge_reasons(check.reasons)
     if block is SelfMergeBlockClass.AI_REVIEW_BELOW_FLOOR:
@@ -854,11 +795,6 @@ def run_merge_lifecycle(
                 result.skip_item = True
                 return result
             # NOTE(parity): failed merge attempt falls through silently.
-        elif decision.action is MergeLifecycleAction.SKIP_ITEM:
-            emit(f"  {decision.reason}")
-            io.promote_item_state(item.repo, item.number)
-            result.skip_item = True
-            return result
         elif decision.action is MergeLifecycleAction.TRIGGER_REVIEW:
             if helper_available:
                 emit(
