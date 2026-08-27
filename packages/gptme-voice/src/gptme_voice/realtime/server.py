@@ -816,6 +816,10 @@ class VoiceServer:
         # into a duplicate cold session (observed 2026-08-27: Twilio's "start"
         # arrived before "Pre-warm ready", leaving an orphaned provider session).
         self._prewarm_tasks: dict[str, asyncio.Task] = {}
+        # Numbers whose pre-warm has connected and is finalizing (consuming
+        # resume state). Cancelling in this phase could lose resume context,
+        # so _claim_prewarm briefly extends its wait instead.
+        self._prewarm_connected: set[str] = set()
         # Max seconds a pre-warm session is kept before being discarded
         self._prewarm_ttl_seconds = 30
 
@@ -1225,6 +1229,11 @@ class VoiceServer:
             )
             client = self._make_client(session_cfg, hold_initial_response=True)
             await client.connect()
+            # Mark the post-connect phase: from here on the task will consume
+            # the caller's resume state, so _claim_prewarm must not cancel it
+            # (cancellation mid-consume could delete the resume file without a
+            # session to show for it — losing the caller's resume context).
+            self._prewarm_connected.add(from_number)
             # connect() succeeded — now safely consume the resume state so a
             # cold-path fallback won't re-inject the same transcript.
             await self._consume_recent_call(from_number)
@@ -1249,6 +1258,8 @@ class VoiceServer:
             # one connection per failed pre-warm attempt.
             if client is not None:
                 asyncio.create_task(self._disconnect_realtime_client(client))
+        finally:
+            self._prewarm_connected.discard(from_number)
 
     def _register_prewarm_task(self, from_number: str) -> None:
         """Start a pre-warm task for from_number and track it for claiming."""
@@ -1284,16 +1295,46 @@ class VoiceServer:
                 try:
                     await asyncio.wait_for(asyncio.shield(task), wait_seconds)
                 except asyncio.TimeoutError:
+                    # The task may have completed (storing its session) between
+                    # the timeout firing and now — never discard that: the
+                    # completed pre-warm holds the caller's (already consumed)
+                    # resume context, so dropping it would greet fresh instead
+                    # of resuming. Claim it.
+                    entry = self._prewarm_sessions.pop(from_number, None)
+                    if entry is not None:
+                        logger.info(
+                            "Pre-warm for %s completed at the timeout boundary — claiming it",
+                            from_number,
+                        )
+                        return entry[0]
+                    if from_number in self._prewarm_connected:
+                        # Connected and finalizing (consuming resume state —
+                        # local file I/O, fast). Cancelling now could delete
+                        # the resume file with no session to show for it, so
+                        # extend the wait briefly instead.
+                        logger.info(
+                            "Pre-warm for %s is finalizing — extending wait",
+                            from_number,
+                        )
+                        try:
+                            await asyncio.wait_for(asyncio.shield(task), 1.0)
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+                        entry = self._prewarm_sessions.pop(from_number, None)
+                        if entry is not None:
+                            logger.info(
+                                "Claimed pre-warm for %s after finalize wait",
+                                from_number,
+                            )
+                            return entry[0]
                     logger.info(
                         "Pre-warm for %s not ready in time — cancelling, using cold path",
                         from_number,
                     )
+                    # Pre-connect cancellation is safe: the peek design means
+                    # the resume state has not been consumed yet.
                     task.cancel()
-                    # The task may have completed (storing its session) between
-                    # the timeout firing and this cancel — cancel() is then a
-                    # no-op on the done task and its CancelledError handler
-                    # never runs. Reap any stored entry synchronously so it
-                    # can't linger and be claimed while we build a cold twin.
+                    # Defensive: reap anything stored despite the paths above.
                     self._reap_prewarm_entry(from_number)
                     return None
                 except Exception:

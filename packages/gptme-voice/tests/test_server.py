@@ -2184,11 +2184,11 @@ def test_prewarm_connect_failure_disconnects_half_open_client() -> None:
     asyncio.run(_exercise())
 
 
-def test_claim_prewarm_timeout_reaps_entry_stored_by_completed_task() -> None:
-    """AI-review P1 (round 2): if the pre-warm task completes and stores its
-    session between the claim timeout and task.cancel(), the cancel is a no-op
-    and nothing disconnects the stored session. The timeout branch must reap it
-    so it can't be claimed while a cold twin is being built."""
+def test_claim_prewarm_timeout_claims_entry_stored_by_completed_task() -> None:
+    """AI-review P1s (rounds 2+3): if the pre-warm task completes — storing
+    its session — in the gap between the claim timeout and cancellation, the
+    completed session must be CLAIMED, not discarded: it holds the caller's
+    already-consumed resume context, so dropping it would lose the resume."""
 
     async def _exercise() -> None:
         server = VoiceServer()
@@ -2200,35 +2200,57 @@ def test_claim_prewarm_timeout_reaps_entry_stored_by_completed_task() -> None:
 
         server._disconnect_realtime_client = _record_disconnect  # type: ignore[method-assign]
 
-        async def _slow_then_store() -> None:
-            # Simulates the race: still pending when wait_for times out, but
-            # the entry is present by the time the timeout branch runs.
+        async def _never_finishes() -> None:
             await asyncio.Event().wait()
 
-        task = asyncio.create_task(_slow_then_store())
+        task = asyncio.create_task(_never_finishes())
         server._prewarm_tasks["+46700000002"] = task
         await asyncio.sleep(0)
-        # Entry appears after the first pop (claim's initial pop sees nothing,
-        # the wait times out, and the store lands before cancel is processed).
-        original_cancel = task.cancel
-
-        def _store_then_cancel() -> bool:
-            server._prewarm_sessions["+46700000002"] = (
-                fake_client,
-                time.monotonic(),
-            )
-            return original_cancel()
-
-        task.cancel = _store_then_cancel  # type: ignore[method-assign]
+        # Simulate the boundary: the entry lands after wait_for times out but
+        # before the timeout branch inspects state.
+        server._prewarm_sessions["+46700000002"] = (fake_client, time.monotonic())
 
         claimed = await server._claim_prewarm("+46700000002", wait_seconds=0.05)
-        await asyncio.sleep(0)  # let the disconnect task run
+        await asyncio.sleep(0)
 
-        assert claimed is None
+        assert claimed is fake_client
         assert "+46700000002" not in server._prewarm_sessions
-        assert disconnected == [fake_client]
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        assert disconnected == []
+        task.cancel()  # test cleanup
+
+    asyncio.run(_exercise())
+
+
+def test_claim_prewarm_timeout_waits_out_finalizing_task() -> None:
+    """AI-review P1 (round 3): a pre-warm that connected and is consuming the
+    resume state must not be cancelled on claim timeout — the claim extends
+    its wait and picks up the session when finalization lands."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        fake_client = _FakeRealtimeClient()
+        finalize = asyncio.Event()
+
+        async def _finalizing_prewarm() -> None:
+            server._prewarm_connected.add("+46700000002")
+            try:
+                await finalize.wait()
+                server._prewarm_sessions["+46700000002"] = (
+                    fake_client,
+                    time.monotonic(),
+                )
+            finally:
+                server._prewarm_connected.discard("+46700000002")
+
+        task = asyncio.create_task(_finalizing_prewarm())
+        server._prewarm_tasks["+46700000002"] = task
+        await asyncio.sleep(0)
+        asyncio.get_running_loop().call_later(0.1, finalize.set)
+
+        claimed = await server._claim_prewarm("+46700000002", wait_seconds=0.05)
+
+        assert claimed is fake_client
+        assert not task.cancelled()
 
     asyncio.run(_exercise())
 
