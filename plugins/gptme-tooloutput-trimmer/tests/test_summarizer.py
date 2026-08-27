@@ -567,9 +567,9 @@ def test_apply_summarization_cache_misses_when_tail_changes() -> None:
         return f"- summary #{len(calls)}", None
 
     # Build tool outputs that share the first 1000 chars but differ in the tail.
-    # _build_summarization_context only uses output_preview[:1000], so the naive
-    # cache key would treat them as identical. We want to prove the full-content
-    # key distinguishes them correctly.
+    # _build_summarization_context only uses output_preview[:1000], so the cache
+    # is keyed on the truncated context. Identical prompts should reuse cached
+    # summaries, even if the full content beyond the truncation boundary differs.
     # Requires content > max_output_chars (200) so the message is evictable, AND
     # > 1000 chars so the tail-difference falls outside the truncation boundary.
     shared_body = "\n".join(f"line-{i:04d}" for i in range(150))  # ~1500 chars
@@ -606,7 +606,11 @@ def test_apply_summarization_cache_misses_when_tail_changes() -> None:
                     _run(content_a)  # same full content — cache hit, no LLM call
                     _run(
                         content_b
-                    )  # tail differs — full-content key differs → cache miss
+                    )  # tail differs, but truncated context is identical → cache hit
 
-    # LLM should have been called twice: once for content_a, once for content_b
-    assert len(calls) == 2, f"expected 2 LLM calls, got {len(calls)}"
+    # LLM should have been called only once. Both content_a and content_b produce
+    # the same truncated context (first 1000 chars), so content_b reuses the cached
+    # summary from content_a, avoiding a redundant LLM call.
+    assert (
+        len(calls) == 1
+    ), f"expected 1 LLM call (cache hit on identical truncated context), got {len(calls)}"

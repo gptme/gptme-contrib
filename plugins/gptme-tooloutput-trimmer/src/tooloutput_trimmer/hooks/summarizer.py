@@ -200,26 +200,24 @@ def _build_summarization_context(
     return "\n\n".join(parts)
 
 
-def _call_summarizer(context: str, *, cache_key_data: str | None = None) -> str | None:
+def _call_summarizer(context: str) -> str | None:
     """Produce a summary of the given context, memoized by source and model.
 
     Returns the summary text, or None if summarization fails. An unchanged
     (context, model) pair reuses the cached summary so repeated preparation
     passes over the same stored log do not re-bill the summarizer LLM.
 
-    cache_key_data: full (un-truncated) content used to derive the cache key.
-    When provided, the cache is keyed on this instead of on context — this
-    prevents a false cache hit when the LLM-prompt preview matches but the
-    full tool output changed beyond the truncation boundary (e.g. a growing
-    log file).
+    The cache is keyed on the truncated context string actually sent to the LLM,
+    not the full message content. This ensures that identical prompts (e.g., a
+    log file that grows beyond the 1000-char truncation boundary) reuse the cached
+    summary, improving performance for repeated passes over stored logs.
     """
     model = get_default_model_summary()
     if not model:
         logger.warning("summarizer: no default model set, skipping")
         return None
 
-    key_source = cache_key_data if cache_key_data is not None else context
-    cached = _cached_summary(key_source, model.full)
+    cached = _cached_summary(context, model.full)
     if cached is not None:
         logger.debug("summarizer: using cached summary (%d chars)", len(cached))
         return cached
@@ -246,7 +244,7 @@ def _call_summarizer(context: str, *, cache_key_data: str | None = None) -> str 
             "summarizer: produced %d chars",
             len(summary),
         )
-        _cache_summary(key_source, model.full, summary)
+        _cache_summary(context, model.full, summary)
         return summary
     except Exception:
         logger.exception("summarizer: LLM call failed")
@@ -276,30 +274,13 @@ def apply_summarization(
     if not evictable:
         return list(messages), False
 
-    # Build context from the W most recently evicted pairs (truncated for LLM prompt)
+    # Build context from the W most recently evicted pairs (truncated for LLM prompt).
+    # This truncated context is also used as the cache key, ensuring that identical
+    # prompts (regardless of un-truncated content changes) reuse cached summaries.
     context = _build_summarization_context(messages, evictable, config.window)
 
-    # Build cache key from full (un-truncated) message content so that changes
-    # beyond the preview boundary (e.g. a log file that grows past 1000 chars)
-    # are not treated as cache hits.
-    recent_evicted_for_key = evictable[-config.window :]
-    full_content_parts: list[str] = []
-    for idx in recent_evicted_for_key:
-        if idx > 0 and messages[idx - 1].role == "assistant":
-            full_content_parts.append(messages[idx - 1].content)
-        full_content_parts.append(messages[idx].content)
-    # Hash each part incrementally to avoid a large intermediate repr() string
-    # for big tool outputs. Length-prefix each encoded part so ["a","bc"] and
-    # ["ab","c"] produce different digests.
-    _key_hasher = hashlib.sha256()
-    for part in full_content_parts:
-        _encoded = part.encode()
-        _key_hasher.update(len(_encoded).to_bytes(4, "big"))
-        _key_hasher.update(_encoded)
-    cache_key_data = _key_hasher.hexdigest()
-
-    # Call summarizer with full-content cache key
-    summary = _call_summarizer(context, cache_key_data=cache_key_data)
+    # Call summarizer with context-based memoization
+    summary = _call_summarizer(context)
     if summary is None:
         return list(messages), False  # fall back to preview truncation
 
