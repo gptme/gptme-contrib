@@ -733,15 +733,27 @@ def clear_scan_cache() -> None:
     _disk_dirty = False
 
 
+_LESSON_LIST_FIELDS = (
+    "keywords",
+    "patterns",
+    "tags",
+    "harness_restrict",
+    "session_categories",
+)
+
+
+def _valid_cached_lesson(lesson: object) -> bool:
+    """Return whether a persisted lesson has the shape cloning requires."""
+    return isinstance(lesson, dict) and all(
+        isinstance(lesson.get(field), list) for field in _LESSON_LIST_FIELDS
+    )
+
+
 def _clone_lesson(lesson: dict[str, Any]) -> dict[str, Any]:
     """Shallow-copy a lesson dict so callers cannot mutate the cache."""
     return {
         **lesson,
-        "keywords": list(lesson["keywords"]),
-        "patterns": list(lesson["patterns"]),
-        "tags": list(lesson["tags"]),
-        "harness_restrict": list(lesson["harness_restrict"]),
-        "session_categories": list(lesson["session_categories"]),
+        **{field: list(lesson[field]) for field in _LESSON_LIST_FIELDS},
     }
 
 
@@ -770,7 +782,7 @@ def _load_disk_cache() -> None:
         lesson = entry.get("lesson")
         if not isinstance(mtime_ns, int) or not isinstance(size, int):
             continue
-        if lesson is not None and not isinstance(lesson, dict):
+        if lesson is not None and not _valid_cached_lesson(lesson):
             continue
         _parse_cache[path] = (mtime_ns, size, lesson)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import sys
@@ -1075,6 +1076,35 @@ class TestScanLessonsCache:
         lessons = scan_lessons([tmp_path])
         assert calls["n"] == 0
         assert lessons[0]["keywords"] == ["cached"]
+
+    def test_malformed_disk_entry_is_reparsed(self, tmp_path, monkeypatch):
+        path = tmp_path / "foo.md"
+        _write_lesson(path, _basic_lesson(["reparsed"]))
+        stat = path.stat()
+        cache_file = Path(os.environ["GPTME_LESSON_SCAN_CACHE"]) / "scan-v1.json"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "files": {
+                        str(path.resolve()): {
+                            "mtime_ns": stat.st_mtime_ns,
+                            "size": stat.st_size,
+                            "lesson": {"keywords": ["incomplete"]},
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        clear_scan_cache()
+        calls = _count_parses(monkeypatch)
+
+        lessons = scan_lessons([tmp_path])
+
+        assert calls["n"] == 1
+        assert lessons[0]["keywords"] == ["reparsed"]
 
     def test_session_categories_round_trip_through_cache(self, tmp_path):
         content = (
