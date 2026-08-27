@@ -96,9 +96,16 @@ def test_get_valid_files_rejects_negative_file_limit(tmp_path):
         indexer._get_valid_files(tmp_path, file_limit=-1)
 
 
-def test_index_cli_rejects_negative_file_limit():
+def test_get_valid_files_rejects_non_integer_file_limit(tmp_path):
+    _write_files(tmp_path, 3)
+    indexer = Indexer.__new__(Indexer)
+    with pytest.raises(TypeError, match="file_limit must be an integer"):
+        indexer._get_valid_files(tmp_path, file_limit=2.5)
+
+
+def test_index_cli_rejects_negative_file_limit(tmp_path):
     runner = CliRunner()
-    result = runner.invoke(cli, ["index", "--file-limit", "-1", "/tmp"])
+    result = runner.invoke(cli, ["index", "--file-limit", "-1", str(tmp_path)])
     assert result.exit_code != 0
     assert "Invalid value" in result.output
     assert "--file-limit" in result.output

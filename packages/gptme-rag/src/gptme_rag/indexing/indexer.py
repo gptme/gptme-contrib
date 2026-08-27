@@ -1587,6 +1587,8 @@ class Indexer:
         Returns:
             Set of valid file paths
         """
+        if not isinstance(file_limit, int):
+            raise TypeError("file_limit must be an integer")
         if file_limit < 0:
             raise ValueError("file_limit must be >= 0")
 
