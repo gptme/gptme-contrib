@@ -1244,6 +1244,11 @@ class VoiceServer:
             raise
         except Exception as exc:
             logger.warning("Pre-warm failed for %s: %s", from_number, exc)
+            # connect() (or _consume_recent_call) failed after the client was
+            # created: close the half-open provider session instead of leaking
+            # one connection per failed pre-warm attempt.
+            if client is not None:
+                asyncio.create_task(self._disconnect_realtime_client(client))
 
     def _register_prewarm_task(self, from_number: str) -> None:
         """Start a pre-warm task for from_number and track it for claiming."""

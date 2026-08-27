@@ -2149,3 +2149,36 @@ def test_register_prewarm_task_cleans_up_after_completion() -> None:
         assert "+46700000002" not in server._prewarm_tasks
 
     asyncio.run(_exercise())
+
+
+def test_prewarm_connect_failure_disconnects_half_open_client() -> None:
+    """AI-review P1: a connect() failure must disconnect the created client,
+    not leak one provider connection per failed pre-warm attempt."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+
+        class _FailingClient:
+            async def connect(self):
+                raise ConnectionError("simulated provider failure")
+
+        failing_client = _FailingClient()
+        disconnected: list[object] = []
+
+        async def _record_disconnect(client) -> None:
+            disconnected.append(client)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                server,
+                "_make_client",
+                lambda *args, **kwargs: failing_client,  # type: ignore[assignment]
+            )
+            mp.setattr(server, "_disconnect_realtime_client", _record_disconnect)
+            await server._prewarm_for_inbound("+46700000099")
+            # disconnect is scheduled as a task; let it run
+            await asyncio.sleep(0)
+
+        assert disconnected == [failing_client]
+
+    asyncio.run(_exercise())
