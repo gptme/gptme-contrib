@@ -943,3 +943,29 @@ def test_force_bypasses_freshness_gate(monkeypatch, capsys, tmp_path):
     assert "exceeds --max-age-days" not in capsys.readouterr().out
     assert calls, "--force should have reached _main and attempted to post"
     assert result == 0
+
+
+def test_naive_published_at_skips_safely(monkeypatch, capsys, tmp_path):
+    """A timezone-less publishedAt must fail closed instead of crashing."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v1.0.0",
+            "isPrerelease": False,
+            "body": "",
+            "url": "u",
+            "publishedAt": "2024-06-16T12:00:00",  # no Z / no offset → naive datetime
+        },
+    )
+    posted: list = []
+
+    def _stub_post(a, account=None):
+        posted.append(a)
+        return True, "1", ""
+
+    monkeypatch.setattr(ra, "_post", _stub_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+    assert ra.main() == 0
+    assert posted == [], "naive publishedAt should skip, not crash or announce"

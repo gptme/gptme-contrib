@@ -465,7 +465,7 @@ def main() -> int:
                 datetime.now(timezone.utc)
                 - datetime.fromisoformat(published.replace("Z", "+00:00"))
             ).total_seconds() / 86400
-        except ValueError:
+        except (ValueError, TypeError):
             age_days = None
         if age_days is None or age_days > args.max_age_days:
             print(
