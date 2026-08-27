@@ -1851,7 +1851,8 @@ check_notifications() {
             repo: .repository.full_name,
             number: (.subject.url // "" | split("/") | last | tonumber? // 0),
             title: .subject.title,
-            detail: .reason
+            detail: .reason,
+            subject_type: (.subject.type // "")
         }' 2>/dev/null | while IFS= read -r item; do
             local notif_id notif_updated state_file map_file prior repo number
             notif_id=$(echo "$item" | jq -r '.id')
@@ -1875,11 +1876,29 @@ check_notifications() {
                 printf '%s' "$notif_updated" > "$state_file"
                 [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
             elif [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
+                # Author-reason PR notifications on a PR that already has a
+                # maintainer-waiting comment are Codecov/Greptile re-unreads,
+                # not new work. Emitting them dispatched NOOP sessions until
+                # retry-budget exhaustion (ActivityWatch/aw-server-rust#660).
+                # mention/assign/review_requested stay emit-eligible — those
+                # are human asks. Persist so we don't retry until updated_at
+                # advances, but do not count against the per-run cap.
+                local _subj_type _notif_reason
+                _subj_type=$(echo "$item" | jq -r '.subject_type // ""')
+                _notif_reason=$(echo "$item" | jq -r '.detail // ""')
+                if [ "$_subj_type" = "PullRequest" ] \
+                        && [ "$_notif_reason" = "author" ] \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && has_maintainer_waiting_comment "$repo" "$number"; then
+                    printf '%s' "$notif_updated" > "$state_file"
+                    printf '%s#%s' "$repo" "$number" > "$map_file"
+                    continue
+                fi
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
                     # Emit first so a jq failure leaves the state file untouched and the
                     # notification is retried on the next run (emit-before-persist semantics).
-                    echo "$item" | jq -c 'del(.id, .updated_at)'
+                    echo "$item" | jq -c 'del(.id, .updated_at, .subject_type)'
                     printf '%s' "$notif_updated" > "$state_file"
                     [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                 fi
