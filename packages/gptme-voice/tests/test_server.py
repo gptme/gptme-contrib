@@ -2182,3 +2182,74 @@ def test_prewarm_connect_failure_disconnects_half_open_client() -> None:
         assert disconnected == [failing_client]
 
     asyncio.run(_exercise())
+
+
+def test_claim_prewarm_timeout_reaps_entry_stored_by_completed_task() -> None:
+    """AI-review P1 (round 2): if the pre-warm task completes and stores its
+    session between the claim timeout and task.cancel(), the cancel is a no-op
+    and nothing disconnects the stored session. The timeout branch must reap it
+    so it can't be claimed while a cold twin is being built."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        fake_client = _FakeRealtimeClient()
+        disconnected: list[object] = []
+
+        async def _record_disconnect(client) -> None:
+            disconnected.append(client)
+
+        server._disconnect_realtime_client = _record_disconnect  # type: ignore[method-assign]
+
+        async def _slow_then_store() -> None:
+            # Simulates the race: still pending when wait_for times out, but
+            # the entry is present by the time the timeout branch runs.
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_slow_then_store())
+        server._prewarm_tasks["+46700000002"] = task
+        await asyncio.sleep(0)
+        # Entry appears after the first pop (claim's initial pop sees nothing,
+        # the wait times out, and the store lands before cancel is processed).
+        original_cancel = task.cancel
+
+        def _store_then_cancel() -> bool:
+            server._prewarm_sessions["+46700000002"] = (
+                fake_client,
+                time.monotonic(),
+            )
+            return original_cancel()
+
+        task.cancel = _store_then_cancel  # type: ignore[method-assign]
+
+        claimed = await server._claim_prewarm("+46700000002", wait_seconds=0.05)
+        await asyncio.sleep(0)  # let the disconnect task run
+
+        assert claimed is None
+        assert "+46700000002" not in server._prewarm_sessions
+        assert disconnected == [fake_client]
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_exercise())
+
+
+def test_reap_prewarm_entry_disconnects_and_removes() -> None:
+    async def _exercise() -> None:
+        server = VoiceServer()
+        fake_client = _FakeRealtimeClient()
+        disconnected: list[object] = []
+
+        async def _record_disconnect(client) -> None:
+            disconnected.append(client)
+
+        server._disconnect_realtime_client = _record_disconnect  # type: ignore[method-assign]
+        server._prewarm_sessions["+1"] = (fake_client, time.monotonic())
+
+        server._reap_prewarm_entry("+1")
+        await asyncio.sleep(0)
+
+        assert "+1" not in server._prewarm_sessions
+        assert disconnected == [fake_client]
+        server._reap_prewarm_entry("+1")  # absent entry is a no-op
+
+    asyncio.run(_exercise())

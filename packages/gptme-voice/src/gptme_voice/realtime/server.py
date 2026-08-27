@@ -1289,6 +1289,12 @@ class VoiceServer:
                         from_number,
                     )
                     task.cancel()
+                    # The task may have completed (storing its session) between
+                    # the timeout firing and this cancel — cancel() is then a
+                    # no-op on the done task and its CancelledError handler
+                    # never runs. Reap any stored entry synchronously so it
+                    # can't linger and be claimed while we build a cold twin.
+                    self._reap_prewarm_entry(from_number)
                     return None
                 except Exception:
                     pass  # failure already logged by _prewarm_for_inbound
@@ -1305,6 +1311,13 @@ class VoiceServer:
             return None
         logger.info("Claimed pre-warm for %s (%.1fs old)", from_number, age)
         return client
+
+    def _reap_prewarm_entry(self, from_number: str) -> None:
+        """Remove and disconnect a stored pre-warm session, if one exists."""
+        entry = self._prewarm_sessions.pop(from_number, None)
+        if entry is not None:
+            client, _ = entry
+            asyncio.create_task(self._disconnect_realtime_client(client))
 
     async def _build_session_instructions(
         self,
