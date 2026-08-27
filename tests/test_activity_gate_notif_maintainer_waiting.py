@@ -41,6 +41,8 @@ waiting_comment = os.environ.get("TEST_WAITING_COMMENT", "1")
 human_after_waiting = os.environ.get("TEST_HUMAN_AFTER_WAITING", "0")
 bot_after_waiting = os.environ.get("TEST_BOT_AFTER_WAITING", "0")
 human_review_after_waiting = os.environ.get("TEST_HUMAN_REVIEW_AFTER_WAITING", "0")
+# Bot re-affirms the handoff AFTER a human comment (regression scenario for last→first fix).
+bot_reaffirm_waiting = os.environ.get("TEST_BOT_REAFFIRM_WAITING", "0")
 comment_count = int(os.environ.get("TEST_COMMENT_COUNT", "1"))
 
 
@@ -128,6 +130,17 @@ if argv[0] == "api":
                     "body": "Please also update the changelog before merging.",
                     "created_at": "2026-08-26T17:00:00Z",
                 })
+            if bot_reaffirm_waiting == "1":
+                # Bot re-posts the waiting handoff AFTER a human comment (e.g. CI
+                # re-ran and the bot re-affirmed the green state). With `last` this
+                # second handoff was selected, finding no human after it and wrongly
+                # suppressing the notification. With `first` the original handoff
+                # is selected; the human at 17:00 is after 16:00, so it emits.
+                comments.append({
+                    "user": {"login": "TimeToBuildBob", "type": "User"},
+                    "body": "CI is green again — waiting only on a maintainer click.",
+                    "created_at": "2026-08-26T17:30:00Z",
+                })
         else:
             comments = []
         if "--paginate" in argv:
@@ -165,6 +178,7 @@ def _run_gate(
     human_after_waiting: str = "0",
     bot_after_waiting: str = "0",
     human_review_after_waiting: str = "0",
+    bot_reaffirm_waiting: str = "0",
     comment_count: int = 1,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
@@ -181,6 +195,7 @@ def _run_gate(
     env["TEST_HUMAN_AFTER_WAITING"] = human_after_waiting
     env["TEST_BOT_AFTER_WAITING"] = bot_after_waiting
     env["TEST_HUMAN_REVIEW_AFTER_WAITING"] = human_review_after_waiting
+    env["TEST_BOT_REAFFIRM_WAITING"] = bot_reaffirm_waiting
     env["TEST_COMMENT_COUNT"] = str(comment_count)
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
@@ -315,6 +330,38 @@ def test_author_pr_emits_when_human_comment_is_after_page_one() -> None:
             waiting="1",
             human_after_waiting="1",
             comment_count=100,
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author"
+
+
+def test_author_pr_emits_when_bot_reaffirms_after_human_comment() -> None:
+    """Regression for last→first fix: bot re-posts handoff after human request.
+
+    Concrete scenario (the P1 finding from AI review of #1522):
+    - Bot posts "waiting only on a maintainer click" at T=10:00 (first handoff).
+    - Maintainer replies "please update docs" at T=10:05 (human activity).
+    - Bot re-posts the same phrase at T=10:10 after a CI re-run (second handoff).
+
+    With ``last``: the second handoff at T=10:10 is selected as the reference; no
+    human comment follows it → suppress=True.  The maintainer's request is silently
+    dropped — the bug.
+
+    With ``first``: the original handoff at T=10:00 is the reference; the human
+    comment at T=10:05 is after it → suppress=False → notification emits correctly.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            waiting="1",
+            human_after_waiting="1",
+            bot_reaffirm_waiting="1",
         )
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)

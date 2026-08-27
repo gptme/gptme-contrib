@@ -1590,7 +1590,7 @@ latest_comment_is_bot_waiting() {
             and ((.user.login // "") != $bot);
         ($comments | flatten) as $comments
         | ($reviews | flatten) as $reviews
-        | ($comments | map(select(is_waiting_handoff)) | last) as $handoff
+        | ($comments | map(select(is_waiting_handoff)) | first) as $handoff
         | $handoff != null
           and (([
               $comments[] | select(is_human and (.created_at > $handoff.created_at))
