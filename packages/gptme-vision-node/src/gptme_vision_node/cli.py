@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import click
+import httpx
 import numpy as np
 
 from .detect import Detector, MotionDetector, PersonDetector
@@ -58,6 +59,20 @@ def _get_frame_or_die(source: FrameSource) -> np.ndarray:
     return frame
 
 
+def _release_source(source: FrameSource) -> None:
+    release = getattr(source, "release", None)
+    if release:
+        release()
+
+
+def _capture_frame(source_spec: str) -> np.ndarray:
+    source = make_source(source_spec)
+    try:
+        return _get_frame_or_die(source)
+    finally:
+        _release_source(source)
+
+
 @click.group()
 def main() -> None:
     """Vision pipeline for the BobBrain presence node."""
@@ -88,9 +103,7 @@ def detect(source_spec: str, once: bool, interval: float) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        release = getattr(source, "release", None)
-        if release:
-            release()
+        _release_source(source)
 
 
 @main.command()
@@ -99,8 +112,12 @@ def detect(source_spec: str, once: bool, interval: float) -> None:
 @click.option("--model", default=None, help="override VISION_MODEL")
 def look(source_spec: str, prompt: str, model: str | None) -> None:
     """Describe the current frame via a vision LLM (needs OPENAI_API_KEY)."""
-    frame = _get_frame_or_die(make_source(source_spec))
-    click.echo(describe_frame(frame, prompt, model=model))
+    frame = _capture_frame(source_spec)
+    try:
+        description = describe_frame(frame, prompt, model=model)
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(description)
 
 
 @main.command()
@@ -116,7 +133,7 @@ def enroll(source_spec: str, place_name: str, gallery: str, no_wifi: bool) -> No
         if gallery_path.exists()
         else PlaceRecognizer()
     )
-    frame = _get_frame_or_die(make_source(source_spec))
+    frame = _capture_frame(source_spec)
     wifi = {} if no_wifi else WifiSignature.scan()
     recognizer.enroll(place_name, frame, wifi_sig=wifi or None)
     recognizer.save(gallery_path)
@@ -139,7 +156,7 @@ def whereami(source_spec: str, gallery: str, no_wifi: bool, as_json: bool) -> No
             f"no gallery at {gallery_path} (enroll some places first)"
         )
     recognizer = PlaceRecognizer.from_file(gallery_path)
-    frame = _get_frame_or_die(make_source(source_spec))
+    frame = _capture_frame(source_spec)
     wifi = {} if no_wifi else WifiSignature.scan()
     results = recognizer.recognize(frame, wifi_sig=wifi or None)
     if not results:

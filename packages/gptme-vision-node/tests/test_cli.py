@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 
 import cv2
+import httpx
+import pytest
 from click.testing import CliRunner
 from gptme_vision_node import cli
 from gptme_vision_node.frame_source import ImageFileSource, OpenCVCameraSource
@@ -42,6 +44,55 @@ def test_cli_capture_failure_is_clean_error(monkeypatch):
     result = CliRunner().invoke(cli.main, ["look", "--source", "camera:9"])
     assert result.exit_code != 0
     assert "camera unavailable" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_capture_frame_releases_source(monkeypatch):
+    class TrackingSource:
+        released = False
+
+        def get_frame(self):
+            return scene_frame(4)
+
+        def release(self):
+            self.released = True
+
+    source = TrackingSource()
+    monkeypatch.setattr(cli, "make_source", lambda spec: source)
+
+    assert cli._capture_frame("camera:4").shape == scene_frame(4).shape
+    assert source.released
+
+
+def test_capture_frame_releases_source_after_failure(monkeypatch):
+    class BrokenSource:
+        released = False
+
+        def get_frame(self):
+            raise RuntimeError("camera unavailable")
+
+        def release(self):
+            self.released = True
+
+    source = BrokenSource()
+    monkeypatch.setattr(cli, "make_source", lambda spec: source)
+
+    with pytest.raises(cli.click.ClickException, match="camera unavailable"):
+        cli._capture_frame("camera:9")
+    assert source.released
+
+
+def test_cli_look_endpoint_failure_is_clean_error(tmp_path, monkeypatch):
+    img = _write_scene(tmp_path / "a.png", 5)
+
+    def timeout(*args, **kwargs):
+        raise httpx.TimeoutException("vision endpoint timed out")
+
+    monkeypatch.setattr(cli, "describe_frame", timeout)
+    result = CliRunner().invoke(cli.main, ["look", "--source", str(img)])
+
+    assert result.exit_code != 0
+    assert "vision endpoint timed out" in result.output
     assert "Traceback" not in result.output
 
 

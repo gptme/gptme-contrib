@@ -302,6 +302,9 @@ class PlaceRecognizer:
                 "embedder mismatch: gallery uses "
                 f"{saved_embedder!r}, current embedder is {self.embedder.embedder_id!r}"
             )
+        saved_wifi_weight = float(payload.get("wifi_weight", self.wifi_weight))
+        if not 0.0 <= saved_wifi_weight <= 1.0:
+            raise ValueError("wifi_weight must be in [0, 1]")
         places: dict[str, list[PlaceSample]] = {}
         for name, samples in payload.get("places", {}).items():
             places[name] = [
@@ -315,6 +318,7 @@ class PlaceRecognizer:
                 )
                 for s in samples
             ]
+        self.wifi_weight = saved_wifi_weight
         self.places = places
 
     @classmethod
