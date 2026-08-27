@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import math
+import os
 import sys
 from pathlib import Path
 
+import pytest
 
+from gptme_rag import lesson_matcher as lesson_matcher_mod
 from gptme_rag.lesson_matcher import (
     BM25_MIN_Z,
     _extract_list_frontmatter_field,
     BM25_STANDOUT_FRACTION,
+    clear_scan_cache,
     effective_status,
     extract_frontmatter,
     filter_by_harness,
@@ -27,6 +31,16 @@ from gptme_rag.lesson_matcher import (
     _bm25_zscores,
     _build_bm25_index,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_lesson_scan_cache(tmp_path_factory, monkeypatch):
+    """Keep scan_lessons cache out of ~/.cache and reset between tests."""
+    cache_dir = tmp_path_factory.mktemp("lesson-scan-cache")
+    monkeypatch.setenv("GPTME_LESSON_SCAN_CACHE", str(cache_dir))
+    clear_scan_cache()
+    yield
+    clear_scan_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -960,6 +974,133 @@ class TestScanLessons:
             assert "valid-lesson" in keywords
         finally:
             bad_file.chmod(0o644)  # restore so tmp_path cleanup works
+
+
+# ---------------------------------------------------------------------------
+# scan_lessons cache (mtime + size, memory + disk)
+# ---------------------------------------------------------------------------
+
+
+def _count_parses(monkeypatch):
+    """Wrap _parse_lesson_file and return a mutable call counter."""
+    calls = {"n": 0}
+    real = lesson_matcher_mod._parse_lesson_file
+
+    def wrapped(path: Path):
+        calls["n"] += 1
+        return real(path)
+
+    monkeypatch.setattr(lesson_matcher_mod, "_parse_lesson_file", wrapped)
+    return calls
+
+
+def _bump_mtime(path: Path) -> None:
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+
+class TestScanLessonsCache:
+    def test_cold_start_parses_each_file_once(self, tmp_path, monkeypatch):
+        _write_lesson(tmp_path / "a.md", _basic_lesson(["alpha"]))
+        _write_lesson(tmp_path / "b.md", _basic_lesson(["beta"]))
+        calls = _count_parses(monkeypatch)
+        lessons = scan_lessons([tmp_path])
+        assert {kw for lesson in lessons for kw in lesson["keywords"]} == {"alpha", "beta"}
+        assert calls["n"] == 2
+
+    def test_unchanged_corpus_does_not_reparse(self, tmp_path, monkeypatch):
+        _write_lesson(tmp_path / "foo.md", _basic_lesson(["merge conflict"]))
+        scan_lessons([tmp_path])
+        calls = _count_parses(monkeypatch)
+        lessons = scan_lessons([tmp_path])
+        assert calls["n"] == 0
+        assert lessons[0]["keywords"] == ["merge conflict"]
+        assert lessons[0]["session_categories"] == []
+        assert "Body text." in lessons[0]["body"]
+
+    def test_modified_file_is_reparsed(self, tmp_path, monkeypatch):
+        path = tmp_path / "foo.md"
+        _write_lesson(path, _basic_lesson(["old-keyword"]))
+        scan_lessons([tmp_path])
+        _write_lesson(path, _basic_lesson(["new-keyword"]))
+        _bump_mtime(path)
+        calls = _count_parses(monkeypatch)
+        lessons = scan_lessons([tmp_path])
+        assert calls["n"] == 1
+        assert lessons[0]["keywords"] == ["new-keyword"]
+
+    def test_added_file_is_parsed(self, tmp_path, monkeypatch):
+        _write_lesson(tmp_path / "old.md", _basic_lesson(["old"]))
+        scan_lessons([tmp_path])
+        _write_lesson(tmp_path / "new.md", _basic_lesson(["brand-new"]))
+        calls = _count_parses(monkeypatch)
+        lessons = scan_lessons([tmp_path])
+        assert calls["n"] == 1
+        keywords = {kw for lesson in lessons for kw in lesson["keywords"]}
+        assert keywords == {"old", "brand-new"}
+
+    def test_deleted_file_disappears(self, tmp_path, monkeypatch):
+        gone = tmp_path / "gone.md"
+        _write_lesson(gone, _basic_lesson(["gone"]))
+        _write_lesson(tmp_path / "kept.md", _basic_lesson(["kept"]))
+        scan_lessons([tmp_path])
+        gone.unlink()
+        calls = _count_parses(monkeypatch)
+        lessons = scan_lessons([tmp_path])
+        assert calls["n"] == 0
+        assert [kw for lesson in lessons for kw in lesson["keywords"]] == ["kept"]
+
+    def test_mid_session_write_is_visible_on_next_scan(self, tmp_path):
+        """A lesson written after the first scan must match on the next call."""
+        _write_lesson(tmp_path / "existing.md", _basic_lesson(["existing"]))
+        first = scan_lessons([tmp_path])
+        assert [lesson["keywords"][0] for lesson in first] == ["existing"]
+        _write_lesson(
+            tmp_path / "fresh.md",
+            "---\nmatch:\n  keywords:\n    - freshly-written\n"
+            "  session_categories:\n    - code\n"
+            "status: active\n---\n# Fresh\nNew body.\n",
+        )
+        second = scan_lessons([tmp_path])
+        by_kw = {lesson["keywords"][0]: lesson for lesson in second}
+        assert "freshly-written" in by_kw
+        assert by_kw["freshly-written"]["session_categories"] == ["code"]
+        assert "New body." in by_kw["freshly-written"]["body"]
+
+    def test_disk_cache_survives_memory_reset(self, tmp_path, monkeypatch):
+        _write_lesson(tmp_path / "foo.md", _basic_lesson(["cached"]))
+        scan_lessons([tmp_path])  # persist to disk
+        clear_scan_cache()  # drop memory; disk stays (simulates a new process)
+        calls = _count_parses(monkeypatch)
+        lessons = scan_lessons([tmp_path])
+        assert calls["n"] == 0
+        assert lessons[0]["keywords"] == ["cached"]
+
+    def test_session_categories_round_trip_through_cache(self, tmp_path):
+        content = (
+            "---\nmatch:\n  keywords:\n    - foo\n"
+            "  session_categories:\n    - code\n    - infrastructure\n"
+            "status: active\n---\n# Title\n"
+        )
+        _write_lesson(tmp_path / "foo.md", content)
+        first = scan_lessons([tmp_path])
+        second = scan_lessons([tmp_path])
+        assert first[0]["session_categories"] == ["code", "infrastructure"]
+        assert second[0]["session_categories"] == ["code", "infrastructure"]
+
+    def test_inactive_file_is_cached_as_skip_not_reparsed(self, tmp_path, monkeypatch):
+        _write_lesson(tmp_path / "foo.md", _basic_lesson(["foo"], status="deprecated"))
+        assert scan_lessons([tmp_path]) == []
+        calls = _count_parses(monkeypatch)
+        assert scan_lessons([tmp_path]) == []
+        assert calls["n"] == 0
+
+    def test_caller_mutation_does_not_corrupt_cache(self, tmp_path):
+        _write_lesson(tmp_path / "foo.md", _basic_lesson(["original"]))
+        first = scan_lessons([tmp_path])
+        first[0]["keywords"].append("mutated")
+        second = scan_lessons([tmp_path])
+        assert second[0]["keywords"] == ["original"]
 
 
 # ---------------------------------------------------------------------------
