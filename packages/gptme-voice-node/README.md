@@ -31,6 +31,10 @@ All config is via environment variables (no CLI flags — systemd-friendly):
 | `GPTME_VOICE_NODE_SERVER` | `ws://localhost:8080/local` | WebSocket URL of `bob-voice-server` |
 | `GPTME_VOICE_NODE_NAME` | `bobbrain-unknown` | Node identity (logged and sent to server) |
 
+The `ws://localhost` default is intended only for a server on the same host. Use
+`wss://` whenever microphone audio crosses a network; the client logs a warning
+for non-local `ws://` endpoints.
+
 ## Raspberry Pi deployment
 
 1. Install system deps:
@@ -48,7 +52,7 @@ All config is via environment variables (no CLI flags — systemd-friendly):
    sudo mkdir -p /etc/systemd/system/gptme-voice-node.service.d/
    cat | sudo tee /etc/systemd/system/gptme-voice-node.service.d/local.conf << 'EOF'
    [Service]
-   Environment=GPTME_VOICE_NODE_SERVER=ws://bob-host.local:8080/local
+   Environment=GPTME_VOICE_NODE_SERVER=wss://bob-host.example.com/local
    Environment=GPTME_VOICE_NODE_NAME=bobbrain-livingroom
    EOF
    sudo systemctl enable --now gptme-voice-node

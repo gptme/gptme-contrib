@@ -114,6 +114,27 @@ class TestRecvLoop:
 
 
 # ---------------------------------------------------------------------------
+# Transport safety warning
+# ---------------------------------------------------------------------------
+
+
+class TestTransportWarning:
+    def test_warns_for_insecure_remote_url(self, caplog):
+        from gptme_voice_node.node import _warn_for_insecure_remote_url
+
+        _warn_for_insecure_remote_url("ws://bob-host.local:8080/local")
+
+        assert "sent unencrypted" in caplog.text
+
+    def test_local_ws_url_does_not_warn(self, caplog):
+        from gptme_voice_node.node import _warn_for_insecure_remote_url
+
+        _warn_for_insecure_remote_url("ws://localhost:8080/local")
+
+        assert not caplog.text
+
+
+# ---------------------------------------------------------------------------
 # Stop / cleanup
 # ---------------------------------------------------------------------------
 

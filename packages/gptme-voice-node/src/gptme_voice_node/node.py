@@ -24,6 +24,7 @@ import os
 import signal
 import sys
 import time
+from urllib.parse import urlparse
 
 try:
     import websockets
@@ -253,6 +254,21 @@ async def _async_main(server_url: str, node_name: str) -> None:
         node.cleanup()
 
 
+def _warn_for_insecure_remote_url(server_url: str) -> None:
+    """Warn when microphone audio would cross the network without TLS."""
+    parsed = urlparse(server_url)
+    if parsed.scheme == "ws" and parsed.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        log.warning(
+            "Microphone audio will be sent unencrypted to %s; use wss:// "
+            "for remote deployments",
+            parsed.hostname,
+        )
+
+
 def main() -> None:
     """Entry point for the gptme-voice-node CLI."""
     logging.basicConfig(
@@ -264,6 +280,7 @@ def main() -> None:
 
     server_url = SERVER_URL
     node_name = NODE_NAME
+    _warn_for_insecure_remote_url(server_url)
 
     log.info("Starting BobBrain voice node")
     log.info("  server : %s", server_url)

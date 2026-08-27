@@ -7,7 +7,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Override these in /etc/systemd/system/gptme-voice-node.service.d/local.conf
-Environment=GPTME_VOICE_NODE_SERVER=ws://bob-host.local:8080/local
+# Use wss:// whenever microphone audio crosses a network.
+Environment=GPTME_VOICE_NODE_SERVER=wss://bob-host.example.com/local
 Environment=GPTME_VOICE_NODE_NAME=bobbrain-puck
 
 # Adjust to the user that has audio access (e.g. pi on Raspberry Pi OS)
