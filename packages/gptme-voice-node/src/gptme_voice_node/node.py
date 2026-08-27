@@ -17,6 +17,7 @@ Protocol:
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import os
@@ -215,12 +216,12 @@ async def _async_main(server_url: str, node_name: str) -> None:
 
     loop = asyncio.get_event_loop()
 
-    def _handle_signal(sig):
+    def _handle_signal(sig: signal.Signals) -> None:
         log.info("[%s] received signal %s, shutting down", node_name, sig)
         node.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda s=sig: _handle_signal(s))
+        loop.add_signal_handler(sig, functools.partial(_handle_signal, sig))
 
     try:
         await node.run_forever()

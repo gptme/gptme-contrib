@@ -35,6 +35,8 @@ repos:
       types-Markdown,
       pytest,
       tomli,
+      "websockets>=12.0",
+      types-pyaudio,
     ]
     args: [--config-file=mypy.ini, --explicit-package-bases]
     types: [python]
