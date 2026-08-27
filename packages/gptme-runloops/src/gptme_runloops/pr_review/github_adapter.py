@@ -403,26 +403,39 @@ def run_github_review(
     pr_number: int,
     *,
     model: str | None = None,
+    verifier_model: str | None = None,
     checkout: Path | None = None,
     shadow: bool = True,
     output_path: Path | None = None,
     min_confidence: float = _MIN_CONFIDENCE,
+    verify: bool = False,
+    shadow_ledger: Path | None = None,
+    verbose: bool = False,
 ) -> tuple[ReviewArtifact, int, int]:
-    """End-to-end GitHub PR review: fetch → run → publish (or shadow).
+    """End-to-end GitHub PR review: fetch → run → [verify] → publish (or shadow).
 
     Args:
         repo: ``OWNER/REPO`` string.
         pr_number: Pull request number.
-        model: gptme model spec. If None, uses gptme default.
+        model: gptme model spec for Stage 1 generation. If None, uses gptme default.
+        verifier_model: gptme model spec for Stage 2 adversarial verification.
+                        Defaults to ``model`` when not set.
         checkout: Optional local repo checkout for AGENTS.md/CLAUDE.md context.
         shadow: If True (default), do not post anything to GitHub.
         output_path: If set, write artifact JSON here.
-        min_confidence: Skip findings below this threshold.
+        min_confidence: Skip findings below this confidence threshold.
+        verify: If True, run the Stage 2 adversarial verifier before publishing.
+                Dropped findings go to ``shadow_ledger``; only confirmed findings post.
+        shadow_ledger: Path to the JSONL shadow ledger for dropped findings.
+                       Defaults to ``state/ai-review-suppressed.jsonl`` relative to
+                       ``checkout`` (or cwd when checkout is not set).
+        verbose: If True, print per-finding verifier outcomes to stdout.
 
     Returns:
         (artifact, posted_count, skipped_count)
     """
     from .reviewer import run_review
+    from .verifier import verify_artifact
 
     meta = fetch_pr_metadata(repo, pr_number)
     base_sha = meta["base_sha"]
@@ -441,6 +454,19 @@ def run_github_review(
         model=model,
         output_path=output_path,
     )
+
+    if verify:
+        artifact = verify_artifact(
+            artifact,
+            diff,
+            effective_checkout,
+            model=verifier_model or model,
+            shadow_ledger=shadow_ledger,
+            verbose=verbose,
+        )
+        # Persist the verified artifact back to output_path if given
+        if output_path is not None:
+            output_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
 
     posted, skipped = publish_artifact(
         artifact,
