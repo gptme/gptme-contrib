@@ -15,9 +15,11 @@ import pytest
 
 def _make_node(server_url="ws://localhost:9999/local", node_name="test-node"):
     """Create a VoiceNode with pyaudio mocked out."""
-    with patch("gptme_voice_node.node.pyaudio") as mock_pa_module:
+    with patch("gptme_voice_node.node._get_pyaudio") as mock_get_pa:
+        mock_pa_module = MagicMock()
         mock_pa_module.paInt16 = 8  # arbitrary constant
         mock_pa_module.PyAudio.return_value = MagicMock()
+        mock_get_pa.return_value = mock_pa_module
         from gptme_voice_node.node import VoiceNode
 
         node = VoiceNode(server_url, node_name)
@@ -121,10 +123,12 @@ class TestLifecycle:
         assert node._running is False
 
     def test_cleanup_terminates_pyaudio(self):
-        with patch("gptme_voice_node.node.pyaudio") as mock_pa_module:
+        with patch("gptme_voice_node.node._get_pyaudio") as mock_get_pa:
+            mock_pa_module = MagicMock()
             mock_pa_module.paInt16 = 8
             mock_pa = MagicMock()
             mock_pa_module.PyAudio.return_value = mock_pa
+            mock_get_pa.return_value = mock_pa_module
             from gptme_voice_node.node import VoiceNode
 
             node = VoiceNode("ws://x", "test")

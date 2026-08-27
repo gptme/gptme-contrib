@@ -25,14 +25,6 @@ import sys
 import time
 
 try:
-    import pyaudio
-except ImportError as e:
-    raise ImportError(
-        "pyaudio is required. Install with: pip install pyaudio\n"
-        "  On Debian/Ubuntu: sudo apt install portaudio19-dev python3-pyaudio"
-    ) from e
-
-try:
     import websockets
     from websockets.exceptions import ConnectionClosed, WebSocketException
 except ImportError as e:
@@ -48,7 +40,28 @@ NODE_NAME = os.environ.get("GPTME_VOICE_NODE_NAME", "bobbrain-unknown")
 SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 CHANNELS = 1
-FORMAT = pyaudio.paInt16
+
+# Lazy import: pyaudio is only required when actually instantiating VoiceNode
+_pyaudio = None
+
+
+def _get_pyaudio():
+    """Import pyaudio on demand, raising a helpful error if not installed."""
+    global _pyaudio
+    if _pyaudio is None:
+        try:
+            import pyaudio
+
+            _pyaudio = pyaudio
+        except ImportError as e:
+            raise ImportError(
+                "pyaudio is required. Install with: pip install 'gptme-voice-node[audio]'\n"
+                "  On Debian/Ubuntu: sudo apt install portaudio19-dev python3-pyaudio"
+            ) from e
+    return _pyaudio
+
+
+FORMAT = None  # Will be set to _get_pyaudio().paInt16 in VoiceNode.__init__
 
 # Cooldown window (seconds) to keep mic muted after playback ends.
 # Prevents echo/feedback on nodes without hardware AEC.
@@ -71,7 +84,9 @@ class VoiceNode:
     def __init__(self, server_url: str, node_name: str) -> None:
         self.server_url = server_url
         self.node_name = node_name
+        pyaudio = _get_pyaudio()  # May raise ImportError if not installed
         self._pa = pyaudio.PyAudio()
+        self._audio_format = pyaudio.paInt16
         self._playing = False
         self._play_ended_at = 0.0
         self._running = True
@@ -91,14 +106,14 @@ class VoiceNode:
         log.info("[%s] connected to %s", self.node_name, self.server_url)
 
         mic = self._pa.open(
-            format=FORMAT,
+            format=self._audio_format,
             channels=CHANNELS,
             rate=SAMPLE_RATE,
             input=True,
             frames_per_buffer=CHUNK_SIZE,
         )
         speaker = self._pa.open(
-            format=FORMAT,
+            format=self._audio_format,
             channels=CHANNELS,
             rate=SAMPLE_RATE,
             output=True,
