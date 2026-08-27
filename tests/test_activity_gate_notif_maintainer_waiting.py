@@ -37,6 +37,8 @@ notif_number = int(os.environ.get("TEST_NOTIF_NUMBER", "660"))
 notif_reason = os.environ.get("TEST_NOTIF_REASON", "author")
 subject_type = os.environ.get("TEST_SUBJECT_TYPE", "PullRequest")
 waiting_comment = os.environ.get("TEST_WAITING_COMMENT", "1")
+# Human comment after the bot's waiting comment: the human's message is now latest.
+human_after_waiting = os.environ.get("TEST_HUMAN_AFTER_WAITING", "0")
 
 
 def apply_jq(data, jq_expr):
@@ -99,6 +101,14 @@ if argv[0] == "api":
                 "user": {"login": "TimeToBuildBob"},
                 "body": "CI-green and mergeable — waiting only on a maintainer click.",
             }]
+            if human_after_waiting == "1":
+                # A maintainer replied after the bot's waiting comment, e.g. asking
+                # for a docs update.  The human's comment is now the latest — the
+                # notification must NOT be suppressed.
+                comments.append({
+                    "user": {"login": "ErikBjare"},
+                    "body": "Please also update the changelog before merging.",
+                })
         else:
             comments = []
         print(apply_jq(comments, jq_expr) if jq_expr else json.dumps(comments))
@@ -117,6 +127,7 @@ def _run_gate(
     reason: str = "author",
     subject_type: str = "PullRequest",
     waiting: str = "1",
+    human_after_waiting: str = "0",
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -129,6 +140,7 @@ def _run_gate(
     env["TEST_NOTIF_REASON"] = reason
     env["TEST_SUBJECT_TYPE"] = subject_type
     env["TEST_WAITING_COMMENT"] = waiting
+    env["TEST_HUMAN_AFTER_WAITING"] = human_after_waiting
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     # Established state dir: seed a sibling so first-sight emits.
@@ -201,6 +213,25 @@ def test_author_pr_emits_without_waiting_comment() -> None:
         state_dir = tmp / "state"
         state_dir.mkdir()
         result = _run_gate(tmp, state_dir, waiting="0")
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author"
+
+
+def test_author_pr_emits_when_human_commented_after_waiting() -> None:
+    """Regression: a maintainer change-request after the bot's waiting comment.
+
+    When a human replies to a bot-authored PR *after* the bot has posted its
+    "waiting only on a maintainer click" comment, the 'author' notification
+    must reach the dispatcher.  The previous broad suppression (any waiting
+    comment ⇒ suppress) would have silently discarded the human's request.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(tmp, state_dir, waiting="1", human_after_waiting="1")
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout

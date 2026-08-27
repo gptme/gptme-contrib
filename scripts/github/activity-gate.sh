@@ -1553,6 +1553,40 @@ has_maintainer_waiting_comment() {
     return 1
 }
 
+# Return 0 if the MOST RECENT comment on the PR is the bot's waiting-for-maintainer
+# comment. Returns 1 if any human (or other commenter) has replied after the waiting
+# comment — their message must not be suppressed.
+#
+# This is stricter than has_maintainer_waiting_comment (which checks whether any bot
+# waiting comment exists). The distinction matters for notification suppression:
+# if a maintainer comments "please update the docs" after the bot's waiting comment,
+# GitHub sends an 'author' notification (the bot is the PR author). That human request
+# must reach the dispatcher, so we only suppress when the bot's comment is still the
+# most recent one.
+latest_comment_is_bot_waiting() {
+    local repo=$1 number=$2
+    local bot="${BOT_USERNAME:-TimeToBuildBob}"
+
+    # Fetch the last comment as a {login, body} object.  jq on an empty array
+    # returns "null" for both fields — treat as not-a-waiting-comment.
+    local last_json last_login last_body
+    last_json=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
+        --jq 'last | {login: .user.login, body: .body}' 2>/dev/null) || return 1
+    last_login=$(printf '%s' "$last_json" | jq -r '.login // ""')
+    last_body=$(printf '%s' "$last_json" | jq -r '.body // ""' | tr '[:upper:]' '[:lower:]')
+
+    [ "$last_login" = "$bot" ] || return 1
+
+    case "$last_body" in
+        *"waiting only on a maintainer click"*) return 0 ;;
+        *"waiting only on a maintainer merge click"*) return 0 ;;
+        *"ready to merge when convenient"*) return 0 ;;
+        *"blocked by missing mergepullrequest permission"*) return 0 ;;
+    esac
+    printf '%s' "$last_body" | grep -qE 'ready (to|for) merge @[a-z0-9_-]+' && return 0
+    return 1
+}
+
 # Return 0 if $repo#$number has at least one UNRESOLVED review thread whose
 # root comment was written by a human (not AUTHOR, not a bot), 1 otherwise
 # (including on API failure — fail open, the merge gate downstream re-checks).
@@ -1889,7 +1923,7 @@ check_notifications() {
                 if [ "$_subj_type" = "PullRequest" ] \
                         && [ "$_notif_reason" = "author" ] \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && has_maintainer_waiting_comment "$repo" "$number"; then
+                        && latest_comment_is_bot_waiting "$repo" "$number"; then
                     printf '%s' "$notif_updated" > "$state_file"
                     printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue

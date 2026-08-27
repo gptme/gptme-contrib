@@ -466,6 +466,19 @@ def decide_self_merge_gate(
     if check.eligible:
         # §7b invariant: self-merge only via the gate — SELF_MERGE is only
         # reachable through an eligible gate verdict.
+        # Exception: notification-only items must NOT auto-merge. A notification
+        # can be triggered by a human change request (e.g. a maintainer comments
+        # "please update the docs" on a bot-authored PR — the bot is the author,
+        # so GitHub sends an 'author' notification). The self-merge gate evaluates
+        # PR state (CI, Greptile, conflicts) and cannot see comment intent, so it
+        # may return eligible even while a human request is pending. Returning
+        # PROCEED dispatches a session that can read comments and act on them.
+        if set(item.types) <= frozenset({"notification"}):
+            return LifecycleDecision(
+                MergeLifecycleAction.PROCEED,
+                "gate eligible but notification-only — dispatching session "
+                "(notification may carry a human change request)",
+            )
         return LifecycleDecision(
             MergeLifecycleAction.SELF_MERGE,
             "self-merge gate reports eligible",

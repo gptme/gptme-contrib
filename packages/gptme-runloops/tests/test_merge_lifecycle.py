@@ -408,6 +408,32 @@ def test_phase_a_pull_only_merge_ready_skips_session() -> None:
     assert decision.action is MergeLifecycleAction.PROCEED
 
 
+def test_notification_only_eligible_does_not_auto_merge() -> None:
+    """Regression: notification-only items must not auto-merge even when gate is eligible.
+
+    A maintainer comment on a bot-authored PR triggers an 'author' notification.
+    The self-merge gate evaluates PR state (CI, Greptile, conflicts) — it cannot
+    inspect comment intent — and may return eligible even while a human change
+    request is pending.  Returning SELF_MERGE would auto-merge the PR, skipping
+    the pending request.  PROCEED dispatches a session that can read comments.
+    """
+    check = SelfMergeCheckResult(True, ())
+    # pr_update item: eligible → SELF_MERGE (existing behavior, unaffected).
+    decision = decide_self_merge_gate(make_item(types=("pr_update",)), check)
+    assert decision.action is MergeLifecycleAction.SELF_MERGE
+    # merge_ready item: eligible → SELF_MERGE (existing behavior, unaffected).
+    decision = decide_self_merge_gate(make_item(types=("merge_ready",)), check)
+    assert decision.action is MergeLifecycleAction.SELF_MERGE
+    # notification-only item: eligible → PROCEED, not SELF_MERGE.
+    decision = decide_self_merge_gate(make_item(types=("notification",)), check)
+    assert decision.action is MergeLifecycleAction.PROCEED
+    # Mixed pr_update + notification: eligible → SELF_MERGE (pr_update present).
+    decision = decide_self_merge_gate(
+        make_item(types=("pr_update", "notification")), check
+    )
+    assert decision.action is MergeLifecycleAction.SELF_MERGE
+
+
 # --- Phase B gating (lib.sh:579) ---
 
 
