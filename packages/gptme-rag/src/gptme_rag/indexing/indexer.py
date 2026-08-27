@@ -1575,7 +1575,7 @@ class Indexer:
             return False
 
     def _get_valid_files(
-        self, path: Path, glob_pattern: str = "**/*.*", file_limit: int = 1000
+        self, path: Path, glob_pattern: str = "**/*.*", file_limit: int = 100_000
     ) -> set[Path]:
         """Get valid files for indexing from a path.
 
@@ -1587,6 +1587,11 @@ class Indexer:
         Returns:
             Set of valid file paths
         """
+        if not isinstance(file_limit, int):
+            raise TypeError("file_limit must be an integer")
+        if file_limit < 0:
+            raise ValueError("file_limit must be >= 0")
+
         valid_files = set()
         path = path.resolve()  # Resolve path first
 
@@ -1650,28 +1655,35 @@ class Indexer:
             except Exception as e:
                 logger.warning(f"Error resolving symlink: {f} -> {e}")
 
-        # Check file limit
-        if len(valid_files) >= file_limit:
-            logger.warning(
-                f"File limit ({file_limit}) reached, was {len(valid_files)}. Consider adding patterns to .gitignore "
-                f"or using a more specific glob pattern than '{glob_pattern}' to exclude unwanted files."
+        # Check file limit. Strict greater-than: a corpus that lands exactly on
+        # the cap is complete, not truncated, so it must not log an ERROR.
+        if len(valid_files) > file_limit:
+            logger.error(
+                f"File limit ({file_limit}) reached, was {len(valid_files)}. "
+                f"Pass a higher --file-limit or use a more specific glob pattern than '{glob_pattern}'."
             )
-            valid_files = set(list(valid_files)[:file_limit])
+            # Sort before slicing so truncation is deterministic. Set iteration
+            # order is arbitrary; without a sort, a corpus over the cap would
+            # index a different subset each run and never reach a stable state.
+            valid_files = set(sorted(valid_files)[:file_limit])
 
         return valid_files
 
-    def collect_documents(self, path: Path, glob_pattern: str = "**/*.*") -> list[Document]:
+    def collect_documents(
+        self, path: Path, glob_pattern: str = "**/*.*", file_limit: int = 100_000
+    ) -> list[Document]:
         """Collect documents from a file or directory without processing them.
 
         Args:
             path: Path to collect documents from
             glob_pattern: Pattern to match files (only used for directories)
+            file_limit: Maximum number of files to collect per directory
 
         Returns:
             List of documents ready for processing
         """
         documents: list[Document] = []
-        valid_files = self._get_valid_files(path, glob_pattern)
+        valid_files = self._get_valid_files(path, glob_pattern, file_limit)
 
         if not valid_files:
             logger.debug(f"No valid files found in {path}")
