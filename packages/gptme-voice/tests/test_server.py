@@ -2275,3 +2275,37 @@ def test_reap_prewarm_entry_disconnects_and_removes() -> None:
         server._reap_prewarm_entry("+1")  # absent entry is a no-op
 
     asyncio.run(_exercise())
+
+
+def test_claim_prewarm_never_cancels_finalizing_task_on_expiry() -> None:
+    """AI-review P1 (round 4): when even the extended finalize wait expires,
+    the claim must fall back cold WITHOUT cancelling the post-connect task —
+    cancellation mid-_consume_recent_call can delete the resume file before
+    the session is stored, destroying the caller's resume context."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        never = asyncio.Event()
+
+        async def _stuck_finalizing() -> None:
+            server._prewarm_connected.add("+46700000002")
+            try:
+                await never.wait()
+            finally:
+                server._prewarm_connected.discard("+46700000002")
+
+        task = asyncio.create_task(_stuck_finalizing())
+        server._prewarm_tasks["+46700000002"] = task
+        await asyncio.sleep(0)
+
+        claimed = await server._claim_prewarm(
+            "+46700000002", wait_seconds=0.05, finalize_wait_seconds=0.05
+        )
+
+        assert claimed is None
+        assert not task.cancelled()
+        assert not task.done(), "post-connect task must be left running"
+        never.set()  # test cleanup
+        await task
+
+    asyncio.run(_exercise())

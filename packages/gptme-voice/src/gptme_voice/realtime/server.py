@@ -1273,7 +1273,11 @@ class VoiceServer:
         task.add_done_callback(_cleanup)
 
     async def _claim_prewarm(
-        self, from_number: str, *, wait_seconds: float = 2.0
+        self,
+        from_number: str,
+        *,
+        wait_seconds: float = 2.0,
+        finalize_wait_seconds: float = 5.0,
     ) -> OpenAIRealtimeClient | None:
         """Claim and remove a pre-warmed session for from_number if still fresh.
 
@@ -1309,17 +1313,32 @@ class VoiceServer:
                         return entry[0]
                     if from_number in self._prewarm_connected:
                         # Connected and finalizing (consuming resume state —
-                        # local file I/O, fast). Cancelling now could delete
-                        # the resume file with no session to show for it, so
-                        # extend the wait briefly instead.
+                        # local file I/O, fast in practice). A post-connect
+                        # task is NEVER cancelled: cancellation could
+                        # interrupt _consume_recent_call after the resume
+                        # file's unlink but before the session is stored,
+                        # destroying the caller's resume context. Extend the
+                        # wait instead; if it still isn't done, fall back
+                        # cold WITHOUT cancelling — the finished session is
+                        # disconnected by TTL eviction.
                         logger.info(
                             "Pre-warm for %s is finalizing — extending wait",
                             from_number,
                         )
                         try:
-                            await asyncio.wait_for(asyncio.shield(task), 1.0)
-                        except (asyncio.TimeoutError, Exception):
-                            pass
+                            await asyncio.wait_for(
+                                asyncio.shield(task), finalize_wait_seconds
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Pre-warm for %s still finalizing after "
+                                "%.1fs — using cold path without cancelling",
+                                from_number,
+                                finalize_wait_seconds,
+                            )
+                            return None
+                        except Exception:
+                            pass  # failure already logged by the task
                         entry = self._prewarm_sessions.pop(from_number, None)
                         if entry is not None:
                             logger.info(
@@ -1327,6 +1346,7 @@ class VoiceServer:
                                 from_number,
                             )
                             return entry[0]
+                        return None  # finalize failed — cold path
                     logger.info(
                         "Pre-warm for %s not ready in time — cancelling, using cold path",
                         from_number,
