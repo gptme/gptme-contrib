@@ -339,4 +339,6 @@ class PlaceRecognizer:
             ),
         )
         recognizer.load(path)
+        if wifi_weight is not None:
+            recognizer.wifi_weight = wifi_weight
         return recognizer

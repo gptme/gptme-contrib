@@ -173,6 +173,17 @@ def test_load_restores_wifi_weight(tmp_path):
     assert loaded.wifi_weight == pytest.approx(0.7)
 
 
+def test_from_file_explicit_wifi_weight_overrides_saved_value(tmp_path):
+    gallery = tmp_path / "places.json"
+    saved = PlaceRecognizer(wifi_weight=0.7)
+    saved.enroll("kitchen", KITCHEN, wifi_sig=KITCHEN_WIFI)
+    saved.save(gallery)
+
+    loaded = PlaceRecognizer.from_file(gallery, wifi_weight=0.2)
+
+    assert loaded.wifi_weight == pytest.approx(0.2)
+
+
 class CustomEmbedder:
     embedder_id = "test-custom-v1"
 

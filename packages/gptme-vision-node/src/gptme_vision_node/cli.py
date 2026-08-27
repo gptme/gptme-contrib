@@ -73,6 +73,13 @@ def _capture_frame(source_spec: str) -> np.ndarray:
         _release_source(source)
 
 
+def _load_gallery(path: Path) -> PlaceRecognizer:
+    try:
+        return PlaceRecognizer.from_file(path)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(f"invalid gallery at {path}: {exc}") from exc
+
+
 @click.group()
 def main() -> None:
     """Vision pipeline for the BobBrain presence node."""
@@ -129,9 +136,7 @@ def enroll(source_spec: str, place_name: str, gallery: str, no_wifi: bool) -> No
     """Enroll a sample of a named place into the gallery."""
     gallery_path = Path(gallery)
     recognizer = (
-        PlaceRecognizer.from_file(gallery_path)
-        if gallery_path.exists()
-        else PlaceRecognizer()
+        _load_gallery(gallery_path) if gallery_path.exists() else PlaceRecognizer()
     )
     frame = _capture_frame(source_spec)
     wifi = {} if no_wifi else WifiSignature.scan()
@@ -155,7 +160,7 @@ def whereami(source_spec: str, gallery: str, no_wifi: bool, as_json: bool) -> No
         raise click.ClickException(
             f"no gallery at {gallery_path} (enroll some places first)"
         )
-    recognizer = PlaceRecognizer.from_file(gallery_path)
+    recognizer = _load_gallery(gallery_path)
     frame = _capture_frame(source_spec)
     wifi = {} if no_wifi else WifiSignature.scan()
     results = recognizer.recognize(frame, wifi_sig=wifi or None)

@@ -146,3 +146,18 @@ def test_cli_whereami_missing_gallery(tmp_path):
     )
     assert result.exit_code != 0
     assert "no gallery" in result.output
+
+
+def test_cli_whereami_corrupt_gallery_is_clean_error(tmp_path):
+    img = _write_scene(tmp_path / "a.png", 6)
+    gallery = tmp_path / "places.json"
+    gallery.write_text("not JSON")
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["whereami", "--source", str(img), "--gallery", str(gallery)],
+    )
+
+    assert result.exit_code != 0
+    assert "invalid gallery" in result.output
+    assert "Traceback" not in result.output

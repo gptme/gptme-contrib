@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
+import pytest
 from gptme_vision_node.detect import Detection, MotionDetector
 from gptme_vision_node.pipeline import (
     MOTION,
@@ -130,3 +133,30 @@ def test_thread_stops_when_source_is_exhausted():
     pipeline._thread.join(timeout=1)
     assert not pipeline._thread.is_alive()
     pipeline.stop()
+
+
+def test_stop_keeps_reference_to_blocked_thread():
+    unblock = threading.Event()
+
+    class BlockingSource:
+        def get_frame(self):
+            unblock.wait()
+            return None
+
+    pipeline = VisionPipeline(BlockingSource(), [])
+    pipeline.start()
+    thread = pipeline._thread
+    assert thread is not None
+
+    try:
+        pipeline.stop(timeout=0.01)
+        assert pipeline._thread is thread
+        assert thread.is_alive()
+        with pytest.raises(RuntimeError, match="already running"):
+            pipeline.start()
+    finally:
+        unblock.set()
+        thread.join(timeout=1)
+        pipeline.stop()
+
+    assert pipeline._thread is None
