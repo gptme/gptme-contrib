@@ -902,6 +902,10 @@ def _cached_parse_lesson_file(path: Path) -> tuple[bool, dict[str, Any] | None]:
     mtime_ns, size = key
     cached = _parse_cache.get(resolved)
     if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+        if not os.access(path, os.R_OK):
+            del _parse_cache[resolved]
+            _disk_dirty = True
+            return False, None
         lesson = cached[2]
         return True, _clone_lesson(lesson) if lesson is not None else None
     try:
@@ -914,15 +918,10 @@ def _cached_parse_lesson_file(path: Path) -> tuple[bool, dict[str, Any] | None]:
     return True, _clone_lesson(stored) if stored is not None else None
 
 
-def _prune_missing_from_cache(scanned_roots: list[str], seen_paths: set[str]) -> None:
-    """Drop cache entries under *scanned_roots* that were not seen this scan."""
+def _prune_missing_from_cache(seen_paths: set[str]) -> None:
+    """Drop cache entries not present in the current scan corpus."""
     global _disk_dirty
-    stale = [
-        path
-        for path in _parse_cache
-        if path not in seen_paths
-        and any(path == root or path.startswith(root + os.sep) for root in scanned_roots)
-    ]
+    stale = [path for path in _parse_cache if path not in seen_paths]
     if not stale:
         return
     for path in stale:
@@ -982,15 +981,10 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
     lessons: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
     seen_names: set[str] = set()  # filename-based dedup: first dir wins
-    scanned_roots: list[str] = []
 
     for lesson_dir in lesson_dirs:
         if not lesson_dir.exists():
             continue
-        try:
-            scanned_roots.append(str(lesson_dir.resolve()))
-        except OSError:
-            scanned_roots.append(str(lesson_dir))
         for f in sorted(lesson_dir.rglob("*.md")):
             if f.name == "README.md":
                 continue
@@ -1030,7 +1024,7 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             if lesson is not None:
                 lessons.append(lesson)
 
-    _prune_missing_from_cache(scanned_roots, seen_paths)
+    _prune_missing_from_cache(seen_paths)
     _save_disk_cache()
     return lessons
 

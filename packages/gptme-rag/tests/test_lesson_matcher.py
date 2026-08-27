@@ -1102,6 +1102,35 @@ class TestScanLessonsCache:
         second = scan_lessons([tmp_path])
         assert second[0]["keywords"] == ["original"]
 
+    def test_permission_change_invalidates_cached_lesson(self, tmp_path):
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        cached_file = dir_a / "foo.md"
+        _write_lesson(cached_file, _basic_lesson(["cached-but-now-unreadable"]))
+        _write_lesson(dir_b / "foo.md", _basic_lesson(["readable-fallback"]))
+        assert scan_lessons([dir_a, dir_b])[0]["keywords"] == ["cached-but-now-unreadable"]
+
+        cached_file.chmod(0o000)
+        try:
+            assert scan_lessons([dir_a, dir_b])[0]["keywords"] == ["readable-fallback"]
+        finally:
+            cached_file.chmod(0o644)
+
+    def test_scan_evicts_entries_from_abandoned_roots(self, tmp_path):
+        old_root = tmp_path / "old"
+        current_root = tmp_path / "current"
+        old_file = old_root / "old.md"
+        current_file = current_root / "current.md"
+        _write_lesson(old_file, _basic_lesson(["old"]))
+        _write_lesson(current_file, _basic_lesson(["current"]))
+
+        scan_lessons([old_root])
+        assert str(old_file.resolve()) in lesson_matcher_mod._parse_cache
+
+        scan_lessons([current_root])
+        assert str(old_file.resolve()) not in lesson_matcher_mod._parse_cache
+        assert str(current_file.resolve()) in lesson_matcher_mod._parse_cache
+
 
 # ---------------------------------------------------------------------------
 # filter_by_session_category
