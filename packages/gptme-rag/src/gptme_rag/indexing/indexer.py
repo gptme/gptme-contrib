@@ -1650,8 +1650,9 @@ class Indexer:
             except Exception as e:
                 logger.warning(f"Error resolving symlink: {f} -> {e}")
 
-        # Check file limit
-        if len(valid_files) >= file_limit:
+        # Check file limit. Strict greater-than: a corpus that lands exactly on
+        # the cap is complete, not truncated, so it must not log an ERROR.
+        if len(valid_files) > file_limit:
             logger.error(
                 f"File limit ({file_limit}) reached, was {len(valid_files)}. "
                 f"Pass a higher --file-limit or use a more specific glob pattern than '{glob_pattern}'."
