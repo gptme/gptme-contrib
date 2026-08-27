@@ -56,6 +56,12 @@ logger = logging.getLogger(__name__)
 class CallerIdentity:
     canonical_name: str
     preferred_spoken_name: str
+    # True when the caller's people file marks them as the operator
+    # (`- Call role: operator`).  Operators get internal context (activity
+    # digest, ops status); everyone else is treated as an external guest.
+    is_operator: bool = False
+    # Preferred spoken language from `- Call language: <lang>`, if present.
+    call_language: str | None = None
 
 
 _DEFAULT_RESUME_WINDOW_SECONDS = 300
@@ -169,13 +175,29 @@ class SessionBootstrap:
     initial_response_instructions: str = ""
 
 
-def _extract_preferred_spoken_name(text: str, canonical_name: str) -> str:
+def _extract_people_field(text: str, field: str) -> str | None:
+    """Extract a `- <field>: value` line from a people file (case-insensitive).
+
+    Handles markdown-bolded property names/values too, e.g.
+    `- **Call name**: Erik` or `- Call name: **Erik**`.
+    """
+    pattern = re.compile(
+        rf"^-\s*\*{{0,2}}{re.escape(field)}\*{{0,2}}\s*:\s*(.+)$",
+        re.IGNORECASE,
+    )
     for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("- call name:"):
-            value = stripped.split(":", 1)[1].strip()
+        m = pattern.match(line.strip())
+        if m:
+            value = m.group(1).strip().strip("*").strip()
             if value:
                 return value
+    return None
+
+
+def _extract_preferred_spoken_name(text: str, canonical_name: str) -> str:
+    value = _extract_people_field(text, "call name")
+    if value:
+        return value
     parts = canonical_name.split()
     return parts[0] if parts else canonical_name
 
@@ -204,9 +226,12 @@ def _lookup_caller_identity(
                         preferred_spoken_name = _extract_preferred_spoken_name(
                             text, canonical_name
                         )
+                        call_role = _extract_people_field(text, "call role")
                         return CallerIdentity(
                             canonical_name=canonical_name,
                             preferred_spoken_name=preferred_spoken_name,
+                            is_operator=(call_role or "").lower() == "operator",
+                            call_language=_extract_people_field(text, "call language"),
                         )
                 except Exception:
                     pass
@@ -239,13 +264,44 @@ def _build_caller_instructions(
             f"You know this person — refer to them by name."
             f"{name_hint}"
         )
+        if not caller_identity.is_operator:
+            caller_ctx += "\n\n" + _external_caller_guidance(caller_identity)
     else:
         caller_ctx = (
             f"The current caller's phone number is {from_number}. "
-            f"You do not recognise this number; treat the caller as an unknown guest."
+            f"You do not recognise this number; treat the caller as an unknown guest. "
+            + _external_caller_guidance(None)
         )
 
     return f"{caller_ctx}\n\n{base_instructions}"
+
+
+def _external_caller_guidance(caller_identity: CallerIdentity | None) -> str:
+    """Conversation guidance for callers who are not the operator.
+
+    External callers should get a friendly host, not an ops report: no
+    unprompted tool calls, no internal status (subagent state, task queues,
+    work summaries), and speech in their language.
+    """
+    if caller_identity and caller_identity.call_language:
+        language_line = (
+            f"Speak {caller_identity.call_language} with this caller "
+            "unless they switch language themselves."
+        )
+    else:
+        language_line = (
+            "Mirror the caller's language: if they speak another language "
+            "than English, answer in that language."
+        )
+    return (
+        "EXTERNAL CALLER GUIDANCE:\n"
+        "- This caller is NOT the operator. Do not volunteer internal "
+        "operational status (subagent status, task queues, PR/CI state, or "
+        "work summaries), and do not call tools unprompted.\n"
+        "- Be a friendly, concise host: answer their questions, and only use "
+        "tools when their request genuinely needs one.\n"
+        f"- {language_line}"
+    )
 
 
 def _build_fresh_call_greeting_instructions(
@@ -269,9 +325,15 @@ def _build_fresh_call_greeting_instructions(
                 f"not their full name, in one short sentence, for example 'Hi {spoken_name}' "
                 f"or 'Hey {spoken_name}, what's up?'. "
             )
+        language_hint = (
+            f"Greet in {caller_identity.call_language}. "
+            if caller_identity.call_language
+            else ""
+        )
         return (
             self_identity
             + greeting_target
+            + language_hint
             + "Do NOT say 'thanks for calling' or use other stock phone greetings. "
             "Then stop and wait for them to speak."
         )
@@ -749,6 +811,15 @@ class VoiceServer:
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
+        # In-flight pre-warm tasks by from_number, so _claim_prewarm can await
+        # a pre-warm that hasn't finished connecting yet instead of racing it
+        # into a duplicate cold session (observed 2026-08-27: Twilio's "start"
+        # arrived before "Pre-warm ready", leaving an orphaned provider session).
+        self._prewarm_tasks: dict[str, asyncio.Task] = {}
+        # Numbers whose pre-warm has connected and is finalizing (consuming
+        # resume state). Cancelling in this phase could lose resume context,
+        # so _claim_prewarm briefly extends its wait instead.
+        self._prewarm_connected: set[str] = set()
         # Max seconds a pre-warm session is kept before being discarded
         self._prewarm_ttl_seconds = 30
 
@@ -1060,7 +1131,19 @@ class VoiceServer:
         # do today?" question is answered from the digest rather than a live
         # subagent lookup (which timed out on 2026-07-28).  Only loaded when the
         # digest is fresh (< _VOICE_DIGEST_MAX_AGE_SECONDS).
-        activity_digest = _load_voice_digest(self.workspace)
+        #
+        # Operator-only: external callers (no `- Call role: operator` in their
+        # people file, or unknown numbers) must not get internal work status —
+        # the digest both leaks internals and steers the model into ops-speak
+        # (Philip's first call was greeted with subagent status, 2026-08-27).
+        # Calls with no from_number (local/browser transport) keep the digest.
+        caller_is_operator = True
+        if from_number:
+            identity = _lookup_caller_identity(from_number, self.workspace)
+            caller_is_operator = bool(identity and identity.is_operator)
+        activity_digest = (
+            _load_voice_digest(self.workspace) if caller_is_operator else None
+        )
         if activity_digest and not standup_brief:
             instructions = _prepend_activity_digest(activity_digest, instructions)
 
@@ -1125,6 +1208,7 @@ class VoiceServer:
         call-side WebSocket is ready; activate_session() releases it.
         """
         self._evict_stale_prewarms()
+        client: OpenAIRealtimeClient | None = None
         try:
             # Peek at the resume record (consume_recent=False) so the on-disk
             # state file is NOT deleted until connect() succeeds.  If connect()
@@ -1145,17 +1229,137 @@ class VoiceServer:
             )
             client = self._make_client(session_cfg, hold_initial_response=True)
             await client.connect()
+            # Mark the post-connect phase: from here on the task will consume
+            # the caller's resume state, so _claim_prewarm must not cancel it
+            # (cancellation mid-consume could delete the resume file without a
+            # session to show for it — losing the caller's resume context).
+            self._prewarm_connected.add(from_number)
             # connect() succeeded — now safely consume the resume state so a
             # cold-path fallback won't re-inject the same transcript.
             await self._consume_recent_call(from_number)
             self._prewarm_sessions[from_number] = (client, time.monotonic())
+            # Guarantee eviction even if no further call ever arrives
+            # (_evict_stale_prewarms otherwise only runs on the next inbound).
+            asyncio.get_running_loop().call_later(
+                self._prewarm_ttl_seconds + 1, self._evict_stale_prewarms
+            )
             logger.info("Pre-warm ready for %s", from_number)
+        except asyncio.CancelledError:
+            # Claim timed out and cancelled us (or the server is shutting
+            # down): close the half-open provider session instead of leaking it.
+            logger.info("Pre-warm cancelled for %s", from_number)
+            if client is not None:
+                asyncio.create_task(self._disconnect_realtime_client(client))
+            raise
         except Exception as exc:
             logger.warning("Pre-warm failed for %s: %s", from_number, exc)
+            # connect() (or _consume_recent_call) failed after the client was
+            # created: close the half-open provider session instead of leaking
+            # one connection per failed pre-warm attempt.
+            if client is not None:
+                asyncio.create_task(self._disconnect_realtime_client(client))
+        finally:
+            self._prewarm_connected.discard(from_number)
 
-    def _claim_prewarm(self, from_number: str) -> OpenAIRealtimeClient | None:
-        """Claim and remove a pre-warmed session for from_number if still fresh."""
+    def _register_prewarm_task(self, from_number: str) -> None:
+        """Start a pre-warm task for from_number and track it for claiming."""
+        task = asyncio.create_task(self._prewarm_for_inbound(from_number))
+        self._prewarm_tasks[from_number] = task
+
+        def _cleanup(done: asyncio.Task, num: str = from_number) -> None:
+            if self._prewarm_tasks.get(num) is done:
+                self._prewarm_tasks.pop(num, None)
+
+        task.add_done_callback(_cleanup)
+
+    async def _claim_prewarm(
+        self,
+        from_number: str,
+        *,
+        wait_seconds: float = 2.0,
+        finalize_wait_seconds: float = 5.0,
+    ) -> OpenAIRealtimeClient | None:
+        """Claim and remove a pre-warmed session for from_number if still fresh.
+
+        If the pre-warm is still connecting, wait up to *wait_seconds* for it —
+        a near-ready pre-warm beats starting a cold session from scratch, and
+        racing past it would leave an orphaned provider session (the doubled
+        "Session created" observed on 2026-08-27).  On timeout the in-flight
+        task is cancelled so the cold path doesn't end up with a twin.
+        """
         entry = self._prewarm_sessions.pop(from_number, None)
+        if entry is None:
+            task = self._prewarm_tasks.get(from_number)
+            if task is not None and not task.done():
+                logger.info(
+                    "Pre-warm for %s still connecting — waiting up to %.1fs",
+                    from_number,
+                    wait_seconds,
+                )
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), wait_seconds)
+                except asyncio.TimeoutError:
+                    # The task may have completed (storing its session) between
+                    # the timeout firing and now — never discard that: the
+                    # completed pre-warm holds the caller's (already consumed)
+                    # resume context, so dropping it would greet fresh instead
+                    # of resuming. Claim it.
+                    entry = self._prewarm_sessions.pop(from_number, None)
+                    if entry is not None:
+                        logger.info(
+                            "Pre-warm for %s completed at the timeout boundary — claiming it",
+                            from_number,
+                        )
+                        return entry[0]
+                    if from_number in self._prewarm_connected:
+                        # Connected and finalizing (consuming resume state —
+                        # local file I/O, fast in practice). A post-connect
+                        # task is NEVER cancelled: cancellation could
+                        # interrupt _consume_recent_call after the resume
+                        # file's unlink but before the session is stored,
+                        # destroying the caller's resume context. Extend the
+                        # wait instead; if it still isn't done, fall back
+                        # cold WITHOUT cancelling — the finished session is
+                        # disconnected by TTL eviction.
+                        logger.info(
+                            "Pre-warm for %s is finalizing — extending wait",
+                            from_number,
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(task), finalize_wait_seconds
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Pre-warm for %s still finalizing after "
+                                "%.1fs — using cold path without cancelling",
+                                from_number,
+                                finalize_wait_seconds,
+                            )
+                            return None
+                        except Exception:
+                            pass  # failure already logged by the task
+                        entry = self._prewarm_sessions.pop(from_number, None)
+                        if entry is not None:
+                            logger.info(
+                                "Claimed pre-warm for %s after finalize wait",
+                                from_number,
+                            )
+                            return entry[0]
+                        return None  # finalize failed — cold path
+                    logger.info(
+                        "Pre-warm for %s not ready in time — cancelling, using cold path",
+                        from_number,
+                    )
+                    # Pre-connect cancellation is safe: the peek design means
+                    # the resume state has not been consumed yet.
+                    task.cancel()
+                    # Defensive: reap anything stored despite the paths above.
+                    self._reap_prewarm_entry(from_number)
+                    return None
+                except Exception:
+                    pass  # failure already logged by _prewarm_for_inbound
+                entry = self._prewarm_sessions.pop(from_number, None)
         if entry is None:
             return None
         client, created_at = entry
@@ -1168,6 +1372,13 @@ class VoiceServer:
             return None
         logger.info("Claimed pre-warm for %s (%.1fs old)", from_number, age)
         return client
+
+    def _reap_prewarm_entry(self, from_number: str) -> None:
+        """Remove and disconnect a stored pre-warm session, if one exists."""
+        entry = self._prewarm_sessions.pop(from_number, None)
+        if entry is not None:
+            client, _ = entry
+            asyncio.create_task(self._disconnect_realtime_client(client))
 
     async def _build_session_instructions(
         self,
@@ -1618,7 +1829,7 @@ class VoiceServer:
         # Twilio's media-stream WebSocket sends its "start" event.  This eliminates
         # most of the ~1-3s dead air between call answer and first greeting audio.
         if from_number:
-            asyncio.create_task(self._prewarm_for_inbound(from_number))
+            self._register_prewarm_task(from_number)
 
         # Forward caller number to WebSocket handler via TwiML custom parameters.
         custom_params: dict[str, str] = {}
@@ -1725,7 +1936,9 @@ class VoiceServer:
                         from_number and not handoff_id and not standup_brief
                     )
                     prewarm_client = (
-                        self._claim_prewarm(from_number) if prewarm_eligible else None
+                        await self._claim_prewarm(from_number)
+                        if prewarm_eligible
+                        else None
                     )
 
                     if prewarm_client is not None:

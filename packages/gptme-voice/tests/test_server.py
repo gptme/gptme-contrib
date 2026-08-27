@@ -23,6 +23,7 @@ from gptme_voice.realtime.server import (
     _build_fresh_call_greeting_instructions,
     _build_resume_instructions,
     _build_runtime_identity_instructions,
+    _extract_people_field,
     _get_twilio_field,
     _load_voice_digest,
     _lookup_caller_identity,
@@ -522,7 +523,10 @@ def test_handle_twilio_websocket_rebinds_speech_started_clear_callback_on_prewar
         async def _fake_on_call_end(*args, **kwargs) -> None:
             return None
 
-        monkeypatch.setattr(server, "_claim_prewarm", lambda _from_number: fake_client)
+        async def _fake_claim(_from_number, **_kwargs):
+            return fake_client
+
+        monkeypatch.setattr(server, "_claim_prewarm", _fake_claim)
         monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
         monkeypatch.setattr(
             "gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge
@@ -1917,3 +1921,391 @@ def test_assistant_turns_with_shared_prefix_are_not_collapsed() -> None:
     ), "Two distinct assistant turns must remain separate even when the second starts with the first"
     assert transcript[0].text == "Sure"
     assert transcript[1].text == "Sure, let me check"
+
+
+# --- Caller-aware external-caller handling (2026-08-27) ---
+
+
+def _write_person(tmpdir: str, filename: str, body: str) -> None:
+    people_dir = Path(tmpdir) / "people"
+    people_dir.mkdir(exist_ok=True)
+    (people_dir / filename).write_text(body)
+
+
+def test_lookup_caller_identity_parses_call_role_and_language() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _write_person(
+            tmpdir,
+            "erik.md",
+            "# Erik Bjäreholt\n\n- Call role: operator\nPhone: +46700000001\n",
+        )
+        _write_person(
+            tmpdir,
+            "philip.md",
+            "# Philip Johansson\n\n- Call language: Swedish\nPhone: +46700000002\n",
+        )
+
+        erik = _lookup_caller_identity("+46700000001", tmpdir)
+        philip = _lookup_caller_identity("+46700000002", tmpdir)
+
+    assert erik is not None and erik.is_operator is True
+    assert erik.call_language is None
+    assert philip is not None and philip.is_operator is False
+    assert philip.call_language == "Swedish"
+
+
+def test_extract_people_field_parses_bolded_property_name() -> None:
+    text = "# Erik Bjäreholt\n\n- **Call name**: Erik\n- **Call role**: operator\n"
+    assert _extract_people_field(text, "call name") == "Erik"
+    assert _extract_people_field(text, "call role") == "operator"
+
+
+def test_extract_people_field_strips_bolded_value() -> None:
+    text = "# Erik Bjäreholt\n\n- Call name: **Erik**\n"
+    assert _extract_people_field(text, "call name") == "Erik"
+
+
+def test_lookup_caller_identity_parses_bolded_call_role() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _write_person(
+            tmpdir,
+            "erik.md",
+            "# Erik Bjäreholt\n\n- **Call role**: operator\nPhone: +46700000001\n",
+        )
+
+        erik = _lookup_caller_identity("+46700000001", tmpdir)
+
+    assert erik is not None and erik.is_operator is True
+
+
+def test_caller_instructions_external_caller_gets_guidance() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _write_person(
+            tmpdir,
+            "philip.md",
+            "# Philip Johansson\n\n- Call language: Swedish\nPhone: +46700000002\n",
+        )
+        result = _build_caller_instructions("You are Bob.", "+46700000002", tmpdir)
+
+    assert "EXTERNAL CALLER GUIDANCE" in result
+    assert "Speak Swedish" in result
+    assert "Do not volunteer internal" in result
+
+
+def test_caller_instructions_operator_gets_no_external_guidance() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _write_person(
+            tmpdir,
+            "erik.md",
+            "# Erik Bjäreholt\n\n- Call role: operator\nPhone: +46700000001\n",
+        )
+        result = _build_caller_instructions("You are Bob.", "+46700000001", tmpdir)
+
+    assert "EXTERNAL CALLER GUIDANCE" not in result
+
+
+def test_caller_instructions_unknown_number_gets_guidance() -> None:
+    result = _build_caller_instructions("You are Bob.", "+15551234567", None)
+    assert "EXTERNAL CALLER GUIDANCE" in result
+    assert "Mirror the caller's language" in result
+
+
+def test_fresh_call_greeting_uses_call_language() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _write_person(
+            tmpdir,
+            "philip.md",
+            "# Philip Johansson\n\n- Call language: Swedish\nPhone: +46700000002\n",
+        )
+        greeting = _build_fresh_call_greeting_instructions(
+            "+46700000002", tmpdir, "bob"
+        )
+
+    assert "Greet in Swedish" in greeting
+    assert "Philip" in greeting
+
+
+def _write_fresh_digest(tmpdir: str) -> None:
+    state_dir = Path(tmpdir) / "state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "voice-digest.md").write_text("Generated at now\n- did things\n")
+
+
+def test_bootstrap_injects_digest_for_operator_only() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _write_fresh_digest(tmpdir)
+        _write_person(
+            tmpdir,
+            "erik.md",
+            "# Erik Bjäreholt\n\n- Call role: operator\nPhone: +46700000001\n",
+        )
+        _write_person(
+            tmpdir,
+            "philip.md",
+            "# Philip Johansson\n\nPhone: +46700000002\n",
+        )
+        server = VoiceServer(workspace=tmpdir)
+        server._instructions = "You are Bob."
+
+        operator_bootstrap = asyncio.run(
+            server._build_session_bootstrap(
+                caller_id="+46700000001", from_number="+46700000001"
+            )
+        )
+        external_bootstrap = asyncio.run(
+            server._build_session_bootstrap(
+                caller_id="+46700000002", from_number="+46700000002"
+            )
+        )
+        unknown_bootstrap = asyncio.run(
+            server._build_session_bootstrap(
+                caller_id="+15551234567", from_number="+15551234567"
+            )
+        )
+        # No from_number (local/browser transport) keeps the digest
+        local_bootstrap = asyncio.run(
+            server._build_session_bootstrap(caller_id=None, from_number="")
+        )
+
+    assert "ACTIVITY DIGEST" in operator_bootstrap.instructions
+    assert "ACTIVITY DIGEST" not in external_bootstrap.instructions
+    assert "ACTIVITY DIGEST" not in unknown_bootstrap.instructions
+    assert "ACTIVITY DIGEST" in local_bootstrap.instructions
+
+
+# --- Pre-warm claim race (2026-08-27) ---
+
+
+def test_claim_prewarm_waits_for_inflight_task() -> None:
+    async def _exercise() -> None:
+        server = VoiceServer()
+        fake_client = _FakeRealtimeClient()
+        ready = asyncio.Event()
+
+        async def _slow_prewarm() -> None:
+            await ready.wait()
+            server._prewarm_sessions["+46700000002"] = (
+                fake_client,
+                time.monotonic(),
+            )
+
+        task = asyncio.create_task(_slow_prewarm())
+        server._prewarm_tasks["+46700000002"] = task
+        asyncio.get_running_loop().call_later(0.05, ready.set)
+
+        claimed = await server._claim_prewarm("+46700000002", wait_seconds=1.0)
+
+        assert claimed is fake_client
+        assert "+46700000002" not in server._prewarm_sessions
+
+    asyncio.run(_exercise())
+
+
+def test_claim_prewarm_timeout_cancels_inflight_task() -> None:
+    async def _exercise() -> None:
+        server = VoiceServer()
+
+        async def _never_ready() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_never_ready())
+        server._prewarm_tasks["+46700000002"] = task
+
+        claimed = await server._claim_prewarm("+46700000002", wait_seconds=0.05)
+
+        assert claimed is None
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+
+    asyncio.run(_exercise())
+
+
+def test_claim_prewarm_ready_session_claimed_without_waiting() -> None:
+    async def _exercise() -> None:
+        server = VoiceServer()
+        fake_client = _FakeRealtimeClient()
+        server._prewarm_sessions["+46700000002"] = (fake_client, time.monotonic())
+
+        claimed = await server._claim_prewarm("+46700000002")
+
+        assert claimed is fake_client
+
+    asyncio.run(_exercise())
+
+
+def test_register_prewarm_task_cleans_up_after_completion() -> None:
+    async def _exercise() -> None:
+        server = VoiceServer()
+
+        async def _noop_prewarm(_from_number: str) -> None:
+            return None
+
+        server._prewarm_for_inbound = _noop_prewarm  # type: ignore[method-assign]
+        server._register_prewarm_task("+46700000002")
+        assert "+46700000002" in server._prewarm_tasks
+        await server._prewarm_tasks["+46700000002"]
+        await asyncio.sleep(0)  # let done-callback run
+        assert "+46700000002" not in server._prewarm_tasks
+
+    asyncio.run(_exercise())
+
+
+def test_prewarm_connect_failure_disconnects_half_open_client() -> None:
+    """AI-review P1: a connect() failure must disconnect the created client,
+    not leak one provider connection per failed pre-warm attempt."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+
+        class _FailingClient:
+            async def connect(self):
+                raise ConnectionError("simulated provider failure")
+
+        failing_client = _FailingClient()
+        disconnected: list[object] = []
+
+        async def _record_disconnect(client) -> None:
+            disconnected.append(client)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                server,
+                "_make_client",
+                lambda *args, **kwargs: failing_client,  # type: ignore[assignment]
+            )
+            mp.setattr(server, "_disconnect_realtime_client", _record_disconnect)
+            await server._prewarm_for_inbound("+46700000099")
+            # disconnect is scheduled as a task; let it run
+            await asyncio.sleep(0)
+
+        assert disconnected == [failing_client]
+
+    asyncio.run(_exercise())
+
+
+def test_claim_prewarm_timeout_claims_entry_stored_by_completed_task() -> None:
+    """AI-review P1s (rounds 2+3): if the pre-warm task completes — storing
+    its session — in the gap between the claim timeout and cancellation, the
+    completed session must be CLAIMED, not discarded: it holds the caller's
+    already-consumed resume context, so dropping it would lose the resume."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        fake_client = _FakeRealtimeClient()
+        disconnected: list[object] = []
+
+        async def _record_disconnect(client) -> None:
+            disconnected.append(client)
+
+        server._disconnect_realtime_client = _record_disconnect  # type: ignore[method-assign]
+
+        async def _never_finishes() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_never_finishes())
+        server._prewarm_tasks["+46700000002"] = task
+        await asyncio.sleep(0)
+        # Simulate the boundary: the entry lands after wait_for times out but
+        # before the timeout branch inspects state.
+        server._prewarm_sessions["+46700000002"] = (fake_client, time.monotonic())
+
+        claimed = await server._claim_prewarm("+46700000002", wait_seconds=0.05)
+        await asyncio.sleep(0)
+
+        assert claimed is fake_client
+        assert "+46700000002" not in server._prewarm_sessions
+        assert disconnected == []
+        task.cancel()  # test cleanup
+
+    asyncio.run(_exercise())
+
+
+def test_claim_prewarm_timeout_waits_out_finalizing_task() -> None:
+    """AI-review P1 (round 3): a pre-warm that connected and is consuming the
+    resume state must not be cancelled on claim timeout — the claim extends
+    its wait and picks up the session when finalization lands."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        fake_client = _FakeRealtimeClient()
+        finalize = asyncio.Event()
+
+        async def _finalizing_prewarm() -> None:
+            server._prewarm_connected.add("+46700000002")
+            try:
+                await finalize.wait()
+                server._prewarm_sessions["+46700000002"] = (
+                    fake_client,
+                    time.monotonic(),
+                )
+            finally:
+                server._prewarm_connected.discard("+46700000002")
+
+        task = asyncio.create_task(_finalizing_prewarm())
+        server._prewarm_tasks["+46700000002"] = task
+        await asyncio.sleep(0)
+        asyncio.get_running_loop().call_later(0.1, finalize.set)
+
+        claimed = await server._claim_prewarm("+46700000002", wait_seconds=0.05)
+
+        assert claimed is fake_client
+        assert not task.cancelled()
+
+    asyncio.run(_exercise())
+
+
+def test_reap_prewarm_entry_disconnects_and_removes() -> None:
+    async def _exercise() -> None:
+        server = VoiceServer()
+        fake_client = _FakeRealtimeClient()
+        disconnected: list[object] = []
+
+        async def _record_disconnect(client) -> None:
+            disconnected.append(client)
+
+        server._disconnect_realtime_client = _record_disconnect  # type: ignore[method-assign]
+        server._prewarm_sessions["+1"] = (fake_client, time.monotonic())
+
+        server._reap_prewarm_entry("+1")
+        await asyncio.sleep(0)
+
+        assert "+1" not in server._prewarm_sessions
+        assert disconnected == [fake_client]
+        server._reap_prewarm_entry("+1")  # absent entry is a no-op
+
+    asyncio.run(_exercise())
+
+
+def test_claim_prewarm_never_cancels_finalizing_task_on_expiry() -> None:
+    """AI-review P1 (round 4): when even the extended finalize wait expires,
+    the claim must fall back cold WITHOUT cancelling the post-connect task —
+    cancellation mid-_consume_recent_call can delete the resume file before
+    the session is stored, destroying the caller's resume context."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        never = asyncio.Event()
+
+        async def _stuck_finalizing() -> None:
+            server._prewarm_connected.add("+46700000002")
+            try:
+                await never.wait()
+            finally:
+                server._prewarm_connected.discard("+46700000002")
+
+        task = asyncio.create_task(_stuck_finalizing())
+        server._prewarm_tasks["+46700000002"] = task
+        await asyncio.sleep(0)
+
+        claimed = await server._claim_prewarm(
+            "+46700000002", wait_seconds=0.05, finalize_wait_seconds=0.05
+        )
+
+        assert claimed is None
+        assert not task.cancelled()
+        assert not task.done(), "post-connect task must be left running"
+        never.set()  # test cleanup
+        await task
+
+    asyncio.run(_exercise())
