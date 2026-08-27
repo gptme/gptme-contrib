@@ -7,6 +7,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from websockets.exceptions import ConnectionClosed
 
 # ---------------------------------------------------------------------------
 # Helpers to avoid pyaudio import in test collection
@@ -69,7 +70,8 @@ class TestRecvLoop:
         msg = json.dumps({"type": "audio", "audio": base64.b64encode(pcm).decode()})
 
         mock_ws = AsyncMock()
-        mock_ws.__aiter__.return_value = iter([msg])
+        # Return the audio frame then ConnectionClosed to exit the recv loop.
+        mock_ws.recv.side_effect = [msg, ConnectionClosed(None, None)]
 
         speaker = MagicMock()
         # We expect write to be called with the PCM bytes
@@ -97,11 +99,12 @@ class TestRecvLoop:
         node = _make_node()
         node._playing = True
 
-        msgs = [
-            json.dumps({"type": "audio_end"}),
-        ]
         mock_ws = AsyncMock()
-        mock_ws.__aiter__.return_value = iter(msgs)
+        # Return audio_end then ConnectionClosed to exit the recv loop.
+        mock_ws.recv.side_effect = [
+            json.dumps({"type": "audio_end"}),
+            ConnectionClosed(None, None),
+        ]
         speaker = MagicMock()
 
         await node._recv_loop(mock_ws, speaker)

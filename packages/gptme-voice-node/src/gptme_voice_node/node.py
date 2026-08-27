@@ -104,6 +104,12 @@ class VoiceNode:
 
     async def _session(self, ws) -> None:
         """Handle one connected WebSocket session."""
+        # Reset per-session playback state on every reconnect.
+        # Without this, a disconnect mid-playback leaves _playing=True, which
+        # silently mutes the mic for the entire next session.
+        self._playing = False
+        self._play_ended_at = 0.0
+
         log.info("[%s] connected to %s", self.node_name, self.server_url)
 
         mic = self._pa.open(
@@ -113,24 +119,25 @@ class VoiceNode:
             input=True,
             frames_per_buffer=CHUNK_SIZE,
         )
-        speaker = self._pa.open(
-            format=self._audio_format,
-            channels=CHANNELS,
-            rate=SAMPLE_RATE,
-            output=True,
-            frames_per_buffer=CHUNK_SIZE,
-        )
-
         try:
-            await asyncio.gather(
-                self._send_loop(ws, mic),
-                self._recv_loop(ws, speaker),
+            speaker = self._pa.open(
+                format=self._audio_format,
+                channels=CHANNELS,
+                rate=SAMPLE_RATE,
+                output=True,
+                frames_per_buffer=CHUNK_SIZE,
             )
+            try:
+                await asyncio.gather(
+                    self._send_loop(ws, mic),
+                    self._recv_loop(ws, speaker),
+                )
+            finally:
+                speaker.stop_stream()
+                speaker.close()
         finally:
             mic.stop_stream()
             mic.close()
-            speaker.stop_stream()
-            speaker.close()
 
     async def _send_loop(self, ws, mic_stream) -> None:
         """Continuously read mic and forward to server (unless muted)."""
@@ -148,9 +155,20 @@ class VoiceNode:
             await asyncio.sleep(0.005)
 
     async def _recv_loop(self, ws, speaker_stream) -> None:
-        """Receive audio frames from server and play them."""
+        """Receive audio frames from server and play them.
+
+        Uses explicit ws.recv() rather than ``async for`` so that the loop
+        respects the ``_running`` flag and exits cleanly on shutdown instead
+        of blocking indefinitely waiting for the next message.  This prevents
+        run_forever from hanging and leaking PyAudio resources when the node
+        is stopped via SIGTERM.
+        """
         loop = asyncio.get_event_loop()
-        async for raw_msg in ws:
+        while self._running:
+            try:
+                raw_msg = await ws.recv()
+            except ConnectionClosed:
+                break
             data = json.loads(raw_msg)
             msg_type = data.get("type")
             if msg_type == "audio":
@@ -215,16 +233,22 @@ async def _async_main(server_url: str, node_name: str) -> None:
     node = VoiceNode(server_url, node_name)
 
     loop = asyncio.get_event_loop()
+    task = asyncio.ensure_future(node.run_forever())
 
     def _handle_signal(sig: signal.Signals) -> None:
         log.info("[%s] received signal %s, shutting down", node_name, sig)
         node.stop()
+        # Cancel the task so any blocked ws.recv() unblocks immediately and
+        # the cleanup finally block runs without waiting for SIGKILL.
+        task.cancel()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, functools.partial(_handle_signal, sig))
 
     try:
-        await node.run_forever()
+        await task
+    except asyncio.CancelledError:
+        pass
     finally:
         node.cleanup()
 
