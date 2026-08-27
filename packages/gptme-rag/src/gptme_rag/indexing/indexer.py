@@ -1587,6 +1587,9 @@ class Indexer:
         Returns:
             Set of valid file paths
         """
+        if file_limit < 0:
+            raise ValueError("file_limit must be >= 0")
+
         valid_files = set()
         path = path.resolve()  # Resolve path first
 
@@ -1657,7 +1660,10 @@ class Indexer:
                 f"File limit ({file_limit}) reached, was {len(valid_files)}. "
                 f"Pass a higher --file-limit or use a more specific glob pattern than '{glob_pattern}'."
             )
-            valid_files = set(list(valid_files)[:file_limit])
+            # Sort before slicing so truncation is deterministic. Set iteration
+            # order is arbitrary; without a sort, a corpus over the cap would
+            # index a different subset each run and never reach a stable state.
+            valid_files = set(sorted(valid_files)[:file_limit])
 
         return valid_files
 

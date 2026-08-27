@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 from click.testing import CliRunner
 
 from gptme_rag.cli import cli
@@ -73,3 +74,31 @@ def test_index_cli_exposes_file_limit_flag():
     assert result.exit_code == 0, result.output
     assert "--file-limit" in result.output
     assert "100000" in result.output
+
+
+def test_get_valid_files_truncation_is_deterministic(tmp_path):
+    """Over-cap truncation keeps the lexicographically first N paths, stably."""
+    _write_files(tmp_path, 12)
+    indexer = Indexer.__new__(Indexer)
+
+    first = indexer._get_valid_files(tmp_path, file_limit=5)
+    second = indexer._get_valid_files(tmp_path, file_limit=5)
+
+    assert first == second
+    expected = set(sorted(tmp_path.resolve().glob("*.txt"))[:5])
+    assert first == expected
+
+
+def test_get_valid_files_rejects_negative_file_limit(tmp_path):
+    _write_files(tmp_path, 3)
+    indexer = Indexer.__new__(Indexer)
+    with pytest.raises(ValueError, match="file_limit must be >= 0"):
+        indexer._get_valid_files(tmp_path, file_limit=-1)
+
+
+def test_index_cli_rejects_negative_file_limit():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["index", "--file-limit", "-1", "/tmp"])
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output
+    assert "--file-limit" in result.output

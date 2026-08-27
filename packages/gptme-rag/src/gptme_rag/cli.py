@@ -198,7 +198,7 @@ def cli(verbose: bool):
 )
 @click.option(
     "--file-limit",
-    type=int,
+    type=click.IntRange(min=0),
     default=100_000,
     help="Maximum number of files to index per directory (default: 100000)",
 )
