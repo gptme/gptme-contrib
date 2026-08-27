@@ -1575,7 +1575,7 @@ class Indexer:
             return False
 
     def _get_valid_files(
-        self, path: Path, glob_pattern: str = "**/*.*", file_limit: int = 1000
+        self, path: Path, glob_pattern: str = "**/*.*", file_limit: int = 100_000
     ) -> set[Path]:
         """Get valid files for indexing from a path.
 
@@ -1652,26 +1652,29 @@ class Indexer:
 
         # Check file limit
         if len(valid_files) >= file_limit:
-            logger.warning(
-                f"File limit ({file_limit}) reached, was {len(valid_files)}. Consider adding patterns to .gitignore "
-                f"or using a more specific glob pattern than '{glob_pattern}' to exclude unwanted files."
+            logger.error(
+                f"File limit ({file_limit}) reached, was {len(valid_files)}. "
+                f"Pass a higher --file-limit or use a more specific glob pattern than '{glob_pattern}'."
             )
             valid_files = set(list(valid_files)[:file_limit])
 
         return valid_files
 
-    def collect_documents(self, path: Path, glob_pattern: str = "**/*.*") -> list[Document]:
+    def collect_documents(
+        self, path: Path, glob_pattern: str = "**/*.*", file_limit: int = 100_000
+    ) -> list[Document]:
         """Collect documents from a file or directory without processing them.
 
         Args:
             path: Path to collect documents from
             glob_pattern: Pattern to match files (only used for directories)
+            file_limit: Maximum number of files to collect per directory
 
         Returns:
             List of documents ready for processing
         """
         documents: list[Document] = []
-        valid_files = self._get_valid_files(path, glob_pattern)
+        valid_files = self._get_valid_files(path, glob_pattern, file_limit)
 
         if not valid_files:
             logger.debug(f"No valid files found in {path}")

@@ -196,6 +196,12 @@ def cli(verbose: bool):
     default=None,
     help="Overlap between chunks. Defaults based on model: ModernBERT-msmarco=50, ModernBERT-base=200",
 )
+@click.option(
+    "--file-limit",
+    type=int,
+    default=100_000,
+    help="Maximum number of files to index per directory (default: 100000)",
+)
 def index(
     paths: list[Path],
     pattern: str,
@@ -205,6 +211,7 @@ def index(
     force_recreate: bool,
     chunk_size: int | None,
     chunk_overlap: int | None,
+    file_limit: int,
 ):
     """Index documents in one or more directories."""
     if not paths:
@@ -260,7 +267,7 @@ def index(
                 else:
                     status.update(f"Processing directory: {path}")
 
-                documents = indexer.collect_documents(path)
+                documents = indexer.collect_documents(path, file_limit=file_limit)
 
                 # Filter for new or modified documents
                 filtered_documents = []
