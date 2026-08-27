@@ -253,8 +253,7 @@ def body_tool_schemas(adapter: BodyAdapter | None) -> list[dict]:
                         "altitude_m": {
                             "type": "number",
                             "description": (
-                                "Hover altitude in meters above ground "
-                                "(default 2.5)."
+                                "Hover altitude in meters above ground (default 2.5)."
                             ),
                         }
                     },
@@ -288,6 +287,14 @@ def body_adapter_from_env() -> BodyAdapter | None:
     if url == "null":
         return NullAdapter()
     if url.startswith("mavsdk://"):
+        try:
+            __import__("mavsdk")
+        except ImportError:
+            logger.warning(
+                "GPTME_VOICE_BODY_URL uses mavsdk:// but the mavsdk dependency "
+                "is unavailable; install gptme-voice[body] (body disabled)"
+            )
+            return None
         from .mavsdk_adapter import MavsdkAdapter
 
         return MavsdkAdapter(url.removeprefix("mavsdk://"))

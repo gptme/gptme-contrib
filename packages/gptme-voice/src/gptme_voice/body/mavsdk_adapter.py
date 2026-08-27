@@ -57,7 +57,8 @@ class MavsdkAdapter:
         self.connect_timeout_s = connect_timeout_s
         self._system: Any = None
         self._connected = False
-        self._lock = asyncio.Lock()
+        self._connection_lock = asyncio.Lock()
+        self._command_lock = asyncio.Lock()
         self._telemetry_tasks: list[asyncio.Task] = []
         # Telemetry caches (filled by background subscriptions)
         self._position: dict[str, float] = {}
@@ -68,9 +69,10 @@ class MavsdkAdapter:
         self._armed: bool | None = None
 
     async def ensure_connected(self) -> None:
-        async with self._lock:
+        async with self._connection_lock:
             if self._connected:
                 return
+            await self._cancel_telemetry_tasks()
             from mavsdk import System
 
             system = System()
@@ -123,21 +125,56 @@ class MavsdkAdapter:
             async for armed in system.telemetry.armed():
                 self._armed = armed
 
-        for coro in (
-            _position(),
-            _heading(),
-            _battery(),
-            _in_air(),
-            _flight_mode(),
-            _armed(),
-        ):
-            self._telemetry_tasks.append(asyncio.create_task(coro))
+        async def _watch(stream_name: str, subscription: Any) -> None:
+            try:
+                await subscription
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - MAVSDK stream errors vary by backend
+                logger.exception("MAVSDK %s telemetry stream failed", stream_name)
+                self._mark_disconnected()
+            else:
+                logger.error("MAVSDK %s telemetry stream ended", stream_name)
+                self._mark_disconnected()
+
+        subscriptions = {
+            "position": _position(),
+            "heading": _heading(),
+            "battery": _battery(),
+            "in_air": _in_air(),
+            "flight_mode": _flight_mode(),
+            "armed": _armed(),
+        }
+        self._telemetry_tasks.extend(
+            asyncio.create_task(_watch(name, subscription))
+            for name, subscription in subscriptions.items()
+        )
+
+    def _mark_disconnected(self) -> None:
+        self._connected = False
+        self._position = {}
+        self._heading_deg = None
+        self._battery = {}
+        self._in_air = None
+        self._flight_mode = None
+        self._armed = None
+        current = asyncio.current_task()
+        for task in self._telemetry_tasks:
+            if task is not current:
+                task.cancel()
+        self._telemetry_tasks.clear()
+
+    async def _cancel_telemetry_tasks(self) -> None:
+        tasks = list(self._telemetry_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._telemetry_tasks.clear()
 
     async def close(self) -> None:
-        for task in self._telemetry_tasks:
-            task.cancel()
-        self._telemetry_tasks.clear()
-        self._connected = False
+        await self._cancel_telemetry_tasks()
+        self._mark_disconnected()
         self._system = None
 
     # -- BodyAdapter interface -------------------------------------------
@@ -156,29 +193,45 @@ class MavsdkAdapter:
         }
 
     async def takeoff(self, altitude_m: float) -> dict[str, Any]:
-        system = self._system
-        await system.action.set_takeoff_altitude(altitude_m)
-        await system.action.arm()
-        await system.action.takeoff()
-        return {
-            "status": "taking_off",
-            "target_altitude_m": altitude_m,
-            "message": "Armed and taking off. Check body_status for altitude.",
-        }
+        async with self._command_lock:
+            system = self._system
+            await system.action.set_takeoff_altitude(altitude_m)
+            await system.action.arm()
+            await system.action.takeoff()
+            return {
+                "status": "taking_off",
+                "target_altitude_m": altitude_m,
+                "message": "Armed and taking off. Check body_status for altitude.",
+            }
 
     async def land(self) -> dict[str, Any]:
-        await self._system.action.land()
-        return {"status": "landing"}
+        async with self._command_lock:
+            await self._system.action.land()
+            return {"status": "landing"}
 
     async def stop(self) -> dict[str, Any]:
-        await self._system.action.hold()
-        return {"status": "holding", "message": "Motion stopped; holding position."}
+        async with self._command_lock:
+            await self._system.action.hold()
+            return {
+                "status": "holding",
+                "message": "Motion stopped; holding position.",
+            }
 
     async def return_home(self) -> dict[str, Any]:
-        await self._system.action.return_to_launch()
-        return {"status": "returning_home"}
+        async with self._command_lock:
+            await self._system.action.return_to_launch()
+            return {"status": "returning_home"}
 
     async def goto(
+        self,
+        latitude_deg: float,
+        longitude_deg: float,
+        altitude_m: float | None,
+    ) -> dict[str, Any]:
+        async with self._command_lock:
+            return await self._goto_unlocked(latitude_deg, longitude_deg, altitude_m)
+
+    async def _goto_unlocked(
         self,
         latitude_deg: float,
         longitude_deg: float,
@@ -209,25 +262,32 @@ class MavsdkAdapter:
     async def move(
         self, forward_m: float, right_m: float, up_m: float
     ) -> dict[str, Any]:
-        pos = self._position
-        if not pos:
-            return {"error": "No position fix yet; cannot move."}
-        yaw = self._heading_deg or 0.0
-        north, east = body_to_ned(forward_m, right_m, yaw)
-        lat, lon = offset_latlon(pos["latitude_deg"], pos["longitude_deg"], north, east)
-        target_rel = pos["relative_altitude_m"] + up_m
-        return await self.goto(lat, lon, target_rel)
+        async with self._command_lock:
+            pos = self._position
+            if not pos:
+                return {"error": "No position fix yet; cannot move."}
+            yaw = self._heading_deg or 0.0
+            north, east = body_to_ned(forward_m, right_m, yaw)
+            lat, lon = offset_latlon(
+                pos["latitude_deg"], pos["longitude_deg"], north, east
+            )
+            target_rel = max(1.0, pos["relative_altitude_m"] + up_m)
+            return await self._goto_unlocked(lat, lon, target_rel)
 
     async def turn(self, yaw_deg: float) -> dict[str, Any]:
-        pos = self._position
-        if not pos:
-            return {"error": "No position fix yet; cannot turn."}
-        current = self._heading_deg or 0.0
-        target_yaw = (current + yaw_deg + 180.0) % 360.0 - 180.0
-        await self._system.action.goto_location(
-            pos["latitude_deg"],
-            pos["longitude_deg"],
-            pos["absolute_altitude_m"],
-            target_yaw,
-        )
-        return {"status": "turning", "target_heading_deg": round(target_yaw, 1)}
+        async with self._command_lock:
+            pos = self._position
+            if not pos:
+                return {"error": "No position fix yet; cannot turn."}
+            current = self._heading_deg or 0.0
+            target_yaw = (current + yaw_deg + 180.0) % 360.0 - 180.0
+            await self._system.action.goto_location(
+                pos["latitude_deg"],
+                pos["longitude_deg"],
+                pos["absolute_altitude_m"],
+                target_yaw,
+            )
+            return {
+                "status": "turning",
+                "target_heading_deg": round(target_yaw, 1),
+            }

@@ -1,6 +1,7 @@
 """Tests for the body adapter layer and its tool-bridge routing."""
 
 import asyncio
+import builtins
 from typing import Any
 
 import pytest
@@ -18,18 +19,29 @@ class FakeAdapter:
 
     name = "fake"
 
-    def __init__(self, capabilities: set[str] | None = None):
+    def __init__(
+        self,
+        capabilities: set[str] | None = None,
+        *,
+        relative_altitude_m: float | None = None,
+    ):
         self.capabilities = (
             capabilities if capabilities is not None else {"move", "rotate", "altitude"}
         )
         self.calls: list[tuple[str, tuple]] = []
         self.connect_calls = 0
+        self.relative_altitude_m = relative_altitude_m
 
     async def ensure_connected(self) -> None:
         self.connect_calls += 1
 
     def telemetry(self) -> dict[str, Any]:
-        return {"body": "fake", "in_air": False}
+        position = (
+            {"relative_altitude_m": self.relative_altitude_m}
+            if self.relative_altitude_m is not None
+            else None
+        )
+        return {"body": "fake", "in_air": False, "position": position}
 
     async def takeoff(self, altitude_m: float) -> dict:
         self.calls.append(("takeoff", (altitude_m,)))
@@ -142,6 +154,15 @@ def test_bridge_takeoff_clamps_altitude(loop, monkeypatch):
     assert adapter.calls[-1] == ("takeoff", (2.5,))
 
 
+@pytest.mark.parametrize("value", ["", "abc", "nan", "inf", "0", "-1"])
+def test_bridge_invalid_body_limits_fall_back(loop, monkeypatch, value):
+    monkeypatch.setenv("GPTME_VOICE_BODY_MAX_ALT_M", value)
+    monkeypatch.setenv("GPTME_VOICE_BODY_MAX_MOVE_M", value)
+    bridge = GptmeToolBridge(body_adapter=FakeAdapter())
+    assert bridge.body_max_altitude_m == 30.0
+    assert bridge.body_max_move_m == 50.0
+
+
 def test_bridge_move_clamps_distance(loop):
     adapter = FakeAdapter()
     bridge = GptmeToolBridge(body_adapter=adapter)
@@ -151,6 +172,19 @@ def test_bridge_move_clamps_distance(loop):
     assert f == bridge.body_max_move_m
     assert r == -bridge.body_max_move_m
     assert u == 0.0
+
+
+def test_bridge_move_clamps_resulting_absolute_altitude(loop, monkeypatch):
+    monkeypatch.setenv("GPTME_VOICE_BODY_MAX_ALT_M", "30")
+    adapter = FakeAdapter(relative_altitude_m=25.0)
+    bridge = GptmeToolBridge(body_adapter=adapter)
+
+    _call(bridge, "body_move", {"up_m": 30})
+    assert adapter.calls[-1] == ("move", (0.0, 0.0, 5.0))
+
+    adapter.relative_altitude_m = 2.0
+    _call(bridge, "body_move", {"up_m": -30})
+    assert adapter.calls[-1] == ("move", (0.0, 0.0, -1.0))
 
 
 def test_bridge_capability_gate_blocks_uncapable_calls(loop):
@@ -223,6 +257,19 @@ def test_adapter_from_env_mavsdk(monkeypatch):
     assert adapter.system_address == "udpin://0.0.0.0:14540"
 
 
+def test_adapter_from_env_mavsdk_missing_dependency(monkeypatch):
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "mavsdk://udpin://0.0.0.0:14540")
+    original_import = builtins.__import__
+
+    def import_without_mavsdk(name, *args, **kwargs):
+        if name == "mavsdk":
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_mavsdk)
+    assert body_adapter_from_env() is None
+
+
 # --- mavsdk geometry helpers (pure math, no mavsdk import needed) -------
 
 
@@ -256,3 +303,93 @@ def test_offset_latlon_east_scales_with_latitude():
     _, lon_north = offset_latlon(60.0, 8.0, 0.0, 1000.0)
     # Same eastward meters => larger longitude delta at higher latitude
     assert (lon_north - 8.0) > (lon_equator - 8.0)
+
+
+# --- MAVSDK safety behavior --------------------------------------------
+
+
+def test_mavsdk_move_never_targets_below_home(loop):
+    from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
+
+    class Action:
+        def __init__(self):
+            self.goto_args = None
+
+        async def goto_location(self, *args):
+            self.goto_args = args
+
+    action = Action()
+    adapter = MavsdkAdapter("unused")
+    adapter._system = type("System", (), {"action": action})()
+    adapter._position = {
+        "latitude_deg": 47.0,
+        "longitude_deg": 8.0,
+        "absolute_altitude_m": 502.0,
+        "relative_altitude_m": 2.0,
+    }
+
+    result = loop.run_until_complete(adapter.move(0.0, 0.0, -30.0))
+
+    assert result["target"]["altitude_m"] == 1.0
+    assert action.goto_args[2] == 501.0
+
+
+def test_mavsdk_serializes_action_commands(loop):
+    from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
+
+    class Action:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+
+        async def hold(self):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0)
+            self.active -= 1
+
+    async def run() -> int:
+        action = Action()
+        adapter = MavsdkAdapter("unused")
+        adapter._system = type("System", (), {"action": action})()
+        await asyncio.gather(adapter.stop(), adapter.stop())
+        return action.max_active
+
+    assert loop.run_until_complete(run()) == 1
+
+
+def test_mavsdk_telemetry_failure_marks_disconnected(loop):
+    from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
+
+    async def broken_stream():
+        if False:
+            yield None
+        raise ConnectionError("link lost")
+
+    async def waiting_stream():
+        while True:
+            await asyncio.sleep(10)
+            yield None
+
+    class Telemetry:
+        position = staticmethod(broken_stream)
+        heading = staticmethod(waiting_stream)
+        battery = staticmethod(waiting_stream)
+        in_air = staticmethod(waiting_stream)
+        flight_mode = staticmethod(waiting_stream)
+        armed = staticmethod(waiting_stream)
+
+    async def run() -> tuple[bool, dict[str, Any], list[asyncio.Task]]:
+        adapter = MavsdkAdapter("unused")
+        adapter._system = type("System", (), {"telemetry": Telemetry()})()
+        adapter._connected = True
+        adapter._position = {"relative_altitude_m": 2.0}
+        adapter._start_telemetry_cache()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return adapter._connected, adapter._position, adapter._telemetry_tasks
+
+    connected, position, tasks = loop.run_until_complete(run())
+    assert connected is False
+    assert position == {}
+    assert tasks == []

@@ -21,7 +21,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.timeout(180)
 def test_full_flight_via_bridge():
     pytest.importorskip("mavsdk")
     from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
@@ -74,4 +73,4 @@ def test_full_flight_via_bridge():
 
         await adapter.close()
 
-    asyncio.run(scenario())
+    asyncio.run(asyncio.wait_for(scenario(), timeout=180))

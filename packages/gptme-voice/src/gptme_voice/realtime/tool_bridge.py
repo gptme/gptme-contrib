@@ -13,6 +13,7 @@ conversation when ready.
 
 import asyncio
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -139,11 +140,11 @@ class GptmeToolBridge:
         self.on_handoff = on_handoff
         self.transcript_provider = transcript_provider
         self.body_adapter = body_adapter
-        self.body_max_altitude_m = float(
-            os.environ.get("GPTME_VOICE_BODY_MAX_ALT_M", "30")
+        self.body_max_altitude_m = self._parse_env_float(
+            "GPTME_VOICE_BODY_MAX_ALT_M", default=30.0, minimum=1.0
         )
-        self.body_max_move_m = float(
-            os.environ.get("GPTME_VOICE_BODY_MAX_MOVE_M", "50")
+        self.body_max_move_m = self._parse_env_float(
+            "GPTME_VOICE_BODY_MAX_MOVE_M", default=50.0, minimum=0.1
         )
         legacy_env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
         env_model_fast = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_FAST")
@@ -178,6 +179,26 @@ class GptmeToolBridge:
         except ValueError:
             logger.warning("%s=%r is not an integer; using %s", name, value, default)
             return default
+
+    @staticmethod
+    def _parse_env_float(name: str, *, default: float, minimum: float) -> float:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        try:
+            parsed = float(value)
+        except ValueError:
+            parsed = float("nan")
+        if not math.isfinite(parsed) or parsed < minimum:
+            logger.warning(
+                "%s=%r must be a finite number >= %s; using %s",
+                name,
+                value,
+                minimum,
+                default,
+            )
+            return default
+        return parsed
 
     @staticmethod
     def _extract_error_text(stdout: str, stderr: str, output: str) -> str:
@@ -944,8 +965,7 @@ class GptmeToolBridge:
         if adapter is None:
             return {
                 "error": (
-                    "No body is connected to this session, so there is "
-                    "nothing to move."
+                    "No body is connected to this session, so there is nothing to move."
                 )
             }
         try:
@@ -978,6 +998,14 @@ class GptmeToolBridge:
                 up = self._clamp(
                     float(arguments.get("up_m", 0.0)), self.body_max_altitude_m
                 )
+                position = adapter.telemetry().get("position") or {}
+                current_altitude = position.get("relative_altitude_m")
+                if current_altitude is not None:
+                    target_altitude = max(
+                        1.0,
+                        min(self.body_max_altitude_m, float(current_altitude) + up),
+                    )
+                    up = target_altitude - float(current_altitude)
                 return await adapter.move(forward, right, up)
             if name == "body_goto" and "move" in caps:
                 lat = float(arguments["latitude_deg"])
