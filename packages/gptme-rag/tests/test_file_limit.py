@@ -8,6 +8,7 @@ across 7 paths, of which only ~4k were ever collected). See gptme-contrib#1523.
 from __future__ import annotations
 
 import logging
+import subprocess
 
 import pytest
 from click.testing import CliRunner
@@ -72,6 +73,7 @@ def test_index_cli_threads_pattern_to_collect_documents(tmp_path, monkeypatch):
     """The index command passes --pattern to document collection."""
     observed_patterns = []
 
+    monkeypatch.setattr(Indexer, "__init__", lambda self, *args, **kwargs: None)
     monkeypatch.setattr(Indexer, "get_all_documents", lambda self: [])
 
     def collect_documents(self, path, glob_pattern="**/*.*", file_limit=100_000):
@@ -85,6 +87,24 @@ def test_index_cli_threads_pattern_to_collect_documents(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert observed_patterns == ["*.md"]
+
+
+def test_get_valid_files_honors_pattern_in_git_repo(tmp_path):
+    """Git-backed discovery filters files with the requested pattern."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "root.md").write_text("root")
+    (tmp_path / "docs" / "nested.md").write_text("nested")
+    (tmp_path / "docs" / "ignored.txt").write_text("ignored")
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+
+    indexer = Indexer.__new__(Indexer)
+    files = indexer._get_valid_files(tmp_path, glob_pattern="**/*.md")
+
+    assert files == {
+        (tmp_path / "root.md").resolve(),
+        (tmp_path / "docs" / "nested.md").resolve(),
+    }
 
 
 def test_index_cli_exposes_file_limit_flag():

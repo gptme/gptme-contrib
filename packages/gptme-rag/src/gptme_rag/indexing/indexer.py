@@ -1632,6 +1632,11 @@ class Indexer:
             files = list(path.glob(glob_pattern))
             gitignore_patterns = self._load_gitignore(path)
 
+        # pathlib treats **/ as optional at the start of a glob, while fnmatch
+        # does not. Normalize that prefix so git-listed paths follow the same
+        # matching semantics as the pathlib fallback.
+        fnmatch_pattern = glob_pattern.replace("**/*", "*")
+
         for f in files:
             if not f.is_file():
                 continue
@@ -1640,13 +1645,9 @@ class Indexer:
             if gitignore_patterns and self._is_ignored(f, gitignore_patterns):
                 continue
 
-            # Filter by glob pattern if it's not from git ls-files
-            if gitignore_patterns:  # Only check pattern if using glob
-                rel_path = str(f.relative_to(path))
-                # Convert glob pattern to fnmatch pattern
-                fnmatch_pattern = glob_pattern.replace("**/*", "*")
-                if not fnmatch_path(rel_path, fnmatch_pattern):
-                    continue
+            rel_path = str(f.relative_to(path))
+            if not fnmatch_path(rel_path, fnmatch_pattern):
+                continue
 
             # Resolve symlinks to target
             try:
@@ -1660,7 +1661,7 @@ class Indexer:
         if len(valid_files) > file_limit:
             logger.error(
                 f"File limit ({file_limit}) reached, was {len(valid_files)}. "
-                f"Raise file_limit or use a more specific glob pattern than '{glob_pattern}'."
+                f"Increase the file limit or use a more specific glob pattern than '{glob_pattern}'."
             )
             # Sort before slicing so truncation is deterministic. Set iteration
             # order is arbitrary; without a sort, a corpus over the cap would
