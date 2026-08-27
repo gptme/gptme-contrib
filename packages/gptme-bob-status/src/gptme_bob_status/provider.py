@@ -342,7 +342,7 @@ class BobStatusProvider:
         lines = ["## Ready Next (top 3)"]
         if ready:
             for i, t in enumerate(ready, 1):
-                title = str(t.get("name", t.get("id", "")))[:65]
+                title = str(t.get("title", t.get("id", "")))[:65]
                 lines.append(f"{i}. `{t.get('id', '?')}` — {title}")
         else:
             lines.append("- No ready backlog tasks found")

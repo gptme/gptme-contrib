@@ -93,7 +93,11 @@ def test_narrative_sections_non_empty_in_bob_workspace(monkeypatch):
     )
     monkeypatch.setattr(mod, "_dead_timers", lambda: 0)
     monkeypatch.setattr(mod, "_blockers", lambda limit=3: [])
-    monkeypatch.setattr(mod, "_ready_tasks", lambda limit=3: [])
+    monkeypatch.setattr(
+        mod,
+        "_ready_tasks",
+        lambda limit=3: [{"id": "ready-1", "title": "Ready task title"}],
+    )
     monkeypatch.setattr(mod, "_journal_entries", lambda limit=5: [])
 
     provider = BobStatusProvider()
@@ -102,10 +106,10 @@ def test_narrative_sections_non_empty_in_bob_workspace(monkeypatch):
     assert isinstance(sections, list)
     assert len(sections) > 0
     assert all(isinstance(s, str) for s in sections)
-    # Should include the active task
     combined = "\n".join(sections)
     assert "t1" in combined
     assert "gptme/gptme" in combined
+    assert "`ready-1` — Ready task title" in combined
 
 
 def test_collect_keys_use_bob_prefix(monkeypatch):
