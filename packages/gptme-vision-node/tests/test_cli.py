@@ -26,6 +26,25 @@ def test_make_source_parsing(tmp_path):
     assert isinstance(rtsp, OpenCVCameraSource) and rtsp.source == "rtsp://host/stream"
 
 
+def test_cli_invalid_camera_index_is_clean_error():
+    result = CliRunner().invoke(cli.main, ["detect", "--source", "camera:nope"])
+    assert result.exit_code != 0
+    assert "invalid camera index" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_capture_failure_is_clean_error(monkeypatch):
+    class BrokenSource:
+        def get_frame(self):
+            raise RuntimeError("camera unavailable")
+
+    monkeypatch.setattr(cli, "make_source", lambda spec: BrokenSource())
+    result = CliRunner().invoke(cli.main, ["look", "--source", "camera:9"])
+    assert result.exit_code != 0
+    assert "camera unavailable" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_cli_detect_once(tmp_path):
     img = _write_scene(tmp_path / "a.png", 2)
     result = CliRunner().invoke(cli.main, ["detect", "--source", str(img), "--once"])

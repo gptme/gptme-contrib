@@ -35,6 +35,8 @@ WifiSig = dict[str, float]  # BSSID -> signal strength (0..100, nmcli SIGNAL)
 class Embedder(Protocol):
     """Maps a BGR frame to a fixed-size embedding vector."""
 
+    embedder_id: str
+
     def embed(self, frame: np.ndarray) -> np.ndarray: ...
 
 
@@ -52,6 +54,11 @@ class HistogramEmbedder:
         self.h_bins = h_bins
         self.s_bins = s_bins
         self.grid = grid
+
+    @property
+    def embedder_id(self) -> str:
+        """Stable identifier for persisted embedding compatibility."""
+        return f"histogram-h{self.h_bins}-s{self.s_bins}-grid{self.grid}-v1"
 
     def embed(self, frame: np.ndarray) -> np.ndarray:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -265,6 +272,7 @@ class PlaceRecognizer:
         """Persist the gallery as JSON (embeddings as float lists)."""
         payload = {
             "version": 1,
+            "embedder": self.embedder.embedder_id,
             "wifi_weight": self.wifi_weight,
             "places": {
                 name: [
@@ -288,6 +296,12 @@ class PlaceRecognizer:
     def load(self, path: str | Path) -> None:
         """Load a gallery saved by :meth:`save` (replaces current places)."""
         payload = json.loads(Path(path).read_text())
+        saved_embedder = payload.get("embedder")
+        if saved_embedder is not None and saved_embedder != self.embedder.embedder_id:
+            raise ValueError(
+                "embedder mismatch: gallery uses "
+                f"{saved_embedder!r}, current embedder is {self.embedder.embedder_id!r}"
+            )
         places: dict[str, list[PlaceSample]] = {}
         for name, samples in payload.get("places", {}).items():
             places[name] = [

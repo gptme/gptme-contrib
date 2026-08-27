@@ -56,20 +56,30 @@ class PersonDetector:
         self.score_threshold = score_threshold
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
-        # HOG needs a minimum window (64x128); upscale tiny frames.
-        h, w = frame.shape[:2]
-        if h < 128 or w < 64:
-            frame = cv2.resize(frame, (max(w, 64), max(h, 128)))
+        # HOG needs a minimum window (64x128); upscale tiny frames and map
+        # detections back to the caller's coordinate space.
+        original_h, original_w = frame.shape[:2]
+        input_h, input_w = max(original_h, 128), max(original_w, 64)
+        if (input_h, input_w) != (original_h, original_w):
+            frame = cv2.resize(frame, (input_w, input_h))
         boxes, weights = self._hog.detectMultiScale(
             frame, winStride=self.win_stride, scale=self.scale
         )
+        x_scale = original_w / input_w
+        y_scale = original_h / input_h
         detections = []
         for box, weight in zip(boxes, np.ravel(weights)):
             score = float(weight)
             if score < self.score_threshold:
                 continue
             x, y, bw, bh = (int(v) for v in box)
-            detections.append(Detection(kind="person", box=(x, y, bw, bh), score=score))
+            mapped_box = (
+                round(x * x_scale),
+                round(y * y_scale),
+                round(bw * x_scale),
+                round(bh * y_scale),
+            )
+            detections.append(Detection(kind="person", box=mapped_box, score=score))
         return detections
 
 
@@ -107,7 +117,7 @@ class MotionDetector:
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
         gray = self._prepare(frame)
-        if self._background is None:
+        if self._background is None or self._background.shape != gray.shape:
             self._background = gray
             return []
 

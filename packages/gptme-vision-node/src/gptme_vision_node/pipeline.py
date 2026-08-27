@@ -78,11 +78,8 @@ class VisionPipeline:
         except Exception:
             logger.exception("event callback failed for %s", event.kind)
 
-    def step(self) -> list[VisionEvent]:
-        """One iteration: capture, detect, emit. Returns emitted events."""
-        frame = self.source.get_frame()
-        if frame is None:
-            return []
+    def _process_frame(self, frame: np.ndarray) -> list[VisionEvent]:
+        """Run detectors and emit events for one captured frame."""
         self.latest_frame = frame
 
         detections: list[Detection] = []
@@ -114,13 +111,21 @@ class VisionPipeline:
             self._emit(event)
         return events
 
+    def step(self) -> list[VisionEvent]:
+        """One iteration: capture, detect, emit. Returns emitted events."""
+        frame = self.source.get_frame()
+        return [] if frame is None else self._process_frame(frame)
+
     # -- thread lifecycle --------------------------------------------------
 
     def _run(self) -> None:
         while not self._stop.is_set():
             started = time.monotonic()
             try:
-                self.step()
+                frame = self.source.get_frame()
+                if frame is None:
+                    break
+                self._process_frame(frame)
             except Exception:
                 logger.exception("pipeline step failed")
             elapsed = time.monotonic() - started

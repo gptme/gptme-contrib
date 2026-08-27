@@ -159,3 +159,23 @@ def test_save_load_roundtrip(tmp_path):
     assert [name for name, _ in original] == [name for name, _ in reloaded]
     for (_, s1), (_, s2) in zip(original, reloaded):
         assert s1 == pytest.approx(s2)
+
+
+class CustomEmbedder:
+    embedder_id = "test-custom-v1"
+
+    def embed(self, frame):
+        return np.asarray([1.0, 0.0])
+
+
+def test_from_file_rejects_mismatched_embedder(tmp_path):
+    gallery = tmp_path / "places.json"
+    rec = PlaceRecognizer(CustomEmbedder())
+    rec.enroll("kitchen", KITCHEN)
+    rec.save(gallery)
+
+    with pytest.raises(ValueError, match="embedder mismatch"):
+        PlaceRecognizer.from_file(gallery)
+
+    loaded = PlaceRecognizer.from_file(gallery, CustomEmbedder())
+    assert set(loaded.places) == {"kitchen"}

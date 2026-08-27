@@ -34,15 +34,25 @@ source_option = click.option(
 
 def make_source(spec: str) -> FrameSource:
     """Parse a source spec: ``camera:N``, a stream URL, or an image path."""
-    if spec.startswith("camera:"):
-        return OpenCVCameraSource(int(spec.split(":", 1)[1]))
-    if "://" in spec:  # rtsp://, http://, ...
-        return OpenCVCameraSource(spec)
-    return ImageFileSource(spec)
+    try:
+        if spec.startswith("camera:"):
+            return OpenCVCameraSource(int(spec.split(":", 1)[1]))
+        if "://" in spec:  # rtsp://, http://, ...
+            return OpenCVCameraSource(spec)
+        return ImageFileSource(spec)
+    except ValueError as exc:
+        if spec.startswith("camera:"):
+            raise click.ClickException(f"invalid camera index: {spec!r}") from exc
+        raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _get_frame_or_die(source: FrameSource) -> np.ndarray:
-    frame = source.get_frame()
+    try:
+        frame = source.get_frame()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
     if frame is None:
         raise click.ClickException("source produced no frame")
     return frame
@@ -63,10 +73,11 @@ def detect(source_spec: str, once: bool, interval: float) -> None:
     detectors: list[Detector] = [PersonDetector(), MotionDetector()]
     try:
         while True:
-            frame = source.get_frame()
-            if frame is None:
-                break
-            detections = [d for det in detectors for d in det.detect(frame)]
+            frame = _get_frame_or_die(source)
+            try:
+                detections = [d for det in detectors for d in det.detect(frame)]
+            except (RuntimeError, ValueError) as exc:
+                raise click.ClickException(str(exc)) from exc
             for d in detections:
                 click.echo(f"{d.kind}\tbox={d.box}\tscore={d.score:.3f}")
             if not detections:

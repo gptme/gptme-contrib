@@ -121,3 +121,12 @@ def test_thread_lifecycle():
     finally:
         pipeline.stop()
     assert pipeline._thread is None
+
+
+def test_thread_stops_when_source_is_exhausted():
+    pipeline = VisionPipeline(ListSource(_frames(1)), [], interval_s=0.01)
+    pipeline.start()
+    assert pipeline._thread is not None
+    pipeline._thread.join(timeout=1)
+    assert not pipeline._thread.is_alive()
+    pipeline.stop()
