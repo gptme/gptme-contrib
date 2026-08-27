@@ -45,16 +45,22 @@ def test_uses_fetch_then_ff_only_not_bare_pull():
 
 
 def test_dirty_tree_ff_skip_returns_true_and_does_not_retry():
-    """A blocked fast-forward (dirty overlap) must not clobber and must not retry-storm."""
+    """A dirty-tree ff refusal must not clobber and must not retry-storm."""
     ws = Path("/tmp/ws")
     calls = []
+    # Real git stderr when uncommitted local changes would be overwritten.
+    dirty_stderr = (
+        "error: Your local changes to the following files would be overwritten by merge:\n"
+        "\tsome_file.py\n"
+        "Please commit your changes or stash them before you merge.\n"
+        "Aborting"
+    )
 
     def fake_run(cmd, cwd=None, capture_output=None, text=None, check=None):
         calls.append(cmd)
         if len(cmd) > 1 and cmd[1] == "fetch":
             return _Run(0)
-        # merge --ff-only refuses (dirty local overlap / divergence)
-        return _Run(1, stderr="error: cannot fast-forward")
+        return _Run(1, stderr=dirty_stderr)
 
     with patch("gptme_runloops.utils.git.subprocess.run", side_effect=fake_run):
         ok = git_pull_with_retry(ws, max_retries=3)
@@ -83,19 +89,46 @@ def test_fetch_failure_retries_then_returns_false():
     assert len(calls) == 2  # exactly two fetch attempts (max_retries)
 
 
-def test_ff_failure_after_retryable_fetch_does_not_retry():
-    """A successful fetch followed by a refused ff-only returns True immediately."""
+def test_diverged_branch_ff_failure_returns_false():
+    """A diverged branch (not a dirty-tree case) surfaces as False so callers know the workspace is stale."""
     ws = Path("/tmp/ws")
     calls = []
+    # Real git stderr when the local branch has diverged from upstream.
+    diverged_stderr = "fatal: Not possible to fast-forward, aborting."
 
     def fake_run(cmd, cwd=None, capture_output=None, text=None, check=None):
         calls.append(cmd)
         if len(cmd) > 1 and cmd[1] == "fetch":
             return _Run(0)
-        return _Run(1, stderr="cannot fast-forward")
+        return _Run(1, stderr=diverged_stderr)
 
     with patch("gptme_runloops.utils.git.subprocess.run", side_effect=fake_run):
         ok = git_pull_with_retry(ws, max_retries=3)
 
-    assert ok is True
-    assert len(calls) == 2  # no retry on a clean fast-forward refusal
+    # Diverged branch means the workspace was NOT updated — report False so
+    # the caller can decide whether to proceed with potentially stale code.
+    assert ok is False
+    assert (
+        len(calls) == 2
+    )  # fetch + one ff-only attempt, no retry on structural failure
+
+
+def test_lock_race_merge_failure_retries():
+    """An index.lock race on merge retries; if all attempts hit the lock, returns False."""
+    ws = Path("/tmp/ws")
+    calls = []
+    lock_stderr = "fatal: Unable to create '/tmp/ws/.git/index.lock': File exists."
+
+    def fake_run(cmd, cwd=None, capture_output=None, text=None, check=None):
+        calls.append(cmd)
+        if len(cmd) > 1 and cmd[1] == "fetch":
+            return _Run(0)
+        return _Run(1, stderr=lock_stderr)
+
+    with patch("gptme_runloops.utils.git.subprocess.run", side_effect=fake_run):
+        ok = git_pull_with_retry(ws, max_retries=2, retry_delay=0)
+
+    # All retries exhausted on a lock race — should report False (not a silent skip).
+    assert ok is False
+    # 2 retries = fetch+merge attempts: (fetch, merge) x2
+    assert len(calls) == 4

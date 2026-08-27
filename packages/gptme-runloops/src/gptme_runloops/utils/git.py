@@ -41,8 +41,12 @@ def git_pull_with_retry(
         logger: Optional logger for messages
 
     Returns:
-        True if the fast-forward succeeded or there was nothing to pull,
-        False otherwise
+        True if the fast-forward succeeded, there was nothing to pull,
+        or the fast-forward was refused because of local uncommitted changes
+        (safe skip — nothing was clobbered).
+        False if the fetch failed after all retries (network error),
+        or if the merge failed for a structural reason (diverged branch,
+        no upstream configured, lock-file race exhausting all retries).
     """
 
     def log(msg: str) -> None:
@@ -73,14 +77,38 @@ def git_pull_with_retry(
                 text=True,
             )
             if merge.returncode != 0:
-                # Not a clean fast-forward (dirty overlap or divergence).
-                # On the shared worktree this is the SAFE outcome — nothing
-                # was clobbered. Surface it as a skip, not a retry storm.
+                stderr = merge.stderr.strip()
+                # Dirty-tree refusal: local uncommitted changes block the
+                # fast-forward. On the shared worktree this is the SAFE
+                # outcome — nothing was clobbered. Return True so pre_run
+                # continues with the current local state.
+                if (
+                    "overwritten by merge" in stderr
+                    or "Please commit your changes" in stderr
+                ):
+                    log(
+                        f"Git fast-forward skipped (dirty tree, "
+                        f"attempt {attempt}/{max_retries}): {stderr}"
+                    )
+                    return True
+                # Transient lock-file race (common in a 20-session shared
+                # worktree): retry rather than declaring failure.
+                if "index.lock" in stderr or "Unable to create" in stderr:
+                    log(
+                        f"WARNING: Git merge lock race (attempt "
+                        f"{attempt}/{max_retries}), retrying in {retry_delay}s..."
+                    )
+                    if attempt < max_retries:
+                        time.sleep(retry_delay)
+                        continue
+                # Structural failure (diverged branch, no upstream, etc.):
+                # the local branch was NOT updated — surface as False so
+                # callers know the workspace may be stale.
                 log(
-                    f"Git fast-forward skipped (attempt {attempt}/{max_retries}): "
-                    f"{merge.stderr.strip() or 'not a clean fast-forward'}"
+                    f"Git fast-forward failed (attempt {attempt}/{max_retries}): "
+                    f"{stderr or 'not a clean fast-forward'}"
                 )
-                return True
+                return False
             log(f"Git pull successful (attempt {attempt}/{max_retries})")
             return True
 
