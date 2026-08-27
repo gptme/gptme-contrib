@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import cv2
+from click.testing import CliRunner
 from gptme_vision_node import cli
 from gptme_vision_node.frame_source import ImageFileSource, OpenCVCameraSource
 
@@ -25,23 +26,25 @@ def test_make_source_parsing(tmp_path):
     assert isinstance(rtsp, OpenCVCameraSource) and rtsp.source == "rtsp://host/stream"
 
 
-def test_cli_detect_once(tmp_path, capsys):
+def test_cli_detect_once(tmp_path):
     img = _write_scene(tmp_path / "a.png", 2)
-    assert cli.main(["detect", "--source", str(img), "--once"]) == 0
-    out = capsys.readouterr().out
-    assert out.strip()  # printed detections or "(no detections)"
+    result = CliRunner().invoke(cli.main, ["detect", "--source", str(img), "--once"])
+    assert result.exit_code == 0
+    assert result.output.strip()  # printed detections or "(no detections)"
 
 
-def test_cli_enroll_and_whereami(tmp_path, capsys, monkeypatch):
+def test_cli_enroll_and_whereami(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli.WifiSignature, "scan", staticmethod(lambda interface=None: {})
     )
+    runner = CliRunner()
     gallery = tmp_path / "places.json"
     kitchen = _write_scene(tmp_path / "kitchen.png", 101)
     office = _write_scene(tmp_path / "office.png", 202)
 
     for place, img in (("kitchen", kitchen), ("office", office)):
-        code = cli.main(
+        result = runner.invoke(
+            cli.main,
             [
                 "enroll",
                 "--place",
@@ -50,24 +53,26 @@ def test_cli_enroll_and_whereami(tmp_path, capsys, monkeypatch):
                 str(img),
                 "--gallery",
                 str(gallery),
-            ]
+            ],
         )
-        assert code == 0
+        assert result.exit_code == 0, result.output
     assert gallery.exists()
 
-    code = cli.main(
-        ["whereami", "--source", str(kitchen), "--gallery", str(gallery), "--json"]
+    result = runner.invoke(
+        cli.main,
+        ["whereami", "--source", str(kitchen), "--gallery", str(gallery), "--json"],
     )
-    assert code == 0
-    out = capsys.readouterr().out
-    results = json.loads(out.splitlines()[-1])
+    assert result.exit_code == 0, result.output
+    results = json.loads(result.output.splitlines()[-1])
     assert results[0]["place"] == "kitchen"
     assert results[0]["score"] > results[-1]["score"]
 
 
-def test_cli_whereami_missing_gallery(tmp_path, capsys):
+def test_cli_whereami_missing_gallery(tmp_path):
     img = _write_scene(tmp_path / "a.png", 3)
-    code = cli.main(
-        ["whereami", "--source", str(img), "--gallery", str(tmp_path / "none.json")]
+    result = CliRunner().invoke(
+        cli.main,
+        ["whereami", "--source", str(img), "--gallery", str(tmp_path / "none.json")],
     )
-    assert code == 1
+    assert result.exit_code != 0
+    assert "no gallery" in result.output
