@@ -18,7 +18,7 @@
     a per-repo YAML file (default ``root-structure-allowlist.yaml``) instead of
     repeated ``--allow`` args, so consuming repos own a data file rather than a
     copy of the checker.
-  entry: scripts/precommit/validators/validate_root_structure_yaml.py
+  entry: validate-root-structure
   language: python
   pass_filenames: false
   always_run: true

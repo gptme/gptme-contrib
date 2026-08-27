@@ -27,6 +27,21 @@ jobs:
       - name: Install pre-commit
         run: |
           pipx install pre-commit
+      - name: Verify remote Python hook installation
+        shell: bash
+        run: |
+          consumer="$(mktemp -d)"
+          git -C "$consumer" init
+          touch "$consumer/README.md"
+          printf '%s\n' \
+            'allowed_entries:' \
+            '  - README.md' \
+            '  - root-structure-allowlist.yaml' \
+            > "$consumer/root-structure-allowlist.yaml"
+          git -C "$consumer" add README.md root-structure-allowlist.yaml
+          cd "$consumer"
+          pre-commit try-repo "$GITHUB_WORKSPACE" \
+            validate-root-structure --all-files
       - name: Create virtual environment
         run: |
           uv sync --all-packages

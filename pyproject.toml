@@ -3,6 +3,21 @@ name = "gptme-contrib-workspace"
 version = "0.1.0"
 description = "Community contributions and utilities for gptme agents"
 requires-python = ">=3.10"
+dependencies = ["PyYAML"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+validate-root-structure = "validate_root_structure_yaml:main"
+
+# The workspace root is installed when consumers use a remote Python
+# pre-commit hook. Package only the hook module instead of auto-discovering the
+# monorepo's many top-level directories.
+[tool.setuptools]
+py-modules = ["validate_root_structure_yaml"]
+package-dir = { "" = "scripts/precommit/validators" }
 
 [dependency-groups]
 dev = [
