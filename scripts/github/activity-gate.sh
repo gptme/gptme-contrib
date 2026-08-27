@@ -1553,6 +1553,53 @@ has_maintainer_waiting_comment() {
     return 1
 }
 
+# Return 0 when the PR has a bot-authored waiting-for-maintainer handoff and no
+# later human activity. Automation comments (Codecov, Greptile, etc.) do not
+# reopen the handoff; a later issue comment or submitted review does.
+latest_comment_is_bot_waiting() {
+    local repo=$1 number=$2
+    local bot="${BOT_USERNAME:-TimeToBuildBob}"
+
+    # Fetch every page before finding the latest handoff. GitHub returns issue
+    # comments oldest-first; ``--slurp`` wraps pages in an outer array. Reviews
+    # are a separate API surface, so include them explicitly.
+    local comments_json reviews_json
+    comments_json=$(gh api --paginate --slurp \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || return 1
+    reviews_json=$(gh api --paginate --slurp \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || return 1
+
+    jq -en --arg bot "$bot" \
+        --argjson comments "$comments_json" \
+        --argjson reviews "$reviews_json" '
+        def is_waiting_handoff:
+            (.user.login == $bot)
+            and ((.body // "") | ascii_downcase | (
+                contains("waiting only on a maintainer click")
+                or contains("waiting only on a maintainer merge click")
+                or contains("ready to merge when convenient")
+                or contains("blocked by missing mergepullrequest permission")
+                or test("ready (to|for) merge @[a-z0-9_-]+")
+            ));
+        def is_human:
+            (.user.type // "") == "User"
+            and ((.user.login // "") != $bot);
+        ($comments | flatten) as $comments
+        | ($reviews | flatten) as $reviews
+        | ($comments | map(select(is_waiting_handoff)) | last) as $handoff
+        | $handoff != null
+          and (([
+              $comments[] | select(is_human and (.created_at > $handoff.created_at))
+          ] + [
+              $reviews[] | select(is_human and (.submitted_at > $handoff.created_at))
+          ]) | length == 0)
+    ' >/dev/null 2>&1
+}
+
 # Return 0 if $repo#$number has at least one UNRESOLVED review thread whose
 # root comment was written by a human (not AUTHOR, not a bot), 1 otherwise
 # (including on API failure — fail open, the merge gate downstream re-checks).
@@ -1851,7 +1898,8 @@ check_notifications() {
             repo: .repository.full_name,
             number: (.subject.url // "" | split("/") | last | tonumber? // 0),
             title: .subject.title,
-            detail: .reason
+            detail: .reason,
+            subject_type: (.subject.type // "")
         }' 2>/dev/null | while IFS= read -r item; do
             local notif_id notif_updated state_file map_file prior repo number
             notif_id=$(echo "$item" | jq -r '.id')
@@ -1875,11 +1923,29 @@ check_notifications() {
                 printf '%s' "$notif_updated" > "$state_file"
                 [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
             elif [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
+                # Author-reason PR notifications on a PR that already has a
+                # maintainer-waiting comment are Codecov/Greptile re-unreads,
+                # not new work. Emitting them dispatched NOOP sessions until
+                # retry-budget exhaustion (ActivityWatch/aw-server-rust#660).
+                # mention/assign/review_requested stay emit-eligible — those
+                # are human asks. Persist so we don't retry until updated_at
+                # advances, but do not count against the per-run cap.
+                local _subj_type _notif_reason
+                _subj_type=$(echo "$item" | jq -r '.subject_type // ""')
+                _notif_reason=$(echo "$item" | jq -r '.detail // ""')
+                if [ "$_subj_type" = "PullRequest" ] \
+                        && [ "$_notif_reason" = "author" ] \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && latest_comment_is_bot_waiting "$repo" "$number"; then
+                    printf '%s' "$notif_updated" > "$state_file"
+                    printf '%s#%s' "$repo" "$number" > "$map_file"
+                    continue
+                fi
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
                     # Emit first so a jq failure leaves the state file untouched and the
                     # notification is retried on the next run (emit-before-persist semantics).
-                    echo "$item" | jq -c 'del(.id, .updated_at)'
+                    echo "$item" | jq -c 'del(.id, .updated_at, .subject_type)'
                     printf '%s' "$notif_updated" > "$state_file"
                     [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                 fi
