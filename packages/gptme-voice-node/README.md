@@ -29,7 +29,7 @@ All config is via environment variables (no CLI flags — systemd-friendly):
 | Variable | Default | Description |
 |---|---|---|
 | `GPTME_VOICE_NODE_SERVER` | `ws://localhost:8080/local` | WebSocket URL of `bob-voice-server` |
-| `GPTME_VOICE_NODE_NAME` | `bobbrain-unknown` | Node identity (logged and sent to server) |
+| `GPTME_VOICE_NODE_NAME` | `bobbrain-unknown` | Node identity used in local logs |
 
 The `ws://localhost` default is intended only for a server on the same host. Use
 `wss://` whenever microphone audio crosses a network; the client logs a warning

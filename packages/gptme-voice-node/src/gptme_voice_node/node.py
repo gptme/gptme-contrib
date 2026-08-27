@@ -72,8 +72,19 @@ PLAYBACK_COOLDOWN = 0.5
 # Reconnect backoff (seconds)
 BACKOFF_INITIAL = 1
 BACKOFF_MAX = 60
+BACKOFF_RESET_AFTER = 30
 
 log = logging.getLogger("gptme_voice_node")
+
+
+def _backoff_after_session(backoff: int, connected_at: float | None) -> int:
+    """Reset retry delay only after a connection stayed healthy long enough."""
+    if (
+        connected_at is not None
+        and time.monotonic() - connected_at >= BACKOFF_RESET_AFTER
+    ):
+        return BACKOFF_INITIAL
+    return backoff
 
 
 class VoiceNode:
@@ -119,6 +130,7 @@ class VoiceNode:
             rate=SAMPLE_RATE,
             input=True,
             frames_per_buffer=CHUNK_SIZE,
+            start=False,
         )
         try:
             speaker = self._pa.open(
@@ -127,8 +139,11 @@ class VoiceNode:
                 rate=SAMPLE_RATE,
                 output=True,
                 frames_per_buffer=CHUNK_SIZE,
+                start=False,
             )
             try:
+                mic.start_stream()
+                speaker.start_stream()
                 await asyncio.gather(
                     self._send_loop(ws, mic),
                     self._recv_loop(ws, speaker),
@@ -187,6 +202,7 @@ class VoiceNode:
         """Connect and auto-reconnect with exponential backoff."""
         backoff = BACKOFF_INITIAL
         while self._running:
+            connected_at: float | None = None
             try:
                 async with websockets.connect(
                     self.server_url,
@@ -194,9 +210,10 @@ class VoiceNode:
                     ping_interval=20,
                     ping_timeout=20,
                 ) as ws:
-                    backoff = BACKOFF_INITIAL  # Reset on success
+                    connected_at = time.monotonic()
                     await self._session(ws)
             except (ConnectionClosed, WebSocketException) as exc:
+                backoff = _backoff_after_session(backoff, connected_at)
                 log.warning(
                     "[%s] disconnected: %s — retrying in %ds",
                     self.node_name,
@@ -204,6 +221,7 @@ class VoiceNode:
                     backoff,
                 )
             except OSError as exc:
+                backoff = _backoff_after_session(backoff, connected_at)
                 log.warning(
                     "[%s] connection error: %s — retrying in %ds",
                     self.node_name,
@@ -211,6 +229,7 @@ class VoiceNode:
                     backoff,
                 )
             except Exception as exc:  # noqa: BLE001
+                backoff = _backoff_after_session(backoff, connected_at)
                 log.error(
                     "[%s] unexpected error: %s — retrying in %ds",
                     self.node_name,

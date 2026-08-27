@@ -146,6 +146,27 @@ class TestLifecycle:
         node.stop()
         assert node._running is False
 
+    @pytest.mark.asyncio
+    async def test_session_explicitly_starts_audio_streams(self):
+        node = _make_node()
+        mic = MagicMock()
+        speaker = MagicMock()
+        node._pa.open.side_effect = [mic, speaker]
+
+        async def stop_session(*_args):
+            node.stop()
+
+        with (
+            patch.object(node, "_send_loop", AsyncMock(side_effect=stop_session)),
+            patch.object(node, "_recv_loop", AsyncMock(side_effect=stop_session)),
+        ):
+            await node._session(AsyncMock())
+
+        mic.start_stream.assert_called_once()
+        speaker.start_stream.assert_called_once()
+        assert node._pa.open.call_args_list[0].kwargs["start"] is False
+        assert node._pa.open.call_args_list[1].kwargs["start"] is False
+
     def test_cleanup_terminates_pyaudio(self):
         with patch("gptme_voice_node.node._get_pyaudio") as mock_get_pa:
             mock_pa_module = MagicMock()
@@ -176,3 +197,15 @@ class TestBackoff:
             mock_ws.connect = AsyncMock()
             await node.run_forever()
             mock_ws.connect.assert_not_called()
+
+    def test_quick_session_failure_preserves_exponential_backoff(self):
+        from gptme_voice_node.node import _backoff_after_session
+
+        with patch("gptme_voice_node.node.time.monotonic", return_value=100.0):
+            assert _backoff_after_session(8, connected_at=99.0) == 8
+
+    def test_stable_session_resets_exponential_backoff(self):
+        from gptme_voice_node.node import BACKOFF_INITIAL, _backoff_after_session
+
+        with patch("gptme_voice_node.node.time.monotonic", return_value=100.0):
+            assert _backoff_after_session(8, connected_at=60.0) == BACKOFF_INITIAL
