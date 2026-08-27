@@ -1554,21 +1554,28 @@ has_maintainer_waiting_comment() {
 }
 
 # Return 0 when the PR has a bot-authored waiting-for-maintainer handoff and no
-# human has commented after it. Later automation comments (Codecov, Greptile,
-# etc.) do not reopen the handoff; a later human comment does.
+# later human activity. Automation comments (Codecov, Greptile, etc.) do not
+# reopen the handoff; a later issue comment or submitted review does.
 latest_comment_is_bot_waiting() {
     local repo=$1 number=$2
     local bot="${BOT_USERNAME:-TimeToBuildBob}"
 
     # Fetch every page before finding the latest handoff. GitHub returns issue
-    # comments oldest-first; ``--slurp`` wraps pages in an outer array.
-    local comments_json
+    # comments oldest-first; ``--slurp`` wraps pages in an outer array. Reviews
+    # are a separate API surface, so include them explicitly.
+    local comments_json reviews_json
     comments_json=$(gh api --paginate --slurp \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || return 1
+    reviews_json=$(gh api --paginate --slurp \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || return 1
 
-    printf '%s' "$comments_json" | jq -e --arg bot "$bot" '
+    jq -en --arg bot "$bot" \
+        --argjson comments "$comments_json" \
+        --argjson reviews "$reviews_json" '
         def is_waiting_handoff:
             (.user.login == $bot)
             and ((.body // "") | ascii_downcase | (
@@ -1581,10 +1588,15 @@ latest_comment_is_bot_waiting() {
         def is_human:
             (.user.type // "") == "User"
             and ((.user.login // "") != $bot);
-        flatten as $comments
-        | ($comments | to_entries | map(select(.value | is_waiting_handoff)) | last) as $handoff
+        ($comments | flatten) as $comments
+        | ($reviews | flatten) as $reviews
+        | ($comments | map(select(is_waiting_handoff)) | last) as $handoff
         | $handoff != null
-          and ([ $comments[($handoff.key + 1):][] | select(is_human) ] | length == 0)
+          and (([
+              $comments[] | select(is_human and (.created_at > $handoff.created_at))
+          ] + [
+              $reviews[] | select(is_human and (.submitted_at > $handoff.created_at))
+          ]) | length == 0)
     ' >/dev/null 2>&1
 }
 

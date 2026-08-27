@@ -37,9 +37,10 @@ notif_number = int(os.environ.get("TEST_NOTIF_NUMBER", "660"))
 notif_reason = os.environ.get("TEST_NOTIF_REASON", "author")
 subject_type = os.environ.get("TEST_SUBJECT_TYPE", "PullRequest")
 waiting_comment = os.environ.get("TEST_WAITING_COMMENT", "1")
-# Human comment after the bot's waiting comment: the human's message is now latest.
+# Human activity after the bot's waiting comment reopens the handoff.
 human_after_waiting = os.environ.get("TEST_HUMAN_AFTER_WAITING", "0")
 bot_after_waiting = os.environ.get("TEST_BOT_AFTER_WAITING", "0")
+human_review_after_waiting = os.environ.get("TEST_HUMAN_REVIEW_AFTER_WAITING", "0")
 comment_count = int(os.environ.get("TEST_COMMENT_COUNT", "1"))
 
 
@@ -97,16 +98,18 @@ if argv[0] == "api":
         }]
         print(apply_jq(notifs, jq_expr))
         sys.exit(0)
-    if "comments" in endpoint:
+    if "/issues/" in endpoint and "/comments" in endpoint:
         if waiting_comment == "1":
             comments = [{
                 "user": {"login": "TimeToBuildBob", "type": "User"},
                 "body": "CI-green and mergeable — waiting only on a maintainer click.",
+                "created_at": "2026-08-26T16:00:00Z",
             }]
             comments.extend(
                 {
                     "user": {"login": "codecov[bot]", "type": "Bot"},
                     "body": f"Coverage report {index}",
+                    "created_at": "2026-08-26T16:30:00Z",
                 }
                 for index in range(1, comment_count)
             )
@@ -114,6 +117,7 @@ if argv[0] == "api":
                 comments.append({
                     "user": {"login": "codecov[bot]", "type": "Bot"},
                     "body": "Coverage report",
+                    "created_at": "2026-08-26T16:30:00Z",
                 })
             if human_after_waiting == "1":
                 # A maintainer replied after the bot's waiting comment, e.g. asking
@@ -122,6 +126,7 @@ if argv[0] == "api":
                 comments.append({
                     "user": {"login": "ErikBjare", "type": "User"},
                     "body": "Please also update the changelog before merging.",
+                    "created_at": "2026-08-26T17:00:00Z",
                 })
         else:
             comments = []
@@ -131,6 +136,17 @@ if argv[0] == "api":
         else:
             page = comments[:100]
             print(apply_jq(page, jq_expr) if jq_expr else json.dumps(page))
+        sys.exit(0)
+    if endpoint.endswith("/reviews?per_page=100"):
+        reviews = []
+        if human_review_after_waiting == "1":
+            reviews.append({
+                "user": {"login": "ErikBjare", "type": "User"},
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-08-26T17:00:00Z",
+            })
+        pages = [reviews[index:index + 100] for index in range(0, len(reviews), 100)]
+        print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
         sys.exit(0)
     print("[]")
     sys.exit(0)
@@ -148,6 +164,7 @@ def _run_gate(
     waiting: str = "1",
     human_after_waiting: str = "0",
     bot_after_waiting: str = "0",
+    human_review_after_waiting: str = "0",
     comment_count: int = 1,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
@@ -163,6 +180,7 @@ def _run_gate(
     env["TEST_WAITING_COMMENT"] = waiting
     env["TEST_HUMAN_AFTER_WAITING"] = human_after_waiting
     env["TEST_BOT_AFTER_WAITING"] = bot_after_waiting
+    env["TEST_HUMAN_REVIEW_AFTER_WAITING"] = human_review_after_waiting
     env["TEST_COMMENT_COUNT"] = str(comment_count)
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
@@ -266,6 +284,19 @@ def test_author_pr_emits_when_human_commented_after_waiting() -> None:
         state_dir = tmp / "state"
         state_dir.mkdir()
         result = _run_gate(tmp, state_dir, waiting="1", human_after_waiting="1")
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author"
+
+
+def test_author_pr_emits_when_human_review_follows_waiting_comment() -> None:
+    """A submitted maintainer review is activity even without an issue comment."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(tmp, state_dir, human_review_after_waiting="1")
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
