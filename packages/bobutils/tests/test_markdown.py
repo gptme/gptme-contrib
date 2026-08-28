@@ -36,6 +36,22 @@ def test_split_drops_delimiter_pipes() -> None:
     assert split_table_row_cells("| a | b |") == ["a", "b"]
 
 
+def test_split_keeps_cells_without_leading_delimiter() -> None:
+    # GFM allows rows that omit the leading/trailing pipe. Position-based
+    # slicing (parts[1:] / parts[1:-1]) silently dropped the first cell.
+    assert split_table_row_cells("a | b") == ["a", "b"]
+    assert split_table_row_cells("a | b |") == ["a", "b"]
+    assert split_table_row_cells("| a | b") == ["a", "b"]
+
+
+def test_split_keeps_last_cell_ending_in_escaped_pipe() -> None:
+    # line.endswith("|") is true for both a trailing delimiter and a cell
+    # that ends with \| — only the empty split part is the delimiter.
+    assert split_table_row_cells(r"| a \|") == [r"a \|"]
+    assert split_table_row_cells(r"| a \| |") == [r"a \|"]
+    assert split_table_row_cells(r"a \|") == [r"a \|"]
+
+
 def test_split_treats_escaped_pipe_as_one_cell() -> None:
     row = r"| 1 | **Show HN: Foo \| a tool for bars** | 100 |"
     assert split_table_row_cells(row) == [

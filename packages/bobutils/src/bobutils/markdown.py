@@ -34,11 +34,20 @@ def escape_table_cell(text: object) -> str:
 def split_table_row_cells(line: str) -> list[str]:
     """Return stripped content cells for a single GFM table row.
 
-    Splits on unescaped pipes only. Leading/trailing delimiter pipes are
-    dropped so ``| a | b |`` → ``['a', 'b']``. This is the consumer-side
-    counterpart of :func:`escape_table_cell` — ``str.split('|')`` is the
-    wrong oracle because it does not understand escaping.
+    Splits on unescaped pipes only. Empty leading/trailing split parts are
+    the delimiter pipes, so ``| a | b |`` → ``['a', 'b']``. A raw
+    ``str.endswith('|')`` slice is the wrong test: a cell that *ends* with
+    an escaped ``\\|`` also ends with ``|``, and slicing it off drops the
+    cell. Do not use ``str.split('|')`` either — it does not understand
+    escaping. This is the consumer-side counterpart of
+    :func:`escape_table_cell`.
     """
     parts = _UNESCAPED_PIPE_RE.split(line)
-    content_cells = parts[1:-1] if line.endswith("|") else parts[1:]
-    return [cell.strip() for cell in content_cells]
+    # Unescaped delimiter pipes produce empty split parts. Drop those only —
+    # not "the first part" / "the last part" by position. A row with no
+    # leading pipe, or a last cell that ends with ``\\|``, must keep that cell.
+    if parts and parts[0] == "":
+        parts = parts[1:]
+    if parts and parts[-1] == "":
+        parts = parts[:-1]
+    return [cell.strip() for cell in parts]
