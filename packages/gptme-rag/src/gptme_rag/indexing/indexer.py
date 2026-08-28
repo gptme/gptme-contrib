@@ -4,6 +4,7 @@ import logging
 import subprocess
 import time
 from collections.abc import Generator, Sequence
+from contextlib import nullcontext
 from datetime import datetime
 from fnmatch import fnmatch as fnmatch_path
 from logging import Filter
@@ -24,6 +25,7 @@ from ..embeddings import (
 )
 from .document import Document
 from .document_processor import DocumentProcessor
+from .gc import index_writer_lock
 
 
 # HuggingFace namespaces used for sentence-transformer / embedding models.
@@ -469,7 +471,9 @@ class Indexer:
                         current_model,
                         e,
                     )
-                    self.collection = _auto_peeked_collection
+                    # Peeked handle was fetched WITHOUT an EF — same defect as the
+                    # matching-model preserve path. Rebind, or fail loud.
+                    self._assign_preserved_collection(_auto_peeked_collection, collection_name)
                     need_recreate = False
                 elif not allow_recreate:
                     # Read-only callers (search, status) must never wipe the index.
@@ -523,57 +527,34 @@ class Indexer:
                                     stored,
                                     e,
                                 )
-                                self.collection = peek
-                                # `peek` was fetched WITHOUT an embedding function, so it
-                                # carries Chroma's default EF (384-dim MiniLM).  Writing
-                                # through it would embed with the wrong model and blow up
-                                # with InvalidDimensionException against the stored 768-dim
-                                # vectors.  The stored model matches ours, so our EF is
-                                # known-compatible: bind it onto the handle Chroma refused
-                                # to bind it to.  Chroma rejected the EF *object identity*,
-                                # not the model.
-                                if (
-                                    self.embedding_function is not None
-                                    and not self._bind_embedding_function(peek)
-                                ):
-                                    # Could not rebind (Chroma internals changed).  Fall
-                                    # back to fail-loud: null the EF and record the stored
-                                    # model so add/search raise a clear RuntimeError
-                                    # instead of silently writing default-EF vectors.
-                                    logger.error(
-                                        "Could not rebind embedding function to preserved "
-                                        "collection %r; it is readable but not writable. "
-                                        "Re-index with --force-recreate to restore writes.",
-                                        collection_name,
-                                    )
-                                    self.embedding_function = None
-                                    self._stored_model_name = stored
+                                self._assign_preserved_collection(peek, collection_name)
                                 need_recreate = False
                             else:
                                 need_recreate = True
 
         if need_recreate:
-            # Delete if exists
-            try:
-                self.client.delete_collection(collection_name)
-            except (ValueError, NotFoundError):
-                pass
+            with self._index_writer_lock():
+                # Delete if exists
+                try:
+                    self.client.delete_collection(collection_name)
+                except (ValueError, NotFoundError):
+                    pass
 
-            # Create new collection
-            metadata = {
-                "hnsw:space": "cosine",
-                "embedding_model": current_model,
-                "embedding_backend": self.embedding_backend_name,
-            }
-            logger.info(f"Creating new collection with {current_model} embeddings")
-            self.collection = self.client.create_collection(
-                name=collection_name,
-                metadata=metadata,
-                embedding_function=self.embedding_function,
-            )
-            # The unavailable model belonged to the collection we just replaced.
-            # Keep the guard only while preserving that old collection.
-            self._stored_model_name = None
+                # Create new collection
+                metadata = {
+                    "hnsw:space": "cosine",
+                    "embedding_model": current_model,
+                    "embedding_backend": self.embedding_backend_name,
+                }
+                logger.info(f"Creating new collection with {current_model} embeddings")
+                self.collection = self.client.create_collection(
+                    name=collection_name,
+                    metadata=metadata,
+                    embedding_function=self.embedding_function,
+                )
+                # The unavailable model belonged to the collection we just replaced.
+                # Keep the guard only while preserving that old collection.
+                self._stored_model_name = None
 
         # Initialize cache with 5-minute TTL and 100MB memory limit
         self.cache = SmartRAGCache(ttl_seconds=300, max_memory_bytes=100 * 1024 * 1024)
@@ -594,6 +575,37 @@ class Indexer:
         }
         if scoring_weights:
             self.scoring_weights.update(scoring_weights)
+
+    def _index_writer_lock(self):
+        persist_dir = getattr(self, "persist_directory", None)
+        if persist_dir is None:
+            return nullcontext()
+        return index_writer_lock(persist_dir)
+
+    def _assign_preserved_collection(self, collection, collection_name: str) -> None:
+        """Keep an EF-less handle; rebind our embedder or fail loud.
+
+        ``get_collection(name=...)`` returns a handle carrying Chroma's default
+        EF. Writing through it embeds at the wrong dimension. The stored model
+        matches ours, so our EF is known-compatible — Chroma objected to object
+        identity, not the model. Bind it; if Chroma internals hid the attribute,
+        null the EF so add/search raise instead of writing MiniLM vectors.
+        """
+        self.collection = collection
+        if self.embedding_function is None:
+            return
+        if self._bind_embedding_function(collection):
+            return
+        logger.error(
+            "Could not rebind embedding function to preserved "
+            "collection %r; it is readable but not writable. "
+            "Re-index with --force-recreate to restore writes.",
+            collection_name,
+        )
+        stored = (collection.metadata or {}).get("embedding_model")
+        self.embedding_function = None
+        if stored:
+            self._stored_model_name = stored
 
     def _bind_embedding_function(self, collection) -> bool:
         """Bind ``self.embedding_function`` onto an EF-less collection handle.
@@ -689,19 +701,20 @@ class Indexer:
 
     def reset_collection(self) -> None:
         """Reset the collection to a clean state."""
-        try:
-            self.client.delete_collection(self.collection_name)
-        except (ValueError, NotFoundError):
-            pass
-        self.collection = self.client.create_collection(
-            name=self.collection_name,
-            metadata={
-                "hnsw:space": "cosine",
-                "embedding_model": self.embedding_model_name,
-                "embedding_backend": self.embedding_backend_name,
-            },
-            embedding_function=self.embedding_function,
-        )
+        with self._index_writer_lock():
+            try:
+                self.client.delete_collection(self.collection_name)
+            except (ValueError, NotFoundError):
+                pass
+            self.collection = self.client.create_collection(
+                name=self.collection_name,
+                metadata={
+                    "hnsw:space": "cosine",
+                    "embedding_model": self.embedding_model_name,
+                    "embedding_backend": self.embedding_backend_name,
+                },
+                embedding_function=self.embedding_function,
+            )
         logger.debug(f"Reset collection: {self.collection_name}")
 
     def _refresh_collection(self) -> None:
@@ -730,11 +743,12 @@ class Indexer:
         assert document.doc_id is not None
 
         try:
-            self.collection.add(
-                documents=[document.content],
-                metadatas=[document.metadata],
-                ids=[document.doc_id],
-            )
+            with self._index_writer_lock():
+                self.collection.add(
+                    documents=[document.content],
+                    metadatas=[document.metadata],
+                    ids=[document.doc_id],
+                )
             logger.debug(f"Added document with ID: {document.doc_id}")
         except Exception as e:
             # Never reset the collection here: wiping the entire persistent
@@ -746,7 +760,8 @@ class Indexer:
     def delete_documents(self, where: dict) -> None:
         """Delete documents matching the where clause."""
         try:
-            self.collection.delete(where=where)
+            with self._index_writer_lock():
+                self.collection.delete(where=where)
             logger.debug(f"Deleted documents matching: {where}")
         except NotFoundError:
             # The cached Collection object is stale (collection was recreated).
@@ -754,7 +769,8 @@ class Indexer:
             logger.debug("Collection handle stale on delete; refreshing and retrying")
             try:
                 self._refresh_collection()
-                self.collection.delete(where=where)
+                with self._index_writer_lock():
+                    self.collection.delete(where=where)
                 logger.debug(f"Deleted documents matching: {where} (after refresh)")
             except NotFoundError as retry_err:
                 # Collection still missing after refresh (race condition).
@@ -813,7 +829,8 @@ class Indexer:
                 ids.append(doc.doc_id)
 
             # Add batch to collection
-            self.collection.add(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
+            with self._index_writer_lock():
+                self.collection.add(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
         except Exception as e:
             logger.error(f"Failed to process batch: {e}")
             raise

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from unittest.mock import patch
 
 import chromadb
 import pytest
@@ -292,3 +293,131 @@ def test_bind_embedding_function_reports_failure_on_unknown_handle():
         __slots__ = ()
 
     assert indexer._bind_embedding_function(Opaque()) is False
+
+
+def test_auto_mode_rebinds_preserved_collection(tmp_path, monkeypatch):
+    """Auto mode must not leave Chroma's default EF on a matching-model handle.
+
+    The auto exception path used to assign the EF-less peek handle and skip
+    ``_bind_embedding_function``. Writes then embedded with MiniLM against a
+    ModernBERT collection.
+    """
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir, model="modernbert")
+    _stub_modernbert(monkeypatch)
+
+    real_get = Client.get_collection
+
+    def boom(self, name, embedding_function=None, **kwargs):
+        if embedding_function is not None:
+            raise ValueError("Embedding function conflict")
+        return real_get(self, name, embedding_function=None, **kwargs)
+
+    monkeypatch.setattr(Client, "get_collection", boom)
+
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="auto",
+        collection_name="default",
+        allow_recreate=True,
+        force_recreate=False,
+    )
+
+    assert indexer.collection.count() == 1
+    assert indexer.collection._embedding_function is indexer.embedding_function
+    assert indexer._stored_model_name is None
+
+
+def test_gc_orphans_refuses_apply_while_writer_lock_is_held(tmp_path):
+    """flock is per-open-file-description; same-process double-open does not
+    conflict, so the holder must be a child process."""
+    import subprocess
+    import sys
+
+    from gptme_rag.indexing.gc import gc_orphan_segment_dirs
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir)
+    orphan = persist_dir / UUID_DIR
+    orphan.mkdir()
+    lock_path = persist_dir / ".gptme-rag-writer.lock"
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o644)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "sys.stdout.write('locked\\n')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n",
+            str(lock_path),
+        ],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline() == b"locked\n"
+        with pytest.raises(RuntimeError, match="index writer is active"):
+            gc_orphan_segment_dirs(persist_dir, apply=True)
+    finally:
+        holder.kill()
+        holder.wait()
+
+    assert orphan.exists()
+
+
+def test_gc_orphans_catalog_error_is_not_reported_as_clean(tmp_path):
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    (persist_dir / "chroma.sqlite3").write_bytes(b"not sqlite")
+
+    result = CliRunner().invoke(
+        cli,
+        ["gc-orphans", "--persist-dir", str(persist_dir)],
+    )
+
+    assert result.exit_code != 0
+    assert "No orphan segment dirs" not in result.output
+
+
+def test_gc_orphans_handles_question_mark_in_persist_path(tmp_path):
+    from gptme_rag.indexing.gc import gc_orphan_segment_dirs
+
+    persist_dir = tmp_path / "index?literal"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir)
+    orphan = persist_dir / UUID_DIR
+    orphan.mkdir()
+
+    assert orphan in gc_orphan_segment_dirs(persist_dir)
+
+
+def test_gc_orphans_continues_after_one_delete_failure(tmp_path):
+    from gptme_rag.indexing.gc import gc_orphan_segment_dirs
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir)
+    first = persist_dir / UUID_DIR
+    second = persist_dir / "11111111-2222-3333-4444-555555555555"
+    first.mkdir()
+    second.mkdir()
+
+    real_rmtree = __import__("shutil").rmtree
+
+    def fail_first(path, *args, **kwargs):
+        if Path(path) == first:
+            raise PermissionError("read-only")
+        return real_rmtree(path, *args, **kwargs)
+
+    with patch("gptme_rag.indexing.gc.shutil.rmtree", side_effect=fail_first):
+        removed = gc_orphan_segment_dirs(persist_dir, apply=True)
+
+    assert first.exists()
+    assert not second.exists()
+    assert removed == [second]

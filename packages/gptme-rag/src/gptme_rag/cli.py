@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from .benchmark import RagBenchmark
 from .indexing.document import Document
-from .indexing.gc import gc_orphan_segment_dirs
+from .indexing.gc import ChromaCatalogError, gc_orphan_segment_dirs
 from .indexing.indexer import Indexer
 from .indexing.watcher import FileWatcher
 from .query.context_assembler import ContextAssembler
@@ -847,9 +847,14 @@ def gc_orphans(persist_dir: Path, apply: bool):
 
     Recreating a collection leaves UUID-named HNSW folders on disk. This
     command lists them (dry-run) or deletes them (--apply). Live segment
-    and collection dirs are never touched.
+    and collection dirs are never touched. --apply refuses if an indexer
+    currently holds the persist-dir writer lock.
     """
-    orphans = gc_orphan_segment_dirs(persist_dir, apply=apply)
+    try:
+        orphans = gc_orphan_segment_dirs(persist_dir, apply=apply)
+    except (ChromaCatalogError, RuntimeError) as exc:
+        console.print(f"❌ {exc}", style="red")
+        raise SystemExit(1) from exc
     if not orphans:
         console.print("No orphan segment dirs", style="green")
         return
