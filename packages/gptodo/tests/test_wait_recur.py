@@ -1,5 +1,6 @@
 """Tests for wait: and recur: scheduling fields."""
 
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -301,6 +302,55 @@ def test_recur_reset_strips_preexisting_waiting_for(
     waiting_since = str(post.metadata.get("waiting_since", ""))
     assert waiting_since, "state=waiting requires waiting_since"
     assert not waiting_since.startswith("2026-08-01"), "waiting_since must be refreshed"
+
+
+def test_expired_recurrence_gate_surfaces_in_ready_and_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A generated recurrence description must not become a permanent blocker."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    expired = "2020-01-01T00:00:00+00:00"
+    write_task(
+        tasks_dir,
+        "weekly-review",
+        state="waiting",
+        created="2026-01-01",
+        recur="7d",
+        wait=expired,
+        wait_kind="machine",
+        waiting_for=f"'next recurrence gate (wait: {expired})'",
+        waiting_since="2026-01-01T00:00:00+00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    ready = runner.invoke(cli, ["ready", "--json"])
+    assert ready.exit_code == 0, ready.output
+    assert {task["id"] for task in json.loads(ready.output)["ready_tasks"]} == {"weekly-review"}
+
+    next_result = runner.invoke(cli, ["next", "--json"])
+    assert next_result.exit_code == 0, next_result.output
+    assert json.loads(next_result.output)["next_task"]["id"] == "weekly-review"
+
+
+def test_stale_recurrence_description_stays_blocked(tmp_path: Path) -> None:
+    """Only the generated description for the current wait: is releasable."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "weekly-review",
+        state="waiting",
+        wait="2020-01-01",
+        wait_kind="machine",
+        waiting_for="'next recurrence gate (wait: 2019-01-01)'",
+        waiting_since="2026-01-01T00:00:00+00:00",
+    )
+
+    task = load_tasks(tasks_dir)[0]
+    assert task_has_waiting_blocker(task)
 
 
 def test_edit_done_with_subday_recur_stores_datetime(

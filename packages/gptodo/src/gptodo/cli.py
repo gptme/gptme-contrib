@@ -3520,12 +3520,7 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
             task
             for task in all_tasks
             if task.state in ["backlog", "todo", "active"]
-            or (
-                task.state == "waiting"
-                and task.metadata.get("wait_kind") == "machine"
-                and not task_is_waiting_for_date(task)
-                and not task.metadata.get("waiting_for")
-            )
+            or (task.state == "waiting" and not task_has_waiting_blocker(task))
         ]
 
     # Apply pool filter (default: general only; --pool all to see every pool)
@@ -3761,12 +3756,7 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
         task
         for task in all_tasks
         if task.state in ["backlog", "todo", "active"]
-        or (
-            task.state == "waiting"
-            and task.metadata.get("wait_kind") == "machine"
-            and not task_is_waiting_for_date(task)
-            and not task.metadata.get("waiting_for")
-        )
+        or (task.state == "waiting" and not task_has_waiting_blocker(task))
     ]
 
     # Apply pool filter (default: general only; --pool all to see every pool)

@@ -640,22 +640,26 @@ class TaskInfo:
 def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     """Return True when a task is explicitly waiting on an external condition."""
     state = normalize_state(task.state or "", warn=False) if task.state else ""
+    waiting_for = str(task.metadata.get("waiting_for") or "").strip()
+    recurrence_gate = task.wait is not None and waiting_for == (
+        f"next recurrence gate (wait: {task.wait.isoformat()})"
+    )
     # A machine time-gate that has already expired is not a blocker — the wait has passed.
     # Guards: task.wait is not None (probe-only tasks with no date stay blocked)
     #         and no probe field (probe+expired-date tasks still need probe resolution)
-    #         and no waiting_for field (a human-described blocker must be resolved explicitly,
-    #         even if the time gate also expired — waiting_for takes precedence).
+    #         and no human waiting_for field (the generated recurrence-gate description
+    #         documents the same wait: field and is therefore safe to release).
     if (
         task.metadata.get("wait_kind") == "machine"
         and task.wait is not None
         and not task_is_waiting_for_date(task)
         and not task.metadata.get("probe")
-        and not task.metadata.get("waiting_for")
+        and (not waiting_for or recurrence_gate)
     ):
         return False
     if state == "waiting":
         return True
-    return bool(task.metadata.get("waiting_for"))
+    return bool(waiting_for)
 
 
 def task_pool(task: "TaskInfo") -> str:
