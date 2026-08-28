@@ -739,3 +739,64 @@ def test_set_wait_and_state_waiting_together_updates_waiting_for(
         f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
         "A stale waiting_for permanently traps the task after the new gate expires."
     )
+
+
+def test_last_set_wait_wins_in_waiting_for_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multiple --set wait in one edit must sync waiting_for to the LAST value.
+
+    The apply loop overwrites wait in order, so the last --set wait is the
+    effective date. The post-loop sync used to take the first match from
+    `changes`, leaving waiting_for pointing at an earlier date while wait
+    holds the later one. After that later date expires,
+    task_has_waiting_blocker treats the stale string as a human blocker
+    (gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    first_wait = "2030-06-15"
+    last_wait = "2030-07-01"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            first_wait,
+            "--set",
+            "wait",
+            last_wait,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert str(post.metadata["wait"]).startswith(
+        last_wait
+    ), f"wait: must be the last --set wait {last_wait}, got {post.metadata['wait']}"
+    wf = post.metadata.get("waiting_for", "")
+    assert (
+        last_wait in wf
+    ), f"waiting_for must reference the last wait date {last_wait!r}; got {wf!r}."
+    assert (
+        first_wait not in wf
+    ), f"waiting_for must not keep the first --set wait {first_wait!r}; got {wf!r}."

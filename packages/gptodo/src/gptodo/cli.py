@@ -2941,10 +2941,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # because state still holds the pre-edit value when wait is processed
         # (P1 on gptme/gptme-contrib#1539). Combined with the existing
         # transitioning_to_waiting check just below, this covers both orderings.
+        # Last --set wait wins (same as the apply loop). next() without
+        # reversed() would rewrite waiting_for from the first wait while
+        # metadata['wait'] holds a later one, permanently trapping the task.
         wait_set = next(
             (
                 value
-                for op, field, value in changes
+                for op, field, value in reversed(changes)
                 if op == "set" and field == "wait" and value is not None
             ),
             None,
