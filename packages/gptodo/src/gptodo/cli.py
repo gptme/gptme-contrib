@@ -2930,21 +2930,36 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                         value = normalize_state(value, warn=False)
 
                     post.metadata[field] = value
-                    # When --set wait is used on a recurrence-reset task (state=waiting,
-                    # wait_kind=machine, waiting_for="next recurrence gate (wait: ...)"),
-                    # keep waiting_for in sync with the new wait value so
-                    # task_has_waiting_blocker can still match the recurrence-gate pattern.
-                    # Without this, a manual wait adjustment permanently traps the task.
-                    if field == "wait" and value is not None:
-                        import re as _re
+        # When --set wait is used on a recurrence-reset task (state=waiting,
+        # wait_kind=machine, waiting_for="next recurrence gate (wait: ...)"),
+        # keep waiting_for in sync with the new wait value so
+        # task_has_waiting_blocker can still match the recurrence-gate pattern.
+        # Without this, a manual wait adjustment permanently traps the task.
+        #
+        # Must run AFTER every --set in this invocation is applied. Doing it
+        # inside the per-field loop misses `--set wait X --set state waiting`
+        # because state still holds the pre-edit value when wait is processed
+        # (P1 on gptme/gptme-contrib#1539). Combined with the existing
+        # transitioning_to_waiting check just below, this covers both orderings.
+        wait_set = next(
+            (
+                value
+                for op, field, value in changes
+                if op == "set" and field == "wait" and value is not None
+            ),
+            None,
+        )
+        if wait_set is not None:
+            import re as _re
 
-                        _wf = post.metadata.get("waiting_for", "")
-                        if (
-                            post.metadata.get("wait_kind") == "machine"
-                            and post.metadata.get("state") == "waiting"
-                            and _re.match(r"^next recurrence gate \(wait: ", _wf)
-                        ):
-                            post.metadata["waiting_for"] = f"next recurrence gate (wait: {value})"
+            _wf = post.metadata.get("waiting_for", "")
+            if (
+                post.metadata.get("wait_kind") == "machine"
+                and post.metadata.get("state") == "waiting"
+                and isinstance(_wf, str)
+                and _re.match(r"^next recurrence gate \(wait: ", _wf)
+            ):
+                post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_set})"
         # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
         # AND waiting_for is either already present or being set in the same edit.
         # Guarding on waiting_for prevents an injected waiting_since from triggering

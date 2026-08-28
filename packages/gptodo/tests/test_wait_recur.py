@@ -681,3 +681,61 @@ def test_set_wait_on_recurrence_gate_updates_waiting_for(
         f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
         "A stale waiting_for permanently traps the task after the new gate expires."
     )
+
+
+def test_set_wait_and_state_waiting_together_updates_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Combined --set wait + --set state waiting must still sync waiting_for.
+
+    The per-field wait-sync used to inspect metadata['state'] while applying
+    wait, so `--set wait NEW --set state waiting` on a not-yet-waiting
+    recurrence-gate task left waiting_for pointing at the old date. After the
+    new wait expires, task_has_waiting_blocker treats that stale string as a
+    human blocker and the task never auto-surfaces (gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: todo\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            new_wait,
+            "--set",
+            "state",
+            "waiting",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "waiting"
+    assert str(post.metadata["wait"]).startswith(
+        new_wait
+    ), f"wait: must be updated to {new_wait}, got {post.metadata['wait']}"
+    wf = post.metadata.get("waiting_for", "")
+    assert new_wait in wf, (
+        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
+        "A stale waiting_for permanently traps the task after the new gate expires."
+    )
