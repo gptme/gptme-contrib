@@ -1018,6 +1018,9 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             relative_path = f.relative_to(lesson_dir)
             is_skill_file = f.name == "SKILL.md"
             if "archive" in relative_path.parts:
+                # Keep the archived target in path dedup so a differently named
+                # symlink from a later root cannot resurrect it.
+                seen_paths.add(resolved)
                 # An archived copy shadows later dirs unless this dir also
                 # carries an active (non-archived) lesson with the same name.
                 # rglob sorts ``archive/foo.md`` before ``foo.md`` so the

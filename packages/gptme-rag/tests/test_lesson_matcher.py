@@ -912,6 +912,16 @@ class TestScanLessons:
         lessons = scan_lessons([dir1, dir2])
         assert [sorted(lesson["keywords"]) for lesson in lessons] == [["active-in-a"]]
 
+    def test_symlink_to_archived_lesson_stays_excluded(self, tmp_path):
+        dir1 = tmp_path / "a"
+        dir2 = tmp_path / "b"
+        archived = dir1 / "archive" / "foo.md"
+        _write_lesson(archived, _basic_lesson(["old-archived"]))
+        dir2.mkdir(parents=True)
+        (dir2 / "renamed.md").symlink_to(archived)
+
+        assert scan_lessons([dir1, dir2]) == []
+
     def test_retired_status_in_dir1_shadows_same_name_in_dir2(self, tmp_path):
         # status: archived/deprecated/automated in an earlier dir suppresses a
         # same-named lesson in a later dir, regardless of category path.
