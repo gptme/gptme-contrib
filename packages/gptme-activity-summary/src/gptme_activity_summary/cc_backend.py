@@ -17,27 +17,59 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from gptme_activity_summary.gptme_backend import call_gptme
+
 logger = logging.getLogger(__name__)
 
 # Retry configuration for empty CC responses (nesting detection, transient failures)
 _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
 
-# Claude Code stdout marker for weekly quota exhaustion on the active slot. When
-# present, retrying on the same slot is futile — every attempt fails identically
-# until the quota resets. Callers with slot fallback should catch
-# ClaudeQuotaExhaustedError and retry on a different slot instead.
-_QUOTA_EXHAUSTED_MARKERS = ("you've hit your weekly limit",)
+# Truly permanent subscription failures — quota resets require waiting until
+# the next billing period; org blocks require admin action. Retrying the same
+# slot is futile. Keep prefixes narrow so transient errors use the normal retry path.
+_PERMANENT_SUBSCRIPTION_FAILURE_MARKERS = (
+    "you've hit your weekly limit",
+    "your organization has disabled claude subscription access",
+)
+
+# OAuth session expiry is distinct from permanent failures: the session CAN be
+# refreshed via /login. In automated contexts that cannot re-authenticate
+# interactively, retrying the same slot is still futile — but the distinction
+# is preserved so callers that can trigger re-auth may catch
+# ClaudeAuthExpiredError specifically rather than being forced into the
+# ClaudeQuotaExhaustedError path.
+_AUTH_FAILURE_MARKERS = ("failed to authenticate: oauth session expired",)
+
+# Combined set used for skip-retry detection.
+_ALL_SKIP_RETRY_MARKERS = _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS + _AUTH_FAILURE_MARKERS
+
+# Every structured summary produced by this module has one of these narrative
+# fields. Requiring one prevents a JSON-shaped provider error from being treated
+# as a successful summary and silently filled out with empty defaults.
+_SUMMARY_NARRATIVE_KEYS = ("narrative", "month_narrative")
 
 
 class ClaudeQuotaExhaustedError(subprocess.CalledProcessError):
-    """The active Claude Code slot has exhausted its weekly quota.
+    """The active Claude Code slot has a permanent subscription failure.
 
-    Raised immediately (without the usual retry loop) when ``claude -p`` prints a
-    weekly-quota-exhaustion marker, since retrying the same slot is futile.
+    Raised immediately (without the usual retry loop) when ``claude -p`` prints
+    a known quota- or subscription-access marker, since retrying the same slot
+    is futile. The historical name is retained for compatibility.
     Subclasses :class:`subprocess.CalledProcessError` so existing callers that
     catch the base type keep working; callers that can switch to a different slot
     should catch this subtype specifically.
+    """
+
+
+class ClaudeAuthExpiredError(ClaudeQuotaExhaustedError):
+    """OAuth session has expired on the active Claude Code slot.
+
+    Unlike quota exhaustion (which requires waiting for a reset period), auth
+    expiry can be resolved by re-authenticating via ``/login`` or similar.
+    Automated invocations cannot re-authenticate interactively, so retries on
+    the same slot are skipped — but callers that can trigger re-auth should
+    catch this subtype specifically and attempt recovery before falling back.
     """
 
 
@@ -81,6 +113,7 @@ def call_claude_code(
     timeout: int = 120,
     max_retries: int = _MAX_RETRIES,
     diagnostic_dir: Path | None = None,
+    narrative_key: str | None = None,
 ) -> str:
     """
     Call Claude Code CLI with a prompt, retrying on non-zero exit or empty responses.
@@ -95,6 +128,13 @@ def call_claude_code(
         max_retries: Maximum number of retry attempts per failure type
         diagnostic_dir: Directory for Claude debug logs. Defaults to a stable
             temporary directory so scheduled failures retain diagnostics.
+        narrative_key: Expected top-level JSON key for the narrative field in
+            the response (e.g. ``"narrative"`` or ``"month_narrative"``). When
+            set, the gptme fallback accepts this exact key or any other key in
+            ``_SUMMARY_NARRATIVE_KEYS``, remapping alternate keys to
+            ``narrative_key`` before returning so the caller always finds the
+            key it expects; when ``None``, any key from
+            ``_SUMMARY_NARRATIVE_KEYS`` is accepted without remapping.
 
     Returns:
         The response text from Claude Code
@@ -125,10 +165,10 @@ def call_claude_code(
     # subprocess sessions (the generic cross-agent signal).
     env["GPTME_SUBPROCESS"] = "1"
 
-    # Fallback credential paths for quota exhaustion recovery.  When the active
-    # slot is exhausted, call_claude_code tries each path in order via a temp
-    # CLAUDE_CONFIG_DIR.  Extract here (before the subprocess env is locked) and
-    # strip from the env so the subprocess never sees it (prevents recursion).
+    # Fallback credential paths for permanent subscription failures. When the
+    # active slot is unavailable, call_claude_code tries each path in order via
+    # a temp CLAUDE_CONFIG_DIR. Extract here (before the subprocess env is locked)
+    # and strip from the env so the subprocess never sees it (prevents recursion).
     # Format: colon-separated absolute paths to credential files.
     # Example: /home/bob/.claude/.credentials.json.alice:/home/bob/.claude/.credentials.json.erik
     _fallback_creds_env = env.pop("GPTME_CC_FALLBACK_CREDS", "").strip()
@@ -212,25 +252,26 @@ def call_claude_code(
                     plain_retry_pending = True
             combined_out = (result.stdout or "") + (result.stderr or "")
             combined_out_lower = combined_out.lower()
-            # Weekly quota exhaustion is a permanent, slot-scoped failure: retrying
-            # the same slot is futile and just burns ~N*delay seconds + token budget.
-            # Signal it distinctly so a caller that can switch slots can retry there.
-            if any(marker.lower() in combined_out_lower for marker in _QUOTA_EXHAUSTED_MARKERS):
+            # Subscription failures are permanent and slot-scoped: retrying the
+            # same slot is futile and just burns ~N*delay seconds + token budget.
+            # Signal them distinctly so a caller can switch slots or backends.
+            if any(marker in combined_out_lower for marker in _ALL_SKIP_RETRY_MARKERS):
                 logger.warning(
-                    "claude -p weekly quota exhausted (attempt %d/%d): %s",
+                    "claude -p subscription unavailable (attempt %d/%d): %s",
                     attempt,
                     max_retries,
                     result.stdout.strip()[:200] if result.stdout else result.stderr.strip()[:200],
                 )
                 # Attempt fallback slots (GPTME_CC_FALLBACK_CREDS) before raising.
-                last_non_quota_error: subprocess.CalledProcessError | None = None
+                last_non_subscription_error: subprocess.CalledProcessError | None = None
                 saw_empty_response = False
+                saw_fallback_auth_failure = False
                 for fb_cred in _fallback_cred_paths:
                     if not fb_cred.exists():
                         logger.debug("Fallback cred file %s not found, skipping", fb_cred)
                         continue
                     logger.info(
-                        "Active slot quota exhausted; trying fallback slot: %s",
+                        "Active slot subscription unavailable; trying fallback slot: %s",
                         fb_cred.name,
                     )
                     for fb_attempt in range(1, max_retries + 1):
@@ -257,14 +298,25 @@ def call_claude_code(
                                 time.sleep(_RETRY_DELAY_S * fb_attempt)
                                 continue
                             break
-                        # Check if this fallback slot is also quota-exhausted.
+                        # Check whether this fallback slot is also unavailable.
                         fb_combined = (fb_result.stdout or "") + (fb_result.stderr or "")
-                        if any(m.lower() in fb_combined.lower() for m in _QUOTA_EXHAUSTED_MARKERS):
-                            logger.warning("Fallback slot %s also quota-exhausted", fb_cred.name)
-                            # Clear any prior non-quota error so the caller receives
-                            # ClaudeQuotaExhaustedError rather than a stale error from
-                            # an earlier fallback that failed for a different reason.
-                            last_non_quota_error = None
+                        fb_combined_lower = fb_combined.lower()
+                        if any(marker in fb_combined_lower for marker in _ALL_SKIP_RETRY_MARKERS):
+                            logger.warning(
+                                "Fallback slot %s also has a subscription failure",
+                                fb_cred.name,
+                            )
+                            # Track auth failures from fallback slots so the signal is not
+                            # lost when the primary slot failed with a different (quota)
+                            # error — callers catching ClaudeAuthExpiredError to trigger
+                            # re-auth must see the correct exception type.
+                            if any(marker in fb_combined_lower for marker in _AUTH_FAILURE_MARKERS):
+                                saw_fallback_auth_failure = True
+                            # Clear any prior non-subscription error so the caller receives
+                            # ClaudeQuotaExhaustedError (or ClaudeAuthExpiredError, if the
+                            # fallback also expired) rather than a stale CalledProcessError
+                            # from an earlier fallback that failed for a different reason.
+                            last_non_subscription_error = None
                             break
                         logger.warning(
                             "Fallback slot %s failed (rc=%d, attempt %d/%d): stdout=%s stderr=%s",
@@ -275,7 +327,7 @@ def call_claude_code(
                             (fb_result.stdout or "")[:200],
                             (fb_result.stderr or "")[:200],
                         )
-                        last_non_quota_error = subprocess.CalledProcessError(
+                        last_non_subscription_error = subprocess.CalledProcessError(
                             fb_result.returncode,
                             cmd,
                             fb_result.stdout,
@@ -285,17 +337,97 @@ def call_claude_code(
                             time.sleep(_RETRY_DELAY_S * fb_attempt)
                             continue
                         break
-                if last_non_quota_error is not None:
-                    raise last_non_quota_error
+                # All Claude slots failed (subscription failures, non-subscription
+                # errors, and/or empty responses). Before surfacing any permanent
+                # failure, try the gptme fallback so summary generation does not
+                # hard-fail on quota days (ErikBjare/bob issue: 5 auto-resolve
+                # flips in 8 days). The gptme adapter is best-effort and returns
+                # "" on any failure, so the original error path is preserved when
+                # no fallback is available.
+                #
+                # The gptme fallback is attempted BEFORE raising
+                # last_non_subscription_error so that a misconfigured fallback
+                # credential slot (e.g. stale auth, returncode=2) does not
+                # prevent gptme from producing a summary when the primary slot is
+                # subscription-exhausted.
+                gptme_response = call_gptme(prompt, timeout=timeout)
+                if gptme_response:
+                    gptme_result = extract_json_from_response(gptme_response)
+
+                    # Check for the exact requested key first.  If an alternate
+                    # recognised key is present instead, remap it so the caller
+                    # always finds the key it asked for.  Without the remap,
+                    # accepting "narrative" when the caller wants "month_narrative"
+                    # lets the validation pass but the caller then defaults the
+                    # narrative to "" — a silent empty summary on quota days.
+                    def _is_nonempty_str(v: object) -> bool:
+                        return isinstance(v, str) and bool(v.strip())
+
+                    if narrative_key and not _is_nonempty_str(gptme_result.get(narrative_key)):
+                        for alt_key in _SUMMARY_NARRATIVE_KEYS:
+                            if alt_key != narrative_key and _is_nonempty_str(
+                                gptme_result.get(alt_key)
+                            ):
+                                gptme_result[narrative_key] = gptme_result.pop(alt_key)
+                                gptme_response = json.dumps(gptme_result)
+                                break
+                    _keys = (narrative_key,) if narrative_key else _SUMMARY_NARRATIVE_KEYS
+                    if any(_is_nonempty_str(gptme_result.get(key)) for key in _keys):
+                        logger.warning(
+                            "Claude subscriptions unavailable; gptme fallback produced a summary"
+                        )
+                        return gptme_response
+                    logger.warning(
+                        "Claude subscriptions unavailable; gptme fallback response did not "
+                        "contain a recognized summary schema; ignoring"
+                    )
+                if last_non_subscription_error is not None:
+                    # Preserve the auth-expiry signal from the primary slot even
+                    # when a fallback slot produced a non-subscription error.
+                    # Also check saw_fallback_auth_failure: if a fallback slot hit
+                    # OAuth-expiry before another fallback slot hit a non-subscription
+                    # error, the combined_out_lower only holds the primary's output
+                    # and would miss the fallback's auth marker.
+                    if (
+                        any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS)
+                        or saw_fallback_auth_failure
+                    ):
+                        raise ClaudeAuthExpiredError(
+                            result.returncode, attempt_cmd, result.stdout, result.stderr
+                        )
+                    raise last_non_subscription_error
                 if saw_empty_response:
+                    # Even when a fallback slot returned empty, surface the
+                    # auth-expiry signal from the primary OR any fallback slot so
+                    # callers can trigger re-auth instead of silently falling back
+                    # to empty defaults.  saw_fallback_auth_failure covers the case
+                    # where the auth marker appeared in a fallback slot's output
+                    # (combined_out_lower only holds the primary's output).
+                    if (
+                        any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS)
+                        or saw_fallback_auth_failure
+                    ):
+                        raise ClaudeAuthExpiredError(
+                            result.returncode, attempt_cmd, result.stdout, result.stderr
+                        )
                     logger.error(
                         "Fallback slots returned empty responses after %d attempts",
                         max_retries,
                     )
                     return ""
-                raise ClaudeQuotaExhaustedError(
-                    result.returncode, attempt_cmd, result.stdout, result.stderr
+                logger.error(
+                    "Claude subscriptions unavailable and gptme fallback produced no summary; "
+                    "raising"
                 )
+                _exc_cls = (
+                    ClaudeAuthExpiredError
+                    if (
+                        any(marker in combined_out_lower for marker in _AUTH_FAILURE_MARKERS)
+                        or saw_fallback_auth_failure
+                    )
+                    else ClaudeQuotaExhaustedError
+                )
+                raise _exc_cls(result.returncode, attempt_cmd, result.stdout, result.stderr)
             stderr_preview = result.stderr.strip()[:500] if result.stderr else "(none)"
             stdout_preview = result.stdout.strip()[:500] if result.stdout else "(none)"
             logger.warning(
@@ -455,7 +587,7 @@ Journal Entry:
 
 Return ONLY the JSON, no additional text."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning("CC returned empty for journal summary (%s), using defaults", entry_date)
     result = extract_json_from_response(response)
@@ -564,7 +696,7 @@ Journal Entries ({len(entries)} total):
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning("CC returned empty for daily summary (%s), using defaults", target_date)
     result = extract_json_from_response(response)
@@ -668,7 +800,7 @@ Daily Summaries:
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning("CC returned empty for weekly summary (%s), using defaults", week_id)
     result = extract_json_from_response(response)
@@ -739,7 +871,7 @@ Guidelines:
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning(
             "CC returned empty for GitHub summary (%s/%s), using defaults", username, period
@@ -807,7 +939,7 @@ Guidelines:
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="narrative")
     if not response:
         logger.warning(
             "CC returned empty for human day summary (%s/%s), using defaults", username, day
@@ -908,7 +1040,7 @@ Weekly Summaries:
 
 Return ONLY the JSON."""
 
-    response = call_claude_code(prompt, timeout=timeout)
+    response = call_claude_code(prompt, timeout=timeout, narrative_key="month_narrative")
     if not response:
         logger.warning("CC returned empty for monthly summary (%s), using defaults", month)
     result = extract_json_from_response(response)
