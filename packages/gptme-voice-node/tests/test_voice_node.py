@@ -56,8 +56,35 @@ class TestMicMute:
 
 
 # ---------------------------------------------------------------------------
-# Recv loop: audio frame handling
+# Send/recv loop handling
 # ---------------------------------------------------------------------------
+
+
+class TestSendLoop:
+    @pytest.mark.asyncio
+    async def test_audio_io_cancellation_waits_for_inflight_thread(self):
+        from gptme_voice_node.node import _run_audio_io
+
+        thread_started = asyncio.Event()
+        allow_thread_to_finish = asyncio.Event()
+
+        async def fake_to_thread(function, *args, **kwargs):
+            thread_started.set()
+            await allow_thread_to_finish.wait()
+            return function(*args, **kwargs)
+
+        operation = MagicMock(return_value=b"audio")
+        with patch("gptme_voice_node.node.asyncio.to_thread", fake_to_thread):
+            task = asyncio.create_task(_run_audio_io(operation))
+            await thread_started.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            allow_thread_to_finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        operation.assert_called_once_with()
 
 
 class TestRecvLoop:
@@ -74,25 +101,15 @@ class TestRecvLoop:
         mock_ws.recv.side_effect = [msg, ConnectionClosed(None, None)]
 
         speaker = MagicMock()
-        # We expect write to be called with the PCM bytes
-        written = []
 
-        def fake_run_in_executor(_, fn):
-            result = fn()
-            written.append(result)
-            fut = asyncio.get_event_loop().create_future()
-            fut.set_result(None)
-            return fut
+        async def fake_audio_io(function, *args, **kwargs):
+            return function(*args, **kwargs)
 
-        with patch.object(
-            asyncio.get_event_loop(),
-            "run_in_executor",
-            side_effect=fake_run_in_executor,
-        ):
+        with patch("gptme_voice_node.node._run_audio_io", fake_audio_io):
             await node._recv_loop(mock_ws, speaker)
 
         assert node._playing is True  # set mid-loop; audio_end not sent
-        assert speaker.write.called
+        speaker.write.assert_called_once_with(pcm)
 
     @pytest.mark.asyncio
     async def test_audio_end_clears_playing_flag(self):
@@ -198,14 +215,14 @@ class TestBackoff:
             await node.run_forever()
             mock_ws.connect.assert_not_called()
 
-    def test_quick_session_failure_preserves_exponential_backoff(self):
-        from gptme_voice_node.node import _backoff_after_session
+    def test_quick_session_failure_increases_exponential_backoff(self):
+        from gptme_voice_node.node import _next_backoff
 
         with patch("gptme_voice_node.node.time.monotonic", return_value=100.0):
-            assert _backoff_after_session(8, connected_at=99.0) == 8
+            assert _next_backoff(8, connected_at=99.0) == 16
 
     def test_stable_session_resets_exponential_backoff(self):
-        from gptme_voice_node.node import BACKOFF_INITIAL, _backoff_after_session
+        from gptme_voice_node.node import BACKOFF_INITIAL, _next_backoff
 
         with patch("gptme_voice_node.node.time.monotonic", return_value=100.0):
-            assert _backoff_after_session(8, connected_at=60.0) == BACKOFF_INITIAL
+            assert _next_backoff(8, connected_at=60.0) == BACKOFF_INITIAL

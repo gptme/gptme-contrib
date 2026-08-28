@@ -24,6 +24,8 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Callable
+from typing import Any, TypeVar
 from urllib.parse import urlparse
 
 try:
@@ -76,15 +78,27 @@ BACKOFF_RESET_AFTER = 30
 
 log = logging.getLogger("gptme_voice_node")
 
+T = TypeVar("T")
 
-def _backoff_after_session(backoff: int, connected_at: float | None) -> int:
-    """Reset retry delay only after a connection stayed healthy long enough."""
+
+async def _run_audio_io(function: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Run blocking audio I/O and let it finish before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
+
+
+def _next_backoff(backoff: int, connected_at: float | None) -> int:
+    """Reset after a healthy session; otherwise increase the retry delay."""
     if (
         connected_at is not None
         and time.monotonic() - connected_at >= BACKOFF_RESET_AFTER
     ):
         return BACKOFF_INITIAL
-    return backoff
+    return min(backoff * 2, BACKOFF_MAX)
 
 
 class VoiceNode:
@@ -157,18 +171,13 @@ class VoiceNode:
 
     async def _send_loop(self, ws, mic_stream) -> None:
         """Continuously read mic and forward to server (unless muted)."""
-        loop = asyncio.get_event_loop()
         while self._running:
-            # Read in executor to avoid blocking the event loop
-            raw = await loop.run_in_executor(
-                None,
-                lambda: mic_stream.read(CHUNK_SIZE, exception_on_overflow=False),
+            raw = await _run_audio_io(
+                mic_stream.read, CHUNK_SIZE, exception_on_overflow=False
             )
             if not self._mic_muted():
                 msg = {"type": "audio", "audio": base64.b64encode(raw).decode()}
                 await ws.send(json.dumps(msg))
-            # Yield to other tasks briefly
-            await asyncio.sleep(0.005)
 
     async def _recv_loop(self, ws, speaker_stream) -> None:
         """Receive audio frames from server and play them.
@@ -179,7 +188,6 @@ class VoiceNode:
         run_forever from hanging and leaking PyAudio resources when the node
         is stopped via SIGTERM.
         """
-        loop = asyncio.get_event_loop()
         while self._running:
             try:
                 raw_msg = await ws.recv()
@@ -190,7 +198,7 @@ class VoiceNode:
             if msg_type == "audio":
                 self._playing = True
                 pcm = base64.b64decode(data["audio"])
-                await loop.run_in_executor(None, lambda: speaker_stream.write(pcm))
+                await _run_audio_io(speaker_stream.write, pcm)
             elif msg_type == "audio_end":
                 self._playing = False
                 self._play_ended_at = time.monotonic()
@@ -213,7 +221,6 @@ class VoiceNode:
                     connected_at = time.monotonic()
                     await self._session(ws)
             except (ConnectionClosed, WebSocketException) as exc:
-                backoff = _backoff_after_session(backoff, connected_at)
                 log.warning(
                     "[%s] disconnected: %s — retrying in %ds",
                     self.node_name,
@@ -221,7 +228,6 @@ class VoiceNode:
                     backoff,
                 )
             except OSError as exc:
-                backoff = _backoff_after_session(backoff, connected_at)
                 log.warning(
                     "[%s] connection error: %s — retrying in %ds",
                     self.node_name,
@@ -229,7 +235,6 @@ class VoiceNode:
                     backoff,
                 )
             except Exception as exc:  # noqa: BLE001
-                backoff = _backoff_after_session(backoff, connected_at)
                 log.error(
                     "[%s] unexpected error: %s — retrying in %ds",
                     self.node_name,
@@ -238,7 +243,7 @@ class VoiceNode:
                 )
             if self._running:
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, BACKOFF_MAX)
+                backoff = _next_backoff(backoff, connected_at)
 
     def stop(self) -> None:
         """Signal the node to shut down cleanly."""
