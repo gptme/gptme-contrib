@@ -207,6 +207,172 @@ def test_twilio_body_tools_require_allowlisted_caller(monkeypatch) -> None:
     assert server._body_adapter_for_websocket(remote, transport="twilio") is None
 
 
+def test_twilio_body_grant_is_single_use_and_fail_closed(monkeypatch) -> None:
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    server = VoiceServer()
+    token = server._mint_twilio_body_grant("+15551212")
+    assert server._consume_twilio_body_grant(token) == "+15551212"
+    assert server._consume_twilio_body_grant(token) is None
+    assert server._consume_twilio_body_grant(None) is None
+    assert server._consume_twilio_body_grant("invented") is None
+
+
+def test_twilio_body_grant_expires(monkeypatch) -> None:
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    server = VoiceServer()
+    server._twilio_body_grant_ttl_s = 0.0
+    token = server._mint_twilio_body_grant("+15551212")
+    assert server._consume_twilio_body_grant(token) is None
+
+
+def test_twilio_websocket_does_not_grant_body_tools_from_spoofed_from_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw /twilio start events can invent customParameters.from_number.
+
+    Body tools must require the one-shot grant minted by signed /incoming.
+    """
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+
+    captured: dict[str, object] = {}
+
+    class _CapturingBridge(_DummyToolBridge):
+        def __init__(self, *args, **kwargs) -> None:
+            captured["body_adapter"] = kwargs.get("body_adapter")
+
+    async def _exercise(*, grant: bool) -> None:
+        captured.clear()
+        server = VoiceServer()
+        custom: dict[str, str] = {"from_number": "+15551212"}
+        if grant:
+            custom["body_grant"] = server._mint_twilio_body_grant("+15551212")
+        websocket = _DummyTwilioWebSocket(
+            [
+                {"event": "connected"},
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZ123",
+                        "callSid": "CA123",
+                        "customParameters": custom,
+                    },
+                },
+                {"event": "stop"},
+            ]
+        )
+        fake_client = _FakeRealtimeClient()
+
+        async def _fake_build_session_bootstrap(
+            *,
+            caller_id: str,
+            from_number: str = "",
+            handoff_id: str | None = None,
+            standup_brief: str | None = None,
+        ) -> SessionBootstrap:
+            return SessionBootstrap("You are Bob.")
+
+        def _fake_make_client(_session_cfg, **_kwargs):
+            return fake_client
+
+        async def _fake_on_call_end(*_args, **_kwargs) -> None:
+            return None
+
+        monkeypatch.setattr(
+            server, "_build_session_bootstrap", _fake_build_session_bootstrap
+        )
+        monkeypatch.setattr(server, "_make_client", _fake_make_client)
+        monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+        monkeypatch.setattr(
+            "gptme_voice.realtime.server.GptmeToolBridge", _CapturingBridge
+        )
+        await server.handle_twilio_websocket(websocket)
+
+    asyncio.run(_exercise(grant=False))
+    assert captured.get("body_adapter") is None
+
+    asyncio.run(_exercise(grant=True))
+    assert captured.get("body_adapter") is not None
+
+
+def test_twilio_spoof_cannot_steal_body_capable_prewarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+
+    claimed: list[str] = []
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        websocket = _DummyTwilioWebSocket(
+            [
+                {"event": "connected"},
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZ123",
+                        "callSid": "CA123",
+                        "customParameters": {"from_number": "+15551212"},
+                    },
+                },
+                {"event": "stop"},
+            ]
+        )
+        fake_client = _FakeRealtimeClient()
+
+        def _fake_claim(from_number: str):
+            claimed.append(from_number)
+            return fake_client
+
+        async def _fake_on_call_end(*_args, **_kwargs) -> None:
+            return None
+
+        async def _fake_build_session_bootstrap(
+            *,
+            caller_id: str,
+            from_number: str = "",
+            handoff_id: str | None = None,
+            standup_brief: str | None = None,
+        ) -> SessionBootstrap:
+            return SessionBootstrap("You are Bob.")
+
+        def _fake_make_client(_session_cfg, **_kwargs):
+            return fake_client
+
+        monkeypatch.setattr(server, "_claim_prewarm", _fake_claim)
+        monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+        monkeypatch.setattr(
+            server, "_build_session_bootstrap", _fake_build_session_bootstrap
+        )
+        monkeypatch.setattr(server, "_make_client", _fake_make_client)
+        monkeypatch.setattr(
+            "gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge
+        )
+        await server.handle_twilio_websocket(websocket)
+
+    asyncio.run(_exercise())
+    assert claimed == []
+
+
 def test_untrusted_sessions_do_not_advertise_body_tools(monkeypatch) -> None:
     monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
     server = VoiceServer()

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import time
@@ -783,6 +784,12 @@ class VoiceServer:
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
         # Max seconds a pre-warm session is kept before being discarded
         self._prewarm_ttl_seconds = 30
+        # One-shot body-tool grants minted by the signed /incoming webhook.
+        # The /twilio WebSocket is unauthenticated; customParameters.from_number
+        # is attacker-controlled, so body tools must not key off it. Token ->
+        # (from_number, expires_monotonic).
+        self._twilio_body_grants: dict[str, tuple[str, float]] = {}
+        self._twilio_body_grant_ttl_s = 120.0
 
         routes = [
             Route("/", self.health_check, methods=["GET"]),
@@ -816,6 +823,43 @@ class VoiceServer:
             return False
         allowlist = {n.strip() for n in raw.split(",") if n.strip()}
         return caller_id in allowlist
+
+    def _expire_twilio_body_grants(self) -> None:
+        now = time.monotonic()
+        expired = [
+            token
+            for token, (_, expires) in self._twilio_body_grants.items()
+            if now > expires
+        ]
+        for token in expired:
+            self._twilio_body_grants.pop(token, None)
+
+    def _mint_twilio_body_grant(self, from_number: str) -> str:
+        """Mint a one-shot token proving /incoming authorized this caller."""
+        self._expire_twilio_body_grants()
+        token = secrets.token_urlsafe(32)
+        self._twilio_body_grants[token] = (
+            from_number,
+            time.monotonic() + self._twilio_body_grant_ttl_s,
+        )
+        return token
+
+    def _consume_twilio_body_grant(self, token: str | None) -> str | None:
+        """Return the from_number bound to a live grant, or None.
+
+        Single-use: a replay or a raw WebSocket that invents customParameters
+        cannot satisfy this. Expired and unknown tokens fail closed.
+        """
+        self._expire_twilio_body_grants()
+        if not token:
+            return None
+        entry = self._twilio_body_grants.pop(token, None)
+        if entry is None:
+            return None
+        from_number, expires = entry
+        if time.monotonic() > expires:
+            return None
+        return from_number
 
     def _body_adapter_for_websocket(
         self, websocket, *, transport: str, caller_id: str | None = None
@@ -1702,6 +1746,10 @@ class VoiceServer:
         custom_params: dict[str, str] = {}
         if from_number:
             custom_params["from_number"] = from_number
+            # Body tools on /twilio must not trust client-supplied from_number.
+            # Mint a one-shot grant here (signed webhook) and require it on start.
+            if self._twilio_body_caller_allowed(from_number):
+                custom_params["body_grant"] = self._mint_twilio_body_grant(from_number)
         twiml = build_connect_stream_twiml(ws_url, custom_params or None)
         return PlainTextResponse(twiml, media_type="text/xml")
 
@@ -1798,17 +1846,31 @@ class VoiceServer:
                         )
                     )
 
-                    # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
-                    prewarm_eligible = (
-                        from_number and not handoff_id and not standup_brief
-                    )
-                    prewarm_client = (
-                        self._claim_prewarm(from_number) if prewarm_eligible else None
+                    # Body-tool authorization is the signed-webhook grant, not
+                    # customParameters.from_number (attacker-controlled on /twilio).
+                    granted_from = self._consume_twilio_body_grant(
+                        custom_params.get("body_grant") or None
                     )
                     body_adapter = self._body_adapter_for_websocket(
                         websocket,
                         transport="twilio",
-                        caller_id=from_number or None,
+                        caller_id=granted_from,
+                    )
+
+                    # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
+                    prewarm_eligible = (
+                        from_number and not handoff_id and not standup_brief
+                    )
+                    # A spoofed start event must not steal a body-capable prewarm.
+                    if (
+                        prewarm_eligible
+                        and self.body_adapter is not None
+                        and self._twilio_body_caller_allowed(from_number)
+                        and granted_from is None
+                    ):
+                        prewarm_eligible = False
+                    prewarm_client = (
+                        self._claim_prewarm(from_number) if prewarm_eligible else None
                     )
 
                     if prewarm_client is not None:
