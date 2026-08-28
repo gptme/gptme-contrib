@@ -235,3 +235,15 @@ def test_blockers_return_compact_summaries_with_narrative_fields(monkeypatch):
             "waiting_since": "2026-08-27T20:30:00+00:00",
         }
     ]
+
+
+def test_blockers_skip_whitespace_only_explanations(monkeypatch):
+    """A task without visible blocker context is not a top blocker."""
+    import json
+
+    import gptme_bob_status.provider as mod
+
+    task = {**_TASK_JSON, "waiting_for": " \n\t "}
+    monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(task))
+
+    assert mod._blockers() == []
