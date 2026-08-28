@@ -6,9 +6,10 @@ import shutil
 import signal
 import sys
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import cast
 
 import click
 from rich.console import Console
@@ -24,6 +25,21 @@ from .query.context_assembler import ContextAssembler
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _StoredFingerprint:
+    """Change-detection fingerprint for one indexed source.
+
+    content_hashes holds every generation currently stored for the source;
+    has_unhashed marks legacy chunks written before content hashing, which
+    force the mtime fallback. last_modified is that fallback timestamp.
+    """
+
+    content_hashes: set[str] = field(default_factory=set)
+    has_unhashed: bool = False
+    last_modified: float | None = None
+
 
 # TODO: change this to a more appropriate location
 default_persist_dir = Path.home() / ".cache" / "gptme" / "rag"
@@ -244,17 +260,15 @@ def index(
         # Map each indexed source to its stored change-detection fingerprint:
         # content_hash (primary) plus last_modified (fallback for legacy docs that
         # predate content hashing). Stored per-chunk but read once per source.
-        existing_files: dict[str, dict[str, object]] = {}
+        existing_files: dict[str, _StoredFingerprint] = {}
         for doc in existing_docs:
             if "source" in doc.metadata:
                 abs_path = os.path.abspath(doc.metadata["source"])
-                entry = existing_files.setdefault(abs_path, {"content_hashes": set()})
-                hashes = entry.setdefault("content_hashes", set())
+                entry = existing_files.setdefault(abs_path, _StoredFingerprint())
                 if "content_hash" in doc.metadata:
-                    if isinstance(hashes, set):
-                        hashes.add(doc.metadata["content_hash"])
+                    entry.content_hashes.add(str(doc.metadata["content_hash"]))
                 else:
-                    entry["has_unhashed"] = True
+                    entry.has_unhashed = True
                 last_modified = doc.metadata.get("last_modified")
                 if last_modified:
                     try:
@@ -266,9 +280,10 @@ def index(
                         # Keep the first valid timestamp. A later chunk with a
                         # bad last_modified must not zero a good stored mtime —
                         # that would re-embed every legacy source on every run.
-                        entry.setdefault("last_modified", parsed)
-                else:
-                    entry.setdefault("last_modified", 0)
+                        if entry.last_modified is None:
+                            entry.last_modified = parsed
+                elif entry.last_modified is None:
+                    entry.last_modified = 0.0
                 # logger.debug("Existing file: %s", abs_path)  # Too spammy
 
         logger.debug("Loaded %d existing files from index", len(existing_files))
@@ -279,7 +294,7 @@ def index(
         # Those sources must not be re-added — chunk IDs include content_hash, so
         # a second add of the same bytes collides — only the stale IDs are deleted.
         all_documents = []
-        cleanup_hashes: dict[str, object] = {}
+        cleanup_hashes: dict[str, str] = {}
         empty_sources: set[str] = set()
         with console.status("Collecting documents...") as status:
             for path in paths:
@@ -319,10 +334,9 @@ def index(
                         # worktree churn) — skip it instead of re-embedding.
                         current_hash = doc.metadata.get("content_hash")
                         if current_hash is not None:
-                            stored_hashes = cast(
-                                set[object], existing.get("content_hashes") or set()
-                            )
-                            has_unhashed = bool(existing.get("has_unhashed"))
+                            current_hash = str(current_hash)
+                            stored_hashes = existing.content_hashes
+                            has_unhashed = existing.has_unhashed
                             if stored_hashes:
                                 if current_hash in stored_hashes:
                                     # Current generation is already indexed. Skip
@@ -349,7 +363,7 @@ def index(
                         # Fallback for legacy stored docs without content_hash:
                         # compare mtime (rounded to microseconds).
                         current_mtime = os.path.getmtime(abs_source)
-                        stored_mtime = cast(float, existing.get("last_modified", 0))
+                        stored_mtime = existing.last_modified or 0.0
                         if round(current_mtime, 6) > round(stored_mtime, 6):
                             logger.debug(
                                 "Modified file: %s (current: %s, stored: %s)",
@@ -363,7 +377,7 @@ def index(
 
                 all_documents.extend(filtered_documents)
 
-        def stale_ids_for(hash_by_source: dict[str, object]) -> list[str]:
+        def stale_ids_for(hash_by_source: Mapping[str, str | None]) -> list[str]:
             return [
                 doc.doc_id
                 for doc in existing_docs
@@ -417,10 +431,12 @@ def index(
 
         logger.info(f"Found {n_files} new/modified files to index ({n_chunks} chunks)")
 
-        current_hash_by_source = {
-            str(doc.metadata.get("source", "")): doc.metadata.get("content_hash")
-            for doc in all_documents
-        }
+        current_hash_by_source: dict[str, str | None] = {}
+        for doc in all_documents:
+            raw_hash = doc.metadata.get("content_hash")
+            current_hash_by_source[str(doc.metadata.get("source", ""))] = (
+                str(raw_hash) if raw_hash is not None else None
+            )
         stale_ids = stale_ids_for(current_hash_by_source) + leftover_stale_ids
 
         with tqdm(
