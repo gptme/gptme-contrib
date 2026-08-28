@@ -31,8 +31,11 @@ Public API::
 
 from __future__ import annotations
 
+import json
 import math
+import os
 import re
+import tempfile
 from pathlib import Path
 from collections.abc import Sequence
 from typing import Any
@@ -678,6 +681,272 @@ def _score_skill_descriptor(lesson: dict[str, Any], prompt_lower: str) -> tuple[
 # Lesson scanning
 # ---------------------------------------------------------------------------
 
+#: On-disk cache schema. Bump when the lesson dict shape changes.
+_CACHE_VERSION = 1
+
+# resolved path -> (mtime_ns, size, lesson_or_None). None means parsed-but-skipped.
+_parse_cache: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
+_disk_loaded = False
+_disk_dirty = False
+
+
+def _xdg_cache_home() -> Path:
+    raw = os.environ.get("XDG_CACHE_HOME")
+    if raw:
+        return Path(raw)
+    return Path.home() / ".cache"
+
+
+def _scan_cache_dir() -> Path | None:
+    """Return the on-disk cache directory, or ``None`` if disk cache is disabled.
+
+    ``GPTME_LESSON_SCAN_CACHE`` overrides the default
+    ``$XDG_CACHE_HOME/gptme/lesson-scan``. Set it to ``off``/``0``/``false`` to
+    keep only the in-memory cache (useful when the caller already isolates
+    processes, or in tests that want a purely ephemeral cache).
+    """
+    raw = os.environ.get("GPTME_LESSON_SCAN_CACHE")
+    if raw is not None:
+        lowered = raw.strip().lower()
+        if lowered in {"", "0", "off", "false", "none"}:
+            return None
+        return Path(raw)
+    return _xdg_cache_home() / "gptme" / "lesson-scan"
+
+
+def _scan_cache_file() -> Path | None:
+    cache_dir = _scan_cache_dir()
+    if cache_dir is None:
+        return None
+    return cache_dir / "scan-v1.json"
+
+
+def clear_scan_cache() -> None:
+    """Drop the in-memory parse cache so the next scan reloads from disk.
+
+    Disk contents are left in place. Tests use this to simulate a fresh
+    process without deleting the on-disk artifact.
+    """
+    global _disk_loaded, _disk_dirty
+    _parse_cache.clear()
+    _disk_loaded = False
+    _disk_dirty = False
+
+
+_LESSON_LIST_FIELDS = (
+    "keywords",
+    "patterns",
+    "tags",
+    "harness_restrict",
+    "session_categories",
+)
+_LESSON_STRING_FIELDS = ("path", "title", "description", "when_to_use", "body")
+
+
+def _valid_cached_lesson(lesson: object) -> bool:
+    """Return whether a persisted lesson has the shape downstream consumers require."""
+    return (
+        isinstance(lesson, dict)
+        and all(isinstance(lesson.get(field), list) for field in _LESSON_LIST_FIELDS)
+        and all(isinstance(lesson.get(field), str) for field in _LESSON_STRING_FIELDS)
+        and (lesson.get("id") is None or isinstance(lesson.get("id"), str))
+        and (lesson.get("skill_name") is None or isinstance(lesson.get("skill_name"), str))
+        and isinstance(lesson.get("is_skill"), bool)
+        and isinstance(lesson.get("n_keywords"), int)
+    )
+
+
+def _clone_lesson(lesson: dict[str, Any]) -> dict[str, Any]:
+    """Shallow-copy a lesson dict so callers cannot mutate the cache."""
+    return {
+        **lesson,
+        **{field: list(lesson[field]) for field in _LESSON_LIST_FIELDS},
+    }
+
+
+def _load_disk_cache() -> None:
+    global _disk_loaded
+    if _disk_loaded:
+        return
+    _disk_loaded = True
+    cache_file = _scan_cache_file()
+    if cache_file is None:
+        return
+    try:
+        raw = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return
+    if not isinstance(raw, dict) or raw.get("version") != _CACHE_VERSION:
+        return
+    files = raw.get("files")
+    if not isinstance(files, dict):
+        return
+    for path, entry in files.items():
+        if not isinstance(path, str) or not isinstance(entry, dict):
+            continue
+        mtime_ns = entry.get("mtime_ns")
+        size = entry.get("size")
+        lesson = entry.get("lesson")
+        if not isinstance(mtime_ns, int) or not isinstance(size, int):
+            continue
+        if lesson is not None and not _valid_cached_lesson(lesson):
+            continue
+        _parse_cache[path] = (mtime_ns, size, lesson)
+
+
+def _save_disk_cache() -> None:
+    global _disk_dirty
+    if not _disk_dirty:
+        return
+    cache_file = _scan_cache_file()
+    if cache_file is None:
+        _disk_dirty = False
+        return
+    payload = {
+        "version": _CACHE_VERSION,
+        "files": {
+            path: {"mtime_ns": mtime_ns, "size": size, "lesson": lesson}
+            for path, (mtime_ns, size, lesson) in _parse_cache.items()
+        },
+    }
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(cache_file.parent), prefix=".scan-v1.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp_name, cache_file)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        _disk_dirty = False
+    except OSError:
+        # Cache is a speed-up, never a correctness requirement.
+        pass
+
+
+def _stat_key(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _parse_lesson_file(path: Path) -> dict[str, Any] | None:
+    """Parse one lesson file. Return the lesson dict, or ``None`` if skipped.
+
+    ``None`` means the file was readable but inactive / has no match data.
+    Unreadable files raise (caller treats that as "not seen").
+    """
+    content = path.read_text(encoding="utf-8")
+    fm, body = extract_frontmatter(content)
+
+    if effective_status(fm) != "active":
+        return None
+
+    match_data = fm.get("match", {})
+    if isinstance(match_data, dict):
+        raw_keywords = match_data.get("keywords", [])
+        raw_patterns = match_data.get("patterns", [])
+    else:
+        raw_keywords = []
+        raw_patterns = []
+
+    if isinstance(raw_keywords, str):
+        raw_keywords = [raw_keywords]
+    keywords = _dedupe_strings([*raw_keywords, *_string_list(fm.get("keywords"))])
+
+    if isinstance(raw_patterns, str):
+        raw_patterns = [raw_patterns]
+    patterns = _dedupe_strings([*raw_patterns, *_string_list(fm.get("patterns"))])
+
+    skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
+    lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
+    description = fm.get("description") if isinstance(fm.get("description"), str) else ""
+    when_to_use = fm.get("when_to_use") if isinstance(fm.get("when_to_use"), str) else ""
+    metadata_value = fm.get("metadata")
+    metadata = metadata_value if isinstance(metadata_value, dict) else {}
+    tags = _string_list(metadata.get("tags"))
+    harness_restrict = _string_list(metadata.get("harness"))
+
+    _raw_sc = match_data.get("session_categories") or [] if isinstance(match_data, dict) else []
+    session_categories = _dedupe_strings(_string_list(_raw_sc))
+
+    if not keywords and not patterns and not skill_name:
+        return None
+
+    title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else path.stem
+
+    return {
+        "path": str(path),
+        "title": title,
+        "id": lesson_id,
+        "keywords": keywords,
+        "patterns": patterns,
+        "skill_name": skill_name,
+        "description": description,
+        "when_to_use": when_to_use,
+        "tags": tags,
+        "harness_restrict": harness_restrict,
+        "session_categories": session_categories,
+        "is_skill": path.name == "SKILL.md" or skill_name is not None,
+        "body": body,
+        "n_keywords": len(keywords),
+    }
+
+
+def _cached_parse_lesson_file(path: Path) -> tuple[bool, dict[str, Any] | None]:
+    """Return ``(readable, lesson_or_none)`` using the mtime+size cache.
+
+    ``readable=False`` means the file could not be stat'd or read — the caller
+    must not register the filename for first-dir-wins dedup, matching the
+    previous uncached behaviour.
+    """
+    global _disk_dirty
+    _load_disk_cache()
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        return False, None
+    key = _stat_key(path)
+    if key is None:
+        return False, None
+    mtime_ns, size = key
+    cached = _parse_cache.get(resolved)
+    if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+        if not os.access(path, os.R_OK):
+            del _parse_cache[resolved]
+            _disk_dirty = True
+            return False, None
+        lesson = cached[2]
+        return True, _clone_lesson(lesson) if lesson is not None else None
+    try:
+        lesson = _parse_lesson_file(path)
+    except Exception:
+        return False, None
+    stored = _clone_lesson(lesson) if lesson is not None else None
+    _parse_cache[resolved] = (mtime_ns, size, stored)
+    _disk_dirty = True
+    return True, _clone_lesson(stored) if stored is not None else None
+
+
+def _prune_missing_from_cache(seen_paths: set[str]) -> None:
+    """Drop cache entries not present in the current scan corpus."""
+    global _disk_dirty
+    stale = [path for path in _parse_cache if path not in seen_paths]
+    if not stale:
+        return
+    for path in stale:
+        del _parse_cache[path]
+    _disk_dirty = True
+
 
 def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
     """Scan *lesson_dirs* and return a list of parsed lesson dicts.
@@ -720,6 +989,13 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
     status is written top-level or as ``metadata.status`` (see
     :func:`effective_status`).
     Lessons with no keywords, patterns, or skill name are skipped.
+
+    Parsed files are cached in memory and on disk, keyed by
+    ``(resolved path, st_mtime_ns, st_size)``. The Claude Code
+    ``match-lessons`` hook is a fresh process per tool call, so the on-disk
+    layer is what actually avoids re-running ``yaml.safe_load`` across 800+
+    unchanged lesson files. A lesson written mid-session still matches on the
+    next call because its mtime/size miss the cache.
     """
     lessons: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
@@ -738,11 +1014,13 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             resolved = str(f.resolve())
             if resolved in seen_paths:
                 continue
-            seen_paths.add(resolved)
 
             relative_path = f.relative_to(lesson_dir)
             is_skill_file = f.name == "SKILL.md"
             if "archive" in relative_path.parts:
+                # Keep the archived target in path dedup so a differently named
+                # symlink from a later root cannot resurrect it.
+                seen_paths.add(resolved)
                 # An archived copy shadows later dirs unless this dir also
                 # carries an active (non-archived) lesson with the same name.
                 # rglob sorts ``archive/foo.md`` before ``foo.md`` so the
@@ -757,73 +1035,19 @@ def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
             if not is_skill_file and f.name in seen_names:
                 continue
 
-            try:
-                content = f.read_text(encoding="utf-8")
-            except Exception:
+            seen_paths.add(resolved)
+            readable, lesson = _cached_parse_lesson_file(f)
+            if not readable:
                 continue
 
             if not is_skill_file:
                 seen_names.add(f.name)
 
-            fm, body = extract_frontmatter(content)
+            if lesson is not None:
+                lessons.append(lesson)
 
-            if effective_status(fm) != "active":
-                continue
-
-            match_data = fm.get("match", {})
-            if isinstance(match_data, dict):
-                raw_keywords = match_data.get("keywords", [])
-                raw_patterns = match_data.get("patterns", [])
-            else:
-                raw_keywords = []
-                raw_patterns = []
-
-            if isinstance(raw_keywords, str):
-                raw_keywords = [raw_keywords]
-            keywords = _dedupe_strings([*raw_keywords, *_string_list(fm.get("keywords"))])
-
-            if isinstance(raw_patterns, str):
-                raw_patterns = [raw_patterns]
-            patterns = _dedupe_strings([*raw_patterns, *_string_list(fm.get("patterns"))])
-
-            skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
-            lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
-            description = fm.get("description") if isinstance(fm.get("description"), str) else ""
-            when_to_use = fm.get("when_to_use") if isinstance(fm.get("when_to_use"), str) else ""
-            metadata_value = fm.get("metadata")
-            metadata = metadata_value if isinstance(metadata_value, dict) else {}
-            tags = _string_list(metadata.get("tags"))
-            harness_restrict = _string_list(metadata.get("harness"))
-
-            _raw_sc = (
-                match_data.get("session_categories") or [] if isinstance(match_data, dict) else []
-            )
-            session_categories = _dedupe_strings(_string_list(_raw_sc))
-
-            if not keywords and not patterns and not skill_name:
-                continue
-
-            title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
-            title = title_match.group(1).strip() if title_match else f.stem
-
-            lessons.append(
-                {
-                    "path": str(f),
-                    "title": title,
-                    "id": lesson_id,
-                    "keywords": keywords,
-                    "patterns": patterns,
-                    "skill_name": skill_name,
-                    "description": description,
-                    "when_to_use": when_to_use,
-                    "tags": tags,
-                    "harness_restrict": harness_restrict,
-                    "session_categories": session_categories,
-                    "is_skill": f.name == "SKILL.md" or skill_name is not None,
-                    "body": body,
-                    "n_keywords": len(keywords),
-                }
-            )
+    _prune_missing_from_cache(seen_paths)
+    _save_disk_cache()
     return lessons
 
 
