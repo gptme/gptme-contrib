@@ -21,6 +21,7 @@ import functools
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -175,10 +176,15 @@ class VoiceNode:
                 mic_started = True
                 speaker.start_stream()
                 speaker_started = True
-                await asyncio.gather(
-                    self._send_loop(ws, mic),
-                    self._recv_loop(ws, speaker),
-                )
+                send_task = asyncio.create_task(self._send_loop(ws, mic))
+                recv_task = asyncio.create_task(self._recv_loop(ws, speaker))
+                try:
+                    await asyncio.gather(send_task, recv_task)
+                finally:
+                    for task in (send_task, recv_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(send_task, recv_task, return_exceptions=True)
             finally:
                 _close_stream(speaker, speaker_started)
         finally:
@@ -245,11 +251,20 @@ class VoiceNode:
                     connected_at = time.monotonic()
                     await self._session(ws)
             except (ConnectionClosed, WebSocketException) as exc:
-                error = (logging.WARNING, f"disconnected: {exc}")
+                error = (
+                    logging.WARNING,
+                    f"disconnected: {_redact_userinfo_in_text(str(exc), self.server_url)}",
+                )
             except OSError as exc:
-                error = (logging.WARNING, f"connection error: {exc}")
+                error = (
+                    logging.WARNING,
+                    f"connection error: {_redact_userinfo_in_text(str(exc), self.server_url)}",
+                )
             except Exception as exc:  # noqa: BLE001
-                error = (logging.ERROR, f"unexpected error: {exc}")
+                error = (
+                    logging.ERROR,
+                    f"unexpected error: {_redact_userinfo_in_text(str(exc), self.server_url)}",
+                )
             if self._running:
                 backoff = _next_backoff(backoff, connected_at)
                 if error is not None:
@@ -296,6 +311,9 @@ async def _async_main(server_url: str, node_name: str) -> None:
         node.cleanup()
 
 
+_USERINFO_IN_TEXT = re.compile(r"(://)([^/@\s]+)@")
+
+
 def _redact_url_userinfo(server_url: str) -> str:
     """Hide credentials from a URL before writing it to logs."""
     parsed = urlparse(server_url)
@@ -308,6 +326,15 @@ def _redact_url_userinfo(server_url: str) -> str:
     if parsed.port is not None:
         hostname = f"{hostname}:{parsed.port}"
     return parsed._replace(netloc=f"***@{hostname}").geturl()
+
+
+def _redact_userinfo_in_text(text: str, server_url: str = "") -> str:
+    """Hide URL userinfo in free-form log/exception text."""
+    if server_url:
+        redacted = _redact_url_userinfo(server_url)
+        if redacted != server_url:
+            text = text.replace(server_url, redacted)
+    return _USERINFO_IN_TEXT.sub(r"\1***@", text)
 
 
 def _warn_for_insecure_remote_url(server_url: str) -> None:

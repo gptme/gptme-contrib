@@ -217,6 +217,27 @@ class TestTransportWarning:
         assert "secret" not in caplog.text
         assert "wss://***@example.com:8443/local" in caplog.text
 
+    @pytest.mark.asyncio
+    async def test_disconnect_log_redacts_userinfo(self, caplog):
+        url = "wss://user:secret@example.com:8443/local"
+        node = _make_node(url)
+
+        async def stop_on_sleep(_delay):
+            node.stop()
+
+        with (
+            patch(
+                "gptme_voice_node.node.websockets.connect",
+                side_effect=OSError(f"failed to connect to {url}"),
+            ),
+            patch("gptme_voice_node.node.asyncio.sleep", side_effect=stop_on_sleep),
+        ):
+            await node.run_forever()
+
+        assert "secret" not in caplog.text
+        assert "user:secret" not in caplog.text
+        assert "wss://***@example.com:8443/local" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Stop / cleanup
@@ -267,6 +288,36 @@ class TestLifecycle:
         mic.close.assert_called_once()
         speaker.close.assert_called_once()
         stream.stop_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_session_cancels_sibling_when_one_loop_fails(self):
+        node = _make_node()
+        mic = MagicMock()
+        speaker = MagicMock()
+        node._pa.open.side_effect = [mic, speaker]
+        recv_started = asyncio.Event()
+        recv_cancelled = asyncio.Event()
+
+        async def send_loop(*_args):
+            await recv_started.wait()
+            raise OSError("mic dead")
+
+        async def recv_loop(*_args):
+            recv_started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                recv_cancelled.set()
+                raise
+
+        with (
+            patch.object(node, "_send_loop", send_loop),
+            patch.object(node, "_recv_loop", recv_loop),
+        ):
+            with pytest.raises(OSError, match="mic dead"):
+                await asyncio.wait_for(node._session(AsyncMock()), timeout=1)
+
+        assert recv_cancelled.is_set()
 
     @pytest.mark.asyncio
     async def test_session_attempts_both_closes_when_one_close_fails(self, caplog):
