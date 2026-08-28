@@ -1,7 +1,6 @@
 import hashlib
 import json
 import logging
-import re
 import subprocess
 import time
 from collections.abc import Generator, Sequence
@@ -16,6 +15,7 @@ from chromadb import Collection
 from chromadb.api import ClientAPI
 from chromadb.config import Settings
 from chromadb.errors import NotFoundError
+from pathspec.patterns.gitignore.spec import GitIgnoreSpecPattern
 
 from ..cache import SmartRAGCache, CacheKey, CacheEntry
 from ..embeddings import (
@@ -28,27 +28,8 @@ from .document_processor import DocumentProcessor
 
 
 def _glob_match_path(path: str, pattern: str) -> bool:
-    """Match a path with ``**`` spanning zero or more directories."""
-    regex_parts: list[str] = []
-    i = 0
-    while i < len(pattern):
-        chunk = pattern[i:]
-        if chunk.startswith("**/"):
-            regex_parts.append("(?:.*/)?")
-            i += 3
-        elif chunk.startswith("**"):
-            regex_parts.append(".*")
-            i += 2
-        elif pattern[i] == "*":
-            regex_parts.append("[^/]*")
-            i += 1
-        elif pattern[i] == "?":
-            regex_parts.append("[^/]")
-            i += 1
-        else:
-            regex_parts.append(re.escape(pattern[i]))
-            i += 1
-    return re.fullmatch("".join(regex_parts), path) is not None
+    """Match a POSIX-style path with full git-wildmatch glob semantics."""
+    return GitIgnoreSpecPattern(pattern).match_file(path) is not None
 
 
 # HuggingFace namespaces used for sentence-transformer / embedding models.

@@ -108,6 +108,7 @@ def test_get_valid_files_honors_pattern_in_git_repo(tmp_path):
     markdown_files = indexer._get_valid_files(tmp_path, glob_pattern="**/*.md")
     named_files = indexer._get_valid_files(tmp_path, glob_pattern="**/named.md")
     python_files = indexer._get_valid_files(tmp_path, glob_pattern="src/**/*.py")
+    character_class_files = indexer._get_valid_files(tmp_path, glob_pattern="src/**/*.[p]y")
 
     assert markdown_files == {
         (tmp_path / "root.md").resolve(),
@@ -119,10 +120,12 @@ def test_get_valid_files_honors_pattern_in_git_repo(tmp_path):
         (tmp_path / "named.md").resolve(),
         (tmp_path / "docs" / "named.md").resolve(),
     }
-    assert python_files == {
+    expected_python_files = {
         (tmp_path / "src" / "root.py").resolve(),
         (tmp_path / "src" / "nested" / "child.py").resolve(),
     }
+    assert python_files == expected_python_files
+    assert character_class_files == expected_python_files
 
 
 def test_index_cli_exposes_file_limit_flag():
