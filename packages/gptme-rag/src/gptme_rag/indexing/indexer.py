@@ -524,6 +524,30 @@ class Indexer:
                                     e,
                                 )
                                 self.collection = peek
+                                # `peek` was fetched WITHOUT an embedding function, so it
+                                # carries Chroma's default EF (384-dim MiniLM).  Writing
+                                # through it would embed with the wrong model and blow up
+                                # with InvalidDimensionException against the stored 768-dim
+                                # vectors.  The stored model matches ours, so our EF is
+                                # known-compatible: bind it onto the handle Chroma refused
+                                # to bind it to.  Chroma rejected the EF *object identity*,
+                                # not the model.
+                                if (
+                                    self.embedding_function is not None
+                                    and not self._bind_embedding_function(peek)
+                                ):
+                                    # Could not rebind (Chroma internals changed).  Fall
+                                    # back to fail-loud: null the EF and record the stored
+                                    # model so add/search raise a clear RuntimeError
+                                    # instead of silently writing default-EF vectors.
+                                    logger.error(
+                                        "Could not rebind embedding function to preserved "
+                                        "collection %r; it is readable but not writable. "
+                                        "Re-index with --force-recreate to restore writes.",
+                                        collection_name,
+                                    )
+                                    self.embedding_function = None
+                                    self._stored_model_name = stored
                                 need_recreate = False
                             else:
                                 need_recreate = True
@@ -570,6 +594,35 @@ class Indexer:
         }
         if scoring_weights:
             self.scoring_weights.update(scoring_weights)
+
+    def _bind_embedding_function(self, collection) -> bool:
+        """Bind ``self.embedding_function`` onto an EF-less collection handle.
+
+        ``client.get_collection(name=...)`` returns a handle carrying Chroma's
+        *default* embedding function.  Writing through such a handle embeds with
+        the wrong model, which raises ``InvalidDimensionException`` against
+        vectors stored by a non-default model (768-dim ModernBERT vs 384-dim
+        MiniLM).  Callers must only use this after verifying the collection's
+        stored ``embedding_model`` matches the current one, so the EF is
+        known-compatible and Chroma's objection was to object identity, not to
+        the model.
+
+        Returns True when the binding is in place and verified, False when
+        Chroma's internals do not expose the attribute (version drift), so the
+        caller can fail loudly instead of writing wrong-dimension vectors.
+        """
+        assert self.embedding_function is not None, (
+            "callers must skip rebinding when the current EF is Chroma's default; "
+            "an EF-less handle is already correct in that case"
+        )
+        if not hasattr(collection, "_embedding_function"):
+            return False
+        try:
+            collection._embedding_function = self.embedding_function
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Rebinding embedding function failed: %s", exc)
+            return False
+        return getattr(collection, "_embedding_function", None) is self.embedding_function
 
     @property
     def embedding_model_name(self) -> str:

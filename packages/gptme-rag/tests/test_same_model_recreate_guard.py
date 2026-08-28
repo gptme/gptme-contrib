@@ -21,24 +21,41 @@ import logging
 from pathlib import Path
 
 import chromadb
+import pytest
 from chromadb.api.client import Client
 from chromadb.config import Settings
 from click.testing import CliRunner
 
 from gptme_rag.cli import cli
-from gptme_rag.indexing.indexer import Indexer
+from gptme_rag.indexing.document import Document
+from gptme_rag.indexing.indexer import Indexer, ModernBERTEmbedding
 
 UUID_DIR = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
-def _make_default_collection(persist_dir: Path, *, n_docs: int = 1) -> None:
+def _stub_modernbert(monkeypatch) -> None:
+    """Make ModernBERTEmbedding constructible without loading 768-dim weights.
+
+    Patching the class itself would break the ``isinstance`` checks the indexer
+    uses to name the current model, so stub the instance methods instead.
+    """
+    monkeypatch.setattr(ModernBERTEmbedding, "__init__", lambda self, **kw: None)
+    monkeypatch.setattr(
+        ModernBERTEmbedding,
+        "__call__",
+        lambda self, input: [[0.1] * 768 for _ in input],  # noqa: A002
+    )
+    monkeypatch.setattr(ModernBERTEmbedding, "is_msmarco", False, raising=False)
+
+
+def _make_default_collection(persist_dir: Path, *, n_docs: int = 1, model: str = "default") -> None:
     settings = Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False)
     client = chromadb.PersistentClient(path=str(persist_dir), settings=settings)
     col = client.create_collection(
         name="default",
         metadata={
             "hnsw:space": "cosine",
-            "embedding_model": "default",
+            "embedding_model": model,
             "embedding_backend": "default",
         },
     )
@@ -176,3 +193,102 @@ def test_gc_orphans_cli_defaults_to_dry_run(tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert not orphan.exists()
+
+
+def test_preserved_collection_keeps_custom_embedding_function(tmp_path, monkeypatch):
+    """A preserved handle must write with OUR embedder, not Chroma's default.
+
+    Regression: the preserve branch assigned the handle returned by
+    ``get_collection(name=...)`` — fetched deliberately without an embedding
+    function — straight to ``self.collection``. ``_add_documents`` calls
+    ``collection.add(documents=...)`` with no explicit ``embeddings=``, so that
+    handle embeds with Chroma's default 384-dim MiniLM and raises
+    InvalidDimensionException against 768-dim ModernBERT vectors. Preserving a
+    collection you can no longer write to is not preserving it.
+    """
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir, model="modernbert")
+
+    _stub_modernbert(monkeypatch)
+
+    real_get = Client.get_collection
+    calls = {"n": 0}
+
+    def boom(self, name, embedding_function=None, **kwargs):
+        calls["n"] += 1
+        if embedding_function is not None:
+            raise ValueError("Embedding function conflict")
+        return real_get(self, name, embedding_function=None, **kwargs)
+
+    monkeypatch.setattr(Client, "get_collection", boom)
+
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="modernbert",
+        collection_name="default",
+        allow_recreate=True,
+        force_recreate=False,
+    )
+
+    assert indexer.collection.count() == 1, "matching-model EF conflict wiped the collection"
+    assert indexer.collection._embedding_function is indexer.embedding_function, (
+        "preserved collection still carries Chroma's default embedder — writes "
+        "would embed at the wrong dimension"
+    )
+    assert indexer._stored_model_name is None, (
+        "rebinding succeeded, so the collection is writable; the read-only "
+        "fail-loud guard must not be armed"
+    )
+
+
+def test_preserve_fails_loud_when_rebinding_is_impossible(tmp_path, monkeypatch):
+    """If the EF cannot be rebound, arm the guard rather than write bad vectors.
+
+    Chroma internals are not API. If a future version drops the attribute we
+    bind to, the collection must become read-only with a clear RuntimeError
+    instead of silently embedding at the default dimension.
+    """
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir, model="modernbert")
+
+    _stub_modernbert(monkeypatch)
+    monkeypatch.setattr(Indexer, "_bind_embedding_function", lambda self, col: False)
+
+    real_get = Client.get_collection
+
+    def boom(self, name, embedding_function=None, **kwargs):
+        if embedding_function is not None:
+            raise ValueError("Embedding function conflict")
+        return real_get(self, name, embedding_function=None, **kwargs)
+
+    monkeypatch.setattr(Client, "get_collection", boom)
+
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="modernbert",
+        collection_name="default",
+        allow_recreate=True,
+        force_recreate=False,
+    )
+
+    assert indexer.collection.count() == 1, "fail-loud path must still preserve the data"
+    assert indexer._stored_model_name == "modernbert"
+    assert indexer.embedding_function is None
+    doc = Document(content="x", metadata={"source": "x.md"}, doc_id="x")
+    with pytest.raises(RuntimeError, match="stored embedding model"):
+        indexer.add_document(doc)
+
+
+def test_bind_embedding_function_reports_failure_on_unknown_handle():
+    """Version drift must be detectable so callers can fail loud, not silently."""
+    indexer = Indexer.__new__(Indexer)
+    indexer.embedding_function = object()
+
+    class Opaque:
+        __slots__ = ()
+
+    assert indexer._bind_embedding_function(Opaque()) is False
