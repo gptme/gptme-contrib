@@ -273,8 +273,13 @@ def index(
 
         logger.debug("Loaded %d existing files from index", len(existing_files))
 
-        # First, collect all documents and filter for new/modified
+        # First, collect all documents and filter for new/modified.
+        # cleanup_hashes: source -> current hash when that generation is already
+        # stored but leftover older hashes remain (add succeeded, delete failed).
+        # Those sources must not be re-added — chunk IDs include content_hash, so
+        # a second add of the same bytes collides — only the stale IDs are deleted.
         all_documents = []
+        cleanup_hashes: dict[str, object] = {}
         with console.status("Collecting documents...") as status:
             for path in paths:
                 if path.is_file():
@@ -310,6 +315,13 @@ def index(
                                 if stored_hashes == {current_hash}:
                                     logger.debug("Unchanged file: %s", abs_source)
                                     continue
+                                if current_hash in stored_hashes:
+                                    cleanup_hashes[abs_source] = current_hash
+                                    logger.debug(
+                                        "Current generation already indexed: %s",
+                                        abs_source,
+                                    )
+                                    continue
                                 logger.debug(
                                     "Modified file: %s (content hash changed)",
                                     abs_source,
@@ -340,8 +352,39 @@ def index(
 
                 all_documents.extend(filtered_documents)
 
+        def stale_ids_for(hash_by_source: dict[str, object]) -> list[str]:
+            return [
+                doc.doc_id
+                for doc in existing_docs
+                if doc.doc_id
+                and str(doc.metadata.get("source", "")) in hash_by_source
+                and doc.metadata.get("content_hash")
+                != hash_by_source.get(str(doc.metadata.get("source", "")))
+            ]
+
+        leftover_stale_ids = stale_ids_for(cleanup_hashes)
+
         if not all_documents:
-            console.print("No new or modified documents to index", style="yellow")
+            if leftover_stale_ids:
+                try:
+                    indexer.collection.delete(ids=leftover_stale_ids)
+                except Exception as delete_err:
+                    logger.warning(
+                        "Failed to delete %d leftover stale chunk(s): %s",
+                        len(leftover_stale_ids),
+                        delete_err,
+                    )
+                    console.print(
+                        "⚠️ Leftover stale chunks remain; they will be removed on the next run",
+                        style="yellow",
+                    )
+                else:
+                    console.print(
+                        f"✅ Removed leftover stale chunks for {len(cleanup_hashes)} files",
+                        style="green",
+                    )
+            else:
+                console.print("No new or modified documents to index", style="yellow")
             return
 
         # Then process them with a progress bar. Preserve the previous chunks until
@@ -359,14 +402,7 @@ def index(
             str(doc.metadata.get("source", "")): doc.metadata.get("content_hash")
             for doc in all_documents
         }
-        stale_ids = [
-            doc.doc_id
-            for doc in existing_docs
-            if doc.doc_id
-            and str(doc.metadata.get("source", "")) in sources
-            and doc.metadata.get("content_hash")
-            != current_hash_by_source.get(str(doc.metadata.get("source", "")))
-        ]
+        stale_ids = stale_ids_for(current_hash_by_source) + leftover_stale_ids
 
         with tqdm(
             total=n_chunks,
@@ -382,8 +418,8 @@ def index(
                 indexer.collection.delete(ids=stale_ids)
             except Exception as delete_err:
                 # Add already succeeded. Failing the command here would hide that
-                # the new generation is indexed; mixed leftover hashes are treated
-                # as modified on the next run, so a retry self-heals.
+                # the new generation is indexed; a retry sees the current hash
+                # already stored and deletes leftover older IDs without re-adding.
                 logger.warning(
                     "Indexed replacements but failed to delete %d stale chunk(s): %s",
                     len(stale_ids),

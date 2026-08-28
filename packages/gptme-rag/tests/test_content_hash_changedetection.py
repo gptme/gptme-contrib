@@ -219,6 +219,8 @@ def test_index_retry_after_crash_does_not_delete_replacement(tmp_path):
 
     second = _run_index(runner, index_dir, [src])
     assert second.exit_code == 0, second.output
+    assert "Removed leftover stale chunks" in _plain(second.output), second.output
+    assert "Successfully indexed" not in _plain(second.output), second.output
 
     chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
     client = chromadb.PersistentClient(
