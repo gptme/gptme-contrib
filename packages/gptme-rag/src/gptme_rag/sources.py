@@ -39,6 +39,11 @@ from pathlib import Path
 from typing import Any
 
 from .indexing.document import Document
+from .knowledge_source import (
+    KnowledgeEntrySource,
+    collect_knowledge_entry_documents,
+    default_knowledge_entries_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -358,4 +363,7 @@ __all__ = [
     "SourceRegistry",
     "de_accumulate_transcript",
     "collect_voice_call_documents",
+    "KnowledgeEntrySource",
+    "collect_knowledge_entry_documents",
+    "default_knowledge_entries_path",
 ]
