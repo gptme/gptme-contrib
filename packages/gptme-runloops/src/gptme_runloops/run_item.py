@@ -94,12 +94,14 @@ from gptme_runloops.merge_lifecycle import (
     WorkItem,
     run_merge_lifecycle,
 )
+from gptme_runloops.pm_bandit import PmModelBandit
 from gptme_runloops.pm_dispatch import (
     DISPATCH_COOLDOWN_DIR_ENV,
     EFFECT_NONE,
     EFFECT_OBSERVED,
     EFFECT_UNKNOWN,
     append_full_ledger_entry,
+    classify_item_work_type,
     derive_slot_key,
     is_direct_mention,
 )
@@ -2622,6 +2624,97 @@ def _read_monitoring_rules(config: RunItemConfig) -> str:
     return ""
 
 
+def _shadow_bandit_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """True when Stage 1 shadow observations are requested.
+
+    Live slots only see this if the launcher forwards ``BOB_PM_BANDIT_SHADOW``
+    via ``systemd-run --setenv``. An orchestrator ``Environment=`` line is
+    inert for transient workers unless forwarded — that is how gptme-contrib
+    #1506/#1504 landed, accumulated zero observations, and were stripped as
+    dead code by #1519.
+    """
+    source = env if env is not None else os.environ
+    return source.get("BOB_PM_BANDIT_SHADOW", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _load_shadow_bandit(config: RunItemConfig) -> PmModelBandit | None:
+    """Load PmModelBandit for observation-only recording. Never changes routing."""
+    if not _shadow_bandit_enabled():
+        return None
+    try:
+        pm_state_dir = Path(config.state_dir) / "pm-dispatch"
+        bandit = PmModelBandit(state_dir=str(pm_state_dir))
+        _log("BOB_PM_BANDIT_SHADOW=1: bandit loaded (recording observations only)")
+        return bandit
+    except Exception as exc:
+        _log(f"WARN: failed to load bandit: {exc}")
+        return None
+
+
+def _log_shadow_bandit_choice(
+    bandit: PmModelBandit,
+    *,
+    item_types: Sequence[str],
+    repo: str,
+    model: str,
+) -> None:
+    """Log what the bandit would pick. Does not override the dispatched model."""
+    try:
+        work_type = classify_item_work_type(list(item_types), repo=repo)
+        available = [
+            m for m in (model, os.environ.get("BOB_PM_FAST_LANE_MODEL", "")) if m
+        ]
+        if not available:
+            return
+        bandit_model = bandit.resolve_model(work_type, available)
+        _log(
+            f"BOB_PM_BANDIT_SHADOW: work_type={work_type} "
+            f"actual_model={model or '-'} bandit_model={bandit_model}"
+        )
+    except Exception as exc:
+        _log(f"WARN: bandit shadow logging failed: {exc}")
+
+
+def _record_shadow_bandit_outcome(
+    bandit: PmModelBandit,
+    *,
+    item_types: Sequence[str],
+    repo: str,
+    model: str,
+    item_effect: str,
+) -> None:
+    """Record a Stage 1 outcome for the model that actually ran.
+
+    Skip ``EFFECT_UNKNOWN``: a biased zero is worse than no signal for work
+    types (e.g. master_ci_failure) where observability is structurally absent.
+    """
+    try:
+        work_type = classify_item_work_type(list(item_types), repo=repo)
+        if item_effect == EFFECT_UNKNOWN:
+            _log(
+                "BOB_PM_BANDIT_SHADOW: outcome skipped (unknown effect): "
+                f"work_type={work_type}, model={model}"
+            )
+            return
+        if not model:
+            _log(
+                "BOB_PM_BANDIT_SHADOW: outcome skipped (no model): "
+                f"work_type={work_type}, effect={item_effect}"
+            )
+            return
+        reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
+        bandit.record_outcome(work_type, model, reward)
+        _log(
+            f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
+        )
+    except Exception as exc:
+        _log(f"WARN: bandit outcome recording failed: {exc}")
+
+
 def _ambient_env(config: RunItemConfig, backend: str, model: str) -> dict[str, str]:
     """p-m.sh:417-422 — harness tag for ambient-memory injections."""
     if not config.ambient_harness_env:
@@ -2729,6 +2822,10 @@ def run_work_file(
             pass
 
         ambient = _ambient_env(config, backend, model)
+        # Stage 1 (shadow mode): load the bandit but do not use it for routing.
+        # Gated by BOB_PM_BANDIT_SHADOW; live only when the slot launcher
+        # forwards that env into the transient unit.
+        bandit = _load_shadow_bandit(config)
         if hooks.sysprompt_builder is not None:
             _log("Building system prompt...")
             env = os.environ.copy()
@@ -2810,6 +2907,14 @@ def run_work_file(
             )
             _log(f"Prompt: {len(plan.prompt)} chars")
 
+            if bandit is not None:
+                _log_shadow_bandit_choice(
+                    bandit,
+                    item_types=item.types,
+                    repo=item.repo,
+                    model=model,
+                )
+
             if rate_limited:
                 _log(f"Rate-limited: skipping item {index} and remaining items")
                 break
@@ -2853,9 +2958,16 @@ def run_work_file(
                     infra_failure = item_outcome.infra_failure
                 if item_outcome.exit_code != 0 and overall_exit == 0:
                     overall_exit = item_outcome.exit_code
-                item_effects.append(
-                    run_post_session(plan, item, item_outcome, config, hooks)
-                )
+                item_effect = run_post_session(plan, item, item_outcome, config, hooks)
+                item_effects.append(item_effect)
+                if bandit is not None:
+                    _record_shadow_bandit_outcome(
+                        bandit,
+                        item_types=item.types,
+                        repo=item.repo,
+                        model=model,
+                        item_effect=item_effect,
+                    )
             finally:
                 # bash EXIT-trap parity: the claim is abandoned on every exit
                 # path, including SIGTERM (the CLI converts it to SystemExit
