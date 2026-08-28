@@ -208,8 +208,8 @@ def verify_finding(
         severity = finding.severity  # fall back to generator's grade on bad output
 
     return VerifierVerdict(
-        real=bool(data.get("real", True)),
-        worth_fixing=bool(data.get("worth_fixing", True)),
+        real=data.get("real") is True,
+        worth_fixing=data.get("worth_fixing") is True,
         severity=severity,
         rationale=str(data.get("rationale", "")),
     )
@@ -224,6 +224,7 @@ def _append_suppressed(
     verdict: VerifierVerdict,
     repo_id: str,
     head_sha: str,
+    generator_severity: Severity,
 ) -> None:
     """Append a dropped finding to the shadow ledger (JSONL, one record per line)."""
     record = {
@@ -234,7 +235,7 @@ def _append_suppressed(
         "title": finding.title,
         "file_path": finding.file_path,
         "line_range": finding.line_range,
-        "generator_severity": finding.severity.value,
+        "generator_severity": generator_severity.value,
         "verifier_severity": verdict.severity.value,
         "real": verdict.real,
         "worth_fixing": verdict.worth_fixing,
@@ -331,9 +332,17 @@ def verify_artifact(
             if verbose:
                 print(f"  [CONFIRMED] {finding.title[:60]} ({verdict.severity.value})")
         else:
+            generator_severity = finding.severity
             finding.disposition = Disposition.dropped
             finding.severity = verdict.severity  # record re-grade even for dropped
-            _append_suppressed(shadow_ledger, finding, verdict, repo_id, head_sha)
+            _append_suppressed(
+                shadow_ledger,
+                finding,
+                verdict,
+                repo_id,
+                head_sha,
+                generator_severity,
+            )
             dropped += 1
             reason = "not real" if not verdict.real else "not worth fixing"
             if verbose:

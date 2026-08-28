@@ -227,6 +227,29 @@ class TestVerifyFinding:
         # Bad severity falls back to original finding severity
         assert verdict.severity == Severity.medium
 
+    @pytest.mark.parametrize(
+        "model_output",
+        [
+            {"severity": "low", "rationale": "Missing verdicts."},
+            {
+                "real": "false",
+                "worth_fixing": "false",
+                "severity": "low",
+                "rationale": "Wrong boolean types.",
+            },
+        ],
+    )
+    def test_invalid_boolean_verdicts_do_not_confirm(self, model_output):
+        finding = _make_finding()
+        with patch(
+            "gptme_runloops.pr_review.verifier._invoke_verifier_model",
+            return_value=json.dumps(model_output),
+        ):
+            verdict = verify_finding(finding, SAMPLE_DIFF, Path("/tmp"))
+
+        assert verdict.real is False
+        assert verdict.worth_fixing is False
+
 
 # ── verify_artifact ───────────────────────────────────────────────────────────
 
@@ -331,6 +354,8 @@ class TestVerifyArtifact:
             assert len(records) == 1
             r = records[0]
             assert r["title"] == "Fake finding"
+            assert r["generator_severity"] == "medium"
+            assert r["verifier_severity"] == "info"
             assert r["real"] is False
             assert r["worth_fixing"] is False
             assert "rationale" in r
