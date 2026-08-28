@@ -407,8 +407,15 @@ class Indexer:
                 metadata = self.collection.metadata or {}
                 stored_model = metadata.get("embedding_model", "unknown")
 
-                if stored_model != current_model or force_recreate:
-                    if not allow_recreate and not force_recreate:
+                if force_recreate:
+                    logger.info(
+                        "Force recreate requested (stored: %r, current: %r)",
+                        stored_model,
+                        current_model,
+                    )
+                    need_recreate = True
+                elif stored_model != current_model:
+                    if not allow_recreate:
                         # Read-only callers (search, status) must never wipe the index.
                         # Warn loudly and keep the existing collection as-is.
                         logger.warning(
@@ -426,11 +433,7 @@ class Indexer:
                         self.embedding_function = None
                         self._stored_model_name = stored_model
                         need_recreate = False
-                    elif (
-                        _openrouter_fallback
-                        and not force_recreate
-                        and _looks_like_openrouter_model(stored_model)
-                    ):
+                    elif _openrouter_fallback and _looks_like_openrouter_model(stored_model):
                         # OPENROUTER_API_KEY is missing, so we fell back to ModernBERT,
                         # but the existing collection was indexed with an OpenRouter model.
                         # Silently recreating would destroy the user's data — raise a clear
@@ -447,7 +450,9 @@ class Indexer:
                         )
                     else:
                         logger.info(
-                            f"Model mismatch (stored: {stored_model}, current: {current_model}) or force recreate"
+                            "Model mismatch (stored: %r, current: %r)",
+                            stored_model,
+                            current_model,
                         )
                         need_recreate = True
 
@@ -496,9 +501,32 @@ class Indexer:
                             self._stored_model_name = _stored
                         need_recreate = False
                 else:
-                    # Collection doesn't exist or other error
-                    logger.debug(f"Collection access error: {e}")
-                    need_recreate = True
+                    # Collection doesn't exist *or* Chroma raised an EF-object
+                    # conflict even though stored_model == current_model.
+                    # Peek without an embedding function before wiping: a matching
+                    # collection must be preserved (the 84k-chunk ambient-memory wipe).
+                    logger.debug("Collection access error: %s", e)
+                    if force_recreate:
+                        need_recreate = True
+                    else:
+                        try:
+                            peek = self.client.get_collection(name=collection_name)
+                        except Exception:
+                            need_recreate = True
+                        else:
+                            stored = (peek.metadata or {}).get("embedding_model", "unknown")
+                            if stored == current_model:
+                                logger.warning(
+                                    "Collection %r exists with matching model %r but could not "
+                                    "be rebound (%s); preserving it instead of recreating",
+                                    collection_name,
+                                    stored,
+                                    e,
+                                )
+                                self.collection = peek
+                                need_recreate = False
+                            else:
+                                need_recreate = True
 
         if need_recreate:
             # Delete if exists

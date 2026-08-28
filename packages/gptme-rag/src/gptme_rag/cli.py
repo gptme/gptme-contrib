@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from .benchmark import RagBenchmark
 from .indexing.document import Document
+from .indexing.gc import gc_orphan_segment_dirs
 from .indexing.indexer import Indexer
 from .indexing.watcher import FileWatcher
 from .query.context_assembler import ContextAssembler
@@ -827,6 +828,37 @@ def watch(
     except Exception as e:
         console.print(f"❌ Error watching directory: {e}", style="red")
         console.print_exception()
+
+
+@cli.command("gc-orphans")
+@click.option(
+    "--persist-dir",
+    type=click.Path(path_type=Path),
+    default=default_persist_dir,
+    help="Directory to persist the index",
+)
+@click.option(
+    "--apply",
+    is_flag=True,
+    help="Actually delete orphan UUID dirs. Default is dry-run.",
+)
+def gc_orphans(persist_dir: Path, apply: bool):
+    """Remove leftover Chroma segment dirs not listed in chroma.sqlite3.
+
+    Recreating a collection leaves UUID-named HNSW folders on disk. This
+    command lists them (dry-run) or deletes them (--apply). Live segment
+    and collection dirs are never touched.
+    """
+    orphans = gc_orphan_segment_dirs(persist_dir, apply=apply)
+    if not orphans:
+        console.print("No orphan segment dirs", style="green")
+        return
+    mode = "Removed" if apply else "Would remove"
+    console.print(f"{mode} {len(orphans)} orphan dir(s):")
+    for path in orphans:
+        console.print(f"  {path.name}")
+    if not apply:
+        console.print("Dry-run. Pass --apply to delete.", style="yellow")
 
 
 @cli.command()
