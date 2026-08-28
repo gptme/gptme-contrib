@@ -193,16 +193,24 @@ class VoiceNode:
                 raw_msg = await ws.recv()
             except ConnectionClosed:
                 break
-            data = json.loads(raw_msg)
-            msg_type = data.get("type")
-            if msg_type == "audio":
-                self._playing = True
-                pcm = base64.b64decode(data["audio"])
-                await _run_audio_io(speaker_stream.write, pcm)
-            elif msg_type == "audio_end":
-                self._playing = False
-                self._play_ended_at = time.monotonic()
-                log.debug("[%s] audio_end received", self.node_name)
+            try:
+                data = json.loads(raw_msg)
+                if not isinstance(data, dict):
+                    raise TypeError("message must be a JSON object")
+                msg_type = data.get("type")
+                if msg_type == "audio":
+                    audio = data.get("audio")
+                    if not isinstance(audio, str):
+                        raise TypeError("audio message must contain a string payload")
+                    pcm = base64.b64decode(audio, validate=True)
+                    self._playing = True
+                    await _run_audio_io(speaker_stream.write, pcm)
+                elif msg_type == "audio_end":
+                    self._playing = False
+                    self._play_ended_at = time.monotonic()
+                    log.debug("[%s] audio_end received", self.node_name)
+            except (ValueError, TypeError) as exc:
+                log.warning("[%s] ignoring malformed message: %s", self.node_name, exc)
 
     # --- Reconnect loop ---
 
@@ -242,8 +250,8 @@ class VoiceNode:
                     backoff,
                 )
             if self._running:
-                await asyncio.sleep(backoff)
                 backoff = _next_backoff(backoff, connected_at)
+                await asyncio.sleep(backoff)
 
     def stop(self) -> None:
         """Signal the node to shut down cleanly."""

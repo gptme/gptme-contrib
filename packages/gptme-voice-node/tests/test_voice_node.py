@@ -129,6 +129,27 @@ class TestRecvLoop:
         assert node._playing is False
         assert node._play_ended_at > 0
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "not json",
+            json.dumps(["not", "an object"]),
+            json.dumps({"type": "audio"}),
+            json.dumps({"type": "audio", "audio": "not base64!"}),
+        ],
+    )
+    async def test_malformed_message_is_ignored(self, message, caplog):
+        node = _make_node()
+        mock_ws = AsyncMock()
+        mock_ws.recv.side_effect = [message, ConnectionClosed(None, None)]
+        speaker = MagicMock()
+
+        await node._recv_loop(mock_ws, speaker)
+
+        speaker.write.assert_not_called()
+        assert "ignoring malformed message" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Transport safety warning
@@ -226,3 +247,30 @@ class TestBackoff:
 
         with patch("gptme_voice_node.node.time.monotonic", return_value=100.0):
             assert _next_backoff(8, connected_at=60.0) == BACKOFF_INITIAL
+
+    @pytest.mark.asyncio
+    async def test_stable_session_uses_reset_delay_for_immediate_retry(self):
+        from gptme_voice_node.node import BACKOFF_INITIAL
+
+        node = _make_node()
+
+        class Connection:
+            async def __aenter__(self):
+                return AsyncMock()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        async def stop_on_sleep(delay):
+            assert delay == BACKOFF_INITIAL
+            node.stop()
+
+        with (
+            patch(
+                "gptme_voice_node.node.websockets.connect", return_value=Connection()
+            ),
+            patch.object(node, "_session", new=AsyncMock()),
+            patch("gptme_voice_node.node._next_backoff", return_value=BACKOFF_INITIAL),
+            patch("gptme_voice_node.node.asyncio.sleep", side_effect=stop_on_sleep),
+        ):
+            await node.run_forever()
