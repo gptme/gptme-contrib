@@ -286,13 +286,15 @@ class MavsdkAdapter:
         pos = self._position
         if not pos:
             return {"error": "No position fix yet; cannot goto."}
+        if self._heading_deg is None:
+            return {"error": "No heading fix yet; cannot goto safely."}
         home_abs = pos["absolute_altitude_m"] - pos["relative_altitude_m"]
         target_abs = (
             home_abs + altitude_m
             if altitude_m is not None
             else pos["absolute_altitude_m"]
         )
-        yaw = self._heading_deg if self._heading_deg is not None else float("nan")
+        yaw = self._heading_deg
         await self._run_action(
             self._system.action.goto_location(
                 latitude_deg, longitude_deg, target_abs, yaw

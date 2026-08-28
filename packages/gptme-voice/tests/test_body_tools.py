@@ -383,9 +383,11 @@ def test_mavsdk_move_and_turn_require_heading(loop):
 
     move = loop.run_until_complete(adapter.move(1.0, 0.0, 0.0))
     turn = loop.run_until_complete(adapter.turn(90.0))
+    goto = loop.run_until_complete(adapter.goto(47.1, 8.1, 10.0))
 
     assert "heading fix" in move["error"]
     assert "heading fix" in turn["error"]
+    assert "heading fix" in goto["error"]
 
 
 def test_mavsdk_action_timeout(loop):

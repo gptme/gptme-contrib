@@ -50,6 +50,28 @@ from .twilio_integration import (
 )
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
 
+
+def _websocket_peer_host(websocket) -> str | None:
+    """Peer host from a Starlette (or mock) websocket.
+
+    Starlette's ``websocket.client`` is ``Address(host, port)`` — a namedtuple
+    with a ``.host`` field that is also a plain ``(host, port)`` tuple. ASGI
+    scope values and some test doubles are just the tuple. Accept both; never
+    assume ``.host`` exists.
+    """
+    client = getattr(websocket, "client", None)
+    if client is None:
+        return None
+    host = getattr(client, "host", None)
+    if isinstance(host, str) and host:
+        return host
+    if isinstance(client, tuple | list) and client:
+        first = client[0]
+        if isinstance(first, str) and first:
+            return first
+    return None
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -809,8 +831,7 @@ class VoiceServer:
                 caller_id or "unknown",
             )
             return None
-        client = getattr(websocket, "client", None)
-        host = getattr(client, "host", None)
+        host = _websocket_peer_host(websocket)
         if host in {"127.0.0.1", "::1", "localhost"}:
             return self.body_adapter
         logger.warning(

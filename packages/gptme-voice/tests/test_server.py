@@ -142,15 +142,26 @@ class _DummyToolBridge:
 def test_body_adapter_only_reaches_trusted_transports(monkeypatch) -> None:
     monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
     server = VoiceServer()
-    remote_client = type("Client", (), {"host": "203.0.113.1"})()
-    local_client = type("Client", (), {"host": "127.0.0.1"})()
-    remote = type("WebSocket", (), {"client": remote_client})()
-    loopback = type("WebSocket", (), {"client": local_client})()
+    # Starlette's websocket.client is Address(host, port) — a (host, port) tuple.
+    remote = type("WebSocket", (), {"client": ("203.0.113.1", 443)})()
+    loopback = type("WebSocket", (), {"client": ("127.0.0.1", 12345)})()
+    ipv6 = type("WebSocket", (), {"client": ("::1", 12345)})()
+    named = type(
+        "WebSocket", (), {"client": type("Client", (), {"host": "127.0.0.1"})()}
+    )()
 
     assert server._body_adapter_for_websocket(remote, transport="local") is None
     assert server._body_adapter_for_websocket(remote, transport="browser") is None
     assert (
         server._body_adapter_for_websocket(loopback, transport="local")
+        is server.body_adapter
+    )
+    assert (
+        server._body_adapter_for_websocket(ipv6, transport="browser")
+        is server.body_adapter
+    )
+    assert (
+        server._body_adapter_for_websocket(named, transport="local")
         is server.body_adapter
     )
     # Twilio is fail-closed: no allowlist means no body tools, even though
