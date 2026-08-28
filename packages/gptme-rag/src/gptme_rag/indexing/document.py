@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,11 +45,17 @@ class Document:
             Document instances, either a single document or multiple chunks
         """
         last_modified = datetime.fromtimestamp(path.stat().st_mtime)
+        # Content hash is the primary change-detection key: it survives mtime-only
+        # rewrites (git restore/checkout, worktree churn) that would otherwise force
+        # a full re-embed of an unchanged file. Falls back to mtime in cli.py when a
+        # stored document predates this field.
+        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         base_metadata = {
             "source": str(path),
             "filename": path.name,
             "extension": path.suffix,
             "last_modified": last_modified.isoformat(),
+            "content_hash": content_hash,
         }
 
         if processor is None:

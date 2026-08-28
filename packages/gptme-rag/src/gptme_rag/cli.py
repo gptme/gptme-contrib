@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 import click
 from rich.console import Console
@@ -240,20 +241,26 @@ def index(
         existing_docs = indexer.get_all_documents()
         logger.debug("Found %d existing documents in index", len(existing_docs))
 
-        existing_files = {}
+        # Map each indexed source to its stored change-detection fingerprint:
+        # content_hash (primary) plus last_modified (fallback for legacy docs that
+        # predate content hashing). Stored per-chunk but read once per source.
+        existing_files: dict[str, dict[str, object]] = {}
         for doc in existing_docs:
             if "source" in doc.metadata:
                 abs_path = os.path.abspath(doc.metadata["source"])
+                entry = existing_files.setdefault(abs_path, {})
+                if "content_hash" in doc.metadata:
+                    entry["content_hash"] = doc.metadata["content_hash"]
                 last_modified = doc.metadata.get("last_modified")
                 if last_modified:
                     try:
                         # Parse ISO format timestamp to float
-                        existing_files[abs_path] = datetime.fromisoformat(last_modified).timestamp()
+                        entry["last_modified"] = datetime.fromisoformat(last_modified).timestamp()
                     except ValueError:
                         logger.warning("Invalid last_modified format: %s", last_modified)
-                        existing_files[abs_path] = 0
+                        entry["last_modified"] = 0
                 else:
-                    existing_files[abs_path] = 0
+                    entry.setdefault("last_modified", 0)
                 # logger.debug("Existing file: %s", abs_path)  # Too spammy
 
         logger.debug("Loaded %d existing files from index", len(existing_files))
@@ -277,19 +284,41 @@ def index(
                         # Resolve to absolute path for consistent comparison
                         abs_source = os.path.abspath(source)
                         doc.metadata["source"] = abs_source
-                        current_mtime = os.path.getmtime(abs_source)
 
-                        # Include if file is new or modified
-                        if abs_source not in existing_files:
+                        existing = existing_files.get(abs_source)
+                        if existing is None:
                             logger.debug("New file: %s", abs_source)
                             filtered_documents.append(doc)
-                        # Round to microseconds (6 decimal places) for comparison
-                        elif round(current_mtime, 6) > round(existing_files[abs_source], 6):
+                            continue
+
+                        # Primary key: content hash. An unchanged hash means the file
+                        # is unchanged even if mtime moved (git restore/checkout,
+                        # worktree churn) — skip it instead of re-embedding.
+                        current_hash = doc.metadata.get("content_hash")
+                        if current_hash is not None:
+                            stored_hash = existing.get("content_hash")
+                            if stored_hash is not None:
+                                if current_hash == stored_hash:
+                                    logger.debug("Unchanged file: %s", abs_source)
+                                    continue
+                                logger.debug(
+                                    "Modified file: %s (content hash changed)",
+                                    abs_source,
+                                )
+                                filtered_documents.append(doc)
+                                continue
+                            # Stored doc predates content hashing: fall through to mtime.
+
+                        # Fallback for legacy stored docs without content_hash:
+                        # compare mtime (rounded to microseconds).
+                        current_mtime = os.path.getmtime(abs_source)
+                        stored_mtime = cast(float, existing.get("last_modified", 0))
+                        if round(current_mtime, 6) > round(stored_mtime, 6):
                             logger.debug(
                                 "Modified file: %s (current: %s, stored: %s)",
                                 abs_source,
                                 current_mtime,
-                                existing_files[abs_source],
+                                stored_mtime,
                             )
                             filtered_documents.append(doc)
                         else:
