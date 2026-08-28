@@ -2930,6 +2930,21 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                         value = normalize_state(value, warn=False)
 
                     post.metadata[field] = value
+                    # When --set wait is used on a recurrence-reset task (state=waiting,
+                    # wait_kind=machine, waiting_for="next recurrence gate (wait: ...)"),
+                    # keep waiting_for in sync with the new wait value so
+                    # task_has_waiting_blocker can still match the recurrence-gate pattern.
+                    # Without this, a manual wait adjustment permanently traps the task.
+                    if field == "wait" and value is not None:
+                        import re as _re
+
+                        _wf = post.metadata.get("waiting_for", "")
+                        if (
+                            post.metadata.get("wait_kind") == "machine"
+                            and post.metadata.get("state") == "waiting"
+                            and _re.match(r"^next recurrence gate \(wait: ", _wf)
+                        ):
+                            post.metadata["waiting_for"] = f"next recurrence gate (wait: {value})"
         # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
         # AND waiting_for is either already present or being set in the same edit.
         # Guarding on waiting_for prevents an injected waiting_since from triggering
@@ -3099,6 +3114,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     post.metadata["waiting_since"] = datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
                     )
+                    # A stale probe from a previous waiting cycle no longer describes
+                    # the new recurrence gate. Clear it so task_has_waiting_blocker
+                    # uses the wait: date rather than the old probe exit-code.
+                    post.metadata.pop("probe", None)
                     if not _completed_explicitly_set_global:
                         post.metadata.pop("completed", None)
                     with open(task.path, "w") as f:

@@ -600,3 +600,84 @@ def test_machine_expired_wait_with_human_waiting_for_stays_blocked(tmp_path: Pat
         "(waiting_for takes precedence over an expired time gate)"
     )
     assert not is_task_ready(task, {}), "machine task with human waiting_for must not be ready"
+
+
+def test_recur_reset_clears_stale_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recurring reset must clear a stale probe field.
+
+    A recurring task may previously have carried a machine probe (e.g. a CI check).
+    On the done→waiting reset that probe is no longer relevant and must be removed.
+    If kept, task_has_waiting_blocker evaluates the probe and the task never
+    auto-surfaces after the new recurrence gate expires.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    today = date.today().isoformat()
+    (tasks_dir / "probe-recur.md").write_text(
+        f"---\n"
+        f"state: active\n"
+        f"created: 2026-01-01\n"
+        f"wait: {today}\n"
+        f"recur: 7d\n"
+        f"probe: 'gh run view 123 --repo owner/repo --json conclusion -q .conclusion'\n"
+        f"wait_kind: machine\n"
+        f"---\n"
+        f"# probe-recur\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "probe-recur", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "probe-recur.md")
+    assert post.metadata["state"] == "waiting", "recurring task must reset to waiting"
+    assert "probe" not in post.metadata, (
+        "stale probe must be cleared on recurrence reset; "
+        "a leftover probe prevents task_has_waiting_blocker from releasing the task"
+    )
+
+
+def test_set_wait_on_recurrence_gate_updates_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--set wait on a recurrence-gate waiting task must keep waiting_for in sync.
+
+    After a recurring reset the task carries waiting_for="next recurrence gate (wait: <old>)".
+    If the user postpones via --set wait <new>, waiting_for must be updated to the new date.
+    Without this, task_has_waiting_blocker fails to match the recurrence-gate pattern on
+    the new wait value and permanently traps the task even after the new gate expires.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "wait", new_wait])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert str(post.metadata["wait"]).startswith(
+        new_wait
+    ), f"wait: must be updated to {new_wait}, got {post.metadata['wait']}"
+    wf = post.metadata.get("waiting_for", "")
+    assert new_wait in wf, (
+        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
+        "A stale waiting_for permanently traps the task after the new gate expires."
+    )
