@@ -145,7 +145,11 @@ class VoiceNode:
         self._playing = False
         self._play_ended_at = 0.0
 
-        log.info("[%s] connected to %s", self.node_name, self.server_url)
+        log.info(
+            "[%s] connected to %s",
+            self.node_name,
+            _redact_url_userinfo(self.server_url),
+        )
 
         mic = self._pa.open(
             format=self._audio_format,

@@ -197,6 +197,26 @@ class TestTransportWarning:
 
         assert not caplog.text
 
+    @pytest.mark.asyncio
+    async def test_session_connect_log_redacts_userinfo(self, caplog):
+        caplog.set_level("INFO")
+        node = _make_node("wss://user:secret@example.com:8443/local")
+        mic = MagicMock()
+        speaker = MagicMock()
+        node._pa.open.side_effect = [mic, speaker]
+
+        async def stop_session(*_args):
+            node.stop()
+
+        with (
+            patch.object(node, "_send_loop", AsyncMock(side_effect=stop_session)),
+            patch.object(node, "_recv_loop", AsyncMock(side_effect=stop_session)),
+        ):
+            await node._session(AsyncMock())
+
+        assert "secret" not in caplog.text
+        assert "wss://***@example.com:8443/local" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Stop / cleanup
