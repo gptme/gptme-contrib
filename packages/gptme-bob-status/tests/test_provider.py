@@ -92,7 +92,17 @@ def test_narrative_sections_non_empty_in_bob_workspace(monkeypatch):
         lambda: [{"label": "Autonomous", "icon": "✓", "status": "active"}],
     )
     monkeypatch.setattr(mod, "_dead_timers", lambda: 0)
-    monkeypatch.setattr(mod, "_blockers", lambda limit=3: [])
+    monkeypatch.setattr(
+        mod,
+        "_blockers",
+        lambda limit=3: [
+            {
+                "id": "blocked-1",
+                "title": "Blocked task title",
+                "waiting_for": "\n  Important blocker detail",
+            }
+        ],
+    )
     monkeypatch.setattr(
         mod,
         "_ready_tasks",
@@ -109,6 +119,7 @@ def test_narrative_sections_non_empty_in_bob_workspace(monkeypatch):
     combined = "\n".join(sections)
     assert "t1" in combined
     assert "gptme/gptme" in combined
+    assert "`blocked-1`: Important blocker detail" in combined
     assert "`ready-1` — Ready task title" in combined
 
 
@@ -209,7 +220,8 @@ def test_blockers_return_compact_summaries_with_narrative_fields(monkeypatch):
 
     task = {
         **_TASK_JSON,
-        "waiting_for": "A blocker explanation that stays available\ninternal detail",
+        "name": None,
+        "waiting_for": "\n  A blocker explanation that stays available\ninternal detail",
         "waiting_since": "2026-08-27T20:30:00+00:00",
     }
     monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(task))
@@ -217,7 +229,7 @@ def test_blockers_return_compact_summaries_with_narrative_fields(monkeypatch):
     assert mod._blockers() == [
         {
             "id": "compact-task",
-            "title": "Compact task title",
+            "title": "compact-task",
             "priority": "high",
             "waiting_for": "A blocker explanation that stays available",
             "waiting_since": "2026-08-27T20:30:00+00:00",

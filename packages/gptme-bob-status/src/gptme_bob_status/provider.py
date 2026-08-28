@@ -189,13 +189,26 @@ def _task_summary(t: dict) -> dict:
     """Return a compact summary of a task for use in status table cells.
 
     Full task objects from ``gptodo --jsonl`` are ~30+ fields; table cells only
-    need id/title/priority for at-a-glance status.  Narrative sections have
-    their own rendering (they call ``t.get(...)`` directly) and are not affected.
+    need id/title/priority for at-a-glance status. Narrative sections render
+    these compact fields directly.
     """
-    summary: dict = {"id": t.get("id", "?"), "title": t.get("name", t.get("id", ""))}
+    task_id = t.get("id", "?")
+    summary: dict = {"id": task_id, "title": t.get("name") or task_id}
     if t.get("priority"):
         summary["priority"] = t["priority"]
     return summary
+
+
+def _first_nonempty_line(value: object, limit: int) -> str:
+    """Return the first non-empty stripped line, truncated to ``limit`` chars."""
+    return next(
+        (
+            line.strip()[:limit]
+            for line in str(value or "").splitlines()
+            if line.strip()
+        ),
+        "",
+    )
 
 
 def _blockers(limit: int = 3) -> list[dict]:
@@ -210,7 +223,7 @@ def _blockers(limit: int = 3) -> list[dict]:
             continue
         if t.get("waiting_for"):
             s = _task_summary(t)
-            wf = str(t.get("waiting_for", "")).split("\n")[0][:70]
+            wf = _first_nonempty_line(t["waiting_for"], 70)
             if wf:
                 s["waiting_for"] = wf
             if t.get("waiting_since"):
@@ -329,7 +342,7 @@ class BobStatusProvider:
         lines = ["## Top Blockers"]
         if blockers:
             for t in blockers:
-                wf = str(t.get("waiting_for", "")).split("\n")[0][:70]
+                wf = _first_nonempty_line(t.get("waiting_for"), 70)
                 since = t.get("waiting_since", "")
                 since_str = f" (since {since})" if since else ""
                 lines.append(f"- `{t.get('id', '?')}`: {wf}{since_str}")
