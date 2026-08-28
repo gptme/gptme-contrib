@@ -59,7 +59,11 @@ def _make_finding(
     )
 
 
-def _make_artifact(findings: list[ReviewFinding]) -> ReviewArtifact:
+def _make_artifact(
+    findings: list[ReviewFinding],
+    *,
+    merge_safety: MergeSafety = MergeSafety.needs_review,
+) -> ReviewArtifact:
     target = LocalReviewTarget(
         checkout="/tmp/test-repo",
         repo_name="test/repo",
@@ -73,7 +77,7 @@ def _make_artifact(findings: list[ReviewFinding]) -> ReviewArtifact:
         started_at=datetime.now(timezone.utc),
         completed_at=datetime.now(timezone.utc),
         summary="Test changes",
-        merge_safety=MergeSafety.needs_review,
+        merge_safety=merge_safety,
         findings=findings,
     )
 
@@ -508,3 +512,68 @@ class TestVerifyArtifact:
 
         assert result.findings[0].severity == Severity.critical
         assert result.findings[0].disposition == Disposition.confirmed
+        assert result.merge_safety == MergeSafety.unsafe
+
+    def test_merge_safety_escalates_from_safe_on_promoted_critical(self):
+        """A Stage 1 'safe' header must not survive a verified critical finding."""
+        findings = [_make_finding("SQLi vuln", severity=Severity.medium)]
+        artifact = _make_artifact(findings, merge_safety=MergeSafety.safe)
+        model_output = json.dumps(
+            {
+                "real": True,
+                "worth_fixing": True,
+                "severity": "critical",
+                "rationale": "SQL injection via user-controlled parameter.",
+            }
+        )
+        with patch(
+            "gptme_runloops.pr_review.verifier._invoke_verifier_model",
+            return_value=model_output,
+        ):
+            result = verify_artifact(artifact, SAMPLE_DIFF, Path("/tmp"))
+
+        assert result.merge_safety == MergeSafety.unsafe
+
+    def test_merge_safety_escalates_safe_to_needs_review_for_medium(self):
+        findings = [_make_finding("Real bug", severity=Severity.low)]
+        artifact = _make_artifact(findings, merge_safety=MergeSafety.safe)
+        model_output = json.dumps(
+            {
+                "real": True,
+                "worth_fixing": True,
+                "severity": "medium",
+                "rationale": "Confirmed defect, not blocking.",
+            }
+        )
+        with patch(
+            "gptme_runloops.pr_review.verifier._invoke_verifier_model",
+            return_value=model_output,
+        ):
+            result = verify_artifact(artifact, SAMPLE_DIFF, Path("/tmp"))
+
+        assert result.merge_safety == MergeSafety.needs_review
+
+    def test_merge_safety_does_not_demote_when_findings_dropped(self):
+        """Stage 1 'unsafe' stays unsafe even if every finding is suppressed."""
+        findings = [_make_finding("Nit", severity=Severity.low)]
+        artifact = _make_artifact(findings, merge_safety=MergeSafety.unsafe)
+        model_output = json.dumps(
+            {
+                "real": False,
+                "worth_fixing": False,
+                "severity": "info",
+                "rationale": "Not a defect.",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "suppressed.jsonl"
+            with patch(
+                "gptme_runloops.pr_review.verifier._invoke_verifier_model",
+                return_value=model_output,
+            ):
+                result = verify_artifact(
+                    artifact, SAMPLE_DIFF, Path("/tmp"), shadow_ledger=ledger
+                )
+
+        assert result.findings[0].disposition == Disposition.dropped
+        assert result.merge_safety == MergeSafety.unsafe

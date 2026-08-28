@@ -35,7 +35,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from .schema import Disposition, ReviewArtifact, ReviewFinding, Severity
+from .schema import Disposition, MergeSafety, ReviewArtifact, ReviewFinding, Severity
 
 VERIFIER_PROMPT_VERSION = "v1"
 
@@ -272,6 +272,31 @@ VerifyResult = Literal[
     "confirmed", "dropped_not_real", "dropped_not_worth_fixing", "error"
 ]
 
+_BLOCKING_SEVERITIES = {Severity.critical, Severity.high}
+
+
+def _escalate_merge_safety(artifact: ReviewArtifact) -> None:
+    """Escalate ``merge_safety`` if remaining findings outrank Stage 1.
+
+    Stage 1's ``merge_safety`` is a holistic model judgment. Stage 2 may
+    promote a finding's severity (the mislabeled-P0 case this module exists
+    to catch) without touching that field, leaving the summary header and
+    the CLI fail-closed gate stale. Escalate only; never demote. A Stage 1
+    ``unsafe`` stays ``unsafe`` even if every finding is dropped.
+    """
+    remaining = [
+        finding
+        for finding in artifact.findings
+        if finding.disposition != Disposition.dropped
+    ]
+    if any(finding.severity in _BLOCKING_SEVERITIES for finding in remaining):
+        artifact.merge_safety = MergeSafety.unsafe
+        return
+    if any(finding.severity == Severity.medium for finding in remaining) and (
+        artifact.merge_safety in (MergeSafety.safe, MergeSafety.unknown)
+    ):
+        artifact.merge_safety = MergeSafety.needs_review
+
 
 def verify_artifact(
     artifact: ReviewArtifact,
@@ -380,4 +405,5 @@ def verify_artifact(
             f"{errors} errors (left as needs_validation)"
         )
 
+    _escalate_merge_safety(artifact)
     return artifact
