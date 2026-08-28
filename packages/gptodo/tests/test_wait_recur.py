@@ -260,11 +260,12 @@ def test_edit_done_with_recur_resets_to_waiting(
 def test_recur_reset_strips_preexisting_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression: recurring reset must strip pre-existing waiting_for/waiting_since.
+    """Regression: recurring reset must replace a leftover human waiting_for.
 
-    A task that was previously in a human-waiting state (waiting_for: 'John to review')
-    with a recur field must have those fields removed on done→reset. Otherwise the
-    waiting_for guard in task_has_waiting_blocker keeps the task permanently blocked.
+    A prior human-wait (waiting_for: 'John to review') must not survive done→reset,
+    or it stays a permanent blocker after the time gate expires. Replace it with a
+    recurrence-gate string (and a fresh waiting_since) so the validator is happy
+    and the auto-releaser still treats the task as a time gate.
     """
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
@@ -293,10 +294,13 @@ def test_recur_reset_strips_preexisting_waiting_for(
     post = fm.load(tasks_dir / "human-wait-recur.md")
     assert post.metadata["state"] == "waiting", "recurring task must reset to waiting"
     assert post.metadata.get("wait_kind") == "machine"
-    assert (
-        "waiting_for" not in post.metadata
-    ), "recur reset must strip waiting_for so the task can auto-surface when the time gate expires"
-    assert "waiting_since" not in post.metadata, "recur reset must strip waiting_since"
+    waiting_for = post.metadata.get("waiting_for", "")
+    assert "John" not in waiting_for, "human leftover waiting_for must not survive reset"
+    assert "recurrence gate" in waiting_for
+    assert str(post.metadata["wait"]) in waiting_for
+    waiting_since = str(post.metadata.get("waiting_since", ""))
+    assert waiting_since, "state=waiting requires waiting_since"
+    assert not waiting_since.startswith("2026-08-01"), "waiting_since must be refreshed"
 
 
 def test_edit_done_with_subday_recur_stores_datetime(

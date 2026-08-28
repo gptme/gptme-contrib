@@ -2956,7 +2956,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # Strip now-stale actionable/blocker metadata when the edit lands the task
         # in a terminal state (TASKS.md best-practice #7: terminal tasks must not
         # keep next_action/waiting_for/waiting_since/wait). Recurring tasks reset to
-        # todo further below and must keep these fields, so skip when recur is set.
+        # waiting further below and must keep these fields, so skip when recur is set.
         # tracking_issue / upstream_coordination_id are intentionally preserved for
         # permanent traceability.
         # cancelled is terminal regardless of recur. A done task only escapes the
@@ -3085,15 +3085,20 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
 
                     current_wait = parse_wait(post.metadata.get("wait"))
                     next_wait = advance_wait(current_wait, recur)
+                    wait_iso = next_wait.isoformat()
                     post.metadata["state"] = "waiting"
-                    post.metadata["wait"] = next_wait.isoformat()
+                    post.metadata["wait"] = wait_iso
                     post.metadata["wait_kind"] = "machine"
-                    # Strip any pre-existing waiting_for/waiting_since: the wait: date IS the
-                    # machine gate. Leaving them would trap the task permanently — task_has_waiting_blocker
-                    # treats any waiting_for as a human blocker that requires explicit resolution,
-                    # so the task would never auto-surface after the time gate expires.
-                    post.metadata.pop("waiting_for", None)
-                    post.metadata.pop("waiting_since", None)
+                    # validate_task_frontmatter requires waiting_for + waiting_since
+                    # on state=waiting. A leftover human blocker (e.g. "John to review")
+                    # would trap the task after the gate expires, so REPLACE it with a
+                    # recurrence-gate string. "next recurrence gate (wait: <date>)" is
+                    # classified as a time_gate by the auto-releaser, so the task
+                    # re-surfaces when wait: expires.
+                    post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_iso})"
+                    post.metadata["waiting_since"] = datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    )
                     if not _completed_explicitly_set_global:
                         post.metadata.pop("completed", None)
                     with open(task.path, "w") as f:
