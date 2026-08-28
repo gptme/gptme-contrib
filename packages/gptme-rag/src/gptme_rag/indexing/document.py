@@ -68,8 +68,11 @@ class Document:
                 last_modified=last_modified,
             )
         else:
-            # Process file in chunks
-            base_id = str(path.absolute())
+            # Process file in chunks. Include the source generation in each ID so
+            # replacement chunks can be added before stale chunks are removed; this
+            # keeps the previous generation queryable if embedding the replacement
+            # fails partway through.
+            base_id = f"{path.absolute()}@{content_hash}"
             for chunk in processor.process_file(path):
                 # Ensure unique chunk IDs by using both index and position
                 chunk_id = f"{base_id}#chunk{chunk['metadata']['chunk_index']}-{chunk['metadata']['chunk_start']}"

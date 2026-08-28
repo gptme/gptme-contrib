@@ -248,9 +248,13 @@ def index(
         for doc in existing_docs:
             if "source" in doc.metadata:
                 abs_path = os.path.abspath(doc.metadata["source"])
-                entry = existing_files.setdefault(abs_path, {})
+                entry = existing_files.setdefault(abs_path, {"content_hashes": set()})
+                hashes = entry.setdefault("content_hashes", set())
                 if "content_hash" in doc.metadata:
-                    entry["content_hash"] = doc.metadata["content_hash"]
+                    if isinstance(hashes, set):
+                        hashes.add(doc.metadata["content_hash"])
+                else:
+                    entry["has_unhashed"] = True
                 last_modified = doc.metadata.get("last_modified")
                 if last_modified:
                     try:
@@ -296,9 +300,10 @@ def index(
                         # worktree churn) — skip it instead of re-embedding.
                         current_hash = doc.metadata.get("content_hash")
                         if current_hash is not None:
-                            stored_hash = existing.get("content_hash")
-                            if stored_hash is not None:
-                                if current_hash == stored_hash:
+                            stored_hashes = existing.get("content_hashes") or set()
+                            has_unhashed = bool(existing.get("has_unhashed"))
+                            if stored_hashes and not has_unhashed:
+                                if stored_hashes == {current_hash}:
                                     logger.debug("Unchanged file: %s", abs_source)
                                     continue
                                 logger.debug(
@@ -307,7 +312,12 @@ def index(
                                 )
                                 filtered_documents.append(doc)
                                 continue
-                            # Stored doc predates content hashing: fall through to mtime.
+                            # Stored doc predates content hashing, or mixed
+                            # generations after a crash: fall through to mtime
+                            # only when there is no hash at all.
+                            if stored_hashes:
+                                filtered_documents.append(doc)
+                                continue
 
                         # Fallback for legacy stored docs without content_hash:
                         # compare mtime (rounded to microseconds).
@@ -330,18 +340,29 @@ def index(
             console.print("No new or modified documents to index", style="yellow")
             return
 
-        # Then process them with a progress bar. Replace all chunks for a modified
-        # source before adding its new chunks; otherwise stale chunks survive when
-        # content or chunk boundaries change and make future fingerprint reads
-        # order-dependent.
+        # Then process them with a progress bar. Preserve the previous chunks until
+        # every replacement chunk has been embedded successfully: deleting first
+        # turns a transient embedding failure into data loss. New chunk IDs include
+        # content_hash, so old and replacement generations can coexist briefly;
+        # after a successful add, delete only the IDs from the old generation.
         sources = {str(doc.metadata.get("source", "")) for doc in all_documents}
         n_files = len(sources)
         n_chunks = len(all_documents)
 
         logger.info(f"Found {n_files} new/modified files to index ({n_chunks} chunks)")
 
-        for source in sources & existing_files.keys():
-            indexer.delete_documents({"source": source})
+        current_hash_by_source = {
+            str(doc.metadata.get("source", "")): doc.metadata.get("content_hash")
+            for doc in all_documents
+        }
+        stale_ids = [
+            doc.doc_id
+            for doc in existing_docs
+            if doc.doc_id
+            and str(doc.metadata.get("source", "")) in sources
+            and doc.metadata.get("content_hash")
+            != current_hash_by_source.get(str(doc.metadata.get("source", "")))
+        ]
 
         with tqdm(
             total=n_chunks,
@@ -351,6 +372,9 @@ def index(
         ) as pbar:
             for progress in indexer.add_documents_progress(all_documents):
                 pbar.update(progress)
+
+        if stale_ids:
+            indexer.collection.delete(ids=stale_ids)
 
         console.print(
             f"✅ Successfully indexed {n_files} files ({n_chunks} chunks)",

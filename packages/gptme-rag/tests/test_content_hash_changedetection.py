@@ -110,6 +110,120 @@ def test_index_reembeds_on_content_change(tmp_path):
     assert "Successfully indexed 1 files" in second.output, second.output
 
 
+def test_index_preserves_old_chunks_when_replacement_add_fails(tmp_path, monkeypatch):
+    """A failed replacement embed must not delete the source's old chunks."""
+    runner = CliRunner()
+    index_dir = tmp_path / "index"
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "doc.txt"
+    f.write_text("version one content")
+
+    first = _run_index(runner, index_dir, [src])
+    assert first.exit_code == 0, first.output
+
+    f.write_text("version two content")
+
+    import chromadb
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    original_add = chromadb.Collection.add
+    replacement_hash = hashlib.sha256(b"version two content").hexdigest()
+
+    def fail_replacement_add(self, *args, **kwargs):
+        metadatas = kwargs.get("metadatas") or []
+        if any(metadata.get("content_hash") == replacement_hash for metadata in metadatas):
+            raise RuntimeError("simulated embedding failure")
+        return original_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(chromadb.Collection, "add", fail_replacement_add)
+    second = _run_index(runner, index_dir, [src])
+    assert second.exit_code == 0, second.output
+    assert "simulated embedding failure" in second.output
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    client = chromadb.PersistentClient(
+        path=str(index_dir),
+        settings=chromadb.config.Settings(
+            allow_reset=True,
+            is_persistent=True,
+            anonymized_telemetry=False,
+        ),
+    )
+    collection = client.get_collection("default")
+    stored = collection.get(include=["metadatas"])["metadatas"]
+    assert stored is not None
+    old_hash = hashlib.sha256(b"version one content").hexdigest()
+    assert {metadata["content_hash"] for metadata in stored} == {old_hash}
+
+
+def test_index_retry_after_crash_does_not_delete_replacement(tmp_path):
+    """If add succeeded and delete did not, retry must keep the new generation."""
+    runner = CliRunner()
+    index_dir = tmp_path / "index"
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "doc.txt"
+    f.write_text("version one content")
+
+    first = _run_index(runner, index_dir, [src])
+    assert first.exit_code == 0, first.output
+
+    import chromadb
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    f.write_text("version two content")
+    v2_hash = hashlib.sha256(b"version two content").hexdigest()
+    abs_source = str(f.resolve())
+
+    client = chromadb.PersistentClient(
+        path=str(index_dir),
+        settings=chromadb.config.Settings(
+            allow_reset=True,
+            is_persistent=True,
+            anonymized_telemetry=False,
+        ),
+    )
+    collection = client.get_collection("default")
+    existing = collection.get(include=["embeddings", "metadatas", "documents"])
+    embeddings = existing["embeddings"]
+    assert embeddings is not None and len(embeddings) > 0
+    collection.add(
+        ids=[f"{abs_source}@{v2_hash}#chunk0-0"],
+        documents=["version two content"],
+        metadatas=[
+            {
+                "source": abs_source,
+                "filename": f.name,
+                "extension": f.suffix,
+                "content_hash": v2_hash,
+                "last_modified": "2026-08-28T00:00:00",
+                "is_chunk": True,
+            }
+        ],
+        embeddings=[existing["embeddings"][0]],
+    )
+    del collection, client
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+
+    second = _run_index(runner, index_dir, [src])
+    assert second.exit_code == 0, second.output
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    client = chromadb.PersistentClient(
+        path=str(index_dir),
+        settings=chromadb.config.Settings(
+            allow_reset=True,
+            is_persistent=True,
+            anonymized_telemetry=False,
+        ),
+    )
+    collection = client.get_collection("default")
+    stored = collection.get(include=["metadatas"])["metadatas"]
+    assert stored is not None
+    assert {metadata["content_hash"] for metadata in stored} == {v2_hash}
+
+
 def test_index_replaces_stale_chunks_on_content_change(tmp_path):
     """Re-indexing a changed source replaces its old chunks instead of accumulating."""
     runner = CliRunner()
