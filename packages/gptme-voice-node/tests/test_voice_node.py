@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -54,6 +55,11 @@ class TestMicMute:
         node._play_ended_at = time.monotonic() - 10  # 10 seconds ago
         assert not node._mic_muted()
 
+    def test_not_muted_at_early_monotonic_time(self):
+        node = _make_node()
+        with patch("gptme_voice_node.node.time.monotonic", return_value=0.1):
+            assert not node._mic_muted()
+
 
 # ---------------------------------------------------------------------------
 # Send/recv loop handling
@@ -65,23 +71,22 @@ class TestSendLoop:
     async def test_audio_io_cancellation_does_not_wait_for_inflight_thread(self):
         from gptme_voice_node.node import _run_audio_io
 
-        thread_started = asyncio.Event()
-        never_finishes = asyncio.Event()
+        thread_started = threading.Event()
+        allow_thread_to_finish = threading.Event()
 
-        async def fake_to_thread(function, *args, **kwargs):
+        def operation():
             thread_started.set()
-            await never_finishes.wait()
-            return function(*args, **kwargs)
+            allow_thread_to_finish.wait(timeout=1)
+            return b"audio"
 
-        operation = MagicMock(return_value=b"audio")
-        with patch("gptme_voice_node.node.asyncio.to_thread", fake_to_thread):
-            task = asyncio.create_task(_run_audio_io(operation))
-            await thread_started.wait()
+        task = asyncio.create_task(_run_audio_io(operation))
+        try:
+            assert await asyncio.to_thread(thread_started.wait, 1)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=0.1)
-
-        operation.assert_not_called()
+        finally:
+            allow_thread_to_finish.set()
 
 
 class TestRecvLoop:
@@ -169,6 +174,15 @@ class TestRecvLoop:
 
 
 class TestTransportWarning:
+    def test_url_userinfo_is_redacted(self):
+        from gptme_voice_node.node import _redact_url_userinfo
+
+        redacted = _redact_url_userinfo("wss://user:secret@example.com:8443/local")
+
+        assert redacted == "wss://***@example.com:8443/local"
+        assert "user" not in redacted
+        assert "secret" not in redacted
+
     def test_warns_for_insecure_remote_url(self, caplog):
         from gptme_voice_node.node import _warn_for_insecure_remote_url
 
@@ -234,6 +248,21 @@ class TestLifecycle:
         speaker.close.assert_called_once()
         stream.stop_stream.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_session_attempts_both_closes_when_one_close_fails(self, caplog):
+        node = _make_node()
+        mic = MagicMock()
+        speaker = MagicMock()
+        node._pa.open.side_effect = [mic, speaker]
+        speaker.close.side_effect = OSError("device gone")
+        node.stop()
+
+        await node._session(AsyncMock())
+
+        mic.close.assert_called_once()
+        speaker.close.assert_called_once()
+        assert "failed to close audio stream" in caplog.text
+
     def test_cleanup_terminates_pyaudio(self):
         with patch("gptme_voice_node.node._get_pyaudio") as mock_get_pa:
             mock_pa_module = MagicMock()
@@ -276,6 +305,25 @@ class TestBackoff:
 
         with patch("gptme_voice_node.node.time.monotonic", return_value=100.0):
             assert _next_backoff(8, connected_at=60.0) == BACKOFF_INITIAL
+
+    @pytest.mark.asyncio
+    async def test_retry_log_matches_sleep_delay(self, caplog):
+        node = _make_node()
+
+        async def stop_on_sleep(delay):
+            assert delay == 2
+            node.stop()
+
+        with (
+            patch(
+                "gptme_voice_node.node.websockets.connect",
+                side_effect=OSError("offline"),
+            ),
+            patch("gptme_voice_node.node.asyncio.sleep", side_effect=stop_on_sleep),
+        ):
+            await node.run_forever()
+
+        assert "retrying in 2s" in caplog.text
 
     @pytest.mark.asyncio
     async def test_stable_session_uses_reset_delay_for_immediate_retry(self):

@@ -93,8 +93,10 @@ def _close_stream(stream, started: bool) -> None:
             stream.stop_stream()
     except Exception as exc:  # noqa: BLE001
         log.warning("failed to stop audio stream: %s", exc)
-    finally:
+    try:
         stream.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to close audio stream: %s", exc)
 
 
 def _next_backoff(backoff: int, connected_at: float | None) -> int:
@@ -129,7 +131,8 @@ class VoiceNode:
     def _mic_muted(self) -> bool:
         """True when we should suppress outbound audio (echo prevention)."""
         return self._playing or (
-            time.monotonic() - self._play_ended_at < PLAYBACK_COOLDOWN
+            self._play_ended_at > 0
+            and time.monotonic() - self._play_ended_at < PLAYBACK_COOLDOWN
         )
 
     # --- Per-session connect handler ---
@@ -227,6 +230,7 @@ class VoiceNode:
         backoff = BACKOFF_INITIAL
         while self._running:
             connected_at: float | None = None
+            error: tuple[int, str] | None = None
             try:
                 async with websockets.connect(
                     self.server_url,
@@ -237,28 +241,22 @@ class VoiceNode:
                     connected_at = time.monotonic()
                     await self._session(ws)
             except (ConnectionClosed, WebSocketException) as exc:
-                log.warning(
-                    "[%s] disconnected: %s — retrying in %ds",
-                    self.node_name,
-                    exc,
-                    backoff,
-                )
+                error = (logging.WARNING, f"disconnected: {exc}")
             except OSError as exc:
-                log.warning(
-                    "[%s] connection error: %s — retrying in %ds",
-                    self.node_name,
-                    exc,
-                    backoff,
-                )
+                error = (logging.WARNING, f"connection error: {exc}")
             except Exception as exc:  # noqa: BLE001
-                log.error(
-                    "[%s] unexpected error: %s — retrying in %ds",
-                    self.node_name,
-                    exc,
-                    backoff,
-                )
+                error = (logging.ERROR, f"unexpected error: {exc}")
             if self._running:
                 backoff = _next_backoff(backoff, connected_at)
+                if error is not None:
+                    level, message = error
+                    log.log(
+                        level,
+                        "[%s] %s — retrying in %ds",
+                        self.node_name,
+                        message,
+                        backoff,
+                    )
                 await asyncio.sleep(backoff)
 
     def stop(self) -> None:
@@ -294,6 +292,20 @@ async def _async_main(server_url: str, node_name: str) -> None:
         node.cleanup()
 
 
+def _redact_url_userinfo(server_url: str) -> str:
+    """Hide credentials from a URL before writing it to logs."""
+    parsed = urlparse(server_url)
+    if parsed.username is None and parsed.password is None:
+        return server_url
+
+    hostname = parsed.hostname or ""
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    if parsed.port is not None:
+        hostname = f"{hostname}:{parsed.port}"
+    return parsed._replace(netloc=f"***@{hostname}").geturl()
+
+
 def _warn_for_insecure_remote_url(server_url: str) -> None:
     """Warn when microphone audio would cross the network without TLS."""
     parsed = urlparse(server_url)
@@ -323,7 +335,7 @@ def main() -> None:
     _warn_for_insecure_remote_url(server_url)
 
     log.info("Starting BobBrain voice node")
-    log.info("  server : %s", server_url)
+    log.info("  server : %s", _redact_url_userinfo(server_url))
     log.info("  name   : %s", node_name)
 
     try:
