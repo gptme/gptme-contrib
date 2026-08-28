@@ -330,11 +330,18 @@ def index(
             console.print("No new or modified documents to index", style="yellow")
             return
 
-        # Then process them with a progress bar
-        n_files = len(set(doc.metadata.get("source", "") for doc in all_documents))
+        # Then process them with a progress bar. Replace all chunks for a modified
+        # source before adding its new chunks; otherwise stale chunks survive when
+        # content or chunk boundaries change and make future fingerprint reads
+        # order-dependent.
+        sources = {str(doc.metadata.get("source", "")) for doc in all_documents}
+        n_files = len(sources)
         n_chunks = len(all_documents)
 
         logger.info(f"Found {n_files} new/modified files to index ({n_chunks} chunks)")
+
+        for source in sources & existing_files.keys():
+            indexer.delete_documents({"source": source})
 
         with tqdm(
             total=n_chunks,
