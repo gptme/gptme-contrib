@@ -221,15 +221,15 @@ def _blockers(limit: int = 3) -> list[dict]:
             t = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if t.get("waiting_for"):
-            wf = _first_nonempty_line(t["waiting_for"], 70)
-            if not wf:
-                continue
-            s = _task_summary(t)
-            s["waiting_for"] = wf
-            if t.get("waiting_since"):
-                s["waiting_since"] = t["waiting_since"]
-            blockers.append(s)
+        wf = _first_nonempty_line(t.get("waiting_for"), 70)
+        if not wf:
+            continue
+        s = _task_summary(t)
+        s["waiting_for"] = wf
+        since = t.get("waiting_since")
+        if since:
+            s["waiting_since"] = since
+        blockers.append(s)
     return blockers[:limit]
 
 

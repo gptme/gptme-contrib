@@ -247,3 +247,15 @@ def test_blockers_skip_whitespace_only_explanations(monkeypatch):
     monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(task))
 
     assert mod._blockers() == []
+
+
+def test_blockers_skip_missing_waiting_for(monkeypatch):
+    """A waiting task without waiting_for is skipped, not a KeyError."""
+    import json
+
+    import gptme_bob_status.provider as mod
+
+    monkeypatch.setattr(mod, "_run", lambda cmd, **k: json.dumps(_TASK_JSON))
+
+    assert "waiting_for" not in _TASK_JSON
+    assert mod._blockers() == []
