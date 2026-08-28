@@ -217,7 +217,11 @@ class MavsdkAdapter:
                 await self._release_system()
 
     async def _run_action(self, awaitable: Any) -> Any:
-        return await asyncio.wait_for(awaitable, timeout=self.command_timeout_s)
+        try:
+            return await asyncio.wait_for(awaitable, timeout=self.command_timeout_s)
+        except TimeoutError:
+            self._mark_disconnected()
+            raise
 
     # -- BodyAdapter interface -------------------------------------------
 
@@ -317,7 +321,7 @@ class MavsdkAdapter:
             lat, lon = offset_latlon(
                 pos["latitude_deg"], pos["longitude_deg"], north, east
             )
-            target_rel = max(1.0, pos["relative_altitude_m"] + up_m)
+            target_rel = max(0.0, pos["relative_altitude_m"] + up_m)
             return await self._goto_unlocked(lat, lon, target_rel)
 
     async def turn(self, yaw_deg: float) -> dict[str, Any]:

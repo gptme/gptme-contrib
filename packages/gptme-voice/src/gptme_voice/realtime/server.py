@@ -1891,6 +1891,8 @@ class VoiceServer:
         self,
         instructions: str,
         initial_response_instructions: str = "",
+        *,
+        include_body_tools: bool = True,
     ) -> SessionConfig:
         """Build a SessionConfig with optional runtime overrides."""
         kwargs: dict = dict(
@@ -1908,7 +1910,7 @@ class VoiceServer:
             kwargs["output_speed"] = self.output_speed
         if self.openai_g711_passthrough:
             kwargs["g711_passthrough"] = True
-        if self.body_adapter is not None:
+        if include_body_tools and self.body_adapter is not None:
             kwargs["extra_tools"] = body_tool_schemas(self.body_adapter)
         return SessionConfig(**kwargs)
 
@@ -2020,7 +2022,13 @@ class VoiceServer:
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
-            session_cfg = self._build_session_config(instructions=instructions)
+            body_adapter = self._body_adapter_for_websocket(
+                websocket, transport="local"
+            )
+            session_cfg = self._build_session_config(
+                instructions=instructions,
+                include_body_tools=body_adapter is not None,
+            )
             on_ai_transcript, on_user_transcript, _local_hangup = (
                 self._make_transcript_callbacks(
                     transcript=transcript,
@@ -2045,9 +2053,7 @@ class VoiceServer:
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
-                body_adapter=self._body_adapter_for_websocket(
-                    websocket, transport="local"
-                ),
+                body_adapter=body_adapter,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2113,7 +2119,13 @@ class VoiceServer:
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
-            session_cfg = self._build_session_config(instructions=instructions)
+            body_adapter = self._body_adapter_for_websocket(
+                websocket, transport="browser"
+            )
+            session_cfg = self._build_session_config(
+                instructions=instructions,
+                include_body_tools=body_adapter is not None,
+            )
             on_ai_transcript, on_user_transcript, _browser_hangup = (
                 self._make_transcript_callbacks(
                     transcript=transcript,
@@ -2138,9 +2150,7 @@ class VoiceServer:
                 on_hangup=_browser_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
-                body_adapter=self._body_adapter_for_websocket(
-                    websocket, transport="browser"
-                ),
+                body_adapter=body_adapter,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 

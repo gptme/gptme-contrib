@@ -187,7 +187,16 @@ def test_bridge_move_clamps_resulting_absolute_altitude(loop, monkeypatch):
 
     adapter.relative_altitude_m = 2.0
     _call(bridge, "body_move", {"up_m": -30})
-    assert adapter.calls[-1] == ("move", (0.0, 0.0, -1.0))
+    assert adapter.calls[-1] == ("move", (0.0, 0.0, -2.0))
+
+
+def test_bridge_descent_on_ground_does_not_become_ascent(loop):
+    adapter = FakeAdapter(relative_altitude_m=0.0)
+    bridge = GptmeToolBridge(body_adapter=adapter)
+
+    _call(bridge, "body_move", {"up_m": -1.0})
+
+    assert adapter.calls[-1] == ("move", (0.0, 0.0, 0.0))
 
 
 def test_bridge_capability_gate_blocks_uncapable_calls(loop):
@@ -356,8 +365,8 @@ def test_mavsdk_move_never_targets_below_home(loop):
 
     result = loop.run_until_complete(adapter.move(0.0, 0.0, -30.0))
 
-    assert result["target"]["altitude_m"] == 1.0
-    assert action.goto_args[2] == 501.0
+    assert result["target"]["altitude_m"] == 0.0
+    assert action.goto_args[2] == 500.0
 
 
 def test_mavsdk_move_and_turn_require_heading(loop):
@@ -388,9 +397,12 @@ def test_mavsdk_action_timeout(loop):
 
     adapter = MavsdkAdapter("unused", command_timeout_s=0.01)
     adapter._system = type("System", (), {"action": Action()})()
+    adapter._connected = True
 
     with pytest.raises(TimeoutError):
         loop.run_until_complete(adapter.stop())
+
+    assert adapter._connected is False
 
 
 def test_mavsdk_close_releases_system(loop):

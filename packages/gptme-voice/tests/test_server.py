@@ -159,6 +159,17 @@ def test_body_adapter_only_reaches_trusted_transports(monkeypatch) -> None:
     )
 
 
+def test_untrusted_sessions_do_not_advertise_body_tools(monkeypatch) -> None:
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    server = VoiceServer()
+
+    denied = server._build_session_config("You are Bob.", include_body_tools=False)
+    allowed = server._build_session_config("You are Bob.")
+
+    assert denied.extra_tools == []
+    assert [tool["name"] for tool in allowed.extra_tools] == ["body_status"]
+
+
 def test_server_lifespan_closes_body_adapter(monkeypatch) -> None:
     class Adapter:
         name = "fake"

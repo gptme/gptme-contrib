@@ -1016,8 +1016,10 @@ class GptmeToolBridge:
                 position = adapter.telemetry().get("position") or {}
                 current_altitude = position.get("relative_altitude_m")
                 if current_altitude is not None:
+                    # Floor at 0 m so "descend" on the ground is a no-op, not
+                    # a forced climb to the old 1 m takeoff floor.
                     target_altitude = max(
-                        1.0,
+                        0.0,
                         min(self.body_max_altitude_m, float(current_altitude) + up),
                     )
                     up = target_altitude - float(current_altitude)
