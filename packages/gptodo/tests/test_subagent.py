@@ -151,6 +151,23 @@ def test_claude_foreground_retries_only_once(run, sleep, sessions_dir):
     sleep.assert_called_once_with(5)
 
 
+@patch("gptodo.subagent.time.sleep")
+@patch("gptodo.subagent.subprocess.run")
+def test_claude_foreground_preserves_first_auth_output_if_retry_times_out(run, sleep, sessions_dir):
+    run.side_effect = [
+        subprocess.CompletedProcess([], 1, "", "Error: 401 Invalid authentication credentials"),
+        subprocess.TimeoutExpired(cmd="claude", timeout=1),
+    ]
+
+    session = spawn_agent("task", "prompt", backend="claude", workspace=sessions_dir)
+
+    assert session.status == "failed"
+    assert "Timeout" in (session.error or "")
+    assert "Invalid authentication credentials" in open(session.output_file).read()
+    assert run.call_count == 2
+    sleep.assert_called_once_with(5)
+
+
 @patch("gptodo.subagent.subprocess.run")
 def test_claude_background_command_retries_auth_failure(run, sessions_dir):
     run.return_value = subprocess.CompletedProcess([], 0, "", "")

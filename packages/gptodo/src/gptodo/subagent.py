@@ -391,8 +391,11 @@ def spawn_agent(
 
         if backend == "claude" and result.returncode != 0 and is_transient_auth_death(output):
             logger.warning("Claude authentication failed; retrying once after 5 seconds")
-            time.sleep(5)
             first_auth_failure = output
+            # Persist before the retry so a TimeoutExpired/exception on the
+            # second run cannot leave the session output file empty.
+            output_file.write_text(first_auth_failure)
+            time.sleep(5)
             result = subprocess.run(
                 cmd,
                 cwd=workspace,
