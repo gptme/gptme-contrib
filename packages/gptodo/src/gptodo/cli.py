@@ -1211,6 +1211,11 @@ def browse(show_all, project, filter_state, no_fzf):
     ready_for_review. Use --all to include every task state.
 
     In fzf mode, press ? to open the command palette with all available actions.
+
+    Requires fzf 0.37.0 or newer (border/preview labels and the
+    change-preview-label action are used unconditionally). Live preview
+    refresh on terminal resize needs fzf 0.46.0+ and is enabled
+    automatically when available.
     """
     import shutil
 
