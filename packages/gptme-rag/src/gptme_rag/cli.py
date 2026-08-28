@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 import click
 from rich.console import Console
@@ -240,26 +241,46 @@ def index(
         existing_docs = indexer.get_all_documents()
         logger.debug("Found %d existing documents in index", len(existing_docs))
 
-        existing_files = {}
+        # Map each indexed source to its stored change-detection fingerprint:
+        # content_hash (primary) plus last_modified (fallback for legacy docs that
+        # predate content hashing). Stored per-chunk but read once per source.
+        existing_files: dict[str, dict[str, object]] = {}
         for doc in existing_docs:
             if "source" in doc.metadata:
                 abs_path = os.path.abspath(doc.metadata["source"])
+                entry = existing_files.setdefault(abs_path, {"content_hashes": set()})
+                hashes = entry.setdefault("content_hashes", set())
+                if "content_hash" in doc.metadata:
+                    if isinstance(hashes, set):
+                        hashes.add(doc.metadata["content_hash"])
+                else:
+                    entry["has_unhashed"] = True
                 last_modified = doc.metadata.get("last_modified")
                 if last_modified:
                     try:
                         # Parse ISO format timestamp to float
-                        existing_files[abs_path] = datetime.fromisoformat(last_modified).timestamp()
+                        parsed = datetime.fromisoformat(last_modified).timestamp()
                     except ValueError:
                         logger.warning("Invalid last_modified format: %s", last_modified)
-                        existing_files[abs_path] = 0
+                    else:
+                        # Keep the first valid timestamp. A later chunk with a
+                        # bad last_modified must not zero a good stored mtime —
+                        # that would re-embed every legacy source on every run.
+                        entry.setdefault("last_modified", parsed)
                 else:
-                    existing_files[abs_path] = 0
+                    entry.setdefault("last_modified", 0)
                 # logger.debug("Existing file: %s", abs_path)  # Too spammy
 
         logger.debug("Loaded %d existing files from index", len(existing_files))
 
-        # First, collect all documents and filter for new/modified
+        # First, collect all documents and filter for new/modified.
+        # cleanup_hashes: source -> current hash when that generation is already
+        # stored but leftover older hashes remain (add succeeded, delete failed).
+        # Those sources must not be re-added — chunk IDs include content_hash, so
+        # a second add of the same bytes collides — only the stale IDs are deleted.
         all_documents = []
+        cleanup_hashes: dict[str, object] = {}
+        empty_sources: set[str] = set()
         with console.status("Collecting documents...") as status:
             for path in paths:
                 if path.is_file():
@@ -277,19 +298,64 @@ def index(
                         # Resolve to absolute path for consistent comparison
                         abs_source = os.path.abspath(source)
                         doc.metadata["source"] = abs_source
-                        current_mtime = os.path.getmtime(abs_source)
 
-                        # Include if file is new or modified
-                        if abs_source not in existing_files:
+                        existing = existing_files.get(abs_source)
+                        if not (doc.content or "").strip():
+                            # Empty/whitespace source: never index it. If it
+                            # previously had chunks, drop them all.
+                            if existing is not None:
+                                empty_sources.add(abs_source)
+                                logger.debug("Empty file, dropping stale chunks: %s", abs_source)
+                            else:
+                                logger.debug("Skipping empty file: %s", abs_source)
+                            continue
+                        if existing is None:
                             logger.debug("New file: %s", abs_source)
                             filtered_documents.append(doc)
-                        # Round to microseconds (6 decimal places) for comparison
-                        elif round(current_mtime, 6) > round(existing_files[abs_source], 6):
+                            continue
+
+                        # Primary key: content hash. An unchanged hash means the file
+                        # is unchanged even if mtime moved (git restore/checkout,
+                        # worktree churn) — skip it instead of re-embedding.
+                        current_hash = doc.metadata.get("content_hash")
+                        if current_hash is not None:
+                            stored_hashes = cast(
+                                set[object], existing.get("content_hashes") or set()
+                            )
+                            has_unhashed = bool(existing.get("has_unhashed"))
+                            if stored_hashes:
+                                if current_hash in stored_hashes:
+                                    # Current generation is already indexed. Skip
+                                    # re-embed even when leftover unhashed/legacy
+                                    # chunks remain — re-adding the same IDs
+                                    # UniqueConstraintErrors and aborts cleanup.
+                                    if stored_hashes != {current_hash} or has_unhashed:
+                                        cleanup_hashes[abs_source] = current_hash
+                                        logger.debug(
+                                            "Current generation already indexed: %s",
+                                            abs_source,
+                                        )
+                                    else:
+                                        logger.debug("Unchanged file: %s", abs_source)
+                                    continue
+                                logger.debug(
+                                    "Modified file: %s (content hash changed)",
+                                    abs_source,
+                                )
+                                filtered_documents.append(doc)
+                                continue
+                            # stored_hashes empty: pure legacy, fall through to mtime
+
+                        # Fallback for legacy stored docs without content_hash:
+                        # compare mtime (rounded to microseconds).
+                        current_mtime = os.path.getmtime(abs_source)
+                        stored_mtime = cast(float, existing.get("last_modified", 0))
+                        if round(current_mtime, 6) > round(stored_mtime, 6):
                             logger.debug(
                                 "Modified file: %s (current: %s, stored: %s)",
                                 abs_source,
                                 current_mtime,
-                                existing_files[abs_source],
+                                stored_mtime,
                             )
                             filtered_documents.append(doc)
                         else:
@@ -297,15 +363,65 @@ def index(
 
                 all_documents.extend(filtered_documents)
 
+        def stale_ids_for(hash_by_source: dict[str, object]) -> list[str]:
+            return [
+                doc.doc_id
+                for doc in existing_docs
+                if doc.doc_id
+                and str(doc.metadata.get("source", "")) in hash_by_source
+                and doc.metadata.get("content_hash")
+                != hash_by_source.get(str(doc.metadata.get("source", "")))
+            ]
+
+        def ids_for_sources(sources: set[str]) -> list[str]:
+            return [
+                doc.doc_id
+                for doc in existing_docs
+                if doc.doc_id and str(doc.metadata.get("source", "")) in sources
+            ]
+
+        leftover_stale_ids = stale_ids_for(cleanup_hashes) + ids_for_sources(empty_sources)
+
         if not all_documents:
-            console.print("No new or modified documents to index", style="yellow")
+            if leftover_stale_ids:
+                try:
+                    indexer.collection.delete(ids=leftover_stale_ids)
+                except Exception as delete_err:
+                    logger.warning(
+                        "Failed to delete %d leftover stale chunk(s): %s",
+                        len(leftover_stale_ids),
+                        delete_err,
+                    )
+                    console.print(
+                        "⚠️ Leftover stale chunks remain; they will be removed on the next run",
+                        style="yellow",
+                    )
+                else:
+                    n_cleaned = len(cleanup_hashes) + len(empty_sources)
+                    console.print(
+                        f"✅ Removed leftover stale chunks for {n_cleaned} files",
+                        style="green",
+                    )
+            else:
+                console.print("No new or modified documents to index", style="yellow")
             return
 
-        # Then process them with a progress bar
-        n_files = len(set(doc.metadata.get("source", "") for doc in all_documents))
+        # Then process them with a progress bar. Preserve the previous chunks until
+        # every replacement chunk has been embedded successfully: deleting first
+        # turns a transient embedding failure into data loss. New chunk IDs include
+        # content_hash, so old and replacement generations can coexist briefly;
+        # after a successful add, delete only the IDs from the old generation.
+        sources = {str(doc.metadata.get("source", "")) for doc in all_documents}
+        n_files = len(sources)
         n_chunks = len(all_documents)
 
         logger.info(f"Found {n_files} new/modified files to index ({n_chunks} chunks)")
+
+        current_hash_by_source = {
+            str(doc.metadata.get("source", "")): doc.metadata.get("content_hash")
+            for doc in all_documents
+        }
+        stale_ids = stale_ids_for(current_hash_by_source) + leftover_stale_ids
 
         with tqdm(
             total=n_chunks,
@@ -315,6 +431,23 @@ def index(
         ) as pbar:
             for progress in indexer.add_documents_progress(all_documents):
                 pbar.update(progress)
+
+        if stale_ids:
+            try:
+                indexer.collection.delete(ids=stale_ids)
+            except Exception as delete_err:
+                # Add already succeeded. Failing the command here would hide that
+                # the new generation is indexed; a retry sees the current hash
+                # already stored and deletes leftover older IDs without re-adding.
+                logger.warning(
+                    "Indexed replacements but failed to delete %d stale chunk(s): %s",
+                    len(stale_ids),
+                    delete_err,
+                )
+                console.print(
+                    "⚠️ New chunks indexed; leftover stale chunks will be removed on the next run",
+                    style="yellow",
+                )
 
         console.print(
             f"✅ Successfully indexed {n_files} files ({n_chunks} chunks)",
