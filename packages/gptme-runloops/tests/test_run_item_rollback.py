@@ -407,7 +407,7 @@ class TestConvergedBackoffEarlyExit:
 
         return IO()
 
-    def _run(self, io, types=("greptile_needs_improvement",)):
+    def _run(self, io, types=("reviewer_needs_improvement",)):
         from gptme_runloops.merge_lifecycle import (
             LifecycleConfig,
             WorkItem,
@@ -460,10 +460,10 @@ class TestConvergedBackoffEarlyExit:
         assert io.promoted == []
 
     def test_mixed_item_is_never_short_circuited(self) -> None:
-        # bash `! grep -qvx greptile_needs_improvement`: a PR that ALSO has a
+        # bash `! grep -qvx reviewer_needs_improvement`: a PR that ALSO has a
         # CI failure still needs its session, however converged Greptile is.
         io = self._io("backoff", '{"verdict": "converged"}')
-        result = self._run(io, types=("greptile_needs_improvement", "ci_failure"))
+        result = self._run(io, types=("reviewer_needs_improvement", "ci_failure"))
         assert result.skip_item is False
         assert io.promoted == []
 

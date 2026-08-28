@@ -113,7 +113,7 @@ def test_fix_instruction_kinds_render_heredoc_stdout(kind: InstructionKind) -> N
 
 @pytest.mark.parametrize(
     "kind",
-    [InstructionKind.GREPTILE_NEEDS_FIX, InstructionKind.GREPTILE_NEEDS_IMPROVEMENT],
+    [InstructionKind.REVIEWER_NEEDS_FIX, InstructionKind.REVIEWER_NEEDS_IMPROVEMENT],
     ids=lambda k: k.value,
 )
 def test_investigate_kinds_render_append_string(kind: InstructionKind) -> None:
@@ -182,10 +182,10 @@ def test_poll_budget_is_a_parameter_with_bash_default() -> None:
 
 def test_number_accepts_str_and_int() -> None:
     as_int = render_instruction(
-        InstructionKind.GREPTILE_NEEDS_FIX, PromptContext("o/r", 42, "/ws")
+        InstructionKind.REVIEWER_NEEDS_FIX, PromptContext("o/r", 42, "/ws")
     )
     as_str = render_instruction(
-        InstructionKind.GREPTILE_NEEDS_FIX, PromptContext("o/r", "42", "/ws")
+        InstructionKind.REVIEWER_NEEDS_FIX, PromptContext("o/r", "42", "/ws")
     )
     assert as_int == as_str
 
@@ -195,7 +195,7 @@ def test_number_accepts_str_and_int() -> None:
 
 @pytest.mark.parametrize(
     "kind",
-    [InstructionKind.GREPTILE_NEEDS_FIX, InstructionKind.GREPTILE_NEEDS_IMPROVEMENT],
+    [InstructionKind.REVIEWER_NEEDS_FIX, InstructionKind.REVIEWER_NEEDS_IMPROVEMENT],
     ids=lambda k: k.value,
 )
 def test_investigate_jq_is_well_formed(kind: InstructionKind) -> None:

@@ -141,8 +141,8 @@ def test_combined_types_concatenate_in_order() -> None:
 
 
 def test_greptile_types_delegate_to_step2_templates() -> None:
-    assert build_investigate(["greptile_needs_fix"], BOB_PARAMS) == render_instruction(
-        InstructionKind.GREPTILE_NEEDS_FIX, BOB_PARAMS.to_prompt_context()
+    assert build_investigate(["reviewer_needs_fix"], BOB_PARAMS) == render_instruction(
+        InstructionKind.REVIEWER_NEEDS_FIX, BOB_PARAMS.to_prompt_context()
     )
 
 
@@ -432,7 +432,7 @@ def test_voice_postcall_positive_record_path() -> None:
     params_with_record = ItemPromptParams(
         repo="gptme/gptme-contrib",
         number=1234,
-        detail="greptile_needs_improvement record=/tmp/voice-2026-01-01T12-00-00.wav",
+        detail="reviewer_needs_improvement record=/tmp/voice-2026-01-01T12-00-00.wav",
         all_numbers=("1234",),
         **BOB_IDENTITY,
     )
@@ -459,7 +459,7 @@ def test_voice_postcall_spaced_record_path() -> None:
     params_spaced = ItemPromptParams(
         repo="gptme/gptme-contrib",
         number=1234,
-        detail="greptile_needs_improvement record=/tmp/voice call 2026.wav",
+        detail="reviewer_needs_improvement record=/tmp/voice call 2026.wav",
         all_numbers=("1234",),
         **BOB_IDENTITY,
     )
@@ -485,7 +485,7 @@ def test_voice_postcall_digit_key_in_path_not_truncated() -> None:
     params = ItemPromptParams(
         repo="gptme/gptme-contrib",
         number=1234,
-        detail="greptile_needs_improvement record=/tmp/voice 2026=full.wav other=val",
+        detail="reviewer_needs_improvement record=/tmp/voice 2026=full.wav other=val",
         all_numbers=("1234",),
         **BOB_IDENTITY,
     )
@@ -510,7 +510,7 @@ def test_voice_postcall_letter_key_in_detail_is_separator() -> None:
     params_with_event_type = ItemPromptParams(
         repo="gptme/gptme-contrib",
         number=1234,
-        detail="greptile_needs_improvement record=/tmp/voice-2026-01-01T12-00-00.wav event_type=terminal",
+        detail="reviewer_needs_improvement record=/tmp/voice-2026-01-01T12-00-00.wav event_type=terminal",
         all_numbers=("1234",),
         **BOB_IDENTITY,
     )
@@ -539,7 +539,7 @@ def test_voice_postcall_single_quote_in_record_path() -> None:
     params = ItemPromptParams(
         repo="gptme/gptme-contrib",
         number=1234,
-        detail="greptile_needs_improvement record=/tmp/voice's-call.wav",
+        detail="reviewer_needs_improvement record=/tmp/voice's-call.wav",
         all_numbers=("1234",),
         **BOB_IDENTITY,
     )
