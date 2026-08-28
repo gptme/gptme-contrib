@@ -36,24 +36,25 @@ def test_build_request_model_env(monkeypatch):
     assert build_request(FRAME, model="explicit-wins")["model"] == "explicit-wins"
 
 
-def test_describe_frame_posts_and_parses(monkeypatch):
+def test_describe_frame_posts_parses_and_closes_response(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example/v1/")
     captured = {}
+    response = httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": "a synthetic room"}}]},
+        request=httpx.Request("POST", "https://llm.example/v1/chat/completions"),
+    )
 
     def fake_post(url, *, json=None, headers=None, timeout=None):
         captured.update(url=url, body=json, headers=headers)
-        request = httpx.Request("POST", url)
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": "a synthetic room"}}]},
-            request=request,
-        )
+        return response
 
     monkeypatch.setattr(look.httpx, "post", fake_post)
     result = describe_frame(FRAME, "describe", model="test-model")
 
     assert result == "a synthetic room"
+    assert response.is_closed
     assert captured["url"] == "https://llm.example/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
     assert captured["body"]["model"] == "test-model"

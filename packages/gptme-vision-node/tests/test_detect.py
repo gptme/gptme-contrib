@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from gptme_vision_node.detect import Detection, MotionDetector, PersonDetector
 
 from .conftest import scene_frame, solid_frame
@@ -45,6 +46,12 @@ def test_motion_detector_reprimes_when_frame_size_changes(gray_frame):
     assert detector.detect(resized) == []
     assert detector._background is not None
     assert detector._background.shape == resized.shape[:2]
+
+
+@pytest.mark.parametrize("blur_ksize", [0, -1, 2, 4])
+def test_motion_detector_rejects_invalid_blur_kernel(blur_ksize):
+    with pytest.raises(ValueError, match="positive odd integer"):
+        MotionDetector(blur_ksize=blur_ksize)
 
 
 def test_person_detector_no_crash_on_synthetic(gray_frame):

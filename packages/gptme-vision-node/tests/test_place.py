@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from gptme_vision_node.place import (
@@ -32,6 +34,15 @@ def test_embedder_output_is_normalized():
     assert vec.ndim == 1
     assert vec.dtype == np.float64
     assert np.linalg.norm(vec) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "parameter"),
+    [({"h_bins": 0}, "h_bins"), ({"s_bins": 0}, "s_bins"), ({"grid": 0}, "grid")],
+)
+def test_embedder_rejects_non_positive_dimensions(kwargs, parameter):
+    with pytest.raises(ValueError, match=parameter):
+        HistogramEmbedder(**kwargs)
 
 
 def test_embedder_discriminates_scenes():
@@ -193,6 +204,15 @@ def test_load_rejects_non_object_payload(tmp_path, payload):
         PlaceRecognizer().load(gallery)
     with pytest.raises(ValueError, match="must contain a JSON object"):
         PlaceRecognizer.from_file(gallery)
+
+
+@pytest.mark.parametrize("places", [[], "kitchen", None])
+def test_load_rejects_non_object_places(tmp_path, places):
+    gallery = tmp_path / "places.json"
+    gallery.write_text(json.dumps({"places": places}))
+
+    with pytest.raises(ValueError, match="places must be a JSON object"):
+        PlaceRecognizer().load(gallery)
 
 
 class CustomEmbedder:

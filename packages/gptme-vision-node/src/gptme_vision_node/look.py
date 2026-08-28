@@ -85,8 +85,11 @@ def describe_frame(
         headers={"Authorization": f"Bearer {key}"},
         timeout=timeout,
     )
-    response.raise_for_status()
-    data = response.json()
+    try:
+        response.raise_for_status()
+        data = response.json()
+    finally:
+        response.close()
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:

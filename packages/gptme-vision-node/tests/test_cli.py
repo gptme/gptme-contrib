@@ -178,6 +178,22 @@ def test_cli_whereami_non_object_gallery_is_clean_error(tmp_path):
     assert "Traceback" not in result.output
 
 
+@pytest.mark.parametrize("wifi_weight", [None, "not-a-number"])
+def test_cli_whereami_invalid_wifi_weight_is_clean_error(tmp_path, wifi_weight):
+    img = _write_scene(tmp_path / "a.png", 9)
+    gallery = tmp_path / "places.json"
+    gallery.write_text(json.dumps({"wifi_weight": wifi_weight, "places": {}}))
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["whereami", "--source", str(img), "--gallery", str(gallery)],
+    )
+
+    assert result.exit_code != 0
+    assert "invalid gallery" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_cli_enroll_save_failure_is_clean_error(tmp_path, monkeypatch):
     img = _write_scene(tmp_path / "a.png", 8)
 

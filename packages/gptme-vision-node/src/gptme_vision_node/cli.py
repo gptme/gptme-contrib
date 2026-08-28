@@ -76,7 +76,7 @@ def _capture_frame(source_spec: str) -> np.ndarray:
 def _load_gallery(path: Path) -> PlaceRecognizer:
     try:
         return PlaceRecognizer.from_file(path)
-    except (OSError, ValueError) as exc:
+    except (OSError, TypeError, ValueError) as exc:
         raise click.ClickException(f"invalid gallery at {path}: {exc}") from exc
 
 

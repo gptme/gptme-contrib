@@ -51,6 +51,9 @@ class HistogramEmbedder:
     """
 
     def __init__(self, *, h_bins: int = 24, s_bins: int = 8, grid: int = 2) -> None:
+        for name, value in (("h_bins", h_bins), ("s_bins", s_bins), ("grid", grid)):
+            if value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         self.h_bins = h_bins
         self.s_bins = s_bins
         self.grid = grid
@@ -307,8 +310,11 @@ class PlaceRecognizer:
         saved_wifi_weight = float(payload.get("wifi_weight", self.wifi_weight))
         if not 0.0 <= saved_wifi_weight <= 1.0:
             raise ValueError("wifi_weight must be in [0, 1]")
+        saved_places = payload.get("places", {})
+        if not isinstance(saved_places, dict):
+            raise ValueError("gallery places must be a JSON object")
         places: dict[str, list[PlaceSample]] = {}
-        for name, samples in payload.get("places", {}).items():
+        for name, samples in saved_places.items():
             places[name] = [
                 PlaceSample(
                     embedding=(

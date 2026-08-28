@@ -100,6 +100,8 @@ class MotionDetector:
         min_area_fraction: float = 0.005,
         blur_ksize: int = 5,
     ) -> None:
+        if blur_ksize <= 0 or blur_ksize % 2 == 0:
+            raise ValueError("blur_ksize must be a positive odd integer")
         self.alpha = alpha
         self.threshold = threshold
         self.min_area_fraction = min_area_fraction
