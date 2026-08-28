@@ -13,11 +13,15 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+
+from gptodo.auth import is_transient_auth_death
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +246,12 @@ def spawn_agent(
                 if system_prompt_file
                 else ""
             )
-            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {timeout_prefix}claude -p {model_arg} {sysprompt_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})" > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+            claude_cmd = f'{timeout_prefix}claude -p {model_arg} {sysprompt_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})"'
+            # Run the classifier in gptodo's current Python environment. The
+            # retry happens inside tmux so check_session keeps one session ID.
+            python = shlex.quote(sys.executable)
+            auth_check = f"{python} -m gptodo.auth --classify-file {safe_output}"
+            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; if [ "$EXIT_CODE" -ne 0 ] && {auth_check}; then cp {safe_output} {safe_output}.first-auth-failure; sleep 5; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; fi; echo "EXIT_CODE=$EXIT_CODE" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions
@@ -373,9 +382,29 @@ def spawn_agent(
             timeout=timeout if timeout > 0 else None,
             env=env,
         )
+        output = result.stdout + "\n" + result.stderr
 
-        # Save output
-        output_file.write_text(result.stdout + "\n" + result.stderr)
+        if backend == "claude" and result.returncode != 0 and is_transient_auth_death(output):
+            logger.warning("Claude authentication failed; retrying once after 5 seconds")
+            time.sleep(5)
+            first_auth_failure = output
+            result = subprocess.run(
+                cmd,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=timeout if timeout > 0 else None,
+                env=env,
+            )
+            output = (
+                first_auth_failure
+                + "\n=== Retried after transient authentication failure ===\n"
+                + result.stdout
+                + "\n"
+                + result.stderr
+            )
+
+        output_file.write_text(output)
 
         session.status = "completed" if result.returncode == 0 else "failed"
         session.completed_at = datetime.now(timezone.utc).isoformat()

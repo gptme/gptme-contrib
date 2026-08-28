@@ -1,16 +1,19 @@
 """Tests for subagent session management."""
 
+import subprocess
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
+from gptodo.auth import is_transient_auth_death
 from gptodo.subagent import (
     AgentSession,
     _setup_coordination,
     list_sessions,
     load_session,
     save_session,
+    spawn_agent,
 )
 
 
@@ -81,6 +84,83 @@ def test_load_corrupted_session(sessions_dir):
     (sd / "corrupt.json").write_text("not valid json")
     loaded = load_session("corrupt", sessions_dir)
     assert loaded is None
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "401 Invalid authentication credentials",
+        '{"error":"authentication_failed"}',
+        '{"type":"authentication_error"}',
+        "Unauthorized: please run /login",
+    ],
+)
+def test_transient_auth_death_signatures(output):
+    assert is_transient_auth_death(output)
+
+
+def test_transient_auth_death_requires_small_output():
+    assert not is_transient_auth_death("401\n" + "x" * 3000)
+
+
+def test_transient_auth_death_uses_encoded_byte_size():
+    assert not is_transient_auth_death("401 " + "å" * 1000, max_bytes=1500)
+
+
+@patch("gptodo.subagent.time.sleep")
+@patch("gptodo.subagent.subprocess.run")
+def test_claude_foreground_retries_tiny_auth_failure_once(run, sleep, sessions_dir):
+    run.side_effect = [
+        subprocess.CompletedProcess([], 1, "", "Error: 401 Invalid authentication credentials"),
+        subprocess.CompletedProcess([], 0, "done", ""),
+    ]
+
+    session = spawn_agent("task", "prompt", backend="claude", workspace=sessions_dir)
+
+    assert session.status == "completed"
+    assert run.call_count == 2
+    sleep.assert_called_once_with(5)
+    assert "Invalid authentication credentials" in open(session.output_file).read()
+    assert "done" in open(session.output_file).read()
+
+
+@patch("gptodo.subagent.time.sleep")
+@patch("gptodo.subagent.subprocess.run")
+def test_claude_foreground_does_not_retry_large_output_mentioning_401(run, sleep, sessions_dir):
+    run.return_value = subprocess.CompletedProcess([], 1, "401\n" + "x" * 3000, "")
+
+    session = spawn_agent("task", "prompt", backend="claude", workspace=sessions_dir)
+
+    assert session.status == "failed"
+    run.assert_called_once()
+    sleep.assert_not_called()
+
+
+@patch("gptodo.subagent.time.sleep")
+@patch("gptodo.subagent.subprocess.run")
+def test_claude_foreground_retries_only_once(run, sleep, sessions_dir):
+    failure = subprocess.CompletedProcess([], 1, "", "authentication_failed")
+    run.side_effect = [failure, failure]
+
+    session = spawn_agent("task", "prompt", backend="claude", workspace=sessions_dir)
+
+    assert session.status == "failed"
+    assert run.call_count == 2
+    sleep.assert_called_once_with(5)
+
+
+@patch("gptodo.subagent.subprocess.run")
+def test_claude_background_command_retries_auth_failure(run, sessions_dir):
+    run.return_value = subprocess.CompletedProcess([], 0, "", "")
+
+    spawn_agent("task", "prompt", backend="claude", background=True, workspace=sessions_dir)
+
+    tmux_command = run.call_args.args[0][-1]
+    assert tmux_command.count("claude -p") == 2
+    assert "gptodo.auth --classify-file" in tmux_command
+    assert ".first-auth-failure" in tmux_command
+    assert "sleep 5" in tmux_command
+    assert "EXIT_CODE=$EXIT_CODE" in tmux_command
 
 
 # --- Coordination tests ---
