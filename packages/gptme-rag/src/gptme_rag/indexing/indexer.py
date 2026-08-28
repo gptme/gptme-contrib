@@ -1632,10 +1632,10 @@ class Indexer:
             files = list(path.glob(glob_pattern))
             gitignore_patterns = self._load_gitignore(path)
 
-        # pathlib treats **/ as optional at the start of a glob, while fnmatch
-        # does not. Normalize that prefix so git-listed paths follow the same
-        # matching semantics as the pathlib fallback.
-        fnmatch_pattern = glob_pattern.replace("**/*", "*")
+        # pathlib treats a leading **/ as optional, while fnmatch requires a
+        # slash. Also try the stripped form so root-level git-listed files
+        # match without losing nested matches from the original pattern.
+        root_pattern = glob_pattern.removeprefix("**/")
 
         for f in files:
             if not f.is_file():
@@ -1646,7 +1646,7 @@ class Indexer:
                 continue
 
             rel_path = str(f.relative_to(path))
-            if not fnmatch_path(rel_path, fnmatch_pattern):
+            if not (fnmatch_path(rel_path, glob_pattern) or fnmatch_path(rel_path, root_pattern)):
                 continue
 
             # Resolve symlinks to target
