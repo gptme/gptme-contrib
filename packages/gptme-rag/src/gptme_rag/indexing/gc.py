@@ -36,7 +36,7 @@ _WRITER_LOCK_NAME = ".gptme-rag-writer.lock"
 
 
 class ChromaCatalogError(RuntimeError):
-    """chroma.sqlite3 is unreadable; GC must not report a clean persist dir."""
+    """Persist dir or chroma.sqlite3 is unreadable; GC must not report a clean dir."""
 
 
 @contextmanager
@@ -119,16 +119,15 @@ def gc_orphan_segment_dirs(persist_dir: Path, *, apply: bool = False) -> list[Pa
     """Return orphan UUID dirs; delete them when ``apply`` is True.
 
     Dry-run (``apply=False``) is the default. Raises ``ChromaCatalogError`` if
-    the sqlite catalog cannot be read, rather than pretending the dir is clean.
-    ``apply=True`` raises ``RuntimeError`` if an index writer currently holds
-    the persist-dir lock.
+    the sqlite catalog or persist dir cannot be read, rather than pretending
+    the dir is clean. ``apply=True`` raises ``RuntimeError`` if an index writer
+    currently holds the persist-dir lock.
     """
     persist_dir = Path(persist_dir)
     db = persist_dir / "chroma.sqlite3"
-    if not persist_dir.is_dir() or not db.is_file():
-        return []
-
     try:
+        if not persist_dir.is_dir() or not db.is_file():
+            return []
         if apply:
             with index_writer_lock(persist_dir, blocking=False):
                 orphans = _collect_orphans(persist_dir, _live_chroma_ids(db))
@@ -136,3 +135,5 @@ def gc_orphan_segment_dirs(persist_dir: Path, *, apply: bool = False) -> list[Pa
         return _collect_orphans(persist_dir, _live_chroma_ids(db))
     except sqlite3.Error as exc:
         raise ChromaCatalogError(f"Cannot read {db}: {exc}") from exc
+    except OSError as exc:
+        raise ChromaCatalogError(f"Cannot access {persist_dir}: {exc}") from exc

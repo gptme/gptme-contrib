@@ -385,6 +385,37 @@ def test_gc_orphans_catalog_error_is_not_reported_as_clean(tmp_path):
     assert "No orphan segment dirs" not in result.output
 
 
+def test_gc_orphans_oserror_is_not_a_traceback(tmp_path):
+    """Permission errors on persist-dir access must exit 1 with a clean message.
+
+    Regression: gc_orphan_segment_dirs only wrapped sqlite3.Error, so
+    iterdir/lock-file OSError leaked as a traceback. The CLI is dry-run
+    by default and should report a permission error, not dump frames.
+    """
+    from gptme_rag.indexing.gc import ChromaCatalogError, gc_orphan_segment_dirs
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir)
+
+    with patch(
+        "gptme_rag.indexing.gc._collect_orphans",
+        side_effect=PermissionError("read-only persist dir"),
+    ):
+        with pytest.raises(ChromaCatalogError, match="read-only persist dir"):
+            gc_orphan_segment_dirs(persist_dir)
+        result = CliRunner().invoke(
+            cli,
+            ["gc-orphans", "--persist-dir", str(persist_dir)],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code != 0
+    assert "No orphan segment dirs" not in result.output
+    assert "Traceback" not in result.output
+    assert "Cannot access" in result.output
+
+
 def test_gc_orphans_handles_question_mark_in_persist_path(tmp_path):
     from gptme_rag.indexing.gc import gc_orphan_segment_dirs
 
