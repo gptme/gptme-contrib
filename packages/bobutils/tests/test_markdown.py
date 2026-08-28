@@ -61,6 +61,18 @@ def test_split_treats_escaped_pipe_as_one_cell() -> None:
     ]
 
 
+def test_even_backslash_run_does_not_shelter_a_pipe() -> None:
+    # GFM: \\ is a literal backslash; the following | is still a delimiter.
+    # (?<!\\)| misses this because it only inspects the preceding character.
+    raw = "a" + "\\\\" + "|" + "b"
+    assert list(raw) == ["a", "\\", "\\", "|", "b"]
+    escaped = escape_table_cell(raw)
+    assert list(escaped) == ["a", "\\", "\\", "\\", "|", "b"]
+    assert escape_table_cell(escaped) == escaped
+    assert split_table_row_cells("| " + escaped + " |") == [escaped]
+    assert split_table_row_cells("| " + raw + " |") == ["a\\\\", "b"]
+
+
 def test_escaped_row_parses_as_one_cell_for_the_real_consumer() -> None:
     """End-to-end: producer and consumer agree on a title that contains ``|``.
 

@@ -6,20 +6,38 @@ code span is not a shelter — `` `--json|--context` `` still becomes two
 cells. HN titles and LLM-authored idea descriptions hit this constantly.
 
 The producer (``escape_table_cell``) and the consumer
-(``split_table_row_cells``) share one regex so they cannot drift. The
-brain-repo incident this exists for: unescaped Active-Idea rows jammed
+(``split_table_row_cells``) share one scanner so they cannot drift. A
+negative-lookbehind regex is the wrong scanner: ``(?<!\\\\)|`` treats an
+even backslash run as an escape, but GFM renders ``\\\\|`` as a literal
+backslash plus a column delimiter. The brain-repo incident this exists
+for: unescaped Active-Idea rows jammed
 ``bob-retire-graduated-ideas.service`` (2026-08-28, rows 1163/1164).
 """
 
 from __future__ import annotations
 
-import re
-
 __all__ = ["escape_table_cell", "split_table_row_cells"]
 
-# A `|` that is not already backslash-escaped. Idempotent replace of this
-# pattern is what keeps re-running a generator from producing `\\\\|`.
-_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+def _unescaped_pipe_indices(text: str) -> list[int]:
+    """Return indices of ``|`` that GFM treats as delimiters.
+
+    A backslash escapes the next character, so a pipe is unescaped iff
+    the run of backslashes immediately before it has even length
+    (including zero). Walking pairs is what keeps ``\\\\|`` (even) a
+    delimiter and ``\\|`` (odd) a literal pipe.
+    """
+    indices: list[int] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if text[i] == "|":
+            indices.append(i)
+        i += 1
+    return indices
 
 
 def escape_table_cell(text: object) -> str:
@@ -28,7 +46,18 @@ def escape_table_cell(text: object) -> str:
     Idempotent: an already-escaped ``\\|`` is left alone. Non-strings are
     coerced with ``str()`` so callers can pass scores/ids without a cast.
     """
-    return _UNESCAPED_PIPE_RE.sub(r"\\|", str(text))
+    s = str(text)
+    idxs = _unescaped_pipe_indices(s)
+    if not idxs:
+        return s
+    parts: list[str] = []
+    last = 0
+    for i in idxs:
+        parts.append(s[last:i])
+        parts.append("\\|")
+        last = i + 1
+    parts.append(s[last:])
+    return "".join(parts)
 
 
 def split_table_row_cells(line: str) -> list[str]:
@@ -42,7 +71,13 @@ def split_table_row_cells(line: str) -> list[str]:
     escaping. This is the consumer-side counterpart of
     :func:`escape_table_cell`.
     """
-    parts = _UNESCAPED_PIPE_RE.split(line)
+    idxs = _unescaped_pipe_indices(line)
+    parts: list[str] = []
+    last = 0
+    for i in idxs:
+        parts.append(line[last:i])
+        last = i + 1
+    parts.append(line[last:])
     # Unescaped delimiter pipes produce empty split parts. Drop those only —
     # not "the first part" / "the last part" by position. A row with no
     # leading pipe, or a last cell that ends with ``\\|``, must keep that cell.
