@@ -35,6 +35,7 @@ dependencies = [
     # constrain it on 3.10 so the package stays installable there.
     "onnxruntime<1.24; python_version < '3.11'",
     "regex>=2024.11.6",
+    "pathspec>=0.12",
 ]
 
 [project.urls]

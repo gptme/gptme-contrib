@@ -267,7 +267,7 @@ def index(
                 else:
                     status.update(f"Processing directory: {path}")
 
-                documents = indexer.collect_documents(path, file_limit=file_limit)
+                documents = indexer.collect_documents(path, pattern, file_limit=file_limit)
 
                 # Filter for new or modified documents
                 filtered_documents = []
