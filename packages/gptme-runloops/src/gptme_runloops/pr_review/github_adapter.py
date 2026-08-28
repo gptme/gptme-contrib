@@ -222,9 +222,14 @@ def _build_summary_comment_body(
     artifact: ReviewArtifact, posted_count: int, skipped_count: int
 ) -> str:
     """Build a top-level summary comment for the PR."""
-    n_total = len(artifact.findings)
+    postable_findings = [
+        finding
+        for finding in artifact.findings
+        if finding.disposition != Disposition.dropped
+    ]
+    n_total = len(postable_findings)
     n_by_severity: dict[str, int] = {}
-    for f in artifact.findings:
+    for f in postable_findings:
         n_by_severity[f.severity.value] = n_by_severity.get(f.severity.value, 0) + 1
 
     severity_line = ", ".join(
