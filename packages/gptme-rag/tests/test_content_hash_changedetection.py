@@ -490,3 +490,110 @@ def test_index_reports_success_when_stale_delete_fails(tmp_path, monkeypatch):
     assert stored is not None
     new_hash = hashlib.sha256(b"version two content").hexdigest()
     assert new_hash in {metadata["content_hash"] for metadata in stored}
+
+
+def test_index_mixed_legacy_and_current_hash_cleans_legacy_without_reembed(tmp_path):
+    """A leftover unhashed chunk beside the current hash must not re-embed."""
+    runner = CliRunner()
+    index_dir = tmp_path / "index"
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "doc.txt"
+    f.write_text("stable mixed-generation content")
+
+    first = _run_index(runner, index_dir, [src])
+    assert first.exit_code == 0, first.output
+
+    import chromadb
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    abs_source = str(f.resolve())
+    current_hash = hashlib.sha256(b"stable mixed-generation content").hexdigest()
+    client = chromadb.PersistentClient(
+        path=str(index_dir),
+        settings=chromadb.config.Settings(
+            allow_reset=True,
+            is_persistent=True,
+            anonymized_telemetry=False,
+        ),
+    )
+    collection = client.get_collection("default")
+    existing = collection.get(include=["embeddings", "metadatas", "documents"])
+    embeddings = existing["embeddings"]
+    assert embeddings is not None and len(embeddings) > 0
+    collection.add(
+        ids=[f"{abs_source}#legacy-unhashed"],
+        documents=["stable mixed-generation content"],
+        metadatas=[
+            {
+                "source": abs_source,
+                "filename": f.name,
+                "extension": f.suffix,
+                "last_modified": "2026-08-28T00:00:00",
+                "is_chunk": True,
+            }
+        ],
+        embeddings=[embeddings[0]],
+    )
+    del collection, client
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+
+    second = _run_index(runner, index_dir, [src])
+    assert second.exit_code == 0, second.output
+    assert "Successfully indexed" not in _plain(second.output), second.output
+    assert "Removed leftover stale chunks" in _plain(second.output), second.output
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    client = chromadb.PersistentClient(
+        path=str(index_dir),
+        settings=chromadb.config.Settings(
+            allow_reset=True,
+            is_persistent=True,
+            anonymized_telemetry=False,
+        ),
+    )
+    collection = client.get_collection("default")
+    stored = collection.get(include=["metadatas"])
+    metadatas = stored["metadatas"]
+    assert metadatas is not None
+    assert {metadata.get("content_hash") for metadata in metadatas} == {current_hash}
+    assert f"{abs_source}#legacy-unhashed" not in stored["ids"]
+
+
+def test_index_emptied_file_deletes_stale_chunks(tmp_path):
+    """Emptying a previously indexed file must drop its leftover chunks."""
+    runner = CliRunner()
+    index_dir = tmp_path / "index"
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "doc.txt"
+    f.write_text("content that will be emptied")
+
+    first = _run_index(runner, index_dir, [src])
+    assert first.exit_code == 0, first.output
+
+    import chromadb
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    f.write_text("   \n")
+    second = _run_index(runner, index_dir, [src])
+    assert second.exit_code == 0, second.output
+    assert "Successfully indexed" not in _plain(second.output), second.output
+    assert "Removed leftover stale chunks" in _plain(second.output), second.output
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    client = chromadb.PersistentClient(
+        path=str(index_dir),
+        settings=chromadb.config.Settings(
+            allow_reset=True,
+            is_persistent=True,
+            anonymized_telemetry=False,
+        ),
+    )
+    collection = client.get_collection("default")
+    stored = collection.get(include=["metadatas"])
+    abs_source = str(f.resolve())
+    leftover = [
+        metadata for metadata in (stored["metadatas"] or []) if metadata.get("source") == abs_source
+    ]
+    assert leftover == []

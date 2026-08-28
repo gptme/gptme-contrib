@@ -80,6 +80,16 @@ class Document:
             except UnicodeDecodeError:
                 return
             if not content.strip():
+                # Yield a tombstone so index can delete leftover chunks for a
+                # file that used to have content and is now empty. process_text
+                # would skip this too; without a document, cli.py never sees
+                # the source and stale search hits remain.
+                yield cls(
+                    content="",
+                    metadata=base_metadata.copy(),
+                    source_path=path,
+                    last_modified=last_modified,
+                )
                 return
             # Process file in chunks. Include the source generation in each ID so
             # replacement chunks can be added before stale chunks are removed; this

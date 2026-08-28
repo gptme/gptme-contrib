@@ -280,6 +280,7 @@ def index(
         # a second add of the same bytes collides — only the stale IDs are deleted.
         all_documents = []
         cleanup_hashes: dict[str, object] = {}
+        empty_sources: set[str] = set()
         with console.status("Collecting documents...") as status:
             for path in paths:
                 if path.is_file():
@@ -299,6 +300,15 @@ def index(
                         doc.metadata["source"] = abs_source
 
                         existing = existing_files.get(abs_source)
+                        if not (doc.content or "").strip():
+                            # Empty/whitespace source: never index it. If it
+                            # previously had chunks, drop them all.
+                            if existing is not None:
+                                empty_sources.add(abs_source)
+                                logger.debug("Empty file, dropping stale chunks: %s", abs_source)
+                            else:
+                                logger.debug("Skipping empty file: %s", abs_source)
+                            continue
                         if existing is None:
                             logger.debug("New file: %s", abs_source)
                             filtered_documents.append(doc)
@@ -313,16 +323,20 @@ def index(
                                 set[object], existing.get("content_hashes") or set()
                             )
                             has_unhashed = bool(existing.get("has_unhashed"))
-                            if stored_hashes and not has_unhashed:
-                                if stored_hashes == {current_hash}:
-                                    logger.debug("Unchanged file: %s", abs_source)
-                                    continue
+                            if stored_hashes:
                                 if current_hash in stored_hashes:
-                                    cleanup_hashes[abs_source] = current_hash
-                                    logger.debug(
-                                        "Current generation already indexed: %s",
-                                        abs_source,
-                                    )
+                                    # Current generation is already indexed. Skip
+                                    # re-embed even when leftover unhashed/legacy
+                                    # chunks remain — re-adding the same IDs
+                                    # UniqueConstraintErrors and aborts cleanup.
+                                    if stored_hashes != {current_hash} or has_unhashed:
+                                        cleanup_hashes[abs_source] = current_hash
+                                        logger.debug(
+                                            "Current generation already indexed: %s",
+                                            abs_source,
+                                        )
+                                    else:
+                                        logger.debug("Unchanged file: %s", abs_source)
                                     continue
                                 logger.debug(
                                     "Modified file: %s (content hash changed)",
@@ -330,12 +344,7 @@ def index(
                                 )
                                 filtered_documents.append(doc)
                                 continue
-                            # Stored doc predates content hashing, or mixed
-                            # generations after a crash: fall through to mtime
-                            # only when there is no hash at all.
-                            if stored_hashes:
-                                filtered_documents.append(doc)
-                                continue
+                            # stored_hashes empty: pure legacy, fall through to mtime
 
                         # Fallback for legacy stored docs without content_hash:
                         # compare mtime (rounded to microseconds).
@@ -364,7 +373,14 @@ def index(
                 != hash_by_source.get(str(doc.metadata.get("source", "")))
             ]
 
-        leftover_stale_ids = stale_ids_for(cleanup_hashes)
+        def ids_for_sources(sources: set[str]) -> list[str]:
+            return [
+                doc.doc_id
+                for doc in existing_docs
+                if doc.doc_id and str(doc.metadata.get("source", "")) in sources
+            ]
+
+        leftover_stale_ids = stale_ids_for(cleanup_hashes) + ids_for_sources(empty_sources)
 
         if not all_documents:
             if leftover_stale_ids:
@@ -381,8 +397,9 @@ def index(
                         style="yellow",
                     )
                 else:
+                    n_cleaned = len(cleanup_hashes) + len(empty_sources)
                     console.print(
-                        f"✅ Removed leftover stale chunks for {len(cleanup_hashes)} files",
+                        f"✅ Removed leftover stale chunks for {n_cleaned} files",
                         style="green",
                     )
             else:
