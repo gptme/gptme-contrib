@@ -234,6 +234,19 @@ def test_load_rejects_malformed_place_samples(tmp_path, samples):
         PlaceRecognizer().load(gallery)
 
 
+@pytest.mark.parametrize("wifi", ["kitchen-ap", [1, 2], 3])
+def test_load_rejects_non_object_wifi(tmp_path, wifi):
+    gallery = tmp_path / "places.json"
+    gallery.write_text(
+        json.dumps({"places": {"kitchen": [{"embedding": [1.0], "wifi": wifi}]}})
+    )
+
+    with pytest.raises(ValueError, match="sample wifi must be a JSON object"):
+        PlaceRecognizer().load(gallery)
+    with pytest.raises(ValueError, match="sample wifi must be a JSON object"):
+        PlaceRecognizer.from_file(gallery)
+
+
 class CustomEmbedder:
     embedder_id = "test-custom-v1"
 

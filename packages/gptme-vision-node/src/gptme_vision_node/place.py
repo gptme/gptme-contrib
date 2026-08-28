@@ -324,17 +324,24 @@ class PlaceRecognizer:
                 raise ValueError(
                     f"gallery place {name!r} samples must be a list of JSON objects"
                 )
-            places[name] = [
-                PlaceSample(
-                    embedding=(
-                        np.asarray(s["embedding"], dtype=np.float64)
-                        if s.get("embedding") is not None
-                        else None
-                    ),
-                    wifi={k: float(v) for k, v in (s.get("wifi") or {}).items()},
+            loaded_samples: list[PlaceSample] = []
+            for s in samples:
+                wifi_raw = s.get("wifi") or {}
+                if not isinstance(wifi_raw, dict):
+                    raise ValueError(
+                        f"gallery place {name!r} sample wifi must be a JSON object"
+                    )
+                loaded_samples.append(
+                    PlaceSample(
+                        embedding=(
+                            np.asarray(s["embedding"], dtype=np.float64)
+                            if s.get("embedding") is not None
+                            else None
+                        ),
+                        wifi={k: float(v) for k, v in wifi_raw.items()},
+                    )
                 )
-                for s in samples
-            ]
+            places[name] = loaded_samples
         self.wifi_weight = saved_wifi_weight
         self.places = places
 

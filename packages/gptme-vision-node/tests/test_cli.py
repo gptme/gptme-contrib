@@ -139,6 +139,22 @@ def test_cli_detect_opencv_failure_is_clean_error(monkeypatch):
     assert "Traceback" not in result.output
 
 
+def test_cli_opencv_source_read_failure_is_clean_error(monkeypatch):
+    class BrokenSource:
+        def get_frame(self):
+            raise cv2.error("capture disconnected")
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cli, "make_source", lambda spec: BrokenSource())
+    result = CliRunner().invoke(cli.main, ["look", "--source", "camera:9"])
+
+    assert result.exit_code != 0
+    assert "capture disconnected" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_cli_enroll_and_whereami(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli.WifiSignature, "scan", staticmethod(lambda interface=None: {})
@@ -242,6 +258,24 @@ def test_cli_whereami_malformed_sample_is_clean_error(tmp_path):
 
     assert result.exit_code != 0
     assert "samples must be a list of JSON objects" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_whereami_non_object_wifi_is_clean_error(tmp_path):
+    img = _write_scene(tmp_path / "a.png", 11)
+    gallery = tmp_path / "places.json"
+    gallery.write_text(
+        json.dumps({"places": {"kitchen": [{"embedding": [1.0], "wifi": "AA"}]}})
+    )
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["whereami", "--source", str(img), "--gallery", str(gallery)],
+    )
+
+    assert result.exit_code != 0
+    assert "invalid gallery" in result.output
+    assert "sample wifi must be a JSON object" in result.output
     assert "Traceback" not in result.output
 
 

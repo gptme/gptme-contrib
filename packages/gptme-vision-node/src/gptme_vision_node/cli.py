@@ -53,7 +53,7 @@ def make_source(spec: str) -> FrameSource:
 def _get_frame(source: FrameSource) -> np.ndarray | None:
     try:
         return source.get_frame()
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (cv2.error, OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
