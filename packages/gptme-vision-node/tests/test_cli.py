@@ -119,6 +119,26 @@ def test_cli_detect_exhausted_source_exits_cleanly(monkeypatch):
     assert result.output.strip()
 
 
+def test_cli_detect_opencv_failure_is_clean_error(monkeypatch):
+    class Source:
+        def get_frame(self):
+            return scene_frame(3)
+
+    class BrokenDetector:
+        def detect(self, frame):
+            raise cv2.error("invalid frame")
+
+    monkeypatch.setattr(cli, "make_source", lambda spec: Source())
+    monkeypatch.setattr(cli, "PersonDetector", BrokenDetector)
+    monkeypatch.setattr(cli, "MotionDetector", BrokenDetector)
+
+    result = CliRunner().invoke(cli.main, ["detect", "--source", "broken", "--once"])
+
+    assert result.exit_code != 0
+    assert "invalid frame" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_cli_enroll_and_whereami(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli.WifiSignature, "scan", staticmethod(lambda interface=None: {})
@@ -207,6 +227,21 @@ def test_cli_whereami_invalid_wifi_weight_is_clean_error(tmp_path, wifi_weight):
 
     assert result.exit_code != 0
     assert "invalid gallery" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_whereami_malformed_sample_is_clean_error(tmp_path):
+    img = _write_scene(tmp_path / "a.png", 10)
+    gallery = tmp_path / "places.json"
+    gallery.write_text(json.dumps({"places": {"kitchen": [1]}}))
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["whereami", "--source", str(img), "--gallery", str(gallery)],
+    )
+
+    assert result.exit_code != 0
+    assert "samples must be a list of JSON objects" in result.output
     assert "Traceback" not in result.output
 
 

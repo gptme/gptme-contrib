@@ -36,6 +36,13 @@ def test_embedder_output_is_normalized():
     assert np.linalg.norm(vec) == pytest.approx(1.0)
 
 
+def test_embedder_handles_frames_smaller_than_grid():
+    vec = HistogramEmbedder(grid=2).embed(np.zeros((1, 1, 3), dtype=np.uint8))
+
+    assert vec.shape == (24 * 8 * 5,)
+    assert np.isfinite(vec).all()
+
+
 @pytest.mark.parametrize(
     ("kwargs", "parameter"),
     [({"h_bins": 0}, "h_bins"), ({"s_bins": 0}, "s_bins"), ({"grid": 0}, "grid")],
@@ -212,6 +219,18 @@ def test_load_rejects_non_object_places(tmp_path, places):
     gallery.write_text(json.dumps({"places": places}))
 
     with pytest.raises(ValueError, match="places must be a JSON object"):
+        PlaceRecognizer().load(gallery)
+
+
+@pytest.mark.parametrize(
+    "samples",
+    [{"embedding": [1.0]}, [1], ["sample"], [[1.0]]],
+)
+def test_load_rejects_malformed_place_samples(tmp_path, samples):
+    gallery = tmp_path / "places.json"
+    gallery.write_text(json.dumps({"places": {"kitchen": samples}}))
+
+    with pytest.raises(ValueError, match="samples must be a list of JSON objects"):
         PlaceRecognizer().load(gallery)
 
 

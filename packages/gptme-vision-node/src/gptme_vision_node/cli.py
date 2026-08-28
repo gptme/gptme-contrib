@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import click
+import cv2
 import httpx
 import numpy as np
 
@@ -104,7 +105,7 @@ def detect(source_spec: str, once: bool, interval: float) -> None:
                 break
             try:
                 detections = [d for det in detectors for d in det.detect(frame)]
-            except (RuntimeError, ValueError) as exc:
+            except (cv2.error, RuntimeError, ValueError) as exc:
                 raise click.ClickException(str(exc)) from exc
             for d in detections:
                 click.echo(f"{d.kind}\tbox={d.box}\tscore={d.score:.3f}")

@@ -83,6 +83,9 @@ class HistogramEmbedder:
                 ]
                 # H+S (not hue alone): hue is meaningless at zero saturation,
                 # so a hue-only cell histogram cannot tell e.g. black from red.
+                if cell.size == 0:
+                    parts.append(np.zeros(self.h_bins * self.s_bins))
+                    continue
                 cell_hist = cv2.calcHist(
                     [cell], [0, 1], None, [self.h_bins, self.s_bins], [0, 180, 0, 256]
                 )
@@ -315,6 +318,12 @@ class PlaceRecognizer:
             raise ValueError("gallery places must be a JSON object")
         places: dict[str, list[PlaceSample]] = {}
         for name, samples in saved_places.items():
+            if not isinstance(samples, list) or not all(
+                isinstance(sample, dict) for sample in samples
+            ):
+                raise ValueError(
+                    f"gallery place {name!r} samples must be a list of JSON objects"
+                )
             places[name] = [
                 PlaceSample(
                     embedding=(
