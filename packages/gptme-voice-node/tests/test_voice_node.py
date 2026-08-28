@@ -62,15 +62,15 @@ class TestMicMute:
 
 class TestSendLoop:
     @pytest.mark.asyncio
-    async def test_audio_io_cancellation_waits_for_inflight_thread(self):
+    async def test_audio_io_cancellation_does_not_wait_for_inflight_thread(self):
         from gptme_voice_node.node import _run_audio_io
 
         thread_started = asyncio.Event()
-        allow_thread_to_finish = asyncio.Event()
+        never_finishes = asyncio.Event()
 
         async def fake_to_thread(function, *args, **kwargs):
             thread_started.set()
-            await allow_thread_to_finish.wait()
+            await never_finishes.wait()
             return function(*args, **kwargs)
 
         operation = MagicMock(return_value=b"audio")
@@ -78,13 +78,10 @@ class TestSendLoop:
             task = asyncio.create_task(_run_audio_io(operation))
             await thread_started.wait()
             task.cancel()
-            await asyncio.sleep(0)
-            assert not task.done()
-            allow_thread_to_finish.set()
             with pytest.raises(asyncio.CancelledError):
-                await task
+                await asyncio.wait_for(task, timeout=0.1)
 
-        operation.assert_called_once_with()
+        operation.assert_not_called()
 
 
 class TestRecvLoop:
@@ -128,6 +125,21 @@ class TestRecvLoop:
 
         assert node._playing is False
         assert node._play_ended_at > 0
+
+    @pytest.mark.asyncio
+    async def test_spurious_audio_end_does_not_start_cooldown(self):
+        node = _make_node()
+        node._playing = False
+
+        mock_ws = AsyncMock()
+        mock_ws.recv.side_effect = [
+            json.dumps({"type": "audio_end"}),
+            ConnectionClosed(None, None),
+        ]
+
+        await node._recv_loop(mock_ws, MagicMock())
+
+        assert node._play_ended_at == 0
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -204,6 +216,23 @@ class TestLifecycle:
         speaker.start_stream.assert_called_once()
         assert node._pa.open.call_args_list[0].kwargs["start"] is False
         assert node._pa.open.call_args_list[1].kwargs["start"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failing_stream", ["mic", "speaker"])
+    async def test_session_closes_streams_when_start_fails(self, failing_stream):
+        node = _make_node()
+        mic = MagicMock()
+        speaker = MagicMock()
+        node._pa.open.side_effect = [mic, speaker]
+        stream = mic if failing_stream == "mic" else speaker
+        stream.start_stream.side_effect = OSError("device unavailable")
+
+        with pytest.raises(OSError, match="device unavailable"):
+            await node._session(AsyncMock())
+
+        mic.close.assert_called_once()
+        speaker.close.assert_called_once()
+        stream.stop_stream.assert_not_called()
 
     def test_cleanup_terminates_pyaudio(self):
         with patch("gptme_voice_node.node._get_pyaudio") as mock_get_pa:

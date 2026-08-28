@@ -82,13 +82,19 @@ T = TypeVar("T")
 
 
 async def _run_audio_io(function: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Run blocking audio I/O and let it finish before propagating cancellation."""
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    """Run blocking audio I/O without blocking cancellation of the caller."""
+    return await asyncio.to_thread(function, *args, **kwargs)
+
+
+def _close_stream(stream, started: bool) -> None:
+    """Close an audio stream even when start or stop fails."""
     try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
+        if started:
+            stream.stop_stream()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to stop audio stream: %s", exc)
+    finally:
+        stream.close()
 
 
 def _next_backoff(backoff: int, connected_at: float | None) -> int:
@@ -146,6 +152,7 @@ class VoiceNode:
             frames_per_buffer=CHUNK_SIZE,
             start=False,
         )
+        mic_started = False
         try:
             speaker = self._pa.open(
                 format=self._audio_format,
@@ -155,19 +162,20 @@ class VoiceNode:
                 frames_per_buffer=CHUNK_SIZE,
                 start=False,
             )
+            speaker_started = False
             try:
                 mic.start_stream()
+                mic_started = True
                 speaker.start_stream()
+                speaker_started = True
                 await asyncio.gather(
                     self._send_loop(ws, mic),
                     self._recv_loop(ws, speaker),
                 )
             finally:
-                speaker.stop_stream()
-                speaker.close()
+                _close_stream(speaker, speaker_started)
         finally:
-            mic.stop_stream()
-            mic.close()
+            _close_stream(mic, mic_started)
 
     async def _send_loop(self, ws, mic_stream) -> None:
         """Continuously read mic and forward to server (unless muted)."""
@@ -205,7 +213,7 @@ class VoiceNode:
                     pcm = base64.b64decode(audio, validate=True)
                     self._playing = True
                     await _run_audio_io(speaker_stream.write, pcm)
-                elif msg_type == "audio_end":
+                elif msg_type == "audio_end" and self._playing:
                     self._playing = False
                     self._play_ended_at = time.monotonic()
                     log.debug("[%s] audio_end received", self.node_name)
