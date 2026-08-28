@@ -93,6 +93,8 @@ def test_load_corrupted_session(sessions_dir):
         '{"error":"authentication_failed"}',
         '{"type":"authentication_error"}',
         "Unauthorized: please run /login",
+        "Authentication failed",
+        "Authentication error",
     ],
 )
 def test_transient_auth_death_signatures(output):
@@ -161,6 +163,18 @@ def test_claude_background_command_retries_auth_failure(run, sessions_dir):
     assert ".first-auth-failure" in tmux_command
     assert "sleep 5" in tmux_command
     assert "EXIT_CODE=$EXIT_CODE" in tmux_command
+
+
+@patch("gptodo.subagent.subprocess.run")
+def test_codex_background_command_does_not_retry_auth_failure(run, sessions_dir):
+    run.return_value = subprocess.CompletedProcess([], 0, "", "")
+
+    spawn_agent("task", "prompt", backend="codex", background=True, workspace=sessions_dir)
+
+    tmux_command = run.call_args.args[0][-1]
+    assert "gptodo.auth --classify-file" not in tmux_command
+    assert ".first-auth-failure" not in tmux_command
+    assert tmux_command.count("sleep 5") == 0
 
 
 # --- Coordination tests ---

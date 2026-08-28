@@ -247,11 +247,16 @@ def spawn_agent(
                 else ""
             )
             claude_cmd = f'{timeout_prefix}claude -p {model_arg} {sysprompt_arg} --dangerously-skip-permissions --tools default -- "$(cat {safe_prompt_file})"'
-            # Run the classifier in gptodo's current Python environment. The
-            # retry happens inside tmux so check_session keeps one session ID.
-            python = shlex.quote(sys.executable)
-            auth_check = f"{python} -m gptodo.auth --classify-file {safe_output}"
-            shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; if [ "$EXIT_CODE" -ne 0 ] && {auth_check}; then cp {safe_output} {safe_output}.first-auth-failure; sleep 5; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; fi; echo "EXIT_CODE=$EXIT_CODE" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+            if backend == "claude":
+                # Run the classifier in gptodo's current Python environment. The
+                # retry happens inside tmux so check_session keeps one session ID.
+                python = shlex.quote(sys.executable)
+                auth_check = f"{python} -m gptodo.auth --classify-file {safe_output}"
+                shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; if [ "$EXIT_CODE" -ne 0 ] && {auth_check}; then cp {safe_output} {safe_output}.first-auth-failure; sleep 5; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; fi; echo "EXIT_CODE=$EXIT_CODE" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+            else:
+                # Non-gptme non-claude (codex) still launches `claude -p` today;
+                # keep that pre-existing command, but do not apply Claude-only retry.
+                shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {claude_cmd} > {safe_output} 2>&1; echo "EXIT_CODE=$?" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
 
         # Build environment exports for critical API keys
         # These may not be inherited by tmux detached sessions

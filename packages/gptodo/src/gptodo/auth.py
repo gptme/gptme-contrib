@@ -10,7 +10,7 @@ DEFAULT_MAX_BYTES = 2000
 
 _AUTH_FAILURE_RE = re.compile(
     rb"\b401\b|unauthorized|invalid authentication credentials|"
-    rb"invalid bearer token|authentication_(?:error|failed)|"
+    rb"invalid bearer token|authentication[ _](?:error|failed)|"
     rb"oauth.{0,40}(?:expired|fail|error|invalid)|please run /login",
     re.IGNORECASE,
 )
