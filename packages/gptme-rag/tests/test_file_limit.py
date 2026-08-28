@@ -92,17 +92,22 @@ def test_index_cli_threads_pattern_to_collect_documents(tmp_path, monkeypatch):
 def test_get_valid_files_honors_pattern_in_git_repo(tmp_path):
     """Git-backed discovery filters files with the requested pattern."""
     (tmp_path / "docs").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "nested").mkdir()
     (tmp_path / "root.md").write_text("root")
     (tmp_path / "named.md").write_text("named")
     (tmp_path / "docs" / "nested.md").write_text("nested")
     (tmp_path / "docs" / "named.md").write_text("nested named")
     (tmp_path / "docs" / "ignored.txt").write_text("ignored")
+    (tmp_path / "src" / "root.py").write_text("root")
+    (tmp_path / "src" / "nested" / "child.py").write_text("nested")
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
 
     indexer = Indexer.__new__(Indexer)
     markdown_files = indexer._get_valid_files(tmp_path, glob_pattern="**/*.md")
     named_files = indexer._get_valid_files(tmp_path, glob_pattern="**/named.md")
+    python_files = indexer._get_valid_files(tmp_path, glob_pattern="src/**/*.py")
 
     assert markdown_files == {
         (tmp_path / "root.md").resolve(),
@@ -113,6 +118,10 @@ def test_get_valid_files_honors_pattern_in_git_repo(tmp_path):
     assert named_files == {
         (tmp_path / "named.md").resolve(),
         (tmp_path / "docs" / "named.md").resolve(),
+    }
+    assert python_files == {
+        (tmp_path / "src" / "root.py").resolve(),
+        (tmp_path / "src" / "nested" / "child.py").resolve(),
     }
 
 

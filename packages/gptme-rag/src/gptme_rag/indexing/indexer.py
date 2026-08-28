@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import time
 from collections.abc import Generator, Sequence
@@ -24,6 +25,30 @@ from ..embeddings import (
 )
 from .document import Document
 from .document_processor import DocumentProcessor
+
+
+def _glob_match_path(path: str, pattern: str) -> bool:
+    """Match a path with ``**`` spanning zero or more directories."""
+    regex_parts: list[str] = []
+    i = 0
+    while i < len(pattern):
+        chunk = pattern[i:]
+        if chunk.startswith("**/"):
+            regex_parts.append("(?:.*/)?")
+            i += 3
+        elif chunk.startswith("**"):
+            regex_parts.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            regex_parts.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            regex_parts.append("[^/]")
+            i += 1
+        else:
+            regex_parts.append(re.escape(pattern[i]))
+            i += 1
+    return re.fullmatch("".join(regex_parts), path) is not None
 
 
 # HuggingFace namespaces used for sentence-transformer / embedding models.
@@ -1632,11 +1657,6 @@ class Indexer:
             files = list(path.glob(glob_pattern))
             gitignore_patterns = self._load_gitignore(path)
 
-        # pathlib treats a leading **/ as optional, while fnmatch requires a
-        # slash. Also try the stripped form so root-level git-listed files
-        # match without losing nested matches from the original pattern.
-        root_pattern = glob_pattern.removeprefix("**/")
-
         for f in files:
             if not f.is_file():
                 continue
@@ -1646,7 +1666,7 @@ class Indexer:
                 continue
 
             rel_path = str(f.relative_to(path))
-            if not (fnmatch_path(rel_path, glob_pattern) or fnmatch_path(rel_path, root_pattern)):
+            if not _glob_match_path(rel_path, glob_pattern):
                 continue
 
             # Resolve symlinks to target
