@@ -77,7 +77,7 @@
 #   become inert.
 #
 #   Maintainer fix requests: a whole-line `@TimeToBuildBob fix` comment from an
-#   OWNER/MEMBER/COLLABORATOR forces a greptile_needs_fix item for that PR even
+#   OWNER/MEMBER/COLLABORATOR forces a reviewer_needs_fix item for that PR even
 #   when every organic route is quiet (clean AI verdict, Greptile 5/5, or inside
 #   the 1h cooldown). Served-ness is derived from GitHub — the 👀 reaction we post
 #   on the trigger comment IS the watermark, so exactly one item is emitted per
@@ -208,8 +208,6 @@ emit_item() {
             merge_conflict)         label="CONFLICT" ;;
             reviewer_needs_fix)     label="REVIEW FIX${source:+ ($source)}" ;;
             reviewer_needs_improvement) label="REVIEW${source:+ ($source)}" ;;
-            greptile_needs_fix)     label="GREPTILE FIX" ;;
-            greptile_needs_improvement) label="GREPTILE" ;;
             merge_ready)            label="MERGE READY" ;;
             *)                      label="$type" ;;
         esac
@@ -1083,7 +1081,7 @@ check_greptile_scores() {
         # No Greptile review or no score found — Greptile may be dark on this
         # repo (billing outage, initial indexing, etc.). Rather than skipping,
         # consult our own AI reviewer: if it has open findings, emit
-        # greptile_needs_fix so the fix loop can still dispatch.
+        # reviewer_needs_fix so the fix loop can still dispatch.
         # The state file records an empty first field so later cycles that DO
         # get a real Greptile score are not confused by a poisoned cache.
         if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
@@ -1134,7 +1132,7 @@ check_greptile_scores() {
                     fi
                 fi
                 echo ":${fetched_at}:${head_sha}:${ai_verdict}:${dark_score}" > "$state_file"
-                # Always route dirty AI verdict to greptile_needs_fix, matching the
+                # Always route dirty AI verdict to reviewer_needs_fix, matching the
                 # non-dark path (which sets route_score=3 on dirty → always fix).
                 # dark_score does not change the severity when our AI says fix it.
                 emit_item "reviewer_needs_fix" "$repo" "$pr_number" "$pr_title" "$detail" "ai-review" "major"
@@ -1149,7 +1147,7 @@ check_greptile_scores() {
         # (e.g. "}" from a failed jq capture whose tail -1 picks up the closing
         # brace of an empty object, or quoted strings like "5" when jq lacks -r)
         # bypass all numeric comparisons and silently fall through to
-        # greptile_needs_improvement. Wipe the state file so the next sweep
+        # reviewer_needs_improvement. Wipe the state file so the next sweep
         # re-fetches from the API instead of serving the corrupt cache forever.
         if ! [[ "$greptile_score" =~ ^[0-9]$ ]]; then
             rm -f "$state_file"
@@ -1250,8 +1248,8 @@ check_greptile_scores() {
 # on first discovery of a changed signature for bot-authored PRs.
 #
 # Routing:
-#   greptile < 4 (significant findings)   → greptile_needs_fix
-#   greptile = 4 (minor improvements)     → greptile_needs_improvement
+#   greptile < 4 (significant findings)   → reviewer_needs_fix
+#   greptile = 4 (minor improvements)     → reviewer_needs_improvement
 #   greptile >= 5                         → skip (perfect review is non-actionable here)
 #   DIRTY / CONFLICTING                   → skip (check_merge_conflicts handles)
 #   UNKNOWN                               → skip (GitHub still computing mergeability — transient)
@@ -1306,8 +1304,8 @@ check_own_pr_review_state() {
             if [ -z "$greptile_score" ] || [ "$greptile_score" = "null" ]; then
                 greptile_score=$(cut -d: -f5 < "$greptile_state_file")
                 # Dark state: if AI verdict (field 4) is dirty, check_greptile_scores
-                # already emitted greptile_needs_fix for this PR.  Emitting
-                # greptile_needs_improvement here too would double-dispatch.
+                # already emitted reviewer_needs_fix for this PR.  Emitting
+                # reviewer_needs_improvement here too would double-dispatch.
                 local dark_ai_verdict=""
                 dark_ai_verdict=$(cut -d: -f4 < "$greptile_state_file")
                 if [ "$dark_ai_verdict" = "dirty" ]; then
@@ -1369,7 +1367,7 @@ check_own_pr_review_state() {
 # `@TimeToBuildBob review` (ai-review-sweep.py) forces a fresh REVIEW of a PR.
 # This is its sibling: it forces a WORKER to act on the PR's outstanding review
 # findings, by emitting the item type that Project Monitoring already routes to
-# the fix lane (greptile_needs_fix → slow lane → greptile-fix bandit arm).
+# the fix lane (reviewer_needs_fix → slow lane → greptile-fix bandit arm).
 #
 # It exists because every organic route into that lane is gated on a signal the
 # maintainer may already disagree with: check_greptile_scores() only fires on a
@@ -1470,7 +1468,7 @@ pending_fix_request() {
     printf '%s' "$comment_id"
 }
 
-# Emit greptile_needs_fix for every PR carrying an unserved maintainer fix
+# Emit reviewer_needs_fix for every PR carrying an unserved maintainer fix
 # request. Exactly one emit per trigger comment.
 # Args: <owner/repo> <prs json>
 check_fix_requests() {
@@ -1766,7 +1764,7 @@ check_merge_ready() {
             # stopped being overwritten, a dirty verdict reached here disguised as
             # a Greptile 3 and was filtered by the check above; now that the real 5
             # is persisted, that accidental filter is gone and a PR with open AI
-            # findings would emit greptile_needs_fix AND merge_ready in the same
+            # findings would emit reviewer_needs_fix AND merge_ready in the same
             # run — the dispatcher could merge exactly what the fix arm is queued
             # to repair. Only "dirty" blocks: clean/pending/none/"" all mean we
             # have nothing to say, and blocking on an unmeasured head would stall
