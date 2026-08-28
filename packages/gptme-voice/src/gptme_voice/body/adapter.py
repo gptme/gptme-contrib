@@ -38,6 +38,8 @@ class BodyAdapter(Protocol):
 
     async def ensure_connected(self) -> None: ...
 
+    async def close(self) -> None: ...
+
     async def takeoff(self, altitude_m: float) -> dict[str, Any]: ...
 
     async def land(self) -> dict[str, Any]: ...
@@ -73,6 +75,9 @@ class NullAdapter:
     name = "null"
 
     async def ensure_connected(self) -> None:
+        return None
+
+    async def close(self) -> None:
         return None
 
     def telemetry(self) -> dict[str, Any]:

@@ -139,6 +139,51 @@ class _DummyToolBridge:
         return []
 
 
+def test_body_adapter_only_reaches_trusted_transports(monkeypatch) -> None:
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    server = VoiceServer()
+    remote_client = type("Client", (), {"host": "203.0.113.1"})()
+    local_client = type("Client", (), {"host": "127.0.0.1"})()
+    remote = type("WebSocket", (), {"client": remote_client})()
+    loopback = type("WebSocket", (), {"client": local_client})()
+
+    assert server._body_adapter_for_websocket(remote, transport="local") is None
+    assert server._body_adapter_for_websocket(remote, transport="browser") is None
+    assert (
+        server._body_adapter_for_websocket(loopback, transport="local")
+        is server.body_adapter
+    )
+    assert (
+        server._body_adapter_for_websocket(remote, transport="twilio")
+        is server.body_adapter
+    )
+
+
+def test_server_lifespan_closes_body_adapter(monkeypatch) -> None:
+    class Adapter:
+        name = "fake"
+        capabilities: set[str] = set()
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    adapter = Adapter()
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.body_adapter_from_env", lambda: adapter
+    )
+    server = VoiceServer()
+
+    async def run_lifespan() -> None:
+        async with server._lifespan(server.app):
+            pass
+
+    asyncio.run(run_lifespan())
+    assert adapter.closed is True
+
+
 def test_build_caller_instructions_no_number() -> None:
     base = "You are Bob."
     result = _build_caller_instructions(base, "", None)

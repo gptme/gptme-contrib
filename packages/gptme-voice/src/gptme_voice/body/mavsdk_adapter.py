@@ -52,11 +52,19 @@ class MavsdkAdapter:
     capabilities = {"move", "rotate", "altitude"}
     name = "mavsdk"
 
-    def __init__(self, system_address: str, connect_timeout_s: float = 20.0):
+    def __init__(
+        self,
+        system_address: str,
+        connect_timeout_s: float = 5.0,
+        command_timeout_s: float = 10.0,
+    ):
         self.system_address = system_address
         self.connect_timeout_s = connect_timeout_s
+        self.command_timeout_s = command_timeout_s
         self._system: Any = None
         self._connected = False
+        # Command calls are serialized, and reconnect takes this lock after the
+        # connection lock so a new System cannot replace one in active use.
         self._connection_lock = asyncio.Lock()
         self._command_lock = asyncio.Lock()
         self._telemetry_tasks: list[asyncio.Task] = []
@@ -72,23 +80,36 @@ class MavsdkAdapter:
         async with self._connection_lock:
             if self._connected:
                 return
-            await self._cancel_telemetry_tasks()
-            from mavsdk import System
+            async with self._command_lock:
+                if self._connected:
+                    return
+                await self._cancel_telemetry_tasks()
+                await self._release_system()
+                from mavsdk import System  # type: ignore[import-not-found]
 
-            system = System()
-            logger.info("MavsdkAdapter connecting to %s", self.system_address)
-            await system.connect(system_address=self.system_address)
+                system = System()
+                logger.info("MavsdkAdapter connecting to %s", self.system_address)
+                try:
+                    await asyncio.wait_for(
+                        system.connect(system_address=self.system_address),
+                        timeout=self.connect_timeout_s,
+                    )
 
-            async def _wait_connected() -> None:
-                async for state in system.core.connection_state():
-                    if state.is_connected:
-                        return
+                    async def _wait_connected() -> None:
+                        async for state in system.core.connection_state():
+                            if state.is_connected:
+                                return
 
-            await asyncio.wait_for(_wait_connected(), timeout=self.connect_timeout_s)
-            self._system = system
-            self._start_telemetry_cache()
-            self._connected = True
-            logger.info("MavsdkAdapter connected")
+                    await asyncio.wait_for(
+                        _wait_connected(), timeout=self.connect_timeout_s
+                    )
+                except BaseException:
+                    self._stop_system(system)
+                    raise
+                self._system = system
+                self._start_telemetry_cache()
+                self._connected = True
+                logger.info("MavsdkAdapter connected")
 
     def _start_telemetry_cache(self) -> None:
         system = self._system
@@ -125,9 +146,9 @@ class MavsdkAdapter:
             async for armed in system.telemetry.armed():
                 self._armed = armed
 
-        async def _watch(stream_name: str, subscription: Any) -> None:
+        async def _watch(stream_name: str, subscription_factory: Any) -> None:
             try:
-                await subscription
+                await subscription_factory()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - MAVSDK stream errors vary by backend
@@ -138,16 +159,16 @@ class MavsdkAdapter:
                 self._mark_disconnected()
 
         subscriptions = {
-            "position": _position(),
-            "heading": _heading(),
-            "battery": _battery(),
-            "in_air": _in_air(),
-            "flight_mode": _flight_mode(),
-            "armed": _armed(),
+            "position": _position,
+            "heading": _heading,
+            "battery": _battery,
+            "in_air": _in_air,
+            "flight_mode": _flight_mode,
+            "armed": _armed,
         }
         self._telemetry_tasks.extend(
-            asyncio.create_task(_watch(name, subscription))
-            for name, subscription in subscriptions.items()
+            asyncio.create_task(_watch(name, subscription_factory))
+            for name, subscription_factory in subscriptions.items()
         )
 
     def _mark_disconnected(self) -> None:
@@ -172,10 +193,31 @@ class MavsdkAdapter:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._telemetry_tasks.clear()
 
+    @staticmethod
+    def _stop_system(system: Any) -> None:
+        """Release MAVSDK-Python's subprocess and gRPC resources.
+
+        MAVSDK-Python 2.x has no public close method. Its destructor invokes
+        this cleanup hook, but garbage collection is too late for reconnects.
+        """
+        stop = getattr(system, "_stop_mavsdk_server", None)
+        if callable(stop):
+            stop()
+
+    async def _release_system(self) -> None:
+        system, self._system = self._system, None
+        if system is not None:
+            self._stop_system(system)
+
     async def close(self) -> None:
-        await self._cancel_telemetry_tasks()
-        self._mark_disconnected()
-        self._system = None
+        async with self._connection_lock:
+            async with self._command_lock:
+                await self._cancel_telemetry_tasks()
+                self._mark_disconnected()
+                await self._release_system()
+
+    async def _run_action(self, awaitable: Any) -> Any:
+        return await asyncio.wait_for(awaitable, timeout=self.command_timeout_s)
 
     # -- BodyAdapter interface -------------------------------------------
 
@@ -195,9 +237,9 @@ class MavsdkAdapter:
     async def takeoff(self, altitude_m: float) -> dict[str, Any]:
         async with self._command_lock:
             system = self._system
-            await system.action.set_takeoff_altitude(altitude_m)
-            await system.action.arm()
-            await system.action.takeoff()
+            await self._run_action(system.action.set_takeoff_altitude(altitude_m))
+            await self._run_action(system.action.arm())
+            await self._run_action(system.action.takeoff())
             return {
                 "status": "taking_off",
                 "target_altitude_m": altitude_m,
@@ -206,12 +248,12 @@ class MavsdkAdapter:
 
     async def land(self) -> dict[str, Any]:
         async with self._command_lock:
-            await self._system.action.land()
+            await self._run_action(self._system.action.land())
             return {"status": "landing"}
 
     async def stop(self) -> dict[str, Any]:
         async with self._command_lock:
-            await self._system.action.hold()
+            await self._run_action(self._system.action.hold())
             return {
                 "status": "holding",
                 "message": "Motion stopped; holding position.",
@@ -219,7 +261,7 @@ class MavsdkAdapter:
 
     async def return_home(self) -> dict[str, Any]:
         async with self._command_lock:
-            await self._system.action.return_to_launch()
+            await self._run_action(self._system.action.return_to_launch())
             return {"status": "returning_home"}
 
     async def goto(
@@ -247,8 +289,10 @@ class MavsdkAdapter:
             else pos["absolute_altitude_m"]
         )
         yaw = self._heading_deg if self._heading_deg is not None else float("nan")
-        await self._system.action.goto_location(
-            latitude_deg, longitude_deg, target_abs, yaw
+        await self._run_action(
+            self._system.action.goto_location(
+                latitude_deg, longitude_deg, target_abs, yaw
+            )
         )
         return {
             "status": "en_route",
@@ -266,7 +310,9 @@ class MavsdkAdapter:
             pos = self._position
             if not pos:
                 return {"error": "No position fix yet; cannot move."}
-            yaw = self._heading_deg or 0.0
+            if self._heading_deg is None:
+                return {"error": "No heading fix yet; cannot move safely."}
+            yaw = self._heading_deg
             north, east = body_to_ned(forward_m, right_m, yaw)
             lat, lon = offset_latlon(
                 pos["latitude_deg"], pos["longitude_deg"], north, east
@@ -279,13 +325,16 @@ class MavsdkAdapter:
             pos = self._position
             if not pos:
                 return {"error": "No position fix yet; cannot turn."}
-            current = self._heading_deg or 0.0
-            target_yaw = (current + yaw_deg + 180.0) % 360.0 - 180.0
-            await self._system.action.goto_location(
-                pos["latitude_deg"],
-                pos["longitude_deg"],
-                pos["absolute_altitude_m"],
-                target_yaw,
+            if self._heading_deg is None:
+                return {"error": "No heading fix yet; cannot turn safely."}
+            target_yaw = (self._heading_deg + yaw_deg + 180.0) % 360.0 - 180.0
+            await self._run_action(
+                self._system.action.goto_location(
+                    pos["latitude_deg"],
+                    pos["longitude_deg"],
+                    pos["absolute_altitude_m"],
+                    target_yaw,
+                )
             )
             return {
                 "status": "turning",

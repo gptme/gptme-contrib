@@ -772,7 +772,30 @@ class VoiceServer:
             routes.append(WebSocketRoute("/voice", self.handle_browser_websocket))
             routes.append(Route("/browser", self.serve_browser_client, methods=["GET"]))
 
-        self.app = Starlette(routes=routes)
+        self.app = Starlette(routes=routes, lifespan=self._lifespan)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(self, _app):
+        try:
+            yield
+        finally:
+            if self.body_adapter is not None:
+                await self.body_adapter.close()
+
+    def _body_adapter_for_websocket(self, websocket, *, transport: str):
+        """Expose motion tools only on authenticated or loopback transports."""
+        if self.body_adapter is None or transport == "twilio":
+            return self.body_adapter
+        client = getattr(websocket, "client", None)
+        host = getattr(client, "host", None)
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return self.body_adapter
+        logger.warning(
+            "Body tools disabled for unauthenticated %s client %s",
+            transport,
+            host or "unknown",
+        )
+        return None
 
     def _recent_call_path(self, caller_id: str) -> Path:
         digest = hashlib.sha256(caller_id.encode("utf-8")).hexdigest()[:16]
@@ -2022,7 +2045,9 @@ class VoiceServer:
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
-                body_adapter=self.body_adapter,
+                body_adapter=self._body_adapter_for_websocket(
+                    websocket, transport="local"
+                ),
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2113,7 +2138,9 @@ class VoiceServer:
                 on_hangup=_browser_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
-                body_adapter=self.body_adapter,
+                body_adapter=self._body_adapter_for_websocket(
+                    websocket, transport="browser"
+                ),
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 

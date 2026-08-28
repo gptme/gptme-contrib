@@ -35,6 +35,9 @@ class FakeAdapter:
     async def ensure_connected(self) -> None:
         self.connect_calls += 1
 
+    async def close(self) -> None:
+        return None
+
     def telemetry(self) -> dict[str, Any]:
         position = (
             {"relative_altitude_m": self.relative_altitude_m}
@@ -212,6 +215,28 @@ def test_bridge_body_error_is_reported_not_raised(loop):
     assert "body_stop failed" in result["error"]
 
 
+def test_bridge_body_call_times_out(loop, monkeypatch):
+    class HangingAdapter(FakeAdapter):
+        async def stop(self) -> dict:
+            await asyncio.Future()
+
+    monkeypatch.setenv("GPTME_VOICE_BODY_CALL_TIMEOUT_S", "0.01")
+    bridge = GptmeToolBridge(body_adapter=HangingAdapter())
+    result = _call(bridge, "body_stop")
+    assert "timed out" in result["error"]
+
+
+def test_bridge_connect_times_out(loop, monkeypatch):
+    class HangingAdapter(FakeAdapter):
+        async def ensure_connected(self) -> None:
+            await asyncio.Future()
+
+    monkeypatch.setenv("GPTME_VOICE_BODY_CALL_TIMEOUT_S", "0.01")
+    bridge = GptmeToolBridge(body_adapter=HangingAdapter())
+    result = _call(bridge, "body_status")
+    assert "timeout" in result["error"]
+
+
 def test_bridge_turn_clamps_yaw(loop):
     adapter = FakeAdapter()
     bridge = GptmeToolBridge(body_adapter=adapter)
@@ -327,11 +352,64 @@ def test_mavsdk_move_never_targets_below_home(loop):
         "absolute_altitude_m": 502.0,
         "relative_altitude_m": 2.0,
     }
+    adapter._heading_deg = 0.0
 
     result = loop.run_until_complete(adapter.move(0.0, 0.0, -30.0))
 
     assert result["target"]["altitude_m"] == 1.0
     assert action.goto_args[2] == 501.0
+
+
+def test_mavsdk_move_and_turn_require_heading(loop):
+    from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
+
+    adapter = MavsdkAdapter("unused")
+    adapter._system = object()
+    adapter._position = {
+        "latitude_deg": 47.0,
+        "longitude_deg": 8.0,
+        "absolute_altitude_m": 502.0,
+        "relative_altitude_m": 2.0,
+    }
+
+    move = loop.run_until_complete(adapter.move(1.0, 0.0, 0.0))
+    turn = loop.run_until_complete(adapter.turn(90.0))
+
+    assert "heading fix" in move["error"]
+    assert "heading fix" in turn["error"]
+
+
+def test_mavsdk_action_timeout(loop):
+    from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
+
+    class Action:
+        async def hold(self):
+            await asyncio.Future()
+
+    adapter = MavsdkAdapter("unused", command_timeout_s=0.01)
+    adapter._system = type("System", (), {"action": Action()})()
+
+    with pytest.raises(TimeoutError):
+        loop.run_until_complete(adapter.stop())
+
+
+def test_mavsdk_close_releases_system(loop):
+    from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
+
+    class System:
+        stopped = False
+
+        def _stop_mavsdk_server(self):
+            self.stopped = True
+
+    system = System()
+    adapter = MavsdkAdapter("unused")
+    adapter._system = system
+
+    loop.run_until_complete(adapter.close())
+
+    assert system.stopped is True
+    assert adapter._system is None
 
 
 def test_mavsdk_serializes_action_commands(loop):
