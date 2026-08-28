@@ -135,6 +135,8 @@ class VisionPipeline:
         if self._thread is not None and self._thread.is_alive():
             raise RuntimeError("pipeline already running")
         self._stop.clear()
+        self._person_present = False
+        self._frames_without_person = 0
         self._thread = threading.Thread(
             target=self._run, name="vision-pipeline", daemon=True
         )

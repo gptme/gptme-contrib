@@ -49,11 +49,15 @@ def make_source(spec: str) -> FrameSource:
         raise click.ClickException(str(exc)) from exc
 
 
-def _get_frame_or_die(source: FrameSource) -> np.ndarray:
+def _get_frame(source: FrameSource) -> np.ndarray | None:
     try:
-        frame = source.get_frame()
+        return source.get_frame()
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _get_frame_or_die(source: FrameSource) -> np.ndarray:
+    frame = _get_frame(source)
     if frame is None:
         raise click.ClickException("source produced no frame")
     return frame
@@ -95,7 +99,9 @@ def detect(source_spec: str, once: bool, interval: float) -> None:
     detectors: list[Detector] = [PersonDetector(), MotionDetector()]
     try:
         while True:
-            frame = _get_frame_or_die(source)
+            frame = _get_frame(source)
+            if frame is None:
+                break
             try:
                 detections = [d for det in detectors for d in det.detect(frame)]
             except (RuntimeError, ValueError) as exc:

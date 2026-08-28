@@ -162,6 +162,32 @@ def test_thread_stops_when_source_is_exhausted():
     pipeline.stop()
 
 
+def test_start_resets_presence_state_after_restart():
+    appeared = threading.Event()
+    pipeline = VisionPipeline(
+        ListSource(_frames(1)),
+        [ScriptedPersonDetector([True])],
+        interval_s=0.01,
+        on_event=lambda event: appeared.set()
+        if event.kind == PERSON_APPEARED
+        else None,
+    )
+    pipeline.start()
+    assert appeared.wait(timeout=1)
+    first_thread = pipeline._thread
+    assert first_thread is not None
+    first_thread.join(timeout=1)
+    assert not first_thread.is_alive()
+
+    appeared.clear()
+    pipeline.source = ListSource(_frames(1))
+    pipeline.detectors = [ScriptedPersonDetector([True])]
+    pipeline.start()
+
+    assert appeared.wait(timeout=1)
+    pipeline.stop()
+
+
 def test_stop_keeps_reference_to_blocked_thread():
     unblock = threading.Event()
 

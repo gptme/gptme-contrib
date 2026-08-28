@@ -103,6 +103,22 @@ def test_cli_detect_once(tmp_path):
     assert result.output.strip()  # printed detections or "(no detections)"
 
 
+def test_cli_detect_exhausted_source_exits_cleanly(monkeypatch):
+    class FiniteSource:
+        def __init__(self):
+            self.frames = [scene_frame(3)]
+
+        def get_frame(self):
+            return self.frames.pop() if self.frames else None
+
+    monkeypatch.setattr(cli, "make_source", lambda spec: FiniteSource())
+    result = CliRunner().invoke(cli.main, ["detect", "--source", "finite"])
+
+    assert result.exit_code == 0
+    assert "source produced no frame" not in result.output
+    assert result.output.strip()
+
+
 def test_cli_enroll_and_whereami(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli.WifiSignature, "scan", staticmethod(lambda interface=None: {})
