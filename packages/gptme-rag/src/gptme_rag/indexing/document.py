@@ -49,7 +49,10 @@ class Document:
         # rewrites (git restore/checkout, worktree churn) that would otherwise force
         # a full re-embed of an unchanged file. Falls back to mtime in cli.py when a
         # stored document predates this field.
-        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        # Read once so the stored hash and the indexed text cannot diverge if the
+        # file is rewritten between a hash pass and a later content read.
+        file_bytes = path.read_bytes()
+        content_hash = hashlib.sha256(file_bytes).hexdigest()
         base_metadata = {
             "source": str(path),
             "filename": path.name,
@@ -60,7 +63,7 @@ class Document:
 
         if processor is None:
             # If no processor provided, create single document
-            content = path.read_text()
+            content = file_bytes.decode()
             yield cls(
                 content=content,
                 metadata=base_metadata.copy(),
@@ -68,12 +71,27 @@ class Document:
                 last_modified=last_modified,
             )
         else:
+            # Skip the same files process_file would skip, but chunk the bytes we
+            # already hashed instead of re-reading the path.
+            if processor.is_binary_file(path):
+                return
+            try:
+                content = file_bytes.decode()
+            except UnicodeDecodeError:
+                return
+            if not content.strip():
+                return
             # Process file in chunks. Include the source generation in each ID so
             # replacement chunks can be added before stale chunks are removed; this
             # keeps the previous generation queryable if embedding the replacement
             # fails partway through.
             base_id = f"{path.absolute()}@{content_hash}"
-            for chunk in processor.process_file(path):
+            file_metadata = {
+                "filename": path.name,
+                "file_path": str(path.absolute()),
+                "file_type": path.suffix.lstrip("."),
+            }
+            for chunk in processor.process_text(content, file_metadata):
                 # Ensure unique chunk IDs by using both index and position
                 chunk_id = f"{base_id}#chunk{chunk['metadata']['chunk_index']}-{chunk['metadata']['chunk_start']}"
                 # Create chunk metadata with chunk-specific fields

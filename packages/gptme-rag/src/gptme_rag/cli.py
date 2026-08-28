@@ -259,10 +259,14 @@ def index(
                 if last_modified:
                     try:
                         # Parse ISO format timestamp to float
-                        entry["last_modified"] = datetime.fromisoformat(last_modified).timestamp()
+                        parsed = datetime.fromisoformat(last_modified).timestamp()
                     except ValueError:
                         logger.warning("Invalid last_modified format: %s", last_modified)
-                        entry["last_modified"] = 0
+                    else:
+                        # Keep the first valid timestamp. A later chunk with a
+                        # bad last_modified must not zero a good stored mtime —
+                        # that would re-embed every legacy source on every run.
+                        entry.setdefault("last_modified", parsed)
                 else:
                     entry.setdefault("last_modified", 0)
                 # logger.debug("Existing file: %s", abs_path)  # Too spammy
@@ -374,7 +378,21 @@ def index(
                 pbar.update(progress)
 
         if stale_ids:
-            indexer.collection.delete(ids=stale_ids)
+            try:
+                indexer.collection.delete(ids=stale_ids)
+            except Exception as delete_err:
+                # Add already succeeded. Failing the command here would hide that
+                # the new generation is indexed; mixed leftover hashes are treated
+                # as modified on the next run, so a retry self-heals.
+                logger.warning(
+                    "Indexed replacements but failed to delete %d stale chunk(s): %s",
+                    len(stale_ids),
+                    delete_err,
+                )
+                console.print(
+                    "⚠️ New chunks indexed; leftover stale chunks will be removed on the next run",
+                    style="yellow",
+                )
 
         console.print(
             f"✅ Successfully indexed {n_files} files ({n_chunks} chunks)",

@@ -15,12 +15,20 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from gptme_rag.cli import cli
 from gptme_rag.indexing.document import Document
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _plain(output: str) -> str:
+    """Strip spinner/markup so assertions work when stdout is a TTY."""
+    return _ANSI_RE.sub("", output)
 
 
 def test_document_from_file_records_content_hash(tmp_path):
@@ -83,13 +91,13 @@ def test_index_skips_unchanged_mtime_only_rewrite(tmp_path):
 
     first = _run_index(runner, index_dir, [src])
     assert first.exit_code == 0, first.output
-    assert "Successfully indexed 1 files" in first.output, first.output
+    assert "Successfully indexed 1 files" in _plain(first.output), first.output
 
     # Simulate a git-restore style mtime rewrite: content identical, mtime bumped.
     os.utime(f, (f.stat().st_atime + 100, f.stat().st_mtime + 100))
     second = _run_index(runner, index_dir, [src])
     assert second.exit_code == 0, second.output
-    assert "No new or modified documents to index" in second.output, second.output
+    assert "No new or modified documents to index" in _plain(second.output), second.output
 
 
 def test_index_reembeds_on_content_change(tmp_path):
@@ -107,7 +115,7 @@ def test_index_reembeds_on_content_change(tmp_path):
     f.write_text("version two content changed")
     second = _run_index(runner, index_dir, [src])
     assert second.exit_code == 0, second.output
-    assert "Successfully indexed 1 files" in second.output, second.output
+    assert "Successfully indexed 1 files" in _plain(second.output), second.output
 
 
 def test_index_preserves_old_chunks_when_replacement_add_fails(tmp_path, monkeypatch):
@@ -131,7 +139,10 @@ def test_index_preserves_old_chunks_when_replacement_add_fails(tmp_path, monkeyp
     replacement_hash = hashlib.sha256(b"version two content").hexdigest()
 
     def fail_replacement_add(self, *args, **kwargs):
-        metadatas = kwargs.get("metadatas") or []
+        metadatas = kwargs.get("metadatas")
+        if metadatas is None and len(args) >= 3:
+            metadatas = args[2]
+        metadatas = metadatas or []
         if any(metadata.get("content_hash") == replacement_hash for metadata in metadatas):
             raise RuntimeError("simulated embedding failure")
         return original_add(self, *args, **kwargs)
@@ -326,7 +337,7 @@ def test_index_legacy_mtime_fallback_skips_unchanged(tmp_path):
     # First run: index the file, storing content_hash.
     first = _run_index(runner, index_dir, [src])
     assert first.exit_code == 0, first.output
-    assert "Successfully indexed 1 files" in first.output, first.output
+    assert "Successfully indexed 1 files" in _plain(first.output), first.output
 
     # Simulate legacy stored docs by removing content_hash from the index.
     _strip_content_hash_from_index(index_dir)
@@ -334,7 +345,7 @@ def test_index_legacy_mtime_fallback_skips_unchanged(tmp_path):
     # Second run: mtime unchanged, no content_hash → mtime fallback should skip.
     second = _run_index(runner, index_dir, [src])
     assert second.exit_code == 0, second.output
-    assert "No new or modified documents to index" in second.output, second.output
+    assert "No new or modified documents to index" in _plain(second.output), second.output
 
 
 def test_index_legacy_mtime_fallback_reembeds_on_mtime_change(tmp_path):
@@ -356,4 +367,124 @@ def test_index_legacy_mtime_fallback_reembeds_on_mtime_change(tmp_path):
     os.utime(f, (f.stat().st_atime + 100, f.stat().st_mtime + 100))
     second = _run_index(runner, index_dir, [src])
     assert second.exit_code == 0, second.output
-    assert "Successfully indexed 1 files" in second.output, second.output
+    assert "Successfully indexed 1 files" in _plain(second.output), second.output
+
+
+def test_from_file_hash_matches_decoded_bytes(tmp_path):
+    """Hash and document content must come from the same read of the file."""
+    f = tmp_path / "a.txt"
+    payload = "hash and content share one read"
+    f.write_bytes(payload.encode())
+    docs = list(Document.from_file(f))
+    assert docs[0].content == payload
+    assert docs[0].metadata["content_hash"] == hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _make_legacy_index_with_invalid_last_chunk_mtime(index_dir: Path) -> None:
+    """Legacy docs: drop content_hash, then poison only the last chunk's mtime."""
+    import chromadb
+
+    client = chromadb.PersistentClient(
+        path=str(index_dir),
+        settings=chromadb.config.Settings(
+            allow_reset=True,
+            is_persistent=True,
+            anonymized_telemetry=False,
+        ),
+    )
+    collection = client.get_collection("default")
+    results = collection.get(include=["embeddings", "metadatas", "documents"])
+    assert results["ids"] and len(results["ids"]) > 1
+    metadatas = []
+    for i, metadata in enumerate(results["metadatas"]):
+        legacy = {key: value for key, value in metadata.items() if key != "content_hash"}
+        if i == len(results["ids"]) - 1:
+            legacy["last_modified"] = "not-a-timestamp"
+        metadatas.append(legacy)
+    collection.delete(ids=results["ids"])
+    collection.add(
+        ids=results["ids"],
+        embeddings=results["embeddings"],
+        metadatas=metadatas,
+        documents=results["documents"],
+    )
+
+
+def test_index_legacy_mtime_fallback_ignores_invalid_chunk_timestamp(tmp_path):
+    """A single invalid last_modified must not zero the stored mtime for a source."""
+    runner = CliRunner()
+    index_dir = tmp_path / "index"
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "legacy.txt"
+    f.write_text("one two three four five six seven eight nine ten")
+
+    first = _run_index(
+        runner,
+        index_dir,
+        [src],
+        "--chunk-size",
+        "3",
+        "--chunk-overlap",
+        "1",
+    )
+    assert first.exit_code == 0, first.output
+
+    _make_legacy_index_with_invalid_last_chunk_mtime(index_dir)
+
+    second = _run_index(
+        runner,
+        index_dir,
+        [src],
+        "--chunk-size",
+        "3",
+        "--chunk-overlap",
+        "1",
+    )
+    assert second.exit_code == 0, second.output
+    assert "No new or modified documents to index" in _plain(second.output), second.output
+
+
+def test_index_reports_success_when_stale_delete_fails(tmp_path, monkeypatch):
+    """A failed stale-chunk delete after a successful add must not hide the add."""
+    runner = CliRunner()
+    index_dir = tmp_path / "index"
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "doc.txt"
+    f.write_text("version one content")
+
+    first = _run_index(runner, index_dir, [src])
+    assert first.exit_code == 0, first.output
+
+    f.write_text("version two content")
+
+    import chromadb
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    original_delete = chromadb.Collection.delete
+
+    def fail_delete(self, *args, **kwargs):
+        raise RuntimeError("simulated delete failure")
+
+    monkeypatch.setattr(chromadb.Collection, "delete", fail_delete)
+    second = _run_index(runner, index_dir, [src])
+    monkeypatch.setattr(chromadb.Collection, "delete", original_delete)
+    assert second.exit_code == 0, second.output
+    assert "Successfully indexed 1 files" in _plain(second.output), second.output
+    assert "leftover stale chunks" in _plain(second.output), second.output
+
+    chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
+    client = chromadb.PersistentClient(
+        path=str(index_dir),
+        settings=chromadb.config.Settings(
+            allow_reset=True,
+            is_persistent=True,
+            anonymized_telemetry=False,
+        ),
+    )
+    collection = client.get_collection("default")
+    stored = collection.get(include=["metadatas"])["metadatas"]
+    assert stored is not None
+    new_hash = hashlib.sha256(b"version two content").hexdigest()
+    assert new_hash in {metadata["content_hash"] for metadata in stored}
