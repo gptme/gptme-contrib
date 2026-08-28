@@ -114,6 +114,39 @@ class TestRecvLoop:
         speaker.write.assert_called_once_with(pcm)
 
     @pytest.mark.asyncio
+    async def test_playback_stall_timeout_unmutes_mic(self, caplog):
+        node = _make_node()
+        pcm = b"\x00\x01" * 512
+        msg = json.dumps({"type": "audio", "audio": base64.b64encode(pcm).decode()})
+        mock_ws = AsyncMock()
+        calls = 0
+
+        async def recv():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return msg
+            if calls == 2:
+                await asyncio.sleep(30)
+            raise ConnectionClosed(None, None)
+
+        mock_ws.recv.side_effect = recv
+        speaker = MagicMock()
+
+        async def fake_audio_io(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with (
+            patch("gptme_voice_node.node._run_audio_io", fake_audio_io),
+            patch("gptme_voice_node.node.PLAYBACK_STALL_TIMEOUT", 0.05),
+        ):
+            await asyncio.wait_for(node._recv_loop(mock_ws, speaker), timeout=1)
+
+        assert node._playing is False
+        assert node._play_ended_at > 0
+        assert "playback stall timeout" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_audio_end_clears_playing_flag(self):
         node = _make_node()
         node._playing = True

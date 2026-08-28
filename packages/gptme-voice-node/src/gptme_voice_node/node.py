@@ -72,6 +72,11 @@ FORMAT = None  # Will be set to _get_pyaudio().paInt16 in VoiceNode.__init__
 # Prevents echo/feedback on nodes without hardware AEC.
 PLAYBACK_COOLDOWN = 0.5
 
+# If the server stops sending audio frames without an `audio_end`, unmute
+# after this many seconds. Otherwise a live connection with a stuck
+# `_playing` flag silently drops every mic chunk until disconnect.
+PLAYBACK_STALL_TIMEOUT = 5.0
+
 # Reconnect backoff (seconds)
 BACKOFF_INITIAL = 1
 BACKOFF_MAX = 60
@@ -211,7 +216,17 @@ class VoiceNode:
         """
         while self._running:
             try:
-                raw_msg = await ws.recv()
+                timeout = PLAYBACK_STALL_TIMEOUT if self._playing else None
+                raw_msg = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            except asyncio.TimeoutError:
+                self._playing = False
+                self._play_ended_at = time.monotonic()
+                log.warning(
+                    "[%s] playback stall timeout after %.1fs without audio_end; unmuting mic",
+                    self.node_name,
+                    PLAYBACK_STALL_TIMEOUT,
+                )
+                continue
             except ConnectionClosed:
                 break
             try:
