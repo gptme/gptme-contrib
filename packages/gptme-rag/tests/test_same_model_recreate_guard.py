@@ -416,6 +416,42 @@ def test_gc_orphans_oserror_is_not_a_traceback(tmp_path):
     assert "Cannot access" in result.output
 
 
+def test_gc_orphans_preserves_live_uuid_dir_case_insensitive(tmp_path):
+    """Uppercase UUID dir whose lowercase id is in the catalog is live, not orphan.
+
+    Regression: _UUID_DIR is IGNORECASE but membership was exact-case. On a
+    case-insensitive filesystem (macOS default) that combination would rmtree
+    a live segment whose on-disk name used uppercase hex.
+    """
+    import sqlite3
+
+    from gptme_rag.indexing.gc import gc_orphan_segment_dirs
+
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    live_id = UUID_DIR
+    upper_live = persist_dir / live_id.upper()
+    upper_live.mkdir()
+    (upper_live / "data_level0.bin").write_bytes(b"live")
+    real_orphan = persist_dir / "11111111-2222-3333-4444-555555555555"
+    real_orphan.mkdir()
+
+    con = sqlite3.connect(str(persist_dir / "chroma.sqlite3"))
+    con.execute("CREATE TABLE segments (id TEXT)")
+    con.execute("INSERT INTO segments (id) VALUES (?)", (live_id,))
+    con.commit()
+    con.close()
+
+    dry = gc_orphan_segment_dirs(persist_dir, apply=False)
+    names = {p.name for p in dry}
+    assert upper_live.name not in names
+    assert real_orphan.name in names
+
+    gc_orphan_segment_dirs(persist_dir, apply=True)
+    assert upper_live.exists(), "case-variant of a catalogued UUID must not be deleted"
+    assert not real_orphan.exists()
+
+
 def test_gc_orphans_handles_question_mark_in_persist_path(tmp_path):
     from gptme_rag.indexing.gc import gc_orphan_segment_dirs
 

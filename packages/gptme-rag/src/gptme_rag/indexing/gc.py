@@ -81,22 +81,33 @@ def _live_chroma_ids(db: Path) -> set[str]:
         }
         ids: set[str] = set()
         if "segments" in tables:
-            ids.update(row[0] for row in con.execute("SELECT id FROM segments") if row[0])
+            ids.update(
+                str(row[0]).lower() for row in con.execute("SELECT id FROM segments") if row[0]
+            )
         if "collections" in tables:
-            ids.update(row[0] for row in con.execute("SELECT id FROM collections") if row[0])
+            ids.update(
+                str(row[0]).lower() for row in con.execute("SELECT id FROM collections") if row[0]
+            )
         return ids
     finally:
         con.close()
 
 
 def _collect_orphans(persist_dir: Path, live_ids: set[str]) -> list[Path]:
+    """UUID hex is case-insensitive (RFC 4122); compare folded.
+
+    ``_UUID_DIR`` is IGNORECASE so an uppercase dir is a candidate. Exact-case
+    membership against sqlite's canonical lowercase ``segments.id`` would
+    classify that live dir as an orphan and ``--apply`` would ``rmtree`` it.
+    """
     orphans: list[Path] = []
+    live = {i.lower() for i in live_ids}
     for child in persist_dir.iterdir():
         if not child.is_dir():
             continue
         if not _UUID_DIR.fullmatch(child.name):
             continue
-        if child.name in live_ids:
+        if child.name.lower() in live:
             continue
         orphans.append(child)
     return orphans
