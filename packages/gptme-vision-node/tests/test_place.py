@@ -184,6 +184,17 @@ def test_from_file_explicit_wifi_weight_overrides_saved_value(tmp_path):
     assert loaded.wifi_weight == pytest.approx(0.2)
 
 
+@pytest.mark.parametrize("payload", ["[]", '"gallery"', "null"])
+def test_load_rejects_non_object_payload(tmp_path, payload):
+    gallery = tmp_path / "places.json"
+    gallery.write_text(payload)
+
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        PlaceRecognizer().load(gallery)
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        PlaceRecognizer.from_file(gallery)
+
+
 class CustomEmbedder:
     embedder_id = "test-custom-v1"
 

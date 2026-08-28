@@ -106,6 +106,32 @@ def test_callback_receives_events_and_errors_are_contained():
     assert received == events
 
 
+def test_callback_can_stop_pipeline():
+    stopped = threading.Event()
+    pipeline = None
+
+    def stop_on_person(event):
+        assert pipeline is not None
+        pipeline.stop()
+        stopped.set()
+
+    pipeline = VisionPipeline(
+        ListSource(_frames(100)),
+        [ScriptedPersonDetector([True])],
+        interval_s=0.01,
+        on_event=stop_on_person,
+    )
+    pipeline.start()
+
+    assert stopped.wait(timeout=1)
+    thread = pipeline._thread
+    assert thread is not None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    pipeline.stop()
+    assert pipeline._thread is None
+
+
 def test_exhausted_source_yields_no_events():
     pipeline = VisionPipeline(ListSource([]), [MotionDetector()])
     assert pipeline.step() == []
@@ -129,9 +155,10 @@ def test_thread_lifecycle():
 def test_thread_stops_when_source_is_exhausted():
     pipeline = VisionPipeline(ListSource(_frames(1)), [], interval_s=0.01)
     pipeline.start()
-    assert pipeline._thread is not None
-    pipeline._thread.join(timeout=1)
-    assert not pipeline._thread.is_alive()
+    thread = pipeline._thread
+    assert thread is not None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
     pipeline.stop()
 
 

@@ -296,6 +296,8 @@ class PlaceRecognizer:
     def load(self, path: str | Path) -> None:
         """Load a gallery saved by :meth:`save` (replaces current places)."""
         payload = json.loads(Path(path).read_text())
+        if not isinstance(payload, dict):
+            raise ValueError("gallery file must contain a JSON object")
         saved_embedder = payload.get("embedder")
         if saved_embedder is not None and saved_embedder != self.embedder.embedder_id:
             raise ValueError(
@@ -330,6 +332,8 @@ class PlaceRecognizer:
         wifi_weight: float | None = None,
     ) -> PlaceRecognizer:
         payload = json.loads(Path(path).read_text())
+        if not isinstance(payload, dict):
+            raise ValueError("gallery file must contain a JSON object")
         recognizer = cls(
             embedder,
             wifi_weight=(

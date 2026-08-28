@@ -142,7 +142,8 @@ class VisionPipeline:
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
-            if not self._thread.is_alive():
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+            if not thread.is_alive():
                 self._thread = None

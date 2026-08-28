@@ -161,3 +161,45 @@ def test_cli_whereami_corrupt_gallery_is_clean_error(tmp_path):
     assert result.exit_code != 0
     assert "invalid gallery" in result.output
     assert "Traceback" not in result.output
+
+
+def test_cli_whereami_non_object_gallery_is_clean_error(tmp_path):
+    img = _write_scene(tmp_path / "a.png", 7)
+    gallery = tmp_path / "places.json"
+    gallery.write_text("[]")
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["whereami", "--source", str(img), "--gallery", str(gallery)],
+    )
+
+    assert result.exit_code != 0
+    assert "gallery file must contain a JSON object" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_enroll_save_failure_is_clean_error(tmp_path, monkeypatch):
+    img = _write_scene(tmp_path / "a.png", 8)
+
+    def fail_save(self, path):
+        raise OSError("gallery is read-only")
+
+    monkeypatch.setattr(cli.PlaceRecognizer, "save", fail_save)
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "enroll",
+            "--place",
+            "office",
+            "--source",
+            str(img),
+            "--gallery",
+            str(tmp_path / "places.json"),
+            "--no-wifi",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "failed to save gallery" in result.output
+    assert "gallery is read-only" in result.output
+    assert "Traceback" not in result.output

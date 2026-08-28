@@ -5,7 +5,11 @@ from __future__ import annotations
 import cv2
 import numpy as np
 import pytest
-from gptme_vision_node.frame_source import FrameSource, ImageFileSource
+from gptme_vision_node.frame_source import (
+    FrameSource,
+    ImageFileSource,
+    OpenCVCameraSource,
+)
 
 from .conftest import solid_frame
 
@@ -55,3 +59,44 @@ def test_empty_directory_raises(tmp_path):
 def test_satisfies_protocol(tmp_path):
     _write(tmp_path / "a.png", (1, 2, 3))
     assert isinstance(ImageFileSource(tmp_path), FrameSource)
+
+
+def test_camera_retries_transient_read_failure(monkeypatch):
+    expected = solid_frame((1, 2, 3))
+
+    class FakeCapture:
+        def __init__(self):
+            self.reads = iter([(False, None), (True, expected)])
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return next(self.reads)
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cv2, "VideoCapture", lambda source: FakeCapture())
+    source = OpenCVCameraSource(0)
+
+    frame = source.get_frame()
+
+    assert frame is expected
+
+
+def test_camera_returns_none_after_retry_budget(monkeypatch):
+    class FailedCapture:
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cv2, "VideoCapture", lambda source: FailedCapture())
+    source = OpenCVCameraSource(0, read_attempts=2)
+
+    assert source.get_frame() is None

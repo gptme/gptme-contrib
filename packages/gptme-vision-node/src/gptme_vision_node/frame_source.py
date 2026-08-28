@@ -69,8 +69,11 @@ class OpenCVCameraSource:
     source is cheap and testable without hardware.
     """
 
-    def __init__(self, source: int | str) -> None:
+    def __init__(self, source: int | str, *, read_attempts: int = 3) -> None:
+        if read_attempts < 1:
+            raise ValueError("read_attempts must be at least 1")
         self.source = source
+        self.read_attempts = read_attempts
         self._cap: cv2.VideoCapture | None = None
 
     def _ensure_open(self) -> cv2.VideoCapture:
@@ -84,10 +87,11 @@ class OpenCVCameraSource:
 
     def get_frame(self) -> np.ndarray | None:
         cap = self._ensure_open()
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            return None
-        return frame
+        for _ in range(self.read_attempts):
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return frame
+        return None
 
     def release(self) -> None:
         if self._cap is not None:

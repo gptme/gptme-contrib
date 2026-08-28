@@ -141,7 +141,12 @@ def enroll(source_spec: str, place_name: str, gallery: str, no_wifi: bool) -> No
     frame = _capture_frame(source_spec)
     wifi = {} if no_wifi else WifiSignature.scan()
     recognizer.enroll(place_name, frame, wifi_sig=wifi or None)
-    recognizer.save(gallery_path)
+    try:
+        recognizer.save(gallery_path)
+    except OSError as exc:
+        raise click.ClickException(
+            f"failed to save gallery at {gallery_path}: {exc}"
+        ) from exc
     n = len(recognizer.places[place_name])
     click.echo(
         f"enrolled '{place_name}' (sample {n}, wifi APs: {len(wifi)}) -> {gallery_path}"
