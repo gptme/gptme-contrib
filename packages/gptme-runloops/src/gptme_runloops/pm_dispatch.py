@@ -33,8 +33,6 @@ SLOW_LANE_TYPES: set[str] = {
     "ci_failure",
     "master_ci_failure",
     "merge_conflict",
-    "greptile_needs_fix",
-    "greptile_needs_improvement",
     "reviewer_needs_fix",
     "reviewer_needs_improvement",
     "greptile_convergence_adjudication",
@@ -512,8 +510,6 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
     if types_set & {"ci_failure", "master_ci_failure"}:
         return "ci-fix"
     if types_set & {
-        "greptile_needs_fix",
-        "greptile_needs_improvement",
         "reviewer_needs_fix",
         "reviewer_needs_improvement",
     }:

@@ -159,8 +159,8 @@ class TestClassifyLane:
         assert classify_lane(["merge_conflict"]) == "slow"
 
     def test_greptile_is_slow(self):
-        assert classify_lane(["greptile_needs_fix"]) == "slow"
-        assert classify_lane(["greptile_needs_improvement"]) == "slow"
+        assert classify_lane(["reviewer_needs_fix"]) == "slow"
+        assert classify_lane(["reviewer_needs_improvement"]) == "slow"
 
     def test_notification_is_fast(self):
         assert classify_lane(["notification"]) == "fast"
@@ -179,8 +179,8 @@ class TestClassifyLane:
             "ci_failure",
             "master_ci_failure",
             "merge_conflict",
-            "greptile_needs_fix",
-            "greptile_needs_improvement",
+            "reviewer_needs_fix",
+            "reviewer_needs_improvement",
             "greptile_convergence_adjudication",
             # source-agnostic renames (backward-compat: old names stay above)
             "reviewer_needs_fix",
@@ -218,7 +218,7 @@ class TestClassifyItemWorkTypeGreptileConvergence:
     def test_adjudication_does_not_collide_with_greptile_fix(self):
         # Two distinct Greptile-related work types; bandit arms must not be merged.
         adjudication = classify_item_work_type(["greptile_convergence_adjudication"])
-        first_pass = classify_item_work_type(["greptile_needs_fix"])
+        first_pass = classify_item_work_type(["reviewer_needs_fix"])
         assert adjudication != first_pass
 
     def test_adjudication_takes_precedence_over_pr_update(self):
@@ -1398,10 +1398,10 @@ class TestClassifyItemWorkType:
         assert classify_item_work_type(["master_ci_failure"]) == "ci-fix"
 
     def test_greptile_fix(self):
-        assert classify_item_work_type(["greptile_needs_fix"]) == "greptile-fix"
+        assert classify_item_work_type(["reviewer_needs_fix"]) == "greptile-fix"
 
     def test_greptile_improvement(self):
-        assert classify_item_work_type(["greptile_needs_improvement"]) == "greptile-fix"
+        assert classify_item_work_type(["reviewer_needs_improvement"]) == "greptile-fix"
 
     def test_merge_conflict(self):
         assert classify_item_work_type(["merge_conflict"]) == "merge-conflict"
@@ -1426,7 +1426,7 @@ class TestClassifyItemWorkType:
 
     def test_greptile_beats_pr(self):
         assert (
-            classify_item_work_type(["pr_update", "greptile_needs_fix"])
+            classify_item_work_type(["pr_update", "reviewer_needs_fix"])
             == "greptile-fix"
         )
 

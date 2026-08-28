@@ -218,7 +218,7 @@ def test_predict_cc_trajectory_path() -> None:
         (["assigned_issue"], False, (1500, "~20 minutes")),
         # assigned_issue wins over the greptile-fix tier (bash if/elif order)
         (["assigned_issue", "pr_update"], True, (1500, "~20 minutes")),
-        (["greptile_needs_fix"], True, (2700, "~35 minutes")),
+        (["reviewer_needs_fix"], True, (2700, "~35 minutes")),
         (["notification"], False, (900, "~10 minutes")),
         (["merge_ready"], True, (900, "~10 minutes")),
     ],
@@ -2224,10 +2224,10 @@ def test_timeout_tier_instruction_kind_routes_to_adjudication(tmp_path) -> None:
     than the 900s default.
     """
     config = make_config(tmp_path)
-    # greptile_needs_improvement is the type the backoff path leaves in
+    # reviewer_needs_improvement is the type the backoff path leaves in
     # item.types; without the type fix, the default tier wins.
     timeout, desc = timeout_tier(
-        ["greptile_needs_improvement"],
+        ["reviewer_needs_improvement"],
         False,
         config,
         instruction_kind="GREPTILE_CONVERGENCE",
@@ -2237,7 +2237,7 @@ def test_timeout_tier_instruction_kind_routes_to_adjudication(tmp_path) -> None:
 
     # Sanity: a different instruction kind does NOT route to adjudication.
     timeout, _ = timeout_tier(
-        ["greptile_needs_improvement"], False, config, instruction_kind="OTHER"
+        ["reviewer_needs_improvement"], False, config, instruction_kind="OTHER"
     )
     assert timeout == config.default_timeout == 900
 

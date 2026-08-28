@@ -19,9 +19,9 @@ ca7aa17a2899dbe676fba7074fc5c4dd61d25fe4):
 - ``project-monitoring-lib.sh:474-517`` — ``_build_cross_repo_greptile_refresh_instructions``
   → :attr:`InstructionKind.CROSS_REPO_GREPTILE_REFRESH`
 - ``project-monitoring-lib.sh:886-912`` — ``build_item_investigate`` arm
-  ``greptile_needs_fix`` → :attr:`InstructionKind.GREPTILE_NEEDS_FIX`
+  ``reviewer_needs_fix`` → :attr:`InstructionKind.REVIEWER_NEEDS_FIX`
 - ``project-monitoring-lib.sh:913-932`` — ``build_item_investigate`` arm
-  ``greptile_needs_improvement`` → :attr:`InstructionKind.GREPTILE_NEEDS_IMPROVEMENT`
+  ``reviewer_needs_improvement`` → :attr:`InstructionKind.REVIEWER_NEEDS_IMPROVEMENT`
 
 The four heredocs are ~90% pairwise-duplicate. They collapse into two shared
 skeletons with per-variant parameter tables:
@@ -40,7 +40,7 @@ Rendering parity (exact bytes, locked by golden tests):
   stdout of the bash function, **including the trailing newline** the heredoc
   emits. The bash call site assigns via ``$(...)`` which strips it; callers
   that need the assigned-variable form should ``.rstrip("\\n")``.
-- ``GREPTILE_NEEDS_FIX`` / ``GREPTILE_NEEDS_IMPROVEMENT`` render the exact
+- ``REVIEWER_NEEDS_FIX`` / ``REVIEWER_NEEDS_IMPROVEMENT`` render the exact
   string the bash appends to ``INVESTIGATE``, **including the leading and
   trailing newline**.
 
@@ -593,13 +593,8 @@ _VARIANTS: dict[InstructionKind, tuple[str, Mapping[str, str]]] = {
         _FIX_SKELETON,
         _CROSS_REPO_REFRESH_SECTIONS,
     ),
-    InstructionKind.GREPTILE_NEEDS_FIX: (_INVESTIGATE_SKELETON, _NEEDS_FIX_SECTIONS),
-    InstructionKind.GREPTILE_NEEDS_IMPROVEMENT: (
-        _INVESTIGATE_SKELETON,
-        _NEEDS_IMPROVEMENT_SECTIONS,
-    ),
-    # source-agnostic renames — same templates as their greptile counterparts
-    # (used when source=greptile or source absent; see build_investigate)
+    # source-agnostic reviewer arms — used when source=greptile or source
+    # absent; see build_investigate
     InstructionKind.REVIEWER_NEEDS_FIX: (_INVESTIGATE_SKELETON, _NEEDS_FIX_SECTIONS),
     InstructionKind.REVIEWER_NEEDS_IMPROVEMENT: (
         _INVESTIGATE_SKELETON,
@@ -675,9 +670,6 @@ def render_instruction(kind: InstructionKind, ctx: PromptContext) -> str:
 # values nothing Bob remains.
 
 _GREPTILE_INVESTIGATE_KINDS: dict[str, InstructionKind] = {
-    "greptile_needs_fix": InstructionKind.GREPTILE_NEEDS_FIX,
-    "greptile_needs_improvement": InstructionKind.GREPTILE_NEEDS_IMPROVEMENT,
-    # source-agnostic renames (backward-compat: old names stay above)
     "reviewer_needs_fix": InstructionKind.REVIEWER_NEEDS_FIX,
     "reviewer_needs_improvement": InstructionKind.REVIEWER_NEEDS_IMPROVEMENT,
 }

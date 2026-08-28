@@ -121,9 +121,9 @@ class InstructionKind(Enum):
     body.
 
     The first two members are produced by the merge-lifecycle decisions in
-    this module. The ``GREPTILE_NEEDS_*`` members correspond to the
+    this module. The ``REVIEWER_NEEDS_*`` members correspond to the
     ``build_item_investigate`` arms keyed by the poller's
-    ``greptile_needs_fix`` / ``greptile_needs_improvement`` item types —
+    ``reviewer_needs_fix`` / ``reviewer_needs_improvement`` item types —
     rendered by the same template module but selected by item type, not by
     a decision here.
     """
@@ -131,12 +131,8 @@ class InstructionKind(Enum):
     LOCAL_GREPTILE_FIX = "local_greptile_fix"  # lib.sh:425-470
     AI_REVIEW_FIX = "ai_review_fix"  # no bash equivalent — see classifier note
     CROSS_REPO_GREPTILE_REFRESH = "cross_repo_greptile_refresh"  # lib.sh:474-517
-    GREPTILE_NEEDS_FIX = "greptile_needs_fix"  # lib.sh:886-912
-    GREPTILE_NEEDS_IMPROVEMENT = "greptile_needs_improvement"  # lib.sh:913-932
-    REVIEWER_NEEDS_FIX = "reviewer_needs_fix"  # renamed from greptile_needs_fix
-    REVIEWER_NEEDS_IMPROVEMENT = (
-        "reviewer_needs_improvement"  # renamed from greptile_needs_improvement
-    )
+    REVIEWER_NEEDS_FIX = "reviewer_needs_fix"  # lib.sh:886-912
+    REVIEWER_NEEDS_IMPROVEMENT = "reviewer_needs_improvement"  # lib.sh:913-932
     AI_REVIEW_NEEDS_FIX = "ai_review_needs_fix"  # reviewer_needs_fix, source=ai-review
     AI_REVIEW_NEEDS_IMPROVEMENT = (
         "ai_review_needs_improvement"  # reviewer_needs_improvement, source=ai-review
@@ -189,8 +185,8 @@ def greptile_convergence_applicable(item: WorkItem, *, helper_available: bool) -
     """bash gate at lib.sh:870-873.
 
     Requires the helper, at least one type, and *every* type to be
-    ``greptile_needs_improvement`` — the bash spells this as
-    ``! grep -qvx 'greptile_needs_improvement'``, i.e. a mixed item (a PR that
+    ``reviewer_needs_improvement`` — the bash spells this as
+    ``! grep -qvx 'reviewer_needs_improvement'``, i.e. a mixed item (a PR that
     also has a CI failure) is deliberately NOT short-circuited.
     """
     if not helper_available or not item.types:
@@ -199,10 +195,7 @@ def greptile_convergence_applicable(item: WorkItem, *, helper_available: bool) -
     # path consults greptile-helper which is irrelevant for that source.
     if item.source == "ai-review":
         return False
-    return all(
-        t in {"greptile_needs_improvement", "reviewer_needs_improvement"}
-        for t in item.types
-    )
+    return all(t == "reviewer_needs_improvement" for t in item.types)
 
 
 def decide_greptile_convergence(

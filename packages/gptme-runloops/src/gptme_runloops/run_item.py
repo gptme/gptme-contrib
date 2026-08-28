@@ -177,8 +177,6 @@ PR_OBSERVE_TYPES: frozenset[str] = PR_STATE_TYPES | frozenset(
     {
         "ci_failure",
         "greptile_convergence_adjudication",
-        "greptile_needs_fix",
-        "greptile_needs_improvement",
         "merge_conflict",
         "pr_changes_requested_stale",
         "pr_never_checked",
@@ -213,8 +211,6 @@ THREAD_DELIVERABLE_TYPES: frozenset[str] = frozenset(
         "pr_update",
         "ci_failure",
         "merge_ready",
-        "greptile_needs_improvement",
-        "greptile_needs_fix",
         "reviewer_needs_improvement",
         "reviewer_needs_fix",
         "merge_conflict",
@@ -580,11 +576,7 @@ def timeout_tier(
         or instruction_kind == "GREPTILE_CONVERGENCE"
     ):
         return config.adjudication_timeout, config.adjudication_time_desc
-    if (
-        "greptile_needs_fix" in types
-        or "reviewer_needs_fix" in types
-        or ("pr_update" in types and has_greptile_fix)
-    ):
+    if "reviewer_needs_fix" in types or ("pr_update" in types and has_greptile_fix):
         return config.greptile_fix_timeout, config.greptile_fix_time_desc
     # Direct @mentions need at least the assigned_issue budget — a 900s fast-lane
     # session was killed at ~14 min before completing (AW#1402, 2026-08-20).
