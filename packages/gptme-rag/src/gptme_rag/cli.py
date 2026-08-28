@@ -309,7 +309,9 @@ def index(
                         # worktree churn) — skip it instead of re-embedding.
                         current_hash = doc.metadata.get("content_hash")
                         if current_hash is not None:
-                            stored_hashes = existing.get("content_hashes") or set()
+                            stored_hashes = cast(
+                                set[object], existing.get("content_hashes") or set()
+                            )
                             has_unhashed = bool(existing.get("has_unhashed"))
                             if stored_hashes and not has_unhashed:
                                 if stored_hashes == {current_hash}:
