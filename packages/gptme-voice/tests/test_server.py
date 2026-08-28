@@ -153,10 +153,47 @@ def test_body_adapter_only_reaches_trusted_transports(monkeypatch) -> None:
         server._body_adapter_for_websocket(loopback, transport="local")
         is server.body_adapter
     )
+    # Twilio is fail-closed: no allowlist means no body tools, even though
+    # the request may have a valid Twilio signature.
+    assert server._body_adapter_for_websocket(remote, transport="twilio") is None
     assert (
-        server._body_adapter_for_websocket(remote, transport="twilio")
+        server._body_adapter_for_websocket(
+            remote, transport="twilio", caller_id="+15551212"
+        )
+        is None
+    )
+
+
+def test_twilio_body_tools_require_allowlisted_caller(monkeypatch) -> None:
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212,+15559999"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+    server = VoiceServer()
+    remote = type(
+        "WebSocket", (), {"client": type("Client", (), {"host": "203.0.113.1"})()}
+    )()
+
+    assert (
+        server._body_adapter_for_websocket(
+            remote, transport="twilio", caller_id="+15551212"
+        )
         is server.body_adapter
     )
+    assert (
+        server._body_adapter_for_websocket(
+            remote, transport="twilio", caller_id="+15550000"
+        )
+        is None
+    )
+    assert server._body_adapter_for_websocket(remote, transport="twilio") is None
 
 
 def test_untrusted_sessions_do_not_advertise_body_tools(monkeypatch) -> None:

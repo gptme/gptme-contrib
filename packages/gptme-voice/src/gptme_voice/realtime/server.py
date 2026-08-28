@@ -782,10 +782,33 @@ class VoiceServer:
             if self.body_adapter is not None:
                 await self.body_adapter.close()
 
-    def _body_adapter_for_websocket(self, websocket, *, transport: str):
-        """Expose motion tools only on authenticated or loopback transports."""
-        if self.body_adapter is None or transport == "twilio":
-            return self.body_adapter
+    def _twilio_body_caller_allowed(self, caller_id: str | None) -> bool:
+        """Twilio body tools require an explicit caller allowlist match.
+
+        Twilio's request signature proves the webhook came from Twilio, not
+        that the human on the line is authorized to fly a vehicle. Fail
+        closed: no allowlist, or a caller not on it, means no motion tools.
+        """
+        raw = _get_config_env("TWILIO_CALLER_ALLOWLIST")
+        if not raw or not caller_id:
+            return False
+        allowlist = {n.strip() for n in raw.split(",") if n.strip()}
+        return caller_id in allowlist
+
+    def _body_adapter_for_websocket(
+        self, websocket, *, transport: str, caller_id: str | None = None
+    ):
+        """Expose motion tools only on loopback or allowlisted Twilio callers."""
+        if self.body_adapter is None:
+            return None
+        if transport == "twilio":
+            if self._twilio_body_caller_allowed(caller_id):
+                return self.body_adapter
+            logger.warning(
+                "Body tools disabled for Twilio caller %s (not on TWILIO_CALLER_ALLOWLIST)",
+                caller_id or "unknown",
+            )
+            return None
         client = getattr(websocket, "client", None)
         host = getattr(client, "host", None)
         if host in {"127.0.0.1", "::1", "localhost"}:
@@ -1175,6 +1198,7 @@ class VoiceServer:
                     if bootstrap.should_greet_first
                     else ""
                 ),
+                include_body_tools=self._twilio_body_caller_allowed(from_number),
             )
             client = self._make_client(session_cfg, hold_initial_response=True)
             await client.connect()
@@ -1760,6 +1784,11 @@ class VoiceServer:
                     prewarm_client = (
                         self._claim_prewarm(from_number) if prewarm_eligible else None
                     )
+                    body_adapter = self._body_adapter_for_websocket(
+                        websocket,
+                        transport="twilio",
+                        caller_id=from_number or None,
+                    )
 
                     if prewarm_client is not None:
                         realtime_client = prewarm_client
@@ -1784,6 +1813,7 @@ class VoiceServer:
                         session_cfg = self._build_session_config(
                             instructions=instructions,
                             initial_response_instructions=initial_response_instructions,
+                            include_body_tools=body_adapter is not None,
                         )
                         realtime_client = self._make_client(
                             session_cfg,
@@ -1813,7 +1843,7 @@ class VoiceServer:
                         on_hangup=_twilio_hangup,
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
                         transcript_provider=lambda: transcript,
-                        body_adapter=self.body_adapter,
+                        body_adapter=body_adapter,
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
