@@ -219,13 +219,17 @@ def _build_inline_comment_body(finding: ReviewFinding) -> str:
 
 
 def _build_summary_comment_body(
-    artifact: ReviewArtifact, posted_count: int, skipped_count: int
+    artifact: ReviewArtifact,
+    posted_count: int,
+    skipped_count: int,
+    min_confidence: float = _MIN_CONFIDENCE,
 ) -> str:
     """Build a top-level summary comment for the PR."""
     postable_findings = [
         finding
         for finding in artifact.findings
         if finding.disposition != Disposition.dropped
+        and finding.confidence >= min_confidence
     ]
     n_total = len(postable_findings)
     n_by_severity: dict[str, int] = {}
@@ -323,6 +327,7 @@ def post_summary_comment(
     artifact: ReviewArtifact,
     posted_count: int,
     skipped_count: int,
+    min_confidence: float = _MIN_CONFIDENCE,
 ) -> str:
     """Post a top-level summary comment on the PR.
 
@@ -330,7 +335,9 @@ def post_summary_comment(
         The GitHub comment ID (as string).
     """
     owner, name = repo.split("/", 1)
-    body = _build_summary_comment_body(artifact, posted_count, skipped_count)
+    body = _build_summary_comment_body(
+        artifact, posted_count, skipped_count, min_confidence
+    )
     data = _gh_api(
         f"/repos/{owner}/{name}/issues/{pr_number}/comments",
         method="POST",
@@ -398,7 +405,7 @@ def publish_artifact(
 
     # Post summary comment only if we actually published something
     if posted > 0:
-        post_summary_comment(repo, pr_number, artifact, posted, skipped)
+        post_summary_comment(repo, pr_number, artifact, posted, skipped, min_confidence)
 
     return posted, skipped
 

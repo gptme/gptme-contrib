@@ -284,16 +284,16 @@ class TestVerifyFinding:
             },
         ],
     )
-    def test_invalid_boolean_verdicts_do_not_confirm(self, model_output):
+    def test_invalid_boolean_verdicts_raise(self, model_output):
         finding = _make_finding()
-        with patch(
-            "gptme_runloops.pr_review.verifier._invoke_verifier_model",
-            return_value=json.dumps(model_output),
+        with (
+            patch(
+                "gptme_runloops.pr_review.verifier._invoke_verifier_model",
+                return_value=json.dumps(model_output),
+            ),
+            pytest.raises(ValueError, match="must be a boolean"),
         ):
-            verdict = verify_finding(finding, SAMPLE_DIFF, Path("/tmp"))
-
-        assert verdict.real is False
-        assert verdict.worth_fixing is False
+            verify_finding(finding, SAMPLE_DIFF, Path("/tmp"))
 
 
 # ── verify_artifact ───────────────────────────────────────────────────────────
@@ -461,14 +461,26 @@ class TestVerifyArtifact:
 
         invoke_mock.assert_not_called()
 
-    def test_error_leaves_needs_validation(self):
-        """On tool failure, finding stays as needs_validation (conservative)."""
+    @pytest.mark.parametrize(
+        "model_output",
+        [
+            None,
+            json.dumps({"severity": "low", "rationale": "Missing verdicts."}),
+        ],
+    )
+    def test_error_leaves_needs_validation(self, model_output):
+        """Tool and malformed-output failures stay needs_validation (conservative)."""
         findings = [_make_finding("Risky")]
         artifact = _make_artifact(findings)
+        invoke_result = (
+            {"side_effect": RuntimeError("gptme timed out")}
+            if model_output is None
+            else {"return_value": model_output}
+        )
 
         with patch(
             "gptme_runloops.pr_review.verifier._invoke_verifier_model",
-            side_effect=RuntimeError("gptme timed out"),
+            **invoke_result,
         ):
             result = verify_artifact(artifact, SAMPLE_DIFF, Path("/tmp"))
 

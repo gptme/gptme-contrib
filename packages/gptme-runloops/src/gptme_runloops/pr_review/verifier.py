@@ -222,9 +222,13 @@ def verify_finding(
     except ValueError:
         severity = finding.severity  # fall back to generator's grade on bad output
 
+    for field in ("real", "worth_fixing"):
+        if type(data.get(field)) is not bool:
+            raise ValueError(f"verifier verdict field {field!r} must be a boolean")
+
     return VerifierVerdict(
-        real=data.get("real") is True,
-        worth_fixing=data.get("worth_fixing") is True,
+        real=data["real"],
+        worth_fixing=data["worth_fixing"],
         severity=severity,
         rationale=str(data.get("rationale", "")),
     )
