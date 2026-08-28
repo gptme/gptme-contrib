@@ -35,6 +35,8 @@ from gptme_runloops.merge_lifecycle import (
     SelfMergeCheckResult,
     run_merge_lifecycle,
 )
+from gptme_runloops.pm_bandit import PmModelBandit
+from gptme_runloops.pm_dispatch import EFFECT_NONE, EFFECT_OBSERVED, EFFECT_UNKNOWN
 from gptme_runloops.run_item import (
     PR_OBSERVE_TYPES,
     PR_STATE_TYPES,
@@ -45,6 +47,9 @@ from gptme_runloops.run_item import (
     RunItemHooks,
     _handle_cc_rate_limit,
     _inspect_cc_failure,
+    _load_shadow_bandit,
+    _record_shadow_bandit_outcome,
+    _shadow_bandit_enabled,
     build_execution_plan,
     clear_slot_event_markers,
     derive_lock_paths,
@@ -616,6 +621,105 @@ def test_run_work_file_happy_path(tmp_path) -> None:
     assert lock_file.read_text() == ""
     history = config.lock_history.read_text()
     assert "ACQUIRED" in history and "RELEASED" in history
+
+
+def test_shadow_bandit_enabled_reads_env() -> None:
+    assert _shadow_bandit_enabled({}) is False
+    assert _shadow_bandit_enabled({"BOB_PM_BANDIT_SHADOW": "0"}) is False
+    assert _shadow_bandit_enabled({"BOB_PM_BANDIT_SHADOW": "1"}) is True
+    assert _shadow_bandit_enabled({"BOB_PM_BANDIT_SHADOW": "true"}) is True
+
+
+def test_load_shadow_bandit_none_when_flag_off(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("BOB_PM_BANDIT_SHADOW", raising=False)
+    assert _load_shadow_bandit(make_config(tmp_path)) is None
+
+
+def test_load_shadow_bandit_when_flag_on(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BOB_PM_BANDIT_SHADOW", "1")
+    bandit = _load_shadow_bandit(make_config(tmp_path))
+    assert isinstance(bandit, PmModelBandit)
+    assert bandit.state_dir == tmp_path / "state-dir" / "pm-dispatch"
+
+
+def test_record_shadow_bandit_outcome_skips_unknown_effect(tmp_path) -> None:
+    bandit = PmModelBandit(state_dir=str(tmp_path / "pm-dispatch"))
+    _record_shadow_bandit_outcome(
+        bandit,
+        item_types=["pr_update"],
+        repo="gptme/gptme-contrib",
+        model="claude-sonnet-4-6",
+        item_effect=EFFECT_UNKNOWN,
+    )
+    assert bandit.summary() == {}
+
+
+def test_record_shadow_bandit_outcome_records_observed(tmp_path) -> None:
+    bandit = PmModelBandit(state_dir=str(tmp_path / "pm-dispatch"))
+    _record_shadow_bandit_outcome(
+        bandit,
+        item_types=["pr_update"],
+        repo="gptme/gptme-contrib",
+        model="claude-sonnet-4-6",
+        item_effect=EFFECT_OBSERVED,
+    )
+    summary = bandit.summary()
+    assert "pr-review" in summary
+    assert summary["pr-review"]["claude-sonnet-4-6"]["selections"] == 1
+
+
+def test_record_shadow_bandit_outcome_zero_for_none(tmp_path) -> None:
+    bandit = PmModelBandit(state_dir=str(tmp_path / "pm-dispatch"))
+    _record_shadow_bandit_outcome(
+        bandit,
+        item_types=["ci_failure"],
+        repo="gptme/gptme",
+        model="claude-sonnet-4-6",
+        item_effect=EFFECT_NONE,
+    )
+    summary = bandit.summary()
+    arm = summary["ci-fix"]["claude-sonnet-4-6"]
+    assert arm["selections"] == 1
+    assert arm["mean"] < 0.5
+
+
+def test_run_work_file_records_shadow_bandit_outcome(tmp_path, monkeypatch) -> None:
+    """Flag on → live path writes bandit-state.json. Prevents a repeat of
+    #1519 stripping this as dead code because the env was never set."""
+    monkeypatch.setenv("BOB_PM_BANDIT_SHADOW", "1")
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.run_post_session",
+        lambda *args, **kwargs: EFFECT_OBSERVED,
+    )
+    (tmp_path / "monitoring-rules.md").write_text("RULES CONTENT")
+    item = make_item()
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("rev-parse", stdout="abc123\n")
+    run_cmd.on(
+        "gh", stdout='{"state": "OPEN", "headRefOid": "AA", "mergeCommit": null}'
+    )
+    hooks = make_hooks(
+        run_cmd=run_cmd,
+        merge_lifecycle_io=FakeLifecycleIO(status="in-progress"),
+        claim_tool=["fake-coordination"],
+    )
+    rc = run_work_file(
+        work_file,
+        config,
+        hooks,
+        backend="claude-code",
+        model="claude-sonnet-4-6",
+        lane="slow",
+        dispatch_id="unit-1",
+        slot_key="gptme/gptme-contrib#1234",
+    )
+    assert rc == 0
+    state_file = tmp_path / "state-dir" / "pm-dispatch" / "bandit-state.json"
+    assert state_file.is_file(), "shadow bandit must persist an observation"
+    reloaded = PmModelBandit(state_dir=str(tmp_path / "state-dir" / "pm-dispatch"))
+    assert reloaded.summary()
 
 
 def test_run_work_file_claim_denied_skips_and_exits_zero(tmp_path) -> None:

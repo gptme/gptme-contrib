@@ -896,6 +896,13 @@ class LaneDispatcher:
             cmd.append(f"--setenv=BOB_SELECTED_MODEL={model}")
         if work_type:
             cmd.append(f"--setenv=PM_WORK_TYPE={work_type}")
+        # Transient units inherit nothing. Forward the Stage 1 shadow flag so
+        # run-item actually records observations (gptme-contrib#1506 was
+        # stripped as dead code because this was never set here).
+        cmd.append(
+            "--setenv=BOB_PM_BANDIT_SHADOW="
+            + os.environ.get("BOB_PM_BANDIT_SHADOW", "0")
+        )
         cmd.extend(["--", "bash", script_path])
 
         try:
