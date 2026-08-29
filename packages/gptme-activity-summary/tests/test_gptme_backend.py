@@ -71,8 +71,8 @@ def test_deepseek_preamble_in_text_then_codeblock_answer():
     caller's extract_json_from_response can parse the code block."""
     ndjson = "\n".join(
         [
-            _msg("Let me think about this:\n{\"thinking\": \"hmm\"}"),
-            _msg("```json\n{\"narrative\": \"final\"}\n```"),
+            _msg('Let me think about this:\n{"thinking": "hmm"}'),
+            _msg('```json\n{"narrative": "final"}\n```'),
         ]
     )
     out = _extract_assistant_text(ndjson)
