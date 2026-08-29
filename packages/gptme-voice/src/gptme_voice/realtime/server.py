@@ -784,12 +784,15 @@ class VoiceServer:
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
         # Max seconds a pre-warm session is kept before being discarded
         self._prewarm_ttl_seconds = 30
-        # One-shot body-tool grants minted by the signed /incoming webhook.
+        # Call-scoped body-tool grants minted by the signed /incoming webhook.
         # The /twilio WebSocket is unauthenticated; customParameters.from_number
         # is attacker-controlled, so body tools must not key off it. Token ->
         # (from_number, call_sid, expires_monotonic). CallSid is bound from the
         # signed webhook and is not copied into TwiML, so a stolen grant cannot
-        # be replayed onto a different call.
+        # be replayed onto a different call. Consume does not pop: Twilio
+        # reconnects resend the same start customParameters, and popping would
+        # leave an airborne vehicle with no body_stop. Revoke on Twilio stop
+        # (real call end) or TTL; do not revoke on websocket drop.
         self._twilio_body_grants: dict[str, tuple[str, str, float]] = {}
         self._twilio_body_grant_ttl_s = 120.0
 
@@ -837,7 +840,7 @@ class VoiceServer:
             self._twilio_body_grants.pop(token, None)
 
     def _mint_twilio_body_grant(self, from_number: str, call_sid: str = "") -> str:
-        """Mint a one-shot token proving /incoming authorized this caller."""
+        """Mint a call-scoped token proving /incoming authorized this caller."""
         self._expire_twilio_body_grants()
         token = secrets.token_urlsafe(32)
         self._twilio_body_grants[token] = (
@@ -850,19 +853,36 @@ class VoiceServer:
     def _consume_twilio_body_grant(self, token: str | None) -> tuple[str, str] | None:
         """Return ``(from_number, call_sid)`` bound to a live grant, or None.
 
-        Single-use: a replay or a raw WebSocket that invents customParameters
-        cannot satisfy this. Expired and unknown tokens fail closed.
+        Call-scoped, not single-use: Twilio reconnects resend the same
+        ``start`` customParameters, so popping the token would leave an
+        airborne vehicle with no ``body_stop``. Replay onto a different
+        call is still fail-closed via CallSid binding. Unknown, expired,
+        and revoked tokens fail closed. The grant is removed on Twilio
+        ``stop`` or TTL expiry.
         """
         self._expire_twilio_body_grants()
         if not token:
             return None
-        entry = self._twilio_body_grants.pop(token, None)
+        entry = self._twilio_body_grants.get(token)
         if entry is None:
             return None
         from_number, call_sid, expires = entry
         if time.monotonic() > expires:
+            self._twilio_body_grants.pop(token, None)
             return None
         return from_number, call_sid
+
+    def _revoke_twilio_body_grants_for_call(self, call_sid: str | None) -> None:
+        """Drop grants bound to a CallSid. Twilio ``stop`` is the real call end."""
+        if not call_sid:
+            return
+        to_drop = [
+            token
+            for token, (_from, sid, _exp) in self._twilio_body_grants.items()
+            if sid == call_sid
+        ]
+        for token in to_drop:
+            self._twilio_body_grants.pop(token, None)
 
     def _body_adapter_for_websocket(
         self, websocket, *, transport: str, caller_id: str | None = None
@@ -1758,7 +1778,7 @@ class VoiceServer:
         if from_number:
             custom_params["from_number"] = from_number
             # Body tools on /twilio must not trust client-supplied from_number.
-            # Mint a one-shot grant here only after signature validation, and
+            # Mint a call-scoped grant here only after signature validation, and
             # bind it to CallSid (kept off TwiML so a stolen grant cannot be
             # replayed onto a different start event).
             if signature_validated and self._twilio_body_caller_allowed(from_number):
@@ -1987,7 +2007,10 @@ class VoiceServer:
                                 await realtime_client.send_audio(pcm_data)
 
                 elif event == "stop":
-                    # Call ended
+                    # Real call end — revoke so a reconnect after hangup cannot
+                    # re-attach motion tools with the stolen start parameters.
+                    # Do not revoke in ``finally``: websocket drop is a reconnect.
+                    self._revoke_twilio_body_grants_for_call(call_sid)
                     break
 
         except WebSocketDisconnect:
@@ -2388,6 +2411,9 @@ class VoiceServer:
             call_sid,
             reason or "<none>",
         )
+        # Hangup is a real call end even if Twilio never sends ``stop``.
+        if "twilio" in source:
+            self._revoke_twilio_body_grants_for_call(call_sid)
 
         # Fire-and-forget Twilio REST API call termination (authoritative kill).
         # Do this BEFORE the farewell delay so the call stops accepting audio

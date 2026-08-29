@@ -207,14 +207,121 @@ def test_twilio_body_tools_require_allowlisted_caller(monkeypatch) -> None:
     assert server._body_adapter_for_websocket(remote, transport="twilio") is None
 
 
-def test_twilio_body_grant_is_single_use_and_fail_closed(monkeypatch) -> None:
+def test_twilio_body_grant_is_reusable_for_same_call_and_fail_closed(
+    monkeypatch,
+) -> None:
+    """Twilio reconnects resend the same start customParameters.
+
+    Popping the grant on first consume leaves an airborne vehicle with no
+    body_stop. The grant stays live for the CallSid until revoke/TTL.
+    Unknown tokens still fail closed.
+    """
     monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
     server = VoiceServer()
     token = server._mint_twilio_body_grant("+15551212", "CA123")
     assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
-    assert server._consume_twilio_body_grant(token) is None
+    assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
     assert server._consume_twilio_body_grant(None) is None
     assert server._consume_twilio_body_grant("invented") is None
+    server._revoke_twilio_body_grants_for_call("CA123")
+    assert server._consume_twilio_body_grant(token) is None
+
+
+def test_twilio_body_grant_survives_reconnect_start_then_revokes_on_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second start event with the same grant (Twilio reconnect) keeps body tools.
+
+    Twilio ``stop`` is the real call end and must revoke the grant so a later
+    replay of the stolen customParameters cannot re-attach motion tools.
+    """
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+
+    captured: list[object] = []
+
+    class _CapturingBridge(_DummyToolBridge):
+        def __init__(self, *args, **kwargs) -> None:
+            captured.append(kwargs.get("body_adapter"))
+
+    server = VoiceServer()
+    token = server._mint_twilio_body_grant("+15551212", "CA123")
+    custom = {"from_number": "+15551212", "body_grant": token}
+
+    def _start_only() -> _DummyTwilioWebSocket:
+        return _DummyTwilioWebSocket(
+            [
+                {"event": "connected"},
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZ123",
+                        "callSid": "CA123",
+                        "customParameters": custom,
+                    },
+                },
+            ]
+        )
+
+    def _start_then_stop() -> _DummyTwilioWebSocket:
+        return _DummyTwilioWebSocket(
+            [
+                {"event": "connected"},
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZ456",
+                        "callSid": "CA123",
+                        "customParameters": custom,
+                    },
+                },
+                {"event": "stop"},
+            ]
+        )
+
+    fake_client = _FakeRealtimeClient()
+
+    async def _fake_build_session_bootstrap(
+        *,
+        caller_id: str,
+        from_number: str = "",
+        handoff_id: str | None = None,
+        standup_brief: str | None = None,
+    ) -> SessionBootstrap:
+        return SessionBootstrap("You are Bob.")
+
+    def _fake_make_client(_session_cfg, **_kwargs):
+        return fake_client
+
+    async def _fake_on_call_end(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        server, "_build_session_bootstrap", _fake_build_session_bootstrap
+    )
+    monkeypatch.setattr(server, "_make_client", _fake_make_client)
+    monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _CapturingBridge)
+
+    async def _run() -> None:
+        await server.handle_twilio_websocket(_start_only())
+        await server.handle_twilio_websocket(_start_then_stop())
+        await server.handle_twilio_websocket(_start_only())
+
+    asyncio.run(_run())
+    assert captured[0] is not None  # first start consumes live grant
+    assert captured[1] is not None  # reconnect start reuses the same grant
+    assert captured[2] is None  # after stop, replay fails closed
+    assert server._consume_twilio_body_grant(token) is None
 
 
 def test_twilio_body_grant_expires(monkeypatch) -> None:
@@ -339,7 +446,7 @@ def test_twilio_websocket_does_not_grant_body_tools_from_spoofed_from_number(
 ) -> None:
     """Raw /twilio start events can invent customParameters.from_number.
 
-    Body tools must require the one-shot grant minted by signed /incoming.
+    Body tools must require the call-scoped grant minted by signed /incoming.
     """
     monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
     import gptme_voice.realtime.server as server_mod
