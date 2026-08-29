@@ -60,6 +60,8 @@ class IndexEventHandler(FileSystemEventHandler):
     def _should_process(self, path: str) -> bool:
         """Check if a file should be processed based on pattern and ignore patterns."""
         path_obj = Path(path)
+        if self._is_persist_path(path_obj):
+            return False
         return path_obj.match(self.pattern) and not any(
             path_obj.match(pattern) for pattern in self.ignore_patterns
         )
@@ -238,9 +240,9 @@ class IndexEventHandler(FileSystemEventHandler):
             logger.debug(f"Skipping non-file: {path}")
             return True
 
-        # Skip if in index directory
-        if "index" in path.parts:
-            logger.debug(f"Skipping file in index directory: {path}")
+        # Skip persist-dir internals (lock file, chroma sqlite, segment dirs)
+        if self._is_persist_path(path):
+            logger.debug(f"Skipping persist-dir artifact: {path}")
             return True
 
         # Skip binary and system files
@@ -260,6 +262,21 @@ class IndexEventHandler(FileSystemEventHandler):
 
         logger.debug(f"File will be processed: {path}")
         return False
+
+    def _is_persist_path(self, path: Path) -> bool:
+        """Skip the indexer's persist dir — those files are the index, not corpus."""
+        is_persist = getattr(self.indexer, "_is_persist_artifact", None)
+        if callable(is_persist):
+            return bool(is_persist(path))
+        persist = getattr(self.indexer, "persist_directory", None)
+        if persist is None:
+            return False
+        try:
+            persist_resolved = Path(persist).resolve()
+            resolved = path.resolve()
+        except OSError:
+            return False
+        return resolved == persist_resolved or persist_resolved in resolved.parents
 
     def _update_index_with_retries(self, path: Path, content: str, max_attempts: int = 5) -> bool:
         """Update index for a file with retries."""

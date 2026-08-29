@@ -4,6 +4,7 @@ import logging
 import subprocess
 import time
 from collections.abc import Generator, Sequence
+from contextlib import nullcontext
 from datetime import datetime
 from fnmatch import fnmatch as fnmatch_path
 from logging import Filter
@@ -25,6 +26,7 @@ from ..embeddings import (
 )
 from .document import Document
 from .document_processor import DocumentProcessor
+from .gc import _WRITER_LOCK_NAME, index_writer_lock
 
 
 def _glob_match_path(path: str, pattern: str) -> bool:
@@ -413,8 +415,15 @@ class Indexer:
                 metadata = self.collection.metadata or {}
                 stored_model = metadata.get("embedding_model", "unknown")
 
-                if stored_model != current_model or force_recreate:
-                    if not allow_recreate and not force_recreate:
+                if force_recreate:
+                    logger.info(
+                        "Force recreate requested (stored: %r, current: %r)",
+                        stored_model,
+                        current_model,
+                    )
+                    need_recreate = True
+                elif stored_model != current_model:
+                    if not allow_recreate:
                         # Read-only callers (search, status) must never wipe the index.
                         # Warn loudly and keep the existing collection as-is.
                         logger.warning(
@@ -432,11 +441,7 @@ class Indexer:
                         self.embedding_function = None
                         self._stored_model_name = stored_model
                         need_recreate = False
-                    elif (
-                        _openrouter_fallback
-                        and not force_recreate
-                        and _looks_like_openrouter_model(stored_model)
-                    ):
+                    elif _openrouter_fallback and _looks_like_openrouter_model(stored_model):
                         # OPENROUTER_API_KEY is missing, so we fell back to ModernBERT,
                         # but the existing collection was indexed with an OpenRouter model.
                         # Silently recreating would destroy the user's data — raise a clear
@@ -453,7 +458,9 @@ class Indexer:
                         )
                     else:
                         logger.info(
-                            f"Model mismatch (stored: {stored_model}, current: {current_model}) or force recreate"
+                            "Model mismatch (stored: %r, current: %r)",
+                            stored_model,
+                            current_model,
                         )
                         need_recreate = True
 
@@ -470,7 +477,9 @@ class Indexer:
                         current_model,
                         e,
                     )
-                    self.collection = _auto_peeked_collection
+                    # Peeked handle was fetched WITHOUT an EF — same defect as the
+                    # matching-model preserve path. Rebind, or fail loud.
+                    self._assign_preserved_collection(_auto_peeked_collection, collection_name)
                     need_recreate = False
                 elif not allow_recreate:
                     # Read-only callers (search, status) must never wipe the index.
@@ -487,9 +496,17 @@ class Indexer:
                     )
                     try:
                         self.collection = self.client.get_collection(name=collection_name)
-                    except Exception:
-                        # Collection truly doesn't exist yet — create it normally.
-                        need_recreate = True
+                    except Exception as peek_err:
+                        # Missing *or* temporarily unreadable (sqlite lock
+                        # during a concurrent write). Creating would be a write;
+                        # the later need_recreate block deletes first, so a
+                        # transient peek failure would wipe a live collection
+                        # from search/status. Fail loud instead.
+                        raise RuntimeError(
+                            f"Collection {collection_name!r} could not be opened "
+                            "and recreation is disabled for this command; not "
+                            f"creating or deleting it. Error: {peek_err}"
+                        ) from peek_err
                     else:
                         # Null out the mismatched embedding function so search() does not
                         # use it and produce a cryptic ChromaDB InvalidDimensionException.
@@ -502,32 +519,74 @@ class Indexer:
                             self._stored_model_name = _stored
                         need_recreate = False
                 else:
-                    # Collection doesn't exist or other error
-                    logger.debug(f"Collection access error: {e}")
-                    need_recreate = True
+                    # Collection doesn't exist *or* Chroma raised an EF-object
+                    # conflict even though stored_model == current_model.
+                    # Peek without an embedding function before wiping: a matching
+                    # collection must be preserved (the 84k-chunk ambient-memory wipe).
+                    logger.debug("Collection access error: %s", e)
+                    if force_recreate:
+                        need_recreate = True
+                    else:
+                        try:
+                            peek = self.client.get_collection(name=collection_name)
+                        except Exception as peek_err:
+                            # Peek failed: either the collection is absent, or
+                            # the catalog is temporarily unreadable (sqlite lock
+                            # during a concurrent write). Recreate wipes first —
+                            # only do that when list_collections confirms absence.
+                            if self._collection_confirmed_missing(collection_name):
+                                need_recreate = True
+                            else:
+                                raise RuntimeError(
+                                    f"Collection {collection_name!r} could not be "
+                                    "opened and was not confirmed missing; refusing "
+                                    "to recreate. "
+                                    f"Error: {peek_err}"
+                                ) from peek_err
+                        else:
+                            stored = (peek.metadata or {}).get("embedding_model", "unknown")
+                            if stored == current_model:
+                                logger.warning(
+                                    "Collection %r exists with matching model %r but could not "
+                                    "be rebound (%s); preserving it instead of recreating",
+                                    collection_name,
+                                    stored,
+                                    e,
+                                )
+                                self._assign_preserved_collection(peek, collection_name)
+                                need_recreate = False
+                            else:
+                                need_recreate = True
 
         if need_recreate:
-            # Delete if exists
-            try:
-                self.client.delete_collection(collection_name)
-            except (ValueError, NotFoundError):
-                pass
+            if not allow_recreate:
+                raise RuntimeError(
+                    f"Collection {collection_name!r} could not be opened "
+                    "and recreation is disabled for this command; not "
+                    "creating or deleting it."
+                )
+            with self._index_writer_lock():
+                # Delete if exists
+                try:
+                    self.client.delete_collection(collection_name)
+                except (ValueError, NotFoundError):
+                    pass
 
-            # Create new collection
-            metadata = {
-                "hnsw:space": "cosine",
-                "embedding_model": current_model,
-                "embedding_backend": self.embedding_backend_name,
-            }
-            logger.info(f"Creating new collection with {current_model} embeddings")
-            self.collection = self.client.create_collection(
-                name=collection_name,
-                metadata=metadata,
-                embedding_function=self.embedding_function,
-            )
-            # The unavailable model belonged to the collection we just replaced.
-            # Keep the guard only while preserving that old collection.
-            self._stored_model_name = None
+                # Create new collection
+                metadata = {
+                    "hnsw:space": "cosine",
+                    "embedding_model": current_model,
+                    "embedding_backend": self.embedding_backend_name,
+                }
+                logger.info(f"Creating new collection with {current_model} embeddings")
+                self.collection = self.client.create_collection(
+                    name=collection_name,
+                    metadata=metadata,
+                    embedding_function=self.embedding_function,
+                )
+                # The unavailable model belonged to the collection we just replaced.
+                # Keep the guard only while preserving that old collection.
+                self._stored_model_name = None
 
         # Initialize cache with 5-minute TTL and 100MB memory limit
         self.cache = SmartRAGCache(ttl_seconds=300, max_memory_bytes=100 * 1024 * 1024)
@@ -548,6 +607,98 @@ class Indexer:
         }
         if scoring_weights:
             self.scoring_weights.update(scoring_weights)
+
+    def _index_writer_lock(self):
+        persist_dir = getattr(self, "persist_directory", None)
+        if persist_dir is None:
+            return nullcontext()
+        return index_writer_lock(persist_dir)
+
+    def _collection_confirmed_missing(self, collection_name: str) -> bool:
+        """True only when the catalog lists no collection of this name.
+
+        A failed get_collection() is not proof of absence: a sqlite write-lock
+        looks the same as "missing". Recreate deletes first, so a false
+        missing signal wipes a live index. If the catalog cannot be listed,
+        treat the collection as present and refuse to wipe.
+        """
+        try:
+            return collection_name not in {c.name for c in self.client.list_collections()}
+        except Exception:
+            return False
+
+    def _is_persist_artifact(self, path: Path) -> bool:
+        """True for the persist dir, files inside it, or the writer lock.
+
+        Indexing those files is always wrong: they are the index, not a
+        corpus. Watcher tests (and any watch of a tree that contains the
+        persist dir) would otherwise ingest ``.gptme-rag-writer.lock``.
+        """
+        if path.name == _WRITER_LOCK_NAME:
+            return True
+        persist = getattr(self, "persist_directory", None)
+        if persist is None:
+            return False
+        try:
+            persist_resolved = Path(persist).resolve()
+            resolved = path.resolve()
+        except OSError:
+            return False
+        return resolved == persist_resolved or persist_resolved in resolved.parents
+
+    def _assign_preserved_collection(self, collection, collection_name: str) -> None:
+        """Keep an EF-less handle; rebind our embedder or fail loud.
+
+        ``get_collection(name=...)`` returns a handle carrying Chroma's default
+        EF. Writing through it embeds at the wrong dimension. The stored model
+        matches ours, so our EF is known-compatible — Chroma objected to object
+        identity, not the model. Bind it; if Chroma internals hid the attribute,
+        null the EF so add/search raise instead of writing MiniLM vectors.
+        """
+        self.collection = collection
+        if self.embedding_function is None:
+            return
+        if self._bind_embedding_function(collection):
+            return
+        logger.error(
+            "Could not rebind embedding function to preserved "
+            "collection %r; it is readable but not writable. "
+            "Re-index with --force-recreate to restore writes.",
+            collection_name,
+        )
+        stored = (collection.metadata or {}).get("embedding_model")
+        self.embedding_function = None
+        if stored:
+            self._stored_model_name = stored
+
+    def _bind_embedding_function(self, collection) -> bool:
+        """Bind ``self.embedding_function`` onto an EF-less collection handle.
+
+        ``client.get_collection(name=...)`` returns a handle carrying Chroma's
+        *default* embedding function.  Writing through such a handle embeds with
+        the wrong model, which raises ``InvalidDimensionException`` against
+        vectors stored by a non-default model (768-dim ModernBERT vs 384-dim
+        MiniLM).  Callers must only use this after verifying the collection's
+        stored ``embedding_model`` matches the current one, so the EF is
+        known-compatible and Chroma's objection was to object identity, not to
+        the model.
+
+        Returns True when the binding is in place and verified, False when
+        Chroma's internals do not expose the attribute (version drift), so the
+        caller can fail loudly instead of writing wrong-dimension vectors.
+        """
+        assert self.embedding_function is not None, (
+            "callers must skip rebinding when the current EF is Chroma's default; "
+            "an EF-less handle is already correct in that case"
+        )
+        if not hasattr(collection, "_embedding_function"):
+            return False
+        try:
+            collection._embedding_function = self.embedding_function
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Rebinding embedding function failed: %s", exc)
+            return False
+        return getattr(collection, "_embedding_function", None) is self.embedding_function
 
     @property
     def embedding_model_name(self) -> str:
@@ -614,19 +765,20 @@ class Indexer:
 
     def reset_collection(self) -> None:
         """Reset the collection to a clean state."""
-        try:
-            self.client.delete_collection(self.collection_name)
-        except (ValueError, NotFoundError):
-            pass
-        self.collection = self.client.create_collection(
-            name=self.collection_name,
-            metadata={
-                "hnsw:space": "cosine",
-                "embedding_model": self.embedding_model_name,
-                "embedding_backend": self.embedding_backend_name,
-            },
-            embedding_function=self.embedding_function,
-        )
+        with self._index_writer_lock():
+            try:
+                self.client.delete_collection(self.collection_name)
+            except (ValueError, NotFoundError):
+                pass
+            self.collection = self.client.create_collection(
+                name=self.collection_name,
+                metadata={
+                    "hnsw:space": "cosine",
+                    "embedding_model": self.embedding_model_name,
+                    "embedding_backend": self.embedding_backend_name,
+                },
+                embedding_function=self.embedding_function,
+            )
         logger.debug(f"Reset collection: {self.collection_name}")
 
     def _refresh_collection(self) -> None:
@@ -655,11 +807,12 @@ class Indexer:
         assert document.doc_id is not None
 
         try:
-            self.collection.add(
-                documents=[document.content],
-                metadatas=[document.metadata],
-                ids=[document.doc_id],
-            )
+            with self._index_writer_lock():
+                self.collection.add(
+                    documents=[document.content],
+                    metadatas=[document.metadata],
+                    ids=[document.doc_id],
+                )
             logger.debug(f"Added document with ID: {document.doc_id}")
         except Exception as e:
             # Never reset the collection here: wiping the entire persistent
@@ -671,7 +824,8 @@ class Indexer:
     def delete_documents(self, where: dict) -> None:
         """Delete documents matching the where clause."""
         try:
-            self.collection.delete(where=where)
+            with self._index_writer_lock():
+                self.collection.delete(where=where)
             logger.debug(f"Deleted documents matching: {where}")
         except NotFoundError:
             # The cached Collection object is stale (collection was recreated).
@@ -679,7 +833,8 @@ class Indexer:
             logger.debug("Collection handle stale on delete; refreshing and retrying")
             try:
                 self._refresh_collection()
-                self.collection.delete(where=where)
+                with self._index_writer_lock():
+                    self.collection.delete(where=where)
                 logger.debug(f"Deleted documents matching: {where} (after refresh)")
             except NotFoundError as retry_err:
                 # Collection still missing after refresh (race condition).
@@ -738,7 +893,8 @@ class Indexer:
                 ids.append(doc.doc_id)
 
             # Add batch to collection
-            self.collection.add(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
+            with self._index_writer_lock():
+                self.collection.add(documents=contents, metadatas=metadatas, ids=ids)  # type: ignore[arg-type]
         except Exception as e:
             logger.error(f"Failed to process batch: {e}")
             raise
@@ -1653,9 +1809,15 @@ class Indexer:
             # Resolve symlinks to target
             try:
                 resolved = f.resolve()
-                valid_files.add(resolved)
             except Exception as e:
                 logger.warning(f"Error resolving symlink: {f} -> {e}")
+                continue
+
+            if self._is_persist_artifact(resolved):
+                logger.debug(f"Skipping persist-dir artifact: {resolved}")
+                continue
+
+            valid_files.add(resolved)
 
         # Check file limit. Strict greater-than: a corpus that lands exactly on
         # the cap is complete, not truncated, so it must not log an ERROR.

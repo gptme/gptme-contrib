@@ -23,6 +23,32 @@ def _write_files(directory, count: int, prefix: str = "doc") -> None:
         (directory / f"{prefix}-{i:03d}.txt").write_text(f"content {i}")
 
 
+def test_get_valid_files_skips_persist_dir_artifacts(tmp_path):
+    """Files inside persist_directory are the index, not corpus, and must not be indexed.
+
+    Regression: FileWatcher.start() calls index_directory on the watched tree,
+    which contained persist_directory (tmp_path/index). The writer lock created
+    during Indexer.__init__ was ingested as an extra document, so watcher tests
+    that asserted len(results) == 1 failed.
+    """
+    persist_dir = tmp_path / "index"
+    keep = tmp_path / "keep.txt"
+    keep.write_text("corpus")
+
+    indexer = Indexer(
+        persist_directory=persist_dir,
+        enable_persist=True,
+        embedding_function="default",
+        collection_name="default",
+    )
+    files = indexer._get_valid_files(tmp_path)
+    names = {p.name for p in files}
+    assert "keep.txt" in names
+    assert ".gptme-rag-writer.lock" not in names
+    assert "chroma.sqlite3" not in names
+    assert all(persist_dir.resolve() not in p.parents for p in files)
+
+
 def test_get_valid_files_truncates_and_logs_error(tmp_path, caplog):
     """A directory over file_limit is truncated and the truncation is an ERROR."""
     _write_files(tmp_path, 12)
