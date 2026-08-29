@@ -59,6 +59,7 @@ members = [
     "gptme-usage",
     "gptme-user-memories",
     "gptme-voice",
+    "gptme-voice-node",
     "gptme-warpgrep",
     "gptme-whatsapp",
     "gptme-wisdom",
@@ -2618,6 +2619,32 @@ requires-dist = [
     { name = "websockets", specifier = ">=12.0" },
 ]
 provides-extras = ["test", "local"]
+
+[[package]]
+name = "gptme-voice-node"
+version = "0.1.0"
+source = { editable = "packages/gptme-voice-node" }
+dependencies = [
+    { name = "websockets" },
+]
+
+[package.optional-dependencies]
+audio = [
+    { name = "pyaudio" },
+]
+test = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pyaudio", marker = "extra == 'audio'", specifier = ">=0.2.13" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
+    { name = "websockets", specifier = ">=12.0" },
+]
+provides-extras = ["audio", "test"]
 
 [[package]]
 name = "gptme-warpgrep"

@@ -1,0 +1,35 @@
+[Unit]
+Description=BobBrain Voice Node — WS client to bob-voice-server
+Documentation=https://github.com/gptme/gptme-contrib/tree/master/packages/gptme-voice-node
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Override these in /etc/systemd/system/gptme-voice-node.service.d/local.conf
+# Use wss:// whenever microphone audio crosses a network.
+Environment=GPTME_VOICE_NODE_SERVER=wss://bob-host.example.com/local
+Environment=GPTME_VOICE_NODE_NAME=bobbrain-puck
+
+# Adjust to the user that has audio access (e.g. pi on Raspberry Pi OS)
+User=pi
+WorkingDirectory=/home/pi
+
+ExecStart=/home/pi/.local/bin/gptme-voice-node
+
+# Auto-restart with progressive cooldown
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Resource limits (target: <50 MB RSS)
+MemoryMax=128M
+CPUQuota=50%
+
+# Logging — stderr goes to journald
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
