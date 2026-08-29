@@ -1089,6 +1089,11 @@ def test_generated_recurrence_waiting_for_is_exact_string() -> None:
     assert not is_generated_recurrence_waiting_for(
         "next recurrence gate (wait: 2025-01-01) - confirm with Bob"
     )
+    # Note *inside* the parentheses is also human — `.+` used to match it
+    # (P1 on gptme/gptme-contrib#1539 / e52af179).
+    assert not is_generated_recurrence_waiting_for(
+        "next recurrence gate (wait: 2025-01-01 - confirm with Bob)"
+    )
     assert not is_generated_recurrence_waiting_for("John to review the PR")
     assert not is_generated_recurrence_waiting_for("")
     assert not is_generated_recurrence_waiting_for(None)
@@ -1188,3 +1193,43 @@ def test_set_wait_does_not_rewrite_suffixed_recurrence_waiting_for(
     assert (
         post.metadata.get("waiting_for") == human_wf
     ), f"human-suffixed waiting_for must be preserved; got {post.metadata.get('waiting_for')!r}"
+
+
+def test_set_wait_does_not_rewrite_inner_paren_recurrence_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A human note *inside* the wait parentheses must not be overwritten.
+
+    `.+` in is_generated_recurrence_waiting_for matched
+    'next recurrence gate (wait: DATE - note)' as generated and --set wait
+    replaced it, destroying the note (P1 on gptme/gptme-contrib#1539 / e52af179).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    human_wf = f"next recurrence gate (wait: {old_wait} - confirm with Bob)"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{human_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "wait", new_wait])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert str(post.metadata["wait"]).startswith(new_wait)
+    assert post.metadata.get("waiting_for") == human_wf, (
+        "inner-paren human waiting_for must be preserved; "
+        f"got {post.metadata.get('waiting_for')!r}"
+    )

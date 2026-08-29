@@ -637,10 +637,11 @@ class TaskInfo:
 # =============================================================================
 
 
-# Exact generated recurrence-gate waiting_for. Prefix-only matching would treat
-# a human suffix ("... (wait: 2025-01-01) - confirm with Bob") as a machine
-# gate and silently overwrite it on --set wait (gptme/gptme-contrib#1539).
-_GENERATED_RECURRENCE_WAITING_FOR = re.compile(r"^next recurrence gate \(wait: .+\)$")
+# Exact generated recurrence-gate waiting_for. `.+` would treat a human note
+# inside the parentheses ("... (wait: 2025-01-01 - confirm with Bob)") as a
+# machine gate and silently overwrite it on --set wait (gptme/gptme-contrib#1539).
+# Generated dates are ISO via datetime.isoformat() — no spaces — so \S+ is exact.
+_GENERATED_RECURRENCE_WAITING_FOR = re.compile(r"^next recurrence gate \(wait: \S+\)$")
 
 
 def is_generated_recurrence_waiting_for(waiting_for: object) -> bool:
