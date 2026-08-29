@@ -2964,14 +2964,28 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             )
             if recurrence_gate and wait_set is None:
                 # Clearing a generated recurrence gate means it is no longer
-                # waiting. Remove the generated blocker metadata as one unit so
-                # the task cannot be left permanently blocked without a date.
-                post.metadata["state"] = "todo"
+                # a machine time-gate. Remove the generated blocker metadata as
+                # one unit so the task cannot stay permanently blocked without
+                # a date. Only default state to todo when this edit did not
+                # set state — `--set wait none --set state done` must not
+                # overwrite the explicit state (P1 on gptme/gptme-contrib#1539).
+                explicit_state = any(
+                    op == "set" and field == "state" for op, field, _value in changes
+                )
+                if not explicit_state:
+                    post.metadata["state"] = "todo"
                 post.metadata.pop("waiting_for", None)
                 post.metadata.pop("waiting_since", None)
                 post.metadata.pop("wait_kind", None)
             elif recurrence_gate and post.metadata.get("state") == "waiting":
                 post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_set})"
+            elif recurrence_gate:
+                # Wait changed but the task is no longer waiting. Drop the
+                # generated recurrence string so it cannot trap a todo/done
+                # task as a leftover human-looking blocker.
+                post.metadata.pop("waiting_for", None)
+                post.metadata.pop("waiting_since", None)
+                post.metadata.pop("wait_kind", None)
         # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
         # AND waiting_for is either already present or being set in the same edit.
         # Guarding on waiting_for prevents an injected waiting_since from triggering
