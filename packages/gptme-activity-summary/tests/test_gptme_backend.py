@@ -8,6 +8,9 @@ Covers:
   must scan all JSON-parseable assistant candidates and prefer the one
   containing a recognised summary key, with the final answer winning over an
   earlier preamble.
+- JSON draft then later prose: if a JSON candidate already has a summary key
+  but a later non-JSON message is real prose (not gptme's no-tool-call
+  trailer), the prose wins. The gptme trailer itself must not displace JSON.
 - Logging paths that surface what was extracted (regression-guard for silent
   fallback failures where nothing was logged).
 """
@@ -197,6 +200,52 @@ def test_no_json_candidate_falls_back_to_non_json_content():
     out = _extract_assistant_text(ndjson)
     # Should return the plain-text answer, not the JSON preamble
     assert out == plain_answer
+
+
+def test_json_draft_then_later_prose_prefers_prose():
+    """JSON with a summary key is still a draft if later prose is the answer.
+
+    A reasoning model can emit a preliminary JSON object that includes
+    ``narrative``, then the actual final answer as plain text. Returning the
+    draft would discard the real answer. gptme trailers are excluded from
+    this path (see ``test_json_answer_then_gptme_trailer_keeps_json``).
+    """
+    draft = json.dumps({"narrative": "draft preamble", "accomplishments": ["x"]})
+    prose = "Bob shipped the think-tag parser and landed fourteen tests."
+    ndjson = "\n".join([_msg(draft), _msg(prose)])
+    out = _extract_assistant_text(ndjson)
+    assert out == prose
+    assert "draft preamble" not in out
+
+
+def test_json_answer_then_gptme_trailer_keeps_json():
+    """gptme's no-tool-call auto-reply must not displace a JSON summary.
+
+    Production path: first assistant message is the JSON answer, then gptme
+    injects "No tool call detected ... use the `complete` tool". Preferring
+    that later prose would return the trailer instead of the real answer and
+    re-break the daily-summary fallback.
+    """
+    answer = json.dumps({"narrative": "REAL summary", "accomplishments": ["a"]})
+    trailer = (
+        "<system>No tool call detected in last message. Did you mean to finish? "
+        "If so, make sure you are completely done and then use the `complete` "
+        "tool to end the session.</system>"
+    )
+    ndjson = "\n".join([_msg(answer), _msg(trailer)])
+    out = _extract_assistant_text(ndjson)
+    parsed = json.loads(out)
+    assert parsed.get("narrative") == "REAL summary"
+
+
+def test_json_draft_then_prose_then_trailer_prefers_prose():
+    """Prose between a JSON draft and the gptme trailer still wins."""
+    draft = json.dumps({"narrative": "draft"})
+    prose = "The real final answer in plain text."
+    trailer = "No tool call detected in last message."
+    ndjson = "\n".join([_msg(draft), _msg(prose), _msg(trailer)])
+    out = _extract_assistant_text(ndjson)
+    assert out == prose
 
 
 def test_multipart_content_list():

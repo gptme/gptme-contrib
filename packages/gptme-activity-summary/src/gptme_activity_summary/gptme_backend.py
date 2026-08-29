@@ -122,6 +122,21 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
 
 
 _THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
+# gptme's no-tool-call auto-reply. Shared prefix of both variants in
+# gptme.tools.complete ("No tool call detected" / "... in last message").
+_GPTME_TRAILER_MARKER = "No tool call detected"
+
+
+def _is_gptme_trailer(text: str) -> bool:
+    """True if this assistant message is gptme's no-tool-call auto-reply.
+
+    After a successful JSON answer gptme injects a later non-JSON assistant
+    message ("No tool call detected ... use the `complete` tool"). That
+    trailer is not a better summary; preferring it over a JSON object that
+    already carries ``narrative``/``month_narrative`` re-breaks the
+    daily-summary fallback.
+    """
+    return _GPTME_TRAILER_MARKER in text
 
 
 def _strip_think_tags(text: str) -> str:
@@ -183,9 +198,28 @@ def _extract_assistant_text(stdout: str) -> str:
         # JSON-shaped thinking preamble that may also contain a summary key.
         # Reasoning models (e.g. deepseek) emit a preamble first, then the
         # real answer; scanning forward would return the preamble instead.
+        json_set = set(json_candidates)
         for candidate in reversed(json_candidates):
             parsed = json.loads(candidate)
             if isinstance(parsed, dict) and any(parsed.get(k) for k in _SUMMARY_KEYS):
+                # A later non-JSON message that is *not* gptme's auto-reply
+                # trailer is the real answer (JSON draft, then prose). The
+                # trailer-only case must keep the JSON.
+                json_index = max(i for i, c in enumerate(contents) if c == candidate)
+                later_prose = [
+                    c
+                    for c in contents[json_index + 1 :]
+                    if c not in json_set and not _is_gptme_trailer(c)
+                ]
+                if later_prose:
+                    logger.debug(
+                        "gptme fallback: JSON with summary key followed by "
+                        "later non-trailer prose; preferring prose "
+                        "(%d chars): %.100r",
+                        len(later_prose[-1]),
+                        later_prose[-1],
+                    )
+                    return later_prose[-1]
                 logger.debug(
                     "gptme fallback: returning JSON with summary key (%d chars): %.100r",
                     len(candidate),
