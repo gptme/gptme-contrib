@@ -802,15 +802,14 @@ def test_last_set_wait_wins_in_waiting_for_sync(
     ), f"waiting_for must not keep the first --set wait {first_wait!r}; got {wf!r}."
 
 
-def test_trailing_set_wait_none_does_not_rewrite_waiting_for(
+def test_trailing_set_wait_none_releases_recurrence_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Last --set wait none must win: do not rewrite waiting_for to a cleared date.
+    """Last --set wait none must clear the generated recurrence blocker.
 
-    `--set wait NEW --set wait none` pops wait. A last-wins filter that skipped
-    None still rewrote waiting_for to NEW, so the task kept a recurrence-gate
-    string with no wait date. task_has_waiting_blocker then treats state=waiting
-    as permanently blocked (gptme/gptme-contrib#1539).
+    `--set wait NEW --set wait none` pops wait. Leaving the generated
+    waiting_for behind would make a state=waiting task permanently blocked
+    without a date (gptme/gptme-contrib#1539).
     """
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
@@ -852,8 +851,7 @@ def test_trailing_set_wait_none_does_not_rewrite_waiting_for(
     assert (
         "wait" not in post.metadata
     ), f"wait: must be cleared by trailing --set wait none, got {post.metadata.get('wait')!r}"
-    wf = post.metadata.get("waiting_for", "")
-    assert (
-        new_wait not in wf
-    ), f"waiting_for must not be rewritten to the cleared wait {new_wait!r}; got {wf!r}."
-    assert wf == old_wf, f"waiting_for must stay the pre-edit recurrence string; got {wf!r}."
+    assert post.metadata["state"] == "todo"
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert "wait_kind" not in post.metadata

@@ -2944,23 +2944,33 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # Last --set wait wins (same as the apply loop). next() without
         # reversed() would rewrite waiting_for from the first wait while
         # metadata['wait'] holds a later one, permanently trapping the task.
-        # Include None: `--set wait NEW --set wait none` pops wait, and a
-        # non-None filter would still rewrite waiting_for to NEW, leaving a
-        # recurrence-gate string with no wait date (P1 on #1539).
-        wait_set = next(
-            (value for op, field, value in reversed(changes) if op == "set" and field == "wait"),
-            None,
+        wait_change = next(
+            (
+                (True, value)
+                for op, field, value in reversed(changes)
+                if op == "set" and field == "wait"
+            ),
+            (False, None),
         )
-        if wait_set is not None:
+        wait_was_set, wait_set = wait_change
+        if wait_was_set:
             import re as _re
 
             _wf = post.metadata.get("waiting_for", "")
-            if (
+            recurrence_gate = (
                 post.metadata.get("wait_kind") == "machine"
-                and post.metadata.get("state") == "waiting"
                 and isinstance(_wf, str)
                 and _re.match(r"^next recurrence gate \(wait: ", _wf)
-            ):
+            )
+            if recurrence_gate and wait_set is None:
+                # Clearing a generated recurrence gate means it is no longer
+                # waiting. Remove the generated blocker metadata as one unit so
+                # the task cannot be left permanently blocked without a date.
+                post.metadata["state"] = "todo"
+                post.metadata.pop("waiting_for", None)
+                post.metadata.pop("waiting_since", None)
+                post.metadata.pop("wait_kind", None)
+            elif recurrence_gate and post.metadata.get("state") == "waiting":
                 post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_set})"
         # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
         # AND waiting_for is either already present or being set in the same edit.
