@@ -416,6 +416,46 @@ def test_gc_orphans_oserror_is_not_a_traceback(tmp_path):
     assert "Cannot access" in result.output
 
 
+def test_allow_recreate_false_peek_failure_does_not_wipe(tmp_path, monkeypatch):
+    """Read-only Indexer must not delete a live collection if peek also fails.
+
+    Regression: the ``not allow_recreate`` except branch set
+    ``need_recreate=True`` when the EF-less ``get_collection()`` raised
+    (transient sqlite lock, permission, missing-looking catalog). The later
+    ``if need_recreate`` block then deleted and recreated the collection,
+    wiping it from search/status.
+    """
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir, n_docs=3)
+
+    real_get = Client.get_collection
+
+    def boom(self, name, embedding_function=None, **kwargs):
+        raise ValueError("Embedding function conflict")
+
+    monkeypatch.setattr(Client, "get_collection", boom)
+
+    with pytest.raises(RuntimeError, match="recreation is disabled"):
+        Indexer(
+            persist_directory=persist_dir,
+            enable_persist=True,
+            embedding_function="default",
+            collection_name="default",
+            allow_recreate=False,
+        )
+
+    monkeypatch.setattr(Client, "get_collection", real_get)
+    verify = chromadb.PersistentClient(
+        path=str(persist_dir),
+        settings=Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False),
+    )
+    assert verify.get_collection("default").count() == 3, (
+        "allow_recreate=False peek failure wiped the collection — "
+        "read-only recreate-guard regression"
+    )
+
+
 def test_gc_orphans_preserves_live_uuid_dir_case_insensitive(tmp_path):
     """Uppercase UUID dir whose lowercase id is in the catalog is live, not orphan.
 

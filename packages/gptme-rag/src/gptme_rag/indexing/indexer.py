@@ -490,9 +490,17 @@ class Indexer:
                     )
                     try:
                         self.collection = self.client.get_collection(name=collection_name)
-                    except Exception:
-                        # Collection truly doesn't exist yet — create it normally.
-                        need_recreate = True
+                    except Exception as peek_err:
+                        # Missing *or* temporarily unreadable (sqlite lock
+                        # during a concurrent write). Creating would be a write;
+                        # the later need_recreate block deletes first, so a
+                        # transient peek failure would wipe a live collection
+                        # from search/status. Fail loud instead.
+                        raise RuntimeError(
+                            f"Collection {collection_name!r} could not be opened "
+                            "and recreation is disabled for this command; not "
+                            f"creating or deleting it. Error: {peek_err}"
+                        ) from peek_err
                     else:
                         # Null out the mismatched embedding function so search() does not
                         # use it and produce a cryptic ChromaDB InvalidDimensionException.
@@ -533,6 +541,12 @@ class Indexer:
                                 need_recreate = True
 
         if need_recreate:
+            if not allow_recreate:
+                raise RuntimeError(
+                    f"Collection {collection_name!r} could not be opened "
+                    "and recreation is disabled for this command; not "
+                    "creating or deleting it."
+                )
             with self._index_writer_lock():
                 # Delete if exists
                 try:
