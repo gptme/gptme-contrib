@@ -8,6 +8,7 @@ across 7 paths, of which only ~4k were ever collected). See gptme-contrib#1523.
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 
 import pytest
@@ -89,6 +90,7 @@ def test_index_cli_threads_pattern_to_collect_documents(tmp_path, monkeypatch):
     assert observed_patterns == ["*.md"]
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires the git executable")
 def test_get_valid_files_honors_pattern_in_git_repo(tmp_path):
     """Git-backed discovery filters files with the requested pattern."""
     (tmp_path / "docs").mkdir()
