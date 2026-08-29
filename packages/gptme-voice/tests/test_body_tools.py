@@ -209,6 +209,28 @@ def test_bridge_descent_on_ground_does_not_become_ascent(loop):
     assert adapter.calls[-1] == ("move", (0.0, 0.0, 0.0))
 
 
+def test_bridge_move_refuses_climb_without_altitude_telemetry(loop):
+    adapter = FakeAdapter()  # relative_altitude_m defaults to None
+    bridge = GptmeToolBridge(body_adapter=adapter)
+
+    result = _call(bridge, "body_move", {"up_m": 5.0})
+
+    assert "error" in result
+    assert "altitude unknown" in result["error"]
+    assert adapter.calls == []
+
+
+def test_bridge_move_allows_level_and_descent_without_altitude_telemetry(loop):
+    adapter = FakeAdapter()
+    bridge = GptmeToolBridge(body_adapter=adapter)
+
+    _call(bridge, "body_move", {"forward_m": 2.0, "up_m": 0.0})
+    assert adapter.calls[-1] == ("move", (2.0, 0.0, 0.0))
+
+    _call(bridge, "body_move", {"up_m": -3.0})
+    assert adapter.calls[-1] == ("move", (0.0, 0.0, -3.0))
+
+
 def test_bridge_capability_gate_blocks_uncapable_calls(loop):
     adapter = FakeAdapter({"move"})
     bridge = GptmeToolBridge(body_adapter=adapter)

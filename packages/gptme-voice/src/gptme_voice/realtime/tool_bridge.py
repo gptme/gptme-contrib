@@ -979,7 +979,7 @@ class GptmeToolBridge:
 
         try:
             await _call(adapter.ensure_connected())
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.error(
                 "Body adapter connect timed out after %.1fs",
                 self.body_call_timeout_s,
@@ -1022,7 +1022,18 @@ class GptmeToolBridge:
                 )
                 position = adapter.telemetry().get("position") or {}
                 current_altitude = position.get("relative_altitude_m")
-                if current_altitude is not None:
+                if current_altitude is None:
+                    # Without a relative-altitude fix the absolute ceiling
+                    # cannot be enforced. Climbing is fail-closed; descent
+                    # and level flight still go through (clamped up <= 0).
+                    if up > 0:
+                        return {
+                            "error": (
+                                "Cannot climb: current altitude unknown. "
+                                "Refuse to exceed the altitude ceiling without telemetry."
+                            )
+                        }
+                else:
                     # Floor at 0 m so "descend" on the ground is a no-op, not
                     # a forced climb to the old 1 m takeoff floor.
                     target_altitude = max(
@@ -1046,7 +1057,7 @@ class GptmeToolBridge:
                 return await _call(adapter.turn(yaw))
         except (KeyError, TypeError, ValueError) as e:
             return {"error": f"Invalid arguments for {name}: {e}"}
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.error(
                 "Body call %s timed out after %.1fs",
                 name,

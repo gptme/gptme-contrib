@@ -219,15 +219,18 @@ class MavsdkAdapter:
     async def _run_action(self, awaitable: Any) -> Any:
         try:
             return await asyncio.wait_for(awaitable, timeout=self.command_timeout_s)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             # The MAVSDK command is already on the vehicle. Dropping the
             # adapter here would cancel telemetry and invite a reconnect
             # while land/takeoff/goto is still executing.
+            # Python 3.10: wait_for raises asyncio.TimeoutError, distinct from
+            # builtin TimeoutError. Re-raise TimeoutError so callers and tests
+            # can catch one type on every supported Python.
             logger.warning(
                 "MAVSDK action timed out after %.1fs; leaving adapter connected",
                 self.command_timeout_s,
             )
-            raise
+            raise TimeoutError from None
 
     # -- BodyAdapter interface -------------------------------------------
 
