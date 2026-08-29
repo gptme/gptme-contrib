@@ -688,6 +688,7 @@ Guidelines:
 - external_signals: News, model releases, ecosystem developments, research findings, podcast mentions
 - Reference PRs and issues using full owner/repo#NNN format (e.g. gptme/gptme#1265) so they can be hyperlinked
 - DO NOT include a "metrics" field — metrics are tracked separately from real data
+- The FIRST non-empty assistant message must be the final JSON object with a top-level "narrative" field. Do not emit any thinking preamble or reasoning text before the JSON — output the JSON object as the very first assistant message.
 
 Journal Entries ({len(entries)} total):
 ---
