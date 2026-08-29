@@ -442,6 +442,45 @@ class ProjectMonitoringRun(BaseRunLoop):
             self.logger.warning(f"Error fetching inline review comments: {e}")
             return None
 
+    # Matches the machine-readable half of the reviewer's summary comment,
+    # `<!-- bob-ai-review {json} -->` (same regex as ai-review.py's _MARKER_RE).
+    _AI_REVIEW_STATE_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
+
+    def _marker_has_standing_findings(
+        self, marker_body: str | None, head_sha: str | None
+    ) -> bool:
+        """True if the AI-review summary marker records unaddressed findings
+        for the current head.
+
+        The summary comment is EDITED in place on re-review, so a fresh pass
+        with standing findings moves nothing in createdAt order — the PR's
+        newest-created comments can all be the agent's own replies while a
+        standing finding lives only in the marker JSON (gptme/gptme#3638: a
+        standing P1 at head sat undispatched for ~2.5 days behind three
+        self-authored comments). Non-empty findings[] whose marker sha matches
+        the current head = the reviewer's latest verdict on this exact code
+        still needs a response, regardless of who commented last.
+
+        A stale marker sha (agent pushed since the review) does not count:
+        the push is fresh activity in its own right and the review sweep will
+        re-review the new head.
+        """
+        if not marker_body:
+            return False
+        m = self._AI_REVIEW_STATE_RE.search(marker_body)
+        if not m:
+            return False
+        try:
+            state = json.loads(m.group(1))
+        except (ValueError, TypeError):
+            return False
+        if not state.get("findings"):
+            return False
+        marker_sha = state.get("sha") or ""
+        if head_sha and marker_sha and not head_sha.startswith(marker_sha):
+            return False
+        return True
+
     def _last_activity_is_self_response(
         self,
         repo: str,
@@ -449,19 +488,28 @@ class ProjectMonitoringRun(BaseRunLoop):
         login: str,
         body: str,
         created_at: str,
+        marker_body: str = "",
+        head_sha: str = "",
     ) -> bool:
         """Classify the last ISSUE comment: is the PR's latest activity the
         agent's own response (i.e. safe to skip dispatch for)?
 
         AI-reviewer output posted under the agent's own login is inbound work,
-        never a response. And when the last issue comment is a plain self
-        comment, a newer INLINE review comment can still carry inbound
-        reviewer findings — check it before concluding "own activity".
+        never a response. Three shapes (all observed live):
+        - the last comment IS reviewer output (marker in body)
+        - the summary marker was edited in place and carries standing
+          findings at head (gptme/gptme#3638)
+        - a newer INLINE review comment carries a finding, invisible to
+          `gh pr view --json comments` (gptme/gptme#3669)
         """
         if not self.author or login != self.author:
             return False
         if self._is_ai_reviewer_output(body):
             # Reviewer output is inbound work, not a response.
+            return False
+        if self._marker_has_standing_findings(marker_body, head_sha):
+            # Standing reviewer findings at head need a response no matter
+            # who commented last (in-place summary edit, gptme#3638).
             return False
         # Plain self issue comment. Inline review comments are invisible to
         # `gh pr view --json comments`; a newer one may be inbound work.
@@ -487,7 +535,8 @@ class ProjectMonitoringRun(BaseRunLoop):
             see _last_activity_is_self_response.
         """
         try:
-            # Get last issue comment on PR (author + body + createdAt)
+            # Last issue comment + head sha + latest AI-review summary marker
+            # comment, all from one call.
             result = subprocess.run(
                 [
                     "gh",
@@ -497,11 +546,15 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--repo",
                     repo,
                     "--json",
-                    "comments",
+                    "comments,headRefOid",
                     "--jq",
-                    ".comments | sort_by(.createdAt) | last | "
+                    '{"headSha": (.headRefOid // ""), '
+                    '"lastComment": (.comments | sort_by(.createdAt) | last | '
                     '{login: (.author.login // ""), body: (.body // ""), '
-                    'createdAt: (.createdAt // "")}',
+                    'createdAt: (.createdAt // "")}), '
+                    '"aiReviewMarker": (([.comments[] '
+                    '| select((.body // "") | contains("<!-- bob-ai-review "))'
+                    '] | last | .body) // "")}',
                 ],
                 capture_output=True,
                 text=True,
@@ -512,8 +565,11 @@ class ProjectMonitoringRun(BaseRunLoop):
                 # No comments or error - assume not by self
                 return False
 
-            last = json.loads(result.stdout)
-            if not isinstance(last, dict) or not last.get("login"):
+            info = json.loads(result.stdout)
+            if not isinstance(info, dict):
+                return False
+            last = info.get("lastComment") or {}
+            if not last.get("login"):
                 return False
             return self._last_activity_is_self_response(
                 repo,
@@ -521,6 +577,8 @@ class ProjectMonitoringRun(BaseRunLoop):
                 last["login"],
                 last.get("body") or "",
                 last.get("createdAt") or "",
+                marker_body=info.get("aiReviewMarker") or "",
+                head_sha=info.get("headSha") or "",
             )
 
         except Exception as e:
@@ -541,7 +599,9 @@ class ProjectMonitoringRun(BaseRunLoop):
             True if last comment is a mention of someone other than self
         """
         try:
-            # Get last comment body
+            # Get last comment body + createdAt (to detect a newer inline
+            # review comment below), plus head sha + AI-review summary marker
+            # (to detect standing findings behind an in-place comment edit).
             result = subprocess.run(
                 [
                     "gh",
@@ -551,9 +611,14 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--repo",
                     repo,
                     "--json",
-                    "comments",
+                    "comments,headRefOid",
                     "--jq",
-                    ".comments | sort_by(.createdAt) | last | .body",
+                    '{"headSha": (.headRefOid // ""), '
+                    '"lastComment": (.comments | sort_by(.createdAt) | last | '
+                    '{body: (.body // ""), createdAt: (.createdAt // "")}), '
+                    '"aiReviewMarker": (([.comments[] '
+                    '| select((.body // "") | contains("<!-- bob-ai-review "))'
+                    '] | last | .body) // "")}',
                 ],
                 capture_output=True,
                 text=True,
@@ -563,7 +628,22 @@ class ProjectMonitoringRun(BaseRunLoop):
             if result.returncode != 0 or not result.stdout.strip():
                 return False
 
-            body = result.stdout.strip()
+            info = json.loads(result.stdout)
+            if not isinstance(info, dict):
+                return False
+            last = info.get("lastComment") or {}
+            body = (last.get("body") or "").strip()
+            created_at = last.get("createdAt") or ""
+            if not body:
+                return False
+
+            # Standing AI-review findings at head are inbound work — never
+            # skip on a bot-invocation comment while they exist (same class
+            # as gptme/gptme#3638).
+            if self._marker_has_standing_findings(
+                info.get("aiReviewMarker") or "", info.get("headSha") or ""
+            ):
+                return False
 
             # Check if comment is short (likely just a bot invocation)
             # Long comments with mentions are probably real discussions
@@ -588,6 +668,17 @@ class ProjectMonitoringRun(BaseRunLoop):
             # If all mentions are to someone other than self, skip
             # (allows comments that mention self along with others)
             if self.author not in mentions:
+                # Same blindness as the self gate (gptme/gptme#3669): the
+                # bot-invocation issue comment may not be the PR's latest
+                # activity — a NEWER inline review comment can carry an
+                # inbound AI-review finding invisible to
+                # `gh pr view --json comments`. Don't skip in that case.
+                inline = self._latest_inline_review_comment(repo, pr_number)
+                if inline and (not created_at or inline["createdAt"] > created_at):
+                    if inline.get(
+                        "login"
+                    ) != self.author or self._is_ai_reviewer_output(inline.get("body")):
+                        return False
                 self.logger.info(
                     f"PR {repo}#{pr_number} last comment mentions others ({mentions}), not {self.author} - skipping"
                 )
@@ -674,12 +765,17 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--repo",
                     repo,
                     "--json",
-                    "updatedAt,comments",
+                    "updatedAt,comments,headRefOid",
                     "--jq",
-                    '{"updatedAt": .updatedAt, "lastComment": '
+                    '{"updatedAt": .updatedAt, '
+                    '"headSha": (.headRefOid // ""), '
+                    '"lastComment": '
                     "(.comments | sort_by(.createdAt) | last | "
                     '{login: (.author.login // ""), body: (.body // ""), '
-                    'createdAt: (.createdAt // "")})}',
+                    'createdAt: (.createdAt // "")}), '
+                    '"aiReviewMarker": (([.comments[] '
+                    '| select((.body // "") | contains("<!-- bob-ai-review "))'
+                    '] | last | .body) // "")}',
                 ],
                 capture_output=True,
                 text=True,
@@ -706,6 +802,8 @@ class ProjectMonitoringRun(BaseRunLoop):
                 last_comment.get("login") or "",
                 last_comment.get("body") or "",
                 last_comment.get("createdAt") or "",
+                marker_body=pr_info.get("aiReviewMarker") or "",
+                head_sha=pr_info.get("headSha") or "",
             )
 
             # Exclusive lock serializes concurrent sessions on this PR's state.
