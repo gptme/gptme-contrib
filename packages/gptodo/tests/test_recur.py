@@ -122,21 +122,29 @@ class TestRecurCliReset:
         assert future > date.today()
 
     def test_recurring_task_reset_emits_valid_frontmatter(self, workspace: Path):
-        """Regression test: recur reset emits state=waiting with required waiting-state fields."""
+        """Regression: recur reset emits state=waiting with validator-required fields.
+
+        The task frontmatter validator rejects state=waiting without waiting_for
+        and waiting_since. The waiting_for string must be a recurrence gate (not a
+        human blocker) so the auto-releaser still surfaces the task when wait: expires.
+        """
         write_task(workspace, "weekly-review", state="active", recur="7d")
         runner = CliRunner()
-        runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        result = runner.invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
 
         post = frontmatter.load(workspace / "tasks" / "weekly-review.md")
-        # state=waiting + wait= is valid frontmatter; state=todo + wait= is rejected by validator
         assert post.metadata["state"] == "waiting"
         assert "wait" in post.metadata
         assert post.metadata.get("wait_kind") == "machine"
-        # waiting_for must NOT be set: the wait: date is the machine gate.
-        # A waiting_for field would be treated as a human blocker and prevent auto-surfacing
-        # once the time gate expires (task_has_waiting_blocker requires waiting_for absent).
-        assert "waiting_for" not in post.metadata
-        assert "waiting_since" not in post.metadata
+        waiting_for = post.metadata.get("waiting_for")
+        assert isinstance(waiting_for, str)
+        assert "recurrence gate" in waiting_for
+        assert str(post.metadata["wait"]) in waiting_for
+        waiting_since = post.metadata.get("waiting_since")
+        assert isinstance(waiting_since, str)
+        # Must be a parseable ISO timestamp, not a date-only leftover.
+        assert "T" in waiting_since
 
     def test_unknown_recur_format_marks_done_normally(self, workspace: Path):
         write_task(workspace, "mystery-task", state="active", recur="every-week")

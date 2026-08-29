@@ -1,5 +1,6 @@
 """Tests for wait: and recur: scheduling fields."""
 
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from click.testing import CliRunner
 from gptodo.cli import cli
 from gptodo.utils import (
     advance_wait,
+    is_generated_recurrence_waiting_for,
     is_task_ready,
     is_valid_recur_value,
     load_tasks,
@@ -260,11 +262,12 @@ def test_edit_done_with_recur_resets_to_waiting(
 def test_recur_reset_strips_preexisting_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression: recurring reset must strip pre-existing waiting_for/waiting_since.
+    """Regression: recurring reset must replace a leftover human waiting_for.
 
-    A task that was previously in a human-waiting state (waiting_for: 'John to review')
-    with a recur field must have those fields removed on done→reset. Otherwise the
-    waiting_for guard in task_has_waiting_blocker keeps the task permanently blocked.
+    A prior human-wait (waiting_for: 'John to review') must not survive done→reset,
+    or it stays a permanent blocker after the time gate expires. Replace it with a
+    recurrence-gate string (and a fresh waiting_since) so the validator is happy
+    and the auto-releaser still treats the task as a time gate.
     """
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
@@ -293,10 +296,62 @@ def test_recur_reset_strips_preexisting_waiting_for(
     post = fm.load(tasks_dir / "human-wait-recur.md")
     assert post.metadata["state"] == "waiting", "recurring task must reset to waiting"
     assert post.metadata.get("wait_kind") == "machine"
-    assert (
-        "waiting_for" not in post.metadata
-    ), "recur reset must strip waiting_for so the task can auto-surface when the time gate expires"
-    assert "waiting_since" not in post.metadata, "recur reset must strip waiting_since"
+    waiting_for = post.metadata.get("waiting_for", "")
+    assert "John" not in waiting_for, "human leftover waiting_for must not survive reset"
+    assert "recurrence gate" in waiting_for
+    assert str(post.metadata["wait"]) in waiting_for
+    waiting_since = str(post.metadata.get("waiting_since", ""))
+    assert waiting_since, "state=waiting requires waiting_since"
+    assert not waiting_since.startswith("2026-08-01"), "waiting_since must be refreshed"
+
+
+def test_expired_recurrence_gate_surfaces_in_ready_and_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A generated recurrence description must not become a permanent blocker."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    expired = "2020-01-01T00:00:00+00:00"
+    write_task(
+        tasks_dir,
+        "weekly-review",
+        state="waiting",
+        created="2026-01-01",
+        recur="7d",
+        wait=expired,
+        wait_kind="machine",
+        waiting_for=f"'next recurrence gate (wait: {expired})'",
+        waiting_since="2026-01-01T00:00:00+00:00",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    ready = runner.invoke(cli, ["ready", "--json"])
+    assert ready.exit_code == 0, ready.output
+    assert {task["id"] for task in json.loads(ready.output)["ready_tasks"]} == {"weekly-review"}
+
+    next_result = runner.invoke(cli, ["next", "--json"])
+    assert next_result.exit_code == 0, next_result.output
+    assert json.loads(next_result.output)["next_task"]["id"] == "weekly-review"
+
+
+def test_stale_recurrence_description_stays_blocked(tmp_path: Path) -> None:
+    """Only the generated description for the current wait: is releasable."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "weekly-review",
+        state="waiting",
+        wait="2020-01-01",
+        wait_kind="machine",
+        waiting_for="'next recurrence gate (wait: 2019-01-01)'",
+        waiting_since="2026-01-01T00:00:00+00:00",
+    )
+
+    task = load_tasks(tasks_dir)[0]
+    assert task_has_waiting_blocker(task)
 
 
 def test_edit_done_with_subday_recur_stores_datetime(
@@ -546,3 +601,701 @@ def test_machine_expired_wait_with_human_waiting_for_stays_blocked(tmp_path: Pat
         "(waiting_for takes precedence over an expired time gate)"
     )
     assert not is_task_ready(task, {}), "machine task with human waiting_for must not be ready"
+
+
+def test_recur_reset_clears_stale_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recurring reset must clear a stale probe field.
+
+    A recurring task may previously have carried a machine probe (e.g. a CI check).
+    On the done→waiting reset that probe is no longer relevant and must be removed.
+    If kept, task_has_waiting_blocker evaluates the probe and the task never
+    auto-surfaces after the new recurrence gate expires.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    today = date.today().isoformat()
+    (tasks_dir / "probe-recur.md").write_text(
+        f"---\n"
+        f"state: active\n"
+        f"created: 2026-01-01\n"
+        f"wait: {today}\n"
+        f"recur: 7d\n"
+        f"probe: 'gh run view 123 --repo owner/repo --json conclusion -q .conclusion'\n"
+        f"wait_kind: machine\n"
+        f"---\n"
+        f"# probe-recur\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "probe-recur", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "probe-recur.md")
+    assert post.metadata["state"] == "waiting", "recurring task must reset to waiting"
+    assert "probe" not in post.metadata, (
+        "stale probe must be cleared on recurrence reset; "
+        "a leftover probe prevents task_has_waiting_blocker from releasing the task"
+    )
+
+
+def test_set_wait_on_recurrence_gate_updates_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--set wait on a recurrence-gate waiting task must keep waiting_for in sync.
+
+    After a recurring reset the task carries waiting_for="next recurrence gate (wait: <old>)".
+    If the user postpones via --set wait <new>, waiting_for must be updated to the new date.
+    Without this, task_has_waiting_blocker fails to match the recurrence-gate pattern on
+    the new wait value and permanently traps the task even after the new gate expires.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "wait", new_wait])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert str(post.metadata["wait"]).startswith(
+        new_wait
+    ), f"wait: must be updated to {new_wait}, got {post.metadata['wait']}"
+    wf = post.metadata.get("waiting_for", "")
+    assert new_wait in wf, (
+        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
+        "A stale waiting_for permanently traps the task after the new gate expires."
+    )
+
+
+def test_set_wait_and_state_waiting_together_updates_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Combined --set wait + --set state waiting must still sync waiting_for.
+
+    The per-field wait-sync used to inspect metadata['state'] while applying
+    wait, so `--set wait NEW --set state waiting` on a not-yet-waiting
+    recurrence-gate task left waiting_for pointing at the old date. After the
+    new wait expires, task_has_waiting_blocker treats that stale string as a
+    human blocker and the task never auto-surfaces (gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: todo\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            new_wait,
+            "--set",
+            "state",
+            "waiting",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "waiting"
+    assert str(post.metadata["wait"]).startswith(
+        new_wait
+    ), f"wait: must be updated to {new_wait}, got {post.metadata['wait']}"
+    wf = post.metadata.get("waiting_for", "")
+    assert new_wait in wf, (
+        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
+        "A stale waiting_for permanently traps the task after the new gate expires."
+    )
+
+
+def test_last_set_wait_wins_in_waiting_for_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multiple --set wait in one edit must sync waiting_for to the LAST value.
+
+    The apply loop overwrites wait in order, so the last --set wait is the
+    effective date. The post-loop sync used to take the first match from
+    `changes`, leaving waiting_for pointing at an earlier date while wait
+    holds the later one. After that later date expires,
+    task_has_waiting_blocker treats the stale string as a human blocker
+    (gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    first_wait = "2030-06-15"
+    last_wait = "2030-07-01"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            first_wait,
+            "--set",
+            "wait",
+            last_wait,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert str(post.metadata["wait"]).startswith(
+        last_wait
+    ), f"wait: must be the last --set wait {last_wait}, got {post.metadata['wait']}"
+    wf = post.metadata.get("waiting_for", "")
+    assert (
+        last_wait in wf
+    ), f"waiting_for must reference the last wait date {last_wait!r}; got {wf!r}."
+    assert (
+        first_wait not in wf
+    ), f"waiting_for must not keep the first --set wait {first_wait!r}; got {wf!r}."
+
+
+def test_trailing_set_wait_none_releases_recurrence_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Last --set wait none must clear the generated recurrence blocker.
+
+    `--set wait NEW --set wait none` pops wait. Leaving the generated
+    waiting_for behind would make a state=waiting task permanently blocked
+    without a date (gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            new_wait,
+            "--set",
+            "wait",
+            "none",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert (
+        "wait" not in post.metadata
+    ), f"wait: must be cleared by trailing --set wait none, got {post.metadata.get('wait')!r}"
+    assert post.metadata["state"] == "todo"
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert "wait_kind" not in post.metadata
+
+
+def test_set_wait_none_preserves_explicit_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set wait none --set state done` must not overwrite the explicit state.
+
+    The wait-none recurrence-gate release used to force state=todo after all
+    --set ops, so an explicit `--set state done` (or cancelled) was lost
+    (gptme/gptme-contrib#1539 P1 on e71b18de).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            "none",
+            "--set",
+            "state",
+            "done",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "done", (
+        f"explicit --set state done must survive wait-none release, "
+        f"got {post.metadata.get('state')!r}"
+    )
+    assert "wait" not in post.metadata
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert "wait_kind" not in post.metadata
+
+
+@pytest.mark.parametrize("start_state", ["done", "cancelled", "active"])
+def test_set_wait_none_does_not_reopen_nonwaiting_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start_state: str
+) -> None:
+    """`--set wait none` must not force todo on a non-waiting task.
+
+    The wait-none release used to set state=todo whenever no explicit
+    `--set state` was in the same edit, even if the task was already
+    done/cancelled/active and merely carried leftover recurrence-gate
+    metadata (gptme/gptme-contrib#1539 P1 on ecb15242).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: {start_state}\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["edit", "recur-gate-task", "--set", "wait", "none"],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == start_state, (
+        f"--set wait none must not reopen/demote {start_state} to todo, "
+        f"got {post.metadata.get('state')!r}"
+    )
+    assert "wait" not in post.metadata
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert "wait_kind" not in post.metadata
+
+
+def test_set_wait_on_nonwaiting_recurrence_gate_drops_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set wait NEW --set state todo` must drop the generated waiting_for.
+
+    If wait-sync only rewrites waiting_for when state stays waiting, a leftover
+    recurrence-gate string on a todo task is treated as a human blocker and
+    traps the task (same family as gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            new_wait,
+            "--set",
+            "state",
+            "todo",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "todo"
+    assert str(post.metadata["wait"]).startswith(new_wait)
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert "wait_kind" not in post.metadata
+
+
+def test_set_state_todo_on_recurrence_gate_drops_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set state todo` must drop generated recurrence waiting_for.
+
+    Wait-sync used to run only when wait was set, so a state-only change
+    left waiting_for on the todo task. task_has_waiting_blocker then
+    treated it as a human blocker (P1 on gptme/gptme-contrib#1539 / 69034e96).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2030-06-15"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    write_task(
+        tasks_dir,
+        "recur-gate-task",
+        state="waiting",
+        wait_kind="machine",
+        wait=old_wait,
+        waiting_for=f"'{old_wf}'",
+        waiting_since="2026-08-01T00:00:00+00:00",
+        created="2026-01-01",
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "state", "todo"])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "todo"
+    assert str(post.metadata["wait"]).startswith(old_wait)
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert "wait_kind" not in post.metadata
+
+    task = load_tasks(tasks_dir)[0]
+    assert not task_has_waiting_blocker(
+        task
+    ), "leftover generated waiting_for on todo must not be a human blocker"
+
+
+def test_set_state_todo_preserves_human_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """State-only todo must not strip a human waiting_for suffix."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "human-gate-task",
+        state="waiting",
+        wait_kind="machine",
+        wait="2030-06-15",
+        waiting_for="'next recurrence gate (wait: 2030-06-15) - confirm with Bob'",
+        waiting_since="2026-08-01T00:00:00+00:00",
+        created="2026-01-01",
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "human-gate-task", "--set", "state", "todo"])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "human-gate-task.md")
+    assert post.metadata["state"] == "todo"
+    assert "confirm with Bob" in str(post.metadata.get("waiting_for", ""))
+
+
+def test_generated_recurrence_waiting_for_is_exact_string() -> None:
+    assert is_generated_recurrence_waiting_for("next recurrence gate (wait: 2025-01-01)")
+    assert is_generated_recurrence_waiting_for(
+        "next recurrence gate (wait: 2025-01-01T00:00:00+00:00)"
+    )
+    assert not is_generated_recurrence_waiting_for(
+        "next recurrence gate (wait: 2025-01-01) - confirm with Bob"
+    )
+    # Note *inside* the parentheses is also human — `.+` used to match it
+    # (P1 on gptme/gptme-contrib#1539 / e52af179).
+    assert not is_generated_recurrence_waiting_for(
+        "next recurrence gate (wait: 2025-01-01 - confirm with Bob)"
+    )
+    assert not is_generated_recurrence_waiting_for("John to review the PR")
+    assert not is_generated_recurrence_waiting_for("")
+    assert not is_generated_recurrence_waiting_for(None)
+
+
+def test_set_wait_none_with_explicit_waiting_keeps_valid_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set wait none --set state waiting` must not drop waiting_for.
+
+    Popping waiting_for/waiting_since while leaving state=waiting produces
+    invalid frontmatter (validator requires both) and was the P1 on
+    gptme/gptme-contrib#1539 / b859fbf4.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            "none",
+            "--set",
+            "state",
+            "waiting",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "waiting"
+    assert "wait" not in post.metadata
+    assert "wait_kind" not in post.metadata
+    assert post.metadata.get("waiting_for"), (
+        "state=waiting requires waiting_for; wait-none must not pop it when "
+        "the edit explicitly stays waiting"
+    )
+    assert post.metadata.get("waiting_since"), (
+        "state=waiting requires waiting_since; wait-none must not pop it when "
+        "the edit explicitly stays waiting"
+    )
+
+
+def test_set_wait_does_not_rewrite_suffixed_recurrence_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A human suffix on a recurrence-gate string must not be overwritten.
+
+    Prefix-only matching treated 'next recurrence gate (wait: DATE) - note'
+    as a generated gate and replaced it on --set wait, destroying the note
+    (gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    human_wf = f"next recurrence gate (wait: {old_wait}) - confirm with Bob"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{human_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "wait", new_wait])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert str(post.metadata["wait"]).startswith(new_wait)
+    assert (
+        post.metadata.get("waiting_for") == human_wf
+    ), f"human-suffixed waiting_for must be preserved; got {post.metadata.get('waiting_for')!r}"
+
+
+def test_set_wait_does_not_rewrite_inner_paren_recurrence_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A human note *inside* the wait parentheses must not be overwritten.
+
+    `.+` in is_generated_recurrence_waiting_for matched
+    'next recurrence gate (wait: DATE - note)' as generated and --set wait
+    replaced it, destroying the note (P1 on gptme/gptme-contrib#1539 / e52af179).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    human_wf = f"next recurrence gate (wait: {old_wait} - confirm with Bob)"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{human_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "wait", new_wait])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert str(post.metadata["wait"]).startswith(new_wait)
+    assert post.metadata.get("waiting_for") == human_wf, (
+        "inner-paren human waiting_for must be preserved; "
+        f"got {post.metadata.get('waiting_for')!r}"
+    )
+
+
+def test_set_wait_after_wait_none_staying_waiting_restores_recurrence_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set wait none --set state waiting` then `--set wait NEW` must stay releasable.
+
+    The first edit pops wait_kind (state=waiting still requires waiting_for) and
+    leaves the generated recurrence string. A later `--set wait NEW` used to skip
+    wait-sync because wait_kind was gone, so waiting_for stayed on the old date
+    and the task never auto-surfaced after the new date expired
+    (P1 on gptme/gptme-contrib#1539 / 7a046593).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    first = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            "none",
+            "--set",
+            "state",
+            "waiting",
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "wait", new_wait])
+    assert second.exit_code == 0, second.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "waiting"
+    assert str(post.metadata["wait"]).startswith(new_wait)
+    assert post.metadata.get("wait_kind") == "machine", (
+        "later --set wait must restore wait_kind=machine so the new date remains "
+        f"a releasable recurrence gate; got {post.metadata.get('wait_kind')!r}"
+    )
+    wf = post.metadata.get("waiting_for", "")
+    assert new_wait in str(wf), (
+        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
+        "A leftover generated string for the old date permanently traps the task."
+    )
+    assert old_wait not in str(
+        wf
+    ), f"waiting_for must not keep the old wait date {old_wait!r}; got {wf!r}."
