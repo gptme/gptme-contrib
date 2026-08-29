@@ -29,6 +29,7 @@ members = [
     "gptme-attention-tracker",
     "gptme-backoff",
     "gptme-bob-status",
+    "gptme-browser-semantic",
     "gptme-cc-memory",
     "gptme-claude-code",
     "gptme-codegraph",
@@ -1780,6 +1781,20 @@ requires-dist = [
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
 ]
+provides-extras = ["test"]
+
+[[package]]
+name = "gptme-browser-semantic"
+version = "0.1.0"
+source = { editable = "packages/gptme-browser-semantic" }
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" }]
 provides-extras = ["test"]
 
 [[package]]

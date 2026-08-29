@@ -13,6 +13,7 @@ Python packages for gptme agents.
 | **gptmail** | Email/message handling | `uv pip install -e packages/gptmail` |
 | **gptodo** | Task management and work queues | `uv pip install -e packages/gptodo` |
 | **gptme-activity-summary** | Activity summarization (journals, GitHub, sessions, tweets, email) | `uv pip install -e packages/gptme-activity-summary` |
+| **gptme-browser-semantic** | Semantic observe/act/extract over gptme's ARIA snapshot (Path A; no stagehand) | `uv pip install -e packages/gptme-browser-semantic` |
 | **gptme-sessions** | Session tracking, analytics, and trajectory extraction | `uv pip install -e packages/gptme-sessions` |
 | **gptme-voice** | Voice interface using OpenAI Realtime API | `uv pip install -e packages/gptme-voice` |
 | **gptme-whatsapp** | WhatsApp integration for agents | `uv pip install -e packages/gptme-whatsapp` |
