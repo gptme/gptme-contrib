@@ -787,8 +787,10 @@ class VoiceServer:
         # One-shot body-tool grants minted by the signed /incoming webhook.
         # The /twilio WebSocket is unauthenticated; customParameters.from_number
         # is attacker-controlled, so body tools must not key off it. Token ->
-        # (from_number, expires_monotonic).
-        self._twilio_body_grants: dict[str, tuple[str, float]] = {}
+        # (from_number, call_sid, expires_monotonic). CallSid is bound from the
+        # signed webhook and is not copied into TwiML, so a stolen grant cannot
+        # be replayed onto a different call.
+        self._twilio_body_grants: dict[str, tuple[str, str, float]] = {}
         self._twilio_body_grant_ttl_s = 120.0
 
         routes = [
@@ -828,24 +830,25 @@ class VoiceServer:
         now = time.monotonic()
         expired = [
             token
-            for token, (_, expires) in self._twilio_body_grants.items()
+            for token, (*_, expires) in self._twilio_body_grants.items()
             if now > expires
         ]
         for token in expired:
             self._twilio_body_grants.pop(token, None)
 
-    def _mint_twilio_body_grant(self, from_number: str) -> str:
+    def _mint_twilio_body_grant(self, from_number: str, call_sid: str = "") -> str:
         """Mint a one-shot token proving /incoming authorized this caller."""
         self._expire_twilio_body_grants()
         token = secrets.token_urlsafe(32)
         self._twilio_body_grants[token] = (
             from_number,
+            call_sid,
             time.monotonic() + self._twilio_body_grant_ttl_s,
         )
         return token
 
-    def _consume_twilio_body_grant(self, token: str | None) -> str | None:
-        """Return the from_number bound to a live grant, or None.
+    def _consume_twilio_body_grant(self, token: str | None) -> tuple[str, str] | None:
+        """Return ``(from_number, call_sid)`` bound to a live grant, or None.
 
         Single-use: a replay or a raw WebSocket that invents customParameters
         cannot satisfy this. Expired and unknown tokens fail closed.
@@ -856,10 +859,10 @@ class VoiceServer:
         entry = self._twilio_body_grants.pop(token, None)
         if entry is None:
             return None
-        from_number, expires = entry
+        from_number, call_sid, expires = entry
         if time.monotonic() > expires:
             return None
-        return from_number
+        return from_number, call_sid
 
     def _body_adapter_for_websocket(
         self, websocket, *, transport: str, caller_id: str | None = None
@@ -1691,9 +1694,16 @@ class VoiceServer:
         """
         form_params = dict(await request.form())
         from_number = form_params.get("From", "")
+        incoming_call_sid = form_params.get("CallSid", "") or form_params.get(
+            "call_sid", ""
+        )
 
         # Validate Twilio webhook signature when auth token is configured.
         # Skip in dev environments where TWILIO_AUTH_TOKEN is absent.
+        # Body-tool grants are fail-closed: they are only minted when this
+        # request was signature-validated. An unsigned /incoming must never
+        # mint a grant from a spoofable From field.
+        signature_validated = False
         auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
         if auth_token:
             from twilio.request_validator import RequestValidator
@@ -1706,6 +1716,7 @@ class VoiceServer:
             ):
                 logger.warning("Rejected request with invalid Twilio signature")
                 return PlainTextResponse("Forbidden", status_code=403)
+            signature_validated = True
 
         # Allowlist: only accept calls from known numbers.
         # Set TWILIO_CALLER_ALLOWLIST to a comma-separated list of E.164 numbers.
@@ -1747,9 +1758,13 @@ class VoiceServer:
         if from_number:
             custom_params["from_number"] = from_number
             # Body tools on /twilio must not trust client-supplied from_number.
-            # Mint a one-shot grant here (signed webhook) and require it on start.
-            if self._twilio_body_caller_allowed(from_number):
-                custom_params["body_grant"] = self._mint_twilio_body_grant(from_number)
+            # Mint a one-shot grant here only after signature validation, and
+            # bind it to CallSid (kept off TwiML so a stolen grant cannot be
+            # replayed onto a different start event).
+            if signature_validated and self._twilio_body_caller_allowed(from_number):
+                custom_params["body_grant"] = self._mint_twilio_body_grant(
+                    from_number, incoming_call_sid
+                )
         twiml = build_connect_stream_twiml(ws_url, custom_params or None)
         return PlainTextResponse(twiml, media_type="text/xml")
 
@@ -1848,9 +1863,26 @@ class VoiceServer:
 
                     # Body-tool authorization is the signed-webhook grant, not
                     # customParameters.from_number (attacker-controlled on /twilio).
-                    granted_from = self._consume_twilio_body_grant(
+                    grant = self._consume_twilio_body_grant(
                         custom_params.get("body_grant") or None
                     )
+                    granted_from: str | None = None
+                    if grant is not None:
+                        grant_from, grant_sid = grant
+                        if grant_from != from_number:
+                            logger.warning(
+                                "Twilio body grant From mismatch: grant=%s start=%s",
+                                grant_from,
+                                from_number,
+                            )
+                        elif grant_sid and grant_sid != call_sid:
+                            logger.warning(
+                                "Twilio body grant CallSid mismatch: grant=%s start=%s",
+                                grant_sid,
+                                call_sid,
+                            )
+                        else:
+                            granted_from = grant_from
                     body_adapter = self._body_adapter_for_websocket(
                         websocket,
                         transport="twilio",

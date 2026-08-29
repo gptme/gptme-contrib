@@ -998,6 +998,13 @@ class GptmeToolBridge:
             if name == "body_return_home" and "move" in caps:
                 return await _call(adapter.return_home())
             if name == "body_takeoff" and "altitude" in caps:
+                if adapter.telemetry().get("in_air") is True:
+                    return {
+                        "error": (
+                            "Already in the air; refuse takeoff. "
+                            "Use body_move, body_goto, or body_land."
+                        )
+                    }
                 altitude = float(arguments.get("altitude_m", 2.5))
                 altitude = max(1.0, min(self.body_max_altitude_m, altitude))
                 return await _call(adapter.takeoff(altitude))

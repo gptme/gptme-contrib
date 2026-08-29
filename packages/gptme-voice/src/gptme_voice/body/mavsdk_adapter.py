@@ -220,7 +220,13 @@ class MavsdkAdapter:
         try:
             return await asyncio.wait_for(awaitable, timeout=self.command_timeout_s)
         except TimeoutError:
-            self._mark_disconnected()
+            # The MAVSDK command is already on the vehicle. Dropping the
+            # adapter here would cancel telemetry and invite a reconnect
+            # while land/takeoff/goto is still executing.
+            logger.warning(
+                "MAVSDK action timed out after %.1fs; leaving adapter connected",
+                self.command_timeout_s,
+            )
             raise
 
     # -- BodyAdapter interface -------------------------------------------
@@ -240,6 +246,13 @@ class MavsdkAdapter:
 
     async def takeoff(self, altitude_m: float) -> dict[str, Any]:
         async with self._command_lock:
+            if self._in_air is True:
+                return {
+                    "error": (
+                        "Already in the air; refuse takeoff. "
+                        "Use body_move, body_goto, or body_land."
+                    )
+                }
             system = self._system
             await self._run_action(system.action.set_takeoff_altitude(altitude_m))
             await self._run_action(system.action.arm())

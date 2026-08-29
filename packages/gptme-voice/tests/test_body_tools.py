@@ -24,6 +24,7 @@ class FakeAdapter:
         capabilities: set[str] | None = None,
         *,
         relative_altitude_m: float | None = None,
+        in_air: bool = False,
     ):
         self.capabilities = (
             capabilities if capabilities is not None else {"move", "rotate", "altitude"}
@@ -31,6 +32,7 @@ class FakeAdapter:
         self.calls: list[tuple[str, tuple]] = []
         self.connect_calls = 0
         self.relative_altitude_m = relative_altitude_m
+        self.in_air = in_air
 
     async def ensure_connected(self) -> None:
         self.connect_calls += 1
@@ -44,7 +46,7 @@ class FakeAdapter:
             if self.relative_altitude_m is not None
             else None
         )
-        return {"body": "fake", "in_air": False, "position": position}
+        return {"body": "fake", "in_air": self.in_air, "position": position}
 
     async def takeoff(self, altitude_m: float) -> dict:
         self.calls.append(("takeoff", (altitude_m,)))
@@ -143,6 +145,14 @@ def test_bridge_status_and_stop(loop):
     assert stop["status"] == "holding"
     assert ("stop", ()) in adapter.calls
     assert adapter.connect_calls == 2  # ensure_connected before every call
+
+
+def test_bridge_refuses_takeoff_when_already_in_air(loop):
+    adapter = FakeAdapter(in_air=True)
+    bridge = GptmeToolBridge(body_adapter=adapter)
+    result = _call(bridge, "body_takeoff", {"altitude_m": 2.5})
+    assert "in the air" in result["error"]
+    assert adapter.calls == []
 
 
 def test_bridge_takeoff_clamps_altitude(loop, monkeypatch):
@@ -390,6 +400,26 @@ def test_mavsdk_move_and_turn_require_heading(loop):
     assert "heading fix" in goto["error"]
 
 
+def test_mavsdk_takeoff_refuses_when_in_air(loop):
+    from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
+
+    class Action:
+        async def set_takeoff_altitude(self, _altitude: float) -> None:
+            raise AssertionError("takeoff must not run while in air")
+
+        async def arm(self) -> None:
+            raise AssertionError("takeoff must not run while in air")
+
+        async def takeoff(self) -> None:
+            raise AssertionError("takeoff must not run while in air")
+
+    adapter = MavsdkAdapter("unused")
+    adapter._system = type("System", (), {"action": Action()})()
+    adapter._in_air = True
+    result = loop.run_until_complete(adapter.takeoff(2.5))
+    assert "in the air" in result["error"]
+
+
 def test_mavsdk_action_timeout(loop):
     from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
 
@@ -404,7 +434,8 @@ def test_mavsdk_action_timeout(loop):
     with pytest.raises(TimeoutError):
         loop.run_until_complete(adapter.stop())
 
-    assert adapter._connected is False
+    # Timeout must not drop the link: the vehicle may still be executing.
+    assert adapter._connected is True
 
 
 def test_mavsdk_close_releases_system(loop):
