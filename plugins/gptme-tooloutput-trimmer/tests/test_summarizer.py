@@ -391,3 +391,222 @@ def test_generation_pre_hook_noop_when_bypass_env_set(
 
     # messages must be unchanged — no LLM call, no summarization
     assert messages == original
+
+
+def test_call_summarizer_memoizes_unchanged_source() -> None:
+    """An unchanged (context, model) source must invoke the LLM only once.
+
+    Phase 1.2 regression: preparation runs twice over the same stored log must
+    reuse the cached summary instead of re-calling the summarizer LLM. Without
+    memoization the two calls below would invoke `_chat_complete` twice.
+    """
+    calls: list[str] = []
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append(model)
+        return "- Executed command: found result\n- Task-level progress: done", None
+
+    with patch("tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE", {}):
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+            return_value=SimpleNamespace(full="openai/gpt-4o"),
+        ):
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._chat_complete",
+                side_effect=fake_chat_complete,
+            ):
+                first = _call_summarizer("unchanged-context-source")
+                second = _call_summarizer("unchanged-context-source")
+
+    assert first == second
+    assert first == "- Executed command: found result\n- Task-level progress: done"
+    # The summarizer LLM must run exactly once for an unchanged source.
+    assert calls == ["openai/gpt-4o"]
+
+
+def test_call_summarizer_memoize_is_model_scoped() -> None:
+    """The memo key must include model identity: a different model re-calls."""
+    calls: list[str] = []
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append(model)
+        return f"summary from {model}", None
+
+    def run_with_model(model: str) -> str | None:
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+            return_value=SimpleNamespace(full=model),
+        ):
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._chat_complete",
+                side_effect=fake_chat_complete,
+            ):
+                return _call_summarizer("same-source")
+
+    with patch(
+        "tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE",
+        {},
+    ):
+        a = run_with_model("openai/gpt-4o")
+        b = run_with_model("openai/gpt-4o")
+        c = run_with_model("anthropic/claude-4")
+
+    assert a == "summary from openai/gpt-4o"
+    assert b == "summary from openai/gpt-4o"
+    assert c == "summary from anthropic/claude-4"
+    # Same model twice (1 call), different model once (1 call) = 2 total.
+    assert calls == ["openai/gpt-4o", "anthropic/claude-4"]
+
+
+def test_call_summarizer_memoize_is_source_scoped() -> None:
+    """The memo key must include source content: a changed source re-calls."""
+    calls: list[str] = []
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append("call")
+        return "- summary", None
+
+    with patch(
+        "tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE",
+        {},
+    ):
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+            return_value=SimpleNamespace(full="openai/gpt-4o"),
+        ):
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._chat_complete",
+                side_effect=fake_chat_complete,
+            ):
+                _call_summarizer("source-one")
+                _call_summarizer("source-one")  # cached
+                _call_summarizer("source-two")  # different source -> re-call
+
+    assert calls == ["call", "call"]
+
+
+def test_call_summarizer_whitespace_response_not_cached() -> None:
+    """A whitespace-only LLM response must not be cached.
+
+    A transient whitespace response (e.g. '\\n') must not permanently poison the
+    cache: the next call for the same source must still invoke the LLM and can
+    recover with a real summary.
+    """
+    calls: list[str] = []
+    responses = ["\n", "- Real summary: result found"]
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append("call")
+        return responses.pop(0), None
+
+    with patch(
+        "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+        return_value=SimpleNamespace(full="openai/gpt-4o"),
+    ):
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer._chat_complete",
+            side_effect=fake_chat_complete,
+        ):
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE",
+                {},
+            ):
+                first = _call_summarizer("source")  # whitespace → None, not cached
+                second = _call_summarizer("source")  # re-calls LLM → real summary
+
+    assert first is None  # whitespace response must not be returned
+    assert second == "- Real summary: result found"
+    assert len(calls) == 2  # LLM invoked twice — cache was not poisoned
+
+
+def test_cache_summary_evicts_when_full() -> None:
+    """When the cache is at capacity, inserting a new key evicts one entry.
+
+    Exercises the eviction branch in _cache_summary (line 105) which is
+    unreachable under normal test conditions because _SUMMARY_CACHE_MAX is 64.
+    """
+    from tooloutput_trimmer.hooks.summarizer import _cache_summary, _cached_summary
+
+    with patch("tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE", {}):
+        with patch("tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE_MAX", 2):
+            _cache_summary("ctx-a", "model", "summary-a")
+            _cache_summary("ctx-b", "model", "summary-b")
+            # Cache is now full; inserting a third key must evict one entry.
+            _cache_summary("ctx-c", "model", "summary-c")
+
+            # The new entry must be present.
+            assert _cached_summary("ctx-c", "model") == "summary-c"
+            # Total entries must not exceed the (patched) max.
+            from tooloutput_trimmer.hooks.summarizer import _SUMMARY_CACHE
+
+            assert len(_SUMMARY_CACHE) <= 2
+
+
+def test_apply_summarization_cache_misses_when_tail_changes() -> None:
+    """Cache must miss when full content changes beyond the truncated preview.
+
+    P1 regression: if a tool output grows past the 1000-char preview boundary,
+    the truncated context string is identical, so a naive hash of context alone
+    returns a stale cached summary. The cache key must be derived from the full
+    message content so any change in the tail triggers a re-call.
+    """
+    calls: list[str] = []
+
+    def fake_chat_complete(
+        messages: list[object], model: str, tools: object = None, **kwargs: object
+    ) -> tuple[str, object]:
+        calls.append("call")
+        return f"- summary #{len(calls)}", None
+
+    # Build tool outputs that share the first 1000 chars but differ in the tail.
+    # _build_summarization_context only uses output_preview[:1000], so the naive
+    # cache key would treat them as identical. We want to prove the full-content
+    # key distinguishes them correctly.
+    # Requires content > max_output_chars (200) so the message is evictable, AND
+    # > 1000 chars so the tail-difference falls outside the truncation boundary.
+    shared_body = "\n".join(f"line-{i:04d}" for i in range(150))  # ~1500 chars
+    content_a = f"Ran command: `ls`\n{shared_body}\nTAIL=AAA"
+    content_b = f"Ran command: `ls`\n{shared_body}\nTAIL=BBB"
+
+    # _default_trimmer_config uses max_output_chars=200 — content exceeds this
+    tc = _default_trimmer_config()
+
+    def _run(tool_content: str) -> None:
+        messages = [
+            _msg("user", "u"),
+            _msg("assistant", "a0"),
+            _msg("system", tool_content),
+            _msg("user", "u1"),
+            _msg("assistant", "a1"),
+        ]
+        apply_summarization(messages, trimmer_config=tc)
+
+    with patch("tooloutput_trimmer.hooks.summarizer._SUMMARY_CACHE", {}):
+        with patch(
+            "tooloutput_trimmer.hooks.summarizer.get_default_model_summary",
+            return_value=SimpleNamespace(full="openai/gpt-4o"),
+        ):
+            with patch(
+                "tooloutput_trimmer.hooks.summarizer._chat_complete",
+                side_effect=fake_chat_complete,
+            ):
+                with patch(
+                    "tooloutput_trimmer.hooks.summarizer.get_config",
+                    return_value=_make_config(summarize_enabled=True),
+                ):
+                    _run(content_a)  # first call — populates cache
+                    _run(content_a)  # same full content — cache hit, no LLM call
+                    _run(
+                        content_b
+                    )  # tail differs — full-content key differs → cache miss
+
+    # LLM should have been called twice: once for content_a, once for content_b
+    assert len(calls) == 2, f"expected 2 LLM calls, got {len(calls)}"
