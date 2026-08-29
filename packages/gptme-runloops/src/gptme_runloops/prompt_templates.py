@@ -1049,6 +1049,21 @@ This PR ({repo}#{number}) hit the Greptile attempt cap: the escalation ledger re
 the maximum number of fix-session dispatches without the score clearing the floor. This session
 must adjudicate the remaining findings — **do NOT trigger another Greptile review**.
 
+**Freshness gate — run FIRST**: adjudication is only valid for a head the newest
+review pass has actually seen. Compare the current `headRefOid` against the
+newest review provenance: the `sha` field of the last `<!-- bob-ai-review {json} -->`
+marker comment, and Greptile's "Last reviewed commit" summary footer. If any
+commit postdates the newest review pass, **STOP — do not adjudicate**. The
+correct action is to await the re-review of the current head (ai-review-sweep
+re-reviews new heads automatically); a later monitoring cycle adjudicates once
+the review covers head.
+
+```bash
+gh pr view {number} --repo {repo} --json headRefOid --jq '.headRefOid'
+gh api repos/{repo}/issues/{number}/comments --paginate \\
+  --jq '[.[] | select(.body | contains("bob-ai-review ")) | .body] | last'
+```
+
 ```bash
 # Check the convergence state (round history, new-blocking count, stable rounds)
 python3 {workspace}/scripts/greptile-convergence.py --json {repo} {number}
@@ -1067,9 +1082,22 @@ gh pr checks {number} --repo {repo}
 
 **Action**: Classify each remaining finding (blocking bug / security / nitpick / false positive).
 Fix blocking ones. Dismiss non-blocking ones with explicit, checkable reasons.
+A dismissal is a reply on the **inline thread** plus a resolve — posting to
+`issues/{number}/comments` does not touch the thread and is scored
+`effect=none` (gptme/gptme-contrib#1485). For our own reviewer:
+
+```bash
+python3 {workspace}/scripts/github/ai-review-dispose.py {repo} {number} --list
+python3 {workspace}/scripts/github/ai-review-dispose.py {repo} {number} \\
+    --fingerprint FP --reason rejected --reply-file /tmp/why.md
+```
+
+Never resolve a human's thread. Do not finish while our unresolved threads remain.
+
 Post **one** structured merge recommendation:
 - Fixed: list of findings addressed in this session
 - Remaining: non-blocking findings plus the dismissal reason for each
+- Verified against: the head sha each classification above was checked on
 - CI: current status
 - Domain risk: any fragile area warranting a maintainer manual test
 - Convergence: quote the `round_convergence` stable-round count from the detector

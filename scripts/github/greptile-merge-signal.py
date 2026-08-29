@@ -38,6 +38,18 @@ SCORE_PATTERNS = (
     re.compile(r"confidence\s+score[^0-9]*(?P<score>[0-5])\s*/\s*5", re.IGNORECASE),
     re.compile(r"\bscore[^0-9]*(?P<score>[0-5])\s*/\s*5", re.IGNORECASE),
 )
+# Greptile's summary footer names the head its review actually covered, e.g.:
+#   <sub>Reviews (8): Last reviewed commit: ["fix(...)"](https://github.com/o/r/commit/<sha>)
+# Greptile edits the summary comment in place, so "latest summary" alone says
+# nothing about WHICH head the score belongs to (gptme/gptme#3656: three
+# commits postdated the score a handoff comment then attributed to the new
+# head). The footer sha is the provenance that makes the score checkable.
+REVIEWED_COMMIT_RE = re.compile(
+    r"last\s+reviewed\s+commit.{0,400}?/commit/(?P<sha>[0-9a-f]{40})",
+    re.IGNORECASE | re.DOTALL,
+)
+# Prefix comparisons shorter than this are not evidence of identity.
+MIN_SHA_PREFIX_LEN = 7
 
 
 @dataclass
@@ -54,11 +66,21 @@ class SignalResult:
     bot_login: str | None = None
     comment_id: int | None = None
     reviewed_at: str | None = None
+    reviewed_commit: str | None = None
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
+    parser.add_argument(
+        "--head-sha",
+        default=None,
+        help=(
+            "Current PR head sha. When given and the summary's 'Last reviewed "
+            "commit' footer names a different commit, the signal is ineligible "
+            "(reason summary_stale_for_head): the score belongs to an older head."
+        ),
+    )
     parser.add_argument("pr_number", type=int)
     return parser.parse_args()
 
@@ -141,6 +163,20 @@ def _extract_score(body: str) -> int | None:
     return None
 
 
+def _extract_reviewed_commit(body: str) -> str | None:
+    match = REVIEWED_COMMIT_RE.search(body)
+    return match.group("sha").lower() if match else None
+
+
+def _sha_matches(reviewed: str, head: str) -> bool:
+    """Prefix-match either way with a minimum-length guard (mirrors self-merge-check)."""
+    reviewed = reviewed.strip().lower()
+    head = head.strip().lower()
+    if len(reviewed) < MIN_SHA_PREFIX_LEN or len(head) < MIN_SHA_PREFIX_LEN:
+        return False
+    return head.startswith(reviewed) or reviewed.startswith(head)
+
+
 def _latest_allowlisted_summary(
     comments: list[dict[str, Any]], allowlist: set[str]
 ) -> dict[str, Any] | None:
@@ -165,7 +201,9 @@ def _latest_allowlisted_summary(
     )
 
 
-def evaluate_summary_signal(repo: str, pr_number: int) -> SignalResult:
+def evaluate_summary_signal(
+    repo: str, pr_number: int, head_sha: str | None = None
+) -> SignalResult:
     threshold = _parse_threshold()
     if _env_var_is_active(DISABLE_ENV):
         return SignalResult(
@@ -193,6 +231,7 @@ def evaluate_summary_signal(repo: str, pr_number: int) -> SignalResult:
     login = str((latest_summary.get("user") or {}).get("login") or "").strip()
     body = str(latest_summary.get("body") or "")
     score = _extract_score(body)
+    reviewed_commit = _extract_reviewed_commit(body)
     safe_to_merge = bool(SAFE_TO_MERGE_RE.search(body))
     result = SignalResult(
         eligible=False,
@@ -212,7 +251,16 @@ def evaluate_summary_signal(repo: str, pr_number: int) -> SignalResult:
             latest_summary.get("updated_at") or latest_summary.get("created_at") or ""
         )
         or None,
+        reviewed_commit=reviewed_commit,
     )
+
+    # Provenance gate first: a score for a head this PR no longer has is not a
+    # score for this PR. Fail-open when the footer sha is absent/unparseable —
+    # older summary formats carry no provenance, and the thread/category gates
+    # in self-merge-check still apply.
+    if head_sha and reviewed_commit and not _sha_matches(reviewed_commit, head_sha):
+        result.reason = "summary_stale_for_head"
+        return result
 
     if not safe_to_merge:
         result.reason = "safe_to_merge_missing"
@@ -231,7 +279,7 @@ def evaluate_summary_signal(repo: str, pr_number: int) -> SignalResult:
 
 def main() -> int:
     args = _parse_args()
-    result = evaluate_summary_signal(args.repo, args.pr_number)
+    result = evaluate_summary_signal(args.repo, args.pr_number, head_sha=args.head_sha)
     print(json.dumps(asdict(result), sort_keys=True))
     return 0 if result.eligible else 1
 

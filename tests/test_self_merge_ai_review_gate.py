@@ -473,6 +473,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
             },
         )
         monkeypatch.setattr(smc, "greptile_summary_score", lambda r, n: 5)
+        monkeypatch.setattr(smc, "greptile_summary_reviewed_commit", lambda r, n: None)
         result = smc.evaluate_pr(
             "gptme/gptme-contrib", 1382, workspace_repos=["gptme/gptme-contrib"]
         )
