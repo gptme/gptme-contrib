@@ -139,6 +139,18 @@ def _is_gptme_trailer(text: str) -> bool:
     return _GPTME_TRAILER_MARKER in text
 
 
+def _last_non_trailer(messages: list[str]) -> str:
+    """Last message that is not gptme's no-tool-call auto-reply.
+
+    Falls back to ``messages[-1]`` if every message is a trailer (or the
+    list is empty, which the caller already guards).
+    """
+    for message in reversed(messages):
+        if not _is_gptme_trailer(message):
+            return message
+    return messages[-1] if messages else ""
+
+
 def _strip_think_tags(text: str) -> str:
     """Strip <think>...</think> reasoning blocks from model output.
 
@@ -233,13 +245,14 @@ def _extract_assistant_text(stdout: str) -> str:
         # code blocks, etc.).
         non_json = [c for c in contents if c not in set(json_candidates)]
         if non_json:
+            chosen = _last_non_trailer(non_json)
             logger.warning(
                 "gptme fallback: no JSON candidate has summary key; "
                 "falling back to last non-JSON content (%d chars): %.100r",
-                len(non_json[-1]),
-                non_json[-1],
+                len(chosen),
+                chosen,
             )
-            return non_json[-1]
+            return chosen
         logger.warning(
             "gptme fallback: no JSON candidate has summary key; "
             "returning last JSON candidate (%d chars): %.100r",
@@ -247,10 +260,11 @@ def _extract_assistant_text(stdout: str) -> str:
             json_candidates[-1],
         )
         return json_candidates[-1]
+    chosen = _last_non_trailer(contents)
     logger.warning(
         "gptme fallback: no assistant message parsed as JSON (%d messages); "
         "returning last message for caller to attempt extraction: %.100r",
         len(contents),
-        contents[-1],
+        chosen,
     )
-    return contents[-1]
+    return chosen

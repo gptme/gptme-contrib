@@ -248,6 +248,34 @@ def test_json_draft_then_prose_then_trailer_prefers_prose():
     assert out == prose
 
 
+def test_thinking_json_then_prose_then_trailer_skips_trailer():
+    """No-summary JSON plus later prose must not lose to gptme's trailer.
+
+    When no JSON candidate has a summary key, the fallback used to return
+    ``non_json[-1]``, which is the trailer if gptme auto-replied after the
+    plain-text answer.
+    """
+    preamble = json.dumps({"thinking": "reasoning"})
+    prose = "Bob shipped many fixes today."
+    trailer = (
+        "<system>No tool call detected in last message. Did you mean to finish? "
+        "If so, make sure you are completely done and then use the `complete` "
+        "tool to end the session.</system>"
+    )
+    ndjson = "\n".join([_msg(preamble), _msg(prose), _msg(trailer)])
+    out = _extract_assistant_text(ndjson)
+    assert out == prose
+
+
+def test_plain_text_then_trailer_skips_trailer():
+    """With no JSON at all, skip gptme's trailer and return the last prose."""
+    prose = "Bob shipped the think-tag parser."
+    trailer = "No tool call detected in last message."
+    ndjson = "\n".join([_msg(prose), _msg(trailer)])
+    out = _extract_assistant_text(ndjson)
+    assert out == prose
+
+
 def test_multipart_content_list():
     """Content as a list of parts (multipart message format)."""
     content_parts = [
