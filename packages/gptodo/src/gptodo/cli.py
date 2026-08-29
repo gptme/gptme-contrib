@@ -133,6 +133,7 @@ from gptodo.utils import (
     KNOWN_FRONTMATTER_FIELDS,
     lint_frontmatter_fields,
     resolve_known_frontmatter_fields,
+    is_generated_recurrence_waiting_for,
     task_has_waiting_blocker,
     task_is_waiting_for_date,
     task_matches_pool_filter,
@@ -2954,14 +2955,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         )
         wait_was_set, wait_set = wait_change
         if wait_was_set:
-            import re as _re
-
             _wf = post.metadata.get("waiting_for", "")
-            recurrence_gate = (
-                post.metadata.get("wait_kind") == "machine"
-                and isinstance(_wf, str)
-                and _re.match(r"^next recurrence gate \(wait: ", _wf)
-            )
+            recurrence_gate = post.metadata.get(
+                "wait_kind"
+            ) == "machine" and is_generated_recurrence_waiting_for(_wf)
             if recurrence_gate and wait_set is None:
                 # Clearing a generated recurrence gate means it is no longer
                 # a machine time-gate. Remove the generated blocker metadata as
@@ -2977,9 +2974,16 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                 # the task (P1 on gptme/gptme-contrib#1539 / ecb15242).
                 if not explicit_state and post.metadata.get("state") == "waiting":
                     post.metadata["state"] = "todo"
-                post.metadata.pop("waiting_for", None)
-                post.metadata.pop("waiting_since", None)
-                post.metadata.pop("wait_kind", None)
+                if post.metadata.get("state") == "waiting":
+                    # `--set wait none --set state waiting` must not pop
+                    # waiting_for/waiting_since: state=waiting requires both
+                    # (P1 on gptme/gptme-contrib#1539 / b859fbf4). Drop
+                    # wait_kind so this is no longer a machine time-gate.
+                    post.metadata.pop("wait_kind", None)
+                else:
+                    post.metadata.pop("waiting_for", None)
+                    post.metadata.pop("waiting_since", None)
+                    post.metadata.pop("wait_kind", None)
             elif recurrence_gate and post.metadata.get("state") == "waiting":
                 post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_set})"
             elif recurrence_gate:

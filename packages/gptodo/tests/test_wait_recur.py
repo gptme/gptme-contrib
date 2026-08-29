@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from gptodo.cli import cli
 from gptodo.utils import (
     advance_wait,
+    is_generated_recurrence_waiting_for,
     is_task_ready,
     is_valid_recur_value,
     load_tasks,
@@ -1007,3 +1008,112 @@ def test_set_wait_on_nonwaiting_recurrence_gate_drops_waiting_for(
     assert "waiting_for" not in post.metadata
     assert "waiting_since" not in post.metadata
     assert "wait_kind" not in post.metadata
+
+
+def test_generated_recurrence_waiting_for_is_exact_string() -> None:
+    assert is_generated_recurrence_waiting_for("next recurrence gate (wait: 2025-01-01)")
+    assert is_generated_recurrence_waiting_for(
+        "next recurrence gate (wait: 2025-01-01T00:00:00+00:00)"
+    )
+    assert not is_generated_recurrence_waiting_for(
+        "next recurrence gate (wait: 2025-01-01) - confirm with Bob"
+    )
+    assert not is_generated_recurrence_waiting_for("John to review the PR")
+    assert not is_generated_recurrence_waiting_for("")
+    assert not is_generated_recurrence_waiting_for(None)
+
+
+def test_set_wait_none_with_explicit_waiting_keeps_valid_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set wait none --set state waiting` must not drop waiting_for.
+
+    Popping waiting_for/waiting_since while leaving state=waiting produces
+    invalid frontmatter (validator requires both) and was the P1 on
+    gptme/gptme-contrib#1539 / b859fbf4.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            "none",
+            "--set",
+            "state",
+            "waiting",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "waiting"
+    assert "wait" not in post.metadata
+    assert "wait_kind" not in post.metadata
+    assert post.metadata.get("waiting_for"), (
+        "state=waiting requires waiting_for; wait-none must not pop it when "
+        "the edit explicitly stays waiting"
+    )
+    assert post.metadata.get("waiting_since"), (
+        "state=waiting requires waiting_since; wait-none must not pop it when "
+        "the edit explicitly stays waiting"
+    )
+
+
+def test_set_wait_does_not_rewrite_suffixed_recurrence_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A human suffix on a recurrence-gate string must not be overwritten.
+
+    Prefix-only matching treated 'next recurrence gate (wait: DATE) - note'
+    as a generated gate and replaced it on --set wait, destroying the note
+    (gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    human_wf = f"next recurrence gate (wait: {old_wait}) - confirm with Bob"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{human_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "wait", new_wait])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert str(post.metadata["wait"]).startswith(new_wait)
+    assert (
+        post.metadata.get("waiting_for") == human_wf
+    ), f"human-suffixed waiting_for must be preserved; got {post.metadata.get('waiting_for')!r}"

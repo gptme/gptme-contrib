@@ -637,6 +637,19 @@ class TaskInfo:
 # =============================================================================
 
 
+# Exact generated recurrence-gate waiting_for. Prefix-only matching would treat
+# a human suffix ("... (wait: 2025-01-01) - confirm with Bob") as a machine
+# gate and silently overwrite it on --set wait (gptme/gptme-contrib#1539).
+_GENERATED_RECURRENCE_WAITING_FOR = re.compile(r"^next recurrence gate \(wait: .+\)$")
+
+
+def is_generated_recurrence_waiting_for(waiting_for: object) -> bool:
+    """True when waiting_for is exactly a generated recurrence-gate string."""
+    if not isinstance(waiting_for, str):
+        return False
+    return bool(_GENERATED_RECURRENCE_WAITING_FOR.match(waiting_for.strip()))
+
+
 def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     """Return True when a task is explicitly waiting on an external condition."""
     state = normalize_state(task.state or "", warn=False) if task.state else ""
