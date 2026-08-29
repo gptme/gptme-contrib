@@ -36,6 +36,7 @@ def _make_finding(
     title: str = "Test finding",
     severity: Severity = Severity.medium,
     disposition: Disposition = Disposition.needs_validation,
+    confidence: float = 0.8,
 ) -> ReviewFinding:
     fp = ReviewFinding.local_fingerprint(
         repo="test/repo",
@@ -48,7 +49,7 @@ def _make_finding(
         id=fp,
         category="correctness",
         severity=severity,
-        confidence=0.8,
+        confidence=confidence,
         file_path="foo.py",
         line_range="10-15",
         title=title,
@@ -552,6 +553,30 @@ class TestVerifyArtifact:
             result = verify_artifact(artifact, SAMPLE_DIFF, Path("/tmp"))
 
         assert result.merge_safety == MergeSafety.needs_review
+
+    def test_merge_safety_ignores_below_min_confidence_critical(self):
+        """A confirmed critical below the publish threshold must not fail-close."""
+        findings = [
+            _make_finding("SQLi vuln", severity=Severity.medium, confidence=0.3)
+        ]
+        artifact = _make_artifact(findings, merge_safety=MergeSafety.safe)
+        model_output = json.dumps(
+            {
+                "real": True,
+                "worth_fixing": True,
+                "severity": "critical",
+                "rationale": "SQL injection via user-controlled parameter.",
+            }
+        )
+        with patch(
+            "gptme_runloops.pr_review.verifier._invoke_verifier_model",
+            return_value=model_output,
+        ):
+            result = verify_artifact(artifact, SAMPLE_DIFF, Path("/tmp"))
+
+        assert result.findings[0].disposition == Disposition.confirmed
+        assert result.findings[0].severity == Severity.critical
+        assert result.merge_safety == MergeSafety.safe
 
     def test_merge_safety_does_not_demote_when_findings_dropped(self):
         """Stage 1 'unsafe' stays unsafe even if every finding is suppressed."""

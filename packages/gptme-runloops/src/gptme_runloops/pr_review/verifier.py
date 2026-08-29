@@ -274,8 +274,15 @@ VerifyResult = Literal[
 
 _BLOCKING_SEVERITIES = {Severity.critical, Severity.high}
 
+# Must match ``github_adapter._MIN_CONFIDENCE``. Escalation keys the same
+# population publish/summary use; a below-threshold finding is not posted
+# and must not flip the CLI fail-closed gate either.
+_DEFAULT_MIN_CONFIDENCE = 0.6
 
-def _escalate_merge_safety(artifact: ReviewArtifact) -> None:
+
+def _escalate_merge_safety(
+    artifact: ReviewArtifact, min_confidence: float = _DEFAULT_MIN_CONFIDENCE
+) -> None:
     """Escalate ``merge_safety`` if remaining findings outrank Stage 1.
 
     Stage 1's ``merge_safety`` is a holistic model judgment. Stage 2 may
@@ -283,11 +290,17 @@ def _escalate_merge_safety(artifact: ReviewArtifact) -> None:
     to catch) without touching that field, leaving the summary header and
     the CLI fail-closed gate stale. Escalate only; never demote. A Stage 1
     ``unsafe`` stays ``unsafe`` even if every finding is dropped.
+
+    ``remaining`` is the publishable set: not dropped, and at or above
+    ``min_confidence``. A confirmed critical with confidence 0.3 would
+    otherwise mark the artifact ``unsafe`` while ``publish_artifact``
+    skipped it, so the summary said "No findings" and the CLI still failed.
     """
     remaining = [
         finding
         for finding in artifact.findings
         if finding.disposition != Disposition.dropped
+        and finding.confidence >= min_confidence
     ]
     if any(finding.severity in _BLOCKING_SEVERITIES for finding in remaining):
         artifact.merge_safety = MergeSafety.unsafe
@@ -306,6 +319,7 @@ def verify_artifact(
     model: str | None = None,
     shadow_ledger: Path | None = None,
     verbose: bool = False,
+    min_confidence: float = _DEFAULT_MIN_CONFIDENCE,
 ) -> ReviewArtifact:
     """Run adversarial verification on every finding in the artifact.
 
@@ -325,6 +339,8 @@ def verify_artifact(
                        Defaults to ``state/ai-review-suppressed.jsonl`` relative
                        to ``checkout``.
         verbose:       If True, print per-finding outcome lines to stdout.
+        min_confidence: Findings below this are ignored when escalating
+                       ``merge_safety``, matching ``publish_artifact``.
 
     Returns:
         The same artifact with updated finding dispositions and severities.
@@ -405,5 +421,5 @@ def verify_artifact(
             f"{errors} errors (left as needs_validation)"
         )
 
-    _escalate_merge_safety(artifact)
+    _escalate_merge_safety(artifact, min_confidence=min_confidence)
     return artifact

@@ -475,6 +475,7 @@ def run_github_review(
             model=verifier_model or model,
             shadow_ledger=shadow_ledger,
             verbose=verbose,
+            min_confidence=min_confidence,
         )
         # Persist the verified artifact back to output_path if given
         if output_path is not None:
