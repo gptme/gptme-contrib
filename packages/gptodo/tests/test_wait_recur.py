@@ -1010,6 +1010,77 @@ def test_set_wait_on_nonwaiting_recurrence_gate_drops_waiting_for(
     assert "wait_kind" not in post.metadata
 
 
+def test_set_state_todo_on_recurrence_gate_drops_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set state todo` must drop generated recurrence waiting_for.
+
+    Wait-sync used to run only when wait was set, so a state-only change
+    left waiting_for on the todo task. task_has_waiting_blocker then
+    treated it as a human blocker (P1 on gptme/gptme-contrib#1539 / 69034e96).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2030-06-15"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    write_task(
+        tasks_dir,
+        "recur-gate-task",
+        state="waiting",
+        wait_kind="machine",
+        wait=old_wait,
+        waiting_for=f"'{old_wf}'",
+        waiting_since="2026-08-01T00:00:00+00:00",
+        created="2026-01-01",
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "state", "todo"])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "todo"
+    assert str(post.metadata["wait"]).startswith(old_wait)
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert "wait_kind" not in post.metadata
+
+    task = load_tasks(tasks_dir)[0]
+    assert not task_has_waiting_blocker(
+        task
+    ), "leftover generated waiting_for on todo must not be a human blocker"
+
+
+def test_set_state_todo_preserves_human_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """State-only todo must not strip a human waiting_for suffix."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "human-gate-task",
+        state="waiting",
+        wait_kind="machine",
+        wait="2030-06-15",
+        waiting_for="'next recurrence gate (wait: 2030-06-15) - confirm with Bob'",
+        waiting_since="2026-08-01T00:00:00+00:00",
+        created="2026-01-01",
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["edit", "human-gate-task", "--set", "state", "todo"])
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "human-gate-task.md")
+    assert post.metadata["state"] == "todo"
+    assert "confirm with Bob" in str(post.metadata.get("waiting_for", ""))
+
+
 def test_generated_recurrence_waiting_for_is_exact_string() -> None:
     assert is_generated_recurrence_waiting_for("next recurrence gate (wait: 2025-01-01)")
     assert is_generated_recurrence_waiting_for(

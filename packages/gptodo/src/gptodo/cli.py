@@ -2993,6 +2993,18 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                 post.metadata.pop("waiting_for", None)
                 post.metadata.pop("waiting_since", None)
                 post.metadata.pop("wait_kind", None)
+        # Drop generated recurrence-gate waiting_for whenever the final state
+        # is not waiting, even if this edit did not touch wait. A state-only
+        # `--set state todo` used to skip the wait-sync (gated on wait_was_set)
+        # and leave waiting_for, which task_has_waiting_blocker treats as a
+        # human blocker on non-waiting states (P1 on gptme/gptme-contrib#1539
+        # / 69034e96). Keep wait: — the user did not ask to clear the date.
+        if post.metadata.get("state") != "waiting" and is_generated_recurrence_waiting_for(
+            post.metadata.get("waiting_for", "")
+        ):
+            post.metadata.pop("waiting_for", None)
+            post.metadata.pop("waiting_since", None)
+            post.metadata.pop("wait_kind", None)
         # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
         # AND waiting_for is either already present or being set in the same edit.
         # Guarding on waiting_for prevents an injected waiting_since from triggering
