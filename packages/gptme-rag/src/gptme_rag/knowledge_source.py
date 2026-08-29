@@ -67,7 +67,16 @@ def _is_valid_entry(parsed: object) -> bool:
     if not problem or not resolution:
         return False
     tags = parsed["tags"]
-    return all(isinstance(tag, str) for tag in tags)
+    if not all(isinstance(tag, str) for tag in tags):
+        return False
+    # Optional field; a bare string iterates as characters and corrupts metadata.
+    if "keywords" in parsed:
+        keywords = parsed["keywords"]
+        if not isinstance(keywords, list) or not all(
+            isinstance(keyword, str) for keyword in keywords
+        ):
+            return False
+    return True
 
 
 def _join_strings(values: Iterable[object]) -> str:

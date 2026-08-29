@@ -152,3 +152,32 @@ def test_tags_in_content_for_lexical_search(tmp_path: Path):
     doc = collect_knowledge_entry_documents(path)[0]
     assert "flock" in doc.content
     assert "jsonl" in doc.content
+
+
+def test_skips_keywords_that_are_not_a_string_list(tmp_path: Path):
+    path = tmp_path / "entries.jsonl"
+    keep = _valid_entry(id="33333333-3333-3333-3333-333333333333", problem="keep me")
+    _write_entries(
+        path,
+        [
+            _valid_entry(keywords="failure"),
+            _valid_entry(keywords=["ok", 1]),
+            keep,
+        ],
+    )
+
+    docs = collect_knowledge_entry_documents(path)
+    assert [doc.doc_id for doc in docs] == ["knowledge_entry:33333333-3333-3333-3333-333333333333"]
+    assert "f, a, i, l, u, r, e" not in docs[0].content
+    assert docs[0].metadata["keywords"] != "f,a,i,l,u,r,e"
+
+
+def test_missing_keywords_is_valid(tmp_path: Path):
+    path = tmp_path / "entries.jsonl"
+    entry = _valid_entry()
+    del entry["keywords"]
+    _write_entries(path, [entry])
+
+    docs = collect_knowledge_entry_documents(path)
+    assert len(docs) == 1
+    assert docs[0].metadata["keywords"] == ""
