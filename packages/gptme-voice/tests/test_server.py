@@ -347,8 +347,22 @@ def test_twilio_body_grant_expires(monkeypatch) -> None:
     monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
     server = VoiceServer()
     server._twilio_body_grant_ttl_s = 0.0
-    token = server._mint_twilio_body_grant("+15551212")
+    token = server._mint_twilio_body_grant("+15551212", "CA123")
     assert server._consume_twilio_body_grant(token) is None
+
+
+def test_twilio_body_grant_refuses_empty_call_sid(monkeypatch) -> None:
+    """Empty CallSid skipped the start-event bind; mint must fail closed."""
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    server = VoiceServer()
+    assert server._mint_twilio_body_grant("+15551212", "") == ""
+    assert server._mint_twilio_body_grant("+15551212", "   ") == ""
+    assert server._mint_twilio_body_grant("", "CA123") == ""
+    assert server._twilio_body_grants == {}
+    # A leftover empty-sid grant must not consume.
+    server._twilio_body_grants["stale"] = ("+15551212", "", float("inf"))
+    assert server._consume_twilio_body_grant("stale") is None
+    assert "stale" not in server._twilio_body_grants
 
 
 def test_incoming_does_not_mint_body_grant_without_auth_token(
@@ -460,6 +474,65 @@ def test_incoming_mints_body_grant_only_when_signature_valid(
     assert ok_grants == 1
 
 
+def test_incoming_does_not_mint_body_grant_without_call_sid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Signed /incoming with empty CallSid must not mint a replayable grant."""
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212"
+        if name == "TWILIO_AUTH_TOKEN":
+            return "secret"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+
+    class _Validator:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        def validate(self, _url: str, _params: dict, signature: str) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "twilio.request_validator.RequestValidator",
+        _Validator,
+    )
+
+    class _Req:
+        headers = {
+            "host": "voice.example",
+            "X-Twilio-Signature": "good",
+        }
+
+        async def form(self) -> dict[str, str]:
+            return {"From": "+15551212", "CallSid": "   "}
+
+    async def _run() -> tuple[str, dict]:
+        server = VoiceServer()
+
+        async def _noop(_from_number: str) -> None:
+            return None
+
+        monkeypatch.setattr(server, "_prewarm_for_inbound", _noop)
+        response = await server.handle_incoming_call(_Req())
+        body = (
+            response.body.decode()
+            if isinstance(response.body, bytes)
+            else str(response.body)
+        )
+        return body, dict(server._twilio_body_grants)
+
+    twiml, grants = asyncio.run(_run())
+    assert "body_grant" not in twiml
+    assert grants == {}
+
+
 def test_twilio_websocket_does_not_grant_body_tools_from_spoofed_from_number(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -490,7 +563,7 @@ def test_twilio_websocket_does_not_grant_body_tools_from_spoofed_from_number(
         server = VoiceServer()
         custom: dict[str, str] = {"from_number": "+15551212"}
         if grant:
-            custom["body_grant"] = server._mint_twilio_body_grant("+15551212")
+            custom["body_grant"] = server._mint_twilio_body_grant("+15551212", "CA123")
         websocket = _DummyTwilioWebSocket(
             [
                 {"event": "connected"},

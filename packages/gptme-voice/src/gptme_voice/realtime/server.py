@@ -841,8 +841,18 @@ class VoiceServer:
         for token in expired:
             self._twilio_body_grants.pop(token, None)
 
-    def _mint_twilio_body_grant(self, from_number: str, call_sid: str = "") -> str:
-        """Mint a call-scoped token proving /incoming authorized this caller."""
+    def _mint_twilio_body_grant(self, from_number: str, call_sid: str) -> str:
+        """Mint a call-scoped token proving /incoming authorized this caller.
+
+        Both From and CallSid must be non-empty. An empty CallSid would skip
+        the consume-time bind and let a stolen grant replay onto any start
+        event that presents the same From.
+        """
+        from_number = from_number.strip()
+        call_sid = call_sid.strip()
+        if not from_number or not call_sid:
+            logger.warning("Refusing Twilio body grant with empty From or CallSid")
+            return ""
         self._expire_twilio_body_grants()
         token = secrets.token_urlsafe(32)
         self._twilio_body_grants[token] = (
@@ -869,6 +879,10 @@ class VoiceServer:
         if entry is None:
             return None
         from_number, call_sid, expires = entry
+        if not from_number or not call_sid:
+            # Empty CallSid skips the start-event bind; drop the grant.
+            self._twilio_body_grants.pop(token, None)
+            return None
         if time.monotonic() > expires:
             self._twilio_body_grants.pop(token, None)
             return None
@@ -1719,10 +1733,10 @@ class VoiceServer:
         Twilio will then open a Media Stream WebSocket to /twilio.
         """
         form_params = dict(await request.form())
-        from_number = form_params.get("From", "")
-        incoming_call_sid = form_params.get("CallSid", "") or form_params.get(
-            "call_sid", ""
-        )
+        from_number = (form_params.get("From", "") or "").strip()
+        incoming_call_sid = (
+            form_params.get("CallSid", "") or form_params.get("call_sid", "") or ""
+        ).strip()
 
         # Validate Twilio webhook signature when auth token is configured.
         # Skip in dev environments where TWILIO_AUTH_TOKEN is absent.
@@ -1787,10 +1801,16 @@ class VoiceServer:
             # Mint a call-scoped grant here only after signature validation, and
             # bind it to CallSid (kept off TwiML so a stolen grant cannot be
             # replayed onto a different start event).
-            if signature_validated and self._twilio_body_caller_allowed(from_number):
-                custom_params["body_grant"] = self._mint_twilio_body_grant(
+            if (
+                signature_validated
+                and incoming_call_sid
+                and self._twilio_body_caller_allowed(from_number)
+            ):
+                grant_token = self._mint_twilio_body_grant(
                     from_number, incoming_call_sid
                 )
+                if grant_token:
+                    custom_params["body_grant"] = grant_token
         twiml = build_connect_stream_twiml(ws_url, custom_params or None)
         return PlainTextResponse(twiml, media_type="text/xml")
 
@@ -1901,7 +1921,7 @@ class VoiceServer:
                                 grant_from,
                                 from_number,
                             )
-                        elif grant_sid and grant_sid != call_sid:
+                        elif not grant_sid or grant_sid != call_sid:
                             logger.warning(
                                 "Twilio body grant CallSid mismatch: grant=%s start=%s",
                                 grant_sid,
