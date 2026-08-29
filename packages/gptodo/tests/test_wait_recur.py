@@ -800,3 +800,60 @@ def test_last_set_wait_wins_in_waiting_for_sync(
     assert (
         first_wait not in wf
     ), f"waiting_for must not keep the first --set wait {first_wait!r}; got {wf!r}."
+
+
+def test_trailing_set_wait_none_does_not_rewrite_waiting_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Last --set wait none must win: do not rewrite waiting_for to a cleared date.
+
+    `--set wait NEW --set wait none` pops wait. A last-wins filter that skipped
+    None still rewrote waiting_for to NEW, so the task kept a recurrence-gate
+    string with no wait date. task_has_waiting_blocker then treats state=waiting
+    as permanently blocked (gptme/gptme-contrib#1539).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            new_wait,
+            "--set",
+            "wait",
+            "none",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert (
+        "wait" not in post.metadata
+    ), f"wait: must be cleared by trailing --set wait none, got {post.metadata.get('wait')!r}"
+    wf = post.metadata.get("waiting_for", "")
+    assert (
+        new_wait not in wf
+    ), f"waiting_for must not be rewritten to the cleared wait {new_wait!r}; got {wf!r}."
+    assert wf == old_wf, f"waiting_for must stay the pre-edit recurrence string; got {wf!r}."

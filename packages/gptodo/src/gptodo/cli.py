@@ -2944,12 +2944,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # Last --set wait wins (same as the apply loop). next() without
         # reversed() would rewrite waiting_for from the first wait while
         # metadata['wait'] holds a later one, permanently trapping the task.
+        # Include None: `--set wait NEW --set wait none` pops wait, and a
+        # non-None filter would still rewrite waiting_for to NEW, leaving a
+        # recurrence-gate string with no wait date (P1 on #1539).
         wait_set = next(
-            (
-                value
-                for op, field, value in reversed(changes)
-                if op == "set" and field == "wait" and value is not None
-            ),
+            (value for op, field, value in reversed(changes) if op == "set" and field == "wait"),
             None,
         )
         if wait_set is not None:
