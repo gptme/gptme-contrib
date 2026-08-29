@@ -793,10 +793,14 @@ class VoiceServer:
         # reconnects resend the same start customParameters, and popping would
         # leave an airborne vehicle with no body_stop. Mint TTL covers the
         # /incoming-to-first-start window; first successful consume pins the
-        # grant (expires=inf) until Twilio stop, hangup, or process restart.
-        # Do not revoke on websocket drop.
+        # grant (expires=inf) until Twilio stop, hangup, idle-disconnect, or
+        # process restart. Do not revoke on websocket drop itself — that is
+        # the reconnect path — but schedule an idle revoke so a call that
+        # never sends ``stop`` cannot leave a live bearer token forever.
         self._twilio_body_grants: dict[str, tuple[str, str, float]] = {}
         self._twilio_body_grant_ttl_s = 120.0
+        self._twilio_body_grant_idle_s = 90.0
+        self._twilio_grant_idle_tasks: dict[str, asyncio.Task[None]] = {}
 
         routes = [
             Route("/", self.health_check, methods=["GET"]),
@@ -815,6 +819,7 @@ class VoiceServer:
         try:
             yield
         finally:
+            await self._cancel_all_twilio_body_grant_idle_revokes()
             if self.body_adapter is not None:
                 await self.body_adapter.close()
 
@@ -896,6 +901,7 @@ class VoiceServer:
         """Drop grants bound to a CallSid. Twilio ``stop`` is the real call end."""
         if not call_sid:
             return
+        self._cancel_twilio_body_grant_idle_revoke(call_sid)
         to_drop = [
             token
             for token, (_from, sid, _exp) in self._twilio_body_grants.items()
@@ -903,6 +909,69 @@ class VoiceServer:
         ]
         for token in to_drop:
             self._twilio_body_grants.pop(token, None)
+
+    def _cancel_twilio_body_grant_idle_revoke(self, call_sid: str | None) -> None:
+        """Cancel a pending idle-disconnect revoke for this CallSid."""
+        if not call_sid:
+            return
+        task = self._twilio_grant_idle_tasks.pop(call_sid, None)
+        if task is None or task.done():
+            return
+        # The idle task itself calls revoke; don't cancel the running task.
+        try:
+            if task is asyncio.current_task():
+                return
+        except RuntimeError:
+            pass
+        task.cancel()
+
+    async def _cancel_all_twilio_body_grant_idle_revokes(self) -> None:
+        tasks = [
+            self._twilio_grant_idle_tasks.pop(sid)
+            for sid in list(self._twilio_grant_idle_tasks)
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _schedule_twilio_body_grant_idle_revoke(self, call_sid: str | None) -> None:
+        """Revoke pinned grants if this CallSid does not reconnect.
+
+        Twilio Media Stream reconnects drop the websocket without ``stop``.
+        Revoking in ``finally`` would take ``body_stop`` away mid-flight.
+        Waiting ``_twilio_body_grant_idle_s`` then revoking iff the CallSid
+        is still absent from ``_connections`` bounds the leak when neither
+        ``stop`` nor hangup arrives.
+        """
+        if not call_sid:
+            return
+        if not any(
+            sid == call_sid for _from, sid, _exp in self._twilio_body_grants.values()
+        ):
+            return
+        self._cancel_twilio_body_grant_idle_revoke(call_sid)
+        delay = self._twilio_body_grant_idle_s
+
+        async def _idle_revoke() -> None:
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            if call_sid in self._connections:
+                return
+            logger.info(
+                "Revoking Twilio body grants for %s after idle disconnect",
+                call_sid,
+            )
+            self._revoke_twilio_body_grants_for_call(call_sid)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._twilio_grant_idle_tasks[call_sid] = loop.create_task(_idle_revoke())
 
     def _body_adapter_for_websocket(
         self, websocket, *, transport: str, caller_id: str | None = None
@@ -2014,6 +2083,8 @@ class VoiceServer:
                         await realtime_client.connect()
 
                     self._connections[call_sid] = (websocket, realtime_client)
+                    # A reconnect arrived inside the idle window — keep the grant.
+                    self._cancel_twilio_body_grant_idle_revoke(call_sid)
 
                 elif event == "media":
                     # Audio chunk from Twilio
@@ -2036,6 +2107,7 @@ class VoiceServer:
                     # Real call end — revoke so a reconnect after hangup cannot
                     # re-attach motion tools with the stolen start parameters.
                     # Do not revoke in ``finally``: websocket drop is a reconnect.
+                    # Idle-revoke in ``finally`` covers the drop-without-stop path.
                     self._revoke_twilio_body_grants_for_call(call_sid)
                     break
 
@@ -2055,6 +2127,10 @@ class VoiceServer:
                 await self._disconnect_realtime_client(realtime_client)
             if call_sid and call_sid in self._connections:
                 del self._connections[call_sid]
+            # Websocket drop ≠ call end. If this CallSid does not reconnect
+            # inside the idle window, drop the pinned grant so an abrupt
+            # hangup that skipped ``stop`` cannot leave a live bearer token.
+            self._schedule_twilio_body_grant_idle_revoke(call_sid)
             await self._on_call_end(
                 caller_id,
                 "twilio",

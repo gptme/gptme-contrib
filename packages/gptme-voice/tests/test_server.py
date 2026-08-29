@@ -246,6 +246,120 @@ def test_twilio_body_grant_pins_until_revoke_after_first_consume(monkeypatch) ->
     assert server._consume_twilio_body_grant(token) is None
 
 
+def test_twilio_body_grant_idle_revoke_without_reconnect(monkeypatch) -> None:
+    """Pinned grants must not live forever if stop/hangup never arrive."""
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    server = VoiceServer()
+    server._twilio_body_grant_idle_s = 0.05
+    token = server._mint_twilio_body_grant("+15551212", "CA123")
+    assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
+
+    async def _run() -> None:
+        server._schedule_twilio_body_grant_idle_revoke("CA123")
+        assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
+        await asyncio.sleep(0.2)
+        assert server._consume_twilio_body_grant(token) is None
+
+    asyncio.run(_run())
+
+
+def test_twilio_body_grant_idle_revoke_cancelled_if_call_reconnects(
+    monkeypatch,
+) -> None:
+    """A reconnect inside the idle window must keep body_stop."""
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    server = VoiceServer()
+    server._twilio_body_grant_idle_s = 0.05
+    token = server._mint_twilio_body_grant("+15551212", "CA123")
+    assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
+
+    async def _run() -> None:
+        server._schedule_twilio_body_grant_idle_revoke("CA123")
+        server._connections["CA123"] = (object(), object())
+        server._cancel_twilio_body_grant_idle_revoke("CA123")
+        await asyncio.sleep(0.2)
+        assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
+        server._revoke_twilio_body_grants_for_call("CA123")
+
+    asyncio.run(_run())
+
+
+def test_twilio_body_grant_idle_revoke_after_websocket_drop_without_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """handle_twilio_websocket finally must idle-revoke when stop never comes."""
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+
+    captured: list[object] = []
+
+    class _CapturingBridge(_DummyToolBridge):
+        def __init__(self, *args, **kwargs) -> None:
+            captured.append(kwargs.get("body_adapter"))
+
+    server = VoiceServer()
+    server._twilio_body_grant_idle_s = 0.05
+    token = server._mint_twilio_body_grant("+15551212", "CA123")
+    custom = {"from_number": "+15551212", "body_grant": token}
+
+    def _start_only() -> _DummyTwilioWebSocket:
+        return _DummyTwilioWebSocket(
+            [
+                {"event": "connected"},
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZ123",
+                        "callSid": "CA123",
+                        "customParameters": custom,
+                    },
+                },
+            ]
+        )
+
+    fake_client = _FakeRealtimeClient()
+
+    async def _fake_build_session_bootstrap(
+        *,
+        caller_id: str,
+        from_number: str = "",
+        handoff_id: str | None = None,
+        standup_brief: str | None = None,
+    ) -> SessionBootstrap:
+        return SessionBootstrap("You are Bob.")
+
+    def _fake_make_client(_session_cfg, **_kwargs):
+        return fake_client
+
+    async def _fake_on_call_end(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        server, "_build_session_bootstrap", _fake_build_session_bootstrap
+    )
+    monkeypatch.setattr(server, "_make_client", _fake_make_client)
+    monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _CapturingBridge)
+
+    async def _run() -> None:
+        await server.handle_twilio_websocket(_start_only())
+        assert captured[0] is not None
+        assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
+        await asyncio.sleep(0.2)
+        assert server._consume_twilio_body_grant(token) is None
+
+    asyncio.run(_run())
+
+
 def test_twilio_body_grant_survives_reconnect_start_then_revokes_on_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
