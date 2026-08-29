@@ -791,8 +791,10 @@ class VoiceServer:
         # signed webhook and is not copied into TwiML, so a stolen grant cannot
         # be replayed onto a different call. Consume does not pop: Twilio
         # reconnects resend the same start customParameters, and popping would
-        # leave an airborne vehicle with no body_stop. Revoke on Twilio stop
-        # (real call end) or TTL; do not revoke on websocket drop.
+        # leave an airborne vehicle with no body_stop. Mint TTL covers the
+        # /incoming-to-first-start window; first successful consume pins the
+        # grant (expires=inf) until Twilio stop, hangup, or process restart.
+        # Do not revoke on websocket drop.
         self._twilio_body_grants: dict[str, tuple[str, str, float]] = {}
         self._twilio_body_grant_ttl_s = 120.0
 
@@ -857,8 +859,8 @@ class VoiceServer:
         ``start`` customParameters, so popping the token would leave an
         airborne vehicle with no ``body_stop``. Replay onto a different
         call is still fail-closed via CallSid binding. Unknown, expired,
-        and revoked tokens fail closed. The grant is removed on Twilio
-        ``stop`` or TTL expiry.
+        and revoked tokens fail closed. Mint TTL covers first start;
+        a successful consume pins the grant until Twilio ``stop`` or hangup.
         """
         self._expire_twilio_body_grants()
         if not token:
@@ -870,6 +872,10 @@ class VoiceServer:
         if time.monotonic() > expires:
             self._twilio_body_grants.pop(token, None)
             return None
+        # Pin after first start so a long call's later reconnect still
+        # has body_stop. Unused grants still expire at mint TTL.
+        if expires != float("inf"):
+            self._twilio_body_grants[token] = (from_number, call_sid, float("inf"))
         return from_number, call_sid
 
     def _revoke_twilio_body_grants_for_call(self, call_sid: str | None) -> None:

@@ -227,6 +227,25 @@ def test_twilio_body_grant_is_reusable_for_same_call_and_fail_closed(
     assert server._consume_twilio_body_grant(token) is None
 
 
+def test_twilio_body_grant_pins_until_revoke_after_first_consume(monkeypatch) -> None:
+    """Mint TTL is only for first start. After consume, the grant must survive
+    a call longer than 120s so a late Twilio reconnect still has body_stop.
+    """
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
+    server = VoiceServer()
+    token = server._mint_twilio_body_grant("+15551212", "CA123")
+    assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
+    from_number, call_sid, expires = server._twilio_body_grants[token]
+    assert from_number == "+15551212"
+    assert call_sid == "CA123"
+    assert expires == float("inf")
+    server._twilio_body_grant_ttl_s = 0.0
+    server._expire_twilio_body_grants()
+    assert server._consume_twilio_body_grant(token) == ("+15551212", "CA123")
+    server._revoke_twilio_body_grants_for_call("CA123")
+    assert server._consume_twilio_body_grant(token) is None
+
+
 def test_twilio_body_grant_survives_reconnect_start_then_revokes_on_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
