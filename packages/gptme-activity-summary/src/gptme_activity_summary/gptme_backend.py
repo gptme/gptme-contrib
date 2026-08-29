@@ -14,6 +14,7 @@ failure so the caller can degrade gracefully.
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 
@@ -120,6 +121,20 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
     return _extract_assistant_text(result.stdout)
 
 
+_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Strip <think>...</think> reasoning blocks from model output.
+
+    Some reasoning models (e.g. DeepSeek) embed internal reasoning in
+    <think>...</think> blocks before the actual response. These blocks may
+    themselves contain JSON-shaped text that confuses downstream JSON
+    extraction; stripping them before processing avoids greedy-regex traps.
+    """
+    return _THINK_TAG_RE.sub("", text).strip()
+
+
 def _extract_assistant_text(stdout: str) -> str:
     """Collect assistant message contents from gptme NDJSON output."""
     contents: list[str] = []
@@ -134,13 +149,18 @@ def _extract_assistant_text(stdout: str) -> str:
         if obj.get("type") == "message" and obj.get("role") == "assistant":
             content = obj.get("content")
             if isinstance(content, str) and content.strip():
-                contents.append(content)
+                # Strip <think>...</think> reasoning blocks before recording.
+                stripped = _strip_think_tags(content)
+                if stripped:
+                    contents.append(stripped)
             elif isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
                         text = part.get("text", "")
                         if isinstance(text, str) and text.strip():
-                            contents.append(text)
+                            stripped = _strip_think_tags(text)
+                            if stripped:
+                                contents.append(stripped)
     if not contents:
         logger.warning("gptme fallback produced no assistant messages")
         return ""
@@ -166,11 +186,37 @@ def _extract_assistant_text(stdout: str) -> str:
         for candidate in reversed(json_candidates):
             parsed = json.loads(candidate)
             if isinstance(parsed, dict) and any(parsed.get(k) for k in _SUMMARY_KEYS):
+                logger.debug(
+                    "gptme fallback: returning JSON with summary key (%d chars): %.100r",
+                    len(candidate),
+                    candidate,
+                )
                 return candidate
+        # No JSON candidate has a summary key. Prefer non-JSON content if
+        # available — the real answer may be plain text while the JSON was
+        # a preamble (e.g. {"thinking": "..."}).  Let extract_json_from_response
+        # try to pull JSON out of the plain text (handles embedded JSON,
+        # code blocks, etc.).
+        non_json = [c for c in contents if c not in set(json_candidates)]
+        if non_json:
+            logger.warning(
+                "gptme fallback: no JSON candidate has summary key; "
+                "falling back to last non-JSON content (%d chars): %.100r",
+                len(non_json[-1]),
+                non_json[-1],
+            )
+            return non_json[-1]
+        logger.warning(
+            "gptme fallback: no JSON candidate has summary key; "
+            "returning last JSON candidate (%d chars): %.100r",
+            len(json_candidates[-1]),
+            json_candidates[-1],
+        )
         return json_candidates[-1]
-    logger.debug(
+    logger.warning(
         "gptme fallback: no assistant message parsed as JSON (%d messages); "
-        "returning last message for caller to attempt extraction",
+        "returning last message for caller to attempt extraction: %.100r",
         len(contents),
+        contents[-1],
     )
     return contents[-1]

@@ -507,15 +507,31 @@ def extract_json_from_response(response: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    # Try to find JSON object in the response
-    json_match = re.search(r"\{[\s\S]*\}", response)
-    if json_match:
+    # Try to find JSON object in the response using raw_decode to avoid
+    # the greedy-regex trap where <think>content with {braces}</think>
+    # followed by {"narrative": "..."} causes the regex to match too broadly.
+    # raw_decode finds all valid top-level JSON objects; prefer the last one
+    # with a recognised summary key (handles preamble-then-answer patterns).
+    decoder = json.JSONDecoder()
+    pos = 0
+    json_objects: list[dict[str, Any]] = []
+    while pos < len(response):
+        start = response.find("{", pos)
+        if start == -1:
+            break
         try:
-            result = json.loads(json_match.group(0))
-            if isinstance(result, dict):
-                return result
+            obj, end = decoder.raw_decode(response, start)
+            if isinstance(obj, dict):
+                json_objects.append(obj)
+            pos = end
         except json.JSONDecodeError:
-            pass
+            pos = start + 1
+    if json_objects:
+        _narrative_keys = ("narrative", "month_narrative")
+        for obj in reversed(json_objects):
+            if any(obj.get(k) for k in _narrative_keys):
+                return obj
+        return json_objects[-1]
 
     # Return empty dict if no JSON found
     return {}

@@ -1,15 +1,23 @@
 """Tests for the gptme fallback backend (gptme_backend.py).
 
-Covers the deepseek reasoning-model preamble gap: a JSON-shaped thinking
-preamble (e.g. ``{"thinking": "..."}``) emitted before the real answer must
-never be returned in place of the actual summary. The parser must scan all
-JSON-parseable assistant candidates and prefer the one containing a recognised
-summary key, with the final answer winning over an earlier preamble.
+Covers:
+- DeepSeek reasoning-model <think>...</think> tag stripping so that embedded
+  JSON inside think blocks does not confuse the downstream JSON extractor.
+- JSON-shaped preamble handling: a preamble emitted as a separate assistant
+  message must never be returned in place of the actual summary. The parser
+  must scan all JSON-parseable assistant candidates and prefer the one
+  containing a recognised summary key, with the final answer winning over an
+  earlier preamble.
+- Logging paths that surface what was extracted (regression-guard for silent
+  fallback failures where nothing was logged).
 """
+
+import json
 
 from gptme_activity_summary.gptme_backend import (
     _DEFAULT_MODEL,
     _extract_assistant_text,
+    _strip_think_tags,
     call_gptme,
     is_enabled,
 )
@@ -17,9 +25,93 @@ from gptme_activity_summary.gptme_backend import (
 
 def _msg(content) -> str:
     """Build a single gptme NDJSON assistant message line."""
-    import json
-
     return json.dumps({"type": "message", "role": "assistant", "content": content})
+
+
+# ---------------------------------------------------------------------------
+# _strip_think_tags
+# ---------------------------------------------------------------------------
+
+
+def test_strip_think_tags_basic():
+    """Simple <think>...</think> block is removed."""
+    raw = '<think>I\'ll think about this...</think>\n{"narrative": "done"}'
+    result = _strip_think_tags(raw)
+    assert "<think>" not in result
+    assert "narrative" in result
+
+
+def test_strip_think_tags_with_braces_inside():
+    """Think block containing {braces} is fully stripped."""
+    raw = '<think>let me use {"structure": "json"}</think>\n{"narrative": "ok"}'
+    result = _strip_think_tags(raw)
+    assert "<think>" not in result
+    assert '"structure"' not in result
+    assert '"narrative"' in result
+
+
+def test_strip_think_tags_multiline():
+    raw = '<think>\nLine one.\nLine two.\n</think>\n{"narrative": "result"}'
+    result = _strip_think_tags(raw)
+    assert "Line one." not in result
+    assert "narrative" in result
+
+
+def test_strip_think_tags_noop_when_absent():
+    """No <think> tags → string unchanged."""
+    raw = '{"narrative": "clean"}'
+    assert _strip_think_tags(raw) == raw
+
+
+def test_strip_think_tags_multiple_blocks():
+    """Multiple disjoint <think> blocks are all stripped."""
+    raw = "<think>first</think> middle <think>second</think> end"
+    result = _strip_think_tags(raw)
+    assert "first" not in result
+    assert "second" not in result
+    assert "middle" in result
+    assert "end" in result
+
+
+# ---------------------------------------------------------------------------
+# _extract_assistant_text — think tag in content
+# ---------------------------------------------------------------------------
+
+
+def test_think_tag_stripped_before_json_extraction():
+    """Content starting with <think>...</think> yields the JSON that follows."""
+    content = '<think>Analyzing the activities...</think>\n{"narrative": "Bob shipped fixes"}'
+    ndjson = _msg(content)
+    out = _extract_assistant_text(ndjson)
+    # After stripping the think block, the remaining text is valid JSON
+    assert "narrative" in out
+
+
+def test_think_tag_with_nested_braces_does_not_confuse_parser():
+    """Think block containing {key: val} JSON-shaped text is stripped cleanly."""
+    content = (
+        '<think>I should output {"type": "summary", "key": "val"}</think>\n'
+        '{"narrative": "real answer here"}'
+    )
+    ndjson = _msg(content)
+    out = _extract_assistant_text(ndjson)
+    # The real answer (not the think-block JSON) should be returned
+    parsed = json.loads(out)
+    assert parsed.get("narrative") == "real answer here"
+
+
+def test_pure_think_tag_with_no_trailing_content():
+    """If stripping a think block leaves nothing, fall back gracefully."""
+    content = "<think>All reasoning, no output.</think>"
+    ndjson = _msg(content)
+    # Should not raise; may return "" or last content
+    result = _extract_assistant_text(ndjson)
+    assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# _extract_assistant_text — JSON preamble (separate messages)
+# ---------------------------------------------------------------------------
 
 
 def test_returns_empty_on_no_assistant_messages():
@@ -91,6 +183,30 @@ def test_list_content_text_messages():
     )
     out = _extract_assistant_text(ndjson)
     assert "list format answer" in out
+
+
+def test_no_json_candidate_falls_back_to_non_json_content():
+    """When only the preamble is JSON and the answer is plain text, return plain text.
+
+    The plain text is returned so that extract_json_from_response can attempt
+    JSON extraction (e.g. via code blocks or embedded JSON regex).
+    """
+    preamble = json.dumps({"thinking": "reasoning"})
+    plain_answer = "Bob shipped many fixes today."
+    ndjson = "\n".join([_msg(preamble), _msg(plain_answer)])
+    out = _extract_assistant_text(ndjson)
+    # Should return the plain-text answer, not the JSON preamble
+    assert out == plain_answer
+
+
+def test_multipart_content_list():
+    """Content as a list of parts (multipart message format)."""
+    content_parts = [
+        {"type": "text", "text": '{"narrative": "from list content"}'},
+    ]
+    ndjson = json.dumps({"type": "message", "role": "assistant", "content": content_parts})
+    out = _extract_assistant_text(ndjson)
+    assert "narrative" in out
 
 
 def test_is_enabled_off_by_default(monkeypatch):
