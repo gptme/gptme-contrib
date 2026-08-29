@@ -456,6 +456,48 @@ def test_allow_recreate_false_peek_failure_does_not_wipe(tmp_path, monkeypatch):
     )
 
 
+def test_allow_recreate_true_peek_failure_does_not_wipe(tmp_path, monkeypatch):
+    """index-command Indexer must not delete a live collection if peek also fails.
+
+    Regression: the allow_recreate=True except branch treated a failed
+    EF-less get_collection() as "collection missing" and set
+    need_recreate=True. Recreate deletes first, so a transient sqlite
+    lock during a concurrent write would wipe a matching live collection
+    (the original 84k-chunk incident, still open on the write path after
+    the read-only guard).
+    """
+    persist_dir = tmp_path / "index"
+    persist_dir.mkdir()
+    _make_default_collection(persist_dir, n_docs=3)
+
+    real_get = Client.get_collection
+
+    def boom(self, name, embedding_function=None, **kwargs):
+        raise ValueError("database is locked")
+
+    monkeypatch.setattr(Client, "get_collection", boom)
+
+    with pytest.raises(RuntimeError, match="not confirmed missing"):
+        Indexer(
+            persist_directory=persist_dir,
+            enable_persist=True,
+            embedding_function="default",
+            collection_name="default",
+            allow_recreate=True,
+            force_recreate=False,
+        )
+
+    monkeypatch.setattr(Client, "get_collection", real_get)
+    verify = chromadb.PersistentClient(
+        path=str(persist_dir),
+        settings=Settings(allow_reset=True, is_persistent=True, anonymized_telemetry=False),
+    )
+    assert verify.get_collection("default").count() == 3, (
+        "allow_recreate=True peek failure wiped the collection — "
+        "write-path recreate-guard regression"
+    )
+
+
 def test_gc_orphans_preserves_live_uuid_dir_case_insensitive(tmp_path):
     """Uppercase UUID dir whose lowercase id is in the catalog is live, not orphan.
 

@@ -25,7 +25,7 @@ from ..embeddings import (
 )
 from .document import Document
 from .document_processor import DocumentProcessor
-from .gc import index_writer_lock
+from .gc import _WRITER_LOCK_NAME, index_writer_lock
 
 
 # HuggingFace namespaces used for sentence-transformer / embedding models.
@@ -523,8 +523,20 @@ class Indexer:
                     else:
                         try:
                             peek = self.client.get_collection(name=collection_name)
-                        except Exception:
-                            need_recreate = True
+                        except Exception as peek_err:
+                            # Peek failed: either the collection is absent, or
+                            # the catalog is temporarily unreadable (sqlite lock
+                            # during a concurrent write). Recreate wipes first —
+                            # only do that when list_collections confirms absence.
+                            if self._collection_confirmed_missing(collection_name):
+                                need_recreate = True
+                            else:
+                                raise RuntimeError(
+                                    f"Collection {collection_name!r} could not be "
+                                    "opened and was not confirmed missing; refusing "
+                                    "to recreate. "
+                                    f"Error: {peek_err}"
+                                ) from peek_err
                         else:
                             stored = (peek.metadata or {}).get("embedding_model", "unknown")
                             if stored == current_model:
@@ -595,6 +607,38 @@ class Indexer:
         if persist_dir is None:
             return nullcontext()
         return index_writer_lock(persist_dir)
+
+    def _collection_confirmed_missing(self, collection_name: str) -> bool:
+        """True only when the catalog lists no collection of this name.
+
+        A failed get_collection() is not proof of absence: a sqlite write-lock
+        looks the same as "missing". Recreate deletes first, so a false
+        missing signal wipes a live index. If the catalog cannot be listed,
+        treat the collection as present and refuse to wipe.
+        """
+        try:
+            return collection_name not in {c.name for c in self.client.list_collections()}
+        except Exception:
+            return False
+
+    def _is_persist_artifact(self, path: Path) -> bool:
+        """True for the persist dir, files inside it, or the writer lock.
+
+        Indexing those files is always wrong: they are the index, not a
+        corpus. Watcher tests (and any watch of a tree that contains the
+        persist dir) would otherwise ingest ``.gptme-rag-writer.lock``.
+        """
+        if path.name == _WRITER_LOCK_NAME:
+            return True
+        persist = getattr(self, "persist_directory", None)
+        if persist is None:
+            return False
+        try:
+            persist_resolved = Path(persist).resolve()
+            resolved = path.resolve()
+        except OSError:
+            return False
+        return resolved == persist_resolved or persist_resolved in resolved.parents
 
     def _assign_preserved_collection(self, collection, collection_name: str) -> None:
         """Keep an EF-less handle; rebind our embedder or fail loud.
@@ -1763,9 +1807,15 @@ class Indexer:
             # Resolve symlinks to target
             try:
                 resolved = f.resolve()
-                valid_files.add(resolved)
             except Exception as e:
                 logger.warning(f"Error resolving symlink: {f} -> {e}")
+                continue
+
+            if self._is_persist_artifact(resolved):
+                logger.debug(f"Skipping persist-dir artifact: {resolved}")
+                continue
+
+            valid_files.add(resolved)
 
         # Check file limit. Strict greater-than: a corpus that lands exactly on
         # the cap is complete, not truncated, so it must not log an ERROR.
