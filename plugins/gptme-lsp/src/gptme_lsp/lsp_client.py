@@ -341,10 +341,14 @@ class LSPServer:
         params = {
             "processId": None,
             "rootUri": self.workspace.as_uri(),
+            "workspaceFolders": [
+                {"uri": self.workspace.as_uri(), "name": self.workspace.name}
+            ],
             "capabilities": {
+                "workspace": {"workspaceFolders": True},
                 "textDocument": {
                     "publishDiagnostics": {"relatedInformation": True},
-                }
+                },
             },
         }
         result = self._send_request("initialize", params)
