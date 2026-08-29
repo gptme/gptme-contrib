@@ -93,11 +93,9 @@ def test_list_content_text_messages():
     assert "list format answer" in out
 
 
-def test_is_enabled_off_by_default():
+def test_is_enabled_off_by_default(monkeypatch):
     """The fallback is off by default (no env set) to avoid data exfiltration."""
-    import os
-
-    os.environ.pop("GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK", None)
+    monkeypatch.delenv("GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK", raising=False)
     assert is_enabled() is False
 
 
@@ -106,9 +104,7 @@ def test_default_model_is_deepseek_flash():
     assert "deepseek" in _DEFAULT_MODEL and "flash" in _DEFAULT_MODEL
 
 
-def test_call_gptme_returns_empty_when_disabled():
+def test_call_gptme_returns_empty_when_disabled(monkeypatch):
     """call_gptme is best-effort and returns '' when the fallback is disabled."""
-    import os
-
-    os.environ.pop("GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK", None)
+    monkeypatch.delenv("GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK", raising=False)
     assert call_gptme("ignored prompt") == ""
