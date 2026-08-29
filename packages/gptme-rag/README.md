@@ -18,6 +18,7 @@ This is the **vector search** complement to [`gptme-wisdom`](https://github.com/
 - 🔌 MCP server for agent integration (`gptme-rag mcp`)
 - 🛠️ CLI interface (`gptme-rag index`, `gptme-rag search`)
 - 📊 Injection logging and index-health/rot reporting (`gptme_rag.observability`)
+- 🧠 Knowledge-entry source over gptme's JSONL store (`KnowledgeEntrySource`, `memory_type="knowledge_entry"`)
 
 ## Quick Start
 
