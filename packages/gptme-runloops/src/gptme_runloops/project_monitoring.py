@@ -392,6 +392,88 @@ class ProjectMonitoringRun(BaseRunLoop):
 
         return work_items
 
+    # The AI reviewer (scripts/github/ai-review.py) posts its output AS the
+    # agent's own GitHub account: a summary ISSUE comment carrying
+    # `<!-- bob-ai-review {...} -->` and per-finding INLINE review comments
+    # (pulls/{n}/comments) carrying `<!-- bob-ai-review-finding -->`. Both are
+    # INBOUND work for PM, not a response by the agent — treating them as "own
+    # activity" made self-review output invisible to dispatch (caught live on
+    # gptme/gptme#3669). Substring match covers every marker variant
+    # (bob-ai-review, -finding, -fp, -disposition, -unreviewable).
+    AI_REVIEW_MARKER = "bob-ai-review"
+
+    def _is_ai_reviewer_output(self, body: str | None) -> bool:
+        """True if a comment body is AI-reviewer output (inbound work)."""
+        return self.AI_REVIEW_MARKER in (body or "")
+
+    def _latest_inline_review_comment(self, repo: str, pr_number: int) -> dict | None:
+        """Fetch the newest inline review comment (pulls/{n}/comments).
+
+        `gh pr view --json comments` returns ISSUE comments only, and the AI
+        reviewer's summary issue comment is upserted in place (its createdAt
+        never moves) — so a fresh review pass can be visible ONLY through
+        inline review comments. Observed live on gptme/gptme#3669: last issue
+        comment was a plain self comment from 14:37Z while the fresh finding
+        landed inline at 15:58Z. One extra gh call, made only when the
+        issue-comment view alone would conclude "self".
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo}/pulls/{pr_number}/comments"
+                    "?sort=created&direction=desc&per_page=1",
+                    "--jq",
+                    '.[0] | {login: (.user.login // ""), '
+                    'body: (.body // ""), createdAt: (.created_at // "")}',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+            comment = json.loads(result.stdout)
+            if not isinstance(comment, dict) or not comment.get("createdAt"):
+                return None
+            return comment
+        except Exception as e:
+            self.logger.warning(f"Error fetching inline review comments: {e}")
+            return None
+
+    def _last_activity_is_self_response(
+        self,
+        repo: str,
+        pr_number: int,
+        login: str,
+        body: str,
+        created_at: str,
+    ) -> bool:
+        """Classify the last ISSUE comment: is the PR's latest activity the
+        agent's own response (i.e. safe to skip dispatch for)?
+
+        AI-reviewer output posted under the agent's own login is inbound work,
+        never a response. And when the last issue comment is a plain self
+        comment, a newer INLINE review comment can still carry inbound
+        reviewer findings — check it before concluding "own activity".
+        """
+        if not self.author or login != self.author:
+            return False
+        if self._is_ai_reviewer_output(body):
+            # Reviewer output is inbound work, not a response.
+            return False
+        # Plain self issue comment. Inline review comments are invisible to
+        # `gh pr view --json comments`; a newer one may be inbound work.
+        inline = self._latest_inline_review_comment(repo, pr_number)
+        if inline and (not created_at or inline["createdAt"] > created_at):
+            # ISO-8601 UTC "Z" timestamps compare correctly as strings.
+            if inline.get("login") != self.author:
+                return False
+            if self._is_ai_reviewer_output(inline.get("body")):
+                return False
+        return True
+
     def _is_last_activity_by_self(self, repo: str, pr_number: int) -> bool:
         """Check if the last activity on the PR was by the agent.
 
@@ -400,10 +482,12 @@ class ProjectMonitoringRun(BaseRunLoop):
             pr_number: PR number
 
         Returns:
-            True if last comment/activity was by self (the configured author)
+            True if the latest activity is the agent's own RESPONSE. The AI
+            reviewer's output (posted under the same login) does not count —
+            see _last_activity_is_self_response.
         """
         try:
-            # Get last comment on PR
+            # Get last issue comment on PR (author + body + createdAt)
             result = subprocess.run(
                 [
                     "gh",
@@ -415,7 +499,9 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--json",
                     "comments",
                     "--jq",
-                    ".comments | sort_by(.createdAt) | last | .author.login",
+                    ".comments | sort_by(.createdAt) | last | "
+                    '{login: (.author.login // ""), body: (.body // ""), '
+                    'createdAt: (.createdAt // "")}',
                 ],
                 capture_output=True,
                 text=True,
@@ -426,8 +512,16 @@ class ProjectMonitoringRun(BaseRunLoop):
                 # No comments or error - assume not by self
                 return False
 
-            last_author = result.stdout.strip()
-            return last_author == self.author
+            last = json.loads(result.stdout)
+            if not isinstance(last, dict) or not last.get("login"):
+                return False
+            return self._last_activity_is_self_response(
+                repo,
+                pr_number,
+                last["login"],
+                last.get("body") or "",
+                last.get("createdAt") or "",
+            )
 
         except Exception as e:
             self.logger.warning(f"Error checking last activity author: {e}")
@@ -582,7 +676,10 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--json",
                     "updatedAt,comments",
                     "--jq",
-                    '{"updatedAt": .updatedAt, "lastCommentAuthor": (.comments | sort_by(.createdAt) | last | .author.login // "")}',
+                    '{"updatedAt": .updatedAt, "lastComment": '
+                    "(.comments | sort_by(.createdAt) | last | "
+                    '{login: (.author.login // ""), body: (.body // ""), '
+                    'createdAt: (.createdAt // "")})}',
                 ],
                 capture_output=True,
                 text=True,
@@ -595,7 +692,21 @@ class ProjectMonitoringRun(BaseRunLoop):
 
             pr_info = json.loads(result.stdout)
             current_updated = pr_info["updatedAt"]
-            last_activity_by_self = pr_info.get("lastCommentAuthor") == self.author
+            # "By self" means the agent's own RESPONSE — the AI reviewer posts
+            # under the same login, but its output (issue-comment summary or
+            # inline findings) is inbound work and must NOT suppress dispatch
+            # (gptme/gptme#3669). May cost one extra gh call in the ambiguous
+            # plain-self case; kept outside the lock below.
+            last_comment = pr_info.get("lastComment") or {}
+            last_activity_by_self = bool(
+                last_comment.get("login")
+            ) and self._last_activity_is_self_response(
+                repo,
+                pr_number,
+                last_comment.get("login") or "",
+                last_comment.get("body") or "",
+                last_comment.get("createdAt") or "",
+            )
 
             # Exclusive lock serializes concurrent sessions on this PR's state.
             # flock is released automatically when the file handle is closed.
