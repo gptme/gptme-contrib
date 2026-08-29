@@ -245,6 +245,10 @@ def test_initialize_includes_workspace_folders():
     assert isinstance(folders, list) and len(folders) == 1
     assert folders[0]["uri"] == Path("/tmp/workspace-folders-test").as_uri()
     assert folders[0]["name"] == "workspace-folders-test"
+    # LSP spec: clients must advertise workspace.workspaceFolders for servers
+    # to enable workspace-folder-aware indexing (not just send the folder list).
+    caps = init_params.get("capabilities", {})
+    assert caps.get("workspace", {}).get("workspaceFolders") is True
 
 
 def test_diagnostics_formats_without_info(tmp_path):
