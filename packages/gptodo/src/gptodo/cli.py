@@ -2972,7 +2972,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                 explicit_state = any(
                     op == "set" and field == "state" for op, field, _value in changes
                 )
-                if not explicit_state:
+                # Only default waiting → todo. A leftover recurrence-gate
+                # string on done/cancelled/active must not reopen or demote
+                # the task (P1 on gptme/gptme-contrib#1539 / ecb15242).
+                if not explicit_state and post.metadata.get("state") == "waiting":
                     post.metadata["state"] = "todo"
                 post.metadata.pop("waiting_for", None)
                 post.metadata.pop("waiting_since", None)

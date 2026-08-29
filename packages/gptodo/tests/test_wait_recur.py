@@ -911,6 +911,53 @@ def test_set_wait_none_preserves_explicit_state(
     assert "wait_kind" not in post.metadata
 
 
+@pytest.mark.parametrize("start_state", ["done", "cancelled", "active"])
+def test_set_wait_none_does_not_reopen_nonwaiting_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start_state: str
+) -> None:
+    """`--set wait none` must not force todo on a non-waiting task.
+
+    The wait-none release used to set state=todo whenever no explicit
+    `--set state` was in the same edit, even if the task was already
+    done/cancelled/active and merely carried leftover recurrence-gate
+    metadata (gptme/gptme-contrib#1539 P1 on ecb15242).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: {start_state}\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["edit", "recur-gate-task", "--set", "wait", "none"],
+    )
+    assert result.exit_code == 0, result.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == start_state, (
+        f"--set wait none must not reopen/demote {start_state} to todo, "
+        f"got {post.metadata.get('state')!r}"
+    )
+    assert "wait" not in post.metadata
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert "wait_kind" not in post.metadata
+
+
 def test_set_wait_on_nonwaiting_recurrence_gate_drops_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
