@@ -1233,3 +1233,69 @@ def test_set_wait_does_not_rewrite_inner_paren_recurrence_waiting_for(
         "inner-paren human waiting_for must be preserved; "
         f"got {post.metadata.get('waiting_for')!r}"
     )
+
+
+def test_set_wait_after_wait_none_staying_waiting_restores_recurrence_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set wait none --set state waiting` then `--set wait NEW` must stay releasable.
+
+    The first edit pops wait_kind (state=waiting still requires waiting_for) and
+    leaves the generated recurrence string. A later `--set wait NEW` used to skip
+    wait-sync because wait_kind was gone, so waiting_for stayed on the old date
+    and the task never auto-surfaced after the new date expired
+    (P1 on gptme/gptme-contrib#1539 / 7a046593).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    old_wait = "2025-01-01"
+    new_wait = "2030-06-15"
+    old_wf = f"next recurrence gate (wait: {old_wait})"
+    (tasks_dir / "recur-gate-task.md").write_text(
+        f"---\n"
+        f"state: waiting\n"
+        f"wait_kind: machine\n"
+        f"wait: {old_wait}\n"
+        f"waiting_for: '{old_wf}'\n"
+        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
+        f"created: 2026-01-01\n"
+        f"recur: 7d\n"
+        f"---\n"
+        f"# recur-gate-task\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    first = runner.invoke(
+        cli,
+        [
+            "edit",
+            "recur-gate-task",
+            "--set",
+            "wait",
+            "none",
+            "--set",
+            "state",
+            "waiting",
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(cli, ["edit", "recur-gate-task", "--set", "wait", new_wait])
+    assert second.exit_code == 0, second.output
+
+    import frontmatter as fm
+
+    post = fm.load(tasks_dir / "recur-gate-task.md")
+    assert post.metadata["state"] == "waiting"
+    assert str(post.metadata["wait"]).startswith(new_wait)
+    assert post.metadata.get("wait_kind") == "machine", (
+        "later --set wait must restore wait_kind=machine so the new date remains "
+        f"a releasable recurrence gate; got {post.metadata.get('wait_kind')!r}"
+    )
+    wf = post.metadata.get("waiting_for", "")
+    assert new_wait in str(wf), (
+        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
+        "A leftover generated string for the old date permanently traps the task."
+    )
+    assert old_wait not in str(
+        wf
+    ), f"waiting_for must not keep the old wait date {old_wait!r}; got {wf!r}."

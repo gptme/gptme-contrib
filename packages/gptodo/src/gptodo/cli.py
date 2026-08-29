@@ -2956,9 +2956,15 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         wait_was_set, wait_set = wait_change
         if wait_was_set:
             _wf = post.metadata.get("waiting_for", "")
-            recurrence_gate = post.metadata.get(
-                "wait_kind"
-            ) == "machine" and is_generated_recurrence_waiting_for(_wf)
+            generated_wf = is_generated_recurrence_waiting_for(_wf)
+            wait_kind = post.metadata.get("wait_kind")
+            # A leftover generated waiting_for without wait_kind is still a
+            # recurrence gate: `--set wait none --set state waiting` pops
+            # wait_kind (state=waiting requires waiting_for) and a later
+            # `--set wait NEW` must restore the machine gate. Otherwise the
+            # old generated string permanently traps the task after the new
+            # date expires (P1 on gptme/gptme-contrib#1539 / 7a046593).
+            recurrence_gate = generated_wf and wait_kind in ("machine", None)
             if recurrence_gate and wait_set is None:
                 # Clearing a generated recurrence gate means it is no longer
                 # a machine time-gate. Remove the generated blocker metadata as
@@ -2986,6 +2992,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     post.metadata.pop("wait_kind", None)
             elif recurrence_gate and post.metadata.get("state") == "waiting":
                 post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_set})"
+                post.metadata["wait_kind"] = "machine"
             elif recurrence_gate:
                 # Wait changed but the task is no longer waiting. Drop the
                 # generated recurrence string so it cannot trap a todo/done
