@@ -871,6 +871,104 @@ class TestGetPostedFingerprints:
         assert call_kwargs.get("paginate") is True
 
 
+class TestSummaryComment:
+    def test_dropped_findings_are_excluded_from_count_and_severity(self):
+        from gptme_runloops.pr_review.github_adapter import _build_summary_comment_body
+
+        kept = ReviewFinding(
+            id="kept",
+            category="correctness",
+            severity=Severity.high,
+            confidence=0.9,
+            file_path="src/foo.py",
+            line_range="42",
+            title="Real bug",
+            description="A bug.",
+            evidence="code here",
+            disposition=Disposition.confirmed,
+        )
+        dropped = ReviewFinding(
+            id="dropped",
+            category="style",
+            severity=Severity.medium,
+            confidence=0.9,
+            file_path="src/foo.py",
+            line_range="43",
+            title="Suppressed nit",
+            description="A nit.",
+            evidence="code here",
+            disposition=Disposition.dropped,
+        )
+        artifact = ReviewArtifact(
+            target=ReviewTarget(
+                repo="org/repo",
+                pr_number=42,
+                base_sha="base" * 10,
+                head_sha="head" * 10,
+            ),
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="ok",
+            merge_safety=MergeSafety.needs_review,
+            findings=[kept, dropped],
+        )
+
+        body = _build_summary_comment_body(artifact, posted_count=1, skipped_count=1)
+
+        assert "**1 finding(s)**: 1 high" in body
+        assert "medium" not in body
+
+    def test_low_confidence_findings_are_excluded(self):
+        from gptme_runloops.pr_review.github_adapter import _build_summary_comment_body
+
+        kept = ReviewFinding(
+            id="kept",
+            category="correctness",
+            severity=Severity.high,
+            confidence=0.9,
+            file_path="src/foo.py",
+            line_range="42",
+            title="Real bug",
+            description="A bug.",
+            evidence="code here",
+        )
+        low_confidence = ReviewFinding(
+            id="low-confidence",
+            category="correctness",
+            severity=Severity.medium,
+            confidence=0.5,
+            file_path="src/foo.py",
+            line_range="43",
+            title="Uncertain bug",
+            description="Maybe a bug.",
+            evidence="code here",
+        )
+        artifact = ReviewArtifact(
+            target=ReviewTarget(
+                repo="org/repo",
+                pr_number=42,
+                base_sha="base" * 10,
+                head_sha="head" * 10,
+            ),
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="ok",
+            merge_safety=MergeSafety.needs_review,
+            findings=[kept, low_confidence],
+        )
+
+        body = _build_summary_comment_body(
+            artifact, posted_count=1, skipped_count=1, min_confidence=0.6
+        )
+
+        assert "**1 finding(s)**: 1 high" in body
+        assert "medium" not in body
+
+
 class TestPublishArtifactShadowMode:
     """publish_artifact() in shadow mode must not call any GitHub API."""
 

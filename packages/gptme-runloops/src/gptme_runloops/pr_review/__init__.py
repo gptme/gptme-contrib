@@ -52,6 +52,12 @@ from .schema import (
     ReviewTarget,
     Severity,
 )
+from .verifier import (
+    VERIFIER_PROMPT_VERSION,
+    VerifierVerdict,
+    verify_artifact,
+    verify_finding,
+)
 
 __all__ = [
     # Schema
@@ -68,4 +74,9 @@ __all__ = [
     "REVIEW_PROMPT_VERSION",
     "resolve_local_target",
     "run_review",
+    # Stage 2 adversarial verifier
+    "VERIFIER_PROMPT_VERSION",
+    "VerifierVerdict",
+    "verify_artifact",
+    "verify_finding",
 ]
