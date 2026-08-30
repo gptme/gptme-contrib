@@ -107,10 +107,13 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
         "GPTME_WORKSPACE",
     ):
         env.pop(key, None)
-    isolated_logs = Path(tempfile.mkdtemp(prefix="gptme-activity-summary-"))
-    env["GPTME_LOGS_HOME"] = str(isolated_logs)
 
+    # Create the private log dir inside the try so a full/unwritable temp
+    # filesystem returns "" instead of raising (never-raise contract).
+    isolated_logs = None
     try:
+        isolated_logs = Path(tempfile.mkdtemp(prefix="gptme-activity-summary-"))
+        env["GPTME_LOGS_HOME"] = str(isolated_logs)
         result = subprocess.run(
             cmd,
             input=prompt,
@@ -126,7 +129,8 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
         logger.warning("gptme fallback errored unexpectedly: %s", exc)
         return ""
     finally:
-        shutil.rmtree(isolated_logs, ignore_errors=True)
+        if isolated_logs is not None:
+            shutil.rmtree(isolated_logs, ignore_errors=True)
 
     if result.returncode != 0:
         logger.warning(

@@ -409,3 +409,31 @@ def test_call_gptme_isolates_parent_session_logs(monkeypatch):
     from pathlib import Path
 
     assert not Path(logs_home).exists()
+
+
+def test_call_gptme_returns_empty_when_tempdir_fails(monkeypatch):
+    """mkdtemp OSError must not escape call_gptme (never-raise contract).
+
+    Greptile on gptme/gptme-contrib#1552: tempdir creation sat outside the
+    try, so a full/unwritable temp filesystem raised before the adapter's
+    error handler and crashed the activity-summary job instead of degrading.
+    """
+    from unittest.mock import patch
+
+    monkeypatch.setenv("GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK", "1")
+
+    with (
+        patch(
+            "gptme_activity_summary.gptme_backend.shutil.which",
+            return_value="/usr/bin/gptme",
+        ),
+        patch(
+            "gptme_activity_summary.gptme_backend.tempfile.mkdtemp",
+            side_effect=OSError("No space left on device"),
+        ),
+        patch("gptme_activity_summary.gptme_backend.subprocess.run") as run_mock,
+    ):
+        out = call_gptme("summarize")
+
+    assert out == ""
+    run_mock.assert_not_called()
