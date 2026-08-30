@@ -1813,9 +1813,12 @@ def _make_lesson(repos: list[str] | None) -> dict:
     """Minimal lesson dict for filter_by_repo tests."""
     lesson: dict = {"keywords": ["x"], "path": "lessons/x.md", "session_categories": []}
     if repos is not None:
-        lesson["repos"] = [r for r in (normalize_repo_slug(s) for s in repos) if r]
+        slugs = [r for r in (normalize_repo_slug(s) for s in repos) if r]
+        lesson["repos"] = slugs
+        lesson["repos_restricted"] = bool(repos)
     else:
         lesson["repos"] = []
+        lesson["repos_restricted"] = False
     return lesson
 
 
@@ -1864,6 +1867,14 @@ class TestFilterByRepo:
         assert filter_by_repo([lesson], "gptme/gptme") == [lesson]
         assert filter_by_repo([lesson], "activitywatch/aw-server-rust") == [lesson]
         assert filter_by_repo([lesson], "erikbjare/bob") == []
+
+    def test_all_invalid_repos_fail_closed(self):
+        """A configured gate whose every entry is invalid must not become unrestricted."""
+        lesson = _make_lesson(["./local", "gptme"])
+        assert lesson["repos"] == []
+        assert lesson["repos_restricted"] is True
+        assert filter_by_repo([lesson], "gptme/gptme") == []
+        assert filter_by_repo([lesson], None) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1928,6 +1939,7 @@ class TestReposFrontmatterParsing:
         lessons = scan_lessons([tmp_path])
         assert len(lessons) == 1
         assert lessons[0]["repos"] == ["gptme/gptme"]
+        assert lessons[0]["repos_restricted"] is True
 
     def test_scan_lessons_no_repos_field_defaults_empty(self, tmp_path):
         (tmp_path / "lesson.md").write_text(
@@ -1936,6 +1948,7 @@ class TestReposFrontmatterParsing:
         lessons = scan_lessons([tmp_path])
         assert len(lessons) == 1
         assert lessons[0]["repos"] == []
+        assert lessons[0]["repos_restricted"] is False
 
     def test_scan_lessons_invalid_repo_entry_dropped(self, tmp_path):
         """An invalid entry (e.g. single-segment or path) is silently dropped."""
@@ -1949,3 +1962,41 @@ class TestReposFrontmatterParsing:
         )
         lessons = scan_lessons([tmp_path])
         assert lessons[0]["repos"] == ["gptme/gptme"]
+        assert lessons[0]["repos_restricted"] is True
+
+    def test_scan_lessons_all_invalid_repos_fail_closed(self, tmp_path):
+        """All-invalid match.repos stays restricted so filter_by_repo excludes it."""
+        (tmp_path / "lesson.md").write_text(
+            "---\n"
+            "match:\n"
+            "  keywords: [datastore merge]\n"
+            "  repos: [./local, gptme]\n"
+            "---\n"
+            "# Title\nBody.\n"
+        )
+        lessons = scan_lessons([tmp_path])
+        assert len(lessons) == 1
+        assert lessons[0]["repos"] == []
+        assert lessons[0]["repos_restricted"] is True
+        assert filter_by_repo(lessons, "gptme/gptme") == []
+        assert filter_by_repo(lessons, None) == []
+
+    def test_regex_fallback_all_invalid_repos_fail_closed(self, tmp_path, monkeypatch):
+        """Regex fallback must not drop an all-invalid gate into unrestricted."""
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        (tmp_path / "lesson.md").write_text(
+            "---\n"
+            "match:\n"
+            "  keywords:\n"
+            "    - datastore merge\n"
+            "  repos:\n"
+            "    - ./local\n"
+            "    - gptme\n"
+            "---\n"
+            "# Title\nBody.\n"
+        )
+        lessons = scan_lessons([tmp_path])
+        assert len(lessons) == 1
+        assert lessons[0]["repos"] == []
+        assert lessons[0]["repos_restricted"] is True
+        assert filter_by_repo(lessons, "erikbjare/bob") == []

@@ -130,6 +130,19 @@ def normalize_repo_slug(value: str) -> str | None:
     return None
 
 
+def _repo_gate(raw: object) -> tuple[list[str], bool]:
+    """Return ``(normalized slugs, is_restricted)`` for a ``match.repos`` value.
+
+    ``is_restricted`` is True when the author supplied any repo entries.
+    If every entry is malformed, slugs is empty but the gate stays restricted
+    so :func:`filter_by_repo` fail-closes instead of treating the lesson as
+    unrestricted.
+    """
+    raw_list = _string_list(raw)
+    slugs = [s for s in (normalize_repo_slug(r) for r in raw_list) if s]
+    return slugs, bool(raw_list)
+
+
 def _dedupe_strings(values: Sequence[object]) -> list[str]:
     """Strip and deduplicate strings while preserving first-seen order."""
     deduped: list[str] = []
@@ -480,12 +493,12 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         match_dict["session_categories"] = session_categories
 
     # ``match.repos`` — optional repository gate; nested form only (same rule
-    # as session_categories).  Each entry is normalised to lowercase owner/repo;
-    # invalid entries are silently dropped.
+    # as session_categories).  Preserve raw entries so ``_parse_lesson_file``
+    # can fail-close when every entry is invalid instead of collapsing the
+    # gate to unrestricted.
     _raw_repos = _extract_list_frontmatter_field(match_block, "repos")
-    repos = [s for s in (normalize_repo_slug(r) for r in _raw_repos) if s]
-    if repos:
-        match_dict["repos"] = repos
+    if _raw_repos:
+        match_dict["repos"] = _raw_repos
 
     top_level_patterns = _extract_list_frontmatter_field(
         top_level_without_match, "patterns", allow_indented=False
@@ -741,7 +754,7 @@ def _score_skill_descriptor(lesson: dict[str, Any], prompt_lower: str) -> tuple[
 # ---------------------------------------------------------------------------
 
 #: On-disk cache schema. Bump when the lesson dict shape changes.
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 
 # resolved path -> (mtime_ns, size, lesson_or_None). None means parsed-but-skipped.
 _parse_cache: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
@@ -798,6 +811,7 @@ _LESSON_LIST_FIELDS = (
     "tags",
     "harness_restrict",
     "session_categories",
+    "repos",
 )
 _LESSON_STRING_FIELDS = ("path", "title", "description", "when_to_use", "body")
 
@@ -811,6 +825,7 @@ def _valid_cached_lesson(lesson: object) -> bool:
         and (lesson.get("id") is None or isinstance(lesson.get("id"), str))
         and (lesson.get("skill_name") is None or isinstance(lesson.get("skill_name"), str))
         and isinstance(lesson.get("is_skill"), bool)
+        and isinstance(lesson.get("repos_restricted"), bool)
         and isinstance(lesson.get("n_keywords"), int)
     )
 
@@ -938,7 +953,7 @@ def _parse_lesson_file(path: Path) -> dict[str, Any] | None:
     session_categories = _dedupe_strings(_string_list(_raw_sc))
 
     _raw_repos = match_data.get("repos") or [] if isinstance(match_data, dict) else []
-    repos = [s for s in (normalize_repo_slug(r) for r in _string_list(_raw_repos)) if s]
+    repos, repos_restricted = _repo_gate(_raw_repos)
 
     if not keywords and not patterns and not skill_name:
         return None
@@ -959,6 +974,7 @@ def _parse_lesson_file(path: Path) -> dict[str, Any] | None:
         "harness_restrict": harness_restrict,
         "session_categories": session_categories,
         "repos": repos,
+        "repos_restricted": repos_restricted,
         "is_skill": path.name == "SKILL.md" or skill_name is not None,
         "body": body,
         "n_keywords": len(keywords),
@@ -1172,15 +1188,20 @@ def filter_by_session_category(
 def filter_by_repo(lessons: list[dict[str, Any]], current_repo: str | None) -> list[dict[str, Any]]:
     """Return lessons that are unrestricted or match *current_repo*.
 
-    Lessons with a non-empty ``match.repos`` list are excluded unless a
+    Lessons with a configured ``match.repos`` gate are excluded unless a
     normalised form of *current_repo* appears in that list.  The contract
     mirrors ``filter_by_session_category`` with one difference: unknown context
     is **fail-closed** (restricted lessons are excluded when *current_repo* is
     ``None``).
 
+    A lesson is restricted when ``repos_restricted`` is True or ``repos`` is
+    non-empty.  That distinction matters when every configured entry is
+    invalid: normalisation yields an empty list, but the author still wrote a
+    gate, so the lesson stays excluded instead of becoming unrestricted.
+
     Rationale: the purpose of the field is to prevent bleed.  If an unknown
-    context failed open, repo-scoped lessons would inject into all sessions
-    until every runtime is wired — eliminating the benefit.
+    context — or a typo'd gate — failed open, repo-scoped lessons would inject
+    into unrelated sessions.
 
     *current_repo* is normalised through :func:`normalize_repo_slug`; pass a
     raw ``GPTME_CURRENT_REPO`` value or an already-normalised slug.
@@ -1191,6 +1212,7 @@ def filter_by_repo(lessons: list[dict[str, Any]], current_repo: str | None) -> l
     | ``[gptme/gptme]``      | ``gptme/gptme``| pass     |
     | ``[gptme/gptme]``      | ``erikbjare/bob``| exclude |
     | ``[gptme/gptme]``      | ``None``       | exclude  |
+    | all entries invalid    | anything       | exclude  |
 
     Examples::
 
@@ -1202,12 +1224,13 @@ def filter_by_repo(lessons: list[dict[str, Any]], current_repo: str | None) -> l
     filtered = []
     for lesson in lessons:
         repos = lesson.get("repos") or []
-        if not repos:
+        restricted = bool(lesson.get("repos_restricted")) or bool(repos)
+        if not restricted:
             # unrestricted — always pass
             filtered.append(lesson)
         elif normalised and normalised in repos:
             filtered.append(lesson)
-        # else: restricted and context unknown or non-matching → exclude
+        # else: restricted and context unknown, non-matching, or invalid gate → exclude
     return filtered
 
 
