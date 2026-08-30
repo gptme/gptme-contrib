@@ -362,3 +362,50 @@ def test_call_gptme_returns_empty_when_disabled(monkeypatch):
     """call_gptme is best-effort and returns '' when the fallback is disabled."""
     monkeypatch.delenv("GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK", raising=False)
     assert call_gptme("ignored prompt") == ""
+
+
+def test_call_gptme_isolates_parent_session_logs(monkeypatch):
+    """Nested gptme must not inherit the parent session's GPTME_LOGS_HOME/NAME.
+
+    Incident 2026-08-30: a parent autonomous session exported
+    GPTME_LOGS_HOME=/tmp/gptme-logs-<id> and GPTME_NAME=autonomous-<id>.
+    call_gptme forwarded that env, so the fallback appended into the parent
+    conversation.jsonl and stdout mixed parent+child assistant messages.
+    """
+    import subprocess
+    from unittest.mock import patch
+
+    monkeypatch.setenv("GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK", "1")
+    monkeypatch.setenv("GPTME_LOGS_HOME", "/tmp/gptme-logs-parent-session")
+    monkeypatch.setenv("GPTME_NAME", "autonomous-parent")
+    monkeypatch.setenv("GPTME_AGENT_NAME", "bob")
+    monkeypatch.setenv("GPTME_WORKSPACE", "/home/bob/bob")
+    monkeypatch.setenv("GPTME_SUBPROCESS", "1")
+
+    captured: dict = {}
+
+    def fake_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env") or {}
+        ndjson = _msg('{"narrative": "isolated"}')
+        return subprocess.CompletedProcess(args=["gptme"], returncode=0, stdout=ndjson)
+
+    with (
+        patch("gptme_activity_summary.gptme_backend.shutil.which", return_value="/usr/bin/gptme"),
+        patch("gptme_activity_summary.gptme_backend.subprocess.run", side_effect=fake_run),
+    ):
+        out = call_gptme("summarize")
+
+    env = captured["env"]
+    assert out == '{"narrative": "isolated"}'
+    assert env.get("GPTME_SUBPROCESS") is None
+    assert env.get("GPTME_NAME") is None
+    assert env.get("GPTME_AGENT_NAME") is None
+    assert env.get("GPTME_WORKSPACE") is None
+    logs_home = env.get("GPTME_LOGS_HOME")
+    assert logs_home, "must set a private GPTME_LOGS_HOME"
+    assert logs_home != "/tmp/gptme-logs-parent-session"
+    assert "gptme-activity-summary-" in logs_home
+    # Isolated dir is cleaned up after the call.
+    from pathlib import Path
+
+    assert not Path(logs_home).exists()
