@@ -8,18 +8,21 @@ Covers:
   must scan all JSON-parseable assistant candidates and prefer the one
   containing a recognised summary key, with the final answer winning over an
   earlier preamble.
-- JSON draft then later prose: if a JSON candidate already has a summary key
-  but a later non-JSON message is real prose (not gptme's no-tool-call
-  trailer), the prose wins. The gptme trailer itself must not displace JSON.
+- JSON answer then later prose: later prose only wins if it *embeds* a
+  summary JSON object. Completion-ack messages ("I have completed the
+  analysis") and gptme trailers must not displace a JSON answer. This is
+  the 2026-08-30 dancing-sad-monster regression.
 - Logging paths that surface what was extracted (regression-guard for silent
   fallback failures where nothing was logged).
 """
 
 import json
 
+from gptme_activity_summary.cc_backend import extract_json_from_response
 from gptme_activity_summary.gptme_backend import (
     _DEFAULT_MODEL,
     _extract_assistant_text,
+    _has_summary_json,
     _strip_think_tags,
     call_gptme,
     is_enabled,
@@ -202,20 +205,46 @@ def test_no_json_candidate_falls_back_to_non_json_content():
     assert out == plain_answer
 
 
-def test_json_draft_then_later_prose_prefers_prose():
-    """JSON with a summary key is still a draft if later prose is the answer.
+def test_json_answer_then_completion_ack_keeps_json():
+    """Completion-ack prose must not displace a JSON summary.
 
-    A reasoning model can emit a preliminary JSON object that includes
-    ``narrative``, then the actual final answer as plain text. Returning the
-    draft would discard the real answer. gptme trailers are excluded from
-    this path (see ``test_json_answer_then_gptme_trailer_keeps_json``).
+    Live 2026-08-30 failure (gptme log ``dancing-sad-monster``): DeepSeek
+    emitted a complete ``narrative`` JSON, then "I have completed the
+    analysis. The full JSON summary ... was emitted in my previous
+    message." That ack mentions the word ``narrative`` but has no JSON
+    object. Preferring it made ``extract_json_from_response`` return {} and
+    the systemd unit failed 12/12 even though the real summary was in the
+    previous assistant message.
+    """
+    answer = json.dumps({"narrative": "REAL summary", "accomplishments": ["a"]})
+    ack = (
+        "I have completed the analysis. The full JSON summary for 2026-08-29 "
+        "was emitted in my previous message. The work is done — it has a "
+        "top-level narrative field as requested.\n\n```complete\n```"
+    )
+    ndjson = "\n".join([_msg(answer), _msg(ack)])
+    out = _extract_assistant_text(ndjson)
+    parsed = json.loads(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert "I have completed" not in out
+
+
+def test_json_draft_then_later_prose_with_summary_json_prefers_later():
+    """Later prose still wins when it *embeds* a summary JSON object.
+
+    A model can emit a JSON draft, then a fenced JSON revision. That later
+    payload is the real answer; keep preferring it over the draft.
     """
     draft = json.dumps({"narrative": "draft preamble", "accomplishments": ["x"]})
-    prose = "Bob shipped the think-tag parser and landed fourteen tests."
+    prose = "Final answer:\n" + json.dumps(
+        {"narrative": "revised summary", "accomplishments": ["y"]}
+    )
     ndjson = "\n".join([_msg(draft), _msg(prose)])
     out = _extract_assistant_text(ndjson)
     assert out == prose
-    assert "draft preamble" not in out
+    assert _has_summary_json(out)
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "revised summary"
 
 
 def test_json_answer_then_gptme_trailer_keeps_json():
@@ -238,14 +267,46 @@ def test_json_answer_then_gptme_trailer_keeps_json():
     assert parsed.get("narrative") == "REAL summary"
 
 
-def test_json_draft_then_prose_then_trailer_prefers_prose():
-    """Prose between a JSON draft and the gptme trailer still wins."""
-    draft = json.dumps({"narrative": "draft"})
-    prose = "The real final answer in plain text."
+def test_json_draft_then_ack_then_trailer_keeps_json():
+    """Completion-ack between a JSON answer and the gptme trailer still loses."""
+    draft = json.dumps({"narrative": "kept summary"})
+    ack = "I have completed the analysis. The full JSON summary was emitted above."
     trailer = "No tool call detected in last message."
-    ndjson = "\n".join([_msg(draft), _msg(prose), _msg(trailer)])
+    ndjson = "\n".join([_msg(draft), _msg(ack), _msg(trailer)])
     out = _extract_assistant_text(ndjson)
-    assert out == prose
+    parsed = json.loads(out)
+    assert parsed.get("narrative") == "kept summary"
+
+
+def test_truncated_think_json_then_complete_json_then_ack():
+    """Live shape: truncated think-JSON, complete think-JSON, then an ack.
+
+    Mirrors the 2026-08-30 dancing-sad-monster fallback: first assistant
+    message is cut off mid-JSON inside ``<think>``, second is a complete
+    summary JSON after a think block, third is a completion-ack. The
+    extractor must return the complete JSON, not the ack.
+    """
+    truncated = (
+        "<think>I'll emit JSON.</think>\n"
+        '{"accomplishments": ["partial"], "blockers": [{"issue": "unterminated"'
+    )
+    complete = "<think>I was cut off. Finishing the JSON.</think>\n" + json.dumps(
+        {
+            "narrative": "recovered daily summary",
+            "accomplishments": ["parser fix"],
+            "blockers": [{"issue": "oauth expired", "status": "active"}],
+        }
+    )
+    ack = (
+        "I have completed the analysis. The full JSON summary was emitted in "
+        "my previous message. It includes narrative, accomplishments, and "
+        "blockers."
+    )
+    ndjson = "\n".join([_msg(truncated), _msg(complete), _msg(ack)])
+    out = _extract_assistant_text(ndjson)
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "recovered daily summary"
+    assert parsed.get("accomplishments") == ["parser fix"]
 
 
 def test_thinking_json_then_prose_then_trailer_skips_trailer():
