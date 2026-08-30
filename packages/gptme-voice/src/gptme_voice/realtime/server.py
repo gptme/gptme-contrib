@@ -74,6 +74,13 @@ def _websocket_peer_host(websocket) -> str | None:
     return None
 
 
+def _websocket_has_vision(websocket) -> bool:
+    """Whether a local client advertised an attached camera bridge."""
+    query_params = getattr(websocket, "query_params", {})
+    value = query_params.get("vision") if query_params is not None else None
+    return isinstance(value, str) and value.lower() in {"1", "true", "yes"}
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -2505,6 +2512,7 @@ class VoiceServer:
         handoff_id = self._get_local_handoff_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
         tool_bridge: GptmeToolBridge | None = None
+        vision_bridge: VisionSessionBridge | None = None
         transcript: list[TranscriptTurn] = []
 
         try:
@@ -2515,11 +2523,12 @@ class VoiceServer:
             body_adapter = self._body_adapter_for_websocket(
                 websocket, transport="local"
             )
-            vision_bridge = VisionSessionBridge(websocket.send_text)
+            if _websocket_has_vision(websocket):
+                vision_bridge = VisionSessionBridge(websocket.send_text)
             session_cfg = self._build_session_config(
                 instructions=instructions,
                 include_body_tools=body_adapter is not None,
-                include_vision_tools=True,
+                include_vision_tools=vision_bridge is not None,
             )
             on_ai_transcript, on_user_transcript, _local_hangup = (
                 self._make_transcript_callbacks(
@@ -2555,7 +2564,9 @@ class VoiceServer:
             async for message in websocket.iter_text():
                 data = json.loads(message)
 
-                if await vision_bridge.handle_message(data):
+                if vision_bridge is not None and await vision_bridge.handle_message(
+                    data
+                ):
                     continue
                 if data.get("type") == "audio":
                     # Audio chunk from client (PCM 24kHz)
@@ -2579,7 +2590,7 @@ class VoiceServer:
         except Exception as e:
             logger.exception("Error handling local connection: %s", e)
         finally:
-            if "vision_bridge" in locals():
+            if vision_bridge is not None:
                 vision_bridge.close()
             if realtime_client:
                 await self._disconnect_realtime_client(realtime_client)

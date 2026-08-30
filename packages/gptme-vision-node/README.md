@@ -65,6 +65,7 @@ GPTME_VOICE_NODE_VISION_SOURCE=camera:0 gptme-voice-node
 The pipeline sends compact person/motion events over the existing `/local`
 WebSocket. It keeps the latest frame on-node until the realtime session calls
 `look`; only then is one JPEG sent to the host for VLM inference.
+Events are telemetry only in v0; they do not trigger unsolicited model speech.
 
 ## Future (explicitly not v0)
 

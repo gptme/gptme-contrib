@@ -82,6 +82,9 @@ With the `vision` extra installed, set `GPTME_VOICE_NODE_VISION_SOURCE=camera:0`
 to run cheap person/motion detectors on the node. Events carry metadata only. A
 JPEG crosses the WebSocket only when the realtime model calls `look`; the host
 then runs VLM inference and returns the description to the same voice turn.
+The node advertises camera capability on connect, so camera-less `/local`
+clients do not expose a `look` tool that can only time out. Vision events remain
+telemetry in v0 and never trigger unsolicited model speech.
 
 ## Architecture
 

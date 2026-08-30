@@ -20,6 +20,7 @@ Protocol:
 import asyncio
 import base64
 import functools
+import importlib
 import json
 import logging
 import os
@@ -117,6 +118,15 @@ def _next_backoff(backoff: int, connected_at: float | None) -> int:
     ):
         return BACKOFF_INITIAL
     return min(backoff * 2, BACKOFF_MAX)
+
+
+def _with_vision_capability(server_url: str, enabled: bool) -> str:
+    """Tell the voice server whether this connection has a camera bridge."""
+    if not enabled:
+        return server_url
+    parsed = urlparse(server_url)
+    query = f"{parsed.query}&vision=1" if parsed.query else "vision=1"
+    return parsed._replace(query=query).geturl()
 
 
 class VoiceNode:
@@ -269,12 +279,15 @@ class VoiceNode:
     async def run_forever(self) -> None:
         """Connect and auto-reconnect with exponential backoff."""
         backoff = BACKOFF_INITIAL
+        connect_url = _with_vision_capability(
+            self.server_url, self.vision_bridge is not None
+        )
         while self._running:
             connected_at: float | None = None
             error: tuple[int, str] | None = None
             try:
                 async with websockets.connect(
-                    self.server_url,
+                    connect_url,
                     open_timeout=10,
                     ping_interval=20,
                     ping_timeout=20,
@@ -322,18 +335,18 @@ def _build_vision_bridge(source_spec: str | None, interval_s: float):
     if not source_spec:
         return None
     try:
-        from gptme_vision_node import (  # type: ignore[import-not-found]
-            MotionDetector,
-            OpenCVCameraSource,
-            PersonDetector,
-            VisionBridge,
-        )
-        from gptme_vision_node.cli import make_source  # type: ignore[import-not-found]
+        vision_node = importlib.import_module("gptme_vision_node")
+        vision_cli = importlib.import_module("gptme_vision_node.cli")
     except ImportError as exc:
         raise ImportError(
             "vision requires: pip install 'gptme-voice-node[vision]'"
         ) from exc
 
+    MotionDetector = getattr(vision_node, "MotionDetector")
+    OpenCVCameraSource = getattr(vision_node, "OpenCVCameraSource")
+    PersonDetector = getattr(vision_node, "PersonDetector")
+    VisionBridge = getattr(vision_node, "VisionBridge")
+    make_source = getattr(vision_cli, "make_source")
     source = make_source(source_spec)
     if not isinstance(source, OpenCVCameraSource):
         log.warning("vision source %s is not a live camera/stream", source_spec)

@@ -453,6 +453,33 @@ class TestBackoff:
         with patch("gptme_voice_node.node.time.monotonic", return_value=100.0):
             assert _next_backoff(8, connected_at=60.0) == BACKOFF_INITIAL
 
+    def test_vision_capability_preserves_existing_query(self):
+        from gptme_voice_node.node import _with_vision_capability
+
+        url = "wss://voice.example/local?caller_id=erik"
+        assert _with_vision_capability(url, False) == url
+        assert (
+            _with_vision_capability(url, True)
+            == "wss://voice.example/local?caller_id=erik&vision=1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_vision_node_advertises_capability_on_connect(self):
+        vision = MagicMock()
+        node = _make_node(vision_bridge=vision)
+
+        async def stop_on_sleep(_delay):
+            node.stop()
+
+        connect = MagicMock(side_effect=OSError("offline"))
+        with (
+            patch("gptme_voice_node.node.websockets.connect", connect),
+            patch("gptme_voice_node.node.asyncio.sleep", side_effect=stop_on_sleep),
+        ):
+            await node.run_forever()
+
+        assert connect.call_args.args[0].endswith("/local?vision=1")
+
     @pytest.mark.asyncio
     async def test_retry_log_matches_sleep_delay(self, caplog):
         node = _make_node()

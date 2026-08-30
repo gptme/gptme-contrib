@@ -7,6 +7,7 @@ import json
 
 import httpx
 import pytest
+from gptme_voice import vision
 from gptme_voice.vision import VisionSessionBridge, describe_image, vision_tool_schema
 
 
@@ -78,6 +79,29 @@ async def test_vision_event_reaches_callback_without_triggering_vlm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_look_returns_bounded_error_for_invalid_vision_url() -> None:
+    async def send(message: str) -> None:
+        payload = json.loads(message)
+        await bridge.handle_message(
+            {
+                "type": "vision_look_result",
+                "request_id": payload["request_id"],
+                "image": base64.b64encode(b"jpeg-bytes").decode(),
+                "media_type": "image/jpeg",
+            }
+        )
+
+    async def invalid_url(*_args, **_kwargs) -> str:
+        raise httpx.InvalidURL("bad vision URL")
+
+    bridge = VisionSessionBridge(send, describe=invalid_url)
+
+    assert await bridge.look() == {
+        "error": "Could not inspect the camera frame: bad vision URL"
+    }
+
+
+@pytest.mark.asyncio
 async def test_describe_image_uses_async_openai_compatible_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -104,13 +128,23 @@ async def test_describe_image_uses_async_openai_compatible_request(
             captured.update(url=url, body=json, headers=headers)
             return _Response()
 
+    class _Config:
+        values = {
+            "OPENAI_API_KEY": "sk-config",
+            "OPENAI_BASE_URL": "https://vision.test/v1/",
+            "VISION_MODEL": "vision-config-model",
+        }
+
+        def get_env(self, key: str) -> str | None:
+            return self.values.get(key)
+
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
-    result = await describe_image(
-        b"jpeg", "what?", api_key="sk-test", base_url="https://vision.test/v1/"
-    )
+    monkeypatch.setattr(vision, "get_config", _Config)
+    result = await describe_image(b"jpeg", "what?")
 
     assert result == "a room"
     assert captured["url"] == "https://vision.test/v1/chat/completions"
-    assert captured["headers"] == {"Authorization": "Bearer sk-test"}
+    assert captured["headers"] == {"Authorization": "Bearer sk-config"}
+    assert captured["body"]["model"] == "vision-config-model"
     image_url = captured["body"]["messages"][0]["content"][1]["image_url"]["url"]
     assert image_url == "data:image/jpeg;base64,anBlZw=="

@@ -75,6 +75,19 @@ def test_person_appeared_only_once_while_present():
     assert events[0].detections[0].kind == "person"
 
 
+def test_latest_frame_copy_is_an_independent_snapshot():
+    frame = solid_frame((60, 60, 60))
+    pipeline = VisionPipeline(ListSource([frame]), [])
+
+    pipeline.step()
+    snapshot = pipeline.latest_frame_copy()
+    assert snapshot is not None
+    snapshot[:] = 0
+
+    assert pipeline.latest_frame is not None
+    assert np.any(pipeline.latest_frame != 0)
+
+
 def test_motion_events_and_latest_frame():
     still = solid_frame((60, 60, 60))
     moved = still.copy()
@@ -160,6 +173,38 @@ def test_thread_stops_when_source_is_exhausted():
     thread.join(timeout=1)
     assert not thread.is_alive()
     pipeline.stop()
+
+
+def test_live_source_retries_after_empty_frame():
+    frame_seen = threading.Event()
+
+    class TransientLiveSource:
+        stop_on_empty = False
+
+        def __init__(self):
+            self.calls = 0
+
+        def get_frame(self):
+            self.calls += 1
+            if self.calls == 1:
+                return None
+            if self.calls == 2:
+                return solid_frame((60, 60, 60))
+            return None
+
+    class SeenDetector:
+        def detect(self, _frame):
+            frame_seen.set()
+            return []
+
+    pipeline = VisionPipeline(TransientLiveSource(), [SeenDetector()], interval_s=0.01)
+    pipeline.start()
+    try:
+        assert frame_seen.wait(timeout=1)
+        assert pipeline._thread is not None
+        assert pipeline._thread.is_alive()
+    finally:
+        pipeline.stop()
 
 
 def test_start_resets_presence_state_after_restart():

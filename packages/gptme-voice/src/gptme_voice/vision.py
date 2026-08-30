@@ -6,7 +6,6 @@ import asyncio
 import base64
 import json
 import logging
-import os
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -14,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from gptme.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +60,15 @@ async def describe_image(
     timeout: float = 60.0,
 ) -> str:
     """Describe a JPEG via an OpenAI-compatible chat-completions endpoint."""
-    key = api_key or os.environ.get("OPENAI_API_KEY")
+    config = get_config()
+    key = api_key or config.get_env("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     if media_type != "image/jpeg":
         raise ValueError(f"unsupported image media type: {media_type}")
     encoded = base64.b64encode(image).decode("ascii")
     body = {
-        "model": model or os.environ.get("VISION_MODEL", DEFAULT_MODEL),
+        "model": model or config.get_env("VISION_MODEL") or DEFAULT_MODEL,
         "max_tokens": 500,
         "messages": [
             {
@@ -82,7 +83,9 @@ async def describe_image(
             }
         ],
     }
-    url = (base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    url = (base_url or config.get_env("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip(
+        "/"
+    )
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             f"{url}/chat/completions",
@@ -147,7 +150,7 @@ class VisionSessionBridge:
             return {"status": "ok", "description": description}
         except asyncio.TimeoutError:
             return {"error": "Camera did not return a frame before the timeout."}
-        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, RuntimeError, ValueError) as exc:
             logger.warning("vision look failed: %s", exc)
             return {"error": f"Could not inspect the camera frame: {exc}"}
         finally:

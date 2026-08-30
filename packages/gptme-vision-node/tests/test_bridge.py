@@ -92,6 +92,41 @@ async def test_look_before_first_frame_returns_bounded_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_event_send_queue_is_bounded(caplog) -> None:
+    bridge = VisionBridge(_Source(), [])
+    unblock = asyncio.Event()
+
+    async def blocked_send(_message: str) -> None:
+        await unblock.wait()
+
+    bridge._loop = asyncio.get_running_loop()
+    bridge._send_message = blocked_send
+    event = VisionEvent(PERSON_APPEARED)
+    for _ in range(10):
+        bridge._schedule_event(event)
+
+    assert len(bridge._pending_sends) == 4
+    assert "transport is backlogged" in caplog.text
+    unblock.set()
+    await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_blocked_event_sends() -> None:
+    bridge = VisionBridge(_Source(), [])
+    blocked = asyncio.Event()
+
+    async def blocked_send(_message: str) -> None:
+        await blocked.wait()
+
+    bridge._send_message = blocked_send
+    bridge._schedule_event(VisionEvent(PERSON_APPEARED))
+
+    await asyncio.wait_for(bridge.stop(), timeout=0.1)
+    assert not bridge._pending_sends
+
+
+@pytest.mark.asyncio
 async def test_unrelated_server_message_is_not_consumed() -> None:
     bridge = VisionBridge(_Source(), [])
 

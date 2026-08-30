@@ -23,12 +23,13 @@ from .look import encode_frame_jpeg
 from .pipeline import VisionEvent, VisionPipeline
 
 logger = logging.getLogger(__name__)
+_MAX_PENDING_EVENT_SENDS = 4
 
 SendMessage = Callable[[str], Awaitable[None]]
 
 
-async def _await_send(awaitable: Awaitable[None]) -> None:
-    await awaitable
+async def _send_event(send_message: SendMessage, message: str) -> None:
+    await send_message(message)
 
 
 class VisionBridge:
@@ -68,6 +69,9 @@ class VisionBridge:
         send_message = self._send_message
         if send_message is None:
             return
+        if len(self._pending_sends) >= _MAX_PENDING_EVENT_SENDS:
+            logger.warning("dropping vision event while transport is backlogged")
+            return
         message = json.dumps(
             {
                 "type": "vision_event",
@@ -77,7 +81,7 @@ class VisionBridge:
             }
         )
         task: asyncio.Task[None] = asyncio.create_task(
-            _await_send(send_message(message))
+            _send_event(send_message, message)
         )
         self._pending_sends.add(task)
         task.add_done_callback(self._event_send_done)
@@ -109,7 +113,7 @@ class VisionBridge:
             logger.warning("ignoring vision look request without request_id")
             return True
 
-        frame = self.pipeline.latest_frame
+        frame = self.pipeline.latest_frame_copy()
         if frame is None:
             payload: dict[str, object] = {
                 "type": "vision_look_result",
@@ -151,6 +155,8 @@ class VisionBridge:
         self._send_message = None
         self._loop = None
         pending = list(self._pending_sends)
+        for task in pending:
+            task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._pending_sends.clear()
