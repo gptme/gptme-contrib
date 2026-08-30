@@ -22,10 +22,12 @@ belongs in the agent harnesses that accumulate per-lesson reward signal.
 Public API::
 
     from gptme_rag.lesson_matcher import scan_lessons, score_lessons
-    from gptme_rag.lesson_matcher import filter_by_session_category
+    from gptme_rag.lesson_matcher import filter_by_session_category, filter_by_repo
+    from gptme_rag.lesson_matcher import normalize_repo_slug
 
     lessons = scan_lessons([Path("lessons")])
     lessons = filter_by_session_category(lessons, "code")
+    lessons = filter_by_repo(lessons, os.environ.get("GPTME_CURRENT_REPO"))
     results = score_lessons(lessons, user_prompt, max_results=5)
 """
 
@@ -77,6 +79,55 @@ PATTERN_TIMEOUT_SECONDS: float = 0.01
 _SKIP_DIR_PARTS: frozenset[str] = frozenset(
     {"__pycache__", ".git", "node_modules", ".venv", "venv", "env"}
 )
+
+#: Pattern for a valid two-segment GitHub slug (owner/repo).
+_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+#: SSH remote form: git@github.com:owner/repo.git
+_REPO_SSH_RE = re.compile(r"git@[^:]+:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$")
+#: HTTPS remote form: https://github.com/owner/repo(.git)
+_REPO_HTTPS_RE = re.compile(r"https?://[^/]+/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?(?:/.*)?$")
+
+
+def normalize_repo_slug(value: str) -> str | None:
+    """Normalise *value* to a lowercase ``owner/repo`` slug or return ``None``.
+
+    Accepts bare slugs (``gptme/gptme``), HTTPS GitHub URLs, and SSH remote
+    strings.  Anything that does not resolve to exactly two non-empty path
+    segments is returned as ``None`` — callers treat ``None`` as *unknown*.
+
+    Examples::
+
+        normalize_repo_slug("gptme/gptme")              -> "gptme/gptme"
+        normalize_repo_slug("ErikBjare/bob")             -> "erikbjare/bob"
+        normalize_repo_slug("gptme/gptme.git")           -> "gptme/gptme"
+        normalize_repo_slug("https://github.com/A/B")   -> "a/b"
+        normalize_repo_slug("git@github.com:A/B.git")   -> "a/b"
+        normalize_repo_slug("./local")                   -> None
+        normalize_repo_slug("gptme")                     -> None  (one segment)
+    """
+    if not value or not isinstance(value, str):
+        return None
+    value = value.strip()
+
+    # SSH form
+    m = _REPO_SSH_RE.match(value)
+    if m:
+        return m.group(1).lower()
+
+    # HTTPS form
+    m = _REPO_HTTPS_RE.match(value)
+    if m:
+        return m.group(1).rstrip("/").lower()
+
+    # Bare slug — reject anything that looks like a local path first
+    if value.startswith((".", "/")):
+        return None
+    # Strip optional .git suffix then validate two segments
+    bare = value.removesuffix(".git")
+    if _REPO_SLUG_RE.match(bare):
+        return bare.lower()
+
+    return None
 
 
 def _dedupe_strings(values: Sequence[object]) -> list[str]:
@@ -427,6 +478,14 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
                 session_categories = [s.strip() for s in val.split(",") if s.strip()]
     if session_categories:
         match_dict["session_categories"] = session_categories
+
+    # ``match.repos`` — optional repository gate; nested form only (same rule
+    # as session_categories).  Each entry is normalised to lowercase owner/repo;
+    # invalid entries are silently dropped.
+    _raw_repos = _extract_list_frontmatter_field(match_block, "repos")
+    repos = [s for s in (normalize_repo_slug(r) for r in _raw_repos) if s]
+    if repos:
+        match_dict["repos"] = repos
 
     top_level_patterns = _extract_list_frontmatter_field(
         top_level_without_match, "patterns", allow_indented=False
@@ -878,6 +937,9 @@ def _parse_lesson_file(path: Path) -> dict[str, Any] | None:
     _raw_sc = match_data.get("session_categories") or [] if isinstance(match_data, dict) else []
     session_categories = _dedupe_strings(_string_list(_raw_sc))
 
+    _raw_repos = match_data.get("repos") or [] if isinstance(match_data, dict) else []
+    repos = [s for s in (normalize_repo_slug(r) for r in _string_list(_raw_repos)) if s]
+
     if not keywords and not patterns and not skill_name:
         return None
 
@@ -896,6 +958,7 @@ def _parse_lesson_file(path: Path) -> dict[str, Any] | None:
         "tags": tags,
         "harness_restrict": harness_restrict,
         "session_categories": session_categories,
+        "repos": repos,
         "is_skill": path.name == "SKILL.md" or skill_name is not None,
         "body": body,
         "n_keywords": len(keywords),
@@ -1103,6 +1166,48 @@ def filter_by_session_category(
         cats = lesson.get("session_categories") or []
         if not cats or (cat_lower is not None and cat_lower in {c.lower() for c in cats}):
             filtered.append(lesson)
+    return filtered
+
+
+def filter_by_repo(lessons: list[dict[str, Any]], current_repo: str | None) -> list[dict[str, Any]]:
+    """Return lessons that are unrestricted or match *current_repo*.
+
+    Lessons with a non-empty ``match.repos`` list are excluded unless a
+    normalised form of *current_repo* appears in that list.  The contract
+    mirrors ``filter_by_session_category`` with one difference: unknown context
+    is **fail-closed** (restricted lessons are excluded when *current_repo* is
+    ``None``).
+
+    Rationale: the purpose of the field is to prevent bleed.  If an unknown
+    context failed open, repo-scoped lessons would inject into all sessions
+    until every runtime is wired — eliminating the benefit.
+
+    *current_repo* is normalised through :func:`normalize_repo_slug`; pass a
+    raw ``GPTME_CURRENT_REPO`` value or an already-normalised slug.
+
+    | ``match.repos``        | *current_repo* | Result   |
+    |------------------------|----------------|----------|
+    | absent / empty         | anything       | pass     |
+    | ``[gptme/gptme]``      | ``gptme/gptme``| pass     |
+    | ``[gptme/gptme]``      | ``erikbjare/bob``| exclude |
+    | ``[gptme/gptme]``      | ``None``       | exclude  |
+
+    Examples::
+
+        filter_by_repo(lessons, "gptme/gptme")   # exact slug (lowercase)
+        filter_by_repo(lessons, "ErikBjare/bob")  # normalised before compare
+        filter_by_repo(lessons, None)             # unknown — restricted lessons excluded
+    """
+    normalised = normalize_repo_slug(current_repo) if current_repo else None
+    filtered = []
+    for lesson in lessons:
+        repos = lesson.get("repos") or []
+        if not repos:
+            # unrestricted — always pass
+            filtered.append(lesson)
+        elif normalised and normalised in repos:
+            filtered.append(lesson)
+        # else: restricted and context unknown or non-matching → exclude
     return filtered
 
 

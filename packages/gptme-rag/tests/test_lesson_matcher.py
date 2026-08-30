@@ -19,11 +19,13 @@ from gptme_rag.lesson_matcher import (
     effective_status,
     extract_frontmatter,
     filter_by_harness,
+    filter_by_repo,
     filter_by_session_category,
     filter_held_out,
     is_held_out,
     keyword_to_regex,
     match_keyword,
+    normalize_repo_slug,
     parse_holdout_set,
     scan_lessons,
     score_lessons,
@@ -1753,3 +1755,197 @@ class TestEffectiveStatus:
         fm, _ = extract_frontmatter(content)
 
         assert effective_status(fm) == "active"
+
+
+# ---------------------------------------------------------------------------
+# normalize_repo_slug
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeRepoSlug:
+    def test_bare_slug_lowercased(self):
+        assert normalize_repo_slug("gptme/gptme") == "gptme/gptme"
+
+    def test_mixed_case_lowercased(self):
+        assert normalize_repo_slug("ErikBjare/bob") == "erikbjare/bob"
+
+    def test_strips_git_suffix(self):
+        assert normalize_repo_slug("gptme/gptme.git") == "gptme/gptme"
+
+    def test_https_url(self):
+        assert normalize_repo_slug("https://github.com/gptme/gptme") == "gptme/gptme"
+
+    def test_https_url_with_git_suffix(self):
+        assert normalize_repo_slug("https://github.com/gptme/gptme.git") == "gptme/gptme"
+
+    def test_https_url_mixed_case(self):
+        assert normalize_repo_slug("https://github.com/ErikBjare/bob") == "erikbjare/bob"
+
+    def test_ssh_remote(self):
+        assert normalize_repo_slug("git@github.com:gptme/gptme.git") == "gptme/gptme"
+
+    def test_ssh_remote_no_git_suffix(self):
+        assert normalize_repo_slug("git@github.com:gptme/gptme") == "gptme/gptme"
+
+    def test_single_segment_is_none(self):
+        assert normalize_repo_slug("gptme") is None
+
+    def test_local_path_is_none(self):
+        assert normalize_repo_slug("./gptme") is None
+        assert normalize_repo_slug("/home/bob/bob") is None
+
+    def test_empty_is_none(self):
+        assert normalize_repo_slug("") is None
+
+    def test_none_input_is_none(self):
+        assert normalize_repo_slug(None) is None  # type: ignore[arg-type]
+
+    def test_activitywatch_slug(self):
+        assert normalize_repo_slug("ActivityWatch/aw-server-rust") == "activitywatch/aw-server-rust"
+
+
+# ---------------------------------------------------------------------------
+# filter_by_repo
+# ---------------------------------------------------------------------------
+
+
+def _make_lesson(repos: list[str] | None) -> dict:
+    """Minimal lesson dict for filter_by_repo tests."""
+    lesson: dict = {"keywords": ["x"], "path": "lessons/x.md", "session_categories": []}
+    if repos is not None:
+        lesson["repos"] = [r for r in (normalize_repo_slug(s) for s in repos) if r]
+    else:
+        lesson["repos"] = []
+    return lesson
+
+
+class TestFilterByRepo:
+    def test_unrestricted_lesson_always_passes(self):
+        lesson = _make_lesson(None)
+        assert filter_by_repo([lesson], "gptme/gptme") == [lesson]
+
+    def test_unrestricted_lesson_passes_when_repo_unknown(self):
+        lesson = _make_lesson(None)
+        assert filter_by_repo([lesson], None) == [lesson]
+
+    def test_restricted_lesson_passes_for_matching_repo(self):
+        lesson = _make_lesson(["gptme/gptme"])
+        assert filter_by_repo([lesson], "gptme/gptme") == [lesson]
+
+    def test_restricted_lesson_excluded_for_wrong_repo(self):
+        lesson = _make_lesson(["gptme/gptme"])
+        assert filter_by_repo([lesson], "erikbjare/bob") == []
+
+    def test_restricted_lesson_excluded_when_repo_unknown(self):
+        lesson = _make_lesson(["gptme/gptme"])
+        assert filter_by_repo([lesson], None) == []
+
+    def test_normalizes_current_repo_slug(self):
+        lesson = _make_lesson(["gptme/gptme"])
+        # Pass mixed-case; filter should normalise
+        assert filter_by_repo([lesson], "Gptme/Gptme") == [lesson]
+
+    def test_normalizes_current_repo_url(self):
+        lesson = _make_lesson(["gptme/gptme"])
+        assert filter_by_repo([lesson], "https://github.com/gptme/gptme") == [lesson]
+
+    def test_empty_repos_field_treated_as_unrestricted(self):
+        lesson = _make_lesson([])
+        assert filter_by_repo([lesson], None) == [lesson]
+
+    def test_mixed_restricted_and_unrestricted(self):
+        free = _make_lesson(None)
+        scoped = _make_lesson(["gptme/gptme"])
+        result = filter_by_repo([free, scoped], "erikbjare/bob")
+        assert result == [free]
+
+    def test_multiple_repos_in_match(self):
+        lesson = _make_lesson(["gptme/gptme", "activitywatch/aw-server-rust"])
+        assert filter_by_repo([lesson], "gptme/gptme") == [lesson]
+        assert filter_by_repo([lesson], "activitywatch/aw-server-rust") == [lesson]
+        assert filter_by_repo([lesson], "erikbjare/bob") == []
+
+
+# ---------------------------------------------------------------------------
+# match.repos frontmatter parsing
+# ---------------------------------------------------------------------------
+
+
+class TestReposFrontmatterParsing:
+    def test_yaml_repos_field_parsed(self):
+        """With PyYAML, match.repos is parsed into the lesson dict."""
+        content = (
+            "---\n"
+            "match:\n"
+            "  keywords: [datastore merge]\n"
+            "  repos: [gptme/gptme, activitywatch/aw-server-rust]\n"
+            "---\n"
+            "# Title\nBody.\n"
+        )
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("match", {}).get("repos") == ["gptme/gptme", "activitywatch/aw-server-rust"]
+
+    def test_regex_fallback_repos_field(self, monkeypatch):
+        """Without PyYAML, match.repos must be parsed by the regex fallback."""
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        content = (
+            "---\n"
+            "match:\n"
+            "  keywords:\n"
+            "    - datastore merge\n"
+            "  repos:\n"
+            "    - gptme/gptme\n"
+            "---\n"
+            "# Title\nBody.\n"
+        )
+        fm, _ = extract_frontmatter(content)
+        assert fm.get("match", {}).get("repos") == ["gptme/gptme"]
+
+    def test_top_level_repos_ignored(self, monkeypatch):
+        """A top-level repos: key must not act as a match gate (same rule as session_categories)."""
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        content = (
+            "---\n"
+            "repos: [gptme/gptme]\n"
+            "match:\n"
+            "  keywords: [datastore merge]\n"
+            "---\n"
+            "# Title\nBody.\n"
+        )
+        fm, _ = extract_frontmatter(content)
+        assert "repos" not in fm.get("match", {})
+
+    def test_scan_lessons_includes_repos(self, tmp_path):
+        """scan_lessons returns the normalised repos list inside lesson dicts."""
+        (tmp_path / "lesson.md").write_text(
+            "---\n"
+            "match:\n"
+            "  keywords: [datastore merge]\n"
+            "  repos: [gptme/gptme]\n"
+            "---\n"
+            "# Title\nBody.\n"
+        )
+        lessons = scan_lessons([tmp_path])
+        assert len(lessons) == 1
+        assert lessons[0]["repos"] == ["gptme/gptme"]
+
+    def test_scan_lessons_no_repos_field_defaults_empty(self, tmp_path):
+        (tmp_path / "lesson.md").write_text(
+            "---\nmatch:\n  keywords: [datastore merge]\n---\n# Title\nBody.\n"
+        )
+        lessons = scan_lessons([tmp_path])
+        assert len(lessons) == 1
+        assert lessons[0]["repos"] == []
+
+    def test_scan_lessons_invalid_repo_entry_dropped(self, tmp_path):
+        """An invalid entry (e.g. single-segment or path) is silently dropped."""
+        (tmp_path / "lesson.md").write_text(
+            "---\n"
+            "match:\n"
+            "  keywords: [datastore merge]\n"
+            "  repos: [gptme/gptme, ./local, gptme]\n"
+            "---\n"
+            "# Title\nBody.\n"
+        )
+        lessons = scan_lessons([tmp_path])
+        assert lessons[0]["repos"] == ["gptme/gptme"]
