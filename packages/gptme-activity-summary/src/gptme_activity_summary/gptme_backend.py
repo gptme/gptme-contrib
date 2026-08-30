@@ -20,6 +20,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from json_repair import repair_json
+
 logger = logging.getLogger(__name__)
 
 # Env switches to enable the fallback or pin a specific model.
@@ -144,6 +146,7 @@ _THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
 # gptme's no-tool-call auto-reply. Shared prefix of both variants in
 # gptme.tools.complete ("No tool call detected" / "... in last message").
 _GPTME_TRAILER_MARKER = "No tool call detected"
+_COMPLETE_TOOL_FENCE_RE = re.compile(r"^```complete\s*```$", re.DOTALL)
 _SUMMARY_KEYS = ("narrative", "month_narrative")
 
 
@@ -156,7 +159,7 @@ def _is_gptme_trailer(text: str) -> bool:
     already carries ``narrative``/``month_narrative`` re-breaks the
     daily-summary fallback.
     """
-    return _GPTME_TRAILER_MARKER in text
+    return _GPTME_TRAILER_MARKER in text or bool(_COMPLETE_TOOL_FENCE_RE.fullmatch(text.strip()))
 
 
 def _last_non_trailer(messages: list[str]) -> str:
@@ -180,6 +183,49 @@ def _strip_think_tags(text: str) -> str:
     extraction; stripping them before processing avoids greedy-regex traps.
     """
     return _THINK_TAG_RE.sub("", text).strip()
+
+
+def _repair_summary_json(text: str) -> str | None:
+    """Repair malformed model JSON when it still contains a root summary.
+
+    ``json_repair`` may return several top-level values when a wrong closing
+    delimiter splits the root object. Reassemble that stream only when the
+    first value carries summary structure and a valid schema-key suffix carries
+    the narrative field. This narrow gate avoids treating arbitrary prose or
+    nested provider-error JSON as a successful summary.
+    """
+    repaired = repair_json(text, return_objects=True)
+    if isinstance(repaired, dict):
+        return json.dumps(repaired) if any(repaired.get(k) for k in _SUMMARY_KEYS) else None
+    if not isinstance(repaired, list) or not repaired or not isinstance(repaired[0], dict):
+        return None
+
+    root = dict(repaired[0])
+    if not any(key in root for key in ("accomplishments", "decisions")):
+        return None
+    for value in repaired[1:]:
+        if isinstance(value, dict) and {"topic", "decision"}.issubset(value):
+            root.setdefault("decisions", []).append(value)
+
+    # json_repair can split a malformed root into several top-level values and
+    # lose their field names. Find the earliest schema-key suffix that is valid
+    # JSON; that preserves every recoverable field after the malformed token
+    # without guessing names for anonymous values that came before it.
+    decoder = json.JSONDecoder()
+    suffix_keys = ("blockers", "themes", "work_in_progress", *_SUMMARY_KEYS)
+    for key in suffix_keys:
+        marker = f'"{key}"'
+        start = text.find(marker)
+        if start == -1:
+            continue
+        try:
+            suffix, _ = decoder.raw_decode("{" + text[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(suffix, dict) and any(suffix.get(k) for k in _SUMMARY_KEYS):
+            root.update(suffix)
+            break
+    return json.dumps(root) if any(root.get(k) for k in _SUMMARY_KEYS) else None
 
 
 def _has_summary_json(text: str) -> bool:
@@ -305,10 +351,22 @@ def _extract_assistant_text(stdout: str) -> str:
             json_candidates[-1],
         )
         return json_candidates[-1]
+    for candidate in reversed(contents):
+        if _is_gptme_trailer(candidate):
+            continue
+        repaired = _repair_summary_json(candidate)
+        if repaired is not None:
+            logger.warning(
+                "gptme fallback: repaired malformed root summary JSON (%d -> %d chars)",
+                len(candidate),
+                len(repaired),
+            )
+            return repaired
+
     chosen = _last_non_trailer(contents)
     logger.warning(
         "gptme fallback: no assistant message parsed as JSON (%d messages); "
-        "returning last message for caller to attempt extraction: %.100r",
+        "returning last non-trailer message for caller to attempt extraction: %.100r",
         len(contents),
         chosen,
     )
