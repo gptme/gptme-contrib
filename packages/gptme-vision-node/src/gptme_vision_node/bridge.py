@@ -146,14 +146,26 @@ class VisionBridge:
         self._send_message = send_message
         self.pipeline.start()
 
-    async def stop(self) -> None:
-        """Stop capture, release the source, and drain pending event sends."""
-        self.pipeline.stop()
-        release = getattr(self.pipeline.source, "release", None)
-        if release is not None:
-            release()
+    async def stop(self, *, timeout: float = 5.0) -> None:
+        """Stop capture, release the source, and drain pending event sends.
+
+        The emission path is cleared first so a late pipeline callback cannot
+        schedule work after teardown. ``source.release()`` runs only after the
+        capture thread has actually exited — concurrent OpenCV ``read()`` /
+        ``release()`` is not documented thread-safe.
+        """
         self._send_message = None
         self._loop = None
+        await asyncio.to_thread(self.pipeline.stop, timeout)
+        if self.pipeline.is_running():
+            logger.warning(
+                "vision pipeline worker still alive after %.1fs; skipping source.release()",
+                timeout,
+            )
+        else:
+            release = getattr(self.pipeline.source, "release", None)
+            if release is not None:
+                release()
         pending = list(self._pending_sends)
         for task in pending:
             task.cancel()

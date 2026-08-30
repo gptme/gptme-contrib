@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import threading
 
 import numpy as np
 import pytest
@@ -124,6 +125,52 @@ async def test_stop_cancels_blocked_event_sends() -> None:
 
     await asyncio.wait_for(bridge.stop(), timeout=0.1)
     assert not bridge._pending_sends
+
+
+@pytest.mark.asyncio
+async def test_stop_releases_source_after_pipeline_exits() -> None:
+    source = _Source()
+    bridge = VisionBridge(source, [])
+    await bridge.stop()
+    assert source.released
+
+
+@pytest.mark.asyncio
+async def test_stop_skips_release_while_capture_thread_is_blocked() -> None:
+    unblock = threading.Event()
+    entered = threading.Event()
+
+    class BlockingSource:
+        def __init__(self) -> None:
+            self.released = False
+
+        def get_frame(self):
+            entered.set()
+            unblock.wait()
+            return None
+
+        def release(self) -> None:
+            self.released = True
+
+    source = BlockingSource()
+    bridge = VisionBridge(source, [])
+
+    async def send(_message: str) -> None:
+        return None
+
+    bridge.start(asyncio.get_running_loop(), send)
+    assert entered.wait(timeout=1)
+    try:
+        await asyncio.wait_for(bridge.stop(timeout=0.05), timeout=1)
+        assert not source.released
+        assert bridge.pipeline.is_running()
+    finally:
+        unblock.set()
+        thread = bridge.pipeline._thread
+        if thread is not None:
+            thread.join(timeout=1)
+        await bridge.stop()
+    assert source.released
 
 
 @pytest.mark.asyncio

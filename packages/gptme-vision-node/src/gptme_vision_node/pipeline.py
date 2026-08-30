@@ -87,7 +87,8 @@ class VisionPipeline:
     def _process_frame(self, frame: np.ndarray) -> list[VisionEvent]:
         """Run detectors and emit events for one captured frame."""
         with self._latest_frame_lock:
-            self.latest_frame = frame
+            # Copy: OpenCV VideoCapture.read() can reuse the same buffer.
+            self.latest_frame = frame.copy()
 
         detections: list[Detection] = []
         for detector in self.detectors:
@@ -153,6 +154,10 @@ class VisionPipeline:
             target=self._run, name="vision-pipeline", daemon=True
         )
         self._thread.start()
+
+    def is_running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
