@@ -201,13 +201,22 @@ def _repair_summary_json(text: str) -> str | None:
     repaired = repair_json(text, return_objects=True)
     if isinstance(repaired, dict):
         return json.dumps(repaired) if any(repaired.get(k) for k in _SUMMARY_KEYS) else None
-    if not isinstance(repaired, list) or not repaired or not isinstance(repaired[0], dict):
+    if not isinstance(repaired, list) or not repaired:
         return None
 
-    root = dict(repaired[0])
-    if not any(key in root for key in ("accomplishments", "decisions")):
+    root_index = next(
+        (
+            i
+            for i, value in enumerate(repaired)
+            if isinstance(value, dict)
+            and any(key in value for key in ("accomplishments", "decisions"))
+        ),
+        None,
+    )
+    if root_index is None:
         return None
-    for value in repaired[1:]:
+    root = dict(repaired[root_index])
+    for value in repaired[root_index + 1 :]:
         if isinstance(value, dict) and {"topic", "decision"}.issubset(value):
             root.setdefault("decisions", []).append(value)
 
