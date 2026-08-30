@@ -1694,6 +1694,7 @@ dependencies = [
     { name = "click" },
     { name = "gptme" },
     { name = "gptme-sessions" },
+    { name = "json-repair" },
 ]
 
 [package.optional-dependencies]
@@ -1713,6 +1714,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "gptme-sessions", editable = "packages/gptme-sessions" },
+    { name = "json-repair", specifier = ">=0.61.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
