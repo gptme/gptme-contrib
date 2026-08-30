@@ -1826,9 +1826,11 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
             )
             first_path = server._save_call_record(first)
             await server._schedule_post_call(first.caller_id, [first_path])
+            first_group_id = server._pending_call_groups[first.caller_id]
             first_unit = server._pending_post_calls[first.caller_id]
             first.archive_record_paths = [str(first_path)]
             first.pending_post_call_unit = first_unit
+            first.call_group_id = first_group_id
             server._save_recent_call(first)
 
             with pytest.MonkeyPatch.context() as mp:
@@ -1838,6 +1840,7 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
             assert resumed is not None
             assert cancelled_units == [first_unit]
             assert server._pending_archive_records[first.caller_id] == [first_path]
+            assert server._pending_call_groups[first.caller_id] == first_group_id
 
             second = RecentCallRecord(
                 caller_id=first.caller_id,
@@ -1853,6 +1856,21 @@ def test_resume_carries_prior_archive_into_next_post_call() -> None:
                 first_path,
                 second_path,
             ]
+            assert server._pending_call_groups[first.caller_id] == first_group_id
+            manifest = json.loads(
+                server._call_group_manifest_path(first_group_id).read_text()
+            )
+            assert manifest["status"] == "open"
+            assert manifest["schema_version"] == 1
+            assert manifest["remote_party"] == first.caller_id
+            assert manifest["archive_record_paths"] == [
+                str(first_path),
+                str(second_path),
+            ]
+            assert server._call_group_is_closed(manifest, now=1_100.0) is False
+            assert server._call_group_is_closed(
+                manifest, now=float(manifest["closes_at"])
+            )
             assert server._pending_post_calls[first.caller_id] != first_unit
 
     asyncio.run(_exercise())
@@ -1891,6 +1909,32 @@ def test_save_call_record_uses_unique_archive_path_per_call() -> None:
             json.loads(second_path.read_text())["transcript"][0]["text"]
             == "Second call"
         )
+
+
+def test_call_record_payload_preserves_remote_party_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        record = RecentCallRecord(
+            caller_id="+46700000001",
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="hello")],
+            metadata={
+                "call_sid": "CAoutbound",
+                "from_number": "+15551234567",
+                "remote_party": "+46700000001",
+            },
+            call_group_id="group-outbound-1",
+        )
+
+        path = server._save_call_record(record)
+        payload = json.loads(path.read_text())
+
+        assert payload["caller_id"] == "+46700000001"
+        assert payload["call_group_id"] == "group-outbound-1"
+        assert payload["metadata"]["remote_party"] == "+46700000001"
+        assert payload["metadata"]["from_number"] == "+15551234567"
 
 
 def test_schedule_post_call_replaces_existing_timer_unit() -> None:
@@ -1966,6 +2010,9 @@ def test_consume_recent_call_restores_pending_schedule_after_restart() -> None:
         record_path = first_server._save_call_record(record)
         record.archive_record_paths = [str(record_path)]
         record.pending_post_call_unit = "gptme-voice-post-call-restart"
+        record.call_group_id = first_server._build_call_group_id(
+            record.caller_id, record_path
+        )
         first_server._save_recent_call(record)
 
         second_server = VoiceServer()
@@ -1980,6 +2027,9 @@ def test_consume_recent_call_restores_pending_schedule_after_restart() -> None:
         assert resumed is not None
         assert cancelled_units == ["gptme-voice-post-call-restart"]
         assert second_server._pending_archive_records[record.caller_id] == [record_path]
+        assert (
+            second_server._pending_call_groups[record.caller_id] == record.call_group_id
+        )
 
 
 def test_on_call_end_persists_pending_post_call_state() -> None:
@@ -2010,12 +2060,164 @@ def test_on_call_end_persists_pending_post_call_state() -> None:
 
             recent = server._load_recent_call("+46700000013")
             assert recent is not None
+            assert recent.call_group_id == server._pending_call_groups["+46700000013"]
             assert len(recent.archive_record_paths) == 1
             assert (
                 recent.pending_post_call_unit
                 == server._pending_post_calls["+46700000013"]
             )
             assert Path(recent.archive_record_paths[0]).exists()
+            archive = json.loads(Path(recent.archive_record_paths[0]).read_text())
+            assert recent.call_group_id is not None
+            assert archive["call_group_id"] == recent.call_group_id
+            assert archive["metadata"]["remote_party"] == "+46700000013"
+            manifest = json.loads(
+                server._call_group_manifest_path(recent.call_group_id).read_text()
+            )
+            assert manifest["status"] == "open"
+            assert manifest["remote_party"] == "+46700000013"
+            assert manifest["archive_record_paths"] == recent.archive_record_paths
+
+    asyncio.run(_exercise())
+
+
+def test_call_group_hold_covers_resume_window() -> None:
+    async def _exercise() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = VoiceServer()
+            server.state_dir = Path(tmpdir)
+            server.resume_window_seconds = 300
+            server.post_call_delay_seconds = 60
+            server.post_call_command = "run-post-call"
+            seen_delays: list[int] = []
+
+            async def _fake_run_post_call(
+                caller_id: str,
+                paths: list[Path],
+                *,
+                delay_seconds: int = 0,
+                unit_name: str | None = None,
+            ) -> None:
+                seen_delays.append(delay_seconds)
+
+            server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
+
+            record = RecentCallRecord(
+                caller_id="+46700000020",
+                source="twilio",
+                ended_at=1_000.0,
+                transcript=[],
+                metadata={"call_sid": "CAhold"},
+            )
+            path = server._save_call_record(record)
+            await server._schedule_post_call(record.caller_id, [path])
+
+            assert seen_delays == [60]
+            group_id = server._pending_call_groups[record.caller_id]
+            manifest = json.loads(
+                server._call_group_manifest_path(group_id).read_text()
+            )
+            assert manifest["status"] == "open"
+            assert float(manifest["closes_at"]) >= time.time() + 299
+            assert server._call_group_is_closed(manifest, now=time.time() + 60) is False
+            assert server._call_group_is_closed(manifest, now=time.time() + 300)
+
+    asyncio.run(_exercise())
+
+
+def test_zero_hold_closes_call_group_immediately() -> None:
+    async def _exercise() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = VoiceServer()
+            server.state_dir = Path(tmpdir)
+            server.resume_window_seconds = 0
+            server.post_call_delay_seconds = 0
+            server.post_call_command = "run-post-call"
+
+            async def _fake_run_post_call(
+                caller_id: str,
+                paths: list[Path],
+                *,
+                delay_seconds: int = 0,
+                unit_name: str | None = None,
+            ) -> None:
+                return None
+
+            server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
+
+            await server._on_call_end(
+                caller_id="+46700000021",
+                source="twilio",
+                transcript=[TranscriptTurn(role="user", text="no hold")],
+                metadata={"call_sid": "CAzero", "remote_party": "+46700000021"},
+            )
+
+            archive_paths = list((Path(tmpdir) / "archive").glob("*.json"))
+            assert len(archive_paths) == 1
+            archive = json.loads(archive_paths[0].read_text())
+            group_id = archive["call_group_id"]
+            manifest = json.loads(
+                server._call_group_manifest_path(group_id).read_text()
+            )
+            assert manifest["status"] == "closed"
+            assert "closed_at" in manifest
+            assert server._call_group_is_closed(manifest)
+            assert "+46700000021" not in server._pending_call_groups
+
+    asyncio.run(_exercise())
+
+
+def test_closed_call_group_does_not_reuse_id_for_next_call() -> None:
+    async def _exercise() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = VoiceServer()
+            server.state_dir = Path(tmpdir)
+            server.resume_window_seconds = 300
+            server.post_call_delay_seconds = 300
+            server.post_call_command = "run-post-call"
+
+            async def _fake_run_post_call(
+                caller_id: str,
+                paths: list[Path],
+                *,
+                delay_seconds: int = 0,
+                unit_name: str | None = None,
+            ) -> None:
+                return None
+
+            server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
+
+            await server._on_call_end(
+                caller_id="+46700000022",
+                source="twilio",
+                transcript=[TranscriptTurn(role="user", text="first call")],
+                metadata={"call_sid": "CAone"},
+            )
+            first_group = server._pending_call_groups["+46700000022"]
+            closed = server._close_call_group("+46700000022")
+            assert closed == first_group
+            assert "+46700000022" not in server._pending_call_groups
+
+            await server._on_call_end(
+                caller_id="+46700000022",
+                source="twilio",
+                transcript=[TranscriptTurn(role="user", text="second call")],
+                metadata={"call_sid": "CAtwo"},
+            )
+            second_group = server._pending_call_groups["+46700000022"]
+            assert second_group != first_group
+            first_manifest = json.loads(
+                server._call_group_manifest_path(first_group).read_text()
+            )
+            second_manifest = json.loads(
+                server._call_group_manifest_path(second_group).read_text()
+            )
+            assert first_manifest["status"] == "closed"
+            assert second_manifest["status"] == "open"
+            assert (
+                first_manifest["archive_record_paths"]
+                != second_manifest["archive_record_paths"]
+            )
 
     asyncio.run(_exercise())
 

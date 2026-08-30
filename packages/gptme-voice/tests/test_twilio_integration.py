@@ -5,6 +5,7 @@ from gptme_voice.realtime.twilio_integration import (
     build_connect_stream_twiml,
     build_stream_url,
     create_outbound_call,
+    outbound_identity_params,
     resolve_outbound_call_settings,
 )
 
@@ -102,7 +103,20 @@ def test_create_outbound_call_uses_twilio_client():
         "auth_token": "secret",
         "to": "+46701234567",
         "from_": "+15551234567",
-        "twiml": build_connect_stream_twiml("wss://voice.example/twilio"),
+        "twiml": build_connect_stream_twiml(
+            "wss://voice.example/twilio",
+            outbound_identity_params("+46701234567"),
+        ),
+    }
+
+
+def test_outbound_identity_params_preserve_dialed_remote_party():
+    params = outbound_identity_params("+46701234567", {"handoff_id": "abc"})
+
+    assert params == {
+        "handoff_id": "abc",
+        "from_number": "+46701234567",
+        "remote_party": "+46701234567",
     }
 
 
@@ -124,3 +138,5 @@ def test_call_cli_dry_run_prints_twiml(monkeypatch):
 
     assert result.exit_code == 0
     assert 'url="wss://voice.example/twilio"' in result.output
+    assert 'name="from_number" value="+46701234567"' in result.output
+    assert 'name="remote_party" value="+46701234567"' in result.output

@@ -198,6 +198,7 @@ class RecentCallRecord:
     subagent_timings: list[dict[str, object]] = field(default_factory=list)
     archive_record_paths: list[str] = field(default_factory=list)
     pending_post_call_unit: str | None = None
+    call_group_id: str | None = None
 
 
 @dataclass
@@ -849,6 +850,7 @@ class VoiceServer:
         self._connections: dict[str, tuple] = {}
         self._pending_post_calls: dict[str, str] = {}
         self._pending_archive_records: dict[str, list[Path]] = {}
+        self._pending_call_groups: dict[str, str] = {}
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
@@ -1093,6 +1095,9 @@ class VoiceServer:
     def _call_archive_dir(self) -> Path:
         return self.state_dir / "archive"
 
+    def _call_group_manifest_dir(self) -> Path:
+        return self.state_dir / "call-groups"
+
     def _handoff_bootstrap_path(self, handoff_id: str) -> Path:
         safe_handoff_id = "".join(
             ch for ch in handoff_id if ch.isalnum() or ch in {"-", "_"}
@@ -1135,6 +1140,8 @@ class VoiceServer:
             payload["subagent_timings"] = record.subagent_timings
         if include_pending_state and record.archive_record_paths:
             payload["archive_record_paths"] = record.archive_record_paths
+        if record.call_group_id:
+            payload["call_group_id"] = record.call_group_id
         if include_pending_state and record.pending_post_call_unit:
             payload["pending_post_call_unit"] = record.pending_post_call_unit
         return payload
@@ -1214,6 +1221,12 @@ class VoiceServer:
                         and payload.get("pending_post_call_unit")
                         else None
                     ),
+                    call_group_id=(
+                        payload.get("call_group_id")
+                        if isinstance(payload.get("call_group_id"), str)
+                        and payload.get("call_group_id")
+                        else None
+                    ),
                 )
             except Exception as exc:
                 logger.warning(
@@ -1232,6 +1245,155 @@ class VoiceServer:
             if path.exists():
                 restored_paths.append(path)
         return self._dedupe_record_paths(restored_paths)
+
+    def _call_group_hold_seconds(self) -> int:
+        """Seconds a logical call stays open for resume before PM may consume it.
+
+        A first leg must not close while a reconnect is still in the resume
+        window, even if GPTME_VOICE_POST_CALL_DELAY_SECONDS is shorter.
+        """
+        return max(
+            int(self.post_call_delay_seconds), int(self.resume_window_seconds), 0
+        )
+
+    def _call_group_manifest_path(self, call_group_id: str) -> Path:
+        safe_id = "".join(
+            ch for ch in call_group_id if ch.isalnum() or ch in {"-", "_"}
+        )
+        if not safe_id:
+            safe_id = "call-group"
+        return self._call_group_manifest_dir() / f"{safe_id}.json"
+
+    def _build_call_group_id(self, caller_id: str, first_record_path: Path) -> str:
+        digest = hashlib.sha256()
+        digest.update(caller_id.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(first_record_path).encode("utf-8"))
+        return digest.hexdigest()[:16]
+
+    def _read_call_group_manifest(self, call_group_id: str) -> dict[str, object] | None:
+        path = self._call_group_manifest_path(call_group_id)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _call_group_is_closed(
+        manifest: dict[str, object], *, now: float | None = None
+    ) -> bool:
+        if manifest.get("status") == "closed":
+            return True
+        closes_at = manifest.get("closes_at")
+        if isinstance(closes_at, int | float):
+            return (time.time() if now is None else now) >= float(closes_at)
+        return False
+
+    def _write_call_group_manifest(
+        self,
+        *,
+        caller_id: str,
+        call_group_id: str,
+        record_paths: list[Path],
+        status: str = "open",
+        remote_party: str | None = None,
+        closes_at: float | None = None,
+    ) -> Path:
+        existing = self._read_call_group_manifest(call_group_id) or {}
+        now = time.time()
+        if closes_at is None:
+            if status == "open":
+                closes_at = now + self._call_group_hold_seconds()
+            else:
+                raw_closes_at = existing.get("closes_at")
+                closes_at = (
+                    float(raw_closes_at)
+                    if isinstance(raw_closes_at, int | float)
+                    else now
+                )
+        existing_remote = existing.get("remote_party")
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "call_group_id": call_group_id,
+            "status": status,
+            "caller_id": caller_id,
+            "remote_party": remote_party
+            or (
+                existing_remote
+                if isinstance(existing_remote, str) and existing_remote
+                else caller_id
+            ),
+            "archive_record_paths": [str(path) for path in record_paths],
+            "closes_at": closes_at,
+            "updated_at": now,
+        }
+        if status == "closed":
+            payload["closed_at"] = now
+        manifest_path = self._call_group_manifest_path(call_group_id)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return manifest_path
+
+    def _open_call_group(
+        self,
+        caller_id: str,
+        record_paths: list[Path],
+        *,
+        remote_party: str | None = None,
+    ) -> str | None:
+        deduped = self._dedupe_record_paths(record_paths)
+        if not deduped:
+            return None
+        call_group_id = self._pending_call_groups.get(caller_id)
+        existing_closed = False
+        if call_group_id:
+            existing = self._read_call_group_manifest(call_group_id)
+            if existing and self._call_group_is_closed(existing):
+                existing_closed = True
+                call_group_id = None
+        if not call_group_id:
+            seed = deduped[-1] if existing_closed else deduped[0]
+            call_group_id = self._build_call_group_id(caller_id, seed)
+        self._pending_call_groups[caller_id] = call_group_id
+        self._write_call_group_manifest(
+            caller_id=caller_id,
+            call_group_id=call_group_id,
+            record_paths=deduped,
+            status="open",
+            remote_party=remote_party or caller_id,
+        )
+        return call_group_id
+
+    def _close_call_group(
+        self,
+        caller_id: str,
+        record_paths: list[Path] | None = None,
+    ) -> str | None:
+        call_group_id = self._pending_call_groups.get(caller_id)
+        if not call_group_id:
+            return None
+        paths = list(record_paths or self._pending_archive_records.get(caller_id, []))
+        if not paths:
+            existing = self._read_call_group_manifest(call_group_id) or {}
+            raw_paths = existing.get("archive_record_paths") or []
+            if isinstance(raw_paths, list):
+                paths = [Path(str(item)) for item in raw_paths]
+        self._write_call_group_manifest(
+            caller_id=caller_id,
+            call_group_id=call_group_id,
+            record_paths=paths,
+            status="closed",
+            remote_party=caller_id,
+        )
+        self._pending_call_groups.pop(caller_id, None)
+        self._pending_archive_records.pop(caller_id, None)
+        return call_group_id
 
     def _build_post_call_unit_name(
         self, caller_id: str, record_paths: list[Path]
@@ -1680,8 +1842,15 @@ class VoiceServer:
         )
         if restored_archive_paths:
             self._pending_archive_records[caller_id] = restored_archive_paths
+            restored_group = recent_call.call_group_id
+            if not restored_group:
+                restored_group = self._build_call_group_id(
+                    caller_id, restored_archive_paths[0]
+                )
+            self._pending_call_groups[caller_id] = restored_group
         else:
             self._pending_archive_records.pop(caller_id, None)
+            self._pending_call_groups.pop(caller_id, None)
 
         # Delete the resume-state file(s) so a crash-resume can't re-inject the old
         # transcript, but keep archived per-call records for post-call analysis.
@@ -1783,12 +1952,16 @@ class VoiceServer:
         deduped_record_paths = self._dedupe_record_paths(record_paths)
         if not deduped_record_paths:
             self._pending_archive_records.pop(caller_id, None)
+            self._pending_call_groups.pop(caller_id, None)
             logger.warning(
                 "Ignoring post-call schedule for %s with no records", caller_id
             )
             return
 
         self._pending_archive_records[caller_id] = deduped_record_paths
+        call_group_id = self._open_call_group(caller_id, deduped_record_paths)
+        if self._call_group_hold_seconds() == 0 and call_group_id:
+            self._close_call_group(caller_id, deduped_record_paths)
 
         if not self.post_call_command:
             self._pending_post_calls.pop(caller_id, None)
@@ -1969,16 +2142,37 @@ class VoiceServer:
             except Exception as exc:  # defensive: never block archival on telemetry
                 logger.warning("Failed to collect subagent timings: %s", exc)
 
+        cleaned_metadata = {k: v for k, v in metadata.items() if v}
+        if caller_id:
+            cleaned_metadata.setdefault("remote_party", caller_id)
+
+        pending_record_paths = list(self._pending_archive_records.get(caller_id, []))
         record = RecentCallRecord(
             caller_id=caller_id,
             source=source,
             ended_at=time.time(),
             transcript=transcript,
-            metadata={k: v for k, v in metadata.items() if v},
+            metadata=cleaned_metadata,
             subagent_timings=subagent_timings,
         )
+        call_group_id = self._pending_call_groups.get(caller_id)
+        if call_group_id:
+            existing = self._read_call_group_manifest(call_group_id)
+            if existing and self._call_group_is_closed(existing):
+                call_group_id = None
+                pending_record_paths = []
+                self._pending_call_groups.pop(caller_id, None)
+                self._pending_archive_records.pop(caller_id, None)
+        if call_group_id is None:
+            seed = (
+                pending_record_paths[0]
+                if pending_record_paths
+                else self._call_record_path(record)
+            )
+            call_group_id = self._build_call_group_id(caller_id, seed)
+            self._pending_call_groups[caller_id] = call_group_id
+        record.call_group_id = call_group_id
         record_path = self._save_call_record(record)
-        pending_record_paths = list(self._pending_archive_records.get(caller_id, []))
         pending_record_paths.append(record_path)
         deduped_record_paths = self._dedupe_record_paths(pending_record_paths)
         record.archive_record_paths = [str(path) for path in deduped_record_paths]
@@ -2085,6 +2279,7 @@ class VoiceServer:
         custom_params: dict[str, str] = {}
         if from_number:
             custom_params["from_number"] = from_number
+            custom_params["remote_party"] = from_number
             # Body tools on /twilio must not trust client-supplied from_number.
             # Mint a call-scoped grant here only after signature validation, and
             # bind it to CallSid (kept off TwiML so a stolen grant cannot be
@@ -2148,11 +2343,13 @@ class VoiceServer:
                     # Inject caller context into instructions (phone + name lookup)
                     custom_params = start.get("customParameters", {})
                     from_number = custom_params.get("from_number", "")
+                    remote_party = custom_params.get("remote_party") or from_number
                     handoff_id = custom_params.get("handoff_id") or None
                     standup_brief = custom_params.get("standup_brief") or None
-                    caller_id = from_number or call_sid or stream_sid
+                    caller_id = remote_party or call_sid or stream_sid
                     metadata = {
                         "from_number": from_number,
+                        "remote_party": remote_party,
                         "call_sid": call_sid,
                         "stream_sid": stream_sid,
                         "provider": self.provider,
