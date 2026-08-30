@@ -224,6 +224,9 @@ class SessionConfig:
     available_agents: list[str] = field(
         default_factory=lambda: ["alice", "gordon", "sven"]
     )
+    # Extra function-tool schemas appended to the built-in tool set —
+    # e.g. capability-gated body_* tools from gptme_voice.body.
+    extra_tools: list[dict] = field(default_factory=list)
     # When True, configure the OpenAI session to send/receive G.711 μ-law at
     # 8kHz directly. The Twilio bridge uses this to skip an otherwise-required
     # PCM16 ↔ μ-law and 8k ↔ 24k resampling round on the OpenAI branch.
@@ -624,6 +627,10 @@ class OpenAIRealtimeClient:
                 },
             ],
         }
+        if self.session_config.extra_tools:
+            session_params["tools"] = list(session_params["tools"]) + list(
+                self.session_config.extra_tools
+            )
         if self.session_config.output_speed is not None:
             session_params["output"] = {"speed": self.session_config.output_speed}
         reasoning = self._get_reasoning_config()

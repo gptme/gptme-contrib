@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import time
@@ -31,6 +32,7 @@ from starlette.responses import FileResponse, PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
+from ..body import body_adapter_from_env, body_tool_schemas
 from ..handoff import HandoffWriter
 from .audio import AudioConverter
 from .openai_client import (
@@ -48,6 +50,28 @@ from .twilio_integration import (
     build_stream_url,
 )
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
+
+
+def _websocket_peer_host(websocket) -> str | None:
+    """Peer host from a Starlette (or mock) websocket.
+
+    Starlette's ``websocket.client`` is ``Address(host, port)`` — a namedtuple
+    with a ``.host`` field that is also a plain ``(host, port)`` tuple. ASGI
+    scope values and some test doubles are just the tuple. Accept both; never
+    assume ``.host`` exists.
+    """
+    client = getattr(websocket, "client", None)
+    if client is None:
+        return None
+    host = getattr(client, "host", None)
+    if isinstance(host, str) and host:
+        return host
+    if isinstance(client, tuple | list) and client:
+        first = client[0]
+        if isinstance(first, str) and first:
+            return first
+    return None
+
 
 logger = logging.getLogger(__name__)
 
@@ -783,6 +807,15 @@ class VoiceServer:
             if handoff_agents_env
             else _default_agents
         )
+        # Optional physical body (BobBrain): registers capability-gated
+        # body_* tools when GPTME_VOICE_BODY_URL is set.
+        self.body_adapter = body_adapter_from_env()
+        if self.body_adapter is not None:
+            logger.info(
+                "Body adapter configured: %s (capabilities: %s)",
+                self.body_adapter.name,
+                sorted(self.body_adapter.capabilities) or "none",
+            )
         if handoff_dir_env:
             if not handoff_secret_env:
                 logger.warning(
@@ -822,6 +855,23 @@ class VoiceServer:
         self._prewarm_connected: set[str] = set()
         # Max seconds a pre-warm session is kept before being discarded
         self._prewarm_ttl_seconds = 30
+        # Call-scoped body-tool grants minted by the signed /incoming webhook.
+        # The /twilio WebSocket is unauthenticated; customParameters.from_number
+        # is attacker-controlled, so body tools must not key off it. Token ->
+        # (from_number, call_sid, expires_monotonic). CallSid is bound from the
+        # signed webhook and is not copied into TwiML, so a stolen grant cannot
+        # be replayed onto a different call. Consume does not pop: Twilio
+        # reconnects resend the same start customParameters, and popping would
+        # leave an airborne vehicle with no body_stop. Mint TTL covers the
+        # /incoming-to-first-start window; first successful consume pins the
+        # grant (expires=inf) until Twilio stop, hangup, idle-disconnect, or
+        # process restart. Do not revoke on websocket drop itself — that is
+        # the reconnect path — but schedule an idle revoke so a call that
+        # never sends ``stop`` cannot leave a live bearer token forever.
+        self._twilio_body_grants: dict[str, tuple[str, str, float]] = {}
+        self._twilio_body_grant_ttl_s = 120.0
+        self._twilio_body_grant_idle_s = 90.0
+        self._twilio_grant_idle_tasks: dict[str, asyncio.Task[None]] = {}
 
         routes = [
             Route("/", self.health_check, methods=["GET"]),
@@ -833,7 +883,190 @@ class VoiceServer:
             routes.append(WebSocketRoute("/voice", self.handle_browser_websocket))
             routes.append(Route("/browser", self.serve_browser_client, methods=["GET"]))
 
-        self.app = Starlette(routes=routes)
+        self.app = Starlette(routes=routes, lifespan=self._lifespan)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(self, _app):
+        try:
+            yield
+        finally:
+            await self._cancel_all_twilio_body_grant_idle_revokes()
+            if self.body_adapter is not None:
+                await self.body_adapter.close()
+
+    def _twilio_body_caller_allowed(self, caller_id: str | None) -> bool:
+        """Twilio body tools require an explicit caller allowlist match.
+
+        Twilio's request signature proves the webhook came from Twilio, not
+        that the human on the line is authorized to fly a vehicle. Fail
+        closed: no allowlist, or a caller not on it, means no motion tools.
+        """
+        raw = _get_config_env("TWILIO_CALLER_ALLOWLIST")
+        if not raw or not caller_id:
+            return False
+        allowlist = {n.strip() for n in raw.split(",") if n.strip()}
+        return caller_id in allowlist
+
+    def _expire_twilio_body_grants(self) -> None:
+        now = time.monotonic()
+        expired = [
+            token
+            for token, (*_, expires) in self._twilio_body_grants.items()
+            if now > expires
+        ]
+        for token in expired:
+            self._twilio_body_grants.pop(token, None)
+
+    def _mint_twilio_body_grant(self, from_number: str, call_sid: str) -> str:
+        """Mint a call-scoped token proving /incoming authorized this caller.
+
+        Both From and CallSid must be non-empty. An empty CallSid would skip
+        the consume-time bind and let a stolen grant replay onto any start
+        event that presents the same From.
+        """
+        from_number = from_number.strip()
+        call_sid = call_sid.strip()
+        if not from_number or not call_sid:
+            logger.warning("Refusing Twilio body grant with empty From or CallSid")
+            return ""
+        self._expire_twilio_body_grants()
+        token = secrets.token_urlsafe(32)
+        self._twilio_body_grants[token] = (
+            from_number,
+            call_sid,
+            time.monotonic() + self._twilio_body_grant_ttl_s,
+        )
+        return token
+
+    def _consume_twilio_body_grant(self, token: str | None) -> tuple[str, str] | None:
+        """Return ``(from_number, call_sid)`` bound to a live grant, or None.
+
+        Call-scoped, not single-use: Twilio reconnects resend the same
+        ``start`` customParameters, so popping the token would leave an
+        airborne vehicle with no ``body_stop``. Replay onto a different
+        call is still fail-closed via CallSid binding. Unknown, expired,
+        and revoked tokens fail closed. Mint TTL covers first start;
+        a successful consume pins the grant until Twilio ``stop`` or hangup.
+        """
+        self._expire_twilio_body_grants()
+        if not token:
+            return None
+        entry = self._twilio_body_grants.get(token)
+        if entry is None:
+            return None
+        from_number, call_sid, expires = entry
+        if not from_number or not call_sid:
+            # Empty CallSid skips the start-event bind; drop the grant.
+            self._twilio_body_grants.pop(token, None)
+            return None
+        if time.monotonic() > expires:
+            self._twilio_body_grants.pop(token, None)
+            return None
+        # Pin after first start so a long call's later reconnect still
+        # has body_stop. Unused grants still expire at mint TTL.
+        if expires != float("inf"):
+            self._twilio_body_grants[token] = (from_number, call_sid, float("inf"))
+        return from_number, call_sid
+
+    def _revoke_twilio_body_grants_for_call(self, call_sid: str | None) -> None:
+        """Drop grants bound to a CallSid. Twilio ``stop`` is the real call end."""
+        if not call_sid:
+            return
+        self._cancel_twilio_body_grant_idle_revoke(call_sid)
+        to_drop = [
+            token
+            for token, (_from, sid, _exp) in self._twilio_body_grants.items()
+            if sid == call_sid
+        ]
+        for token in to_drop:
+            self._twilio_body_grants.pop(token, None)
+
+    def _cancel_twilio_body_grant_idle_revoke(self, call_sid: str | None) -> None:
+        """Cancel a pending idle-disconnect revoke for this CallSid."""
+        if not call_sid:
+            return
+        task = self._twilio_grant_idle_tasks.pop(call_sid, None)
+        if task is None or task.done():
+            return
+        # The idle task itself calls revoke; don't cancel the running task.
+        try:
+            if task is asyncio.current_task():
+                return
+        except RuntimeError:
+            pass
+        task.cancel()
+
+    async def _cancel_all_twilio_body_grant_idle_revokes(self) -> None:
+        tasks = [
+            self._twilio_grant_idle_tasks.pop(sid)
+            for sid in list(self._twilio_grant_idle_tasks)
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _schedule_twilio_body_grant_idle_revoke(self, call_sid: str | None) -> None:
+        """Revoke pinned grants if this CallSid does not reconnect.
+
+        Twilio Media Stream reconnects drop the websocket without ``stop``.
+        Revoking in ``finally`` would take ``body_stop`` away mid-flight.
+        Waiting ``_twilio_body_grant_idle_s`` then revoking iff the CallSid
+        is still absent from ``_connections`` bounds the leak when neither
+        ``stop`` nor hangup arrives.
+        """
+        if not call_sid:
+            return
+        if not any(
+            sid == call_sid for _from, sid, _exp in self._twilio_body_grants.values()
+        ):
+            return
+        self._cancel_twilio_body_grant_idle_revoke(call_sid)
+        delay = self._twilio_body_grant_idle_s
+
+        async def _idle_revoke() -> None:
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            if call_sid in self._connections:
+                return
+            logger.info(
+                "Revoking Twilio body grants for %s after idle disconnect",
+                call_sid,
+            )
+            self._revoke_twilio_body_grants_for_call(call_sid)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._twilio_grant_idle_tasks[call_sid] = loop.create_task(_idle_revoke())
+
+    def _body_adapter_for_websocket(
+        self, websocket, *, transport: str, caller_id: str | None = None
+    ):
+        """Expose motion tools only on loopback or allowlisted Twilio callers."""
+        if self.body_adapter is None:
+            return None
+        if transport == "twilio":
+            if self._twilio_body_caller_allowed(caller_id):
+                return self.body_adapter
+            logger.warning(
+                "Body tools disabled for Twilio caller %s (not on TWILIO_CALLER_ALLOWLIST)",
+                caller_id or "unknown",
+            )
+            return None
+        host = _websocket_peer_host(websocket)
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return self.body_adapter
+        logger.warning(
+            "Body tools disabled for unauthenticated %s client %s",
+            transport,
+            host or "unknown",
+        )
+        return None
 
     def _recent_call_path(self, caller_id: str) -> Path:
         digest = hashlib.sha256(caller_id.encode("utf-8")).hexdigest()[:16]
@@ -1226,6 +1459,7 @@ class VoiceServer:
                     if bootstrap.should_greet_first
                     else ""
                 ),
+                include_body_tools=self._twilio_body_caller_allowed(from_number),
             )
             client = self._make_client(session_cfg, hold_initial_response=True)
             await client.connect()
@@ -1779,10 +2013,17 @@ class VoiceServer:
         Twilio will then open a Media Stream WebSocket to /twilio.
         """
         form_params = dict(await request.form())
-        from_number = form_params.get("From", "")
+        from_number = (form_params.get("From", "") or "").strip()
+        incoming_call_sid = (
+            form_params.get("CallSid", "") or form_params.get("call_sid", "") or ""
+        ).strip()
 
         # Validate Twilio webhook signature when auth token is configured.
         # Skip in dev environments where TWILIO_AUTH_TOKEN is absent.
+        # Body-tool grants are fail-closed: they are only minted when this
+        # request was signature-validated. An unsigned /incoming must never
+        # mint a grant from a spoofable From field.
+        signature_validated = False
         auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
         if auth_token:
             from twilio.request_validator import RequestValidator
@@ -1795,6 +2036,7 @@ class VoiceServer:
             ):
                 logger.warning("Rejected request with invalid Twilio signature")
                 return PlainTextResponse("Forbidden", status_code=403)
+            signature_validated = True
 
         # Allowlist: only accept calls from known numbers.
         # Set TWILIO_CALLER_ALLOWLIST to a comma-separated list of E.164 numbers.
@@ -1835,6 +2077,20 @@ class VoiceServer:
         custom_params: dict[str, str] = {}
         if from_number:
             custom_params["from_number"] = from_number
+            # Body tools on /twilio must not trust client-supplied from_number.
+            # Mint a call-scoped grant here only after signature validation, and
+            # bind it to CallSid (kept off TwiML so a stolen grant cannot be
+            # replayed onto a different start event).
+            if (
+                signature_validated
+                and incoming_call_sid
+                and self._twilio_body_caller_allowed(from_number)
+            ):
+                grant_token = self._mint_twilio_body_grant(
+                    from_number, incoming_call_sid
+                )
+                if grant_token:
+                    custom_params["body_grant"] = grant_token
         twiml = build_connect_stream_twiml(ws_url, custom_params or None)
         return PlainTextResponse(twiml, media_type="text/xml")
 
@@ -1931,10 +2187,46 @@ class VoiceServer:
                         )
                     )
 
+                    # Body-tool authorization is the signed-webhook grant, not
+                    # customParameters.from_number (attacker-controlled on /twilio).
+                    grant = self._consume_twilio_body_grant(
+                        custom_params.get("body_grant") or None
+                    )
+                    granted_from: str | None = None
+                    if grant is not None:
+                        grant_from, grant_sid = grant
+                        if grant_from != from_number:
+                            logger.warning(
+                                "Twilio body grant From mismatch: grant=%s start=%s",
+                                grant_from,
+                                from_number,
+                            )
+                        elif not grant_sid or grant_sid != call_sid:
+                            logger.warning(
+                                "Twilio body grant CallSid mismatch: grant=%s start=%s",
+                                grant_sid,
+                                call_sid,
+                            )
+                        else:
+                            granted_from = grant_from
+                    body_adapter = self._body_adapter_for_websocket(
+                        websocket,
+                        transport="twilio",
+                        caller_id=granted_from,
+                    )
+
                     # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
                     prewarm_eligible = (
                         from_number and not handoff_id and not standup_brief
                     )
+                    # A spoofed start event must not steal a body-capable prewarm.
+                    if (
+                        prewarm_eligible
+                        and self.body_adapter is not None
+                        and self._twilio_body_caller_allowed(from_number)
+                        and granted_from is None
+                    ):
+                        prewarm_eligible = False
                     prewarm_client = (
                         await self._claim_prewarm(from_number)
                         if prewarm_eligible
@@ -1964,6 +2256,7 @@ class VoiceServer:
                         session_cfg = self._build_session_config(
                             instructions=instructions,
                             initial_response_instructions=initial_response_instructions,
+                            include_body_tools=body_adapter is not None,
                         )
                         realtime_client = self._make_client(
                             session_cfg,
@@ -1993,6 +2286,7 @@ class VoiceServer:
                         on_hangup=_twilio_hangup,
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
                         transcript_provider=lambda: transcript,
+                        body_adapter=body_adapter,
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2002,6 +2296,8 @@ class VoiceServer:
                         await realtime_client.connect()
 
                     self._connections[call_sid] = (websocket, realtime_client)
+                    # A reconnect arrived inside the idle window — keep the grant.
+                    self._cancel_twilio_body_grant_idle_revoke(call_sid)
 
                 elif event == "media":
                     # Audio chunk from Twilio
@@ -2021,7 +2317,11 @@ class VoiceServer:
                                 await realtime_client.send_audio(pcm_data)
 
                 elif event == "stop":
-                    # Call ended
+                    # Real call end — revoke so a reconnect after hangup cannot
+                    # re-attach motion tools with the stolen start parameters.
+                    # Do not revoke in ``finally``: websocket drop is a reconnect.
+                    # Idle-revoke in ``finally`` covers the drop-without-stop path.
+                    self._revoke_twilio_body_grants_for_call(call_sid)
                     break
 
         except WebSocketDisconnect:
@@ -2040,6 +2340,10 @@ class VoiceServer:
                 await self._disconnect_realtime_client(realtime_client)
             if call_sid and call_sid in self._connections:
                 del self._connections[call_sid]
+            # Websocket drop ≠ call end. If this CallSid does not reconnect
+            # inside the idle window, drop the pinned grant so an abrupt
+            # hangup that skipped ``stop`` cannot leave a live bearer token.
+            self._schedule_twilio_body_grant_idle_revoke(call_sid)
             await self._on_call_end(
                 caller_id,
                 "twilio",
@@ -2070,6 +2374,8 @@ class VoiceServer:
         self,
         instructions: str,
         initial_response_instructions: str = "",
+        *,
+        include_body_tools: bool = True,
     ) -> SessionConfig:
         """Build a SessionConfig with optional runtime overrides."""
         kwargs: dict = dict(
@@ -2087,6 +2393,8 @@ class VoiceServer:
             kwargs["output_speed"] = self.output_speed
         if self.openai_g711_passthrough:
             kwargs["g711_passthrough"] = True
+        if include_body_tools and self.body_adapter is not None:
+            kwargs["extra_tools"] = body_tool_schemas(self.body_adapter)
         return SessionConfig(**kwargs)
 
     def _make_client(
@@ -2197,7 +2505,13 @@ class VoiceServer:
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
-            session_cfg = self._build_session_config(instructions=instructions)
+            body_adapter = self._body_adapter_for_websocket(
+                websocket, transport="local"
+            )
+            session_cfg = self._build_session_config(
+                instructions=instructions,
+                include_body_tools=body_adapter is not None,
+            )
             on_ai_transcript, on_user_transcript, _local_hangup = (
                 self._make_transcript_callbacks(
                     transcript=transcript,
@@ -2222,6 +2536,7 @@ class VoiceServer:
                 on_hangup=_local_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
+                body_adapter=body_adapter,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2287,7 +2602,13 @@ class VoiceServer:
                 caller_id=caller_id,
                 handoff_id=handoff_id,
             )
-            session_cfg = self._build_session_config(instructions=instructions)
+            body_adapter = self._body_adapter_for_websocket(
+                websocket, transport="browser"
+            )
+            session_cfg = self._build_session_config(
+                instructions=instructions,
+                include_body_tools=body_adapter is not None,
+            )
             on_ai_transcript, on_user_transcript, _browser_hangup = (
                 self._make_transcript_callbacks(
                     transcript=transcript,
@@ -2312,6 +2633,7 @@ class VoiceServer:
                 on_hangup=_browser_hangup,
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
+                body_adapter=body_adapter,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2404,6 +2726,9 @@ class VoiceServer:
             call_sid,
             reason or "<none>",
         )
+        # Hangup is a real call end even if Twilio never sends ``stop``.
+        if "twilio" in source:
+            self._revoke_twilio_body_grants_for_call(call_sid)
 
         # Fire-and-forget Twilio REST API call termination (authoritative kill).
         # Do this BEFORE the farewell delay so the call stops accepting audio

@@ -13,6 +13,7 @@ conversation when ready.
 
 import asyncio
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -20,9 +21,14 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Awaitable, Callable, Sequence, TypeVar
+
+if TYPE_CHECKING:
+    from ..body import BodyAdapter
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 # Max task-description length to echo back when reporting status
 _MAX_TASK_PREVIEW = 120
@@ -124,6 +130,7 @@ class GptmeToolBridge:
         on_hangup: Callable[[str | None], Awaitable[None]] | None = None,
         on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
         transcript_provider: Callable[[], Sequence[object]] | None = None,
+        body_adapter: "BodyAdapter | None" = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
@@ -134,6 +141,16 @@ class GptmeToolBridge:
         self.on_hangup = on_hangup
         self.on_handoff = on_handoff
         self.transcript_provider = transcript_provider
+        self.body_adapter = body_adapter
+        self.body_max_altitude_m = self._parse_env_float(
+            "GPTME_VOICE_BODY_MAX_ALT_M", default=30.0, minimum=1.0
+        )
+        self.body_max_move_m = self._parse_env_float(
+            "GPTME_VOICE_BODY_MAX_MOVE_M", default=50.0, minimum=0.1
+        )
+        self.body_call_timeout_s = self._parse_env_float(
+            "GPTME_VOICE_BODY_CALL_TIMEOUT_S", default=12.0, minimum=0.1
+        )
         legacy_env_model = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL")
         env_model_fast = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_FAST")
         env_model_smart = os.environ.get("GPTME_VOICE_SUBAGENT_MODEL_SMART")
@@ -167,6 +184,26 @@ class GptmeToolBridge:
         except ValueError:
             logger.warning("%s=%r is not an integer; using %s", name, value, default)
             return default
+
+    @staticmethod
+    def _parse_env_float(name: str, *, default: float, minimum: float) -> float:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        try:
+            parsed = float(value)
+        except ValueError:
+            parsed = float("nan")
+        if not math.isfinite(parsed) or parsed < minimum:
+            logger.warning(
+                "%s=%r must be a finite number >= %s; using %s",
+                name,
+                value,
+                minimum,
+                default,
+            )
+            return default
+        return parsed
 
     @staticmethod
     def _extract_error_text(stdout: str, stderr: str, output: str) -> str:
@@ -911,4 +948,129 @@ class GptmeToolBridge:
             result = await self.on_handoff(to_agent, reason, context_summary)
             return result
 
+        if name.startswith("body_"):
+            return await self._handle_body_call(name, arguments)
+
         return {"error": f"Unknown function: {name}"}
+
+    @staticmethod
+    def _clamp(value: float, limit: float) -> float:
+        return max(-limit, min(limit, value))
+
+    async def _handle_body_call(self, name: str, arguments: dict) -> dict:
+        """Route body_* tools to the configured body adapter.
+
+        Direct, low-latency path by design: motion goals (especially
+        body_stop) must not round-trip through subagent dispatch. Numeric
+        inputs are clamped to conservative envelopes here so a confused
+        model cannot request a 500 m climb; the autopilot's own failsafes
+        and geofence remain the final safety authority.
+        """
+        adapter = self.body_adapter
+        if adapter is None:
+            return {
+                "error": (
+                    "No body is connected to this session, so there is nothing to move."
+                )
+            }
+
+        async def _call(awaitable: Awaitable[_T]) -> _T:
+            return await asyncio.wait_for(awaitable, timeout=self.body_call_timeout_s)
+
+        try:
+            await _call(adapter.ensure_connected())
+        except asyncio.TimeoutError:
+            logger.error(
+                "Body adapter connect timed out after %.1fs",
+                self.body_call_timeout_s,
+            )
+            return {"error": "Could not reach the body before the timeout."}
+        except Exception as e:
+            logger.error("Body adapter connect failed: %s", e)
+            return {"error": f"Could not reach the body: {e}"}
+
+        caps = adapter.capabilities
+        try:
+            if name == "body_status":
+                return {"status": "ok", "telemetry": adapter.telemetry()}
+            if name == "body_stop" and "move" in caps:
+                return await _call(adapter.stop())
+            if name == "body_return_home" and "move" in caps:
+                return await _call(adapter.return_home())
+            if name == "body_takeoff" and "altitude" in caps:
+                if adapter.telemetry().get("in_air") is True:
+                    return {
+                        "error": (
+                            "Already in the air; refuse takeoff. "
+                            "Use body_move, body_goto, or body_land."
+                        )
+                    }
+                altitude = float(arguments.get("altitude_m", 2.5))
+                altitude = max(1.0, min(self.body_max_altitude_m, altitude))
+                return await _call(adapter.takeoff(altitude))
+            if name == "body_land" and "altitude" in caps:
+                return await _call(adapter.land())
+            if name == "body_move" and "move" in caps:
+                forward = self._clamp(
+                    float(arguments.get("forward_m", 0.0)), self.body_max_move_m
+                )
+                right = self._clamp(
+                    float(arguments.get("right_m", 0.0)), self.body_max_move_m
+                )
+                up = self._clamp(
+                    float(arguments.get("up_m", 0.0)), self.body_max_altitude_m
+                )
+                position = adapter.telemetry().get("position") or {}
+                current_altitude = position.get("relative_altitude_m")
+                if current_altitude is None:
+                    # Without a relative-altitude fix the absolute ceiling
+                    # cannot be enforced. Climbing is fail-closed; descent
+                    # and level flight still go through (clamped up <= 0).
+                    if up > 0:
+                        return {
+                            "error": (
+                                "Cannot climb: current altitude unknown. "
+                                "Refuse to exceed the altitude ceiling without telemetry."
+                            )
+                        }
+                else:
+                    # Floor at 0 m so "descend" on the ground is a no-op, not
+                    # a forced climb to the old 1 m takeoff floor.
+                    target_altitude = max(
+                        0.0,
+                        min(self.body_max_altitude_m, float(current_altitude) + up),
+                    )
+                    up = target_altitude - float(current_altitude)
+                return await _call(adapter.move(forward, right, up))
+            if name == "body_goto" and "move" in caps:
+                lat = float(arguments["latitude_deg"])
+                lon = float(arguments["longitude_deg"])
+                altitude_arg = arguments.get("altitude_m")
+                goto_alt: float | None = None
+                if altitude_arg is not None:
+                    goto_alt = max(
+                        1.0, min(self.body_max_altitude_m, float(altitude_arg))
+                    )
+                return await _call(adapter.goto(lat, lon, goto_alt))
+            if name == "body_turn" and "rotate" in caps:
+                yaw = self._clamp(float(arguments.get("yaw_deg", 0.0)), 180.0)
+                return await _call(adapter.turn(yaw))
+        except (KeyError, TypeError, ValueError) as e:
+            return {"error": f"Invalid arguments for {name}: {e}"}
+        except asyncio.TimeoutError:
+            logger.error(
+                "Body call %s timed out after %.1fs",
+                name,
+                self.body_call_timeout_s,
+            )
+            return {"error": f"{name} timed out before the body responded."}
+        except Exception as e:  # noqa: BLE001 - report body errors to the model
+            logger.error("Body call %s failed: %s", name, e)
+            return {"error": f"{name} failed: {e}"}
+
+        return {
+            "error": (
+                f"{name} is not available on this body "
+                f"(capabilities: {sorted(caps) or 'none'})."
+            )
+        }
