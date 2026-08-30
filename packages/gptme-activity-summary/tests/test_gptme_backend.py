@@ -357,6 +357,20 @@ def test_json_preamble_then_malformed_summary_recovers_root_json():
     assert parsed.get("accomplishments") == ["parser fix"]
 
 
+def test_same_message_json_preamble_then_malformed_summary_recovers_root_json():
+    """A JSON preamble in the same message must not hide a malformed summary."""
+    content = (
+        '{"thinking": "assemble the daily summary"}\n'
+        '{"accomplishments": ["parser fix"], "narrative": "REAL summary"]'
+    )
+
+    out = _extract_assistant_text(_msg(content))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("accomplishments") == ["parser fix"]
+
+
 def test_malformed_summary_then_complete_fence_recovers_root_json():
     """Recover a one-token malformed root summary before a complete trailer.
 
