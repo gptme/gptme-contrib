@@ -991,7 +991,26 @@ ai_review_verdict() {
 
     score=$(printf '%s' "$marker" | jq -r '.score // empty' 2>/dev/null)
     if [ -n "$score" ] && [ "$score" != "null" ]; then
-        [ "$score" -ge 5 ] 2>/dev/null && echo "clean" || echo "dirty"
+        if [ "$score" -ge 5 ] 2>/dev/null; then
+            echo "clean"
+            return 0
+        fi
+        # Round cap: after 5 reviews, P2-only (score 4) is informational.
+        # apply_round_cap uses review_round_count = len(history)+1 and fires
+        # when that is > 5; the posted marker includes the current round, so
+        # history length >= 6 means the cap has already been applied. Keep
+        # P0/P1 (score <= 3) dirty so they still dispatch.
+        # Incident: gptme/gptme#3646 — 23 PM sessions on a round-capped P2
+        # that had already been rejected, no open threads, same head.
+        if [ "$score" -eq 4 ] 2>/dev/null; then
+            local n_rounds
+            n_rounds=$(printf '%s' "$marker" | jq -r '(.history // []) | length' 2>/dev/null)
+            if [ -n "$n_rounds" ] && [ "$n_rounds" -gt 5 ] 2>/dev/null; then
+                echo "clean"
+                return 0
+            fi
+        fi
+        echo "dirty"
         return 0
     fi
     # Markers written before the score field shipped (2026-08-07/08) carry none,
