@@ -8,6 +8,7 @@ from .twilio_integration import (
     ConfigurationError,
     build_connect_stream_twiml,
     create_outbound_call,
+    outbound_identity_params,
     resolve_outbound_call_settings,
 )
 
@@ -47,7 +48,10 @@ def main(
     except ConfigurationError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    twiml = build_connect_stream_twiml(settings.stream_url)
+    twiml = build_connect_stream_twiml(
+        settings.stream_url,
+        outbound_identity_params(to_number, settings.custom_params),
+    )
     if dry_run:
         click.echo(twiml)
         return

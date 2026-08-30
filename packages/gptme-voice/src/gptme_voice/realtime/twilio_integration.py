@@ -88,6 +88,22 @@ def build_stream_url(
     return urlunsplit((scheme, parsed.netloc, path, "", ""))
 
 
+def outbound_identity_params(
+    to_number: str, extra: dict[str, str] | None = None
+) -> dict[str, str]:
+    """TwiML params that preserve the remote party on outbound Twilio legs.
+
+    Outbound Media Streams otherwise arrive with no From number, so the server
+    would archive the Call SID as ``caller_id`` and lose the dialed party.
+    ``from_number`` stays the key the WebSocket handler already uses for resume
+    and identity lookup; ``remote_party`` is the explicit durable identity.
+    """
+    params = dict(extra or {})
+    params["from_number"] = to_number
+    params["remote_party"] = to_number
+    return params
+
+
 def build_connect_stream_twiml(
     stream_url: str, custom_params: dict[str, str] | None = None
 ) -> str:
@@ -149,9 +165,10 @@ def create_outbound_call(
             ) from exc
 
     client = client_cls(settings.account_sid, settings.auth_token)
+    custom_params = outbound_identity_params(to_number, settings.custom_params)
     call = client.calls.create(
         to=to_number,
         from_=settings.from_number,
-        twiml=build_connect_stream_twiml(settings.stream_url, settings.custom_params),
+        twiml=build_connect_stream_twiml(settings.stream_url, custom_params),
     )
     return call.sid
