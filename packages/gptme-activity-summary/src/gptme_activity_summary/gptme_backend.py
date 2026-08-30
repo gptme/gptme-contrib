@@ -17,6 +17,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +94,26 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
     env = os.environ.copy()
     # Prevent recursion / contamination from a parent gptme invocation.
     env.pop("GPTME_SUBPROCESS", None)
+    # Nested gptme must not inherit the parent session's log dir or name.
+    # Incident 2026-08-30: a parent autonomous session had
+    # GPTME_LOGS_HOME=/tmp/gptme-logs-<id> and GPTME_NAME=autonomous-<id>;
+    # the fallback appended its JSON summary into that conversation.jsonl
+    # and stdout then mixed parent+child assistant messages so
+    # _extract_assistant_text preferred a completion-ack over the JSON.
+    for key in (
+        "GPTME_LOGS_HOME",
+        "GPTME_NAME",
+        "GPTME_AGENT_NAME",
+        "GPTME_WORKSPACE",
+    ):
+        env.pop(key, None)
 
+    # Create the private log dir inside the try so a full/unwritable temp
+    # filesystem returns "" instead of raising (never-raise contract).
+    isolated_logs = None
     try:
+        isolated_logs = Path(tempfile.mkdtemp(prefix="gptme-activity-summary-"))
+        env["GPTME_LOGS_HOME"] = str(isolated_logs)
         result = subprocess.run(
             cmd,
             input=prompt,
@@ -108,6 +128,9 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
     except Exception as exc:  # noqa: BLE001 - best-effort adapter must not raise
         logger.warning("gptme fallback errored unexpectedly: %s", exc)
         return ""
+    finally:
+        if isolated_logs is not None:
+            shutil.rmtree(isolated_logs, ignore_errors=True)
 
     if result.returncode != 0:
         logger.warning(
