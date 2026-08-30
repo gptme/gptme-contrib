@@ -194,7 +194,7 @@ def _repair_summary_json(text: str) -> str | None:
 
     ``json_repair`` may return several top-level values when a wrong closing
     delimiter splits the root object. Reassemble that stream only when the
-    first value carries summary structure and a valid schema-key suffix carries
+    final value carries summary structure and a valid schema-key suffix carries
     the narrative field. This narrow gate avoids treating arbitrary prose or
     nested provider-error JSON as a successful summary.
     """
@@ -224,14 +224,25 @@ def _repair_summary_json(text: str) -> str | None:
             root.setdefault("decisions", []).append(value)
 
     # json_repair can split a malformed root into several top-level values and
-    # lose their field names. Find the earliest schema-key suffix that is valid
-    # JSON; that preserves every recoverable field after the malformed token
-    # without guessing names for anonymous values that came before it.
+    # lose their field names. Skip independently valid preamble objects, then
+    # find the earliest schema-key suffix in the remaining text. Never overwrite
+    # truthy fields already present on the selected final root — a preamble
+    # ``narrative``/``accomplishments`` would otherwise clobber the recovered
+    # activity record.
     decoder = json.JSONDecoder()
     suffix_keys = ("blockers", "themes", "work_in_progress", *_SUMMARY_KEYS)
+    search_start = 0
+    for _ in range(root_index):
+        preamble_start = text.find("{", search_start)
+        if preamble_start == -1:
+            break
+        try:
+            _, search_start = decoder.raw_decode(text, preamble_start)
+        except json.JSONDecodeError:
+            break
     for key in suffix_keys:
         marker = f'"{key}"'
-        start = text.find(marker)
+        start = text.find(marker, search_start)
         if start == -1:
             continue
         try:
@@ -239,7 +250,10 @@ def _repair_summary_json(text: str) -> str | None:
         except json.JSONDecodeError:
             continue
         if isinstance(suffix, dict) and any(suffix.get(k) for k in _SUMMARY_KEYS):
-            root.update(suffix)
+            for field, value in suffix.items():
+                if root.get(field):
+                    continue
+                root[field] = value
             break
     return json.dumps(root) if any(root.get(k) for k in _SUMMARY_KEYS) else None
 

@@ -385,6 +385,29 @@ def test_structural_preamble_then_malformed_summary_prefers_final_root():
     assert parsed.get("accomplishments") == ["final"]
 
 
+def test_narrative_preamble_then_split_summary_keeps_final_narrative():
+    """A preamble narrative must not overwrite a later concatenated summary root.
+
+    json-repair returns both independently valid objects. Last-match selects the
+    final root, but ``text.find('"narrative"')`` still lands in the preamble and
+    ``root.update(suffix)`` would persist the draft narrative and accomplishments.
+    """
+    content = (
+        '{"accomplishments": ["draft"], "blockers": [], '
+        '"narrative": "DRAFT summary"}\n'
+        '{"accomplishments": ["final"], "decisions": '
+        '[{"topic": "x", "decision": "y"}],\n'
+        '"blockers": [], "narrative": "REAL summary"}'
+    )
+
+    out = _extract_assistant_text(_msg(content))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("accomplishments") == ["final"]
+    assert parsed.get("decisions") == [{"topic": "x", "decision": "y"}]
+
+
 def test_malformed_summary_then_complete_fence_recovers_root_json():
     """Recover a one-token malformed root summary before a complete trailer.
 
