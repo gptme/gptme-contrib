@@ -15,7 +15,12 @@ from websockets.exceptions import ConnectionClosed
 # ---------------------------------------------------------------------------
 
 
-def _make_node(server_url="ws://localhost:9999/local", node_name="test-node"):
+def _make_node(
+    server_url="ws://localhost:9999/local",
+    node_name="test-node",
+    *,
+    vision_bridge=None,
+):
     """Create a VoiceNode with pyaudio mocked out."""
     with patch("gptme_voice_node.node._get_pyaudio") as mock_get_pa:
         mock_pa_module = MagicMock()
@@ -24,7 +29,7 @@ def _make_node(server_url="ws://localhost:9999/local", node_name="test-node"):
         mock_get_pa.return_value = mock_pa_module
         from gptme_voice_node.node import VoiceNode
 
-        node = VoiceNode(server_url, node_name)
+        node = VoiceNode(server_url, node_name, vision_bridge=vision_bridge)
     return node
 
 
@@ -200,6 +205,21 @@ class TestRecvLoop:
         speaker.write.assert_not_called()
         assert "ignoring malformed message" in caplog.text
 
+    @pytest.mark.asyncio
+    async def test_vision_request_is_delegated_to_bridge(self):
+        bridge = MagicMock()
+        bridge.handle_message = AsyncMock(return_value=True)
+        node = _make_node(vision_bridge=bridge)
+        message = {"type": "vision_look_request", "request_id": "req-1"}
+        mock_ws = AsyncMock()
+        mock_ws.recv.side_effect = [json.dumps(message), ConnectionClosed(None, None)]
+        speaker = MagicMock()
+
+        await node._recv_loop(mock_ws, speaker)
+
+        bridge.handle_message.assert_awaited_once_with(message, mock_ws.send)
+        speaker.write.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Transport safety warning
@@ -306,6 +326,29 @@ class TestLifecycle:
         assert node._pa.open.call_args_list[1].kwargs["start"] is False
 
     @pytest.mark.asyncio
+    async def test_session_starts_and_stops_vision_with_audio(self):
+        vision = MagicMock()
+        vision.stop = AsyncMock()
+        node = _make_node(vision_bridge=vision)
+        mic = MagicMock()
+        speaker = MagicMock()
+        node._pa.open.side_effect = [mic, speaker]
+
+        async def stop_session(*_args):
+            node.stop()
+
+        websocket = AsyncMock()
+        with (
+            patch.object(node, "_send_loop", AsyncMock(side_effect=stop_session)),
+            patch.object(node, "_recv_loop", AsyncMock(side_effect=stop_session)),
+        ):
+            await node._session(websocket)
+
+        vision.start.assert_called_once()
+        assert vision.start.call_args.args[1] == websocket.send
+        vision.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("failing_stream", ["mic", "speaker"])
     async def test_session_closes_streams_when_start_fails(self, failing_stream):
         node = _make_node()
@@ -409,6 +452,33 @@ class TestBackoff:
 
         with patch("gptme_voice_node.node.time.monotonic", return_value=100.0):
             assert _next_backoff(8, connected_at=60.0) == BACKOFF_INITIAL
+
+    def test_vision_capability_preserves_existing_query(self):
+        from gptme_voice_node.node import _with_vision_capability
+
+        url = "wss://voice.example/local?caller_id=erik"
+        assert _with_vision_capability(url, False) == url
+        assert (
+            _with_vision_capability(url, True)
+            == "wss://voice.example/local?caller_id=erik&vision=1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_vision_node_advertises_capability_on_connect(self):
+        vision = MagicMock()
+        node = _make_node(vision_bridge=vision)
+
+        async def stop_on_sleep(_delay):
+            node.stop()
+
+        connect = MagicMock(side_effect=OSError("offline"))
+        with (
+            patch("gptme_voice_node.node.websockets.connect", connect),
+            patch("gptme_voice_node.node.asyncio.sleep", side_effect=stop_on_sleep),
+        ):
+            await node.run_forever()
+
+        assert connect.call_args.args[0].endswith("/local?vision=1")
 
     @pytest.mark.asyncio
     async def test_retry_log_matches_sleep_delay(self, caplog):

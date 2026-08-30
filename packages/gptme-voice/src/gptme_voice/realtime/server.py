@@ -34,6 +34,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from ..body import body_adapter_from_env, body_tool_schemas
 from ..handoff import HandoffWriter
+from ..vision import VisionSessionBridge, vision_tool_schema
 from .audio import AudioConverter
 from .openai_client import (
     OpenAIRealtimeClient,
@@ -71,6 +72,13 @@ def _websocket_peer_host(websocket) -> str | None:
         if isinstance(first, str) and first:
             return first
     return None
+
+
+def _websocket_has_vision(websocket) -> bool:
+    """Whether a local client advertised an attached camera bridge."""
+    query_params = getattr(websocket, "query_params", {})
+    value = query_params.get("vision") if query_params is not None else None
+    return isinstance(value, str) and value.lower() in {"1", "true", "yes"}
 
 
 logger = logging.getLogger(__name__)
@@ -2376,6 +2384,7 @@ class VoiceServer:
         initial_response_instructions: str = "",
         *,
         include_body_tools: bool = True,
+        include_vision_tools: bool = False,
     ) -> SessionConfig:
         """Build a SessionConfig with optional runtime overrides."""
         kwargs: dict = dict(
@@ -2393,8 +2402,13 @@ class VoiceServer:
             kwargs["output_speed"] = self.output_speed
         if self.openai_g711_passthrough:
             kwargs["g711_passthrough"] = True
+        extra_tools: list[dict] = []
         if include_body_tools and self.body_adapter is not None:
-            kwargs["extra_tools"] = body_tool_schemas(self.body_adapter)
+            extra_tools.extend(body_tool_schemas(self.body_adapter))
+        if include_vision_tools:
+            extra_tools.append(vision_tool_schema())
+        if extra_tools:
+            kwargs["extra_tools"] = extra_tools
         return SessionConfig(**kwargs)
 
     def _make_client(
@@ -2498,6 +2512,7 @@ class VoiceServer:
         handoff_id = self._get_local_handoff_id(websocket)
         realtime_client: OpenAIRealtimeClient | None = None
         tool_bridge: GptmeToolBridge | None = None
+        vision_bridge: VisionSessionBridge | None = None
         transcript: list[TranscriptTurn] = []
 
         try:
@@ -2508,9 +2523,12 @@ class VoiceServer:
             body_adapter = self._body_adapter_for_websocket(
                 websocket, transport="local"
             )
+            if _websocket_has_vision(websocket):
+                vision_bridge = VisionSessionBridge(websocket.send_text)
             session_cfg = self._build_session_config(
                 instructions=instructions,
                 include_body_tools=body_adapter is not None,
+                include_vision_tools=vision_bridge is not None,
             )
             on_ai_transcript, on_user_transcript, _local_hangup = (
                 self._make_transcript_callbacks(
@@ -2537,6 +2555,7 @@ class VoiceServer:
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
                 body_adapter=body_adapter,
+                vision_bridge=vision_bridge,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2545,6 +2564,10 @@ class VoiceServer:
             async for message in websocket.iter_text():
                 data = json.loads(message)
 
+                if vision_bridge is not None and await vision_bridge.handle_message(
+                    data
+                ):
+                    continue
                 if data.get("type") == "audio":
                     # Audio chunk from client (PCM 24kHz)
                     audio_b64 = data.get("audio", "")
@@ -2567,6 +2590,8 @@ class VoiceServer:
         except Exception as e:
             logger.exception("Error handling local connection: %s", e)
         finally:
+            if vision_bridge is not None:
+                vision_bridge.close()
             if realtime_client:
                 await self._disconnect_realtime_client(realtime_client)
             await self._on_call_end(

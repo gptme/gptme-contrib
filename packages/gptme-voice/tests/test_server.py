@@ -30,6 +30,7 @@ from gptme_voice.realtime.server import (
     _prepend_activity_digest,
     _should_trigger_hangup_transcript_fallback,
     _truncate_resume_transcript,
+    _websocket_has_vision,
 )
 from gptme_voice.realtime.sounds import PCM_CUES, SAMPLE_RATE
 
@@ -44,6 +45,16 @@ class _DummyWebSocket:
 
     async def send_bytes(self, message: bytes) -> None:
         self.binary_messages.append(message)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("1", True), ("true", True), ("yes", True), ("0", False), (None, False)],
+)
+def test_local_vision_capability_is_explicit(value, expected) -> None:
+    websocket = _DummyWebSocket()
+    websocket.query_params = {} if value is None else {"vision": value}
+    assert _websocket_has_vision(websocket) is expected
 
 
 class _ClosableWebSocket(_DummyWebSocket):
@@ -2396,6 +2407,15 @@ class TestTranscriptPromotion:
 
         server._promote_transcript_to_gptme("+15551234567", transcript, metadata)
         assert len(calls) == 0
+
+
+def test_local_session_config_exposes_look_without_body_tools() -> None:
+    server = VoiceServer()
+    config = server._build_session_config(
+        "You are Bob.", include_body_tools=False, include_vision_tools=True
+    )
+
+    assert [tool["name"] for tool in config.extra_tools] == ["look"]
 
 
 def test_server_g711_passthrough_off_by_default() -> None:

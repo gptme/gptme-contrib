@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Sequence, TypeVar
 
 if TYPE_CHECKING:
     from ..body import BodyAdapter
+    from ..vision import VisionSessionBridge
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class GptmeToolBridge:
         on_handoff: Callable[[str, str, str | None], Awaitable[dict]] | None = None,
         transcript_provider: Callable[[], Sequence[object]] | None = None,
         body_adapter: "BodyAdapter | None" = None,
+        vision_bridge: "VisionSessionBridge | None" = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
@@ -142,6 +144,7 @@ class GptmeToolBridge:
         self.on_handoff = on_handoff
         self.transcript_provider = transcript_provider
         self.body_adapter = body_adapter
+        self.vision_bridge = vision_bridge
         self.body_max_altitude_m = self._parse_env_float(
             "GPTME_VOICE_BODY_MAX_ALT_M", default=30.0, minimum=1.0
         )
@@ -947,6 +950,14 @@ class GptmeToolBridge:
                 }
             result = await self.on_handoff(to_agent, reason, context_summary)
             return result
+
+        if name == "look":
+            if self.vision_bridge is None:
+                return {"error": "No camera is connected to this session."}
+            prompt = arguments.get("prompt") or "Describe what you see, briefly."
+            if not isinstance(prompt, str):
+                return {"error": "Invalid arguments for look: prompt must be text."}
+            return await self.vision_bridge.look(prompt)
 
         if name.startswith("body_"):
             return await self._handle_body_call(name, arguments)

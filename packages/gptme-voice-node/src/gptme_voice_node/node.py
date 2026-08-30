@@ -7,10 +7,12 @@ Low memory footprint, systemd-managed lifecycle.
 Config (env vars):
   GPTME_VOICE_NODE_SERVER  — WebSocket URL of bob-voice-server (default: ws://localhost:8080/local)
   GPTME_VOICE_NODE_NAME    — Node identity string (default: bobbrain-unknown)
+  GPTME_VOICE_NODE_VISION_SOURCE — optional camera:N, stream URL, or image path
 
 Protocol:
   Client → Server: {"type": "audio", "audio": "<base64 PCM 16-bit 24kHz mono>"}
   Client → Server: {"type": "commit"}      (optional flush signal)
+  Client → Server: {"type": "vision_event", ...} / {"type": "vision_look_result", ...}
   Server → Client: {"type": "audio", "audio": "<base64>"}
   Server → Client: {"type": "audio_end"}
 """
@@ -18,6 +20,7 @@ Protocol:
 import asyncio
 import base64
 import functools
+import importlib
 import json
 import logging
 import os
@@ -40,6 +43,8 @@ except ImportError as e:
 # --- Config ---
 SERVER_URL = os.environ.get("GPTME_VOICE_NODE_SERVER", "ws://localhost:8080/local")
 NODE_NAME = os.environ.get("GPTME_VOICE_NODE_NAME", "bobbrain-unknown")
+VISION_SOURCE = os.environ.get("GPTME_VOICE_NODE_VISION_SOURCE")
+VISION_INTERVAL = float(os.environ.get("GPTME_VOICE_NODE_VISION_INTERVAL", "1.0"))
 
 # --- Audio constants (must match server) ---
 SAMPLE_RATE = 24000
@@ -115,6 +120,15 @@ def _next_backoff(backoff: int, connected_at: float | None) -> int:
     return min(backoff * 2, BACKOFF_MAX)
 
 
+def _with_vision_capability(server_url: str, enabled: bool) -> str:
+    """Tell the voice server whether this connection has a camera bridge."""
+    if not enabled:
+        return server_url
+    parsed = urlparse(server_url)
+    query = f"{parsed.query}&vision=1" if parsed.query else "vision=1"
+    return parsed._replace(query=query).geturl()
+
+
 class VoiceNode:
     """Thin embedded voice client.
 
@@ -122,9 +136,12 @@ class VoiceNode:
     and closed per-session so the OS sees a clean release on disconnect.
     """
 
-    def __init__(self, server_url: str, node_name: str) -> None:
+    def __init__(
+        self, server_url: str, node_name: str, *, vision_bridge: Any | None = None
+    ) -> None:
         self.server_url = server_url
         self.node_name = node_name
+        self.vision_bridge = vision_bridge
         pyaudio = _get_pyaudio()  # May raise ImportError if not installed
         self._pa = pyaudio.PyAudio()
         self._audio_format = pyaudio.paInt16
@@ -181,6 +198,8 @@ class VoiceNode:
                 mic_started = True
                 speaker.start_stream()
                 speaker_started = True
+                if self.vision_bridge is not None:
+                    self.vision_bridge.start(asyncio.get_running_loop(), ws.send)
                 send_task = asyncio.create_task(self._send_loop(ws, mic))
                 recv_task = asyncio.create_task(self._recv_loop(ws, speaker))
                 try:
@@ -190,6 +209,8 @@ class VoiceNode:
                         if not task.done():
                             task.cancel()
                     await asyncio.gather(send_task, recv_task, return_exceptions=True)
+                    if self.vision_bridge is not None:
+                        await self.vision_bridge.stop()
             finally:
                 _close_stream(speaker, speaker_started)
         finally:
@@ -233,6 +254,11 @@ class VoiceNode:
                 data = json.loads(raw_msg)
                 if not isinstance(data, dict):
                     raise TypeError("message must be a JSON object")
+                if (
+                    self.vision_bridge is not None
+                    and await self.vision_bridge.handle_message(data, ws.send)
+                ):
+                    continue
                 msg_type = data.get("type")
                 if msg_type == "audio":
                     audio = data.get("audio")
@@ -253,12 +279,15 @@ class VoiceNode:
     async def run_forever(self) -> None:
         """Connect and auto-reconnect with exponential backoff."""
         backoff = BACKOFF_INITIAL
+        connect_url = _with_vision_capability(
+            self.server_url, self.vision_bridge is not None
+        )
         while self._running:
             connected_at: float | None = None
             error: tuple[int, str] | None = None
             try:
                 async with websockets.connect(
-                    self.server_url,
+                    connect_url,
                     open_timeout=10,
                     ping_interval=20,
                     ping_timeout=20,
@@ -302,8 +331,36 @@ class VoiceNode:
         self._pa.terminate()
 
 
+def _build_vision_bridge(source_spec: str | None, interval_s: float):
+    if not source_spec:
+        return None
+    try:
+        vision_node = importlib.import_module("gptme_vision_node")
+        vision_cli = importlib.import_module("gptme_vision_node.cli")
+    except ImportError as exc:
+        raise ImportError(
+            "vision requires: pip install 'gptme-voice-node[vision]'"
+        ) from exc
+
+    MotionDetector = getattr(vision_node, "MotionDetector")
+    OpenCVCameraSource = getattr(vision_node, "OpenCVCameraSource")
+    PersonDetector = getattr(vision_node, "PersonDetector")
+    VisionBridge = getattr(vision_node, "VisionBridge")
+    make_source = getattr(vision_cli, "make_source")
+    source = make_source(source_spec)
+    if not isinstance(source, OpenCVCameraSource):
+        log.warning("vision source %s is not a live camera/stream", source_spec)
+    return VisionBridge(
+        source, [PersonDetector(), MotionDetector()], interval_s=interval_s
+    )
+
+
 async def _async_main(server_url: str, node_name: str) -> None:
-    node = VoiceNode(server_url, node_name)
+    node = VoiceNode(
+        server_url,
+        node_name,
+        vision_bridge=_build_vision_bridge(VISION_SOURCE, VISION_INTERVAL),
+    )
 
     loop = asyncio.get_event_loop()
     task = asyncio.ensure_future(node.run_forever())

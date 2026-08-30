@@ -63,6 +63,7 @@ class VisionPipeline:
         self.absent_frames_for_left = absent_frames_for_left
 
         self.latest_frame: np.ndarray | None = None
+        self._latest_frame_lock = threading.Lock()
         self._person_present = False
         self._frames_without_person = 0
         self._thread: threading.Thread | None = None
@@ -78,9 +79,15 @@ class VisionPipeline:
         except Exception:
             logger.exception("event callback failed for %s", event.kind)
 
+    def latest_frame_copy(self) -> np.ndarray | None:
+        """Return a thread-safe snapshot for consumers outside the capture loop."""
+        with self._latest_frame_lock:
+            return None if self.latest_frame is None else self.latest_frame.copy()
+
     def _process_frame(self, frame: np.ndarray) -> list[VisionEvent]:
         """Run detectors and emit events for one captured frame."""
-        self.latest_frame = frame
+        with self._latest_frame_lock:
+            self.latest_frame = frame
 
         detections: list[Detection] = []
         for detector in self.detectors:
@@ -124,8 +131,10 @@ class VisionPipeline:
             try:
                 frame = self.source.get_frame()
                 if frame is None:
-                    break
-                self._process_frame(frame)
+                    if getattr(self.source, "stop_on_empty", True):
+                        break
+                else:
+                    self._process_frame(frame)
             except Exception:
                 logger.exception("pipeline step failed")
             elapsed = time.monotonic() - started
@@ -137,6 +146,9 @@ class VisionPipeline:
         self._stop.clear()
         self._person_present = False
         self._frames_without_person = 0
+        with self._latest_frame_lock:
+            # Drop the previous session's snapshot so look cannot describe a stale scene.
+            self.latest_frame = None
         self._thread = threading.Thread(
             target=self._run, name="vision-pipeline", daemon=True
         )

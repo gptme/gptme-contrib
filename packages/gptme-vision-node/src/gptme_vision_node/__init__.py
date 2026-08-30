@@ -5,6 +5,7 @@ place recognition (visual + WiFi fingerprints). See the BobBrain spec
 (ErikBjare/bob#730) — this is milestone 2 (vision v0).
 """
 
+from .bridge import VisionBridge
 from .detect import Detection, Detector, MotionDetector, PersonDetector
 from .frame_source import FrameSource, ImageFileSource, OpenCVCameraSource
 from .look import describe_frame
@@ -22,6 +23,7 @@ __all__ = [
     "OpenCVCameraSource",
     "PersonDetector",
     "PlaceRecognizer",
+    "VisionBridge",
     "VisionEvent",
     "VisionPipeline",
     "WifiSignature",

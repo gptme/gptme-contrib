@@ -11,6 +11,8 @@ Voice interface for gptme agents using OpenAI or xAI Grok Realtime APIs.
 - **Feedback loop prevention** by muting mic during playback
 - **Twilio integration** for phone call support via Media Streams
 - **Local testing** with direct microphone/speaker I/O
+- **BobBrain camera tool** — the `/local` session exposes `look` and runs VLM
+  inference only after the edge node returns an on-demand frame
 
 ## Installation
 
@@ -99,7 +101,8 @@ No need to export them as shell env vars if they're already configured in gptme.
 - **openai_client.py** - WebSocket client for OpenAI Realtime API with VAD, audio streaming, and event handling
 - **xai_client.py** - xAI Grok Voice Agent adapter (OpenAI-compatible WebSocket protocol)
 - **server.py** - Starlette WebSocket server bridging clients to OpenAI or xAI
-- **tool_bridge.py** - Async subagent dispatcher (runs `gptme --non-interactive` in background, injects results)
+- **tool_bridge.py** - Async subagent dispatcher plus body/vision tool routing
+- **vision.py** - Correlated camera-frame requests, edge-event handling, and host-side VLM inference
 - **audio.py** - Audio format conversion (PCM ↔ μ-law for Twilio)
 - **client.py** - Local client with mic/speaker I/O and feedback loop prevention
 

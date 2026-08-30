@@ -30,6 +30,8 @@ All config is via environment variables (no CLI flags — systemd-friendly):
 |---|---|---|
 | `GPTME_VOICE_NODE_SERVER` | `ws://localhost:8080/local` | WebSocket URL of `bob-voice-server` |
 | `GPTME_VOICE_NODE_NAME` | `bobbrain-unknown` | Node identity used in local logs |
+| `GPTME_VOICE_NODE_VISION_SOURCE` | unset | Optional `camera:N`, RTSP/HTTP stream URL, or image path; enables the camera bridge |
+| `GPTME_VOICE_NODE_VISION_INTERVAL` | `1.0` | Seconds between local person/motion detection frames |
 
 The `ws://localhost` default is intended only for a server on the same host. Use
 `wss://` whenever microphone audio crosses a network; the client logs a warning
@@ -69,11 +71,20 @@ The node speaks the same WebSocket JSON protocol as `gptme-voice-client`:
 
 ```
 Client → Server: {"type": "audio", "audio": "<base64 PCM 16-bit 24kHz mono>"}
+Client → Server: {"type": "vision_event", "event": "person_appeared", ...}
+Client → Server: {"type": "vision_look_result", "request_id": "...", "image": "<base64 JPEG>"}
 Server → Client: {"type": "audio", "audio": "<base64>"}
 Server → Client: {"type": "audio_end"}
+Server → Client: {"type": "vision_look_request", "request_id": "..."}
 ```
 
-All inference happens on the host; the node is pure I/O plumbing.
+With the `vision` extra installed, set `GPTME_VOICE_NODE_VISION_SOURCE=camera:0`
+to run cheap person/motion detectors on the node. Events carry metadata only. A
+JPEG crosses the WebSocket only when the realtime model calls `look`; the host
+then runs VLM inference and returns the description to the same voice turn.
+The node advertises camera capability on connect, so camera-less `/local`
+clients do not expose a `look` tool that can only time out. Vision events remain
+telemetry in v0 and never trigger unsolicited model speech.
 
 ## Architecture
 

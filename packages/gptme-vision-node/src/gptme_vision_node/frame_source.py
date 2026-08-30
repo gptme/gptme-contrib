@@ -69,6 +69,8 @@ class OpenCVCameraSource:
     source is cheap and testable without hardware.
     """
 
+    stop_on_empty = False
+
     def __init__(self, source: int | str, *, read_attempts: int = 3) -> None:
         if read_attempts < 1:
             raise ValueError("read_attempts must be at least 1")
