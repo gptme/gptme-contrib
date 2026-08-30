@@ -8,24 +8,24 @@ backend that agents already have.
 
 ## Why
 
-The stock `browser` tool is screenshot-and-snapshot based. On a multi-step
-page task an agent pays an LLM call on every step:
+The stock `browser` tool exposes snapshots and deterministic actions. The
+outer agent model normally interprets each fresh snapshot before choosing the
+next action:
 
-```
-snapshot_page()   # 1 LLM: interpret ARIA
+```text
+snapshot_page()   # outer model interprets ARIA
 click_element()   # 0
-snapshot_page()   # 1 LLM: re-interpret
+snapshot_page()   # outer model re-interprets
 fill_element()    # 0
-snapshot_page()   # 1 LLM: verify
+snapshot_page()   # outer model verifies
 ```
 
-The semantic pattern collapses that cost:
+The semantic pattern makes selector discovery reusable:
 
-```
-browser_observe("the submit button")   # 1 LLM-equivalent hop, returns selectors
-browser_act(observed[0])               # 0 — reuses the cached selector
-browser_act(observed[1], fill="x")     # 0
-browser_extract()                      # 0 (raw ARIA)
+```python
+observed = browser_observe("the submit button")
+browser_act(observed[0])
+browser_extract()
 ```
 
 `browser_observe` is the load-bearing primitive: one call produces a ranked
@@ -69,40 +69,39 @@ actions act on for **zero** extra interpretation cost.
 
 - **Path A (this package)**: implement the semantic interface directly over
   gptme's ARIA snapshot + Playwright. Shippable today, zero new dependencies.
-- **Path B**: once `stagehand` exposes a usable local-only Python mode
-  (`stagehand.local_browser.launch()`, not yet on PyPI), these same tool
-  signatures wrap stagehand and inherit its real semantic model. The
-  `ObserveResult` shape is deliberately stagehand-compatible so the swap is
-  mechanical.
+- **Stagehand evaluation path**: `stagehand==3.23.0` now exposes a local API
+  server and local browser. It is not a mechanical swap: Stagehand requires a
+  CDP browser/session boundary, while gptme's current Playwright page is
+  private, thread-bound state. Keep Path A native until a supported shared-page
+  seam and an executed end-to-end benchmark justify the extra server and inner
+  model calls.
 
 ## Benchmark
 
-`benchmark.py` counts LLM calls across 5 representative page tasks against a
-static, deterministic `fixtures/hn.html` (HN clone — no live web, no browser
-launch). Recorded result under the conservative production-path proxy
-(observe and instructed extract counted as 1 LLM each, as if rerank/typed
-extract were on):
+`benchmark.py` preserves five representative action sequences and applies a
+static counting heuristic. It does not open `fixtures/hn.html`, invoke a
+browser or model, or record success. The historical scenario proxy is:
 
-| | LLM calls |
+| | Proxy units |
 |---|---:|
 | Raw `browser` path | 11 |
 | Path A semantic path | 7 |
-| **Reduction** | **−36.4%** |
+| **Difference** | **-4** |
 
-Path A's default implementation is cheaper than this proxy (0-LLM
-token-overlap observe, raw-ARIA extract). The −36% figure is therefore a
-lower bound. Run it:
+This is not a measured LLM, token, latency, or success-rate result. A verdict
+requires both paths to execute against the same page while recording outer
+agent turns and any inner provider calls separately. Run the proxy with:
 
-```
+```bash
 make benchmark
 ```
 
-`tests/test_benchmark.py` pins these totals so the design-doc claim can't
-rot silently.
+`tests/test_benchmark.py` pins the scenario arithmetic and its explicit
+limitations so it cannot silently become a performance claim again.
 
 ## Tests
 
-```
+```bash
 make test
 ```
 
@@ -132,5 +131,4 @@ The original Path A prototype lived only in
 `/tmp/worktrees/gptme-browser-semantic/` and was lost when that worktree
 was removed. This package reconstructs it from the committed design
 (`browser-tool-act-observe-extract.md`) and the 5d08 benchmark table.
-The 11→7 LLM-call claim is the conservative proxy from that design; it is
-pinned here rather than re-invented.
+The 11→7 result is retained only as the historical static scenario proxy.
