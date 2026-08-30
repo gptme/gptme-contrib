@@ -87,6 +87,7 @@ from gptodo.locks import (
 
 # Import subagent functionality (Issue #255: Multi-Agent Collaboration)
 from gptodo.subagent import (
+    SESSION_STATUSES,
     check_session,
     cleanup_sessions,
     get_session_output,
@@ -5953,7 +5954,7 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         coordination_db=coordination_db,
     )
 
-    if session.status == "failed":
+    if session.status in ("failed", "auth_failed"):
         console.print(f"[red]✗ Failed to {action.lower()} agent:[/] {session.error}")
         return
 
@@ -6340,7 +6341,7 @@ def loop_cmd(
 @click.option(
     "--status",
     "-s",
-    type=click.Choice(["running", "completed", "failed", "killed"]),
+    type=click.Choice(list(SESSION_STATUSES)),
     help="Filter by status",
 )
 @click.option(
@@ -6388,6 +6389,7 @@ def sessions_cmd(status: str | None, as_json: bool):
         "running": "yellow",
         "completed": "green",
         "failed": "red",
+        "auth_failed": "red",
         "killed": "dim",
     }
 
@@ -6467,7 +6469,8 @@ def kill_cmd(session_id: str):
 def cleanup_sessions_cmd(older_than: int):
     """Clean up old session files.
 
-    Removes completed/failed session files older than the specified time.
+    Removes completed/failed/auth_failed/killed session files older than the
+    specified time.
     """
     repo_root = find_repo_root(Path.cwd())
     count = cleanup_sessions(repo_root, older_than)

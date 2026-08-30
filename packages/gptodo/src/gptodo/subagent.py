@@ -18,7 +18,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from gptodo._auth import DEFAULT_MAX_BYTES, is_auth_death
 
@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 # Directory for session state files
 SESSIONS_DIR = "state/sessions"
+
+SessionStatus = Literal["running", "completed", "failed", "auth_failed", "killed"]
+SESSION_STATUSES: tuple[str, ...] = get_args(SessionStatus)
+# Terminal statuses are eligible for cleanup-sessions once older than the cutoff.
+TERMINAL_SESSION_STATUSES: frozenset[str] = frozenset(
+    status for status in SESSION_STATUSES if status != "running"
+)
 
 # 401 / auth-death retry policy for the ``claude`` backend foreground path.
 # A transient CC 401 (OAuth blip) is usually self-healing; one retry after a
@@ -43,7 +50,7 @@ class AgentSession:
     agent_type: Literal["general", "explore", "plan", "execute"]
     backend: Literal["gptme", "claude", "codex"]
     started: str
-    status: Literal["running", "completed", "failed", "auth_failed", "killed"]
+    status: SessionStatus
     tmux_session: str | None = None
     output_file: str | None = None
     error: str | None = None
@@ -392,7 +399,7 @@ def spawn_agent(
         if result.returncode != 0 and backend not in ("gptme",):
             if is_auth_death(combined_output):
                 logger.warning(
-                    "spawn_agent: transient 401 detected on first attempt; " "retrying in %ds …",
+                    "spawn_agent: transient 401 detected on first attempt; retrying in %ds …",
                     _AUTH_RETRY_BACKOFF_SECS,
                 )
                 time.sleep(_AUTH_RETRY_BACKOFF_SECS)
@@ -560,7 +567,7 @@ def cleanup_sessions(
 
     # Phase 2: Remove old terminated sessions
     for session in sessions:
-        if session.status in ("completed", "failed", "killed"):
+        if session.status in TERMINAL_SESSION_STATUSES:
             started = datetime.fromisoformat(session.started.replace("Z", "+00:00"))
             if started.timestamp() < cutoff:
                 # Remove session file

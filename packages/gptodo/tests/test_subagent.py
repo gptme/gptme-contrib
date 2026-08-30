@@ -6,10 +6,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from gptodo._auth import DEFAULT_MAX_BYTES
+from gptodo.cli import cli
 from gptodo.subagent import (
+    TERMINAL_SESSION_STATUSES,
     AgentSession,
     _setup_coordination,
     check_session,
+    cleanup_sessions,
     list_sessions,
     load_session,
     save_session,
@@ -66,12 +69,17 @@ def test_list_sessions_by_status(sessions_dir):
     save_session(_make_session("s1", status="running"), sessions_dir)
     save_session(_make_session("s2", status="completed"), sessions_dir)
     save_session(_make_session("s3", status="running"), sessions_dir)
+    save_session(_make_session("s4", status="auth_failed"), sessions_dir)
 
     running = list_sessions(sessions_dir, status="running")
     assert len(running) == 2
 
     completed = list_sessions(sessions_dir, status="completed")
     assert len(completed) == 1
+
+    auth_failed = list_sessions(sessions_dir, status="auth_failed")
+    assert len(auth_failed) == 1
+    assert auth_failed[0].session_id == "s4"
 
 
 def test_load_nonexistent_session(sessions_dir):
@@ -291,3 +299,73 @@ def test_check_session_background_normal_failure_not_auth(sessions_dir):
 
     assert updated is not None
     assert updated.status == "failed"
+
+
+def test_cleanup_sessions_removes_old_auth_failed(sessions_dir):
+    """auth_failed is terminal: expired session JSON/output/prompt are removed."""
+    old_started = "2020-01-01T00:00:00+00:00"
+    sessions = sessions_dir / "state" / "sessions"
+    output_file = sessions / "oldauth.output"
+    prompt_file = sessions / "oldauth.prompt"
+    output_file.write_text("authentication_error: 401 unauthorized\n")
+    prompt_file.write_text("do the thing\n")
+
+    save_session(
+        _make_session(
+            "oldauth",
+            status="auth_failed",
+            started=old_started,
+            output_file=str(output_file),
+        ),
+        sessions_dir,
+    )
+    save_session(
+        _make_session("stillrunning", status="running", started=old_started),
+        sessions_dir,
+    )
+
+    with (
+        patch("gptodo.subagent.check_session"),
+        patch("gptodo.subagent.subprocess.run", side_effect=FileNotFoundError),
+    ):
+        count = cleanup_sessions(sessions_dir, older_than_hours=24)
+
+    assert count == 1
+    assert not (sessions / "oldauth.json").exists()
+    assert not output_file.exists()
+    assert not prompt_file.exists()
+    assert (sessions / "stillrunning.json").exists()
+
+
+def test_cleanup_sessions_keeps_recent_auth_failed(sessions_dir):
+    """auth_failed sessions younger than the cutoff stay on disk."""
+    save_session(_make_session("freshauth", status="auth_failed"), sessions_dir)
+
+    with (
+        patch("gptodo.subagent.check_session"),
+        patch("gptodo.subagent.subprocess.run", side_effect=FileNotFoundError),
+    ):
+        count = cleanup_sessions(sessions_dir, older_than_hours=24)
+
+    assert count == 0
+    loaded = load_session("freshauth", sessions_dir)
+    assert loaded is not None
+    assert loaded.status == "auth_failed"
+
+
+def test_terminal_statuses_include_auth_failed():
+    assert "auth_failed" in TERMINAL_SESSION_STATUSES
+    assert "running" not in TERMINAL_SESSION_STATUSES
+
+
+def test_sessions_cli_accepts_auth_failed_status():
+    """gptodo sessions --status auth_failed is a valid Choice, not rejected."""
+    from click.testing import CliRunner
+
+    status_opt = next(p for p in cli.commands["sessions"].params if p.name == "status")
+    assert "auth_failed" in status_opt.type.choices
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["sessions", "--help"])
+    assert result.exit_code == 0
+    assert "auth_failed" in result.output
