@@ -252,7 +252,21 @@ def spawn_agent(
                 # retry happens inside tmux so check_session keeps one session ID.
                 python = shlex.quote(sys.executable)
                 auth_check = f"{python} -m gptodo.auth --classify-file {safe_output}"
-                shell_cmd = f'touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; if [ "$EXIT_CODE" -ne 0 ] && {auth_check}; then cp {safe_output} {safe_output}.first-auth-failure; sleep 5; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; fi; echo "EXIT_CODE=$EXIT_CODE" >> {safe_output}; kill $TAIL_PID 2>/dev/null'
+                # Concatenate the classifier so the shell never sees a
+                # `{auth_check}` token. That is a Python f-string field, not a
+                # bash brace group (`{ cmd; }`).
+                shell_cmd = (
+                    f"touch {safe_output}; tail -f {safe_output} & TAIL_PID=$!; "
+                    f"{claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; "
+                    'if [ "$EXIT_CODE" -ne 0 ] && '
+                    + auth_check
+                    + (
+                        f"; then cp {safe_output} {safe_output}.first-auth-failure; "
+                        f"sleep 5; {claude_cmd} > {safe_output} 2>&1; EXIT_CODE=$?; fi; "
+                        f'echo "EXIT_CODE=$EXIT_CODE" >> {safe_output}; '
+                        "kill $TAIL_PID 2>/dev/null"
+                    )
+                )
             else:
                 # Non-gptme non-claude (codex) still launches `claude -p` today;
                 # keep that pre-existing command, but do not apply Claude-only retry.

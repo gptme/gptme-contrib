@@ -1,5 +1,6 @@
 """Tests for subagent session management."""
 
+import shlex
 import subprocess
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -180,6 +181,14 @@ def test_claude_background_command_retries_auth_failure(run, sessions_dir):
     assert ".first-auth-failure" in tmux_command
     assert "sleep 5" in tmux_command
     assert "EXIT_CODE=$EXIT_CODE" in tmux_command
+    inner = shlex.split(tmux_command)[-1]
+    assert "{auth_check}" not in inner
+    syntax = subprocess.run(
+        ["bash", "-n", "-c", inner],
+        capture_output=True,
+        text=True,
+    )
+    assert syntax.returncode == 0, syntax.stderr
 
 
 @patch("gptodo.subagent.subprocess.run")
