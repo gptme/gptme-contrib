@@ -395,8 +395,10 @@ def spawn_agent(
         # 401 retry — foreground ``claude`` backend only.
         # A transient OAuth blip produces a tiny output with an auth signature.
         # Retry once after a short backoff; only mark failed if retry also fails.
+        # ``codex`` and ``gptme`` are excluded: gptme has its own auth layer,
+        # and Codex 401s are not the CC OAuth-blip this policy exists for.
         retried_401 = False
-        if result.returncode != 0 and backend not in ("gptme",):
+        if result.returncode != 0 and backend == "claude":
             if is_auth_death(combined_output):
                 logger.warning(
                     "spawn_agent: transient 401 detected on first attempt; retrying in %ds …",
@@ -421,11 +423,10 @@ def spawn_agent(
         if result.returncode == 0:
             session.status = "completed"
         else:
-            # For non-gptme backends (which have the retry policy), classify
-            # the failure so callers can distinguish a transient auth blip from
-            # a real task failure.  gptme has its own auth layer — just report
-            # "failed" with the exit code so nothing downstream is surprised.
-            if backend not in ("gptme",) and is_auth_death(combined_output):
+            # Only the claude retry policy classifies as auth_failed. Other
+            # backends report a plain "failed" with the exit code so nothing
+            # downstream is surprised by a status they never opted into.
+            if backend == "claude" and is_auth_death(combined_output):
                 session.status = "auth_failed"
                 retry_note = " (retried once)" if retried_401 else ""
                 session.error = f"auth-death: transient 401{retry_note}"

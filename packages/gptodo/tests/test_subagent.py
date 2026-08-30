@@ -256,6 +256,27 @@ def test_spawn_agent_gptme_backend_no_401_retry(sessions_dir):
     assert session.status == "failed"
 
 
+def test_spawn_agent_codex_backend_no_401_retry(sessions_dir):
+    """codex backend does NOT get the 401 retry (claude-only policy)."""
+    auth_death = MagicMock(returncode=1, stdout="401 unauthorized\n", stderr="")
+
+    with (
+        patch("gptodo.subagent.subprocess.run", return_value=auth_death) as mock_run,
+        patch("gptodo.subagent.time.sleep") as mock_sleep,
+    ):
+        session = spawn_agent(
+            task_id="t4c",
+            prompt="do something",
+            backend="codex",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert mock_run.call_count == 1
+    assert not mock_sleep.called
+    assert session.status == "failed"
+
+
 def test_check_session_background_auth_death_classified(sessions_dir):
     """Background session: EXIT_CODE non-zero + tiny auth output → auth_failed, not failed."""
     output_file = sessions_dir / "state" / "sessions" / "agent_authtest.output"
