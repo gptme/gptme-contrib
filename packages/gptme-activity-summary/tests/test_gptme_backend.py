@@ -1,15 +1,29 @@
 """Tests for the gptme fallback backend (gptme_backend.py).
 
-Covers the deepseek reasoning-model preamble gap: a JSON-shaped thinking
-preamble (e.g. ``{"thinking": "..."}``) emitted before the real answer must
-never be returned in place of the actual summary. The parser must scan all
-JSON-parseable assistant candidates and prefer the one containing a recognised
-summary key, with the final answer winning over an earlier preamble.
+Covers:
+- DeepSeek reasoning-model <think>...</think> tag stripping so that embedded
+  JSON inside think blocks does not confuse the downstream JSON extractor.
+- JSON-shaped preamble handling: a preamble emitted as a separate assistant
+  message must never be returned in place of the actual summary. The parser
+  must scan all JSON-parseable assistant candidates and prefer the one
+  containing a recognised summary key, with the final answer winning over an
+  earlier preamble.
+- JSON answer then later prose: later prose only wins if it *embeds* a
+  summary JSON object. Completion-ack messages ("I have completed the
+  analysis") and gptme trailers must not displace a JSON answer. This is
+  the 2026-08-30 dancing-sad-monster regression.
+- Logging paths that surface what was extracted (regression-guard for silent
+  fallback failures where nothing was logged).
 """
 
+import json
+
+from gptme_activity_summary.cc_backend import extract_json_from_response
 from gptme_activity_summary.gptme_backend import (
     _DEFAULT_MODEL,
     _extract_assistant_text,
+    _has_summary_json,
+    _strip_think_tags,
     call_gptme,
     is_enabled,
 )
@@ -17,9 +31,93 @@ from gptme_activity_summary.gptme_backend import (
 
 def _msg(content) -> str:
     """Build a single gptme NDJSON assistant message line."""
-    import json
-
     return json.dumps({"type": "message", "role": "assistant", "content": content})
+
+
+# ---------------------------------------------------------------------------
+# _strip_think_tags
+# ---------------------------------------------------------------------------
+
+
+def test_strip_think_tags_basic():
+    """Simple <think>...</think> block is removed."""
+    raw = '<think>I\'ll think about this...</think>\n{"narrative": "done"}'
+    result = _strip_think_tags(raw)
+    assert "<think>" not in result
+    assert "narrative" in result
+
+
+def test_strip_think_tags_with_braces_inside():
+    """Think block containing {braces} is fully stripped."""
+    raw = '<think>let me use {"structure": "json"}</think>\n{"narrative": "ok"}'
+    result = _strip_think_tags(raw)
+    assert "<think>" not in result
+    assert '"structure"' not in result
+    assert '"narrative"' in result
+
+
+def test_strip_think_tags_multiline():
+    raw = '<think>\nLine one.\nLine two.\n</think>\n{"narrative": "result"}'
+    result = _strip_think_tags(raw)
+    assert "Line one." not in result
+    assert "narrative" in result
+
+
+def test_strip_think_tags_noop_when_absent():
+    """No <think> tags → string unchanged."""
+    raw = '{"narrative": "clean"}'
+    assert _strip_think_tags(raw) == raw
+
+
+def test_strip_think_tags_multiple_blocks():
+    """Multiple disjoint <think> blocks are all stripped."""
+    raw = "<think>first</think> middle <think>second</think> end"
+    result = _strip_think_tags(raw)
+    assert "first" not in result
+    assert "second" not in result
+    assert "middle" in result
+    assert "end" in result
+
+
+# ---------------------------------------------------------------------------
+# _extract_assistant_text — think tag in content
+# ---------------------------------------------------------------------------
+
+
+def test_think_tag_stripped_before_json_extraction():
+    """Content starting with <think>...</think> yields the JSON that follows."""
+    content = '<think>Analyzing the activities...</think>\n{"narrative": "Bob shipped fixes"}'
+    ndjson = _msg(content)
+    out = _extract_assistant_text(ndjson)
+    # After stripping the think block, the remaining text is valid JSON
+    assert "narrative" in out
+
+
+def test_think_tag_with_nested_braces_does_not_confuse_parser():
+    """Think block containing {key: val} JSON-shaped text is stripped cleanly."""
+    content = (
+        '<think>I should output {"type": "summary", "key": "val"}</think>\n'
+        '{"narrative": "real answer here"}'
+    )
+    ndjson = _msg(content)
+    out = _extract_assistant_text(ndjson)
+    # The real answer (not the think-block JSON) should be returned
+    parsed = json.loads(out)
+    assert parsed.get("narrative") == "real answer here"
+
+
+def test_pure_think_tag_with_no_trailing_content():
+    """If stripping a think block leaves nothing, fall back gracefully."""
+    content = "<think>All reasoning, no output.</think>"
+    ndjson = _msg(content)
+    # Should not raise; may return "" or last content
+    result = _extract_assistant_text(ndjson)
+    assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# _extract_assistant_text — JSON preamble (separate messages)
+# ---------------------------------------------------------------------------
 
 
 def test_returns_empty_on_no_assistant_messages():
@@ -91,6 +189,162 @@ def test_list_content_text_messages():
     )
     out = _extract_assistant_text(ndjson)
     assert "list format answer" in out
+
+
+def test_no_json_candidate_falls_back_to_non_json_content():
+    """When only the preamble is JSON and the answer is plain text, return plain text.
+
+    The plain text is returned so that extract_json_from_response can attempt
+    JSON extraction (e.g. via code blocks or embedded JSON regex).
+    """
+    preamble = json.dumps({"thinking": "reasoning"})
+    plain_answer = "Bob shipped many fixes today."
+    ndjson = "\n".join([_msg(preamble), _msg(plain_answer)])
+    out = _extract_assistant_text(ndjson)
+    # Should return the plain-text answer, not the JSON preamble
+    assert out == plain_answer
+
+
+def test_json_answer_then_completion_ack_keeps_json():
+    """Completion-ack prose must not displace a JSON summary.
+
+    Live 2026-08-30 failure (gptme log ``dancing-sad-monster``): DeepSeek
+    emitted a complete ``narrative`` JSON, then "I have completed the
+    analysis. The full JSON summary ... was emitted in my previous
+    message." That ack mentions the word ``narrative`` but has no JSON
+    object. Preferring it made ``extract_json_from_response`` return {} and
+    the systemd unit failed 12/12 even though the real summary was in the
+    previous assistant message.
+    """
+    answer = json.dumps({"narrative": "REAL summary", "accomplishments": ["a"]})
+    ack = (
+        "I have completed the analysis. The full JSON summary for 2026-08-29 "
+        "was emitted in my previous message. The work is done — it has a "
+        "top-level narrative field as requested.\n\n```complete\n```"
+    )
+    ndjson = "\n".join([_msg(answer), _msg(ack)])
+    out = _extract_assistant_text(ndjson)
+    parsed = json.loads(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert "I have completed" not in out
+
+
+def test_json_draft_then_later_prose_with_summary_json_prefers_later():
+    """Later prose still wins when it *embeds* a summary JSON object.
+
+    A model can emit a JSON draft, then a fenced JSON revision. That later
+    payload is the real answer; keep preferring it over the draft.
+    """
+    draft = json.dumps({"narrative": "draft preamble", "accomplishments": ["x"]})
+    prose = "Final answer:\n" + json.dumps(
+        {"narrative": "revised summary", "accomplishments": ["y"]}
+    )
+    ndjson = "\n".join([_msg(draft), _msg(prose)])
+    out = _extract_assistant_text(ndjson)
+    assert out == prose
+    assert _has_summary_json(out)
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "revised summary"
+
+
+def test_json_answer_then_gptme_trailer_keeps_json():
+    """gptme's no-tool-call auto-reply must not displace a JSON summary.
+
+    Production path: first assistant message is the JSON answer, then gptme
+    injects "No tool call detected ... use the `complete` tool". Preferring
+    that later prose would return the trailer instead of the real answer and
+    re-break the daily-summary fallback.
+    """
+    answer = json.dumps({"narrative": "REAL summary", "accomplishments": ["a"]})
+    trailer = (
+        "<system>No tool call detected in last message. Did you mean to finish? "
+        "If so, make sure you are completely done and then use the `complete` "
+        "tool to end the session.</system>"
+    )
+    ndjson = "\n".join([_msg(answer), _msg(trailer)])
+    out = _extract_assistant_text(ndjson)
+    parsed = json.loads(out)
+    assert parsed.get("narrative") == "REAL summary"
+
+
+def test_json_draft_then_ack_then_trailer_keeps_json():
+    """Completion-ack between a JSON answer and the gptme trailer still loses."""
+    draft = json.dumps({"narrative": "kept summary"})
+    ack = "I have completed the analysis. The full JSON summary was emitted above."
+    trailer = "No tool call detected in last message."
+    ndjson = "\n".join([_msg(draft), _msg(ack), _msg(trailer)])
+    out = _extract_assistant_text(ndjson)
+    parsed = json.loads(out)
+    assert parsed.get("narrative") == "kept summary"
+
+
+def test_truncated_think_json_then_complete_json_then_ack():
+    """Live shape: truncated think-JSON, complete think-JSON, then an ack.
+
+    Mirrors the 2026-08-30 dancing-sad-monster fallback: first assistant
+    message is cut off mid-JSON inside ``<think>``, second is a complete
+    summary JSON after a think block, third is a completion-ack. The
+    extractor must return the complete JSON, not the ack.
+    """
+    truncated = (
+        "<think>I'll emit JSON.</think>\n"
+        '{"accomplishments": ["partial"], "blockers": [{"issue": "unterminated"'
+    )
+    complete = "<think>I was cut off. Finishing the JSON.</think>\n" + json.dumps(
+        {
+            "narrative": "recovered daily summary",
+            "accomplishments": ["parser fix"],
+            "blockers": [{"issue": "oauth expired", "status": "active"}],
+        }
+    )
+    ack = (
+        "I have completed the analysis. The full JSON summary was emitted in "
+        "my previous message. It includes narrative, accomplishments, and "
+        "blockers."
+    )
+    ndjson = "\n".join([_msg(truncated), _msg(complete), _msg(ack)])
+    out = _extract_assistant_text(ndjson)
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "recovered daily summary"
+    assert parsed.get("accomplishments") == ["parser fix"]
+
+
+def test_thinking_json_then_prose_then_trailer_skips_trailer():
+    """No-summary JSON plus later prose must not lose to gptme's trailer.
+
+    When no JSON candidate has a summary key, the fallback used to return
+    ``non_json[-1]``, which is the trailer if gptme auto-replied after the
+    plain-text answer.
+    """
+    preamble = json.dumps({"thinking": "reasoning"})
+    prose = "Bob shipped many fixes today."
+    trailer = (
+        "<system>No tool call detected in last message. Did you mean to finish? "
+        "If so, make sure you are completely done and then use the `complete` "
+        "tool to end the session.</system>"
+    )
+    ndjson = "\n".join([_msg(preamble), _msg(prose), _msg(trailer)])
+    out = _extract_assistant_text(ndjson)
+    assert out == prose
+
+
+def test_plain_text_then_trailer_skips_trailer():
+    """With no JSON at all, skip gptme's trailer and return the last prose."""
+    prose = "Bob shipped the think-tag parser."
+    trailer = "No tool call detected in last message."
+    ndjson = "\n".join([_msg(prose), _msg(trailer)])
+    out = _extract_assistant_text(ndjson)
+    assert out == prose
+
+
+def test_multipart_content_list():
+    """Content as a list of parts (multipart message format)."""
+    content_parts = [
+        {"type": "text", "text": '{"narrative": "from list content"}'},
+    ]
+    ndjson = json.dumps({"type": "message", "role": "assistant", "content": content_parts})
+    out = _extract_assistant_text(ndjson)
+    assert "narrative" in out
 
 
 def test_is_enabled_off_by_default(monkeypatch):

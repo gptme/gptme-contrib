@@ -14,6 +14,7 @@ failure so the caller can degrade gracefully.
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 
@@ -120,6 +121,75 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
     return _extract_assistant_text(result.stdout)
 
 
+_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
+# gptme's no-tool-call auto-reply. Shared prefix of both variants in
+# gptme.tools.complete ("No tool call detected" / "... in last message").
+_GPTME_TRAILER_MARKER = "No tool call detected"
+_SUMMARY_KEYS = ("narrative", "month_narrative")
+
+
+def _is_gptme_trailer(text: str) -> bool:
+    """True if this assistant message is gptme's no-tool-call auto-reply.
+
+    After a successful JSON answer gptme injects a later non-JSON assistant
+    message ("No tool call detected ... use the `complete` tool"). That
+    trailer is not a better summary; preferring it over a JSON object that
+    already carries ``narrative``/``month_narrative`` re-breaks the
+    daily-summary fallback.
+    """
+    return _GPTME_TRAILER_MARKER in text
+
+
+def _last_non_trailer(messages: list[str]) -> str:
+    """Last message that is not gptme's no-tool-call auto-reply.
+
+    Falls back to ``messages[-1]`` if every message is a trailer (or the
+    list is empty, which the caller already guards).
+    """
+    for message in reversed(messages):
+        if not _is_gptme_trailer(message):
+            return message
+    return messages[-1] if messages else ""
+
+
+def _strip_think_tags(text: str) -> str:
+    """Strip <think>...</think> reasoning blocks from model output.
+
+    Some reasoning models (e.g. DeepSeek) embed internal reasoning in
+    <think>...</think> blocks before the actual response. These blocks may
+    themselves contain JSON-shaped text that confuses downstream JSON
+    extraction; stripping them before processing avoids greedy-regex traps.
+    """
+    return _THINK_TAG_RE.sub("", text).strip()
+
+
+def _has_summary_json(text: str) -> bool:
+    """True if ``text`` contains a JSON object with a recognised summary key.
+
+    Completion-ack messages mention the word ``narrative`` without carrying a
+    JSON object. Preferring those over an earlier JSON answer is what broke
+    the 2026-08-30 live fallback (gptme log ``dancing-sad-monster``): DeepSeek
+    emitted a complete summary JSON, then "I have completed the analysis."
+    ``extract_json_from_response`` lives in ``cc_backend`` (which imports this
+    module), so this predicate stays local to avoid a circular import.
+    """
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(text):
+        start = text.find("{", pos)
+        if start == -1:
+            return False
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            pos = start + 1
+            continue
+        if isinstance(obj, dict) and any(obj.get(k) for k in _SUMMARY_KEYS):
+            return True
+        pos = end
+    return False
+
+
 def _extract_assistant_text(stdout: str) -> str:
     """Collect assistant message contents from gptme NDJSON output."""
     contents: list[str] = []
@@ -134,13 +204,18 @@ def _extract_assistant_text(stdout: str) -> str:
         if obj.get("type") == "message" and obj.get("role") == "assistant":
             content = obj.get("content")
             if isinstance(content, str) and content.strip():
-                contents.append(content)
+                # Strip <think>...</think> reasoning blocks before recording.
+                stripped = _strip_think_tags(content)
+                if stripped:
+                    contents.append(stripped)
             elif isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
                         text = part.get("text", "")
                         if isinstance(text, str) and text.strip():
-                            contents.append(text)
+                            stripped = _strip_think_tags(text)
+                            if stripped:
+                                contents.append(stripped)
     if not contents:
         logger.warning("gptme fallback produced no assistant messages")
         return ""
@@ -150,7 +225,6 @@ def _extract_assistant_text(stdout: str) -> str:
     # summary key so that a JSON-shaped preamble is not returned instead of the
     # real answer; only fall back to the first JSON-parseable if none contain a
     # recognised key.
-    _SUMMARY_KEYS = ("narrative", "month_narrative")
     json_candidates: list[str] = []
     for candidate in contents:
         try:
@@ -163,14 +237,60 @@ def _extract_assistant_text(stdout: str) -> str:
         # JSON-shaped thinking preamble that may also contain a summary key.
         # Reasoning models (e.g. deepseek) emit a preamble first, then the
         # real answer; scanning forward would return the preamble instead.
+        json_set = set(json_candidates)
         for candidate in reversed(json_candidates):
             parsed = json.loads(candidate)
             if isinstance(parsed, dict) and any(parsed.get(k) for k in _SUMMARY_KEYS):
+                # Later prose only wins if it *itself* carries a summary JSON
+                # object (e.g. a fenced JSON revision). Completion-ack prose
+                # ("I have completed the analysis") and gptme trailers do not.
+                json_index = max(i for i, c in enumerate(contents) if c == candidate)
+                later_prose = [
+                    c
+                    for c in contents[json_index + 1 :]
+                    if c not in json_set and not _is_gptme_trailer(c)
+                ]
+                for prose in reversed(later_prose):
+                    if _has_summary_json(prose):
+                        logger.debug(
+                            "gptme fallback: later prose carries summary JSON "
+                            "(%d chars); preferring it over earlier JSON draft",
+                            len(prose),
+                        )
+                        return prose
+                logger.debug(
+                    "gptme fallback: returning JSON with summary key (%d chars): %.100r",
+                    len(candidate),
+                    candidate,
+                )
                 return candidate
+        # No JSON candidate has a summary key. Prefer non-JSON content if
+        # available — the real answer may be plain text while the JSON was
+        # a preamble (e.g. {"thinking": "..."}).  Let extract_json_from_response
+        # try to pull JSON out of the plain text (handles embedded JSON,
+        # code blocks, etc.).
+        non_json = [c for c in contents if c not in set(json_candidates)]
+        if non_json:
+            chosen = _last_non_trailer(non_json)
+            logger.warning(
+                "gptme fallback: no JSON candidate has summary key; "
+                "falling back to last non-JSON content (%d chars): %.100r",
+                len(chosen),
+                chosen,
+            )
+            return chosen
+        logger.warning(
+            "gptme fallback: no JSON candidate has summary key; "
+            "returning last JSON candidate (%d chars): %.100r",
+            len(json_candidates[-1]),
+            json_candidates[-1],
+        )
         return json_candidates[-1]
-    logger.debug(
+    chosen = _last_non_trailer(contents)
+    logger.warning(
         "gptme fallback: no assistant message parsed as JSON (%d messages); "
-        "returning last message for caller to attempt extraction",
+        "returning last message for caller to attempt extraction: %.100r",
         len(contents),
+        chosen,
     )
-    return contents[-1]
+    return chosen
