@@ -13,6 +13,7 @@ dependencies = [
     "twilio>=9.0.0",
     "audioop-lts>=0.2; python_version >= '3.13'",
     "gptme",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]

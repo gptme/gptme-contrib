@@ -2398,6 +2398,15 @@ class TestTranscriptPromotion:
         assert len(calls) == 0
 
 
+def test_local_session_config_exposes_look_without_body_tools() -> None:
+    server = VoiceServer()
+    config = server._build_session_config(
+        "You are Bob.", include_body_tools=False, include_vision_tools=True
+    )
+
+    assert [tool["name"] for tool in config.extra_tools] == ["look"]
+
+
 def test_server_g711_passthrough_off_by_default() -> None:
     server = VoiceServer()
     assert server.openai_g711_passthrough is False

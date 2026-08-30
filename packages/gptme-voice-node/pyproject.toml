@@ -15,6 +15,9 @@ gptme-voice-node = "gptme_voice_node.node:main"
 audio = [
     "pyaudio>=0.2.13",
 ]
+vision = [
+    "gptme-vision-node>=0.1.0",
+]
 test = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",

@@ -15,7 +15,12 @@ from websockets.exceptions import ConnectionClosed
 # ---------------------------------------------------------------------------
 
 
-def _make_node(server_url="ws://localhost:9999/local", node_name="test-node"):
+def _make_node(
+    server_url="ws://localhost:9999/local",
+    node_name="test-node",
+    *,
+    vision_bridge=None,
+):
     """Create a VoiceNode with pyaudio mocked out."""
     with patch("gptme_voice_node.node._get_pyaudio") as mock_get_pa:
         mock_pa_module = MagicMock()
@@ -24,7 +29,7 @@ def _make_node(server_url="ws://localhost:9999/local", node_name="test-node"):
         mock_get_pa.return_value = mock_pa_module
         from gptme_voice_node.node import VoiceNode
 
-        node = VoiceNode(server_url, node_name)
+        node = VoiceNode(server_url, node_name, vision_bridge=vision_bridge)
     return node
 
 
@@ -200,6 +205,21 @@ class TestRecvLoop:
         speaker.write.assert_not_called()
         assert "ignoring malformed message" in caplog.text
 
+    @pytest.mark.asyncio
+    async def test_vision_request_is_delegated_to_bridge(self):
+        bridge = MagicMock()
+        bridge.handle_message = AsyncMock(return_value=True)
+        node = _make_node(vision_bridge=bridge)
+        message = {"type": "vision_look_request", "request_id": "req-1"}
+        mock_ws = AsyncMock()
+        mock_ws.recv.side_effect = [json.dumps(message), ConnectionClosed(None, None)]
+        speaker = MagicMock()
+
+        await node._recv_loop(mock_ws, speaker)
+
+        bridge.handle_message.assert_awaited_once_with(message, mock_ws.send)
+        speaker.write.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Transport safety warning
@@ -304,6 +324,29 @@ class TestLifecycle:
         speaker.start_stream.assert_called_once()
         assert node._pa.open.call_args_list[0].kwargs["start"] is False
         assert node._pa.open.call_args_list[1].kwargs["start"] is False
+
+    @pytest.mark.asyncio
+    async def test_session_starts_and_stops_vision_with_audio(self):
+        vision = MagicMock()
+        vision.stop = AsyncMock()
+        node = _make_node(vision_bridge=vision)
+        mic = MagicMock()
+        speaker = MagicMock()
+        node._pa.open.side_effect = [mic, speaker]
+
+        async def stop_session(*_args):
+            node.stop()
+
+        websocket = AsyncMock()
+        with (
+            patch.object(node, "_send_loop", AsyncMock(side_effect=stop_session)),
+            patch.object(node, "_recv_loop", AsyncMock(side_effect=stop_session)),
+        ):
+            await node._session(websocket)
+
+        vision.start.assert_called_once()
+        assert vision.start.call_args.args[1] == websocket.send
+        vision.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failing_stream", ["mic", "speaker"])

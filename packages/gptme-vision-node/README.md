@@ -52,6 +52,20 @@ pipeline = VisionPipeline(
 pipeline.start()
 ```
 
+## Voice bridge
+
+Install the vision extra next to the embedded voice node and point it at a
+camera or stream:
+
+```bash
+pip install 'gptme-voice-node[audio,vision]'
+GPTME_VOICE_NODE_VISION_SOURCE=camera:0 gptme-voice-node
+```
+
+The pipeline sends compact person/motion events over the existing `/local`
+WebSocket. It keeps the latest frame on-node until the realtime session calls
+`look`; only then is one JPEG sent to the host for VLM inference.
+
 ## Future (explicitly not v0)
 
 - **CLIP embeddings** for place recognition — a strict upgrade over the

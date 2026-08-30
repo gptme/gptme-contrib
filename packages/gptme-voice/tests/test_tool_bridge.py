@@ -1,12 +1,33 @@
 import asyncio
 import logging
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from gptme_voice.realtime.tool_bridge import (
     _TIMEOUT_BINARY_AVAILABLE,
     GptmeToolBridge,
 )
+
+
+@pytest.mark.asyncio
+async def test_look_routes_to_vision_bridge() -> None:
+    vision = AsyncMock()
+    vision.look.return_value = {"status": "ok", "description": "a room"}
+    bridge = GptmeToolBridge(workspace="/fake/workspace", vision_bridge=vision)
+
+    result = await bridge.handle_function_call("look", {"prompt": "Who is here?"})
+
+    assert result == {"status": "ok", "description": "a room"}
+    vision.look.assert_awaited_once_with("Who is here?")
+
+
+@pytest.mark.asyncio
+async def test_look_without_camera_fails_cleanly() -> None:
+    bridge = GptmeToolBridge(workspace="/fake/workspace")
+    assert await bridge.handle_function_call("look", {}) == {
+        "error": "No camera is connected to this session."
+    }
 
 
 class _FakeStream:
