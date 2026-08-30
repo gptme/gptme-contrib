@@ -2222,6 +2222,86 @@ def test_closed_call_group_does_not_reuse_id_for_next_call() -> None:
     asyncio.run(_exercise())
 
 
+def test_call_group_manifest_unions_archive_paths() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        first = Path(tmpdir) / "archive" / "first.json"
+        second = Path(tmpdir) / "archive" / "second.json"
+        first.parent.mkdir(parents=True)
+        first.write_text("{}")
+        second.write_text("{}")
+
+        server._write_call_group_manifest(
+            caller_id="+46700000030",
+            call_group_id="group-union",
+            record_paths=[first],
+        )
+        server._write_call_group_manifest(
+            caller_id="+46700000030",
+            call_group_id="group-union",
+            record_paths=[second],
+        )
+
+        manifest = json.loads(
+            server._call_group_manifest_path("group-union").read_text()
+        )
+        assert manifest["archive_record_paths"] == [str(first), str(second)]
+
+
+def test_concurrent_same_caller_teardowns_share_one_group() -> None:
+    async def _exercise() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = VoiceServer()
+            server.state_dir = Path(tmpdir)
+            server.resume_window_seconds = 300
+            server.post_call_delay_seconds = 300
+            server.post_call_command = "run-post-call"
+
+            async def _fake_run_post_call(
+                caller_id: str,
+                paths: list[Path],
+                *,
+                delay_seconds: int = 0,
+                unit_name: str | None = None,
+            ) -> None:
+                return None
+
+            server._run_post_call_command = _fake_run_post_call  # type: ignore[method-assign]
+
+            await asyncio.gather(
+                server._on_call_end(
+                    caller_id="+46700000031",
+                    source="twilio",
+                    transcript=[TranscriptTurn(role="user", text="leg one")],
+                    metadata={"call_sid": "CAoverlap1"},
+                ),
+                server._on_call_end(
+                    caller_id="+46700000031",
+                    source="twilio",
+                    transcript=[TranscriptTurn(role="user", text="leg two")],
+                    metadata={"call_sid": "CAoverlap2"},
+                ),
+            )
+
+            group_id = server._pending_call_groups["+46700000031"]
+            manifest = json.loads(
+                server._call_group_manifest_path(group_id).read_text()
+            )
+            archive_paths = list((Path(tmpdir) / "archive").glob("*.json"))
+            assert len(archive_paths) == 2
+            assert set(manifest["archive_record_paths"]) == {
+                str(path) for path in archive_paths
+            }
+            assert manifest["status"] == "open"
+            assert manifest["remote_party"] == "+46700000031"
+            assert set(server._pending_archive_records["+46700000031"]) == {
+                Path(p) for p in manifest["archive_record_paths"]
+            }
+
+    asyncio.run(_exercise())
+
+
 def test_post_call_schedule_survives_scheduler_process_exit(tmp_path: Path) -> None:
     marker_file = tmp_path / "post-call-fired.txt"
     launcher_done_file = tmp_path / "launcher-done.txt"

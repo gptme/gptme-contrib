@@ -850,7 +850,12 @@ class VoiceServer:
         self._connections: dict[str, tuple] = {}
         self._pending_post_calls: dict[str, str] = {}
         self._pending_archive_records: dict[str, list[Path]] = {}
+        # One open group per remote party. Resume/redial inside the hold window
+        # reuses that group even when CallSids differ. Overlapping teardowns
+        # from the same number are serialized via `_call_end_locks` so a
+        # last-writer cannot drop a sibling archive path.
         self._pending_call_groups: dict[str, str] = {}
+        self._call_end_locks: dict[str, asyncio.Lock] = {}
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
@@ -1238,6 +1243,9 @@ class VoiceServer:
     def _dedupe_record_paths(self, record_paths: list[Path]) -> list[Path]:
         return list(dict.fromkeys(record_paths))
 
+    def _call_end_lock_for(self, caller_id: str) -> asyncio.Lock:
+        return self._call_end_locks.setdefault(caller_id, asyncio.Lock())
+
     def _restore_archive_record_paths(self, raw_paths: list[str]) -> list[Path]:
         restored_paths: list[Path] = []
         for raw_path in raw_paths:
@@ -1315,6 +1323,15 @@ class VoiceServer:
                     else now
                 )
         existing_remote = existing.get("remote_party")
+        existing_paths = existing.get("archive_record_paths") or []
+        merged_paths = self._dedupe_record_paths(
+            [
+                Path(str(item))
+                for item in existing_paths
+                if isinstance(item, str) and item.strip()
+            ]
+            + list(record_paths)
+        )
         payload: dict[str, object] = {
             "schema_version": 1,
             "call_group_id": call_group_id,
@@ -1326,7 +1343,7 @@ class VoiceServer:
                 if isinstance(existing_remote, str) and existing_remote
                 else caller_id
             ),
-            "archive_record_paths": [str(path) for path in record_paths],
+            "archive_record_paths": [str(path) for path in merged_paths],
             "closes_at": closes_at,
             "updated_at": now,
         }
@@ -1949,7 +1966,9 @@ class VoiceServer:
                 None, self._cancel_post_call_schedule, existing_unit
             )
 
-        deduped_record_paths = self._dedupe_record_paths(record_paths)
+        deduped_record_paths = self._dedupe_record_paths(
+            list(self._pending_archive_records.get(caller_id, [])) + list(record_paths)
+        )
         if not deduped_record_paths:
             self._pending_archive_records.pop(caller_id, None)
             self._pending_call_groups.pop(caller_id, None)
@@ -2135,6 +2154,23 @@ class VoiceServer:
         if not caller_id:
             return
 
+        async with self._call_end_lock_for(caller_id):
+            await self._on_call_end_locked(
+                caller_id,
+                source,
+                transcript,
+                metadata,
+                tool_bridge=tool_bridge,
+            )
+
+    async def _on_call_end_locked(
+        self,
+        caller_id: str,
+        source: str,
+        transcript: list[TranscriptTurn],
+        metadata: dict[str, str],
+        tool_bridge: GptmeToolBridge | None = None,
+    ) -> None:
         subagent_timings: list[dict[str, object]] = []
         if tool_bridge is not None:
             try:
@@ -2143,8 +2179,7 @@ class VoiceServer:
                 logger.warning("Failed to collect subagent timings: %s", exc)
 
         cleaned_metadata = {k: v for k, v in metadata.items() if v}
-        if caller_id:
-            cleaned_metadata.setdefault("remote_party", caller_id)
+        cleaned_metadata.setdefault("remote_party", caller_id)
 
         pending_record_paths = list(self._pending_archive_records.get(caller_id, []))
         record = RecentCallRecord(
