@@ -1,16 +1,19 @@
 """Tests for subagent session management."""
 
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from gptodo._auth import DEFAULT_MAX_BYTES
 from gptodo.subagent import (
     AgentSession,
     _setup_coordination,
+    check_session,
     list_sessions,
     load_session,
     save_session,
+    spawn_agent,
 )
 
 
@@ -138,3 +141,153 @@ def test_setup_coordination_announce_failure(coord_workspace):
     # Should still return valid results despite announce failure
     assert agent_id.startswith("agent_")
     assert db_path.endswith("coord.db")
+
+
+# ── 401 retry tests ───────────────────────────────────────────────────────────
+
+
+def _make_proc(returncode: int, stdout: str = "", stderr: str = "") -> MagicMock:
+    m = MagicMock()
+    m.returncode = returncode
+    m.stdout = stdout
+    m.stderr = stderr
+    return m
+
+
+def test_spawn_agent_401_retries_and_succeeds(sessions_dir):
+    """Tiny 401 output → one retry → succeeds on second attempt."""
+    auth_death = MagicMock(
+        returncode=1,
+        stdout="Error: 401 unauthorized\n",
+        stderr="",
+    )
+    success = MagicMock(returncode=0, stdout="Task complete\n", stderr="")
+
+    with (
+        patch("gptodo.subagent.subprocess.run", side_effect=[auth_death, success]),
+        patch("gptodo.subagent.time.sleep") as mock_sleep,
+    ):
+        session = spawn_agent(
+            task_id="t1",
+            prompt="do something",
+            backend="claude",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert session.status == "completed"
+    assert mock_sleep.called
+    assert mock_sleep.call_args[0][0] >= 1  # backoff > 0s
+
+
+def test_spawn_agent_401_retries_still_fails(sessions_dir):
+    """Two consecutive 401s → one retry → status auth_failed."""
+    auth_death = MagicMock(
+        returncode=1,
+        stdout="authentication_error\n",
+        stderr="",
+    )
+
+    with (
+        patch("gptodo.subagent.subprocess.run", side_effect=[auth_death, auth_death]),
+        patch("gptodo.subagent.time.sleep"),
+    ):
+        session = spawn_agent(
+            task_id="t2",
+            prompt="do something",
+            backend="claude",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert session.status == "auth_failed"
+    assert "retried" in (session.error or "")
+
+
+def test_spawn_agent_large_401_prose_no_retry(sessions_dir):
+    """Large output with '401' in prose must NOT trigger a retry."""
+    large_output = "I handled the 401 case in PR #401.\n" + "x" * DEFAULT_MAX_BYTES
+    big_fail = MagicMock(returncode=1, stdout=large_output, stderr="")
+
+    with (
+        patch("gptodo.subagent.subprocess.run", return_value=big_fail) as mock_run,
+        patch("gptodo.subagent.time.sleep") as mock_sleep,
+    ):
+        session = spawn_agent(
+            task_id="t3",
+            prompt="do something",
+            backend="claude",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    # Only one subprocess call (no retry)
+    assert mock_run.call_count == 1
+    assert not mock_sleep.called
+    assert session.status == "failed"
+
+
+def test_spawn_agent_gptme_backend_no_401_retry(sessions_dir):
+    """gptme backend does NOT get the 401 retry (it has its own auth layer)."""
+    auth_death = MagicMock(returncode=1, stdout="401 unauthorized\n", stderr="")
+
+    with (
+        patch("gptodo.subagent.subprocess.run", return_value=auth_death) as mock_run,
+        patch("gptodo.subagent.time.sleep") as mock_sleep,
+    ):
+        session = spawn_agent(
+            task_id="t4",
+            prompt="do something",
+            backend="gptme",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert mock_run.call_count == 1
+    assert not mock_sleep.called
+    assert session.status == "failed"
+
+
+def test_check_session_background_auth_death_classified(sessions_dir):
+    """Background session: EXIT_CODE non-zero + tiny auth output → auth_failed, not failed."""
+    output_file = sessions_dir / "state" / "sessions" / "agent_authtest.output"
+    output_file.write_text("authentication_error: 401 unauthorized\nEXIT_CODE=1\n")
+
+    session = _make_session(
+        session_id="agent_authtest",
+        status="running",
+        tmux_session="gptodo_agent_authtest",
+        output_file=str(output_file),
+    )
+    save_session(session, sessions_dir)
+
+    # tmux has-session returns 1 → session ended
+    with patch("gptodo.subagent.subprocess.run", return_value=MagicMock(returncode=1)):
+        updated = check_session("agent_authtest", sessions_dir)
+
+    assert updated is not None
+    assert updated.status == "auth_failed", f"expected auth_failed, got {updated.status!r}"
+    assert "auth-death" in (updated.error or "")
+
+
+def test_check_session_background_normal_failure_not_auth(sessions_dir):
+    """Background session: EXIT_CODE non-zero, large output → status failed (not auth_failed)."""
+    big_output = (
+        "Task ran, hit some issue. Exiting.\n" + "x" * DEFAULT_MAX_BYTES + "\nEXIT_CODE=1\n"
+    )
+    output_file = sessions_dir / "state" / "sessions" / "agent_bigfail.output"
+    output_file.write_text(big_output)
+
+    session = _make_session(
+        session_id="agent_bigfail",
+        status="running",
+        tmux_session="gptodo_agent_bigfail",
+        output_file=str(output_file),
+    )
+    save_session(session, sessions_dir)
+
+    with patch("gptodo.subagent.subprocess.run", return_value=MagicMock(returncode=1)):
+        updated = check_session("agent_bigfail", sessions_dir)
+
+    assert updated is not None
+    assert updated.status == "failed"

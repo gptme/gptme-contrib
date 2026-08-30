@@ -13,16 +13,25 @@ import logging
 import os
 import shlex
 import subprocess
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from gptodo._auth import DEFAULT_MAX_BYTES, is_auth_death
+
 logger = logging.getLogger(__name__)
 
 # Directory for session state files
 SESSIONS_DIR = "state/sessions"
+
+# 401 / auth-death retry policy for the ``claude`` backend foreground path.
+# A transient CC 401 (OAuth blip) is usually self-healing; one retry after a
+# short backoff recovers the vast majority of cases without burning the attempt.
+_AUTH_RETRY_BACKOFF_SECS = 5
+_AUTH_RETRY_MAX = 1
 
 
 @dataclass
@@ -34,7 +43,7 @@ class AgentSession:
     agent_type: Literal["general", "explore", "plan", "execute"]
     backend: Literal["gptme", "claude", "codex"]
     started: str
-    status: Literal["running", "completed", "failed", "killed"]
+    status: Literal["running", "completed", "failed", "auth_failed", "killed"]
     tmux_session: str | None = None
     output_file: str | None = None
     error: str | None = None
@@ -374,13 +383,48 @@ def spawn_agent(
             env=env,
         )
 
-        # Save output
-        output_file.write_text(result.stdout + "\n" + result.stderr)
+        combined_output = result.stdout + "\n" + result.stderr
 
-        session.status = "completed" if result.returncode == 0 else "failed"
+        # 401 retry — foreground ``claude`` backend only.
+        # A transient OAuth blip produces a tiny output with an auth signature.
+        # Retry once after a short backoff; only mark failed if retry also fails.
+        retried_401 = False
+        if result.returncode != 0 and backend not in ("gptme",):
+            if is_auth_death(combined_output):
+                logger.warning(
+                    "spawn_agent: transient 401 detected on first attempt; " "retrying in %ds …",
+                    _AUTH_RETRY_BACKOFF_SECS,
+                )
+                time.sleep(_AUTH_RETRY_BACKOFF_SECS)
+                result = subprocess.run(
+                    cmd,
+                    cwd=workspace,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout if timeout > 0 else None,
+                    env=env,
+                )
+                combined_output = result.stdout + "\n" + result.stderr
+                retried_401 = True
+
+        # Save output
+        output_file.write_text(combined_output)
+
         session.completed_at = datetime.now(timezone.utc).isoformat()
-        if result.returncode != 0:
-            session.error = f"Exit code: {result.returncode}"
+        if result.returncode == 0:
+            session.status = "completed"
+        else:
+            # For non-gptme backends (which have the retry policy), classify
+            # the failure so callers can distinguish a transient auth blip from
+            # a real task failure.  gptme has its own auth layer — just report
+            # "failed" with the exit code so nothing downstream is surprised.
+            if backend not in ("gptme",) and is_auth_death(combined_output):
+                session.status = "auth_failed"
+                retry_note = " (retried once)" if retried_401 else ""
+                session.error = f"auth-death: transient 401{retry_note}"
+            else:
+                session.status = "failed"
+                session.error = f"Exit code: {result.returncode}"
 
     except subprocess.TimeoutExpired:
         session.status = "failed"
@@ -426,8 +470,15 @@ def check_session(session_id: str, workspace: Path | None = None) -> AgentSessio
                     session.status = "failed"
                     session.error = "Timed out"
                 elif "EXIT_CODE=" in output:
-                    session.status = "failed"
-                    session.error = "Non-zero exit code"
+                    # Classify: tiny output with auth signature → auth_failed
+                    # (distinct from a generic non-zero, and never conflated
+                    # with a successful session that mentions "401" in prose).
+                    if is_auth_death(output, DEFAULT_MAX_BYTES):
+                        session.status = "auth_failed"
+                        session.error = "auth-death: transient 401"
+                    else:
+                        session.status = "failed"
+                        session.error = "Non-zero exit code"
 
             save_session(session, workspace)
 
