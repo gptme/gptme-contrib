@@ -1,5 +1,6 @@
 """Tests for subagent session management."""
 
+import subprocess
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -277,14 +278,73 @@ def test_spawn_agent_codex_backend_no_401_retry(sessions_dir):
     assert session.status == "failed"
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    ["403 Forbidden\n", "credit balance is too low\n", "disabled subscription\n"],
+)
+def test_spawn_agent_persistent_403_billing_no_retry(sessions_dir, stderr):
+    """Persistent 403 / billing failures must not retry or stamp auth_failed."""
+    persistent = MagicMock(returncode=1, stdout="", stderr=stderr)
+
+    with (
+        patch("gptodo.subagent.subprocess.run", return_value=persistent) as mock_run,
+        patch("gptodo.subagent.time.sleep") as mock_sleep,
+    ):
+        session = spawn_agent(
+            task_id="t4p",
+            prompt="do something",
+            backend="claude",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert mock_run.call_count == 1
+    assert not mock_sleep.called
+    assert session.status == "failed"
+
+
+def test_spawn_agent_401_retry_timeout_persists_first_output(sessions_dir):
+    """First-attempt output is persisted even if the retry times out."""
+    auth_death = MagicMock(
+        returncode=1,
+        stdout="Error: 401 unauthorized\n",
+        stderr="",
+    )
+
+    with (
+        patch(
+            "gptodo.subagent.subprocess.run",
+            side_effect=[
+                auth_death,
+                subprocess.TimeoutExpired(cmd="claude", timeout=1),
+            ],
+        ),
+        patch("gptodo.subagent.time.sleep"),
+    ):
+        session = spawn_agent(
+            task_id="t4t",
+            prompt="do something",
+            backend="claude",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert session.status == "failed"
+    assert "Timeout" in (session.error or "")
+    output_path = sessions_dir / "state" / "sessions" / f"{session.session_id}.output"
+    assert output_path.exists()
+    assert "401 unauthorized" in output_path.read_text()
+
+
 def test_check_session_background_auth_death_classified(sessions_dir):
-    """Background session: EXIT_CODE non-zero + tiny auth output → auth_failed, not failed."""
+    """Background claude session: EXIT_CODE non-zero + tiny auth output → auth_failed."""
     output_file = sessions_dir / "state" / "sessions" / "agent_authtest.output"
     output_file.write_text("authentication_error: 401 unauthorized\nEXIT_CODE=1\n")
 
     session = _make_session(
         session_id="agent_authtest",
         status="running",
+        backend="claude",
         tmux_session="gptodo_agent_authtest",
         output_file=str(output_file),
     )
@@ -317,6 +377,28 @@ def test_check_session_background_normal_failure_not_auth(sessions_dir):
 
     with patch("gptodo.subagent.subprocess.run", return_value=MagicMock(returncode=1)):
         updated = check_session("agent_bigfail", sessions_dir)
+
+    assert updated is not None
+    assert updated.status == "failed"
+
+
+@pytest.mark.parametrize("backend", ["gptme", "codex"])
+def test_check_session_non_claude_backend_not_auth_failed(sessions_dir, backend):
+    """Background gptme/codex sessions stay failed even on tiny 401 output."""
+    output_file = sessions_dir / "state" / "sessions" / f"agent_{backend}.output"
+    output_file.write_text("authentication_error: 401 unauthorized\nEXIT_CODE=1\n")
+
+    session = _make_session(
+        session_id=f"agent_{backend}",
+        status="running",
+        backend=backend,
+        tmux_session=f"gptodo_agent_{backend}",
+        output_file=str(output_file),
+    )
+    save_session(session, sessions_dir)
+
+    with patch("gptodo.subagent.subprocess.run", return_value=MagicMock(returncode=1)):
+        updated = check_session(f"agent_{backend}", sessions_dir)
 
     assert updated is not None
     assert updated.status == "failed"

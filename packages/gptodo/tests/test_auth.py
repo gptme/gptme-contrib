@@ -18,8 +18,6 @@ from gptodo._auth import DEFAULT_MAX_BYTES, is_auth_death, is_transient_401
         "invalid_api_key",
         "oauth expired",
         "Please run /login",
-        "credit balance is too low",
-        "disabled subscription",
     ],
 )
 def test_is_transient_401_positive(text):
@@ -32,6 +30,10 @@ def test_is_transient_401_positive(text):
         "Completed successfully",
         "Error: 500 server error",
         "timeout after 30s",
+        # Persistent 403 / billing must not be treated as a transient 401.
+        "403 Forbidden",
+        "credit balance is too low",
+        "disabled subscription",
         # Note: "PR #401 merged" DOES match \b401\b — that is by design.
         # is_transient_401 has no size gate. The size gate in is_auth_death is
         # what prevents false positives on large, legitimate outputs.

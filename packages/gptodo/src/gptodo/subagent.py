@@ -380,6 +380,7 @@ def spawn_agent(
             env = os.environ.copy()
         env["COORDINATION_DB"] = coord_db_path
 
+    combined_output = ""
     try:
         result = subprocess.run(
             cmd,
@@ -400,6 +401,10 @@ def spawn_agent(
         retried_401 = False
         if result.returncode != 0 and backend == "claude":
             if is_auth_death(combined_output):
+                # Persist first-attempt output *before* sleep/retry. If the
+                # retry raises TimeoutExpired (or any other exception), the
+                # except path must not discard a complete first result.
+                output_file.write_text(combined_output)
                 logger.warning(
                     "spawn_agent: transient 401 detected on first attempt; retrying in %ds …",
                     _AUTH_RETRY_BACKOFF_SECS,
@@ -435,9 +440,13 @@ def spawn_agent(
                 session.error = f"Exit code: {result.returncode}"
 
     except subprocess.TimeoutExpired:
+        if combined_output:
+            output_file.write_text(combined_output)
         session.status = "failed"
         session.error = f"Timeout after {timeout}s"
     except Exception as e:
+        if combined_output:
+            output_file.write_text(combined_output)
         session.status = "failed"
         session.error = str(e)
 
@@ -478,10 +487,10 @@ def check_session(session_id: str, workspace: Path | None = None) -> AgentSessio
                     session.status = "failed"
                     session.error = "Timed out"
                 elif "EXIT_CODE=" in output:
-                    # Classify: tiny output with auth signature → auth_failed
-                    # (distinct from a generic non-zero, and never conflated
-                    # with a successful session that mentions "401" in prose).
-                    if is_auth_death(output, DEFAULT_MAX_BYTES):
+                    # Classify: tiny claude output with auth signature →
+                    # auth_failed. gptme/codex keep a plain "failed" — they
+                    # are not the CC OAuth-blip this status exists for.
+                    if session.backend == "claude" and is_auth_death(output, DEFAULT_MAX_BYTES):
                         session.status = "auth_failed"
                         session.error = "auth-death: transient 401"
                     else:

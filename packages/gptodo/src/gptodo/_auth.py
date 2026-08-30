@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import re
 
-# Auth-failure markers emitted by CC / gptme on a dead auth token.
-# Kept deliberately broad — the tiny-output size gate prevents false positives
-# in the spawn-output case.
+# Transient 401 / credential-death markers emitted by CC on a dead OAuth token.
+# Deliberately excludes 403 (org policy, region block, content-filter) and
+# billing ("credit balance is too low", disabled subscription): those are
+# persistent. Treating them as "transient 401" would retry a doomed
+# `claude -p` session and send operators to check OAuth tokens.
+# The tiny-output size gate still prevents prose false positives.
 _AUTH_PATTERNS = [
     r"\b401\b",
-    r"\b403\b",
     r"unauthorized",
     r"invalid bearer token",
     r"authentication_error",
@@ -34,8 +36,6 @@ _AUTH_PATTERNS = [
     r"oauth\b.{0,40}\bexpired",
     r"oauth\b.{0,40}\b(fail|error|invalid)",
     r"please run /login",
-    r"credit balance is too low",
-    r"disabled.*subscription",
 ]
 
 _AUTH_RE = re.compile("|".join(_AUTH_PATTERNS), re.IGNORECASE)
