@@ -233,6 +233,31 @@ def test_start_resets_presence_state_after_restart():
     pipeline.stop()
 
 
+def test_start_clears_stale_frame_until_new_capture():
+    """Reconnect/restart must not serve a frame from the previous session."""
+    first = solid_frame((10, 20, 30))
+    pipeline = VisionPipeline(ListSource([first]), [], interval_s=0.01)
+    pipeline.start()
+    thread = pipeline._thread
+    assert thread is not None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert pipeline.latest_frame is not None
+
+    class EmptyLiveSource:
+        stop_on_empty = False
+
+        def get_frame(self):
+            return None
+
+    pipeline.source = EmptyLiveSource()
+    pipeline.start()
+    try:
+        assert pipeline.latest_frame_copy() is None
+    finally:
+        pipeline.stop()
+
+
 def test_stop_keeps_reference_to_blocked_thread():
     unblock = threading.Event()
 

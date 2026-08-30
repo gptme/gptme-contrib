@@ -146,6 +146,9 @@ class VisionPipeline:
         self._stop.clear()
         self._person_present = False
         self._frames_without_person = 0
+        with self._latest_frame_lock:
+            # Drop the previous session's snapshot so look cannot describe a stale scene.
+            self.latest_frame = None
         self._thread = threading.Thread(
             target=self._run, name="vision-pipeline", daemon=True
         )
