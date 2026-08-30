@@ -14,6 +14,7 @@ import base64
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 import cv2
 
@@ -26,10 +27,29 @@ logger = logging.getLogger(__name__)
 _MAX_PENDING_EVENT_SENDS = 4
 
 SendMessage = Callable[[str], Awaitable[None]]
+_T = TypeVar("_T")
 
 
 async def _send_event(send_message: SendMessage, message: str) -> None:
     await send_message(message)
+
+
+async def _await_even_if_cancelled(aw: asyncio.Future[_T]) -> _T:
+    """Await *aw* even if the current task is cancelled.
+
+    Capture-thread join must finish before ``source.release()``: concurrent
+    OpenCV ``read()`` / ``release()`` is not documented thread-safe. The
+    original cancellation is re-raised after *aw* completes.
+    """
+    cancelled_exc: BaseException | None = None
+    while not aw.done():
+        try:
+            await asyncio.shield(aw)
+        except asyncio.CancelledError as exc:
+            cancelled_exc = exc
+    if cancelled_exc is not None:
+        raise cancelled_exc
+    return aw.result()
 
 
 class VisionBridge:
@@ -153,22 +173,33 @@ class VisionBridge:
         schedule work after teardown. ``source.release()`` runs only after the
         capture thread has actually exited — concurrent OpenCV ``read()`` /
         ``release()`` is not documented thread-safe.
+
+        Cancellation during the off-loop join still runs this cleanup: the
+        worker join is shielded so we never ``release()`` against a live
+        ``read()``, and pending event-send tasks are cancelled regardless.
         """
         self._send_message = None
         self._loop = None
-        await asyncio.to_thread(self.pipeline.stop, timeout)
-        if self.pipeline.is_running():
-            logger.warning(
-                "vision pipeline worker still alive after %.1fs; skipping source.release()",
-                timeout,
-            )
-        else:
-            release = getattr(self.pipeline.source, "release", None)
-            if release is not None:
-                release()
-        pending = list(self._pending_sends)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        self._pending_sends.clear()
+        join = asyncio.create_task(asyncio.to_thread(self.pipeline.stop, timeout))
+        try:
+            await _await_even_if_cancelled(join)
+        finally:
+            if self.pipeline.is_running():
+                logger.warning(
+                    "vision pipeline worker still alive after %.1fs; skipping source.release()",
+                    timeout,
+                )
+            else:
+                release = getattr(self.pipeline.source, "release", None)
+                if release is not None:
+                    release()
+            pending = list(self._pending_sends)
+            for pending_task in pending:
+                pending_task.cancel()
+            self._pending_sends.clear()
+            if pending:
+                await _await_even_if_cancelled(
+                    asyncio.ensure_future(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+                )
