@@ -1,10 +1,10 @@
 """
 Semantic browser primitives for gptme computer-use.
 
-Wraps the stagehand act/observe/extract pattern as three gptme tool functions:
-  - browser_act: execute an action on the current page (one LLM call, deterministic)
+Implements the stagehand act/observe/extract pattern as three library functions:
+  - browser_act: execute a deterministic action on the current page
   - browser_observe: return Playwright selectors matching an instruction (reusable)
-  - browser_extract: typed page data extraction (Pydantic schema optional)
+  - browser_extract: return the current raw ARIA snapshot
 
 Design intent (full justification in the "browser tool act/observe/extract"
 design doc, knowledge/technical-designs/browser-tool-act-observe-extract.md
@@ -15,35 +15,32 @@ in the workspace that prototyped this):
   selector, deterministic Playwright ops (`page.click`, `page.fill`) are zero-LLM
   calls. This is the headline gain over the existing `browser.snapshot` →
   `click_element(selector)` pattern, which already does this for ONE action at
-  a time; observe() enables chained deterministic actions after a single LLM hop.
+  a time; observe() enables chained deterministic actions from one snapshot.
 - act() with a pre-observed ObserveResult also goes deterministic (no LLM call).
   Reusing observed selectors across actions is the multi-step efficiency win.
-- extract() returns a typed schema (or raw text). Strictly optional; useful when
-  the downstream consumer is JSON-producing code (filling a form from a CSV,
-  pulling structured data off a list page).
+- extract() returns raw ARIA. Schema-aware extraction is deliberately rejected
+  in Path A rather than silently pretending to validate structured output.
 
 This module is the prototype. There are two implementation paths:
 
   Path A (this file): the *interface*. gptme tools are pure-Python functions
     that take the existing playwright page from `browser.py`. The semantic
     primitives are implemented over Playwright directly: observe() walks the
-    ARIA tree and uses LLM-ranked fuzzy matching; act() runs the selector;
-    extract() walks the DOM and applies schema validation.
-    Tradeoff: no stagehand dep, but you re-implement the AI bits.
+    ARIA tree and uses deterministic token-overlap ranking; act() runs the
+    selector; extract() returns the snapshot.
+    Tradeoff: no stagehand dependency, but no LLM reranking or typed extraction.
 
-  Path B (in design doc): when stagehand gains a usable local-only path OR
-    when we ship a small helper that runs the stagehand server locally, these
-    tools wrap stagehand.local_browser.launch() and inherit the real semantic
-    model. This is the recommended next step.
+  Stagehand evaluation path (in the design doc): stagehand==3.23.0 now has a
+    local server and local browser, but it requires a supported CDP/session
+    handoff to share gptme's current page. It is not a mechanical backend swap.
 
-This module implements Path A so we can benchmark today.
+This module implements Path A. The bundled benchmark is static scenario
+accounting, not an executed performance benchmark.
 
 Install notes:
 - Requires `pip install playwright` (already part of `gptme[browser]` extras).
 - `playwright install chromium` must have been run.
-- For the LLM-backed observe/extract paths, OPENAI_API_KEY (or any provider
-  gptme supports via its LLM router) must be set. Plumbed through gptme's
-  existing model client.
+- LLM-backed reranking and schema extraction are not implemented in Path A.
 """
 
 from __future__ import annotations
@@ -218,8 +215,8 @@ def browser_observe(
         instruction: natural-language description of what to find.
             Example: "the submit button at the bottom of the form".
         top_k: maximum number of results to return.
-        llm_rerank: if True, call the LLM to rerank the candidates. Adds
-            one LLM call per observe(). Default False keeps the path cheap.
+        llm_rerank: reserved for a future native reranker. Path A raises
+            ``NotImplementedError`` when this is True.
 
     Returns:
         list[ObserveResult]: ranked observations, best match first.
@@ -345,9 +342,8 @@ def browser_act(
     """Execute a single browser action.
 
     Two forms:
-      1. `browser_act("click the submit button")` — runs observe() internally
-         and dispatches the top match. One LLM call only when observe() needs
-         reranking.
+      1. `browser_act("click the submit button")` — runs the deterministic
+         observe() scorer internally and dispatches the top match.
       2. `browser_act(observed)` — pass an ObserveResult from a prior
          browser_observe() call. Zero LLM calls; uses the cached selector.
 
@@ -355,9 +351,8 @@ def browser_act(
     resolves — the page re-rendered, moved the element, or swapped refs — the
     dispatch fails and, with `retry_on_stale=True` (default), the element is
     re-observed once with the same query and retried with the fresh top
-    match. The re-observe is zero-LLM on the default token-scoring path, so
-    the retry costs nothing against the LLM-call budget. `retry_on_stale=False`
-    returns the first failure immediately.
+    match. The re-observe makes no model call on the token-scoring path.
+    `retry_on_stale=False` returns the first failure immediately.
 
     Returns ActResult with `success`, the selector used, and elapsed time.
     """

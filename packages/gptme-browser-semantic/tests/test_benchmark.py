@@ -1,11 +1,7 @@
-"""Regression test for the LLM-call benchmark claim.
+"""Regression tests for the static five-scenario operation proxy.
 
-Pins the numbers from the design doc: on the 5-task HN fixture the raw
-browser path costs 11 LLM calls, the Path A semantic path 7 (−36.4%)
-under the conservative production-path proxy. If a change to the action
-sequences or the counting heuristic moves these totals, the design-doc
-claim must be re-verified (and re-documented) rather than letting this
-test rot silently.
+Pins the historical 11→7 arithmetic and guards the output from presenting it as
+an executed LLM-call or success-rate result.
 """
 
 from __future__ import annotations
@@ -31,7 +27,7 @@ def test_benchmark_fixture_exists() -> None:
     assert (PACKAGE_ROOT / "fixtures" / "hn.html").exists()
 
 
-def test_benchmark_reproduces_recorded_claim() -> None:
+def test_benchmark_reproduces_recorded_proxy() -> None:
     bench = _load_benchmark()
     total_raw = 0
     total_sem = 0
@@ -43,8 +39,8 @@ def test_benchmark_reproduces_recorded_claim() -> None:
         "multi_step_with_verification": (3, 2),
     }
     for task in bench.TASKS:
-        raw = bench.count_llm_calls(task.raw_actions, is_semantic=False)
-        sem = bench.count_llm_calls(task.semantic_actions, is_semantic=True)
+        raw = bench.count_proxy_units(task.raw_actions, is_semantic=False)
+        sem = bench.count_proxy_units(task.semantic_actions, is_semantic=True)
         assert (raw, sem) == expected[task.name], task.name
         total_raw += raw
         total_sem += sem
@@ -52,5 +48,15 @@ def test_benchmark_reproduces_recorded_claim() -> None:
     assert len(bench.TASKS) == 5
     assert total_raw == 11
     assert total_sem == 7
-    pct = (total_raw - total_sem) / total_raw * 100
-    assert abs(pct - 36.4) < 0.1
+
+
+def test_benchmark_output_states_its_limitations(capsys) -> None:
+    bench = _load_benchmark()
+
+    bench.main()
+
+    output = capsys.readouterr().out
+    assert "static operation proxy" in output
+    assert "not executed" in output
+    assert "does not measure success, turns, tokens, or latency" in output
+    assert "fewer LLM calls" not in output
