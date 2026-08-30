@@ -78,9 +78,12 @@ def parse_trending(html: str) -> list[dict]:
         )
         language = lang_match.group(1).strip() if lang_match else ""
 
-        # Total stars (in the stargazers link)
+        # Total stars (in the stargazers link). GitHub currently puts an
+        # octicon <svg> inside the <a> before the count; older markup had
+        # the digits immediately after the opening tag. Allow optional inner
+        # HTML, then take the comma-grouped integer that sits before </a>.
         stars_match = re.search(
-            r'href="/[^"]+/stargazers"[^>]*>\s*([\d,]+)\s*</a>',
+            r'href="/[^"]+/stargazers"[^>]*>.*?([\d,]+)\s*</a>',
             article,
             re.DOTALL,
         )
