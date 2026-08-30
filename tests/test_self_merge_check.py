@@ -1700,6 +1700,9 @@ def test_evaluate_pr_captures_head_sha() -> None:
         ),
         patch.object(self_merge_check, "greptile_summary_score", return_value=5),
         patch.object(
+            self_merge_check, "greptile_summary_reviewed_commit", return_value=None
+        ),
+        patch.object(
             self_merge_check,
             "fetch_unresolved_human_threads",
             return_value={"unresolved": 0, "total": 0, "authors": []},
@@ -1712,6 +1715,76 @@ def test_evaluate_pr_captures_head_sha() -> None:
         )
 
     assert result.head_sha == "abc123def456"
+
+
+def _evaluate_with_score_provenance(reviewed_commit, head_sha="abc123def456789a"):
+    """Evaluate a has_review PR with score 5 and the given summary provenance."""
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+        "headRefOid": head_sha,
+        "labels": [],
+    }
+
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=5),
+        patch.object(
+            self_merge_check,
+            "greptile_summary_reviewed_commit",
+            return_value=reviewed_commit,
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+    ):
+        return self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+
+def test_evaluate_pr_blocks_stale_summary_score() -> None:
+    """A clearing score whose summary reviewed an older head must not count.
+
+    gptme/gptme#3656 class: three commits landed after the last review pass,
+    and a handoff comment attributed the old 5/5 to the new head. The summary's
+    "Last reviewed commit" provenance makes the staleness detectable.
+    """
+    outcome = _evaluate_with_score_provenance("deadbeef" * 5)
+    assert any(
+        "is stale" in r and "re-review of head required" in r for r in outcome.reasons
+    )
+
+
+def test_evaluate_pr_accepts_score_reviewed_at_head() -> None:
+    """Provenance matching the current head adds no stale-score reason."""
+    outcome = _evaluate_with_score_provenance("abc123def456789a")
+    assert not any("is stale" in r for r in outcome.reasons)
+
+
+def test_evaluate_pr_score_provenance_absent_fails_open() -> None:
+    """No parseable provenance (None) must not block — old summary formats."""
+    outcome = _evaluate_with_score_provenance(None)
+    assert not any("is stale" in r for r in outcome.reasons)
 
 
 def test_evaluate_pr_head_sha_empty_when_missing() -> None:

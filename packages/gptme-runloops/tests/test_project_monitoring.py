@@ -285,7 +285,7 @@ def test_should_post_comment_pr_updated(workspace):
     with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout='{"updatedAt": "2025-11-25T11:00:00Z", "lastCommentAuthor": "other-user"}',  # Newer than state file, not by self
+            stdout='{"updatedAt": "2025-11-25T11:00:00Z", "lastComment": {"login": "other-user", "body": "please fix", "createdAt": "2025-11-25T10:59:00Z"}}',  # Newer than state file, not by self
             stderr="",
         )
 
@@ -340,6 +340,432 @@ def test_should_post_comment_stale(workspace):
         # Should post (stale comment)
         should_post = run.should_post_comment("gptme/gptme", 123, "update")
         assert should_post is True
+
+
+# --- last-activity-by-self classification (AI reviewer posts as self) ------
+#
+# The AI reviewer posts under the agent's own login; its output (bob-ai-review
+# markers) is inbound work, never a self-response. Regression: gptme/gptme#3669
+# — a fresh inline finding sat undispatched because PM read "own activity".
+
+SELF = "TimeToBuildBob"
+
+
+def _last_comment_json(
+    login, body, created_at="2026-08-29T14:00:00Z", marker="", head_sha=""
+):
+    """Mock stdout for the _is_last_activity_by_self gh pr view call."""
+    return json.dumps(
+        {
+            "headSha": head_sha,
+            "lastComment": {"login": login, "body": body, "createdAt": created_at},
+            "aiReviewMarker": marker,
+        }
+    )
+
+
+def test_is_last_activity_by_self_plain_self_comment(workspace):
+    """Plain self comment last, no newer inline review comment -> True."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            # gh pr view --json comments (last issue comment)
+            MagicMock(
+                returncode=0,
+                stdout=_last_comment_json(SELF, "Fixed in abc123."),
+                stderr="",
+            ),
+            # gh api pulls/N/comments (no inline review comments)
+            MagicMock(returncode=0, stdout="null", stderr=""),
+        ]
+        assert run._is_last_activity_by_self("gptme/gptme", 123) is True
+
+
+def test_is_last_activity_by_self_ai_review_marker(workspace):
+    """Self-authored comment carrying a bob-ai-review marker is inbound work."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    body = 'Review summary\n\n<!-- bob-ai-review {"head_sha": "abc"} -->'
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=_last_comment_json(SELF, body), stderr=""
+        )
+        assert run._is_last_activity_by_self("gptme/gptme", 123) is False
+        # Marker short-circuits before the inline review comment lookup.
+        assert mock_run.call_count == 1
+
+
+def test_is_ai_reviewer_output_quoted_marker_is_self_chatter(workspace):
+    """Quoting a finding marker must not classify Bob's reply as inbound review.
+
+    The reviewer emits the HTML comment as a standalone line. A reply that
+    blockquotes that line, or mentions the token in prose, is still Bob
+    talking — substring matching used to self-dispatch those (P1 on #1549).
+    """
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    quoted = (
+        "Fixed the matcher.\n"
+        "> <!-- bob-ai-review-finding -->\n"
+        "> quoted P1 text\n"
+        "Also mentioning bob-ai-review in prose."
+    )
+    assert run._is_ai_reviewer_output(quoted) is False
+    finding = "<!-- bob-ai-review-finding -->\nPossible bug here"
+    assert run._is_ai_reviewer_output(finding) is True
+    summary = 'Review summary\n\n<!-- bob-ai-review {"head_sha": "abc"} -->'
+    assert run._is_ai_reviewer_output(summary) is True
+
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=_last_comment_json(SELF, quoted),
+                stderr="",
+            ),
+            MagicMock(returncode=0, stdout="null", stderr=""),
+        ]
+        assert run._is_last_activity_by_self("gptme/gptme", 1549) is True
+
+
+def test_is_last_activity_by_self_other_author(workspace):
+    """Last comment by someone else -> False (inbound)."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=_last_comment_json("erikbjare", "Looks good"),
+            stderr="",
+        )
+        assert run._is_last_activity_by_self("gptme/gptme", 123) is False
+        assert mock_run.call_count == 1
+
+
+def test_is_last_activity_by_self_newer_inline_finding(workspace):
+    """The gptme#3669 shape: plain self issue comment, but a NEWER inline
+    review comment carries an AI-review finding -> inbound, False."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    inline = json.dumps(
+        {
+            "login": SELF,
+            "body": "<!-- bob-ai-review-finding -->\nPossible bug here",
+            "createdAt": "2026-08-29T15:58:39Z",
+        }
+    )
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=_last_comment_json(
+                    SELF, "@greptileai review", "2026-08-29T14:37:34Z"
+                ),
+                stderr="",
+            ),
+            MagicMock(returncode=0, stdout=inline, stderr=""),
+        ]
+        assert run._is_last_activity_by_self("gptme/gptme", 3669) is False
+
+
+def test_is_last_activity_by_self_older_inline_finding(workspace):
+    """An inline finding OLDER than the self reply does not flip the verdict:
+    the agent already responded after the finding."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    inline = json.dumps(
+        {
+            "login": SELF,
+            "body": "<!-- bob-ai-review-finding -->\nPossible bug here",
+            "createdAt": "2026-08-29T10:00:00Z",
+        }
+    )
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=_last_comment_json(
+                    SELF, "Addressed the finding in abc123.", "2026-08-29T14:00:00Z"
+                ),
+                stderr="",
+            ),
+            MagicMock(returncode=0, stdout=inline, stderr=""),
+        ]
+        assert run._is_last_activity_by_self("gptme/gptme", 123) is True
+
+
+_MARKER_3638 = (
+    "## AI code review\n\nreview body...\n\n"
+    '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 3, "engine": "agent", '
+    '"findings": [{"fp": "071a049d9d84", "severity": "P1"}], '
+    '"suppressed": [], "auto_resolved": []} -->'
+)
+_HEAD_3638 = "7bb89e6c544c12c15fbfd224ab40f690e7a11401"
+
+
+def test_is_last_activity_by_self_standing_marker_findings(workspace):
+    """The gptme#3638 shape: reviewer EDITED its summary in place (createdAt
+    never moves), so the last-created comments are all plain self replies —
+    but the marker records a standing finding at head. Inbound -> False."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=_last_comment_json(
+                SELF,
+                "## Greptile Convergence Adjudication\n\nAll threads resolved.",
+                "2026-08-26T19:56:40Z",
+                marker=_MARKER_3638,
+                head_sha=_HEAD_3638,
+            ),
+            stderr="",
+        )
+        assert run._is_last_activity_by_self("gptme/gptme", 3638) is False
+        # Standing findings short-circuit before the inline lookup.
+        assert mock_run.call_count == 1
+
+
+def test_quoted_standing_marker_is_not_standing_findings(workspace):
+    """A self-reply that blockquotes a standing marker must not be parsed
+    as the reviewer's outstanding state (P2 on gptme-contrib#1549).
+
+    The old substring/DOTALL search treated a quoted
+    `<!-- bob-ai-review {...} -->` as live findings at head, which flipped
+    `_last_activity_is_self_response` to inbound and re-dispatched.
+    """
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    quoted = (
+        "Looked at this.\n"
+        '> <!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 3, '
+        '"engine": "agent", "findings": [{"fp": "071a049d9d84", '
+        '"severity": "P1"}], "suppressed": [], "auto_resolved": []} -->\n'
+        "Waiting on the next pass."
+    )
+    assert run._marker_has_standing_findings(quoted, _HEAD_3638) is False
+    assert run._marker_has_standing_findings(_MARKER_3638, _HEAD_3638) is True
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=_last_comment_json(
+                    SELF,
+                    quoted,
+                    "2026-08-30T10:00:00Z",
+                    marker=quoted,
+                    head_sha=_HEAD_3638,
+                ),
+                stderr="",
+            ),
+            MagicMock(returncode=0, stdout="null", stderr=""),
+        ]
+        assert run._is_last_activity_by_self("gptme/gptme", 1549) is True
+
+
+def test_is_last_activity_by_self_stale_marker_findings(workspace):
+    """Marker findings recorded against an OLDER head do not count: the push
+    since the review is fresh activity and the sweep will re-review it."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=_last_comment_json(
+                    SELF,
+                    "Fixed the finding in deadbeef.",
+                    "2026-08-27T10:00:00Z",
+                    marker=_MARKER_3638,
+                    head_sha="deadbeef00001111222233334444555566667777",
+                ),
+                stderr="",
+            ),
+            # No newer inline review comments
+            MagicMock(returncode=0, stdout="null", stderr=""),
+        ]
+        assert run._is_last_activity_by_self("gptme/gptme", 3638) is True
+
+
+def test_should_post_comment_standing_marker_findings_posts(workspace):
+    """The live gptme#3638 gate path: PR updated, last three actors all self,
+    standing P1 only in the in-place-edited marker JSON -> should POST."""
+    from datetime import datetime, timedelta
+
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    prev_time = (datetime.now() - timedelta(hours=1)).isoformat()
+    state_file = run.state_dir / "gptme-gptme-pr-3638-comment.state"
+    state_file.write_text(f"update {prev_time} 2026-08-26T15:00:00Z")
+
+    payload = json.dumps(
+        {
+            "updatedAt": "2026-08-26T20:21:00Z",
+            "headSha": _HEAD_3638,
+            "lastComment": {
+                "login": SELF,
+                "body": "## Greptile Convergence Adjudication\n\nAll resolved.",
+                "createdAt": "2026-08-26T19:56:40Z",
+            },
+            "aiReviewMarker": _MARKER_3638,
+        }
+    )
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
+        assert run.should_post_comment("gptme/gptme", 3638, "update") is True
+
+
+def test_should_post_comment_pr_updated_ai_review_summary(workspace):
+    """PR updated + last comment is the self-authored AI-review summary ->
+    inbound work, should POST (dispatch), not skip."""
+    from datetime import datetime, timedelta
+
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    prev_time = (datetime.now() - timedelta(hours=1)).isoformat()
+    state_file = run.state_dir / "gptme-gptme-pr-123-comment.state"
+    state_file.write_text(f"update {prev_time} 2026-08-29T09:00:00Z")
+
+    payload = json.dumps(
+        {
+            "updatedAt": "2026-08-29T11:00:00Z",
+            "lastComment": {
+                "login": SELF,
+                "body": 'Findings...\n\n<!-- bob-ai-review {"score": 3} -->',
+                "createdAt": "2026-08-29T10:59:00Z",
+            },
+        }
+    )
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
+        assert run.should_post_comment("gptme/gptme", 123, "update") is True
+
+
+def test_should_post_comment_pr_updated_plain_self_skips(workspace):
+    """PR updated + last comment is a plain self response (and no newer inline
+    review comment) -> still skips and records state."""
+    from datetime import datetime, timedelta
+
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    prev_time = (datetime.now() - timedelta(hours=1)).isoformat()
+    state_file = run.state_dir / "gptme-gptme-pr-123-comment.state"
+    state_file.write_text(f"update {prev_time} 2026-08-29T09:00:00Z")
+
+    payload = json.dumps(
+        {
+            "updatedAt": "2026-08-29T11:00:00Z",
+            "lastComment": {
+                "login": SELF,
+                "body": "Rebased and fixed.",
+                "createdAt": "2026-08-29T10:59:00Z",
+            },
+        }
+    )
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=payload, stderr=""),
+            # No inline review comments
+            MagicMock(returncode=0, stdout="null", stderr=""),
+        ]
+        assert run.should_post_comment("gptme/gptme", 123, "update") is False
+    # State advanced so the same self-update isn't re-checked
+    assert "2026-08-29T11:00:00Z" in state_file.read_text()
+
+
+def test_should_post_comment_pr_updated_newer_inline_finding_posts(workspace):
+    """The live gptme#3669 gate path: plain self issue comment last, fresh
+    inline AI-review finding -> should POST (dispatch)."""
+    from datetime import datetime, timedelta
+
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    prev_time = (datetime.now() - timedelta(hours=1)).isoformat()
+    state_file = run.state_dir / "gptme-gptme-pr-3669-comment.state"
+    state_file.write_text(f"update {prev_time} 2026-08-29T09:00:00Z")
+
+    payload = json.dumps(
+        {
+            "updatedAt": "2026-08-29T15:58:39Z",
+            "lastComment": {
+                "login": SELF,
+                "body": "@greptileai review",
+                "createdAt": "2026-08-29T14:37:34Z",
+            },
+        }
+    )
+    inline = json.dumps(
+        {
+            "login": SELF,
+            "body": "<!-- bob-ai-review-finding -->\nPossible bug",
+            "createdAt": "2026-08-29T15:58:39Z",
+        }
+    )
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=payload, stderr=""),
+            MagicMock(returncode=0, stdout=inline, stderr=""),
+        ]
+        assert run.should_post_comment("gptme/gptme", 3669, "update") is True
+
+
+def _mention_view_json(body, created_at="2026-08-29T14:37:34Z", marker="", head_sha=""):
+    """Mock stdout for the _is_mention_of_someone_else gh pr view call."""
+    return json.dumps(
+        {
+            "headSha": head_sha,
+            "lastComment": {"body": body, "createdAt": created_at},
+            "aiReviewMarker": marker,
+        }
+    )
+
+
+def test_is_mention_of_someone_else_plain(workspace):
+    """Bot invocation with no newer inline review comment -> True (skip)."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0, stdout=_mention_view_json("@greptileai review"), stderr=""
+            ),
+            # No inline review comments
+            MagicMock(returncode=0, stdout="null", stderr=""),
+        ]
+        assert run._is_mention_of_someone_else("gptme/gptme", 123) is True
+
+
+def test_is_mention_of_someone_else_newer_inline_finding(workspace):
+    """The other half of the gptme#3669 blindness: last issue comment is a bot
+    invocation, but a NEWER inline AI-review finding is inbound work -> False
+    (do not skip)."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    inline = json.dumps(
+        {
+            "login": SELF,
+            "body": "<!-- bob-ai-review-finding -->\nPossible bug",
+            "createdAt": "2026-08-29T15:58:39Z",
+        }
+    )
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0, stdout=_mention_view_json("@greptileai review"), stderr=""
+            ),
+            MagicMock(returncode=0, stdout=inline, stderr=""),
+        ]
+        assert run._is_mention_of_someone_else("gptme/gptme", 3669) is False
+
+
+def test_is_mention_of_someone_else_standing_marker_findings(workspace):
+    """Bot invocation last, but the (in-place-edited) AI-review summary marker
+    carries standing findings at head -> inbound work, False (gptme#3638
+    class)."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    marker = (
+        "## AI code review\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 3, '
+        '"findings": [{"fp": "071a049d9d84", "severity": "P1"}]} -->'
+    )
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=_mention_view_json(
+                "@greptileai review",
+                marker=marker,
+                head_sha="7bb89e6c544c12c15fbfd224ab40f690e7a11401",
+            ),
+            stderr="",
+        )
+        assert run._is_mention_of_someone_else("gptme/gptme", 3638) is False
+        assert mock_run.call_count == 1
 
 
 def test_should_post_comment_concurrent_first_time(workspace):
@@ -398,7 +824,7 @@ def test_check_pr_updates_new_pr(mock_run, workspace):
     comment_state = '{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}'
 
     def side_effect(args, **kwargs):
-        if "updatedAt,comments" in args:
+        if "updatedAt,comments,headRefOid" in args or "comments,headRefOid" in args:
             return MagicMock(returncode=0, stdout=comment_state, stderr="")
         return MagicMock(returncode=0, stdout=pr_data, stderr="")
 
@@ -430,7 +856,7 @@ def test_check_pr_updates_no_change(mock_run, workspace):
     comment_state = '{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}'
 
     def side_effect(args, **kwargs):
-        if "updatedAt,comments" in args:
+        if "updatedAt,comments,headRefOid" in args or "comments,headRefOid" in args:
             return MagicMock(returncode=0, stdout=comment_state, stderr="")
         return MagicMock(returncode=0, stdout=pr_data, stderr="")
 
@@ -470,7 +896,7 @@ def test_check_pr_updates_surfaces_draft(mock_run, workspace):
     comment_state = '{"updatedAt": "2026-05-12T20:17:24Z", "lastCommentAuthor": ""}'
 
     def side_effect(args, **kwargs):
-        if "updatedAt,comments" in args:
+        if "updatedAt,comments,headRefOid" in args or "comments,headRefOid" in args:
             return MagicMock(returncode=0, stdout=comment_state, stderr="")
         return MagicMock(returncode=0, stdout=pr_data, stderr="")
 
@@ -538,7 +964,7 @@ def test_check_ci_failures(mock_run, workspace):
     comment_state = '{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}'
 
     def side_effect(args, **kwargs):
-        if "updatedAt,comments" in args:
+        if "updatedAt,comments,headRefOid" in args or "comments,headRefOid" in args:
             return MagicMock(returncode=0, stdout=comment_state, stderr="")
         return MagicMock(returncode=0, stdout=pr_data, stderr="")
 

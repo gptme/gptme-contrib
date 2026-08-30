@@ -363,9 +363,15 @@ class TestAdjudicationTimeoutTier:
         assert "do NOT trigger another Greptile review" in out
         assert "greptile-helper.sh trigger" in out  # named as forbidden
         # Token substitution must be complete and jq objects left intact.
+        # `{json}` is a substitutable token shape (`_TOKEN_RE`); the marker
+        # description uses `{...}` so `_substitute` cannot eat it (P1 on
+        # gptme-contrib#1549). `{{json}}` is the str.format escape and would
+        # survive here as a literal `{{`, which this assertion also forbids.
         assert "{repo}" not in out and "{number}" not in out
+        assert "{json}" not in out
         assert "{{" not in out
         assert "{id, path, line" in out
+        assert "<!-- bob-ai-review {...} -->" in out
 
 
 class TestConvergedBackoffEarlyExit:

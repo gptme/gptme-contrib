@@ -461,7 +461,36 @@ fetch_pr_noncomment_actor() {
 # (.latestReviews) since either can bump updatedAt.
 has_actionable_update() {
     local pr_data=$1
+    local repo=${2:-}
     # pr_data is a JSON object with comments and latestReviews already included
+
+    # Standing AI-review findings at the CURRENT head are inbound work no
+    # matter who acted last. The reviewer upserts its summary comment in
+    # place, so a re-review with unaddressed findings moves nothing in
+    # createdAt order — the newest-created comments can all be the agent's
+    # own replies while a standing finding lives only in the marker JSON
+    # (gptme/gptme#3638: a standing P1 at head sat undispatched ~2.5 days
+    # behind three self-authored comments). A stale marker sha (the agent
+    # pushed since the review) does not count: the push is fresh activity
+    # and the review sweep re-reviews the new head.
+    local standing_findings
+    standing_findings=$(echo "$pr_data" | jq -r '
+        (.headRefOid // "") as $head
+        | [ .comments[]? | (.body // "")
+            | select(any(split("\n")[]; startswith("<!-- bob-ai-review {")))
+            | (try (capture("<!-- bob-ai-review (?<j>\\{.*?\\}) -->"; "s").j
+                    | fromjson) catch empty) ]
+        | last
+        | if . == null then "no"
+          else (.sha // "") as $sha
+            | if (((.findings // []) | length) > 0)
+                 and ($sha != "") and ($head | startswith($sha))
+              then "yes" else "no" end
+          end
+    ' 2>/dev/null)
+    if [ "$standing_findings" = "yes" ]; then
+        return 0
+    fi
 
     # Determine the most recent actor across both comments and reviews.
     # .comments are issue-style comments (chronological).
@@ -513,6 +542,45 @@ has_actionable_update() {
     if [ "$last_actor" = "$AUTHOR" ] && printf '%s\n' "$last_body" \
         | grep -qE "$AI_REVIEW_MARKER_RE"; then
         is_ai_review=0
+    fi
+    # A fresh AI-review pass can be ENTIRELY invisible in pr_data: inline
+    # findings are review comments (not in .comments), and GraphQL's
+    # latestReviews omits the PR author's OWN reviews — on a Bob-authored PR
+    # the reviewer's whole pass (an empty-body review wrapping the marked
+    # inline comments) leaves no trace here. Live case gptme/gptme#3669: a
+    # finding landed 15:58Z while the last VISIBLE activity was Bob's plain
+    # "@greptileai review" comment from 14:37Z, so the update was silenced as
+    # self-chatter. Before silencing a plain self last-activity, consult the
+    # newest inline review comment (one extra gh call, only on this shape):
+    # if it is NEWER and is either someone else's or carries the reviewer
+    # marker, the update is inbound work. Bob's own inline thread replies
+    # (self login, no marker) stay silenced.
+    if [ "$is_ai_review" -ne 0 ] && [ "$last_actor" = "$AUTHOR" ] && [ -n "$repo" ]; then
+        local pr_num_inline last_time inline_json inline_login inline_time inline_body
+        pr_num_inline=$(echo "$pr_data" | jq -r '.number // empty' 2>/dev/null)
+        last_time=$(echo "$pr_data" | jq -r '
+            [
+                (.comments[-1] | select(. != null) | .createdAt),
+                (.latestReviews | sort_by(.submittedAt) | last | select(. != null) | .submittedAt)
+            ]
+            | map(select(. != null)) | max // ""
+        ' 2>/dev/null)
+        if [ -n "$pr_num_inline" ]; then
+            inline_json=$(timeout 30 gh api \
+                "repos/$repo/pulls/$pr_num_inline/comments?sort=created&direction=desc&per_page=1" \
+                --jq '.[0] | {login: (.user.login // ""), time: (.created_at // ""), body: (.body // "")}' \
+                2>/dev/null || true)
+            inline_login=$(echo "$inline_json" | jq -r '.login // empty' 2>/dev/null)
+            inline_time=$(echo "$inline_json" | jq -r '.time // empty' 2>/dev/null)
+            inline_body=$(echo "$inline_json" | jq -r '.body // empty' 2>/dev/null)
+            # ISO-8601 UTC "Z" timestamps compare correctly as strings.
+            if [ -n "$inline_time" ] && { [ -z "$last_time" ] || [[ "$inline_time" > "$last_time" ]]; }; then
+                if [ "$inline_login" != "$AUTHOR" ] \
+                    || printf '%s\n' "$inline_body" | grep -qE "$AI_REVIEW_MARKER_RE"; then
+                    is_ai_review=0
+                fi
+            fi
+        fi
     fi
     if [ "$last_actor" = "$AUTHOR" ] && [ "$is_ai_review" -ne 0 ]; then
         return 1
@@ -616,7 +684,7 @@ check_pr_updates() {
                 fi
 
                 # Check if the update was from someone we should respond to
-                if has_actionable_update "$pr_data"; then
+                if has_actionable_update "$pr_data" "$repo"; then
                     local pr_title priority_tokens item_detail
                     pr_title=$(echo "$pr_data" | jq -r '.title')
                     # Human-priority tokens (§7b human > bot): let the

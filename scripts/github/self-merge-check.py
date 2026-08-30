@@ -2426,6 +2426,37 @@ def greptile_summary_score(repo: str, pr_number: int) -> int | None:
     return int(score) if isinstance(score, int) else None
 
 
+def greptile_summary_reviewed_commit(repo: str, pr_number: int) -> str | None:
+    """Head sha named by the latest Greptile summary's "Last reviewed commit" footer.
+
+    Greptile edits its summary comment in place, so the "latest summary" score
+    can belong to an older head (gptme/gptme#3656: three commits postdated the
+    5/5 a handoff comment then attributed to the new head). This provenance is
+    what lets the score floor reject a score for a head the PR no longer has.
+
+    Returns None when the footer is absent or unparseable — older summary
+    formats carry no provenance, and the caller must fail open on None.
+    """
+    signal = Path(__file__).with_name("greptile-merge-signal.py")
+    if not signal.exists():
+        return None
+    try:
+        env = os.environ.copy()
+        env.pop("GREPTILE_MERGE_SIGNAL_DISABLED", None)
+        proc = subprocess.run(
+            [sys.executable, str(signal), "--repo", repo, str(pr_number)],
+            capture_output=True,
+            env=env,
+            text=True,
+            timeout=30,
+        )
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+    reviewed = data.get("reviewed_commit")
+    return reviewed if isinstance(reviewed, str) and reviewed else None
+
+
 def _parse_self_merge_min_greptile_score() -> int:
     raw = os.environ.get("SELF_MERGE_MIN_GREPTILE_SCORE", "").strip()
     if not raw:
@@ -2648,6 +2679,20 @@ def evaluate_pr(
         score = greptile_summary_score(repo, number)
         if score is not None and score < min_score:
             result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
+        elif score is not None and result.head_sha:
+            # Provenance gate (gptme/gptme#3656 class): Greptile edits its
+            # summary in place, so the "latest summary" score can belong to an
+            # older head. A clearing score only counts when the summary's
+            # "Last reviewed commit" footer names the current head. Fails open
+            # when provenance is absent (None) — older summary formats carry no
+            # footer, and the thread/category gates still apply.
+            reviewed = greptile_summary_reviewed_commit(repo, number)
+            if reviewed and not _sha_matches_head(reviewed, result.head_sha):
+                result.reasons.append(
+                    f"Greptile score {score}/5 is stale (summary reviewed "
+                    f"{reviewed[:12]}, head is {result.head_sha[:12]}) — "
+                    "re-review of head required"
+                )
 
     # An explicit abstention blocks in its own right. If the structured review
     # state cannot be read, fail closed rather than silently removing the gate.
