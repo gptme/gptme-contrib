@@ -23,6 +23,7 @@ from gptme_activity_summary.gptme_backend import (
     _DEFAULT_MODEL,
     _extract_assistant_text,
     _has_summary_json,
+    _is_gptme_trailer,
     _strip_think_tags,
     call_gptme,
     is_enabled,
@@ -335,6 +336,117 @@ def test_plain_text_then_trailer_skips_trailer():
     ndjson = "\n".join([_msg(prose), _msg(trailer)])
     out = _extract_assistant_text(ndjson)
     assert out == prose
+
+
+def test_complete_tool_fence_is_gptme_trailer():
+    """A bare complete tool fence is a gptme protocol trailer, not content."""
+    trailer = "```complete\n```"
+    assert _is_gptme_trailer(trailer)
+    assert _extract_assistant_text("\n".join([_msg("real prose"), _msg(trailer)])) == ("real prose")
+
+
+def test_json_preamble_then_malformed_summary_recovers_root_json():
+    """A valid JSON preamble must not prevent repair of a later summary."""
+    preamble = json.dumps({"thinking": "assemble the daily summary"})
+    malformed = '{"accomplishments": ["parser fix"], "narrative": "REAL summary"]'
+
+    out = _extract_assistant_text("\n".join([_msg(preamble), _msg(malformed)]))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("accomplishments") == ["parser fix"]
+
+
+def test_same_message_json_preamble_then_malformed_summary_recovers_root_json():
+    """A JSON preamble in the same message must not hide a malformed summary."""
+    content = (
+        '{"thinking": "assemble the daily summary"}\n'
+        '{"accomplishments": ["parser fix"], "narrative": "REAL summary"]'
+    )
+
+    out = _extract_assistant_text(_msg(content))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("accomplishments") == ["parser fix"]
+
+
+def test_structural_preamble_then_malformed_summary_prefers_final_root():
+    """A summary-shaped preamble must not be merged into the final summary."""
+    content = (
+        '{"accomplishments": ["draft"], "decisions": []}\n'
+        '{"accomplishments": ["final"], "narrative": "REAL summary"]'
+    )
+
+    out = _extract_assistant_text(_msg(content))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("accomplishments") == ["final"]
+
+
+def test_narrative_preamble_then_split_summary_keeps_final_narrative():
+    """A preamble narrative must not overwrite a later concatenated summary root.
+
+    json-repair returns both independently valid objects. Last-match selects the
+    final root, but ``text.find('"narrative"')`` still lands in the preamble and
+    ``root.update(suffix)`` would persist the draft narrative and accomplishments.
+    """
+    content = (
+        '{"accomplishments": ["draft"], "blockers": [], '
+        '"narrative": "DRAFT summary"}\n'
+        '{"accomplishments": ["final"], "decisions": '
+        '[{"topic": "x", "decision": "y"}],\n'
+        '"blockers": [], "narrative": "REAL summary"}'
+    )
+
+    out = _extract_assistant_text(_msg(content))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("accomplishments") == ["final"]
+    assert parsed.get("decisions") == [{"topic": "x", "decision": "y"}]
+
+
+def test_malformed_summary_then_complete_fence_recovers_root_json():
+    """Recover a one-token malformed root summary before a complete trailer.
+
+    Live 2026-08-30 failure (gptme log ``running-hungry-monster``): DeepSeek
+    closed one object in the root ``decisions`` array with ``]`` instead of
+    ``}``, then emitted a bare ``complete`` fence. Returning that fence made
+    the caller find an unrelated nested news object rather than the root
+    summary.
+    """
+    malformed = json.dumps(
+        {
+            "accomplishments": ["parser fix"],
+            "decisions": [
+                {
+                    "topic": "fallback parser",
+                    "decision": "repair one closing delimiter",
+                    "rationale": "the rest of the root JSON is complete",
+                }
+            ],
+            "blockers": [{"issue": "quota", "status": "active"}],
+            "themes": ["reliability"],
+            "work_in_progress": ["missing-day live verification"],
+            "narrative": "REAL summary",
+            "interactions": [{"type": "conversation", "person": "Erik"}],
+        }
+    )
+    bad_delimiter = malformed.index("}", malformed.index('"rationale"'))
+    malformed = malformed[:bad_delimiter] + "]" + malformed[bad_delimiter + 1 :]
+    trailer = "```complete\n```"
+
+    out = _extract_assistant_text("\n".join([_msg(malformed), _msg(trailer)]))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("decisions", [{}])[0].get("topic") == "fallback parser"
+    assert parsed.get("blockers") == [{"issue": "quota", "status": "active"}]
+    assert parsed.get("themes") == ["reliability"]
+    assert parsed.get("work_in_progress") == ["missing-day live verification"]
+    assert parsed.get("interactions") == [{"type": "conversation", "person": "Erik"}]
 
 
 def test_multipart_content_list():
