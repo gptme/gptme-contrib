@@ -340,6 +340,18 @@ def _extract_assistant_text(stdout: str) -> str:
         # code blocks, etc.).
         non_json = [c for c in contents if c not in set(json_candidates)]
         if non_json:
+            for candidate in reversed(non_json):
+                if _is_gptme_trailer(candidate):
+                    continue
+                repaired = _repair_summary_json(candidate)
+                if repaired is not None:
+                    logger.warning(
+                        "gptme fallback: repaired malformed root summary JSON "
+                        "after JSON preamble (%d -> %d chars)",
+                        len(candidate),
+                        len(repaired),
+                    )
+                    return repaired
             chosen = _last_non_trailer(non_json)
             logger.warning(
                 "gptme fallback: no JSON candidate has summary key; "

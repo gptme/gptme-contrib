@@ -345,6 +345,18 @@ def test_complete_tool_fence_is_gptme_trailer():
     assert _extract_assistant_text("\n".join([_msg("real prose"), _msg(trailer)])) == ("real prose")
 
 
+def test_json_preamble_then_malformed_summary_recovers_root_json():
+    """A valid JSON preamble must not prevent repair of a later summary."""
+    preamble = json.dumps({"thinking": "assemble the daily summary"})
+    malformed = '{"accomplishments": ["parser fix"], "narrative": "REAL summary"]'
+
+    out = _extract_assistant_text("\n".join([_msg(preamble), _msg(malformed)]))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("accomplishments") == ["parser fix"]
+
+
 def test_malformed_summary_then_complete_fence_recovers_root_json():
     """Recover a one-token malformed root summary before a complete trailer.
 
