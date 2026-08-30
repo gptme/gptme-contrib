@@ -199,6 +199,52 @@ def test_standing_marker_findings_at_head_actionable():
     assert _actionable_pr(_pr_3638_shape())
 
 
+def test_quoted_standing_marker_reply_is_silenced():
+    """A later self-reply that blockquotes the standing marker is not itself
+    reviewer state. Without a complete-line marker comment, last-actor=self
+    stays silenced (P2 on gptme-contrib#1549)."""
+    quoted = (
+        "Looked at this.\n"
+        f'> {MARKER} {{"sha": "7bb89e6c544c", "score": 3, '
+        f'"findings": [{{"fp": "x", "severity": "P1"}}]}} -->\n'
+        "Waiting on the next pass."
+    )
+    pr = {
+        "number": 1549,
+        "headRefOid": HEAD,
+        "comments": [
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-08-30T10:00:00Z",
+                "body": quoted,
+            },
+        ],
+        "latestReviews": [],
+    }
+    assert not _actionable_pr(pr)
+
+
+def test_real_marker_still_actionable_when_later_reply_quotes_it():
+    """The jq selector must keep the real complete-line marker even if a
+    later self-reply quotes it. Otherwise the #3638 standing-findings
+    check would go blind the moment anyone quotes the marker."""
+    quoted = (
+        "Looked at this.\n"
+        f'> {MARKER} {{"sha": "7bb89e6c544c", "score": 3, '
+        f'"findings": [{{"fp": "x", "severity": "P1"}}]}} -->\n'
+        "Waiting on the next pass."
+    )
+    pr = _pr_3638_shape()
+    pr["comments"].append(
+        {
+            "author": {"login": BOT},
+            "createdAt": "2026-08-30T10:00:00Z",
+            "body": quoted,
+        }
+    )
+    assert _actionable_pr(pr)
+
+
 def test_standing_marker_findings_stale_sha_silenced():
     """A marker recorded against an older head does not count — the push
     since the review is fresh activity and the sweep re-reviews it."""

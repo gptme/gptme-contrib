@@ -1051,7 +1051,7 @@ must adjudicate the remaining findings — **do NOT trigger another Greptile rev
 
 **Freshness gate — run FIRST**: adjudication is only valid for a head the newest
 review pass has actually seen. Compare the current `headRefOid` against the
-newest review provenance: the `sha` field of the last `<!-- bob-ai-review {json} -->`
+newest review provenance: the `sha` field of the last `<!-- bob-ai-review {...} -->`
 marker comment, and Greptile's "Last reviewed commit" summary footer. If any
 commit postdates the newest review pass, **STOP — do not adjudicate**. The
 correct action is to await the re-review of the current head (ai-review-sweep

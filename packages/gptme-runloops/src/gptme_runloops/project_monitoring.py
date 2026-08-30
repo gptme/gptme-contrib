@@ -449,8 +449,11 @@ class ProjectMonitoringRun(BaseRunLoop):
             return None
 
     # Matches the machine-readable half of the reviewer's summary comment,
-    # `<!-- bob-ai-review {json} -->` (same regex as ai-review.py's _MARKER_RE).
-    _AI_REVIEW_STATE_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
+    # `<!-- bob-ai-review {...} -->`. Same complete-line contract as
+    # `_is_ai_reviewer_output` / activity-gate.sh: a reply that quotes or
+    # pastes the marker must not be parsed as standing reviewer state
+    # (P2 on gptme-contrib#1549). Applied per line, so DOTALL is not needed.
+    _AI_REVIEW_STATE_RE = re.compile(r"^<!-- bob-ai-review (\{.*\}) -->$")
 
     def _marker_has_standing_findings(
         self, marker_body: str | None, head_sha: str | None
@@ -473,11 +476,15 @@ class ProjectMonitoringRun(BaseRunLoop):
         """
         if not marker_body:
             return False
-        m = self._AI_REVIEW_STATE_RE.search(marker_body)
-        if not m:
+        payload = None
+        for line in marker_body.splitlines():
+            m = self._AI_REVIEW_STATE_RE.match(line)
+            if m:
+                payload = m.group(1)
+        if not payload:
             return False
         try:
-            state = json.loads(m.group(1))
+            state = json.loads(payload)
         except (ValueError, TypeError):
             return False
         if not state.get("findings"):
@@ -559,7 +566,8 @@ class ProjectMonitoringRun(BaseRunLoop):
                     '{login: (.author.login // ""), body: (.body // ""), '
                     'createdAt: (.createdAt // "")}), '
                     '"aiReviewMarker": (([.comments[] '
-                    '| select((.body // "") | contains("<!-- bob-ai-review "))'
+                    '| select(any((.body // "") | split("\\n")[]; '
+                    'startswith("<!-- bob-ai-review {")))'
                     '] | last | .body) // "")}',
                 ],
                 capture_output=True,
@@ -623,7 +631,8 @@ class ProjectMonitoringRun(BaseRunLoop):
                     '"lastComment": (.comments | sort_by(.createdAt) | last | '
                     '{body: (.body // ""), createdAt: (.createdAt // "")}), '
                     '"aiReviewMarker": (([.comments[] '
-                    '| select((.body // "") | contains("<!-- bob-ai-review "))'
+                    '| select(any((.body // "") | split("\\n")[]; '
+                    'startswith("<!-- bob-ai-review {")))'
                     '] | last | .body) // "")}',
                 ],
                 capture_output=True,
@@ -780,7 +789,8 @@ class ProjectMonitoringRun(BaseRunLoop):
                     '{login: (.author.login // ""), body: (.body // ""), '
                     'createdAt: (.createdAt // "")}), '
                     '"aiReviewMarker": (([.comments[] '
-                    '| select((.body // "") | contains("<!-- bob-ai-review "))'
+                    '| select(any((.body // "") | split("\\n")[]; '
+                    'startswith("<!-- bob-ai-review {")))'
                     '] | last | .body) // "")}',
                 ],
                 capture_output=True,

@@ -520,6 +520,42 @@ def test_is_last_activity_by_self_standing_marker_findings(workspace):
         assert mock_run.call_count == 1
 
 
+def test_quoted_standing_marker_is_not_standing_findings(workspace):
+    """A self-reply that blockquotes a standing marker must not be parsed
+    as the reviewer's outstanding state (P2 on gptme-contrib#1549).
+
+    The old substring/DOTALL search treated a quoted
+    `<!-- bob-ai-review {...} -->` as live findings at head, which flipped
+    `_last_activity_is_self_response` to inbound and re-dispatched.
+    """
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    quoted = (
+        "Looked at this.\n"
+        '> <!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 3, '
+        '"engine": "agent", "findings": [{"fp": "071a049d9d84", '
+        '"severity": "P1"}], "suppressed": [], "auto_resolved": []} -->\n'
+        "Waiting on the next pass."
+    )
+    assert run._marker_has_standing_findings(quoted, _HEAD_3638) is False
+    assert run._marker_has_standing_findings(_MARKER_3638, _HEAD_3638) is True
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=_last_comment_json(
+                    SELF,
+                    quoted,
+                    "2026-08-30T10:00:00Z",
+                    marker=quoted,
+                    head_sha=_HEAD_3638,
+                ),
+                stderr="",
+            ),
+            MagicMock(returncode=0, stdout="null", stderr=""),
+        ]
+        assert run._is_last_activity_by_self("gptme/gptme", 1549) is True
+
+
 def test_is_last_activity_by_self_stale_marker_findings(workspace):
     """Marker findings recorded against an OLDER head do not count: the push
     since the review is fresh activity and the sweep will re-review it."""

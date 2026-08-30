@@ -477,7 +477,7 @@ has_actionable_update() {
     standing_findings=$(echo "$pr_data" | jq -r '
         (.headRefOid // "") as $head
         | [ .comments[]? | (.body // "")
-            | select(test("<!-- bob-ai-review \\{"))
+            | select(any(split("\n")[]; startswith("<!-- bob-ai-review {")))
             | (try (capture("<!-- bob-ai-review (?<j>\\{.*?\\}) -->"; "s").j
                     | fromjson) catch empty) ]
         | last
