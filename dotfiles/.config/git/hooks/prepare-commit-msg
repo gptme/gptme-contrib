@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Append a Git-Session-Id trailer when the session id is available in the env.
+
+set -euo pipefail
+
+MSG_FILE="${1:-}"
+SESSION_ID="${GIT_COMMITTER_SESSION_ID:-}"
+
+if [ -z "$MSG_FILE" ] || [ ! -f "$MSG_FILE" ] || [ -z "$SESSION_ID" ]; then
+    exit 0
+fi
+
+if git interpret-trailers --parse "$MSG_FILE" | grep -qi '^Git-Session-Id: '; then
+    exit 0
+fi
+
+git interpret-trailers \
+    --in-place \
+    --if-exists doNothing \
+    --if-missing add \
+    --trailer "Git-Session-Id: $SESSION_ID" \
+    "$MSG_FILE"

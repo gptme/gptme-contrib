@@ -29,6 +29,12 @@ The dotfiles install global git hooks that apply to ALL repositories:
 - **Branch base warning**: Shows warning when checking out branch not based on origin/master
 - Helps catch branching issues early
 
+#### prepare-commit-msg
+- **Git-Session-Id trailer**: When `GIT_COMMITTER_SESSION_ID` is set, appends a
+  `Git-Session-Id` commit trailer. No-ops if the env var is absent or the
+  trailer already exists. This is source-of-truth parity with the live agent
+  hook — not a new attribution feature.
+
 ## Customization
 
 ### Adding Allowed Repos
@@ -56,6 +62,7 @@ dotfiles/
 │           ├── pre-commit               # Main pre-commit hook
 │           ├── pre-push                 # Pre-push protection + validation
 │           ├── post-checkout            # Post-checkout warnings
+│           ├── prepare-commit-msg       # Git-Session-Id trailer (when env is set)
 │           ├── validate-branch-base.sh  # Branch base checking
 │           └── validate-worktree-tracking.sh  # Worktree validation
 ├── install.sh                           # Installation script
