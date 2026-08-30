@@ -207,9 +207,12 @@ def _repair_summary_json(text: str) -> str | None:
     root_index = next(
         (
             i
-            for i, value in enumerate(repaired)
-            if isinstance(value, dict)
-            and any(key in value for key in ("accomplishments", "decisions"))
+            for i in range(len(repaired) - 1, -1, -1)
+            if isinstance(repaired[i], dict)
+            and (
+                any(repaired[i].get(key) for key in _SUMMARY_KEYS)
+                or any(key in repaired[i] for key in ("accomplishments", "decisions"))
+            )
         ),
         None,
     )

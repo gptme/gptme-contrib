@@ -371,6 +371,20 @@ def test_same_message_json_preamble_then_malformed_summary_recovers_root_json():
     assert parsed.get("accomplishments") == ["parser fix"]
 
 
+def test_structural_preamble_then_malformed_summary_prefers_final_root():
+    """A summary-shaped preamble must not be merged into the final summary."""
+    content = (
+        '{"accomplishments": ["draft"], "decisions": []}\n'
+        '{"accomplishments": ["final"], "narrative": "REAL summary"]'
+    )
+
+    out = _extract_assistant_text(_msg(content))
+
+    parsed = extract_json_from_response(out)
+    assert parsed.get("narrative") == "REAL summary"
+    assert parsed.get("accomplishments") == ["final"]
+
+
 def test_malformed_summary_then_complete_fence_recovers_root_json():
     """Recover a one-token malformed root summary before a complete trailer.
 
