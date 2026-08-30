@@ -394,6 +394,38 @@ def test_is_last_activity_by_self_ai_review_marker(workspace):
         assert mock_run.call_count == 1
 
 
+def test_is_ai_reviewer_output_quoted_marker_is_self_chatter(workspace):
+    """Quoting a finding marker must not classify Bob's reply as inbound review.
+
+    The reviewer emits the HTML comment as a standalone line. A reply that
+    blockquotes that line, or mentions the token in prose, is still Bob
+    talking — substring matching used to self-dispatch those (P1 on #1549).
+    """
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    quoted = (
+        "Fixed the matcher.\n"
+        "> <!-- bob-ai-review-finding -->\n"
+        "> quoted P1 text\n"
+        "Also mentioning bob-ai-review in prose."
+    )
+    assert run._is_ai_reviewer_output(quoted) is False
+    finding = "<!-- bob-ai-review-finding -->\nPossible bug here"
+    assert run._is_ai_reviewer_output(finding) is True
+    summary = 'Review summary\n\n<!-- bob-ai-review {"head_sha": "abc"} -->'
+    assert run._is_ai_reviewer_output(summary) is True
+
+    with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=_last_comment_json(SELF, quoted),
+                stderr="",
+            ),
+            MagicMock(returncode=0, stdout="null", stderr=""),
+        ]
+        assert run._is_last_activity_by_self("gptme/gptme", 1549) is True
+
+
 def test_is_last_activity_by_self_other_author(workspace):
     """Last comment by someone else -> False (inbound)."""
     run = ProjectMonitoringRun(workspace, author=SELF)

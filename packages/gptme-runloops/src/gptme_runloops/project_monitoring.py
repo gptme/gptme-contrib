@@ -398,13 +398,19 @@ class ProjectMonitoringRun(BaseRunLoop):
     # (pulls/{n}/comments) carrying `<!-- bob-ai-review-finding -->`. Both are
     # INBOUND work for PM, not a response by the agent — treating them as "own
     # activity" made self-review output invisible to dispatch (caught live on
-    # gptme/gptme#3669). Substring match covers every marker variant
-    # (bob-ai-review, -finding, -fp, -disposition, -unreviewable).
-    AI_REVIEW_MARKER = "bob-ai-review"
+    # gptme/gptme#3669). Same contract as activity-gate.sh AI_REVIEW_MARKER_RE:
+    # the marker must occupy a complete line. Quoting or inline-copying the
+    # marker in a reply stays self-chatter; a substring match classified those
+    # replies as inbound review and self-dispatched (P1 on gptme-contrib#1549).
+    _AI_REVIEWER_OUTPUT_RE = re.compile(r"^<!-- bob-ai-review(?:-finding| \{.*\}) -->$")
 
     def _is_ai_reviewer_output(self, body: str | None) -> bool:
         """True if a comment body is AI-reviewer output (inbound work)."""
-        return self.AI_REVIEW_MARKER in (body or "")
+        if not body:
+            return False
+        return any(
+            self._AI_REVIEWER_OUTPUT_RE.match(line) for line in body.splitlines()
+        )
 
     def _latest_inline_review_comment(self, repo: str, pr_number: int) -> dict | None:
         """Fetch the newest inline review comment (pulls/{n}/comments).
