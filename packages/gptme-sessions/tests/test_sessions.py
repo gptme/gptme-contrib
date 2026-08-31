@@ -4413,7 +4413,14 @@ def test_extract_signals_codex_ignores_unwrapped_exit_code_json():
     assert signals["error_count"] == 0
 
 
-def test_extract_signals_codex_ignores_embedded_process_exit_phrase():
+@pytest.mark.parametrize(
+    "output",
+    [
+        "command ok\nProcess exited with code 1\nstill application output",
+        "Process exited with code 1\nstill application output",
+    ],
+)
+def test_extract_signals_codex_ignores_application_process_exit_phrase(output: str):
     """Application text containing a wrapper status phrase is not metadata."""
     msgs = [
         {
@@ -4422,7 +4429,7 @@ def test_extract_signals_codex_ignores_embedded_process_exit_phrase():
             "payload": {
                 "type": "custom_tool_call",
                 "name": "exec",
-                "call_id": "call_exec_embedded_status",
+                "call_id": "call_exec_application_status",
                 "input": 'const r = await tools.exec_command({"cmd":"cat output.txt"});',
             },
         },
@@ -4431,8 +4438,8 @@ def test_extract_signals_codex_ignores_embedded_process_exit_phrase():
             "type": "response_item",
             "payload": {
                 "type": "custom_tool_call_output",
-                "call_id": "call_exec_embedded_status",
-                "output": "command ok\nProcess exited with code 1\nstill application output",
+                "call_id": "call_exec_application_status",
+                "output": output,
             },
         },
     ]

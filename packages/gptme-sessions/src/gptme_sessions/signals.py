@@ -59,17 +59,23 @@ def _codex_output_text(raw_output: object) -> str:
     return ""
 
 
-# Codex tool wrapper header. Must start the payload; later application text
-# mentioning wrapper status phrases is not metadata.
-_CODEX_WRAPPER_HEADER_RE = re.compile(
-    r"^(?:Script completed(?:\n(?:Wall time [^\n]+|Process exited with code \d+|Output:|\s*))*"
-    r"|Process exited with code \d+(?:\nOutput:)?)"
+# The JS ``exec``/``wait`` wrapper identifies itself with ``Script completed``.
+# Legacy ``exec_command`` output has no such marker, so its status is trusted only
+# when the caller is known to be that tool. This keeps arbitrary JS-tool output
+# beginning with ``Process exited with code N`` from impersonating metadata.
+_CODEX_SCRIPT_WRAPPER_HEADER_RE = re.compile(
+    r"^Script completed(?:\n(?:Wall time [^\n]+|Process exited with code \d+|Output:|\s*))*"
 )
+_CODEX_EXEC_COMMAND_HEADER_RE = re.compile(r"^Process exited with code \d+(?:\nOutput:)?")
 
 
-def _codex_output_metadata(output: str) -> tuple[str, int | None]:
+def _codex_output_metadata(
+    output: str, *, allow_legacy_exec_command: bool = False
+) -> tuple[str, int | None]:
     """Decode nested command output and exit code from a Codex wrapper."""
-    header_match = _CODEX_WRAPPER_HEADER_RE.match(output)
+    header_match = _CODEX_SCRIPT_WRAPPER_HEADER_RE.match(output)
+    if header_match is None and allow_legacy_exec_command:
+        header_match = _CODEX_EXEC_COMMAND_HEADER_RE.match(output)
     code_match = (
         re.search(r"Process exited with code (\d+)", header_match.group(0))
         if header_match
@@ -1715,7 +1721,10 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
 
                 # Error detection from shell output. Async ``wait`` output often
                 # nests the actual command result as escaped JSON.
-                scan_output, exit_code = _codex_output_metadata(output)
+                scan_output, exit_code = _codex_output_metadata(
+                    output,
+                    allow_legacy_exec_command=(tool_name == "exec_command"),
+                )
                 if exit_code is not None and exit_code != 0:
                     error_count += 1
 
