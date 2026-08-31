@@ -4413,6 +4413,37 @@ def test_extract_signals_codex_ignores_unwrapped_exit_code_json():
     assert signals["error_count"] == 0
 
 
+def test_extract_signals_codex_ignores_embedded_script_completed_json():
+    """Application text mentioning Script completed is not wrapper metadata."""
+    msgs = [
+        {
+            "timestamp": "2026-08-26T06:35:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_exec_embedded_wrapper",
+                "input": 'const r = await tools.exec_command({"cmd":"cat result.json"});',
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_embedded_wrapper",
+                "output": (
+                    "command ok\nScript completed\n" '{"exit_code":1,"output":"application data"}'
+                ),
+            },
+        },
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["error_count"] == 0
+
+
 def test_extract_signals_codex_patch_apply_end_file_writes():
     """Successful nested patch events expose their changed files."""
     msgs = [

@@ -59,27 +59,41 @@ def _codex_output_text(raw_output: object) -> str:
     return ""
 
 
+# Codex JS-tool wrapper header. Must start the payload; later application text
+# mentioning "Script completed" is not wrapper metadata.
+_CODEX_WRAPPER_HEADER_RE = re.compile(
+    r"^Script completed(?:\n(?:Wall time [^\n]+|Process exited with code \d+|Output:|\s*))*"
+)
+
+
 def _codex_output_metadata(output: str) -> tuple[str, int | None]:
     """Decode nested command output and exit code from a Codex wrapper."""
     code_match = re.search(r"Process exited with code (\d+)", output)
     wrapper_exit_code = int(code_match.group(1)) if code_match else None
     nested_parts: list[str] = []
     nested_exit_codes: list[int] = []
-    # The JavaScript tool wrapper emits this marker before its JSON result.
-    # Without it, an application may simply have printed similarly shaped JSON.
-    if "Script completed" in output:
-        for candidate in re.findall(r"\{[^\n]*\}", output):
+    header_match = _CODEX_WRAPPER_HEADER_RE.match(output)
+    if header_match:
+        remainder = output[header_match.end() :].lstrip("\n")
+        for line in remainder.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if not stripped.startswith("{"):
+                break
             try:
-                value = json.loads(candidate)
+                value = json.loads(stripped)
             except (json.JSONDecodeError, TypeError):
-                continue
+                break
             if not isinstance(value, dict):
-                continue
+                break
             nested_output = value.get("output")
             nested_code = value.get("exit_code")
             if isinstance(nested_output, str) and isinstance(nested_code, int):
                 nested_parts.append(nested_output)
                 nested_exit_codes.append(nested_code)
+            else:
+                break
     # Raw JSON has escaped newlines that make commit regexes consume the whole
     # object as a message. Prefer decoded command output when it is available,
     # but never let command output override an explicit wrapper status.
