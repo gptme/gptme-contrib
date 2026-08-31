@@ -198,7 +198,7 @@ def fetch_session_stats_range(
                 info.model = info.model or usage.get("model") or ""
                 info.input_tokens = usage["input_tokens"]
                 info.output_tokens = usage["output_tokens"]
-                info.cost = usage["cost"]
+                info.cost = usage.get("cost", 0.0)
 
         # Fallback: extract model from eval dirname
         if not info.model and "evals" in session_dir.name:
