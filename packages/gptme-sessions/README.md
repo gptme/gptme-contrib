@@ -3,7 +3,9 @@
 Session tracking and analytics for agents. Supports trajectories from gptme,
 Claude Code, Codex, Copilot, Grok Build, and Pi native v3 sessions.
 
-Provides an append-only JSONL-based session record system that any agent can use to track operational metadata across sessions: which harness ran, what model was used, what type of work was done, and the outcome.
+Provides an append-only JSONL-based session record system that any agent can use
+to track operational metadata across sessions: which harness and inference
+provider ran, what model was used, what type of work was done, and the outcome.
 
 ## Installation
 
@@ -24,11 +26,14 @@ store = SessionStore(sessions_dir=Path("state/sessions"))
 
 # Append a session record
 store.append(SessionRecord(
-    harness="claude-code",
-    model="opus",
+    harness="pi",
+    provider="openai-codex",
+    model="gpt-5.6-luna",
     run_type="autonomous",
     category="code",
     outcome="productive",
+    stop_reason="stop",
+    cost_usd=0.0004264,
     duration_seconds=2400,
     deliverables=["abc123"],
 ))
@@ -128,8 +133,13 @@ Model names are automatically normalized to short canonical forms:
 Records are stored as append-only JSONL (one JSON object per line):
 
 ```jsonl
-{"session_id":"a1b2c3d4","timestamp":"2026-03-04T12:00:00+00:00","harness":"claude-code","model":"opus","run_type":"autonomous","category":"code","outcome":"productive","duration_seconds":2400,"deliverables":["abc123"]}
+{"session_id":"a1b2c3d4","timestamp":"2026-08-31T12:00:00+00:00","harness":"pi","provider":"openai-codex","model":"gpt-5.6-luna","run_type":"autonomous","category":"code","outcome":"productive","stop_reason":"stop","cost_usd":0.0004264,"duration_seconds":2400,"deliverables":["abc123"]}
 ```
+
+`cost_usd` is the USD-equivalent cost reported by the harness. With OAuth or
+subscription access it can be a nominal API-equivalent value rather than an
+incremental charge on the subscription invoice. Missing cost is `null`; a
+reported `0.0` is retained as a real observation.
 
 ## Extending
 

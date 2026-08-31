@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from gptme_sessions.post_session import post_session
+from gptme_sessions.post_session import PostSessionResult, post_session
+from gptme_sessions.record import SessionRecord
 from gptme_sessions.store import SessionStore
 
 # gptme_sessions/__init__.py re-exports 'post_session' (function), shadowing the
@@ -15,6 +16,16 @@ from gptme_sessions.store import SessionStore
 # from gptme_sessions.post_session import post_session ensures the module is in
 # sys.modules, so we can retrieve it directly for patch.object calls.
 _post_session_mod = sys.modules["gptme_sessions.post_session"]
+
+
+def test_post_session_result_route_metadata_does_not_shift_positional_fields():
+    """Additive result fields preserve the established constructor prefix."""
+    result = PostSessionResult(SessionRecord(), None, None, 123, 45, 67)
+
+    assert result.token_count == 123
+    assert result.input_tokens == 45
+    assert result.output_tokens == 67
+    assert result.provider is None
 
 
 def test_post_session_context_tier(tmp_path: Path):
@@ -233,6 +244,66 @@ def test_post_session_model_fallback_from_signals(tmp_path: Path):
             trajectory_path=fake_traj,
         )
     assert result.record.model == "claude-sonnet-4-6"
+
+
+def test_post_session_persists_pi_route_metadata(tmp_path: Path):
+    """Pi provider/model/cost/stop metadata reaches the canonical store."""
+    store = SessionStore(sessions_dir=tmp_path)
+    trajectory = Path(__file__).parent / "fixtures" / "pi" / "productive-codex.jsonl"
+
+    result = post_session(
+        store=store,
+        harness="pi",
+        model="unknown",
+        trajectory_path=trajectory,
+    )
+
+    assert result.provider == "openai-codex"
+    assert result.record.provider == "openai-codex"
+    assert result.record.model == "gpt-5.6-luna"
+    assert result.stop_reason == "stop"
+    assert result.record.stop_reason == "stop"
+    assert result.cost_usd == pytest.approx(0.0004264)
+    assert result.record.cost_usd == pytest.approx(0.0004264)
+
+    persisted = SessionStore(sessions_dir=tmp_path).load_all()
+    assert len(persisted) == 1
+    assert persisted[0].provider == "openai-codex"
+    assert persisted[0].model == "gpt-5.6-luna"
+    assert persisted[0].stop_reason == "stop"
+    assert persisted[0].cost_usd == pytest.approx(0.0004264)
+
+
+@pytest.mark.parametrize(
+    ("reported_cost", "expected_cost"),
+    [(0.0, 0.0), (None, None)],
+)
+def test_post_session_preserves_zero_vs_missing_cost(
+    tmp_path: Path, reported_cost: float | None, expected_cost: float | None
+):
+    """A reported zero remains distinct from unavailable cost data."""
+    store = SessionStore(sessions_dir=tmp_path)
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.touch()
+    usage = {"model": "grok-4.6"}
+    if reported_cost is not None:
+        usage["cost"] = reported_cost
+
+    with patch.object(
+        _post_session_mod,
+        "extract_from_path",
+        return_value={"productive": True, "usage": usage},
+    ):
+        result = post_session(
+            store=store,
+            harness="pi",
+            model="unknown",
+            trajectory_path=trajectory,
+        )
+
+    assert result.cost_usd == expected_cost
+    assert result.record.cost_usd == expected_cost
+    assert SessionStore(sessions_dir=tmp_path).load_all()[0].cost_usd == expected_cost
 
 
 def test_post_session_populates_productivity_grade(tmp_path: Path):

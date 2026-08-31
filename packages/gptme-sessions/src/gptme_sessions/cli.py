@@ -48,10 +48,16 @@ from .store import (
 logger = logging.getLogger(__name__)
 
 HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot-cli"]
+# Pi can already be recorded from an explicitly supplied native trajectory.
+# Automatic Pi discovery remains a separate retention slice.
+POST_SESSION_HARNESS_CHOICES = [*HARNESS_CHOICES, "pi"]
 
 # Maps usage dict keys (from extract_from_path) to SessionRecord field names.
 _USAGE_FIELD_MAP: dict[str, str] = {
     "model": "model",
+    "provider": "provider",
+    "cost": "cost_usd",
+    "stop_reason": "stop_reason",
     "total_tokens": "token_count",
     "input_tokens": "input_tokens",
     "output_tokens": "output_tokens",
@@ -66,12 +72,60 @@ _USAGE_FIELD_MAP: dict[str, str] = {
     "session_total_bytes": "session_total_bytes",
 }
 
+# Fields whose absence should trigger ``sync --signals`` re-extraction.
+# Missing fields that a harness never emits must not keep backfill true forever.
+_COPILOT_BACKFILL_FIELDS: tuple[str, ...] = (
+    "model",
+    "sys_prompt_bytes",
+    "first_turn_bytes",
+    "context_peak_bytes",
+    "session_total_bytes",
+)
+_DEFAULT_BACKFILL_FIELDS: tuple[str, ...] = (
+    "token_count",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "sys_prompt_tokens",
+    "context_peak_tokens",
+    "context_window",
+    "sys_prompt_bytes",
+    "first_turn_bytes",
+    "context_peak_bytes",
+    "session_total_bytes",
+)
+_PI_ROUTE_BACKFILL_FIELDS: tuple[str, ...] = (
+    "provider",
+    "stop_reason",
+    "cost_usd",
+)
+
+
+def _usage_backfill_fields(harness: str | None) -> tuple[str, ...]:
+    """Record fields that ``sync --signals`` should backfill for ``harness``.
+
+    Copilot trajectories never contain token-count fields — only byte metrics
+    and model name are extractable. Pi extractors populate provider, stop
+    reason, and reported cost; skipping those on an otherwise complete record
+    leaves route metadata absent from the durable store and JSON/CSV exports.
+    """
+    if harness == "copilot-cli":
+        return _COPILOT_BACKFILL_FIELDS
+    if harness == "pi":
+        return _DEFAULT_BACKFILL_FIELDS + _PI_ROUTE_BACKFILL_FIELDS
+    return _DEFAULT_BACKFILL_FIELDS
+
 
 def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool:
     """Set ``record.field`` when it is empty/unknown and ``value`` is usable."""
     if value is None:
         return False
     current = getattr(record, field)
+    # Zero is an observed cost, especially for local/subscription providers.
+    # It must not be treated as an empty value and replaced during a later sync.
+    if field == "cost_usd" and current is not None:
+        return False
     if isinstance(current, list):
         if current:
             return False
@@ -2196,34 +2250,9 @@ def sync(
                 existing.project = entry["project"]
                 needs_update = True
 
-            # Copilot trajectories never contain token-count fields — only byte
-            # metrics and model name are extractable. Checking token fields for
-            # copilot-cli sessions would keep usage_backfill_needed=True forever.
-            if existing.harness == "copilot-cli":
-                _backfill_fields: tuple[str, ...] = (
-                    "model",
-                    "sys_prompt_bytes",
-                    "first_turn_bytes",
-                    "context_peak_bytes",
-                    "session_total_bytes",
-                )
-            else:
-                _backfill_fields = (
-                    "token_count",
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_creation_tokens",
-                    "cache_read_tokens",
-                    "sys_prompt_tokens",
-                    "context_peak_tokens",
-                    "context_window",
-                    "sys_prompt_bytes",
-                    "first_turn_bytes",
-                    "context_peak_bytes",
-                    "session_total_bytes",
-                )
             usage_backfill_needed = any(
-                getattr(existing, field) is None for field in _backfill_fields
+                getattr(existing, field) is None
+                for field in _usage_backfill_fields(existing.harness)
             )
 
             if (
@@ -2389,8 +2418,8 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
 @click.option(
     "--harness",
     required=True,
-    type=click.Choice(HARNESS_CHOICES),
-    help="Harness name (claude-code, gptme, codex, copilot)",
+    type=click.Choice(POST_SESSION_HARNESS_CHOICES),
+    help="Harness name (claude-code, gptme, codex, copilot, pi)",
 )
 @click.option("--model", default="unknown", help="Model name")
 @click.option("--run-type", default="unknown", help="Run type (autonomous, etc.)")
@@ -2497,6 +2526,10 @@ def post_session_cmd(
                     "session_id": ps.record.session_id,
                     "outcome": ps.record.outcome,
                     "grade": ps.grade,
+                    "provider": ps.provider,
+                    "model": ps.record.model,
+                    "stop_reason": ps.stop_reason,
+                    "cost_usd": ps.cost_usd,
                     "token_count": ps.token_count,
                 }
             )

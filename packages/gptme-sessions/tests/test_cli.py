@@ -178,6 +178,34 @@ class TestExportCommand:
         assert len(data) == 5
         assert {row["session_id"] for row in data}
 
+    def test_export_preserves_pi_route_metadata(self, tmp_path: Path):
+        """Both structured export formats retain exact Pi route metadata."""
+        SessionStore(sessions_dir=tmp_path).append(
+            SessionRecord(
+                harness="pi",
+                provider="xai",
+                model="grok-4.6",
+                stop_reason="stop",
+                cost_usd=0.000824,
+            )
+        )
+
+        json_rc, json_out = _invoke(["export", "--format", "json"], tmp_path)
+        assert json_rc == 0
+        json_row = json.loads(json_out)[0]
+        assert json_row["provider"] == "xai"
+        assert json_row["model"] == "grok-4.6"
+        assert json_row["stop_reason"] == "stop"
+        assert json_row["cost_usd"] == pytest.approx(0.000824)
+
+        csv_rc, csv_out = _invoke(["export", "--format", "csv"], tmp_path)
+        assert csv_rc == 0
+        csv_row = next(csv.DictReader(StringIO(csv_out)))
+        assert csv_row["provider"] == "xai"
+        assert csv_row["model"] == "grok-4.6"
+        assert csv_row["stop_reason"] == "stop"
+        assert float(csv_row["cost_usd"]) == pytest.approx(0.000824)
+
     def test_export_json_since_7d(self, tmp_path: Path):
         """export --format json --since 7d drops records older than the window."""
         store = _seed_store(tmp_path)
@@ -1609,3 +1637,98 @@ class TestFmtSince:
         from gptme_sessions.cli import _fmt_since
 
         assert _fmt_since(since_days) == expected
+
+
+class TestSyncRouteBackfill:
+    """sync --signals must backfill Pi route metadata on complete legacy records."""
+
+    def test_usage_backfill_fields_include_pi_route_metadata(self) -> None:
+        from gptme_sessions.cli import _usage_backfill_fields
+
+        pi_fields = _usage_backfill_fields("pi")
+        assert "provider" in pi_fields
+        assert "stop_reason" in pi_fields
+        assert "cost_usd" in pi_fields
+        assert "token_count" in pi_fields
+
+        copilot_fields = _usage_backfill_fields("copilot-cli")
+        assert "provider" not in copilot_fields
+        assert "stop_reason" not in copilot_fields
+        assert "cost_usd" not in copilot_fields
+        assert "token_count" not in copilot_fields
+
+        gptme_fields = _usage_backfill_fields("gptme")
+        assert "provider" not in gptme_fields
+        assert "cost_usd" not in gptme_fields
+        assert "token_count" in gptme_fields
+
+    def test_sync_signals_backfills_pi_route_metadata_for_existing_known_record(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        from gptme_sessions.cli import main
+
+        fake_file = tmp_path / "session.jsonl"
+        fake_file.touch()
+
+        monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+        monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [fake_file])
+        monkeypatch.setattr("gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [])
+        monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda p: {
+                "productive": True,
+                "session_duration_s": 90,
+                "deliverables": [],
+                "inferred_category": "code",
+                "usage": {
+                    "provider": "xai",
+                    "model": "grok-4.6",
+                    "cost": 0.0,
+                    "stop_reason": "stop",
+                },
+            },
+        )
+
+        sessions_dir = tmp_path / "sessions"
+        store = SessionStore(sessions_dir=sessions_dir)
+        store.append(
+            SessionRecord(
+                harness="pi",
+                trajectory_path=str(fake_file),
+                outcome="productive",
+                duration_seconds=90,
+                token_count=1200,
+                input_tokens=800,
+                output_tokens=400,
+                cache_creation_tokens=10,
+                cache_read_tokens=20,
+                sys_prompt_tokens=100,
+                context_peak_tokens=900,
+                context_window=128000,
+                sys_prompt_bytes=400,
+                first_turn_bytes=800,
+                context_peak_bytes=800,
+                session_total_bytes=1600,
+            )
+        )
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+        )
+        rc = main()
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "updated 1" in captured.out
+
+        records = store.load_all()
+        assert len(records) == 1
+        assert records[0].outcome == "productive"
+        assert records[0].provider == "xai"
+        assert records[0].model == "grok-4.6"
+        assert records[0].cost_usd == 0.0
+        assert records[0].stop_reason == "stop"
