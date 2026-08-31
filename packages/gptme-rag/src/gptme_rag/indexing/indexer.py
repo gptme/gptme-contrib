@@ -1461,11 +1461,25 @@ class Indexer:
         Returns:
             List of documents
         """
-        # Get all documents from collection
-        results = self.collection.get()
-        result_ids = results["ids"] or []
-        result_docs = results["documents"] or []
-        result_metas = results["metadatas"] or []
+        # Chroma's unbounded get() can exceed SQLite's variable limit on large
+        # collections. Read bounded pages instead; callers still receive the
+        # complete list.
+        page_size = 1000
+        result_ids: list[str] = []
+        result_docs: list[str] = []
+        result_metas: list[dict] = []
+        offset = 0
+        while True:
+            results = self.collection.get(limit=page_size, offset=offset)
+            page_ids = results["ids"] or []
+            page_docs = results["documents"] or []
+            page_metas = results["metadatas"] or []
+            result_ids.extend(page_ids)
+            result_docs.extend(page_docs)
+            result_metas.extend(page_metas)  # type: ignore[arg-type]
+            if len(page_ids) < page_size:
+                break
+            offset += len(page_ids)
         logger.debug("ChromaDB returned %d documents", len(result_ids))
         if result_ids:
             logger.debug("First document metadata: %s", result_metas[0])

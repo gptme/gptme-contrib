@@ -474,6 +474,7 @@ def index(
         console.print(f"❌ Error indexing directory: {e}", style="red")
         if logger.isEnabledFor(logging.DEBUG):
             console.print_exception()
+        raise SystemExit(1) from e
 
 
 @cli.command()
