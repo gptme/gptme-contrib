@@ -824,6 +824,64 @@ def test_step_types_two_distinct_commits_plus_pr_is_multi():
     assert "single_commit" not in labels
 
 
+def test_step_types_commit_message_hex_does_not_override_sha():
+    """Hex tokens in the commit message must not become the identity.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1: unanchored
+    ``search()`` picked the first 7+ hex token, collapsing two distinct
+    SHAs that shared a message token into single_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "fix: revert deadbeef123 (aaa1111)"},
+            {"kind": "commit", "value": "fix: revert deadbeef123 (bbb2222)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_two_pr_only_is_multi():
+    """Distinct PR-only deliveries keep their cardinality.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1: the no-commit
+    fallback hardcoded commit_count=1, collapsing two PRs into
+    single_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/3646",
+            },
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme-contrib/pull/1565",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
 def test_step_types_pr_merge_pair_is_single_commit():
     """A PR and its merge commit are one logical delivery.
 

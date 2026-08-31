@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .deliverables import looks_like_sha
+
 # Harm category taxonomy (idea #191 — ESRRSim-inspired, 7×~3 subcategories).
 # See knowledge/technical-designs/dual-rubric-harm-category-taxonomy.md.
 HARM_CATEGORY_TAXONOMY: dict[str, str] = {
@@ -175,6 +177,58 @@ def compute_trajectory_grade(
     if denominator == 0.0:
         return None
     return numerator / denominator
+
+
+_TRAILING_PAREN_SHA_RE = re.compile(r"\(([0-9a-f]{7,40})\)\s*$", re.IGNORECASE)
+_LEADING_SHA_RE = re.compile(r"^([0-9a-f]{7,40})(?![0-9a-f])", re.IGNORECASE)
+_PR_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", re.IGNORECASE)
+_PR_NUMBER_RE = re.compile(r"PR\s+#(\d+)", re.IGNORECASE)
+
+
+def _commit_identity(value: object) -> str | None:
+    """Extract a SHA identity from a commit deliverable value.
+
+    Prefer the trailing parenthetical SHA used by trajectory producers
+    (``message (sha)``, ``merge-commit (sha)``) so hexadecimal tokens in the
+    commit message cannot override the actual identity. Fall back to a bare
+    SHA, then a leading SHA (Grok: ``sha message``).
+    """
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    trailing = _TRAILING_PAREN_SHA_RE.search(stripped)
+    if trailing:
+        return trailing.group(1).lower()
+    if looks_like_sha(stripped):
+        return stripped.lower()
+    leading = _LEADING_SHA_RE.match(stripped)
+    if leading:
+        return leading.group(1).lower()
+    return None
+
+
+def _remember_commit_id(commit_ids: list[str], commit_id: str) -> None:
+    """Record a SHA, merging short/full forms of the same hash."""
+    for known_id in commit_ids:
+        if commit_id.startswith(known_id) or known_id.startswith(commit_id):
+            return
+    commit_ids.append(commit_id)
+
+
+def _pr_identity(value: object) -> str:
+    """Stable identity for a pull-request deliverable."""
+    if not isinstance(value, str):
+        return str(value)
+    stripped = value.strip()
+    url = _PR_URL_RE.search(stripped)
+    if url:
+        return f"{url.group(1).lower()}/{url.group(2).lower()}#{url.group(3)}"
+    number = _PR_NUMBER_RE.search(stripped)
+    if number:
+        return f"#{number.group(1)}"
+    return stripped.lower()
 
 
 @dataclass
@@ -579,27 +633,28 @@ class SessionRecord:
         # identities; identical identity-less values also count once. PRs are
         # commit-bearing fallback evidence only when no commit detail exists.
         dd = self.deliverable_details or []
-        _sha_re = re.compile(r"(?<![0-9a-f])([0-9a-f]{7,40})(?![0-9a-f])", re.IGNORECASE)
         commit_ids: list[str] = []
         anonymous_commit_values: set[str] = set()
         for detail in dd:
             if detail.get("kind") not in {"commit", "git_commit", "merge_commit"}:
                 continue
             value = detail.get("value")
-            match = _sha_re.search(value) if isinstance(value, str) else None
-            if match is None:
+            commit_id = _commit_identity(value)
+            if commit_id is None:
                 anonymous_commit_values.add(str(value))
                 continue
-            commit_id = match.group(1).lower()
-            for known_id in commit_ids:
-                if commit_id.startswith(known_id) or known_id.startswith(commit_id):
-                    break
-            else:
-                commit_ids.append(commit_id)
+            _remember_commit_id(commit_ids, commit_id)
 
         commit_count = len(commit_ids) + len(anonymous_commit_values)
-        if commit_count == 0 and any(d.get("kind") == "pull_request" for d in dd):
-            commit_count = 1
+        if commit_count == 0:
+            pr_ids: list[str] = []
+            for detail in dd:
+                if detail.get("kind") != "pull_request":
+                    continue
+                pr_id = _pr_identity(detail.get("value"))
+                if pr_id not in pr_ids:
+                    pr_ids.append(pr_id)
+            commit_count = len(pr_ids)
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 
         # Partition on commit cardinality: 0 / 1 / 2+. Two-commit sessions
