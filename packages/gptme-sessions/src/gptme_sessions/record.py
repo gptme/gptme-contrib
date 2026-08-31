@@ -188,24 +188,25 @@ _PR_NUMBER_RE = re.compile(r"PR\s+#(\d+)", re.IGNORECASE)
 def _commit_identity(value: object) -> str | None:
     """Extract a SHA identity from a commit deliverable value.
 
-    Prefer the trailing parenthetical SHA used by trajectory producers
-    (``message (sha)``, ``merge-commit (sha)``) so hexadecimal tokens in the
-    commit message cannot override the actual identity. Fall back to a bare
-    SHA, then a leading SHA (Grok: ``sha message``).
+    Prefer a bare SHA, then a leading SHA (Grok: ``sha message``), then the
+    trailing parenthetical SHA used by trajectory producers (``message (sha)``,
+    ``merge-commit (sha)``). Leading SHA beats a parenthetical hex token in the
+    commit message so Grok identity is not overridden; hexadecimal tokens in
+    the message still cannot override identity when no leading SHA is present.
     """
     if not isinstance(value, str):
         return None
     stripped = value.strip()
     if not stripped:
         return None
-    trailing = _TRAILING_PAREN_SHA_RE.search(stripped)
-    if trailing:
-        return trailing.group(1).lower()
     if looks_like_sha(stripped):
         return stripped.lower()
     leading = _LEADING_SHA_RE.match(stripped)
     if leading:
         return leading.group(1).lower()
+    trailing = _TRAILING_PAREN_SHA_RE.search(stripped)
+    if trailing:
+        return trailing.group(1).lower()
     return None
 
 
@@ -229,6 +230,36 @@ def _pr_identity(value: object) -> str:
     if number:
         return f"#{number.group(1)}"
     return stripped.lower()
+
+
+def _remember_pr_id(pr_ids: list[str], pr_id: str) -> None:
+    """Record a PR identity, merging ``#N`` with ``owner/repo#N``.
+
+    Caller URLs normalize to ``owner/repo#N``; trajectory text like
+    ``merge PR #N`` normalizes to ``#N``. Those are the same delivery when
+    merge-SHA resolution failed and both producers recorded the PR.
+    Distinct qualified identities with the same number stay distinct.
+    """
+    if "#" not in pr_id:
+        if pr_id not in pr_ids:
+            pr_ids.append(pr_id)
+        return
+    number = pr_id.rsplit("#", 1)[-1]
+    qualified = not pr_id.startswith("#")
+    for i, known in enumerate(pr_ids):
+        if "#" not in known:
+            continue
+        if known.rsplit("#", 1)[-1] != number:
+            continue
+        known_qualified = not known.startswith("#")
+        if known == pr_id:
+            return
+        if not qualified and known_qualified:
+            return
+        if qualified and not known_qualified:
+            pr_ids[i] = pr_id
+            return
+    pr_ids.append(pr_id)
 
 
 @dataclass
@@ -651,9 +682,7 @@ class SessionRecord:
             for detail in dd:
                 if detail.get("kind") != "pull_request":
                     continue
-                pr_id = _pr_identity(detail.get("value"))
-                if pr_id not in pr_ids:
-                    pr_ids.append(pr_id)
+                _remember_pr_id(pr_ids, _pr_identity(detail.get("value")))
             commit_count = len(pr_ids)
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 

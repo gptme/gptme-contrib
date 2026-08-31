@@ -850,6 +850,64 @@ def test_step_types_commit_message_hex_does_not_override_sha():
     assert "single_commit" not in labels
 
 
+def test_step_types_grok_leading_sha_not_overridden_by_message_paren():
+    """Grok ``sha message (hex)`` must keep the leading SHA as identity.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1 (round 2): preferring
+    trailing parenthetical SHA made ``abc1234 fix: revert change (deadbeef)``
+    disagree with caller evidence ``abc1234``, stamping multi_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "git_commit",
+                "value": "abc1234 fix: revert change (deadbeef)",
+            },
+            {"kind": "commit", "value": "abc1234"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+
+
+def test_step_types_pr_url_and_text_same_pr_is_single():
+    """URL and ``PR #N`` forms of the same PR are one delivery.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1 (round 2): when
+    merge-SHA resolution fails, ``owner/repo#N`` and ``#N`` were counted
+    as two deliveries.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/42",
+            },
+            {"kind": "pull_request", "value": "merge PR #42"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+
+
 def test_step_types_two_pr_only_is_multi():
     """Distinct PR-only deliveries keep their cardinality.
 
