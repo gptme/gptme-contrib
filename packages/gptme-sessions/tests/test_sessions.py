@@ -4347,6 +4347,72 @@ def test_extract_signals_codex_wait_continuation_failure():
     assert signals["git_commits"] == []
 
 
+def test_extract_signals_codex_wrapper_exit_code_takes_precedence():
+    """Command JSON output cannot override the Codex wrapper exit status."""
+    msgs = [
+        {
+            "timestamp": "2026-08-26T06:35:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait",
+                "call_id": "call_wait_wrapper_status",
+                "arguments": '{"cell_id":"125","yield_time_ms":30000}',
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait_wrapper_status",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Script completed\nProcess exited with code 0\nOutput:\n"
+                            '{"exit_code":1,"output":"application data"}'
+                        ),
+                    }
+                ],
+            },
+        },
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["error_count"] == 0
+
+
+def test_extract_signals_codex_ignores_unwrapped_exit_code_json():
+    """Arbitrary command JSON is not interpreted as Codex metadata."""
+    msgs = [
+        {
+            "timestamp": "2026-08-26T06:35:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_exec_json",
+                "input": 'const r = await tools.exec_command({"cmd":"cat result.json"});',
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_json",
+                "output": '{"exit_code":1,"output":"application data"}',
+            },
+        },
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["error_count"] == 0
+
+
 def test_extract_signals_codex_patch_apply_end_file_writes():
     """Successful nested patch events expose their changed files."""
     msgs = [

@@ -62,23 +62,34 @@ def _codex_output_text(raw_output: object) -> str:
 def _codex_output_metadata(output: str) -> tuple[str, int | None]:
     """Decode nested command output and exit code from a Codex wrapper."""
     code_match = re.search(r"Process exited with code (\d+)", output)
-    exit_code = int(code_match.group(1)) if code_match else None
+    wrapper_exit_code = int(code_match.group(1)) if code_match else None
     nested_parts: list[str] = []
-    for candidate in re.findall(r"\{[^\n]*\}", output):
-        try:
-            value = json.loads(candidate)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(value, dict):
-            continue
-        nested_output = value.get("output")
-        if isinstance(nested_output, str):
-            nested_parts.append(nested_output)
-        nested_code = value.get("exit_code")
-        if isinstance(nested_code, int):
-            exit_code = nested_code
+    nested_exit_codes: list[int] = []
+    # The JavaScript tool wrapper emits this marker before its JSON result.
+    # Without it, an application may simply have printed similarly shaped JSON.
+    if "Script completed" in output:
+        for candidate in re.findall(r"\{[^\n]*\}", output):
+            try:
+                value = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            nested_output = value.get("output")
+            nested_code = value.get("exit_code")
+            if isinstance(nested_output, str) and isinstance(nested_code, int):
+                nested_parts.append(nested_output)
+                nested_exit_codes.append(nested_code)
     # Raw JSON has escaped newlines that make commit regexes consume the whole
-    # object as a message. Prefer decoded command output when it is available.
+    # object as a message. Prefer decoded command output when it is available,
+    # but never let command output override an explicit wrapper status.
+    exit_code = (
+        wrapper_exit_code
+        if wrapper_exit_code is not None
+        else nested_exit_codes[-1]
+        if nested_exit_codes
+        else None
+    )
     return ("\n".join(nested_parts) if nested_parts else output, exit_code)
 
 
