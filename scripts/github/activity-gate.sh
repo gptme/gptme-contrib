@@ -1943,7 +1943,17 @@ check_merge_ready() {
 check_notifications() {
     local notifs
     notifs=$(gh api notifications \
-        --jq '.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign" or .reason == "author" or .reason == "comment")' \
+        --jq '
+def notification_priority:
+  if .reason == "mention" then 0
+  elif .reason == "assign" then 1
+  elif .reason == "review_requested" then 2
+  elif .reason == "comment" then 3
+  elif .reason == "author" then 4
+  else 5 end;
+[.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign" or .reason == "author" or .reason == "comment")]
+| sort_by([notification_priority, -(.updated_at | fromdateiso8601)])
+| .[]' \
         2>/dev/null) || return 0
     [ -z "$notifs" ] && return 0
 
