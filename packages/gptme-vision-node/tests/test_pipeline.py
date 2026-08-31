@@ -88,6 +88,18 @@ def test_latest_frame_copy_is_an_independent_snapshot():
     assert np.any(pipeline.latest_frame != 0)
 
 
+def test_process_frame_stores_an_independent_copy():
+    """OpenCV can reuse the capture buffer; stored latest_frame must not alias it."""
+    frame = solid_frame((60, 60, 60))
+    pipeline = VisionPipeline(ListSource([frame]), [])
+
+    pipeline.step()
+    frame[:] = 0
+
+    assert pipeline.latest_frame is not None
+    assert np.any(pipeline.latest_frame != 0)
+
+
 def test_motion_events_and_latest_frame():
     still = solid_frame((60, 60, 60))
     moved = still.copy()
