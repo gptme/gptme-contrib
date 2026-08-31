@@ -243,33 +243,39 @@ def _refresh_pi_extract_result(record: SessionRecord, result: dict) -> bool:
     return changed
 
 
-def _merge_concurrent_annotations(
-    records: list[SessionRecord], latest_records: list[SessionRecord]
+def _merge_concurrent_record_updates(
+    records: list[SessionRecord],
+    latest_records: list[SessionRecord],
+    original_records: dict[str, dict[str, object]],
 ) -> None:
-    """Merge operator annotations that landed after sync's initial store read.
+    """Three-way merge updates that landed after sync's initial store read.
 
     Sync intentionally extracts outside the store lock because trajectory
-    parsing can be slow. Before rewriting, it re-reads under the lock and uses
-    this helper so a concurrent ``annotate`` cannot be clobbered by the stale
-    same-session object. Deliverables retain additive semantics.
+    parsing can be slow. Before rewriting, compare the final locked re-read
+    with the original snapshot: fields changed by another writer win, while
+    fields untouched on disk retain sync's extracted values.
     """
     latest_by_id = {record.session_id: record for record in latest_records}
     for record in records:
         latest = latest_by_id.get(record.session_id)
-        if latest is None:
+        original = original_records.get(record.session_id)
+        if latest is None or original is None:
             continue
 
-        annotated_fields = list(dict.fromkeys([*record.annotated_fields, *latest.annotated_fields]))
-        for field in latest.annotated_fields:
-            if field in ANNOTATABLE_FIELDS:
-                setattr(record, field, getattr(latest, field))
-        record.annotated_fields = annotated_fields
-
-        merged_deliverables = list(record.deliverables)
-        for deliverable in latest.deliverables:
-            if deliverable not in merged_deliverables:
-                merged_deliverables.append(deliverable)
-        record.deliverables = merged_deliverables
+        latest_values = latest.to_dict()
+        original_annotations = original.get("annotated_fields")
+        if not isinstance(original_annotations, list):
+            original_annotations = []
+        concurrently_annotated = set(latest.annotated_fields) - set(original_annotations)
+        for field, latest_value in latest_values.items():
+            if field == "session_id":
+                continue
+            if original.get(field) == latest_value and field not in concurrently_annotated:
+                continue
+            if hasattr(record, field):
+                setattr(record, field, latest_value)
+            else:
+                record._legacy_fields[field] = latest_value
 
 
 def _apply_extract_result_to_kwargs(record_kwargs: dict, result: dict) -> None:
@@ -2321,6 +2327,7 @@ def sync(
 
     # Build lookup structures for deduplication and in-place updates.
     existing_records = store.load_all()
+    original_records = {record.session_id: record.to_dict() for record in existing_records}
     existing_by_path: dict[str, SessionRecord] = {}
     for record in existing_records:
         # ``journal_path`` held trajectories in records written before the
@@ -2510,10 +2517,12 @@ def sync(
     if not dry_run:
         if updated_paths:
             # Rewrite the store to persist in-place mutations on existing_records.
-            # Extraction happens outside the lock; merge annotations from a
-            # final locked re-read so an operator correction cannot be lost.
+            # Extraction happens outside the lock; three-way merge a final
+            # locked re-read so no concurrent record mutation is lost.
             with store.lock():
-                _merge_concurrent_annotations(existing_records, store.load_all())
+                _merge_concurrent_record_updates(
+                    existing_records, store.load_all(), original_records
+                )
                 store.rewrite(existing_records + new_records)
         else:
             for rec in new_records:

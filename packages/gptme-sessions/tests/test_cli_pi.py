@@ -414,6 +414,58 @@ def test_sync_pi_refresh_preserves_explicit_annotations(tmp_path: Path, monkeypa
     ]
 
 
+def test_sync_pi_preserves_record_updates_that_land_during_extraction(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The final locked merge keeps unrelated concurrent record mutations."""
+    import gptme_sessions.cli as cli_module
+
+    source = tmp_path / "concurrent-record-update.jsonl"
+    fixture_lines = PI_FIXTURE.read_text().splitlines(keepends=True)
+    source.write_text("".join(fixture_lines[:7]))
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_pi_sessions",
+        lambda start, end: [source],
+    )
+    sessions_dir = tmp_path / "records"
+    runner = CliRunner()
+    command = [
+        "--sessions-dir",
+        str(sessions_dir),
+        "sync",
+        "--harness",
+        "pi",
+        "--signals",
+    ]
+    first = runner.invoke(cli, command)
+    assert first.exit_code == 0, first.output
+
+    real_extract = cli_module.extract_from_path
+
+    def update_after_sync_read(path: Path) -> dict:
+        result = real_extract(path)
+        concurrent_store = SessionStore(sessions_dir=sessions_dir)
+        with concurrent_store.lock():
+            [latest] = concurrent_store.load_all()
+            latest.category = "concurrent-category"
+            latest.timestamp = "2026-08-31T20:00:00+00:00"
+            latest.attempt_kind = "infra_retry"
+            concurrent_store.rewrite([latest])
+        return result
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", update_after_sync_read)
+    source.write_text("".join(fixture_lines))
+    refreshed = runner.invoke(cli, command)
+
+    assert refreshed.exit_code == 0, refreshed.output
+    [complete] = SessionStore(sessions_dir=sessions_dir).load_all()
+    assert complete.category == "concurrent-category"
+    assert complete.timestamp == "2026-08-31T20:00:00+00:00"
+    assert complete.attempt_kind == "infra_retry"
+    assert complete.token_count == 1317
+    assert complete.stop_reason == "stop"
+
+
 def test_sync_pi_merges_annotation_that_lands_during_extraction(
     tmp_path: Path, monkeypatch
 ) -> None:
