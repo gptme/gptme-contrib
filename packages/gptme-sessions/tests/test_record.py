@@ -699,6 +699,161 @@ def test_populate_span_aggregates_also_populates_step_types(tmp_path: Path):
     assert "shallow_session" in r.step_types
 
 
+@pytest.mark.parametrize(
+    "tool_counts,expected",
+    [
+        ({"exec_command": 10}, "bash_dominant"),
+        ({"apply_patch": 5, "Bash": 5}, "edit_focused"),
+        ({"TodoWrite": 3, "Bash": 7}, "task_op_heavy"),
+        ({"Task": 1, "Bash": 9}, "agent_spawner"),
+        ({"write_stdin": 10}, "bash_dominant"),
+        ({"write": 5, "Bash": 5}, "edit_focused"),
+        ({"edit": 5, "Bash": 5}, "edit_focused"),
+    ],
+)
+def test_step_types_cross_harness_aliases(tool_counts: dict, expected: str):
+    """Codex/CC tool names normalize onto Bash/Edit/TaskOp/Agent labels.
+
+    Regression for gptme/gptme-contrib#1564 Greptile P1: aliases only covered
+    gptme names, so exec_command/apply_patch/TodoWrite/Task never contributed.
+    CC Task is the subagent tool → Agent, not TaskOp.
+    """
+    labels = _record_with_spans(total_spans=10, tool_counts=tool_counts).step_types or []
+    assert expected in labels
+
+
+@pytest.mark.parametrize("kind", ["git_commit", "merge_commit", "pull_request"])
+def test_step_types_commit_bearing_kinds(kind: str):
+    """git_commit/merge_commit/pull_request count as commit-bearing delivery.
+
+    Regression for gptme/gptme-contrib#1564 Greptile P1: only the literal
+    ``commit`` kind was counted, so those producers stamped no_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[{"kind": kind, "value": "x"}],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "no_commit" not in labels
+    assert "single_commit" in labels
+
+
+def test_step_types_pr_merge_pair_is_single_commit():
+    """A paired pull_request + merge_commit is one logical delivery.
+
+    Regression for gptme/gptme-contrib#1564 Greptile P1: `gh pr merge`
+    records both kinds, so entry-based counting stamped multi_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+    assert "no_commit" not in labels
+
+
+def test_step_types_pr_merge_pair_plus_commit_is_multi():
+    """A PR-merge pair plus a separate commit is still multi_commit."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "sha0"},
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_unrelated_pr_and_merge_commit_not_paired():
+    """Independently sourced pull_request + merge_commit stay two deliveries.
+
+    Regression for gptme/gptme-contrib#1564 Greptile P1: count-only pairing
+    collapsed a PR URL and an unrelated merge_commit into single_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "pull_request", "value": "https://github.com/org/repo/pull/99"},
+            {"kind": "merge_commit", "value": "merge-commit (abc1234)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_zero_spans_not_shallow():
+    """Zero completed spans must not be coerced into an observed shallow_session.
+
+    Regression for gptme/gptme-contrib#1564 Greptile P1: ``max(total or 1, 1)``
+    turned absent tool evidence into total_spans=1 and stamped shallow_session.
+    """
+    labels = _record_with_spans(total_spans=0, tool_counts={}).step_types or []
+    assert "shallow_session" not in labels
+    assert "deep_session" not in labels
+
+
+def test_populate_span_aggregates_codex_normalizes_exec_command(tmp_path: Path):
+    """Codex exec_command spans classify as bash_dominant after aliasing."""
+    p = _write_codex_trajectory(tmp_path)
+    r = SessionRecord(harness="codex", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is True
+    assert r.step_types is not None
+    assert "bash_dominant" in r.step_types
+
+
 # --- harm_category tests ---
 
 
