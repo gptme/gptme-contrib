@@ -4240,6 +4240,142 @@ def test_extract_signals_codex_exec_commit_after_8k_chars():
     assert "build: big (feed1234)" in signals["git_commits"]
 
 
+def test_extract_signals_codex_wait_continuation_block_output():
+    """Async exec output returned by ``wait`` remains productive.
+
+    Sanitized from a real Codex trajectory where ``exec`` first returned only
+    a cell ID and the later ``wait`` output carried the commit line.
+    """
+    msgs = [
+        {
+            "timestamp": "2026-08-26T06:35:30Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec_async",
+                "name": "exec",
+                "input": (
+                    'const r = await tools.exec_command({"cmd":"git commit -m '
+                    '\\"feat: async work\\""});\ntext(r.output);\n'
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:40Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_async",
+                "output": "Script running with cell ID 123\nWall time 10.0 seconds\nOutput:\n",
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:41Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait",
+                "call_id": "call_wait_async",
+                "arguments": '{"cell_id":"123","yield_time_ms":30000}',
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait_async",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "Script completed\nWall time 9.7 seconds\nOutput:\n",
+                    },
+                    {
+                        "type": "input_text",
+                        "text": (
+                            '{"exit_code":0,"output":"[master 07388abc6c] '
+                            'feat: async work\\n 2 files changed\\n"}'
+                        ),
+                    },
+                ],
+            },
+        },
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["tool_calls"] == {"exec": 1, "wait": 1}
+    assert signals["error_count"] == 0
+    assert signals["git_commits"] == ["feat: async work (07388abc6c)"]
+    assert is_productive(signals) is True
+
+
+def test_extract_signals_codex_wait_continuation_failure():
+    """A failed async command reported by ``wait`` counts as an error."""
+    msgs = [
+        {
+            "timestamp": "2026-08-26T06:35:41Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait",
+                "call_id": "call_wait_failure",
+                "arguments": '{"cell_id":"124","yield_time_ms":30000}',
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait_failure",
+                "output": [
+                    {"type": "input_text", "text": "Script completed\n"},
+                    {
+                        "type": "input_text",
+                        "text": '{"exit_code":1,"output":"tests failed"}',
+                    },
+                ],
+            },
+        },
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["tool_calls"] == {"wait": 1}
+    assert signals["error_count"] == 1
+    assert signals["git_commits"] == []
+
+
+def test_extract_signals_codex_patch_apply_end_file_writes():
+    """Successful nested patch events expose their changed files."""
+    msgs = [
+        {
+            "timestamp": "2026-08-26T21:15:57Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "call_id": "exec-patch-1",
+                "success": True,
+                "changes": {
+                    "/workspace/src/new.py": {"type": "add"},
+                    "/workspace/src/existing.py": {"type": "update"},
+                    "/workspace/src/removed.py": {"type": "delete"},
+                },
+            },
+        }
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["tool_calls"] == {"apply_patch": 1}
+    assert signals["file_writes"] == [
+        "/workspace/src/new.py",
+        "/workspace/src/existing.py",
+    ]
+    assert is_productive(signals) is True
+
+
 def test_extract_usage_codex():
     """Extract model, token, and rate-limit info from Codex trajectory."""
     msgs = [

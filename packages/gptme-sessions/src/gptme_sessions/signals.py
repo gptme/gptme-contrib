@@ -47,6 +47,41 @@ _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
 
 _WARNING_PHRASE_RE = re.compile(r"error:|\bfailed\b|\bfailures?\b|\btraceback\b|\bexception\b")
 
+
+def _codex_output_text(raw_output: object) -> str:
+    """Normalize Codex string or content-block-list tool output to text."""
+    if isinstance(raw_output, str):
+        return raw_output
+    if isinstance(raw_output, list):
+        return "\n".join(
+            str(block.get("text", "")) for block in raw_output if isinstance(block, dict)
+        )
+    return ""
+
+
+def _codex_output_metadata(output: str) -> tuple[str, int | None]:
+    """Decode nested command output and exit code from a Codex wrapper."""
+    code_match = re.search(r"Process exited with code (\d+)", output)
+    exit_code = int(code_match.group(1)) if code_match else None
+    nested_parts: list[str] = []
+    for candidate in re.findall(r"\{[^\n]*\}", output):
+        try:
+            value = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        nested_output = value.get("output")
+        if isinstance(nested_output, str):
+            nested_parts.append(nested_output)
+        nested_code = value.get("exit_code")
+        if isinstance(nested_code, int):
+            exit_code = nested_code
+    # Raw JSON has escaped newlines that make commit regexes consume the whole
+    # object as a message. Prefer decoded command output when it is available.
+    return ("\n".join(nested_parts) if nested_parts else output, exit_code)
+
+
 # Regex to detect background bash task output file paths in CC sessions.
 # When CC runs a Bash command in background mode, the tool result contains:
 # "Command running in background with ID: TASKID. Output is being written to: PATH"
@@ -1644,15 +1679,15 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                         )
 
             elif payload_type == "function_call_output":
-                output = payload.get("output") or ""
+                output = _codex_output_text(payload.get("output"))
                 call_id = payload.get("call_id", "")
                 tool_name = call_id_to_name.get(call_id, "")
 
-                # Error detection from shell output
-                if "Process exited with code " in output:
-                    code_match = re.search(r"Process exited with code (\d+)", output)
-                    if code_match and code_match.group(1) != "0":
-                        error_count += 1
+                # Error detection from shell output. Async ``wait`` output often
+                # nests the actual command result as escaped JSON.
+                scan_output, exit_code = _codex_output_metadata(output)
+                if exit_code is not None and exit_code != 0:
+                    error_count += 1
 
                 # Git commit detection from shell output. Codex uses a persistent
                 # shell session: an initial exec_command spawns the shell, and
@@ -1661,8 +1696,8 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                 # attached to a write_stdin call. Codex outputs are also verbose
                 # (full file dumps), so scan a wider window than the legacy
                 # 500-char head.
-                if tool_name in ("exec_command", "write_stdin"):
-                    for commit_match in _COMMIT_RE.finditer(output[:8000]):
+                if tool_name in ("exec_command", "write_stdin", "wait"):
+                    for commit_match in _COMMIT_RE.finditer(scan_output[:8000]):
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
                         commit_value = f"{commit_msg} ({commit_hash})"
@@ -1683,23 +1718,14 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                 tool_name = call_id_to_name.get(call_id, "")
 
                 if tool_name == "exec":
-                    raw_output = payload.get("output")
-                    if isinstance(raw_output, str):
-                        output = raw_output
-                    elif isinstance(raw_output, list):
-                        output = "\n".join(
-                            block.get("text", "") for block in raw_output if isinstance(block, dict)
-                        )
-                    else:
-                        output = ""
+                    output = _codex_output_text(payload.get("output"))
 
                     # Error detection from shell output
-                    if "Process exited with code " in output:
-                        code_match = re.search(r"Process exited with code (\d+)", output)
-                        if code_match and code_match.group(1) != "0":
-                            error_count += 1
+                    scan_output, exit_code = _codex_output_metadata(output)
+                    if exit_code is not None and exit_code != 0:
+                        error_count += 1
 
-                    for commit_match in _COMMIT_RE.finditer(output):
+                    for commit_match in _COMMIT_RE.finditer(scan_output):
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
                         commit_value = f"{commit_msg} ({commit_hash})"
@@ -1711,6 +1737,34 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                             provenance_class="session_committed",
                             evidence={"source": "trajectory", "tool_name": "exec"},
                         )
+
+        elif rec_type == "event_msg":
+            payload = record.get("payload") or {}
+            if payload.get("type") == "patch_apply_end" and payload.get("success") is True:
+                changes = payload.get("changes") or {}
+                if not isinstance(changes, dict):
+                    continue
+                tool_calls["apply_patch"] = tool_calls.get("apply_patch", 0) + 1
+                current_turn_has_tool = True
+                for raw_path, change in changes.items():
+                    if not isinstance(raw_path, str) or not isinstance(change, dict):
+                        continue
+                    if change.get("type") == "delete":
+                        continue
+                    path = raw_path.strip()
+                    if not path:
+                        continue
+                    if "/journal/" in path or path.startswith("journal/"):
+                        journal_paths.append(path)
+                        continue
+                    file_writes.append(path)
+                    _record_deliverable_detail(
+                        detail_by_value,
+                        value=path,
+                        kind="file",
+                        provenance_class="tool_authored",
+                        evidence={"source": "trajectory", "tool_name": "apply_patch"},
+                    )
 
     # Finalize the last turn (not followed by another turn_context)
     if current_turn_has_tool:
