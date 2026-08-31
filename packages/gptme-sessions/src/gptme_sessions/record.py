@@ -185,14 +185,17 @@ _PR_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", re.IGNORECASE
 _PR_NUMBER_RE = re.compile(r"PR\s+#(\d+)", re.IGNORECASE)
 
 
-def _commit_identity(value: object) -> str | None:
+def _commit_identity(value: object, kind: str | None = None) -> str | None:
     """Extract a SHA identity from a commit deliverable value.
 
-    Prefer a bare SHA, then a leading SHA (Grok: ``sha message``), then the
-    trailing parenthetical SHA used by trajectory producers (``message (sha)``,
-    ``merge-commit (sha)``). Leading SHA beats a parenthetical hex token in the
-    commit message so Grok identity is not overridden; hexadecimal tokens in
-    the message still cannot override identity when no leading SHA is present.
+    Producers encode identity in different slots of the same string:
+
+    - Grok ``git_commit``: ``sha message``. The leading SHA is identity; a
+      parenthetical hex token in the message is not.
+    - Trajectory ``commit`` / ``merge_commit``: ``message (sha)``. The trailing
+      parenthetical SHA is identity; a leading hex token in the message is not.
+    - Caller / unknown: a bare SHA, else the producer-encoded slot when
+      present (trailing paren, then leading SHA).
     """
     if not isinstance(value, str):
         return None
@@ -202,11 +205,21 @@ def _commit_identity(value: object) -> str | None:
     if looks_like_sha(stripped):
         return stripped.lower()
     leading = _LEADING_SHA_RE.match(stripped)
-    if leading:
-        return leading.group(1).lower()
     trailing = _TRAILING_PAREN_SHA_RE.search(stripped)
+    # Grok writes ``sha message``; prefer the leading token even when the
+    # commit message itself ends in ``(hex)``.
+    if kind == "git_commit":
+        if leading:
+            return leading.group(1).lower()
+        if trailing:
+            return trailing.group(1).lower()
+        return None
+    # Trajectory and merge-commit values put the real SHA in trailing parens.
+    # A message that happens to start with a hex token must not win.
     if trailing:
         return trailing.group(1).lower()
+    if leading:
+        return leading.group(1).lower()
     return None
 
 
@@ -670,7 +683,7 @@ class SessionRecord:
             if detail.get("kind") not in {"commit", "git_commit", "merge_commit"}:
                 continue
             value = detail.get("value")
-            commit_id = _commit_identity(value)
+            commit_id = _commit_identity(value, kind=detail.get("kind"))
             if commit_id is None:
                 anonymous_commit_values.add(str(value))
                 continue

@@ -850,6 +850,60 @@ def test_step_types_commit_message_hex_does_not_override_sha():
     assert "single_commit" not in labels
 
 
+def test_step_types_trailing_sha_not_overridden_by_leading_message_token():
+    """Trajectory ``hex-token message (sha)`` must keep the trailing SHA.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1 (round 3): leading-SHA
+    precedence treated a hex token at the start of a trajectory commit message
+    as identity, collapsing two distinct trailing SHAs into single_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "deadbeef123 fix: revert (aaa1111)"},
+            {"kind": "commit", "value": "deadbeef123 fix: revert (bbb2222)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_grok_and_trajectory_same_sha_is_single():
+    """Grok leading SHA and trajectory trailing SHA for one hash are one delivery.
+
+    Kind-aware parsing is load-bearing: a global leading-SHA or trailing-SHA
+    rule would disagree across producers and stamp multi_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "git_commit",
+                "value": "aaa1111 fix: revert change (deadbeef)",
+            },
+            {"kind": "commit", "value": "deadbeef123 fix: revert change (aaa1111)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+
+
 def test_step_types_grok_leading_sha_not_overridden_by_message_paren():
     """Grok ``sha message (hex)`` must keep the leading SHA as identity.
 
