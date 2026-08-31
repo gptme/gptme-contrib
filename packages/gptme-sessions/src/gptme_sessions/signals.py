@@ -64,7 +64,7 @@ def _codex_output_text(raw_output: object) -> str:
 # when the caller is known to be that tool. This keeps arbitrary JS-tool output
 # beginning with ``Process exited with code N`` from impersonating metadata.
 _CODEX_SCRIPT_WRAPPER_HEADER_RE = re.compile(
-    r"^Script completed(?:\n(?:Wall time [^\n]+|Process exited with code \d+|Output:|\s*))*"
+    r"^Script completed\nWall time [^\n]+" r"(?:\nProcess exited with code \d+)?\nOutput:"
 )
 _CODEX_EXEC_COMMAND_HEADER_RE = re.compile(r"^Process exited with code \d+(?:\nOutput:)?")
 

@@ -4330,7 +4330,10 @@ def test_extract_signals_codex_wait_continuation_failure():
                 "type": "function_call_output",
                 "call_id": "call_wait_failure",
                 "output": [
-                    {"type": "input_text", "text": "Script completed\n"},
+                    {
+                        "type": "input_text",
+                        "text": "Script completed\nWall time 1.2 seconds\nOutput:\n",
+                    },
                     {
                         "type": "input_text",
                         "text": '{"exit_code":1,"output":"tests failed"}',
@@ -4370,7 +4373,8 @@ def test_extract_signals_codex_wrapper_exit_code_takes_precedence():
                     {
                         "type": "input_text",
                         "text": (
-                            "Script completed\nProcess exited with code 0\nOutput:\n"
+                            "Script completed\nWall time 1.2 seconds\n"
+                            "Process exited with code 0\nOutput:\n"
                             '{"exit_code":1,"output":"application data"}'
                         ),
                     }
@@ -4440,6 +4444,35 @@ def test_extract_signals_codex_ignores_application_process_exit_phrase(output: s
                 "type": "custom_tool_call_output",
                 "call_id": "call_exec_application_status",
                 "output": output,
+            },
+        },
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["error_count"] == 0
+
+
+def test_extract_signals_codex_ignores_status_after_statusless_script_wrapper():
+    """A status-like first application line is not wrapper metadata."""
+    msgs = [
+        {
+            "timestamp": "2026-08-26T06:35:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait",
+                "call_id": "call_wait_statusless_wrapper",
+                "arguments": '{"cell_id":"126","yield_time_ms":30000}',
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait_statusless_wrapper",
+                "output": "Script completed\nProcess exited with code 1\napplication output",
             },
         },
     ]
