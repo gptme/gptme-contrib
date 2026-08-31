@@ -149,7 +149,7 @@ def test_index_preserves_old_chunks_when_replacement_add_fails(tmp_path, monkeyp
 
     monkeypatch.setattr(chromadb.Collection, "add", fail_replacement_add)
     second = _run_index(runner, index_dir, [src])
-    assert second.exit_code == 0, second.output
+    assert second.exit_code == 1, second.output
     assert "simulated embedding failure" in second.output
 
     chromadb.api.shared_system_client.SharedSystemClient._identifier_to_system.clear()
