@@ -106,7 +106,7 @@ log "Starting autonomous run (timeout: ${SCRIPT_TIMEOUT}s / 50 minutes)..."
 log "Workspace: $WORKSPACE"
 
 # Detect if this is a scheduled run or manual trigger
-if [ -n "$INVOCATION_ID" ]; then
+if [ -n "${INVOCATION_ID:-}" ]; then
     RUN_TYPE="Scheduled (systemd)"
 else
     RUN_TYPE="Manual"

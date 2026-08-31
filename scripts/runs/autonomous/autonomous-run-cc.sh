@@ -49,25 +49,38 @@ log() {
 }
 
 # --- Lock management ---
-LOCKFILE="/tmp/${AGENT_NAME,,}-autonomous.lock"
+LOCKFILE="${TMPDIR:-/tmp}/${AGENT_NAME,,}-autonomous.lock"
+LOCK_HELD=false
 
 acquire_lock() {
-    if [ -f "$LOCKFILE" ]; then
-        local pid
-        pid=$(cat "$LOCKFILE" 2>/dev/null || echo "")
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            log "ERROR: Another autonomous run is active (PID $pid)"
-            exit 1
-        fi
-        log "WARN: Stale lock from PID $pid, removing"
-        rm -f "$LOCKFILE"
+    if ! command -v flock >/dev/null 2>&1; then
+        log "ERROR: flock is required for exclusive autonomous runs"
+        exit 1
     fi
-    echo $$ > "$LOCKFILE"
+
+    exec 9>>"$LOCKFILE"
+    if ! flock -n 9; then
+        local pid
+        pid=$(cat "$LOCKFILE" 2>/dev/null || true)
+        exec 9>&-
+        log "ERROR: Another autonomous run is active (PID ${pid:-unknown})"
+        exit 1
+    fi
+
+    : > "$LOCKFILE"
+    printf '%s\n' "$$" >&9
+    LOCK_HELD=true
 }
 
 release_lock() {
     # shellcheck disable=SC2317  # Called by trap, not directly
-    rm -f "$LOCKFILE"
+    if [ "$LOCK_HELD" = true ]; then
+        # Keep the inode in place: unlinking a flock file can split later lockers
+        # across the old and newly-created inodes.
+        flock -u 9 2>/dev/null || true
+        exec 9>&-
+        LOCK_HELD=false
+    fi
 }
 
 trap release_lock EXIT INT TERM HUP
@@ -172,13 +185,14 @@ unset CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
 # Run Claude Code
 # IMPORTANT: </dev/null prevents SIGSTOP in non-interactive contexts (tmux, systemd)
+set +e
 timeout "$SCRIPT_TIMEOUT" claude -p \
     --dangerously-skip-permissions \
     --model "$MODEL" \
     --append-system-prompt-file "$SYSPROMPT_FILE" \
     "$PROMPT" </dev/null
-
 EXIT_CODE=$?
+set -e
 
 if [ $EXIT_CODE -eq 124 ]; then
     log "Session timed out after ${SCRIPT_TIMEOUT}s"
