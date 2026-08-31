@@ -495,22 +495,32 @@ class SessionRecord:
         """
         sa = self.span_aggregates or {}
         raw_counts: dict[str, int] = sa.get("tool_counts") or {}
-        total_spans = max(sa.get("total_spans") or 1, 1)
+        # 0 is a real observation (no completed tool spans). Do not coerce it
+        # to 1 — that would stamp shallow_session on absent evidence.
+        total_spans = sa.get("total_spans") or 0
         error_spans = sa.get("error_spans") or 0
         retry_depth = sa.get("retry_depth") or 0
 
-        # Normalize harness-specific tool names
+        # Normalize harness-specific tool names onto CC-canonical labels.
+        # Keys are lowercased; lookup uses tool.lower().
+        # Task (CC) is the subagent tool → Agent, not TaskOp. TodoWrite is TaskOp.
         _aliases = {
             "shell": "Bash",
             "ipython": "Bash",
+            "exec_command": "Bash",
+            "write_stdin": "Bash",
+            "exec": "Bash",
             "save": "Write",
             "patch": "Edit",
             "append": "Edit",
+            "apply_patch": "Edit",
             "read": "Read",
             "todo": "TaskOp",
             "complete": "TaskOp",
+            "todowrite": "TaskOp",
             "agent": "Agent",
             "subagent": "Agent",
+            "task": "Agent",
         }
         tc: dict[str, int] = {}
         for tool, count in raw_counts.items():
@@ -523,11 +533,14 @@ class SessionRecord:
         agent_count = tc.get("Agent", 0)
         task_op_count = tc.get("TaskOp", 0)
 
-        bash_ratio = bash_count / total_spans
-        read_ratio = read_count / total_spans
-        edit_ratio = edit_count / total_spans
+        if total_spans > 0:
+            bash_ratio = bash_count / total_spans
+            read_ratio = read_count / total_spans
+            edit_ratio = edit_count / total_spans
+            error_rate = error_spans / total_spans
+        else:
+            bash_ratio = read_ratio = edit_ratio = error_rate = 0.0
         tool_diversity = len([v for v in tc.values() if v > 0])
-        error_rate = error_spans / total_spans
 
         step_types: list[str] = []
 
@@ -548,7 +561,7 @@ class SessionRecord:
             step_types.append("high_tool_diversity")
         if total_spans >= 40:
             step_types.append("deep_session")
-        elif total_spans <= 10:
+        elif 0 < total_spans <= 10:
             step_types.append("shallow_session")
 
         # Quality / reliability
@@ -559,9 +572,13 @@ class SessionRecord:
         if error_rate > 0.10:
             step_types.append("error_prone")
 
-        # Delivery patterns (from deliverable_details)
+        # Delivery patterns (from deliverable_details). Producers emit
+        # commit/git_commit/merge_commit/pull_request for commit-bearing work;
+        # counting only the literal "commit" kind stamps completed sessions
+        # as no_commit.
         dd = self.deliverable_details or []
-        commit_count = sum(1 for d in dd if d.get("kind") == "commit")
+        _commit_kinds = {"commit", "git_commit", "merge_commit", "pull_request"}
+        commit_count = sum(1 for d in dd if d.get("kind") in _commit_kinds)
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 
         # Partition on commit cardinality: 0 / 1 / 2+. Two-commit sessions
