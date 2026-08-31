@@ -609,6 +609,96 @@ def test_populate_span_aggregates_path_fallback_no_false_positive(tmp_path: Path
     assert r.span_aggregates is None
 
 
+# -- step_types field + populate_step_types helper ----------------------------
+
+
+def _record_with_spans(
+    *,
+    total_spans: int = 20,
+    error_spans: int = 0,
+    retry_depth: int = 0,
+    tool_counts: dict | None = None,
+    commits: int = 0,
+    files: int = 0,
+) -> SessionRecord:
+    """Build a record and populate step_types from synthetic aggregates."""
+    details = [{"kind": "commit", "value": f"sha{i}"} for i in range(commits)]
+    details.extend({"kind": "file", "value": f"f{i}.py"} for i in range(files))
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": total_spans,
+            "error_spans": error_spans,
+            "error_rate": error_spans / max(total_spans, 1),
+            "tool_counts": tool_counts or {"Bash": total_spans},
+            "retry_depth": retry_depth,
+        },
+        deliverable_details=details,
+    )
+    r.populate_step_types()
+    return r
+
+
+def test_step_types_default_is_none():
+    """step_types defaults to None (not yet computed)."""
+    assert SessionRecord().step_types is None
+
+
+def test_step_types_roundtrip():
+    """step_types survives to_dict/from_dict round-trip."""
+    r = SessionRecord(session_id="st-rt", step_types=["bash_dominant", "multi_commit"])
+    d = r.to_dict()
+    assert d["step_types"] == ["bash_dominant", "multi_commit"]
+    assert SessionRecord.from_dict(d).step_types == d["step_types"]
+
+
+@pytest.mark.parametrize(
+    "commits,expected",
+    [
+        (0, "no_commit"),
+        (1, "single_commit"),
+        (2, "multi_commit"),
+        (3, "multi_commit"),
+        (5, "multi_commit"),
+    ],
+)
+def test_step_types_commit_cardinality(commits: int, expected: str):
+    """Delivery labels partition all commit counts — two commits is multi_commit.
+
+    Regression for gptme/gptme-contrib#1562 Greptile P1: `>= 3` left
+    two-commit sessions with no delivery label.
+    """
+    labels = _record_with_spans(commits=commits).step_types or []
+    delivery = {"no_commit", "single_commit", "multi_commit"}
+    assert expected in labels
+    assert len(delivery.intersection(labels)) == 1
+
+
+def test_step_types_mixed_deliverables():
+    """Commits plus file artifacts get mixed_deliverables alongside cardinality."""
+    labels = _record_with_spans(commits=1, files=1).step_types or []
+    assert "single_commit" in labels
+    assert "mixed_deliverables" in labels
+
+
+def test_step_types_two_commits_not_mixed_without_files():
+    """Two commits with no file artifacts is multi_commit only, not mixed."""
+    labels = _record_with_spans(commits=2, files=0).step_types or []
+    assert "multi_commit" in labels
+    assert "mixed_deliverables" not in labels
+
+
+def test_populate_span_aggregates_also_populates_step_types(tmp_path: Path):
+    """populate_span_aggregates derives step_types after writing aggregates."""
+    p = _write_cc_trajectory(tmp_path)
+    r = SessionRecord(harness="claude-code", trajectory_path=str(p))
+    assert r.populate_span_aggregates() is True
+    assert r.step_types is not None
+    assert "bash_dominant" in r.step_types
+    assert "no_commit" in r.step_types
+    assert "shallow_session" in r.step_types
+
+
 # --- harm_category tests ---
 
 

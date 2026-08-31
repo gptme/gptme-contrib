@@ -564,11 +564,14 @@ class SessionRecord:
         commit_count = sum(1 for d in dd if d.get("kind") == "commit")
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 
+        # Partition on commit cardinality: 0 / 1 / 2+. Two-commit sessions
+        # (commit + fixup) are multi, not a silent hole — the analysis script
+        # can still subset to 3+ if it wants a stricter "iterative" cut.
         if commit_count == 0:
             step_types.append("no_commit")
         elif commit_count == 1:
             step_types.append("single_commit")
-        elif commit_count >= 3:
+        elif commit_count >= 2:
             step_types.append("multi_commit")
 
         if commit_count > 0 and file_count > 0:
