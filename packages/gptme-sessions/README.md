@@ -117,6 +117,20 @@ Discovery and sync are non-mutating. A synced record retains the source
 a historical artifact, so keep or independently back up the source tree—do not
 delete it after sync.
 
+The parser is pinned to Pi 0.84.4's v3 session contract and route catalogs. Run
+the explicit upstream drift sentinel after upgrading Pi or refreshing retained
+fixtures:
+
+```bash
+cd packages/gptme-sessions
+uv run python3 scripts/check_pi_compat.py
+```
+
+The command downloads Pi's release source archive and fails if the session
+version, entry types, stop reasons, pinned route catalogs, or fixture models no
+longer match. Network/download failures are errors rather than false green
+checks. Update the parser and retained fixtures before advancing the pin.
+
 ## Model Normalization
 
 Model names are automatically normalized to short canonical forms:

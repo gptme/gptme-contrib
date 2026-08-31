@@ -21,6 +21,11 @@ FIXTURES = Path(__file__).parent / "fixtures" / "pi"
 PRODUCTIVE = FIXTURES / "productive-codex.jsonl"
 NOOP_CODEX = FIXTURES / "noop-codex.jsonl"
 NOOP_XAI = FIXTURES / "noop-xai.jsonl"
+FAILED_TOOL = FIXTURES / "failed-tool-upstream.jsonl"
+PROVIDER_ERROR = FIXTURES / "provider-error-upstream.jsonl"
+ABORTED = FIXTURES / "aborted-upstream.jsonl"
+COMPACTION = FIXTURES / "compaction-upstream.jsonl"
+BRANCH = FIXTURES / "branch-upstream.jsonl"
 
 
 def _header(*, version: int = 3) -> dict:
@@ -104,6 +109,67 @@ def test_real_smoke_fixture_remains_truthful_noop(
     assert result["usage"]["total_tokens"] == total_tokens
     assert result["usage"]["cache_read_tokens"] == cache_read
     assert result["usage"]["cost"] == pytest.approx(cost)
+
+
+def test_retained_failed_tool_fixture_counts_the_tool_error() -> None:
+    result = extract_from_path(FAILED_TOOL)
+
+    assert result["productive"] is False
+    assert result["tool_calls"] == {"bash": 1}
+    assert result["error_count"] == 1
+    assert result["provider_errors"] == []
+    assert result["usage"]["provider"] == "anthropic"
+    assert result["usage"]["model"] == "claude-opus-4-5"
+    assert result["usage"]["stop_reason"] == "toolUse"
+
+
+def test_retained_provider_error_fixture_preserves_recovery() -> None:
+    result = extract_from_path(PROVIDER_ERROR)
+
+    assert result["productive"] is False
+    assert result["error_count"] == 1
+    assert result["provider_errors"] == [
+        "Cloud Code Assist API error (429): No capacity available for model "
+        "claude-opus-4-5-thinking on the server"
+    ]
+    # The session recovered on the same branch, so final route metadata is the
+    # successful turn while the earlier provider error remains counted.
+    assert result["usage"]["stop_reason"] == "stop"
+    assert result["usage"]["total_tokens"] == 6765
+
+
+def test_retained_abort_fixture_is_not_mislabeled_as_provider_error() -> None:
+    result = extract_from_path(ABORTED)
+
+    assert result["productive"] is False
+    assert result["aborted"] is True
+    assert result["stop_reason"] == "aborted"
+    assert result["error_count"] == 0
+    assert result["provider_errors"] == []
+    assert result["usage"]["stop_reason"] == "aborted"
+
+
+def test_retained_compaction_fixture_counts_usage_once() -> None:
+    result = extract_from_path(COMPACTION)
+
+    assert result["productive"] is False
+    assert result["compaction_count"] == 1
+    assert result["branch_summary_count"] == 0
+    assert result["usage"]["total_tokens"] == 19000
+    assert result["usage"]["cache_read_tokens"] == 5510
+    assert result["usage"]["cache_creation_tokens"] == 13225
+
+
+def test_retained_branch_fixture_keeps_full_tree_usage_and_active_transcript() -> None:
+    result = extract_from_path(BRANCH)
+    transcript = read_transcript(BRANCH)
+
+    assert result["productive"] is False
+    assert result["branch_summary_count"] == 1
+    assert result["usage"]["total_tokens"] == 141851
+    assert len(transcript.messages) == 2
+    assert "full interactive-mode rewrite" in transcript.messages[-1].content
+    assert "partial fork" not in transcript.messages[-1].content
 
 
 def test_productive_fixture_transcript_and_metadata() -> None:
