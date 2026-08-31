@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from typing import Any
 
-from gptme_body_protocol import Command, Handshake, decode_message, encode_message
+from gptme_body_protocol import (
+    Command,
+    Handshake,
+    decode_message,
+    encode_message,
+    require_command_result,
+    require_handshake_ok,
+)
 
 # Body-node wire capabilities mapped to gptme-voice's model-facing capabilities.
 _WIRE_TO_ADAPTER_CAPABILITY = {
@@ -14,6 +22,20 @@ _WIRE_TO_ADAPTER_CAPABILITY = {
     "interact": "interact",
 }
 _REQUIRED_WIRE_CAPABILITIES = {"status", "move", "turn", "stop"}
+
+
+def is_loopback_host(host: str) -> bool:
+    """True for literal loopback addresses and localhost.
+
+    Hostnames are not resolved. Plaintext body control is local-only, so a
+    DNS name other than localhost is treated as non-loopback.
+    """
+    if host.lower().rstrip(".") == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class RemoteAdapter:
@@ -38,6 +60,10 @@ class RemoteAdapter:
     ) -> None:
         if not token:
             raise ValueError("a non-empty body token is required")
+        if not is_loopback_host(host):
+            raise ValueError(
+                f"plaintext body transport is loopback-only, refused host {host!r}"
+            )
         self.token = token
         self.host = host
         self.port = port
@@ -51,12 +77,21 @@ class RemoteAdapter:
         self._command_lock = asyncio.Lock()
         self._connection_lock = asyncio.Lock()
 
+    def _is_connected(self) -> bool:
+        return (
+            self._reader is not None
+            and self._writer is not None
+            and not self._writer.is_closing()
+        )
+
     async def ensure_connected(self) -> None:
-        if self._writer is not None and not self._writer.is_closing():
+        if self._is_connected():
             return
         async with self._connection_lock:
-            if self._writer is not None and not self._writer.is_closing():
+            if self._is_connected():
                 return
+            if self._writer is not None:
+                await self.close()
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port), self.timeout_s
             )
@@ -64,11 +99,6 @@ class RemoteAdapter:
                 response = await self._exchange(
                     Handshake(token=self.token, controller_id=self.controller_id)
                 )
-                if response.get("type") != "handshake_ok":
-                    raise PermissionError(
-                        response.get("detail")
-                        or response.get("code", "body handshake rejected")
-                    )
                 wire_capabilities = set(response.get("capabilities") or ())
                 missing = _REQUIRED_WIRE_CAPABILITIES - wire_capabilities
                 if missing:
@@ -148,11 +178,21 @@ class RemoteAdapter:
             return response
 
     async def _exchange(self, message: Handshake | Command) -> dict[str, Any]:
-        if self._reader is None or self._writer is None:
+        reader, writer = self._reader, self._writer
+        if reader is None or writer is None:
             raise ConnectionError("body node is not connected")
-        self._writer.write(encode_message(message))
-        await self._writer.drain()
-        line = await asyncio.wait_for(self._reader.readline(), self.timeout_s)
-        if not line:
-            raise ConnectionError("body node closed the connection")
-        return decode_message(line)
+        try:
+            writer.write(encode_message(message))
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), self.timeout_s)
+            if not line:
+                raise ConnectionError("body node closed the connection")
+            response = decode_message(line)
+            if isinstance(message, Handshake):
+                require_handshake_ok(response)
+            else:
+                require_command_result(response, message.command_id)
+            return response
+        except BaseException:
+            await self.close()
+            raise

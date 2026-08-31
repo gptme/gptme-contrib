@@ -8,7 +8,16 @@ from typing import Any
 
 import pytest
 from gptme_voice.body import RemoteAdapter, body_adapter_from_env, body_tool_schemas
+from gptme_voice.body.remote_adapter import is_loopback_host
 from gptme_voice.realtime.tool_bridge import GptmeToolBridge
+
+_HANDSHAKE_OK = {
+    "type": "handshake_ok",
+    "protocol": "bob-body/0",
+    "body_id": "bob-world-local",
+    "capabilities": ["status", "move", "turn", "stop", "interact"],
+    "telemetry": {"body_id": "bob-world-local"},
+}
 
 
 async def _body_node(
@@ -20,13 +29,7 @@ async def _body_node(
         request = json.loads(line)
         requests.append(request)
         if request["type"] == "handshake":
-            response = {
-                "type": "handshake_ok",
-                "protocol": "bob-body/0",
-                "body_id": "bob-world-local",
-                "capabilities": ["status", "move", "turn", "stop", "interact"],
-                "telemetry": {"body_id": "bob-world-local"},
-            }
+            response = dict(_HANDSHAKE_OK)
         else:
             response = {
                 "type": "command_result",
@@ -91,7 +94,13 @@ def test_remote_adapter_rejects_unadvertised_required_capabilities() -> None:
             await reader.readline()
             writer.write(
                 (
-                    json.dumps({"type": "handshake_ok", "capabilities": ["status"]})
+                    json.dumps(
+                        {
+                            "type": "handshake_ok",
+                            "protocol": "bob-body/0",
+                            "capabilities": ["status"],
+                        }
+                    )
                     + "\n"
                 ).encode()
             )
@@ -115,6 +124,27 @@ def test_remote_adapter_rejects_unadvertised_required_capabilities() -> None:
 def test_remote_adapter_requires_token() -> None:
     with pytest.raises(ValueError, match="token"):
         RemoteAdapter("")
+
+
+def test_is_loopback_host() -> None:
+    assert is_loopback_host("127.0.0.1")
+    assert is_loopback_host("::1")
+    assert is_loopback_host("localhost")
+    assert not is_loopback_host("10.0.0.4")
+    assert not is_loopback_host("body.example")
+
+
+def test_remote_adapter_rejects_non_loopback_host() -> None:
+    with pytest.raises(ValueError, match="loopback-only"):
+        RemoteAdapter("secret", host="10.0.0.4")
+
+
+def test_remote_adapter_from_env_rejects_non_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GPTME_VOICE_BODY_URL", "tcp://10.0.0.4:7788")
+    monkeypatch.setenv("GPTME_VOICE_BODY_TOKEN", "secret")
+    assert body_adapter_from_env() is None
 
 
 def test_remote_adapter_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,11 +179,132 @@ def test_remote_capabilities_register_and_route_interaction() -> None:
             return {"status": "completed"}
 
     adapter = Adapter()
-    names = {tool["name"] for tool in body_tool_schemas(adapter)}  # type: ignore[arg-type]
+    tools = body_tool_schemas(adapter)  # type: ignore[arg-type]
+    names = {tool["name"] for tool in tools}
     assert names == {"body_status", "body_interact"}
+    interact = next(tool for tool in tools if tool["name"] == "body_interact")
+    assert "when the caller wants you to engage" in interact["description"]
     result = asyncio.run(
         GptmeToolBridge(body_adapter=adapter).handle_function_call(  # type: ignore[arg-type]
             "body_interact", {}
         )
     )
     assert result == {"status": "completed"}
+
+
+def test_remote_adapter_rejects_incompatible_protocol() -> None:
+    async def scenario() -> None:
+        async def incompatible_node(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            await reader.readline()
+            writer.write(
+                (
+                    json.dumps(
+                        {
+                            "type": "handshake_ok",
+                            "protocol": "bob-body/1",
+                            "capabilities": [
+                                "status",
+                                "move",
+                                "turn",
+                                "stop",
+                            ],
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(incompatible_node, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        adapter = RemoteAdapter("secret", port=port)
+        try:
+            with pytest.raises(ValueError, match="incompatible body protocol"):
+                await adapter.ensure_connected()
+            assert adapter._writer is None
+        finally:
+            await adapter.close()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_remote_adapter_rejects_mismatched_command_id() -> None:
+    async def scenario() -> None:
+        async def mismatched_node(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            await reader.readline()
+            writer.write((json.dumps(_HANDSHAKE_OK) + "\n").encode())
+            await writer.drain()
+            await reader.readline()
+            writer.write(
+                (
+                    json.dumps(
+                        {
+                            "type": "command_result",
+                            "command_id": "stale-from-earlier",
+                            "status": "completed",
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(mismatched_node, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        adapter = RemoteAdapter("secret", port=port)
+        try:
+            await adapter.ensure_connected()
+            with pytest.raises(ValueError, match="command_id"):
+                await adapter.move(1.0, 0.0)
+            assert adapter._writer is None
+        finally:
+            await adapter.close()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_remote_adapter_reconnects_after_timeout() -> None:
+    async def scenario() -> None:
+        connections = {"n": 0}
+
+        async def flaky_node(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            connections["n"] += 1
+            if connections["n"] == 1:
+                await reader.readline()
+                writer.write((json.dumps(_HANDSHAKE_OK) + "\n").encode())
+                await writer.drain()
+                await reader.readline()
+                await reader.read()
+                writer.close()
+                return
+            await _body_node(reader, writer, [])
+
+        server = await asyncio.start_server(flaky_node, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        adapter = RemoteAdapter("secret", port=port, timeout_s=0.2)
+        try:
+            await adapter.ensure_connected()
+            with pytest.raises(asyncio.TimeoutError):
+                await adapter.move(1.0, 0.0)
+            assert adapter._writer is None
+            result = await adapter.move(1.0, 0.0)
+            assert result["command_id"] == "remote-0002"
+            assert result["status"] == "accepted"
+        finally:
+            await adapter.close()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())

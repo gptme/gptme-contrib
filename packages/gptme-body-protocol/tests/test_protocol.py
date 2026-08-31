@@ -4,7 +4,14 @@ import json
 import time
 
 import pytest
-from gptme_body_protocol import Command, Handshake, decode_message, encode_message
+from gptme_body_protocol import (
+    Command,
+    Handshake,
+    decode_message,
+    encode_message,
+    require_command_result,
+    require_handshake_ok,
+)
 
 
 def test_protocol_frames_handshake_and_command() -> None:
@@ -36,3 +43,21 @@ def test_command_timestamp_is_current() -> None:
 def test_decode_rejects_non_object_json() -> None:
     with pytest.raises(ValueError, match="JSON object"):
         decode_message(b"[]\n")
+
+
+def test_decode_rejects_incompatible_protocol() -> None:
+    with pytest.raises(ValueError, match="incompatible body protocol"):
+        decode_message(b'{"type":"handshake_ok","protocol":"bob-body/1"}\n')
+
+
+def test_require_handshake_ok_rejects_missing_protocol() -> None:
+    with pytest.raises(ValueError, match="incompatible body protocol"):
+        require_handshake_ok({"type": "handshake_ok", "capabilities": ["status"]})
+
+
+def test_require_command_result_rejects_mismatched_id() -> None:
+    with pytest.raises(ValueError, match="command_id"):
+        require_command_result(
+            {"type": "command_result", "command_id": "other"},
+            "remote-0001",
+        )

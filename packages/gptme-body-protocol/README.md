@@ -6,8 +6,8 @@ Small, transport-neutral wire models for a gptme Brain↔Body connection.
 bounded goal commands without importing one another's runtime. This package is
 that shared seam. The initial `bob-body/0` protocol supports:
 
-- an authenticated controller handshake;
-- stable controller and command IDs;
+- an authenticated controller handshake that must echo `bob-body/0`;
+- stable controller and command IDs (command results must repeat `command_id`);
 - command TTLs;
 - `status`, relative `move`, relative `turn`, preemptive `stop`, and `interact`;
 - newline-framed JSON encoding for the current native-local transport.

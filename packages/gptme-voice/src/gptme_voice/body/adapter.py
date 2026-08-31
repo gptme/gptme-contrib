@@ -257,8 +257,10 @@ def body_tool_schemas(adapter: BodyAdapter | None) -> list[dict]:
                 "type": "function",
                 "name": "body_interact",
                 "description": (
-                    "Trigger the body's default interaction with the nearby "
-                    "object or landmark."
+                    "Use this when the caller wants you to engage whatever is "
+                    "immediately in front of the body: pick it up, press it, "
+                    "talk to it, or otherwise interact with that nearby object "
+                    "or landmark. Do not use it to walk, turn, or stop."
                 ),
                 "parameters": {"type": "object", "properties": {}},
             }
@@ -307,8 +309,10 @@ def body_adapter_from_env() -> BodyAdapter | None:
     - ``mavsdk://<system_address>`` -> MavsdkAdapter, e.g.
       ``mavsdk://udpin://0.0.0.0:14540`` (SITL) or
       ``mavsdk://serial:///dev/ttyUSB0:57600`` (SiK radio)
-    - ``tcp://<host>:<port>`` -> authenticated RemoteAdapter. The token comes
-      from ``GPTME_VOICE_BODY_TOKEN`` rather than the URL to avoid log leaks.
+    - ``tcp://<loopback>:<port>`` -> authenticated RemoteAdapter. Plaintext
+      TCP is loopback-only so the bearer token never leaves the machine.
+      The token comes from ``GPTME_VOICE_BODY_TOKEN`` rather than the URL
+      to avoid log leaks.
 
     Remote capabilities are discovered during the asynchronous handshake, so
     construction performs no I/O. The server connects remote adapters before
@@ -335,7 +339,15 @@ def body_adapter_from_env() -> BodyAdapter | None:
         ):
             logger.warning("Invalid remote body URL: %s (body disabled)", url)
             return None
-        from .remote_adapter import RemoteAdapter
+        from .remote_adapter import RemoteAdapter, is_loopback_host
+
+        if not is_loopback_host(parsed.hostname):
+            logger.warning(
+                "GPTME_VOICE_BODY_URL tcp:// host %s is not loopback "
+                "(plaintext remote bodies are disabled)",
+                parsed.hostname,
+            )
+            return None
 
         return RemoteAdapter(
             token,

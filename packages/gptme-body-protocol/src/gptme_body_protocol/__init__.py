@@ -44,11 +44,32 @@ def encode_message(message: Handshake | Command) -> bytes:
 
 
 def decode_message(line: bytes) -> dict[str, Any]:
-    """Decode one response, rejecting non-object JSON."""
+    """Decode one response, rejecting non-object JSON and foreign protocols."""
     value = json.loads(line)
     if not isinstance(value, dict):
         raise ValueError("body-node response must be a JSON object")
+    protocol = value.get("protocol")
+    if protocol is not None and protocol != PROTOCOL_VERSION:
+        raise ValueError(f"incompatible body protocol: {protocol}")
     return value
+
+
+def require_handshake_ok(response: dict[str, Any]) -> None:
+    """Reject anything that is not a compatible handshake_ok."""
+    if response.get("type") != "handshake_ok":
+        raise PermissionError(
+            response.get("detail") or response.get("code", "body handshake rejected")
+        )
+    if response.get("protocol") != PROTOCOL_VERSION:
+        raise ValueError(f"incompatible body protocol: {response.get('protocol')!r}")
+
+
+def require_command_result(response: dict[str, Any], command_id: str) -> None:
+    """Reject mismatched, delayed, or non-result command frames."""
+    if response.get("type") != "command_result":
+        raise ValueError(f"unexpected body response type: {response.get('type')!r}")
+    if response.get("command_id") != command_id:
+        raise ValueError("body response command_id does not match")
 
 
 __all__ = [
@@ -57,4 +78,6 @@ __all__ = [
     "Handshake",
     "decode_message",
     "encode_message",
+    "require_command_result",
+    "require_handshake_ok",
 ]

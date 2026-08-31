@@ -100,6 +100,10 @@ GPTME_VOICE_BODY_TOKEN=<body-node-token>
 GPTME_VOICE_BODY_CONTROLLER_ID=gptme-voice-local  # optional
 ```
 
+Plaintext `tcp://` is loopback-only (`127.0.0.1`, `::1`, `localhost`). A
+non-loopback host is refused so the bearer token and physical commands never
+cross the network in the clear.
+
 The remote node negotiates its actual capabilities during the authenticated
 handshake. `gptme-voice` registers only the corresponding realtime tools. The
 body node remains responsible for controller leases, command TTLs, idempotency,
