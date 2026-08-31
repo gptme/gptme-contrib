@@ -15,6 +15,7 @@ on:
       - 'skills/**'
       - 'gptme.toml'
       - '.github/workflows/dashboard.yml'
+      - 'scripts/fetch-community-plugins.py'
   workflow_dispatch:
 
 permissions:
@@ -46,11 +47,14 @@ jobs:
           # GitHub topic/registry down still means an incomplete index).
           if python3 scripts/fetch-community-plugins.py; then
             echo "Community plugin index written to docs/community_plugins.json"
-          elif [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "Scheduled community-plugin fetch failed"
-            exit 1
-          else
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            # Push deploys stay best-effort so a GitHub API blip does not
+            # block Pages. Schedule and workflow_dispatch fail closed —
+            # a manual refresh must not publish a blank Community section.
             echo "Fetch failed; dashboard will omit the community section"
+          else
+            echo "Community-plugin fetch failed"
+            exit 1
           fi
 
       - name: Install gptme-dashboard
