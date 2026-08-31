@@ -1,6 +1,6 @@
-"""Session cost estimation and analysis.
+"""Session cost reporting, estimation, and analysis.
 
-Requires ``gptme-usage`` (optional dependency):
+Token-based estimates require ``gptme-usage`` (optional dependency):
     pip install gptme-sessions[cost]
 """
 

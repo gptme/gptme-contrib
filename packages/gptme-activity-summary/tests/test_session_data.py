@@ -103,6 +103,25 @@ def test_fetch_session_stats_with_logs(tmp_path):
     assert stats.total_duration_seconds == 300.0  # 5 minutes
 
 
+def test_fetch_session_stats_without_reported_cost(tmp_path):
+    """Token usage without a reported cost remains valid session data."""
+    session_dir = tmp_path / "2025-01-15-test-session"
+    session_dir.mkdir()
+    (session_dir / "config.toml").write_text('model = "claude-3-opus"\n')
+    message = {
+        "role": "assistant",
+        "content": "Hi there",
+        "metadata": {"input_tokens": 200, "output_tokens": 100},
+    }
+    (session_dir / "conversation.jsonl").write_text(json.dumps(message))
+
+    stats = fetch_session_stats(date(2025, 1, 15), logs_dir=tmp_path)
+
+    assert stats.total_input_tokens == 200
+    assert stats.total_output_tokens == 100
+    assert stats.total_cost == 0.0
+
+
 def test_fetch_session_stats_range(tmp_path):
     """Test fetching stats across a date range."""
     # Create sessions on different days

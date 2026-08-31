@@ -3083,20 +3083,12 @@ def cost(
     last_7d: bool,
     as_json: bool,
 ) -> None:
-    """Show session cost breakdown.
+    """Show reported and estimated session costs.
 
-    Requires gptme-usage to be installed for pricing data.
-    Install with: pip install gptme-sessions[cost]
+    Harness-reported costs work without optional dependencies. Install
+    ``gptme-sessions[cost]`` to estimate records that only contain token usage.
     """
     from .cost import analyze_costs, format_cost_summary
-
-    try:
-        from gptme_usage.harness_models import estimate_session_cost as _  # noqa: F401
-    except ImportError:
-        raise click.ClickException(
-            "gptme-usage is required for cost estimation.\n"
-            "Install with: pip install gptme-sessions[cost]"
-        )
 
     if last_7d:
         days = 7

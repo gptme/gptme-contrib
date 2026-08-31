@@ -2562,7 +2562,7 @@ def test_extract_usage_gptme_no_metadata():
     # Byte metrics are returned even without token metadata (the primary gptme use case)
     assert result["session_total_bytes"] == len("test".encode())
     assert result["total_tokens"] == 0
-    assert result["cost"] == 0.0
+    assert "cost" not in result
 
 
 def test_extract_usage_gptme_truly_empty():
@@ -2599,6 +2599,20 @@ def test_extract_usage_gptme_byte_metrics_without_token_data():
     assert result["context_peak_bytes"] == len(sys_content.encode()) + len(user_content.encode())
     # Token fields are zero since no metadata
     assert result["total_tokens"] == 0
+    assert "cost" not in result
+
+
+def test_extract_usage_gptme_explicit_zero_cost_is_reported():
+    """An explicit zero remains distinct from unavailable cost data."""
+    result = extract_usage_gptme(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "metadata": {"model": "local/model", "cost": 0.0},
+            }
+        ]
+    )
     assert result["cost"] == 0.0
 
 

@@ -1206,6 +1206,7 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     cache_read_tokens = 0
     cache_creation_tokens = 0
     cost = 0.0
+    cost_found = False
     model: str | None = None
     sys_prompt_tokens: int | None = None
     context_peak_tokens: int | None = None
@@ -1285,22 +1286,24 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         context_peak_tokens = (
             turn_context if context_peak_tokens is None else max(context_peak_tokens, turn_context)
         )
-        cost += metadata.get("cost", 0.0)
+        reported_cost = metadata.get("cost")
+        if not isinstance(reported_cost, bool) and isinstance(reported_cost, (int, float)):
+            cost += float(reported_cost)
+            cost_found = True
 
     total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
     has_byte_metrics = any(
         v is not None
         for v in (sys_prompt_bytes, first_turn_bytes, context_peak_bytes, session_total_bytes)
     )
-    if total_tokens == 0 and cost == 0.0 and not has_byte_metrics:
+    if total_tokens == 0 and not cost_found and not has_byte_metrics:
         return {}
-    return {
+    result: dict[str, object] = {
         "model": model,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_read_tokens": cache_read_tokens,
         "cache_creation_tokens": cache_creation_tokens,
-        "cost": cost,
         "total_tokens": total_tokens,
         "sys_prompt_tokens": sys_prompt_tokens,
         "context_peak_tokens": context_peak_tokens,
@@ -1309,6 +1312,9 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         "context_peak_bytes": context_peak_bytes,
         "session_total_bytes": session_total_bytes,
     }
+    if cost_found:
+        result["cost"] = cost
+    return result
 
 
 def extract_timings_gptme(msgs: list[dict]) -> dict:
@@ -2368,9 +2374,9 @@ def extract_signals_pi(msgs: list[dict]) -> dict:
     }
 
 
-def _pi_cost_number(value: object) -> float:
+def _pi_cost_number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0.0
+        return None
     return float(value)
 
 
@@ -2402,6 +2408,7 @@ def extract_usage_pi(msgs: list[dict]) -> dict:
         "cache_creation": 0.0,
         "total": 0.0,
     }
+    cost_found = False
 
     for entry in active_records:
         entry_type = entry.get("type")
@@ -2481,13 +2488,17 @@ def extract_usage_pi(msgs: list[dict]) -> dict:
                 "cache_creation": _pi_cost_number(cost.get("cacheWrite")),
             }
             for key, value in turn_cost.items():
-                cost_breakdown[key] += value
-            reported_cost = cost.get("total")
-            cost_breakdown["total"] += (
-                _pi_cost_number(reported_cost)
-                if reported_cost is not None
-                else sum(turn_cost.values())
-            )
+                if value is not None:
+                    cost_breakdown[key] += value
+            reported_cost = _pi_cost_number(cost.get("total"))
+            if reported_cost is not None:
+                cost_breakdown["total"] += reported_cost
+                cost_found = True
+            elif any(value is not None for value in turn_cost.values()):
+                cost_breakdown["total"] += sum(
+                    value for value in turn_cost.values() if value is not None
+                )
+                cost_found = True
 
     if not usage_found and provider is None and model is None and stop_reason is None:
         return {}
@@ -2497,9 +2508,10 @@ def extract_usage_pi(msgs: list[dict]) -> dict:
         "cache_read_tokens": cache_read_tokens,
         "cache_creation_tokens": cache_creation_tokens,
         "total_tokens": input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens,
-        "cost": cost_breakdown["total"],
-        "cost_breakdown": cost_breakdown,
     }
+    if cost_found:
+        result["cost"] = cost_breakdown["total"]
+        result["cost_breakdown"] = cost_breakdown
     if provider is not None:
         result["provider"] = provider
     if model is not None:
