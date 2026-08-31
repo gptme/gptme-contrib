@@ -87,6 +87,7 @@ from gptodo.locks import (
 
 # Import subagent functionality (Issue #255: Multi-Agent Collaboration)
 from gptodo.subagent import (
+    SESSION_STATUSES,
     check_session,
     cleanup_sessions,
     get_session_output,
@@ -5865,8 +5866,14 @@ def _execute_task_agent(
     system_prompt_file: str | None = None,
     coordination: bool = False,
     coordination_db: str | None = None,
-):
-    """Shared logic for run and spawn commands."""
+) -> bool:
+    """Shared logic for run and spawn commands.
+
+    Returns True when the agent spawned/completed successfully, False when
+    the spawn was refused or the session ended in failed/auth_failed.
+    The sequential ``gptodo loop`` uses this to count failures instead of
+    treating a normal return as success.
+    """
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
@@ -5889,7 +5896,7 @@ def _execute_task_agent(
             console.print(
                 "\nWait for agents to finish, or kill one with: [cyan]gptodo kill <session-id>[/]"
             )
-            return
+            return False
 
     # Find the task
     tasks = load_tasks(tasks_dir)
@@ -5908,7 +5915,7 @@ def _execute_task_agent(
 
     if not task:
         console.print(f"[red]Error: Task '{task_id}' not found[/]")
-        return
+        return False
 
     # Build prompt from task if not provided
     if not prompt:
@@ -5953,9 +5960,9 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         coordination_db=coordination_db,
     )
 
-    if session.status == "failed":
+    if session.status in ("failed", "auth_failed"):
         console.print(f"[red]✗ Failed to {action.lower()} agent:[/] {session.error}")
-        return
+        return False
 
     console.print(
         f"[green]✓ Agent {'spawned' if background else 'completed'}:[/] {session.session_id}"
@@ -5969,6 +5976,7 @@ Focus on making progress on this task. When done, summarize what you accomplishe
         console.print(f"  Status: {session.status}")
         if session.error:
             console.print(f"  Error: {session.error}")
+    return True
 
 
 @cli.command("run")
@@ -6319,7 +6327,7 @@ def loop_cmd(
         for i, task in enumerate(tasks_to_run, 1):
             console.print(f"\n[bold]Task {i}/{len(tasks_to_run)}: {task.name}[/]")
             try:
-                _execute_task_agent(
+                ok = _execute_task_agent(
                     task_id=task.name,
                     prompt=None,
                     agent_type=agent_type,
@@ -6328,7 +6336,10 @@ def loop_cmd(
                     model=model,
                     timeout=timeout,
                 )
-                completed += 1
+                if ok:
+                    completed += 1
+                else:
+                    failed += 1
             except Exception as e:
                 console.print(f"[red]Error: {e}[/]")
                 failed += 1
@@ -6340,7 +6351,7 @@ def loop_cmd(
 @click.option(
     "--status",
     "-s",
-    type=click.Choice(["running", "completed", "failed", "killed"]),
+    type=click.Choice(list(SESSION_STATUSES)),
     help="Filter by status",
 )
 @click.option(
@@ -6388,6 +6399,7 @@ def sessions_cmd(status: str | None, as_json: bool):
         "running": "yellow",
         "completed": "green",
         "failed": "red",
+        "auth_failed": "red",
         "killed": "dim",
     }
 
@@ -6467,7 +6479,8 @@ def kill_cmd(session_id: str):
 def cleanup_sessions_cmd(older_than: int):
     """Clean up old session files.
 
-    Removes completed/failed session files older than the specified time.
+    Removes completed/failed/auth_failed/killed session files older than the
+    specified time.
     """
     repo_root = find_repo_root(Path.cwd())
     count = cleanup_sessions(repo_root, older_than)
