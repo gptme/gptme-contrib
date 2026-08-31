@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 
 PI_SESSION_VERSION = 3
+# Bump whenever Pi extraction output or field semantics change. Sync persists
+# this separately from the source-file revision so unchanged trajectories are
+# reprocessed once after parser/schema improvements.
+PI_EXTRACTION_SCHEMA_VERSION = 1
 
 _PI_ENTRY_TYPES = frozenset(
     {
@@ -23,6 +28,19 @@ _PI_ENTRY_TYPES = frozenset(
 
 class PiSessionFormatError(ValueError):
     """Raised when a Pi-looking JSONL file is not a supported native session."""
+
+
+def reject_nonfinite_json(value: str) -> None:
+    """Match JavaScript ``JSON.parse`` by rejecting NaN and infinities."""
+    raise ValueError(f"invalid JSON constant {value}")
+
+
+def parse_finite_json_float(value: str) -> float:
+    """Parse a JSON float while rejecting values outside finite float range."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"JSON number is not finite: {value}")
+    return parsed
 
 
 def is_pi_session_header(record: object) -> bool:
@@ -63,7 +81,7 @@ def validate_pi_records(records: list[dict]) -> list[dict]:
         if not isinstance(entry, dict):
             raise PiSessionFormatError(f"Pi entry on JSONL line {index} is not an object")
         entry_type = entry.get("type")
-        if entry_type not in _PI_ENTRY_TYPES:
+        if not isinstance(entry_type, str) or entry_type not in _PI_ENTRY_TYPES:
             raise PiSessionFormatError(
                 f"unsupported Pi v3 entry type {entry_type!r} on JSONL line {index}"
             )

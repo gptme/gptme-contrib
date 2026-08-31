@@ -302,6 +302,27 @@ def test_malformed_pi_json_fails_visibly(tmp_path: Path) -> None:
         parse_trajectory(path)
 
 
+@pytest.mark.parametrize(
+    "invalid_value",
+    ["NaN", "1e400", "[" * 10000 + "0" + "]" * 10000],
+    ids=["nonfinite-constant", "nonfinite-exponent", "recursive"],
+)
+def test_strict_pi_json_failures_fail_visibly(tmp_path: Path, invalid_value: str) -> None:
+    path = tmp_path / "strict-invalid.jsonl"
+    path.write_text(
+        json.dumps(_header())
+        + "\n"
+        + '{"type":"custom","id":"bad","parentId":null,'
+        + '"timestamp":"2026-08-31T12:00:01Z","value":'
+        + invalid_value
+        + "}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PiSessionFormatError, match="invalid JSON.*line 2"):
+        parse_trajectory(path)
+
+
 def test_provider_error_and_failed_tool_are_errors() -> None:
     records = [
         _header(),

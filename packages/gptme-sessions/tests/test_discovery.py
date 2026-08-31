@@ -737,6 +737,25 @@ def test_discover_pi_sessions_direct_env_override_wins(
     assert result == [direct_session.resolve()]
 
 
+def test_discover_pi_sessions_keeps_named_user_env_path_literal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi only expands bare ``~``/``~/``; ``~username`` stays cwd-relative."""
+    literal_sessions = tmp_path / "~pi-user-that-does-not-exist" / "sessions"
+    session = _make_pi_session(
+        literal_sessions,
+        "literal.jsonl",
+        "2026-03-05T10:00:00Z",
+        "pi-literal-env",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", "~pi-user-that-does-not-exist/sessions")
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [session.resolve()]
+
+
 def test_discover_pi_sessions_agent_dir_env_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -753,6 +772,108 @@ def test_discover_pi_sessions_agent_dir_env_fallback(
     result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
 
     assert result == [session.resolve()]
+
+
+def test_discover_pi_sessions_uses_project_settings_session_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi's project setting overrides its global setting and agent default."""
+    agent = tmp_path / "agent"
+    global_sessions = tmp_path / "global-sessions"
+    project_sessions = tmp_path / ".pi" / "custom-sessions"
+    agent.mkdir()
+    (tmp_path / ".pi").mkdir()
+    (agent / "settings.json").write_text(json.dumps({"sessionDir": str(global_sessions)}))
+    (tmp_path / ".pi" / "settings.json").write_text(
+        json.dumps({"sessionDir": ".pi/custom-sessions"})
+    )
+    _make_pi_session(
+        global_sessions,
+        "global.jsonl",
+        "2026-03-05T10:00:00Z",
+        "pi-global",
+    )
+    project_session = _make_pi_session(
+        project_sessions,
+        "project.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-project",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [project_session.resolve()]
+
+
+def test_discover_pi_sessions_keeps_named_user_setting_path_literal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    (tmp_path / ".pi").mkdir()
+    (tmp_path / ".pi" / "settings.json").write_text(json.dumps({"sessionDir": "~bob/pi-literal"}))
+    session = _make_pi_session(
+        tmp_path / "~bob" / "pi-literal",
+        "literal.jsonl",
+        "2026-03-05T10:00:00Z",
+        "pi-literal-setting",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [session.resolve()]
+
+
+def test_discover_pi_sessions_uses_global_settings_session_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = tmp_path / "agent"
+    configured_sessions = tmp_path / "configured-sessions"
+    agent.mkdir()
+    (agent / "settings.json").write_text(json.dumps({"sessionDir": str(configured_sessions)}))
+    session = _make_pi_session(
+        configured_sessions,
+        "configured.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-configured",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [session.resolve()]
+
+
+def test_discover_pi_sessions_isolates_recursive_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = tmp_path / "agent"
+    sessions = agent / "sessions"
+    agent.mkdir()
+    (agent / "settings.json").write_text("[" * 10000 + "0" + "]" * 10000)
+    session = _make_pi_session(
+        sessions,
+        "default.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-default",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [session.resolve()]
+    assert "Ignoring unreadable Pi global settings" in caplog.text
 
 
 def test_discover_pi_sessions_keeps_tiny_noop_and_does_not_mutate(tmp_path: Path) -> None:
@@ -875,6 +996,45 @@ def test_discover_pi_sessions_rejects_non_native_pi_formats(
     assert error_match in caplog.text
 
 
+def test_discover_pi_sessions_isolates_unhashable_entry_type(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    malformed = tmp_path / "unhashable-entry-type.jsonl"
+    malformed.write_text(
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": "unhashable-entry-type",
+                "timestamp": "2026-03-05T10:00:00Z",
+                "cwd": "/workspace",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": [],
+                "id": "bad-entry",
+                "parentId": None,
+                "timestamp": "2026-03-05T10:00:01Z",
+            }
+        )
+        + "\n"
+    )
+    valid = _make_pi_session(
+        tmp_path,
+        "valid.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-valid",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [valid.resolve()]
+    assert "unsupported Pi v3 entry type []" in caplog.text
+
+
 def test_discover_pi_sessions_rejects_malformed_native_json(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -890,6 +1050,51 @@ def test_discover_pi_sessions_rejects_malformed_native_json(
             }
         )
         + "\n{not-json\n"
+    )
+    valid = _make_pi_session(
+        tmp_path,
+        "valid.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-valid",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [valid.resolve()]
+    assert "invalid JSON on line 2" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        "NaN",
+        "1e400",
+        "[" * 10000 + "0" + "]" * 10000,
+    ],
+    ids=["nonfinite-constant", "nonfinite-exponent", "recursive"],
+)
+def test_discover_pi_sessions_isolates_strict_json_failures(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    invalid_value: str,
+) -> None:
+    malformed = tmp_path / "strict-json-failure.jsonl"
+    malformed.write_text(
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": "strict-json-failure",
+                "timestamp": "2026-03-05T10:00:00Z",
+                "cwd": "/workspace",
+            }
+        )
+        + "\n"
+        + '{"type":"custom","id":"bad","parentId":null,'
+        + '"timestamp":"2026-03-05T10:00:01Z","value":'
+        + invalid_value
+        + "}\n"
     )
     valid = _make_pi_session(
         tmp_path,
@@ -933,6 +1138,84 @@ def test_discover_pi_sessions_skips_invalid_timestamp_but_keeps_sibling(
 
     assert result == [valid.resolve()]
     assert "invalid header timestamp" in caplog.text
+
+
+def test_discover_pi_sessions_skips_overflowing_utc_timestamp_but_keeps_sibling(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    overflowing = tmp_path / "overflowing-timestamp.jsonl"
+    overflowing.write_text(
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": "overflowing-timestamp",
+                "timestamp": "9999-12-31T23:59:59-14:00",
+                "cwd": "/workspace",
+            }
+        )
+        + "\n"
+    )
+    valid = _make_pi_session(
+        tmp_path,
+        "valid.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-valid",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [valid.resolve()]
+    assert "invalid header timestamp" in caplog.text
+
+
+def test_discover_pi_sessions_filters_old_headers_before_full_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gptme_sessions.discovery as discovery_module
+
+    old = _make_pi_session(
+        tmp_path,
+        "old.jsonl",
+        "2020-03-05T11:00:00Z",
+        "pi-old",
+    )
+    current = _make_pi_session(
+        tmp_path,
+        "current.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-current",
+    )
+    real_load = discovery_module._load_pi_native_records
+    fully_loaded: list[Path] = []
+
+    def recording_load(path: Path) -> list[dict] | None:
+        fully_loaded.append(path)
+        return real_load(path)
+
+    monkeypatch.setattr(discovery_module, "_load_pi_native_records", recording_load)
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [current.resolve()]
+    assert fully_loaded == [current]
+    assert old not in fully_loaded
+
+
+def test_discover_pi_sessions_deduplicates_canonical_aliases(tmp_path: Path) -> None:
+    target = _make_pi_session(
+        tmp_path,
+        "target.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-target",
+    )
+    (tmp_path / "alias-a.jsonl").symlink_to(target)
+    (tmp_path / "alias-b.jsonl").symlink_to(target)
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [target.resolve()]
 
 
 def test_discover_pi_sessions_skips_unreadable_file_but_keeps_sibling(

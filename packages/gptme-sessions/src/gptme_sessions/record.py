@@ -39,6 +39,25 @@ ATTEMPT_KINDS: frozenset[str] = frozenset(["repetition", "infra_retry", "unknown
 # Valid values for the dropout_depth field.
 DROPOUT_DEPTH_VALUES: frozenset[str] = frozenset(["shallow", "deep"])
 
+# Scalar fields the ``annotate`` CLI can explicitly override. Persisting this
+# provenance lets later source extraction distinguish operator decisions from
+# values it owns and may refresh.
+ANNOTATABLE_FIELDS: frozenset[str] = frozenset(
+    [
+        "model",
+        "harness",
+        "run_type",
+        "category",
+        "outcome",
+        "duration_seconds",
+        "journal_path",
+        "selector_mode",
+        "trigger",
+        "token_count",
+        "recommended_category",
+    ]
+)
+
 # Normalize model names to short canonical forms
 MODEL_ALIASES: dict[str, str] = {
     # Anthropic Claude models (bare) — dash and dot variants
@@ -327,6 +346,18 @@ class SessionRecord:
     # this may be nominal API-equivalent cost, not incremental billed spend.
     cost_usd: float | None = None
 
+    # Cheap source revision captured after a successful trajectory extraction.
+    # Pi sessions are append-only and resumable, so sync uses this to refresh
+    # cumulative signals when the native JSONL grows without reparsing
+    # unchanged historical sessions on every run.
+    trajectory_revision: str | None = None
+    trajectory_extract_version: int | None = None
+
+    # Fields explicitly overridden through ``gptme-sessions annotate``. Source
+    # refreshes must not silently replace these operator decisions, including
+    # an override that happens to equal the source value at annotation time.
+    annotated_fields: list[str] = field(default_factory=list)
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``recommended_confidence``, ``notes``).
@@ -348,10 +379,25 @@ class SessionRecord:
         # Guard against JSON null for integer field
         if self.duration_seconds is None:
             self.duration_seconds = 0
+        if self.deliverables is None:
+            self.deliverables = []
         if self.deliverable_details is None:
             self.deliverable_details = []
         if self.lesson_events is None:
             self.lesson_events = []
+        if not isinstance(self.annotated_fields, list):
+            self.annotated_fields = []
+        else:
+            # Preserve first-write order for readable JSON while preventing
+            # corrupt payloads from turning membership checks into substring
+            # checks (a bare JSON string) or retaining non-field values.
+            self.annotated_fields = list(
+                dict.fromkeys(
+                    value
+                    for value in self.annotated_fields
+                    if isinstance(value, str) and value in ANNOTATABLE_FIELDS
+                )
+            )
         if self.grades is None:
             self.grades = {}
         if self.grade_reasons is None:

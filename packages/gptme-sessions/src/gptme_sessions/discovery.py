@@ -22,6 +22,8 @@ from .pi import (
     PiSessionFormatError,
     active_pi_records,
     is_pi_session_header,
+    parse_finite_json_float,
+    reject_nonfinite_json,
     validate_pi_records,
 )
 
@@ -71,20 +73,68 @@ def _get_copilot_state_dir() -> Path:
     return DEFAULT_COPILOT_STATE_DIR
 
 
+def _expand_pi_path(value: str) -> Path:
+    """Expand Pi's supported ``~`` spellings without Python's user lookup."""
+    if value == "~":
+        return Path.home()
+    if value.startswith("~/") or (os.name == "nt" and value.startswith("~\\")):
+        return Path.home() / value[2:]
+    return Path(value)
+
+
 def _get_pi_sessions_dir() -> Path:
-    """Get Pi's native session directory from env or the upstream default.
+    """Get Pi's native session directory using Pi's startup precedence.
 
     ``PI_CODING_AGENT_SESSION_DIR`` is Pi's direct session-directory override.
-    When only ``PI_CODING_AGENT_DIR`` is set, Pi stores sessions below its
-    ``sessions`` child. The direct override therefore takes precedence.
+    Otherwise Pi merges global and project ``settings.json`` files, with the
+    project ``sessionDir`` winning. Relative configured paths resolve from the
+    startup working directory, matching Pi's ``SessionManager``. When no
+    override is configured, sessions live below the agent directory.
     """
     session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
     if session_dir:
-        return Path(session_dir)
-    agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
-    if agent_dir:
-        return Path(agent_dir) / "sessions"
-    return DEFAULT_PI_SESSIONS_DIR
+        return _expand_pi_path(session_dir)
+
+    agent_dir = _expand_pi_path(os.environ.get("PI_CODING_AGENT_DIR") or "~/.pi/agent")
+    configured_session_dir: str | None = None
+    for scope, settings_path in (
+        ("global", agent_dir / "settings.json"),
+        ("project", Path.cwd() / ".pi" / "settings.json"),
+    ):
+        try:
+            settings = json.loads(
+                settings_path.read_text(encoding="utf-8-sig"),
+                parse_constant=reject_nonfinite_json,
+                parse_float=parse_finite_json_float,
+            )
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+            logger.warning("Ignoring unreadable Pi %s settings %s: %s", scope, settings_path, exc)
+            continue
+        if not isinstance(settings, dict):
+            logger.warning("Ignoring non-object Pi %s settings: %s", scope, settings_path)
+            continue
+        if "sessionDir" not in settings:
+            continue
+        value = settings["sessionDir"]
+        # Pi's deep merge gives the project key precedence even when its value
+        # is null/empty. Such a value selects the normal default store rather
+        # than reviving a valid global override.
+        configured_session_dir = None
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str) or not value:
+            logger.warning(
+                "Ignoring invalid Pi %s sessionDir %r in %s", scope, value, settings_path
+            )
+            continue
+        configured_session_dir = value
+
+    if configured_session_dir is not None:
+        configured = _expand_pi_path(configured_session_dir)
+        return configured if configured.is_absolute() else Path.cwd() / configured
+    return agent_dir / "sessions"
 
 
 def _session_in_range(session_name: str, start: date, end: date) -> bool:
@@ -143,9 +193,37 @@ def _quick_pi_header(jsonl_path: Path) -> dict | None:
             first_line = session_file.readline(8192).strip()
         if not first_line:
             return None
-        header = json.loads(first_line)
+        header = json.loads(
+            first_line,
+            parse_constant=reject_nonfinite_json,
+            parse_float=parse_finite_json_float,
+        )
         return header if is_pi_session_header(header) else None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        return None
+
+
+def _pi_header_datetime(header: dict, jsonl_path: Path) -> datetime | None:
+    """Parse and UTC-normalize a Pi header timestamp without escaping failures."""
+    timestamp = header.get("timestamp")
+    if not isinstance(timestamp, str):
+        logger.warning(
+            "Skipping Pi session with invalid header timestamp %r: %s",
+            timestamp,
+            jsonl_path,
+        )
+        return None
+    try:
+        session_datetime = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if session_datetime.tzinfo is None:
+            session_datetime = session_datetime.replace(tzinfo=timezone.utc)
+        return session_datetime.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        logger.warning(
+            "Skipping Pi session with invalid header timestamp %r: %s",
+            timestamp,
+            jsonl_path,
+        )
         return None
 
 
@@ -521,7 +599,11 @@ def _load_pi_native_records(jsonl_path: Path) -> list[dict] | None:
         if not line:
             continue
         try:
-            record = json.loads(line)
+            record = json.loads(
+                line,
+                parse_constant=reject_nonfinite_json,
+                parse_float=parse_finite_json_float,
+            )
         except json.JSONDecodeError as exc:
             if pi_session and incomplete_tail and line_number == len(lines):
                 logger.warning(
@@ -532,6 +614,12 @@ def _load_pi_native_records(jsonl_path: Path) -> list[dict] | None:
             if pi_session:
                 raise PiSessionFormatError(
                     f"{jsonl_path}: invalid JSON on line {line_number}: {exc.msg}"
+                ) from exc
+            return None
+        except (ValueError, RecursionError) as exc:
+            if pi_session:
+                raise PiSessionFormatError(
+                    f"{jsonl_path}: invalid JSON on line {line_number}: {exc}"
                 ) from exc
             return None
 
@@ -573,12 +661,16 @@ def discover_pi_sessions(
     """
     if pi_dir is None:
         pi_dir = _get_pi_sessions_dir()
-    pi_dir = pi_dir.expanduser().absolute()
+    # ``_get_pi_sessions_dir`` already applies exactly Pi's supported `~`
+    # spellings. A second Path.expanduser() would reinterpret literal
+    # ``~username`` paths that Pi resolves relative to its startup cwd.
+    pi_dir = pi_dir.absolute()
     if not pi_dir.exists():
         logger.debug("Pi sessions directory does not exist: %s", pi_dir)
         return []
 
     sessions_with_dates: list[tuple[datetime, Path]] = []
+    seen_paths: set[Path] = set()
 
     def _walk_error(error: OSError) -> None:
         logger.warning("Skipping unreadable Pi session directory: %s", error)
@@ -597,6 +689,17 @@ def discover_pi_sessions(
             except OSError as exc:
                 logger.warning("Skipping unreadable Pi session candidate %s: %s", jsonl_file, exc)
                 continue
+
+            # Date-filter from the small header before materializing the full
+            # tree. The authoritative snapshot is checked again below in case
+            # a file changes between these two read-only operations.
+            quick_header = _quick_pi_header(jsonl_file)
+            if quick_header is not None:
+                quick_datetime = _pi_header_datetime(quick_header, jsonl_file)
+                if quick_datetime is None:
+                    continue
+                if not (start <= quick_datetime.date() <= end):
+                    continue
             try:
                 records = _load_pi_native_records(jsonl_file)
             except PiSessionFormatError as exc:
@@ -604,21 +707,14 @@ def discover_pi_sessions(
                 continue
             if records is None:
                 continue
-            timestamp = records[0]["timestamp"]
-            try:
-                session_datetime = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                logger.warning(
-                    "Skipping Pi session with invalid header timestamp %r: %s",
-                    timestamp,
-                    jsonl_file,
-                )
+            session_datetime = _pi_header_datetime(records[0], jsonl_file)
+            if session_datetime is None:
                 continue
-            if session_datetime.tzinfo is None:
-                session_datetime = session_datetime.replace(tzinfo=timezone.utc)
-            session_datetime = session_datetime.astimezone(timezone.utc)
             if start <= session_datetime.date() <= end:
-                sessions_with_dates.append((session_datetime, jsonl_file.resolve()))
+                resolved = jsonl_file.resolve()
+                if resolved not in seen_paths:
+                    seen_paths.add(resolved)
+                    sessions_with_dates.append((session_datetime, resolved))
     return [path for _, path in sorted(sessions_with_dates)]
 
 
