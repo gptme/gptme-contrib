@@ -4,7 +4,7 @@ Reads raw harness-specific JSONL files and produces a stable, version-tagged
 JSON contract that external consumers (dashboards, fleet operators, analysis
 tools) can depend on without parsing harness-specific formats directly.
 
-Supported harnesses: gptme, claude-code, codex, copilot, grok.
+Supported harnesses: gptme, claude-code, codex, copilot, grok, pi.
 
 Schema version: 1 (increment when breaking changes are made to the output shape).
 """
@@ -21,11 +21,8 @@ from .discovery import (
     extract_project,
     extract_session_name,
 )
-from .signals import (
-    _parse_timestamp,  # type: ignore[attr-defined]  # private but co-located
-    detect_format,
-    parse_trajectory,
-)
+from .pi import active_pi_records, pi_content_text
+from .signals import _parse_timestamp, detect_format, extract_usage_pi, parse_trajectory
 
 TRANSCRIPT_SCHEMA_VERSION = 1
 
@@ -84,7 +81,8 @@ class SessionTranscript:
     session_id : str
         Opaque session identifier (harness-specific, e.g. UUID or path stem).
     harness : str
-        One of ``"gptme"``, ``"claude-code"``, ``"codex"``, ``"copilot"``.
+        One of ``"gptme"``, ``"claude-code"``, ``"codex"``, ``"copilot"``,
+        ``"grok"``, or ``"pi"``.
     session_name : str | None
         Human-readable session name (e.g. ``"dancing-blue-fish"``).
     project : str | None
@@ -95,6 +93,14 @@ class SessionTranscript:
         ISO 8601 timestamp of the first message.
     last_activity : str | None
         ISO 8601 timestamp of the last message.
+    provider : str | None
+        Provider recorded by the active Pi branch, when available.
+    stop_reason : str | None
+        Final assistant stop reason on the active Pi branch, when available.
+    usage : dict | None
+        Exact normalized Pi token/cache/cost metadata, when available.
+    cost : float | None
+        Exact total session cost recorded by Pi, when available.
     trajectory_path : str
         Absolute path to the source JSONL file.
     capabilities : list[str]
@@ -115,6 +121,10 @@ class SessionTranscript:
     model: str | None = None
     started_at: str | None = None
     last_activity: str | None = None
+    provider: str | None = None
+    stop_reason: str | None = None
+    usage: dict[str, object] | None = None
+    cost: float | None = None
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict."""
@@ -379,6 +389,107 @@ def _normalize_copilot(msgs: list[dict]) -> list[NormalizedMessage]:
     return normalized
 
 
+def _normalize_pi(msgs: list[dict]) -> list[NormalizedMessage]:
+    """Normalize the active branch of a Pi native v3 tree session."""
+    normalized: list[NormalizedMessage] = []
+
+    for entry in active_pi_records(msgs):
+        entry_type = entry.get("type")
+        ts = _ts_str(_parse_timestamp(entry.get("timestamp", "")))
+
+        if entry_type in ("compaction", "branch_summary"):
+            summary = entry.get("summary")
+            if isinstance(summary, str) and summary:
+                normalized.append(NormalizedMessage(role="system", content=summary, timestamp=ts))
+            continue
+
+        if entry_type == "custom_message":
+            content = pi_content_text(entry.get("content"))
+            if content:
+                normalized.append(NormalizedMessage(role="system", content=content, timestamp=ts))
+            continue
+
+        if entry_type != "message":
+            continue
+        message = entry.get("message") or {}
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+
+        if role == "user":
+            content = pi_content_text(message.get("content"))
+            if content:
+                normalized.append(NormalizedMessage(role="user", content=content, timestamp=ts))
+
+        elif role == "assistant":
+            content_blocks = message.get("content")
+            if not isinstance(content_blocks, list):
+                continue
+            text = pi_content_text(content_blocks).strip()
+            if text:
+                normalized.append(NormalizedMessage(role="assistant", content=text, timestamp=ts))
+            for block in content_blocks:
+                if not isinstance(block, dict) or block.get("type") != "toolCall":
+                    continue
+                tool_name = block.get("name")
+                if not isinstance(tool_name, str) or not tool_name:
+                    continue
+                arguments = block.get("arguments")
+                normalized.append(
+                    NormalizedMessage(
+                        role="assistant",
+                        content="",
+                        timestamp=ts,
+                        tool_name=tool_name,
+                        tool_input=arguments if isinstance(arguments, dict) else {},
+                    )
+                )
+
+        elif role == "toolResult":
+            content = pi_content_text(message.get("content"))
+            normalized.append(
+                NormalizedMessage(
+                    role="tool_result",
+                    content=content,
+                    timestamp=ts,
+                    tool_result=content,
+                    is_error=message.get("isError") is True,
+                )
+            )
+
+        elif role == "bashExecution":
+            command = message.get("command")
+            output = message.get("output")
+            normalized.append(
+                NormalizedMessage(
+                    role="assistant",
+                    content="",
+                    timestamp=ts,
+                    tool_name="bash",
+                    tool_input={"command": command} if isinstance(command, str) else {},
+                )
+            )
+            output_text = output if isinstance(output, str) else ""
+            exit_code = message.get("exitCode")
+            normalized.append(
+                NormalizedMessage(
+                    role="tool_result",
+                    content=output_text,
+                    timestamp=ts,
+                    tool_result=output_text,
+                    is_error=(isinstance(exit_code, int) and exit_code != 0)
+                    or message.get("cancelled") is True,
+                )
+            )
+
+        elif role == "custom":
+            content = pi_content_text(message.get("content"))
+            if content:
+                normalized.append(NormalizedMessage(role="system", content=content, timestamp=ts))
+
+    return normalized
+
+
 def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
     """Normalize Grok Build streaming-json NDJSON messages.
 
@@ -499,7 +610,7 @@ def _extract_model(fmt: str, msgs: list[dict], path: Path) -> str | None:
 def read_transcript(path: Path) -> SessionTranscript:
     """Read a trajectory file and return a normalized SessionTranscript.
 
-    Auto-detects the harness format (gptme, claude-code, codex, copilot, grok).
+    Auto-detects the harness format (gptme, claude-code, codex, copilot, grok, pi).
     The ``messages`` list is in chronological order as they appear in the
     source file — no resorting is applied.
 
@@ -534,12 +645,15 @@ def read_transcript(path: Path) -> SessionTranscript:
         "codex": "codex",
         "copilot": "copilot",
         "grok": "grok",
+        "pi": "pi",
     }
     harness = harness_map.get(fmt, fmt)
 
     # Normalize messages
     if fmt == "claude_code":
         norm_msgs = _normalize_cc(msgs)
+    elif fmt == "pi":
+        norm_msgs = _normalize_pi(msgs)
     elif fmt == "codex":
         norm_msgs = _normalize_codex(msgs)
     elif fmt == "copilot":
@@ -564,12 +678,39 @@ def read_transcript(path: Path) -> SessionTranscript:
     session_name = extract_session_name(harness, path)
     project = extract_project(harness, path)
 
-    model = _extract_model(fmt, msgs, path)
+    pi_usage: dict[str, object] | None = None
+    pi_active_records: list[dict] | None = None
+    provider: str | None = None
+    stop_reason: str | None = None
+    cost: float | None = None
+    if fmt == "pi":
+        pi_active_records = active_pi_records(msgs)
+        header = pi_active_records[0]
+        project = str(header.get("cwd")) if header.get("cwd") else None
+        for entry in pi_active_records:
+            if entry.get("type") == "session_info" and isinstance(entry.get("name"), str):
+                session_name = entry["name"]
+        pi_usage = extract_usage_pi(msgs)
+        raw_provider = pi_usage.get("provider")
+        provider = str(raw_provider) if raw_provider else None
+        raw_stop_reason = pi_usage.get("stop_reason")
+        stop_reason = str(raw_stop_reason) if raw_stop_reason else None
+        raw_cost = pi_usage.get("cost")
+        cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else None
+
+    if pi_usage is not None:
+        raw_model = pi_usage.get("model")
+        model = str(raw_model) if raw_model else None
+    else:
+        model = _extract_model(fmt, msgs, path)
 
     # Session ID: use path stem (UUID for CC, session dir name for gptme, etc.)
     # For gptme directories, path.stem will be "conversation" after conversion,
     # so use the parent directory name instead.
-    if path.suffix == ".jsonl" and fmt == "gptme":
+    if fmt == "pi":
+        assert pi_active_records is not None
+        session_id = str(pi_active_records[0]["id"])
+    elif path.suffix == ".jsonl" and fmt == "gptme":
         session_id = path.parent.name
     else:
         session_id = path.stem if path.suffix == ".jsonl" else path.name
@@ -587,6 +728,10 @@ def read_transcript(path: Path) -> SessionTranscript:
         model=model,
         started_at=started_at,
         last_activity=last_activity,
+        provider=provider,
+        stop_reason=stop_reason,
+        usage=pi_usage,
+        cost=cost,
         trajectory_path=str(path.resolve()),
         capabilities=capabilities,
         messages=norm_msgs,

@@ -1,6 +1,7 @@
 # gptme-sessions
 
-Session tracking and analytics for agents. Supports trajectories from gptme, Claude Code, Codex, and Copilot.
+Session tracking and analytics for agents. Supports trajectories from gptme,
+Claude Code, Codex, Copilot, Grok Build, and Pi native v3 sessions.
 
 Provides an append-only JSONL-based session record system that any agent can use to track operational metadata across sessions: which harness ran, what model was used, what type of work was done, and the outcome.
 

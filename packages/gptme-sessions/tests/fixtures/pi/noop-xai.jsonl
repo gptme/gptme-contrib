@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"pi-smoke-xai-002","timestamp":"2026-08-31T18:11:32.469Z","cwd":"/workspace/bob"}
+{"type":"session_info","id":"f1312e3a","parentId":null,"timestamp":"2026-08-31T18:11:32.469Z","name":"pi-smoke-xai-002"}
+{"type":"model_change","id":"9103db2b","parentId":"f1312e3a","timestamp":"2026-08-31T18:11:32.486Z","provider":"xai","modelId":"grok-4.6"}
+{"type":"thinking_level_change","id":"e571b0d9","parentId":"9103db2b","timestamp":"2026-08-31T18:11:32.486Z","thinkingLevel":"low"}
+{"type":"message","id":"f9433db7","parentId":"e571b0d9","timestamp":"2026-08-31T18:11:32.496Z","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly: PI_XAI_SMOKE_OK"}],"timestamp":1788199892495}}
+{"type":"message","id":"86942b1b","parentId":"f9433db7","timestamp":"2026-08-31T18:11:33.749Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"[redacted]"},{"type":"text","text":"PI_XAI_SMOKE_OK"}],"api":"openai-responses","provider":"xai","model":"grok-4.6","usage":{"input":158,"output":42,"cacheRead":512,"cacheWrite":0,"reasoning":33,"totalTokens":712,"cost":{"input":0.000316,"output":0.000252,"cacheRead":0.000256,"cacheWrite":0,"total":0.0008239999999999999}},"stopReason":"stop","timestamp":1788199892526}}

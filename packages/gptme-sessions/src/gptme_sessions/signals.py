@@ -1,10 +1,12 @@
 """Extract productivity signals from agent trajectory files.
 
-Supports four trajectory formats:
+Supports six trajectory formats:
 - **gptme**: conversation.jsonl with top-level role/content/timestamp fields
 - **Claude Code**: session .jsonl with top-level type/message/timestamp fields
 - **Codex CLI**: JSONL with typed entries (session_meta, turn_context, response_item, event_msg)
 - **Copilot CLI**: JSONL with typed events (session.start, assistant.message, tool.*)
+- **Grok Build**: streaming JSON with available_commands/tool_call/end records
+- **Pi**: native v3 tree-JSONL with session header and parent-linked entries
 
 Provides grounded reward signals for Thompson sampling and session analytics
 by analyzing actual transcripts rather than self-reported journals.
@@ -24,9 +26,20 @@ from datetime import datetime
 from pathlib import Path
 
 from .deliverables import build_deliverable_detail, project_deliverable_details
+from .pi import (
+    PiSessionFormatError,
+    active_pi_records,
+    is_pi_session_header,
+    pi_content_text,
+    pi_usage_sources,
+    validate_pi_records,
+)
 
 # Regex for git commit lines in shell output (works for both harnesses)
-_COMMIT_RE = re.compile(r"\[(?:master|main|[a-zA-Z0-9_/-]+)\s+([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)")
+_COMMIT_RE = re.compile(
+    r"\[(?:master|main|[a-zA-Z0-9_/-]+)(?: \(root-commit\))?\s+"
+    r"([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)"
+)
 
 # Tools that write files in Claude Code
 # Note: gptme has a "patch" tool but Claude Code does not — no "Patch" here
@@ -208,27 +221,37 @@ _CI_FAILURE_LOG_CMD_RE = re.compile(r"gh\s+run\s+view\b.*--log-failed")
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
     msgs = []
+    pi_session = False
     with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
-                msgs.append(json.loads(line))
-            except json.JSONDecodeError:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if pi_session:
+                    raise PiSessionFormatError(
+                        f"invalid JSON in Pi session on line {line_number}: {exc.msg}"
+                    ) from exc
                 continue
+            msgs.append(record)
+            if len(msgs) == 1 and is_pi_session_header(record):
+                pi_session = True
     return msgs
 
 
 def _detect_format(msgs: list[dict]) -> str:
     """Detect trajectory format from parsed JSONL records.
 
-    Returns one of: 'gptme', 'claude_code', 'codex', 'copilot', 'grok'.
+    Returns one of: 'gptme', 'claude_code', 'codex', 'copilot', 'grok', 'pi'.
 
     Detection heuristics (checked in order):
     - **Codex**: first record has type='session_meta' with originator='codex_exec'
     - **Copilot**: first record has type='session.start' with producer='copilot-agent'
     - **Grok Build**: first record has type='available_commands' (capability broadcast)
+    - **Pi**: first record is a native session header and all following records
+      validate as the supported v3 tree schema
     - **gptme**: any record has a top-level 'role' field
     - **Claude Code**: any record has type in (user, assistant, result)
 
@@ -237,6 +260,13 @@ def _detect_format(msgs: list[dict]) -> str:
     """
     if msgs:
         first = msgs[0]
+        # Pi: recognize the family before checking the exact version, then
+        # validate the native tree immediately. Unsupported versions and Pi's
+        # similarly headed print stream must fail here rather than falling
+        # through to the gptme parser and manufacturing false NOOPs.
+        if is_pi_session_header(first):
+            validate_pi_records(msgs)
+            return "pi"
         # Codex: first line is always session_meta
         if first.get("type") == "session_meta":
             payload = first.get("payload") or {}
@@ -2171,6 +2201,320 @@ def infer_category(signals: dict) -> str | None:
     return best
 
 
+_PI_WRITE_TOOLS = {"write", "edit"}
+_PI_STOP_REASONS = {"stop", "length", "toolUse", "error", "aborted"}
+
+
+def _pi_message_usage(message: object) -> dict | None:
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage")
+    return usage if isinstance(usage, dict) else None
+
+
+def extract_signals_pi(msgs: list[dict]) -> dict:
+    """Extract productivity signals from a Pi native v3 tree session.
+
+    Every stored entry is analyzed because abandoned branches still executed
+    real tools and may have produced durable work. Tree entries are counted
+    once each; embedded compaction snapshots are never traversed.
+    """
+    records = validate_pi_records(msgs)
+    tool_calls: dict[str, int] = {}
+    error_count = 0
+    git_commits: list[str] = []
+    file_writes: list[str] = []
+    journal_paths: list[str] = []
+    retry_candidates: list[str] = []
+    timestamps: list[datetime] = []
+    steps = 0
+    recent_sigs: list[str] = []
+    detail_by_value: dict[str, dict[str, object]] = {}
+    tool_by_id: dict[str, tuple[str, dict]] = {}
+    provider_errors: list[str] = []
+    stop_reason: str | None = None
+    compaction_count = 0
+    branch_summary_count = 0
+
+    for entry in records:
+        ts = _parse_timestamp(entry.get("timestamp", ""))
+        if ts is not None:
+            timestamps.append(ts)
+
+        entry_type = entry.get("type")
+        if entry_type == "compaction":
+            compaction_count += 1
+            continue
+        if entry_type == "branch_summary":
+            branch_summary_count += 1
+            continue
+        if entry_type != "message":
+            continue
+
+        message = entry.get("message") or {}
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+
+        if role == "assistant":
+            reason = message.get("stopReason")
+            if reason is not None:
+                if reason not in _PI_STOP_REASONS:
+                    raise ValueError(f"unsupported persisted Pi stop reason {reason!r}")
+                stop_reason = reason
+                if reason == "error":
+                    error_count += 1
+                    error_message = message.get("errorMessage")
+                    if isinstance(error_message, str) and error_message:
+                        provider_errors.append(error_message)
+
+            step_has_tool = False
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "toolCall":
+                    continue
+                tool = block.get("name")
+                if not isinstance(tool, str) or not tool:
+                    continue
+                arguments = block.get("arguments")
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                call_id = block.get("id")
+                if isinstance(call_id, str) and call_id:
+                    tool_by_id[call_id] = (tool, arguments)
+                tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                step_has_tool = True
+
+                if tool in _PI_WRITE_TOOLS:
+                    path = arguments.get("path") or arguments.get("file_path")
+                    if isinstance(path, str) and path:
+                        normalized_path = path.replace("\\", "/")
+                        if "/journal/" in normalized_path or normalized_path.startswith("journal/"):
+                            journal_paths.append(path)
+                        else:
+                            file_writes.append(path)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=path,
+                                kind="file",
+                                provenance_class="tool_authored",
+                                evidence={"source": "trajectory", "tool_name": tool},
+                            )
+                            sig = f"{tool}:{path}"
+                            if sig in recent_sigs:
+                                retry_candidates.append(tool)
+                            recent_sigs.append(sig)
+                            if len(recent_sigs) > 20:
+                                recent_sigs.pop(0)
+            if step_has_tool:
+                steps += 1
+
+        elif role == "toolResult":
+            if message.get("isError") is True:
+                error_count += 1
+            call_id = message.get("toolCallId")
+            matched_tool = tool_by_id.get(call_id) if isinstance(call_id, str) else None
+            if matched_tool is not None:
+                result_tool, result_arguments = matched_tool
+            else:
+                raw_tool = message.get("toolName")
+                result_tool = raw_tool if isinstance(raw_tool, str) else ""
+                result_arguments = {}
+            if result_tool != "bash":
+                continue
+            command = result_arguments.get("command")
+            if not isinstance(command, str) or not re.search(
+                r"(?:^|[;&|]\s*)git(?:-safe)?(?:-commit|\s+commit)\b", command
+            ):
+                continue
+            output = pi_content_text(message.get("content"))
+            for commit_match in _COMMIT_RE.finditer(output[:8000]):
+                commit_hash = commit_match.group(1)
+                commit_msg = commit_match.group(2).strip()
+                commit_value = f"{commit_msg} ({commit_hash})"
+                git_commits.append(commit_value)
+                _record_deliverable_detail(
+                    detail_by_value,
+                    value=commit_value,
+                    kind="commit",
+                    provenance_class="session_committed",
+                    evidence={"source": "trajectory", "tool_name": "bash"},
+                )
+
+    duration_s = 0
+    if len(timestamps) >= 2:
+        duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
+
+    git_commits = list(dict.fromkeys(git_commits))
+    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    return {
+        "tool_calls": tool_calls,
+        "steps": steps,
+        "error_count": error_count,
+        "git_commits": git_commits,
+        "file_writes": file_writes,
+        "journal_paths": list(dict.fromkeys(journal_paths)),
+        "session_duration_s": duration_s,
+        "retry_count": len(retry_candidates),
+        "deliverables": deliverables,
+        "deliverable_details": _ordered_deliverable_details(deliverables, detail_by_value),
+        "provider_errors": provider_errors,
+        "stop_reason": stop_reason,
+        "aborted": stop_reason == "aborted",
+        "compaction_count": compaction_count,
+        "branch_summary_count": branch_summary_count,
+    }
+
+
+def _pi_cost_number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
+
+
+def extract_usage_pi(msgs: list[dict]) -> dict:
+    """Normalize Pi provider/model/token/cache/cost/stop metadata.
+
+    Usage is summed once across assistant, tool, compaction, and branch-summary
+    records in the full retained tree because abandoned branches were billed.
+    ``retainedTail`` snapshots are not traversed, preventing compaction from
+    duplicating earlier message usage. Provider/model/stop metadata follows the
+    active branch.
+    """
+    records = validate_pi_records(msgs)
+    active_records = active_pi_records(msgs)
+    provider: str | None = None
+    model: str | None = None
+    stop_reason: str | None = None
+    input_tokens = 0
+    output_tokens = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
+    reasoning_tokens = 0
+    sys_prompt_tokens: int | None = None
+    context_peak_tokens: int | None = None
+    cost_breakdown = {
+        "input": 0.0,
+        "output": 0.0,
+        "cache_read": 0.0,
+        "cache_creation": 0.0,
+        "total": 0.0,
+    }
+
+    for entry in active_records:
+        entry_type = entry.get("type")
+        if entry_type == "model_change":
+            raw_provider = entry.get("provider")
+            raw_model = entry.get("modelId")
+            if isinstance(raw_provider, str) and raw_provider:
+                provider = raw_provider
+            if isinstance(raw_model, str) and raw_model:
+                model = raw_model
+            continue
+        if entry_type != "message":
+            continue
+        message = entry.get("message") or {}
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        raw_provider = message.get("provider")
+        raw_model = message.get("model")
+        if isinstance(raw_provider, str) and raw_provider:
+            provider = raw_provider
+        if isinstance(raw_model, str) and raw_model:
+            model = raw_model
+        reason = message.get("stopReason")
+        if reason is not None:
+            if reason not in _PI_STOP_REASONS:
+                raise ValueError(f"unsupported persisted Pi stop reason {reason!r}")
+            stop_reason = reason
+    for entry in records:
+        if entry.get("type") != "message":
+            continue
+        message = entry.get("message") or {}
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        usage = _pi_message_usage(message)
+        if not usage:
+            continue
+        context_tokens = (
+            (_as_int(usage.get("input")) or 0)
+            + (_as_int(usage.get("cacheRead")) or 0)
+            + (_as_int(usage.get("cacheWrite")) or 0)
+        )
+        if sys_prompt_tokens is None:
+            sys_prompt_tokens = context_tokens
+        context_peak_tokens = (
+            context_tokens
+            if context_peak_tokens is None
+            else max(context_peak_tokens, context_tokens)
+        )
+
+    usage_found = False
+    for usage in pi_usage_sources(records):
+        usage_found = True
+        turn_input = _as_int(usage.get("input")) or 0
+        turn_output = _as_int(usage.get("output")) or 0
+        turn_cache_read = _as_int(usage.get("cacheRead")) or 0
+        turn_cache_write = _as_int(usage.get("cacheWrite")) or 0
+        turn_reasoning = _as_int(usage.get("reasoning")) or 0
+        computed_total = turn_input + turn_output + turn_cache_read + turn_cache_write
+        reported_total = _as_int(usage.get("totalTokens"))
+        if reported_total is not None and reported_total != computed_total:
+            raise ValueError(
+                "Pi usage totalTokens does not equal input+output+cacheRead+cacheWrite: "
+                f"{reported_total} != {computed_total}"
+            )
+        input_tokens += turn_input
+        output_tokens += turn_output
+        cache_read_tokens += turn_cache_read
+        cache_creation_tokens += turn_cache_write
+        reasoning_tokens += turn_reasoning
+
+        cost = usage.get("cost") or {}
+        if isinstance(cost, dict):
+            turn_cost = {
+                "input": _pi_cost_number(cost.get("input")),
+                "output": _pi_cost_number(cost.get("output")),
+                "cache_read": _pi_cost_number(cost.get("cacheRead")),
+                "cache_creation": _pi_cost_number(cost.get("cacheWrite")),
+            }
+            for key, value in turn_cost.items():
+                cost_breakdown[key] += value
+            reported_cost = cost.get("total")
+            cost_breakdown["total"] += (
+                _pi_cost_number(reported_cost)
+                if reported_cost is not None
+                else sum(turn_cost.values())
+            )
+
+    if not usage_found and provider is None and model is None and stop_reason is None:
+        return {}
+    result: dict[str, object] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "total_tokens": input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens,
+        "cost": cost_breakdown["total"],
+        "cost_breakdown": cost_breakdown,
+    }
+    if provider is not None:
+        result["provider"] = provider
+    if model is not None:
+        result["model"] = model
+    if stop_reason is not None:
+        result["stop_reason"] = stop_reason
+    if reasoning_tokens:
+        result["reasoning_tokens"] = reasoning_tokens
+    if sys_prompt_tokens is not None:
+        result["sys_prompt_tokens"] = sys_prompt_tokens
+    if context_peak_tokens is not None:
+        result["context_peak_tokens"] = context_peak_tokens
+    return result
+
+
 def extract_usage_copilot(msgs: list[dict]) -> dict:
     """Extract model info, byte-level context metrics, and output tokens from Copilot trajectories.
 
@@ -2502,7 +2846,7 @@ def extract_usage_grok(msgs: list[dict]) -> dict:
 def extract_from_path(jsonl_path: Path) -> dict:
     """Parse trajectory and return signals + grade in one call.
 
-    Auto-detects format: gptme, Claude Code, Codex, Copilot, or Grok Build.
+    Auto-detects format: gptme, Claude Code, Codex, Copilot, Grok Build, or Pi.
     Token usage is extracted when available (CC has full counts, Codex has
     rate-limit percentages only, Copilot has model info only).
 
@@ -2523,6 +2867,9 @@ def extract_from_path(jsonl_path: Path) -> dict:
     if fmt == "claude_code":
         signals = extract_signals_cc(msgs)
         usage = extract_usage_cc(msgs)
+    elif fmt == "pi":
+        signals = extract_signals_pi(msgs)
+        usage = extract_usage_pi(msgs)
     elif fmt == "codex":
         signals = extract_signals_codex(msgs)
         usage = extract_usage_codex(msgs)

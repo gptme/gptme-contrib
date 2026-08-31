@@ -1,6 +1,6 @@
 """gptme-sessions — session tracking and analytics for agents.
 
-Supports trajectories from gptme, Claude Code, Codex, and Copilot.
+Supports trajectories from gptme, Claude Code, Codex, Copilot, Grok, and Pi.
 Provides append-only JSONL-based session records with query, stats,
 and analytics capabilities. Designed for any agent to track
 operational metadata across sessions.
@@ -38,9 +38,11 @@ from .signals import (
     extract_signals_cc,
     extract_signals_codex,
     extract_signals_copilot,
+    extract_signals_pi,
     extract_usage_cc,
     extract_usage_codex,
     extract_usage_gptme,
+    extract_usage_pi,
     grade_signals,
     is_productive,
 )
@@ -95,11 +97,13 @@ __all__ = [
     "extract_usage_cc",
     "extract_usage_codex",
     "extract_usage_gptme",
+    "extract_usage_pi",
     "extract_from_path",
     "extract_signals",
     "extract_signals_cc",
     "extract_signals_codex",
     "extract_signals_copilot",
+    "extract_signals_pi",
     "grade_signals",
     "is_productive",
     "discover_gptme_sessions",
