@@ -42,6 +42,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Script exits non-zero on total OR partial source failure (one
+          # GitHub topic/registry down still means an incomplete index).
           if python3 scripts/fetch-community-plugins.py; then
             echo "Community plugin index written to docs/community_plugins.json"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
