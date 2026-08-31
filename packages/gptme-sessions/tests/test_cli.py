@@ -345,6 +345,29 @@ class TestExportCommand:
         assert "invalid choice" in out.lower() or "xml" in out.lower()
 
 
+# -- cost --------------------------------------------------------------------
+
+
+class TestCostCommand:
+    def test_reported_costs_work_without_optional_estimator(self, tmp_path: Path):
+        """Reported costs, including zero, do not require gptme-usage."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(SessionRecord(model="gpt-5.6-luna", cost_usd=0.0123))
+        store.append(SessionRecord(model="local/model", cost_usd=0.0))
+
+        with patch.dict(
+            "sys.modules",
+            {"gptme_usage": None, "gptme_usage.harness_models": None},
+        ):
+            rc, out = _invoke(["cost", "--json"], tmp_path)
+
+        assert rc == 0, out
+        result = json.loads(out)
+        assert result["session_count"] == 2
+        assert result["priced_count"] == 2
+        assert result["total_cost"] == pytest.approx(0.0123)
+
+
 # -- show --------------------------------------------------------------------
 
 

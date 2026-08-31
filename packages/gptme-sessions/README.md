@@ -39,7 +39,7 @@ store.append(SessionRecord(
 ))
 
 # Query records
-recent = store.query(model="opus", since_days=7)
+recent = store.query(model="gpt-5.6-luna", since_days=7)
 
 # Get stats
 stats = store.stats()

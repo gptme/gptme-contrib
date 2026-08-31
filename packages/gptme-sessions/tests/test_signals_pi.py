@@ -248,6 +248,41 @@ def test_compaction_retained_tail_usage_is_not_double_counted() -> None:
     assert extract_signals_pi(records)["compaction_count"] == 1
 
 
+def test_missing_pi_cost_is_distinct_from_explicit_zero() -> None:
+    usage_without_cost = _usage(7)
+    usage_without_cost.pop("cost")
+    records = [
+        _header(),
+        {
+            "type": "message",
+            "id": "root",
+            "parentId": None,
+            "timestamp": "2026-08-31T12:00:01Z",
+            "message": {
+                "role": "assistant",
+                "content": "done",
+                "usage": usage_without_cost,
+                "stopReason": "stop",
+            },
+        },
+    ]
+
+    missing = extract_usage_pi(records)
+    assert "cost" not in missing
+    assert "cost_breakdown" not in missing
+
+    records[1]["message"]["usage"]["cost"] = {
+        "input": 0.0,
+        "output": 0.0,
+        "cacheRead": 0.0,
+        "cacheWrite": 0.0,
+        "total": 0.0,
+    }
+    explicit_zero = extract_usage_pi(records)
+    assert explicit_zero["cost"] == 0.0
+    assert explicit_zero["cost_breakdown"]["total"] == 0.0
+
+
 def test_pi_print_stream_is_detected_then_rejected() -> None:
     records = [_header(), {"type": "agent_start"}]
     with pytest.raises(PiSessionFormatError, match="entry type 'agent_start'"):
