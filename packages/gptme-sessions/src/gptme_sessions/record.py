@@ -581,10 +581,22 @@ class SessionRecord:
         dd = self.deliverable_details or []
         _commit_kinds = {"commit", "git_commit", "merge_commit", "pull_request"}
         commit_count = sum(1 for d in dd if d.get("kind") in _commit_kinds)
+
         # A single `gh pr merge` emits both pull_request and merge_commit
-        # for one delivery. Pair them so one merge is not stamped multi_commit.
-        pr_n = sum(1 for d in dd if d.get("kind") == "pull_request")
-        merge_n = sum(1 for d in dd if d.get("kind") == "merge_commit")
+        # with evidence.action == "gh_pr_merge". Pair only those — a bare
+        # pull_request (PR URL) plus an unrelated merge_commit must stay two
+        # deliveries, or LOO undercounts distinct work.
+        def _action(d: dict[str, Any]) -> str | None:
+            evidence = d.get("evidence")
+            if isinstance(evidence, dict):
+                action = evidence.get("action")
+                return action if isinstance(action, str) else None
+            return None
+
+        pr_n = sum(1 for d in dd if d.get("kind") == "pull_request" and _action(d) == "gh_pr_merge")
+        merge_n = sum(
+            1 for d in dd if d.get("kind") == "merge_commit" and _action(d) == "gh_pr_merge"
+        )
         commit_count -= min(pr_n, merge_n)
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 

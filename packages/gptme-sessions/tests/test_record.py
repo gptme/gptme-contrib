@@ -760,8 +760,16 @@ def test_step_types_pr_merge_pair_is_single_commit():
             "retry_depth": 0,
         },
         deliverable_details=[
-            {"kind": "pull_request", "value": "merge PR #42"},
-            {"kind": "merge_commit", "value": "merge-commit (abc1234)"},
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
         ],
     )
     r.populate_step_types()
@@ -783,7 +791,40 @@ def test_step_types_pr_merge_pair_plus_commit_is_multi():
         },
         deliverable_details=[
             {"kind": "commit", "value": "sha0"},
-            {"kind": "pull_request", "value": "merge PR #42"},
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_unrelated_pr_and_merge_commit_not_paired():
+    """Independently sourced pull_request + merge_commit stay two deliveries.
+
+    Regression for gptme/gptme-contrib#1564 Greptile P1: count-only pairing
+    collapsed a PR URL and an unrelated merge_commit into single_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "pull_request", "value": "https://github.com/org/repo/pull/99"},
             {"kind": "merge_commit", "value": "merge-commit (abc1234)"},
         ],
     )
