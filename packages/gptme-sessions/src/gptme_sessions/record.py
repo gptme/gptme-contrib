@@ -291,6 +291,14 @@ class SessionRecord:
     # importing gptme_sessions.spans. ``None`` means not yet populated.
     span_aggregates: dict[str, Any] | None = None
 
+    # Derived step-type labels, populated from span_aggregates immediately after
+    # populate_span_aggregates() runs. Each label is a short string describing a
+    # characteristic of how this session used tools (e.g. "bash_dominant",
+    # "multi_commit", "deep_session"). Used by scripts/loo-step-analysis.py for
+    # within-session credit assignment (LOO over step-type mixes).
+    # ``None`` means not yet computed (pre-dates this field or trajectory absent).
+    step_types: list[str] | None = None
+
     # Whether the tool-output summarizer fired at least once during this session.
     # Detected by scanning the trajectory for the summarization marker text.
     # True = summarizer ran; False = summarizer enabled but no eviction happened;
@@ -473,7 +481,100 @@ class SessionRecord:
             "tool_counts": agg.tool_counts,
             "retry_depth": agg.retry_depth,
         }
+        self.populate_step_types()
         return True
+
+    def populate_step_types(self) -> None:
+        """Derive step-type labels from span_aggregates and deliverable_details.
+
+        Step types are binary attributes that characterize how a session used
+        its tool budget. They enable LOO-style attribution (see
+        scripts/loo-step-analysis.py) without requiring trajectory re-parsing.
+
+        Idempotent: re-running on an already-populated record updates in place.
+        """
+        sa = self.span_aggregates or {}
+        raw_counts: dict[str, int] = sa.get("tool_counts") or {}
+        total_spans = max(sa.get("total_spans") or 1, 1)
+        error_spans = sa.get("error_spans") or 0
+        retry_depth = sa.get("retry_depth") or 0
+
+        # Normalize harness-specific tool names
+        _aliases = {
+            "shell": "Bash",
+            "ipython": "Bash",
+            "save": "Write",
+            "patch": "Edit",
+            "append": "Edit",
+            "read": "Read",
+            "todo": "TaskOp",
+            "complete": "TaskOp",
+            "agent": "Agent",
+            "subagent": "Agent",
+        }
+        tc: dict[str, int] = {}
+        for tool, count in raw_counts.items():
+            normalized = _aliases.get(tool.lower(), tool)
+            tc[normalized] = tc.get(normalized, 0) + count
+
+        bash_count = tc.get("Bash", 0)
+        read_count = tc.get("Read", 0)
+        edit_count = tc.get("Edit", 0) + tc.get("Write", 0)
+        agent_count = tc.get("Agent", 0)
+        task_op_count = tc.get("TaskOp", 0)
+
+        bash_ratio = bash_count / total_spans
+        read_ratio = read_count / total_spans
+        edit_ratio = edit_count / total_spans
+        tool_diversity = len([v for v in tc.values() if v > 0])
+        error_rate = error_spans / total_spans
+
+        step_types: list[str] = []
+
+        # Tool-use patterns
+        if bash_ratio > 0.60:
+            step_types.append("bash_dominant")
+        if read_ratio > 0.20:
+            step_types.append("read_heavy")
+        if edit_ratio > 0.12:
+            step_types.append("edit_focused")
+        if agent_count > 0:
+            step_types.append("agent_spawner")
+        if task_op_count > 2:
+            step_types.append("task_op_heavy")
+
+        # Session depth / diversity
+        if tool_diversity >= 5:
+            step_types.append("high_tool_diversity")
+        if total_spans >= 40:
+            step_types.append("deep_session")
+        elif total_spans <= 10:
+            step_types.append("shallow_session")
+
+        # Quality / reliability
+        if error_spans == 0 and total_spans >= 5:
+            step_types.append("error_free")
+        if retry_depth >= 2:
+            step_types.append("retry_heavy")
+        if error_rate > 0.10:
+            step_types.append("error_prone")
+
+        # Delivery patterns (from deliverable_details)
+        dd = self.deliverable_details or []
+        commit_count = sum(1 for d in dd if d.get("kind") == "commit")
+        file_count = sum(1 for d in dd if d.get("kind") == "file")
+
+        if commit_count == 0:
+            step_types.append("no_commit")
+        elif commit_count == 1:
+            step_types.append("single_commit")
+        elif commit_count >= 3:
+            step_types.append("multi_commit")
+
+        if commit_count > 0 and file_count > 0:
+            step_types.append("mixed_deliverables")
+
+        self.step_types = step_types
 
     @property
     def model_normalized(self) -> str | None:
