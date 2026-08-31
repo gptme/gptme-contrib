@@ -511,8 +511,10 @@ class SessionRecord:
             "write_stdin": "Bash",
             "exec": "Bash",
             "save": "Write",
+            "write": "Write",
             "patch": "Edit",
             "append": "Edit",
+            "edit": "Edit",
             "apply_patch": "Edit",
             "read": "Read",
             "todo": "TaskOp",
@@ -579,6 +581,11 @@ class SessionRecord:
         dd = self.deliverable_details or []
         _commit_kinds = {"commit", "git_commit", "merge_commit", "pull_request"}
         commit_count = sum(1 for d in dd if d.get("kind") in _commit_kinds)
+        # A single `gh pr merge` emits both pull_request and merge_commit
+        # for one delivery. Pair them so one merge is not stamped multi_commit.
+        pr_n = sum(1 for d in dd if d.get("kind") == "pull_request")
+        merge_n = sum(1 for d in dd if d.get("kind") == "merge_commit")
+        commit_count -= min(pr_n, merge_n)
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 
         # Partition on commit cardinality: 0 / 1 / 2+. Two-commit sessions

@@ -707,6 +707,8 @@ def test_populate_span_aggregates_also_populates_step_types(tmp_path: Path):
         ({"TodoWrite": 3, "Bash": 7}, "task_op_heavy"),
         ({"Task": 1, "Bash": 9}, "agent_spawner"),
         ({"write_stdin": 10}, "bash_dominant"),
+        ({"write": 5, "Bash": 5}, "edit_focused"),
+        ({"edit": 5, "Bash": 5}, "edit_focused"),
     ],
 )
 def test_step_types_cross_harness_aliases(tool_counts: dict, expected: str):
@@ -741,6 +743,54 @@ def test_step_types_commit_bearing_kinds(kind: str):
     labels = r.step_types or []
     assert "no_commit" not in labels
     assert "single_commit" in labels
+
+
+def test_step_types_pr_merge_pair_is_single_commit():
+    """A paired pull_request + merge_commit is one logical delivery.
+
+    Regression for gptme/gptme-contrib#1564 Greptile P1: `gh pr merge`
+    records both kinds, so entry-based counting stamped multi_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "pull_request", "value": "merge PR #42"},
+            {"kind": "merge_commit", "value": "merge-commit (abc1234)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+    assert "no_commit" not in labels
+
+
+def test_step_types_pr_merge_pair_plus_commit_is_multi():
+    """A PR-merge pair plus a separate commit is still multi_commit."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "sha0"},
+            {"kind": "pull_request", "value": "merge PR #42"},
+            {"kind": "merge_commit", "value": "merge-commit (abc1234)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
 
 
 def test_step_types_zero_spans_not_shallow():
