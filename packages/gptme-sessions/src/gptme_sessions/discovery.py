@@ -1,9 +1,13 @@
 """Discover session files across agent harnesses.
 
 Scans known session directories for gptme, Claude Code, Codex CLI,
-and Copilot CLI, filtering by date range. This replaces the directory
+Copilot CLI, and Pi, filtering by date range. This replaces the directory
 scanning logic previously duplicated in gptme-activity-summary's
 session_data.py and cc_session_data.py.
+
+Discovery is read-only. In particular, Pi's native tree JSONL files are
+historical artifacts: callers may retain their paths in session records, but
+must not move, rewrite, or delete the source files during discovery or sync.
 """
 
 from __future__ import annotations
@@ -11,8 +15,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
+
+from .pi import (
+    PiSessionFormatError,
+    active_pi_records,
+    is_pi_session_header,
+    validate_pi_records,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +31,7 @@ DEFAULT_GPTME_LOGS_DIR = Path.home() / ".local" / "share" / "gptme" / "logs"
 DEFAULT_CC_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 DEFAULT_CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 DEFAULT_COPILOT_STATE_DIR = Path.home() / ".copilot" / "session-state"
+DEFAULT_PI_SESSIONS_DIR = Path.home() / ".pi" / "agent" / "sessions"
 
 # CC emits these as the assistant `model` field when no real model ran
 # (e.g. authentication failure 401 → message with model="<synthetic>"),
@@ -57,6 +69,22 @@ def _get_copilot_state_dir() -> Path:
     if env_dir:
         return Path(env_dir)
     return DEFAULT_COPILOT_STATE_DIR
+
+
+def _get_pi_sessions_dir() -> Path:
+    """Get Pi's native session directory from env or the upstream default.
+
+    ``PI_CODING_AGENT_SESSION_DIR`` is Pi's direct session-directory override.
+    When only ``PI_CODING_AGENT_DIR`` is set, Pi stores sessions below its
+    ``sessions`` child. The direct override therefore takes precedence.
+    """
+    session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    if session_dir:
+        return Path(session_dir)
+    agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
+    if agent_dir:
+        return Path(agent_dir) / "sessions"
+    return DEFAULT_PI_SESSIONS_DIR
 
 
 def _session_in_range(session_name: str, start: date, end: date) -> bool:
@@ -106,6 +134,19 @@ def _quick_date_from_jsonl(jsonl_path: Path) -> date | None:
     """
     dt = _quick_datetime_from_jsonl(jsonl_path)
     return dt.date() if dt else None
+
+
+def _quick_pi_header(jsonl_path: Path) -> dict | None:
+    """Read Pi's small first-line session header without scanning the tree."""
+    try:
+        with jsonl_path.open(encoding="utf-8") as session_file:
+            first_line = session_file.readline(8192).strip()
+        if not first_line:
+            return None
+        header = json.loads(first_line)
+        return header if is_pi_session_header(header) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def decode_cc_project_path(encoded: str) -> str:
@@ -428,6 +469,159 @@ def discover_codex_sessions(
     return [path for _, path in sorted(dated_sessions)]
 
 
+def _load_pi_native_records(jsonl_path: Path) -> list[dict] | None:
+    """Load a Pi native session candidate, returning ``None`` for non-Pi JSONL.
+
+    Once the first record identifies the file as Pi, parsing is strict: invalid
+    JSON, print-stream events, malformed trees, and unsupported versions raise
+    :class:`PiSessionFormatError`. The one exception is an unterminated final
+    fragment from a session that Pi is actively appending: discovery parses the
+    last complete newline-delimited prefix. This prevents a normal concurrent
+    write from temporarily hiding the session while still failing closed on
+    malformed complete records and future formats.
+    """
+    records: list[dict] = []
+    pi_session = False
+    try:
+        snapshot = jsonl_path.read_bytes()
+    except OSError as exc:
+        logger.warning("Skipping unreadable Pi session candidate %s: %s", jsonl_path, exc)
+        return None
+
+    if not snapshot:
+        return None
+
+    incomplete_tail = not snapshot.endswith((b"\n", b"\r"))
+    try:
+        text = snapshot.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # A concurrent append can expose only the first bytes of a UTF-8 code
+        # point. Keep the last complete newline-delimited prefix in that one
+        # case; decoding errors inside completed records remain visible.
+        if not incomplete_tail or exc.end != len(snapshot):
+            logger.warning("Skipping unreadable Pi session candidate %s: %s", jsonl_path, exc)
+            return None
+        stable_end = snapshot.rfind(b"\n") + 1
+        if stable_end <= 0:
+            return None
+        try:
+            text = snapshot[:stable_end].decode("utf-8")
+        except UnicodeDecodeError as stable_exc:
+            logger.warning(
+                "Skipping unreadable Pi session candidate %s: %s", jsonl_path, stable_exc
+            )
+            return None
+        logger.warning(
+            "Reading stable prefix of Pi session with an incomplete UTF-8 tail: %s", jsonl_path
+        )
+
+    lines = text.splitlines()
+    for line_number, line in enumerate(lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if pi_session and incomplete_tail and line_number == len(lines):
+                logger.warning(
+                    "Reading stable prefix of Pi session with an incomplete JSON tail: %s",
+                    jsonl_path,
+                )
+                break
+            if pi_session:
+                raise PiSessionFormatError(
+                    f"{jsonl_path}: invalid JSON on line {line_number}: {exc.msg}"
+                ) from exc
+            return None
+
+        if not records:
+            if not is_pi_session_header(record):
+                return None
+            pi_session = True
+        if not isinstance(record, dict):
+            raise PiSessionFormatError(
+                f"{jsonl_path}: record on line {line_number} is not an object"
+            )
+        records.append(record)
+
+    if not records:
+        return None
+    try:
+        return validate_pi_records(records)
+    except PiSessionFormatError as exc:
+        raise PiSessionFormatError(f"{jsonl_path}: {exc}") from exc
+
+
+def discover_pi_sessions(
+    start: date,
+    end: date,
+    pi_dir: Path | None = None,
+) -> list[Path]:
+    """Find native Pi v3 tree-JSONL sessions within a date range.
+
+    Pi's default store is ``~/.pi/agent/sessions/`` and is organized into
+    per-workspace subdirectories, while ``--session-dir`` may point at a flat
+    custom directory. Discovery therefore scans recursively and validates each
+    Pi-looking file as the native v3 tree schema. Print-mode streams, malformed
+    trees, and future versions are visibly warned and skipped instead of
+    becoming false NOOPs or hiding readable sibling sessions.
+
+    No minimum-size filter is applied: a small, genuine NOOP is still a
+    historical session. This function is strictly read-only and never moves,
+    rewrites, truncates, or deletes a source trajectory.
+    """
+    if pi_dir is None:
+        pi_dir = _get_pi_sessions_dir()
+    pi_dir = pi_dir.expanduser().absolute()
+    if not pi_dir.exists():
+        logger.debug("Pi sessions directory does not exist: %s", pi_dir)
+        return []
+
+    sessions_with_dates: list[tuple[datetime, Path]] = []
+
+    def _walk_error(error: OSError) -> None:
+        logger.warning("Skipping unreadable Pi session directory: %s", error)
+
+    for root, directory_names, file_names in os.walk(
+        pi_dir, topdown=True, onerror=_walk_error, followlinks=False
+    ):
+        directory_names.sort()
+        for file_name in sorted(file_names):
+            if not file_name.endswith(".jsonl"):
+                continue
+            jsonl_file = Path(root) / file_name
+            try:
+                if not jsonl_file.is_file():
+                    continue
+            except OSError as exc:
+                logger.warning("Skipping unreadable Pi session candidate %s: %s", jsonl_file, exc)
+                continue
+            try:
+                records = _load_pi_native_records(jsonl_file)
+            except PiSessionFormatError as exc:
+                logger.warning("Skipping malformed or unsupported Pi session: %s", exc)
+                continue
+            if records is None:
+                continue
+            timestamp = records[0]["timestamp"]
+            try:
+                session_datetime = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Skipping Pi session with invalid header timestamp %r: %s",
+                    timestamp,
+                    jsonl_file,
+                )
+                continue
+            if session_datetime.tzinfo is None:
+                session_datetime = session_datetime.replace(tzinfo=timezone.utc)
+            session_datetime = session_datetime.astimezone(timezone.utc)
+            if start <= session_datetime.date() <= end:
+                sessions_with_dates.append((session_datetime, jsonl_file.resolve()))
+    return [path for _, path in sorted(sessions_with_dates)]
+
+
 def session_date_from_path(harness: str, path: Path) -> date | None:
     """Extract session date from a discovered session path.
 
@@ -435,7 +629,7 @@ def session_date_from_path(harness: str, path: Path) -> date | None:
 
     - **gptme**: parse from session directory name (``YYYY-MM-DD-…``)
     - **codex**: parse from directory structure (``…/YYYY/MM/DD/file.jsonl``)
-    - **claude-code**, **copilot**: read first timestamp from the JSONL file
+    - **claude-code**, **copilot**, **pi**: read first timestamp from the JSONL file
 
     Returns ``None`` if the date cannot be determined.
     """
@@ -454,15 +648,15 @@ def session_date_from_path(harness: str, path: Path) -> date | None:
         except (ValueError, IndexError):
             return None
     else:
-        # claude-code, copilot: date is embedded in the JSONL file
+        # claude-code, copilot, pi: date is embedded in the JSONL file
         return _quick_date_from_jsonl(path)
 
 
 def session_datetime_from_path(harness: str, path: Path) -> datetime | None:
     """Extract session start datetime from a discovered session path.
 
-    For **claude-code** and **copilot**, reads the first event timestamp from
-    the JSONL file, yielding a real datetime (not a placeholder).
+    For **claude-code**, **copilot**, and **pi**, reads the first event timestamp
+    from the JSONL file, yielding a real datetime (not a placeholder).
     For **gptme** and **codex**, the path structure only encodes a date, so this
     returns ``None`` unless the session's JSONL can be located and read.
 
@@ -484,7 +678,7 @@ def session_datetime_from_path(harness: str, path: Path) -> datetime | None:
             return _quick_datetime_from_jsonl(path)
         return None
     else:
-        # claude-code, copilot: start time is embedded in the JSONL file
+        # claude-code, copilot, pi: start time is embedded in the JSONL file
         return _quick_datetime_from_jsonl(path)
 
 
@@ -496,6 +690,7 @@ def extract_session_name(harness: str, path: Path) -> str | None:
     - **claude-code**: first 8 characters of the JSONL filename (UUID)
     - **codex**: JSONL filename stem
     - **copilot**: parent directory name (UUID, first 8 chars)
+    - **pi**: latest active-branch session name, falling back to the full header ID
 
     Returns ``None`` if no meaningful name can be extracted.
     """
@@ -517,6 +712,18 @@ def extract_session_name(harness: str, path: Path) -> str | None:
         return path.stem[:8] if path.stem else None
     elif harness == "copilot":
         return path.parent.name[:8]
+    elif harness == "pi":
+        records = _load_pi_native_records(path)
+        if records is None:
+            return None
+        for entry in reversed(active_pi_records(records)[1:]):
+            if entry.get("type") != "session_info":
+                continue
+            name = entry.get("name")
+            if isinstance(name, str) and name:
+                return name
+        session_id = records[0].get("id")
+        return session_id if isinstance(session_id, str) and session_id else None
     return None
 
 
@@ -527,6 +734,7 @@ def extract_project(harness: str, path: Path) -> str | None:
       :func:`decode_cc_project_path` (e.g. ``-Users-erb-myproj`` → ``/Users/erb/myproj``)
     - **gptme**: read ``workspace`` from the session's ``config.toml``
     - **codex**: read ``payload.cwd`` from the first event in the JSONL file
+    - **pi**: read ``cwd`` from the native session header
 
     Returns ``None`` for harnesses where project cannot be determined.
     """
@@ -543,6 +751,12 @@ def extract_project(harness: str, path: Path) -> str | None:
     elif harness == "codex":
         # Read the first event's payload.cwd from the JSONL file
         return _first_event_cwd(path)
+    elif harness == "pi":
+        header = _quick_pi_header(path)
+        if header is None:
+            return None
+        cwd = header.get("cwd")
+        return cwd if isinstance(cwd, str) and cwd else None
     return None
 
 
