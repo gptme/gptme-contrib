@@ -1031,8 +1031,9 @@ def scan_skills(workspace: Path, source: str = "") -> list[dict]:
 def scan_community_plugins(workspace: Path) -> list[dict]:
     """Load community/external gptme extensions from community_plugins.json.
 
-    Returns an empty list when the file is missing (graceful degradation for
-    workspaces that don't run the fetch script).
+    Prefers ``docs/community_plugins.json`` (fetch-script default, gitignored
+    generated artifact) and falls back to the repo-root path used before #1449.
+    Missing file → empty list (graceful degradation).
 
     The JSON file has this shape::
 
@@ -1052,14 +1053,18 @@ def scan_community_plugins(workspace: Path) -> list[dict]:
             ]
         }
     """
-    json_path = workspace / "community_plugins.json"
-    if not json_path.exists():
+    candidates = (
+        workspace / "docs" / "community_plugins.json",
+        workspace / "community_plugins.json",
+    )
+    json_path = next((path for path in candidates if path.exists()), None)
+    if json_path is None:
         return []
     try:
         data = json.loads(json_path.read_text())
         return list(data.get("entries", []))
     except Exception as exc:
-        logger.warning("Failed to load community_plugins.json: %s", exc)
+        logger.warning("Failed to load %s: %s", json_path, exc)
         return []
 
 

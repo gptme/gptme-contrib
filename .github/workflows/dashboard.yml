@@ -1,6 +1,11 @@
 name: Deploy Dashboard
 
 on:
+  schedule:
+    # Monday 04:00 UTC — refresh community plugins even when the repo is quiet.
+    # Replaces the old community-plugins.yml commit-and-PR job: the JSON is a
+    # gitignored generated artifact (see #1449), so we fetch at build time.
+    - cron: '0 4 * * 1'
   push:
     branches: [master]
     paths:
@@ -9,7 +14,6 @@ on:
       - 'packages/**'
       - 'skills/**'
       - 'gptme.toml'
-      - 'community_plugins.json'
       - '.github/workflows/dashboard.yml'
   workflow_dispatch:
 
@@ -33,6 +37,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Fetch community plugins
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if python3 scripts/fetch-community-plugins.py; then
+            echo "Community plugin index written to docs/community_plugins.json"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Scheduled community-plugin fetch failed"
+            exit 1
+          else
+            echo "Fetch failed; dashboard will omit the community section"
+          fi
 
       - name: Install gptme-dashboard
         run: uv pip install --system -e packages/gptme-dashboard
