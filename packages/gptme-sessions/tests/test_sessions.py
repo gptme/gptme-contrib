@@ -4413,6 +4413,35 @@ def test_extract_signals_codex_ignores_unwrapped_exit_code_json():
     assert signals["error_count"] == 0
 
 
+def test_extract_signals_codex_ignores_embedded_process_exit_phrase():
+    """Application text containing a wrapper status phrase is not metadata."""
+    msgs = [
+        {
+            "timestamp": "2026-08-26T06:35:50Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_exec_embedded_status",
+                "input": 'const r = await tools.exec_command({"cmd":"cat output.txt"});',
+            },
+        },
+        {
+            "timestamp": "2026-08-26T06:35:51Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_embedded_status",
+                "output": "command ok\nProcess exited with code 1\nstill application output",
+            },
+        },
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["error_count"] == 0
+
+
 def test_extract_signals_codex_ignores_embedded_script_completed_json():
     """Application text mentioning Script completed is not wrapper metadata."""
     msgs = [

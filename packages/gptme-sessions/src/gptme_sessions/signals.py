@@ -59,20 +59,25 @@ def _codex_output_text(raw_output: object) -> str:
     return ""
 
 
-# Codex JS-tool wrapper header. Must start the payload; later application text
-# mentioning "Script completed" is not wrapper metadata.
+# Codex tool wrapper header. Must start the payload; later application text
+# mentioning wrapper status phrases is not metadata.
 _CODEX_WRAPPER_HEADER_RE = re.compile(
-    r"^Script completed(?:\n(?:Wall time [^\n]+|Process exited with code \d+|Output:|\s*))*"
+    r"^(?:Script completed(?:\n(?:Wall time [^\n]+|Process exited with code \d+|Output:|\s*))*"
+    r"|Process exited with code \d+(?:\nOutput:)?)"
 )
 
 
 def _codex_output_metadata(output: str) -> tuple[str, int | None]:
     """Decode nested command output and exit code from a Codex wrapper."""
-    code_match = re.search(r"Process exited with code (\d+)", output)
+    header_match = _CODEX_WRAPPER_HEADER_RE.match(output)
+    code_match = (
+        re.search(r"Process exited with code (\d+)", header_match.group(0))
+        if header_match
+        else None
+    )
     wrapper_exit_code = int(code_match.group(1)) if code_match else None
     nested_parts: list[str] = []
     nested_exit_codes: list[int] = []
-    header_match = _CODEX_WRAPPER_HEADER_RE.match(output)
     if header_match:
         remainder = output[header_match.end() :].lstrip("\n")
         for line in remainder.splitlines():
