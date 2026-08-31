@@ -32,6 +32,7 @@ from .pi import (
     is_pi_session_header,
     pi_content_text,
     pi_usage_sources,
+    reject_nonfinite_json,
     validate_pi_records,
 )
 
@@ -228,11 +229,17 @@ def parse_trajectory(jsonl_path: Path) -> list[dict]:
             if not line:
                 continue
             try:
-                record = json.loads(line)
+                record = json.loads(line, parse_constant=reject_nonfinite_json)
             except json.JSONDecodeError as exc:
                 if pi_session:
                     raise PiSessionFormatError(
                         f"invalid JSON in Pi session on line {line_number}: {exc.msg}"
+                    ) from exc
+                continue
+            except (ValueError, RecursionError) as exc:
+                if pi_session:
+                    raise PiSessionFormatError(
+                        f"invalid JSON in Pi session on line {line_number}: {exc}"
                     ) from exc
                 continue
             msgs.append(record)

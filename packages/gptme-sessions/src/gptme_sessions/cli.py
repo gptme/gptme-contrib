@@ -35,8 +35,8 @@ from .replay import (
     resolve_replay_target,
     resolve_session_record_prefix,
 )
-from .record import ATTEMPT_KINDS, SessionRecord, normalize_run_type
-from .pi import PiSessionFormatError
+from .record import ANNOTATABLE_FIELDS, ATTEMPT_KINDS, SessionRecord, normalize_run_type
+from .pi import PI_EXTRACTION_SCHEMA_VERSION, PiSessionFormatError
 from .signals import extract_from_path
 from .store import (
     SessionStore,
@@ -138,26 +138,35 @@ def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool
     return True
 
 
+def _assign_extracted_if_missing(record: SessionRecord, field: str, value: object) -> bool:
+    """Backfill an extracted value unless an operator explicitly overrode it."""
+    # Deliverables are additive evidence. ``annotate --add-deliverable`` must
+    # coexist with later source discoveries rather than freezing the list.
+    if field not in {"deliverables", "deliverable_details"} and field in record.annotated_fields:
+        return False
+    return _assign_if_missing(record, field, value)
+
+
 def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool:
     """Backfill missing fields on an existing record from ``extract_from_path`` output."""
     changed = False
 
-    if record.outcome == "unknown":
+    if record.outcome == "unknown" and "outcome" not in record.annotated_fields:
         record.outcome = "productive" if result.get("productive") else "noop"
         changed = True
-    changed |= _assign_if_missing(
+    changed |= _assign_extracted_if_missing(
         record, "duration_seconds", int(result.get("session_duration_s") or 0)
     )
-    changed |= _assign_if_missing(record, "deliverables", result.get("deliverables", []))
-    changed |= _assign_if_missing(
+    changed |= _assign_extracted_if_missing(record, "deliverables", result.get("deliverables", []))
+    changed |= _assign_extracted_if_missing(
         record, "deliverable_details", result.get("deliverable_details", [])
     )
-    changed |= _assign_if_missing(record, "category", result.get("inferred_category"))
+    changed |= _assign_extracted_if_missing(record, "category", result.get("inferred_category"))
 
     usage = result.get("usage")
     if isinstance(usage, dict):
         for usage_key, record_key in _USAGE_FIELD_MAP.items():
-            changed |= _assign_if_missing(record, record_key, usage.get(usage_key))
+            changed |= _assign_extracted_if_missing(record, record_key, usage.get(usage_key))
 
     return changed
 
@@ -172,13 +181,29 @@ def _refresh_pi_extract_result(record: SessionRecord, result: dict) -> bool:
     """
     changed = _apply_extract_result_to_record(record, result)
 
-    if result.get("productive") and record.outcome in ("unknown", "noop"):
+    usage = result.get("usage")
+    # Older extraction semantics coerced absent cost to 0.0. If the current
+    # extractor has no cost key, that zero has no source evidence and must not
+    # become permanent when we stamp the new extraction schema version.
+    if (
+        record.cost_usd == 0.0
+        and "cost_usd" not in record.annotated_fields
+        and (not isinstance(usage, dict) or "cost" not in usage)
+    ):
+        record.cost_usd = None
+        changed = True
+
+    if (
+        "outcome" not in record.annotated_fields
+        and result.get("productive")
+        and record.outcome in ("unknown", "noop")
+    ):
         if record.outcome != "productive":
             record.outcome = "productive"
             changed = True
 
     duration = int(result.get("session_duration_s") or 0)
-    if duration > record.duration_seconds:
+    if "duration_seconds" not in record.annotated_fields and duration > record.duration_seconds:
         record.duration_seconds = duration
         changed = True
 
@@ -195,12 +220,13 @@ def _refresh_pi_extract_result(record: SessionRecord, result: dict) -> bool:
             setattr(record, field, merged)
             changed = True
 
-    usage = result.get("usage")
     if not isinstance(usage, dict):
         return changed
 
     latest_fields = {"model", "provider", "stop_reason"}
     for usage_key, record_key in _USAGE_FIELD_MAP.items():
+        if record_key in record.annotated_fields:
+            continue
         value = usage.get(usage_key)
         if value is None:
             continue
@@ -215,6 +241,35 @@ def _refresh_pi_extract_result(record: SessionRecord, result: dict) -> bool:
                 changed = True
 
     return changed
+
+
+def _merge_concurrent_annotations(
+    records: list[SessionRecord], latest_records: list[SessionRecord]
+) -> None:
+    """Merge operator annotations that landed after sync's initial store read.
+
+    Sync intentionally extracts outside the store lock because trajectory
+    parsing can be slow. Before rewriting, it re-reads under the lock and uses
+    this helper so a concurrent ``annotate`` cannot be clobbered by the stale
+    same-session object. Deliverables retain additive semantics.
+    """
+    latest_by_id = {record.session_id: record for record in latest_records}
+    for record in records:
+        latest = latest_by_id.get(record.session_id)
+        if latest is None:
+            continue
+
+        annotated_fields = list(dict.fromkeys([*record.annotated_fields, *latest.annotated_fields]))
+        for field in latest.annotated_fields:
+            if field in ANNOTATABLE_FIELDS:
+                setattr(record, field, getattr(latest, field))
+        record.annotated_fields = annotated_fields
+
+        merged_deliverables = list(record.deliverables)
+        for deliverable in latest.deliverables:
+            if deliverable not in merged_deliverables:
+                merged_deliverables.append(deliverable)
+        record.deliverables = merged_deliverables
 
 
 def _apply_extract_result_to_kwargs(record_kwargs: dict, result: dict) -> None:
@@ -1388,29 +1443,37 @@ def annotate(
 
         record = matches[0]
 
+        def set_annotated(field: str, value: object) -> None:
+            """Apply an explicit override and retain its operator provenance."""
+            if field not in ANNOTATABLE_FIELDS:
+                raise ValueError(f"unsupported annotation field: {field}")
+            setattr(record, field, value)
+            if field not in record.annotated_fields:
+                record.annotated_fields.append(field)
+
         # Apply only the fields that were explicitly provided
         if model is not None:
-            record.model = model
+            set_annotated("model", model)
         if harness is not None:
-            record.harness = harness
+            set_annotated("harness", harness)
         if run_type is not None:
-            record.run_type = normalize_run_type(run_type)
+            set_annotated("run_type", normalize_run_type(run_type))
         if category is not None:
-            record.category = category
+            set_annotated("category", category)
         if outcome is not None:
-            record.outcome = outcome
+            set_annotated("outcome", outcome)
         if duration is not None:
-            record.duration_seconds = duration
+            set_annotated("duration_seconds", duration)
         if journal_path is not None:
-            record.journal_path = journal_path
+            set_annotated("journal_path", journal_path)
         if selector_mode is not None:
-            record.selector_mode = selector_mode
+            set_annotated("selector_mode", selector_mode)
         if trigger is not None:
-            record.trigger = trigger
+            set_annotated("trigger", trigger)
         if token_count is not None:
-            record.token_count = token_count
+            set_annotated("token_count", token_count)
         if recommended_category is not None:
-            record.recommended_category = recommended_category
+            set_annotated("recommended_category", recommended_category)
         if add_deliverable:
             existing = list(record.deliverables or [])
             for d in add_deliverable:
@@ -2273,6 +2336,8 @@ def sync(
     imported = 0
     updated = 0
     skipped = 0
+    duplicates = 0
+    signal_failures = 0
 
     # Warn when a large number of new sessions would be imported.
     # This catches accidental wide-window syncs (e.g. --since 90d) that inflate stats.
@@ -2295,17 +2360,22 @@ def sync(
         # guard for alternative discovery providers and files that race through
         # different spellings within one batch.
         if path_str in seen_discovered_paths:
-            skipped += 1
+            duplicates += 1
             continue
         seen_discovered_paths.add(path_str)
 
         if path_str in existing_by_path:
             existing = existing_by_path[path_str]
             needs_update = False
+            signal_extraction_failed = False
 
             # Update model if it was previously unknown and we now know it.
             entry_model = entry.get("model")
-            if entry_model and (not existing.model or existing.model == "unknown"):
+            if (
+                entry_model
+                and "model" not in existing.annotated_fields
+                and (not existing.model or existing.model == "unknown")
+            ):
                 existing.model = entry_model
                 needs_update = True
 
@@ -2325,7 +2395,10 @@ def sync(
             pi_source_changed = (
                 existing.harness == "pi"
                 and source_revision is not None
-                and source_revision != existing.trajectory_revision
+                and (
+                    source_revision != existing.trajectory_revision
+                    or existing.trajectory_extract_version != PI_EXTRACTION_SCHEMA_VERSION
+                )
             )
 
             if (
@@ -2344,9 +2417,14 @@ def sync(
                             if existing.trajectory_revision != source_revision:
                                 existing.trajectory_revision = source_revision
                                 needs_update = True
+                            if existing.trajectory_extract_version != PI_EXTRACTION_SCHEMA_VERSION:
+                                existing.trajectory_extract_version = PI_EXTRACTION_SCHEMA_VERSION
+                                needs_update = True
                         else:
                             needs_update |= _apply_extract_result_to_record(existing, result)
                     except Exception as exc:
+                        signal_failures += 1
+                        signal_extraction_failed = True
                         click.echo(
                             f"  warning: signals extraction failed for {path_str}: {exc}",
                             err=True,
@@ -2370,7 +2448,7 @@ def sync(
                 else:
                     updated_paths.add(path_str)
                     updated += 1
-            else:
+            elif not signal_extraction_failed:
                 skipped += 1
             continue
 
@@ -2415,7 +2493,9 @@ def sync(
                 _apply_extract_result_to_kwargs(record_kwargs, result)
                 if entry["harness"] == "pi":
                     record_kwargs["trajectory_revision"] = source_revision
+                    record_kwargs["trajectory_extract_version"] = PI_EXTRACTION_SCHEMA_VERSION
             except Exception as exc:
+                signal_failures += 1
                 click.echo(
                     f"  warning: signals extraction failed for {path_str}: {exc}",
                     err=True,
@@ -2430,27 +2510,35 @@ def sync(
     if not dry_run:
         if updated_paths:
             # Rewrite the store to persist in-place mutations on existing_records.
-            # NOTE: existing_records was loaded once at the start of sync; any records
-            # appended to the store by a concurrent process after that load may be lost
-            # here.  See store.rewrite() docstring for details on this known trade-off.
-            store.rewrite(existing_records + new_records)
+            # Extraction happens outside the lock; merge annotations from a
+            # final locked re-read so an operator correction cannot be lost.
+            with store.lock():
+                _merge_concurrent_annotations(existing_records, store.load_all())
+                store.rewrite(existing_records + new_records)
         else:
             for rec in new_records:
                 store.append(rec)
 
     if dry_run:
         n_would_update = len(updated_paths)
-        n_would_import = len(discovered) - skipped - n_would_update
+        unique_found = len(seen_discovered_paths)
+        n_would_import = unique_found - skipped - n_would_update
         click.echo(
-            f"\n{len(discovered)} found, {skipped} unchanged, "
+            f"\n{unique_found} found, {skipped} unchanged, "
             f"{n_would_import} would be imported"
             + (f", {n_would_update} would be updated" if n_would_update else "")
+            + (f", {duplicates} duplicate aliases" if duplicates else "")
         )
     else:
         parts = [f"Imported {imported} session(s)"]
         if updated:
             parts.append(f"updated {updated}")
         parts.append(f"{skipped} unchanged.")
+        if duplicates:
+            parts.append(f"{duplicates} duplicate aliases.")
+        if signal_failures:
+            suffix = "" if signal_failures == 1 else "s"
+            parts.append(f"{signal_failures} signal extraction failure{suffix}.")
         click.echo(", ".join(parts))
 
 

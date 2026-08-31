@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 PI_SESSION_VERSION = 3
+# Bump whenever Pi extraction output or field semantics change. Sync persists
+# this separately from the source-file revision so unchanged trajectories are
+# reprocessed once after parser/schema improvements.
+PI_EXTRACTION_SCHEMA_VERSION = 1
 
 _PI_ENTRY_TYPES = frozenset(
     {
@@ -23,6 +27,11 @@ _PI_ENTRY_TYPES = frozenset(
 
 class PiSessionFormatError(ValueError):
     """Raised when a Pi-looking JSONL file is not a supported native session."""
+
+
+def reject_nonfinite_json(value: str) -> None:
+    """Match JavaScript ``JSON.parse`` by rejecting NaN and infinities."""
+    raise ValueError(f"invalid JSON constant {value}")
 
 
 def is_pi_session_header(record: object) -> bool:

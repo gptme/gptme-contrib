@@ -22,6 +22,7 @@ from .pi import (
     PiSessionFormatError,
     active_pi_records,
     is_pi_session_header,
+    reject_nonfinite_json,
     validate_pi_records,
 )
 
@@ -80,11 +81,6 @@ def _expand_pi_path(value: str) -> Path:
     return Path(value)
 
 
-def _reject_nonfinite_json(value: str) -> None:
-    """Match JavaScript ``JSON.parse`` by rejecting NaN and infinities."""
-    raise ValueError(f"invalid JSON constant {value}")
-
-
 def _get_pi_sessions_dir() -> Path:
     """Get Pi's native session directory using Pi's startup precedence.
 
@@ -107,7 +103,7 @@ def _get_pi_sessions_dir() -> Path:
         try:
             settings = json.loads(
                 settings_path.read_text(encoding="utf-8-sig"),
-                parse_constant=_reject_nonfinite_json,
+                parse_constant=reject_nonfinite_json,
             )
         except FileNotFoundError:
             continue
@@ -195,9 +191,9 @@ def _quick_pi_header(jsonl_path: Path) -> dict | None:
             first_line = session_file.readline(8192).strip()
         if not first_line:
             return None
-        header = json.loads(first_line)
+        header = json.loads(first_line, parse_constant=reject_nonfinite_json)
         return header if is_pi_session_header(header) else None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return None
 
 
@@ -597,7 +593,7 @@ def _load_pi_native_records(jsonl_path: Path) -> list[dict] | None:
         if not line:
             continue
         try:
-            record = json.loads(line)
+            record = json.loads(line, parse_constant=reject_nonfinite_json)
         except json.JSONDecodeError as exc:
             if pi_session and incomplete_tail and line_number == len(lines):
                 logger.warning(
@@ -608,6 +604,12 @@ def _load_pi_native_records(jsonl_path: Path) -> list[dict] | None:
             if pi_session:
                 raise PiSessionFormatError(
                     f"{jsonl_path}: invalid JSON on line {line_number}: {exc.msg}"
+                ) from exc
+            return None
+        except (ValueError, RecursionError) as exc:
+            if pi_session:
+                raise PiSessionFormatError(
+                    f"{jsonl_path}: invalid JSON on line {line_number}: {exc}"
                 ) from exc
             return None
 
@@ -649,7 +651,10 @@ def discover_pi_sessions(
     """
     if pi_dir is None:
         pi_dir = _get_pi_sessions_dir()
-    pi_dir = pi_dir.expanduser().absolute()
+    # ``_get_pi_sessions_dir`` already applies exactly Pi's supported `~`
+    # spellings. A second Path.expanduser() would reinterpret literal
+    # ``~username`` paths that Pi resolves relative to its startup cwd.
+    pi_dir = pi_dir.absolute()
     if not pi_dir.exists():
         logger.debug("Pi sessions directory does not exist: %s", pi_dir)
         return []

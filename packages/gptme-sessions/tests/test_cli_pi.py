@@ -251,7 +251,35 @@ def test_sync_pi_deduplicates_aliases_within_one_run(tmp_path: Path, monkeypatch
 
     assert result.exit_code == 0, result.output
     assert "Imported 1 session(s)" in result.output
+    assert "0 unchanged" in result.output
+    assert "2 duplicate aliases" in result.output
     assert len(SessionStore(sessions_dir=sessions_dir).load_all()) == 1
+
+
+def test_sync_pi_dry_run_reports_unique_alias_accounting(tmp_path: Path, monkeypatch) -> None:
+    alias_a = tmp_path / "alias-a.jsonl"
+    alias_b = tmp_path / "alias-b.jsonl"
+    alias_a.symlink_to(PI_FIXTURE.resolve())
+    alias_b.symlink_to(PI_FIXTURE.resolve())
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_pi_sessions",
+        lambda start, end: [alias_a, PI_FIXTURE, alias_b],
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--sessions-dir",
+            str(tmp_path / "records"),
+            "sync",
+            "--harness",
+            "pi",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 found, 0 unchanged, 1 would be imported, 2 duplicate aliases" in result.output
 
 
 def test_sync_pi_refreshes_resumed_session_monotonically(tmp_path: Path, monkeypatch) -> None:
@@ -320,6 +348,195 @@ def test_sync_pi_refreshes_resumed_session_monotonically(tmp_path: Path, monkeyp
     assert stable.to_dict() == complete.to_dict()
 
 
+def test_sync_pi_refresh_preserves_explicit_annotations(tmp_path: Path, monkeypatch) -> None:
+    """A resumed trajectory refreshes signals but never operator overrides."""
+    source = tmp_path / "annotated-resume.jsonl"
+    fixture_lines = PI_FIXTURE.read_text().splitlines(keepends=True)
+    source.write_text("".join(fixture_lines[:7]))
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_pi_sessions",
+        lambda start, end: [source],
+    )
+    sessions_dir = tmp_path / "records"
+    runner = CliRunner()
+    sync_command = [
+        "--sessions-dir",
+        str(sessions_dir),
+        "sync",
+        "--harness",
+        "pi",
+        "--signals",
+    ]
+
+    first = runner.invoke(cli, sync_command)
+    assert first.exit_code == 0, first.output
+    [partial] = SessionStore(sessions_dir=sessions_dir).load_all()
+    assert partial.outcome == "noop"
+
+    annotated = runner.invoke(
+        cli,
+        [
+            "--sessions-dir",
+            str(sessions_dir),
+            "annotate",
+            partial.session_id,
+            "--outcome",
+            "noop",
+            "--model",
+            "operator-model",
+            "--duration",
+            "1",
+            "--token-count",
+            "123",
+        ],
+    )
+    assert annotated.exit_code == 0, annotated.output
+
+    source.write_text("".join(fixture_lines))
+    refreshed = runner.invoke(cli, sync_command)
+    assert refreshed.exit_code == 0, refreshed.output
+    assert "updated 1" in refreshed.output
+    [complete] = SessionStore(sessions_dir=sessions_dir).load_all()
+    assert complete.outcome == "noop"
+    assert complete.model == "operator-model"
+    assert complete.duration_seconds == 1
+    assert complete.token_count == 123
+    assert complete.provider == "openai-codex"
+    assert complete.stop_reason == "stop"
+    assert complete.input_tokens == 1154
+    assert complete.cost_usd == pytest.approx(0.0004264)
+    assert "test: create Pi fixture (526d692)" in complete.deliverables
+    assert complete.annotated_fields == [
+        "model",
+        "outcome",
+        "duration_seconds",
+        "token_count",
+    ]
+
+
+def test_sync_pi_merges_annotation_that_lands_during_extraction(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The final locked re-read wins over sync's stale same-session object."""
+    import gptme_sessions.cli as cli_module
+
+    source = tmp_path / "concurrent-annotation.jsonl"
+    fixture_lines = PI_FIXTURE.read_text().splitlines(keepends=True)
+    source.write_text("".join(fixture_lines[:7]))
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_pi_sessions",
+        lambda start, end: [source],
+    )
+    sessions_dir = tmp_path / "records"
+    runner = CliRunner()
+    command = [
+        "--sessions-dir",
+        str(sessions_dir),
+        "sync",
+        "--harness",
+        "pi",
+        "--signals",
+    ]
+    first = runner.invoke(cli, command)
+    assert first.exit_code == 0, first.output
+
+    real_extract = cli_module.extract_from_path
+
+    def annotate_after_sync_read(path: Path) -> dict:
+        result = real_extract(path)
+        concurrent_store = SessionStore(sessions_dir=sessions_dir)
+        with concurrent_store.lock():
+            [latest] = concurrent_store.load_all()
+            latest.model = "concurrent-model"
+            latest.outcome = "noop"
+            latest.annotated_fields.extend(["model", "outcome"])
+            latest.deliverables.append("manual:operator-note")
+            concurrent_store.rewrite([latest])
+        return result
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", annotate_after_sync_read)
+    source.write_text("".join(fixture_lines))
+    refreshed = runner.invoke(cli, command)
+
+    assert refreshed.exit_code == 0, refreshed.output
+    [complete] = SessionStore(sessions_dir=sessions_dir).load_all()
+    assert complete.model == "concurrent-model"
+    assert complete.outcome == "noop"
+    assert complete.annotated_fields == ["model", "outcome"]
+    assert "manual:operator-note" in complete.deliverables
+    assert complete.token_count == 1317
+    assert complete.stop_reason == "stop"
+
+
+def test_pi_extraction_schema_upgrade_repairs_false_missing_cost(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An unchanged legacy Pi record is re-extracted after schema changes."""
+    import gptme_sessions.cli as cli_module
+
+    source = tmp_path / "legacy-cost.jsonl"
+    source.write_bytes(PI_FIXTURE.read_bytes())
+    monkeypatch.setattr(
+        "gptme_sessions.cli.discover_pi_sessions",
+        lambda start, end: [source],
+    )
+    sessions_dir = tmp_path / "records"
+    store = SessionStore(sessions_dir=sessions_dir)
+    legacy = SessionRecord(
+        harness="pi",
+        trajectory_path=str(source.resolve()),
+        outcome="productive",
+        cost_usd=0.0,
+        trajectory_revision=cli_module._trajectory_revision(source),
+        trajectory_extract_version=None,
+    )
+    store.append(legacy)
+    real_extract = cli_module.extract_from_path
+
+    def extract_without_reported_cost(path: Path) -> dict:
+        result = real_extract(path)
+        result["usage"].pop("cost", None)
+        return result
+
+    monkeypatch.setattr("gptme_sessions.cli.extract_from_path", extract_without_reported_cost)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--sessions-dir",
+            str(sessions_dir),
+            "sync",
+            "--harness",
+            "pi",
+            "--signals",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "updated 1" in result.output
+    [repaired] = store.load_all()
+    assert repaired.cost_usd is None
+    assert repaired.trajectory_extract_version == cli_module.PI_EXTRACTION_SCHEMA_VERSION
+
+
+def test_session_record_normalizes_malformed_annotation_provenance() -> None:
+    assert SessionRecord.from_dict({"annotated_fields": "model"}).annotated_fields == []
+    record = SessionRecord.from_dict(
+        {
+            "annotated_fields": [
+                "model",
+                7,
+                "model",
+                None,
+                "model_normalized",
+                "outcome",
+            ],
+            "deliverables": None,
+        }
+    )
+    assert record.annotated_fields == ["model", "outcome"]
+    assert record.deliverables == []
+
+
 def test_sync_pi_extraction_failure_does_not_advance_revision(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "retry.jsonl"
     source.write_bytes(PI_FIXTURE.read_bytes())
@@ -347,8 +564,25 @@ def test_sync_pi_extraction_failure_does_not_advance_revision(tmp_path: Path, mo
 
     assert result.exit_code == 0, result.output
     assert "signals extraction failed" in result.output
+    assert "0 unchanged" in result.output
+    assert "1 signal extraction failure" in result.output
     [record] = SessionStore(sessions_dir=sessions_dir).load_all()
     assert record.trajectory_revision is None
+
+    retry = CliRunner().invoke(
+        cli,
+        [
+            "--sessions-dir",
+            str(sessions_dir),
+            "sync",
+            "--harness",
+            "pi",
+            "--signals",
+        ],
+    )
+    assert retry.exit_code == 0, retry.output
+    assert "0 unchanged" in retry.output
+    assert "1 signal extraction failure" in retry.output
 
 
 def test_sync_pi_extractor_time_append_keeps_pre_read_revision(tmp_path: Path, monkeypatch) -> None:
