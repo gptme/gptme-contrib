@@ -852,6 +852,30 @@ def test_discover_pi_sessions_uses_global_settings_session_dir(
     assert result == [session.resolve()]
 
 
+def test_discover_pi_sessions_isolates_recursive_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = tmp_path / "agent"
+    sessions = agent / "sessions"
+    agent.mkdir()
+    (agent / "settings.json").write_text("[" * 10000 + "0" + "]" * 10000)
+    session = _make_pi_session(
+        sessions,
+        "default.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-default",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [session.resolve()]
+    assert "Ignoring unreadable Pi global settings" in caplog.text
+
+
 def test_discover_pi_sessions_keeps_tiny_noop_and_does_not_mutate(tmp_path: Path) -> None:
     """Small genuine sessions are retained; discovery only reads source bytes."""
     session = _make_pi_session(
@@ -1045,9 +1069,10 @@ def test_discover_pi_sessions_rejects_malformed_native_json(
     "invalid_value",
     [
         "NaN",
+        "1e400",
         "[" * 10000 + "0" + "]" * 10000,
     ],
-    ids=["nonfinite", "recursive"],
+    ids=["nonfinite-constant", "nonfinite-exponent", "recursive"],
 )
 def test_discover_pi_sessions_isolates_strict_json_failures(
     tmp_path: Path,

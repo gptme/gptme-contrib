@@ -22,6 +22,7 @@ from .pi import (
     PiSessionFormatError,
     active_pi_records,
     is_pi_session_header,
+    parse_finite_json_float,
     reject_nonfinite_json,
     validate_pi_records,
 )
@@ -104,10 +105,11 @@ def _get_pi_sessions_dir() -> Path:
             settings = json.loads(
                 settings_path.read_text(encoding="utf-8-sig"),
                 parse_constant=reject_nonfinite_json,
+                parse_float=parse_finite_json_float,
             )
         except FileNotFoundError:
             continue
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
             logger.warning("Ignoring unreadable Pi %s settings %s: %s", scope, settings_path, exc)
             continue
         if not isinstance(settings, dict):
@@ -191,7 +193,11 @@ def _quick_pi_header(jsonl_path: Path) -> dict | None:
             first_line = session_file.readline(8192).strip()
         if not first_line:
             return None
-        header = json.loads(first_line, parse_constant=reject_nonfinite_json)
+        header = json.loads(
+            first_line,
+            parse_constant=reject_nonfinite_json,
+            parse_float=parse_finite_json_float,
+        )
         return header if is_pi_session_header(header) else None
     except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return None
@@ -593,7 +599,11 @@ def _load_pi_native_records(jsonl_path: Path) -> list[dict] | None:
         if not line:
             continue
         try:
-            record = json.loads(line, parse_constant=reject_nonfinite_json)
+            record = json.loads(
+                line,
+                parse_constant=reject_nonfinite_json,
+                parse_float=parse_finite_json_float,
+            )
         except json.JSONDecodeError as exc:
             if pi_session and incomplete_tail and line_number == len(lines):
                 logger.warning(

@@ -269,8 +269,8 @@ def test_malformed_pi_json_fails_visibly(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "invalid_value",
-    ["NaN", "[" * 10000 + "0" + "]" * 10000],
-    ids=["nonfinite", "recursive"],
+    ["NaN", "1e400", "[" * 10000 + "0" + "]" * 10000],
+    ids=["nonfinite-constant", "nonfinite-exponent", "recursive"],
 )
 def test_strict_pi_json_failures_fail_visibly(tmp_path: Path, invalid_value: str) -> None:
     path = tmp_path / "strict-invalid.jsonl"

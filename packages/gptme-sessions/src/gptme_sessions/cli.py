@@ -272,6 +272,12 @@ def _merge_concurrent_record_updates(
                 continue
             if original.get(field) == latest_value and field not in concurrently_annotated:
                 continue
+            if field in {"deliverables", "deliverable_details"} and isinstance(latest_value, list):
+                current_value = getattr(record, field)
+                for item in latest_value:
+                    if item not in current_value:
+                        current_value.append(item)
+                continue
             if hasattr(record, field):
                 setattr(record, field, latest_value)
             else:

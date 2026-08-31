@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 
 PI_SESSION_VERSION = 3
@@ -32,6 +33,14 @@ class PiSessionFormatError(ValueError):
 def reject_nonfinite_json(value: str) -> None:
     """Match JavaScript ``JSON.parse`` by rejecting NaN and infinities."""
     raise ValueError(f"invalid JSON constant {value}")
+
+
+def parse_finite_json_float(value: str) -> float:
+    """Parse a JSON float while rejecting values outside finite float range."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"JSON number is not finite: {value}")
+    return parsed
 
 
 def is_pi_session_header(record: object) -> bool:

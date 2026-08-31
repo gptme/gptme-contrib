@@ -516,6 +516,11 @@ def test_sync_pi_merges_annotation_that_lands_during_extraction(
     assert complete.outcome == "noop"
     assert complete.annotated_fields == ["model", "outcome"]
     assert "manual:operator-note" in complete.deliverables
+    assert "test: create Pi fixture (526d692)" in complete.deliverables
+    assert any(
+        detail["value"] == "test: create Pi fixture (526d692)"
+        for detail in complete.deliverable_details
+    )
     assert complete.token_count == 1317
     assert complete.stop_reason == "stop"
 

@@ -30,6 +30,7 @@ from .pi import (
     PiSessionFormatError,
     active_pi_records,
     is_pi_session_header,
+    parse_finite_json_float,
     pi_content_text,
     pi_usage_sources,
     reject_nonfinite_json,
@@ -229,7 +230,11 @@ def parse_trajectory(jsonl_path: Path) -> list[dict]:
             if not line:
                 continue
             try:
-                record = json.loads(line, parse_constant=reject_nonfinite_json)
+                record = json.loads(
+                    line,
+                    parse_constant=reject_nonfinite_json,
+                    parse_float=parse_finite_json_float,
+                )
             except json.JSONDecodeError as exc:
                 if pi_session:
                     raise PiSessionFormatError(
