@@ -46,10 +46,16 @@ from .store import (
 logger = logging.getLogger(__name__)
 
 HARNESS_CHOICES = ["gptme", "claude-code", "codex", "copilot-cli"]
+# Pi can already be recorded from an explicitly supplied native trajectory.
+# Automatic Pi discovery remains a separate retention slice.
+POST_SESSION_HARNESS_CHOICES = [*HARNESS_CHOICES, "pi"]
 
 # Maps usage dict keys (from extract_from_path) to SessionRecord field names.
 _USAGE_FIELD_MAP: dict[str, str] = {
     "model": "model",
+    "provider": "provider",
+    "cost": "cost_usd",
+    "stop_reason": "stop_reason",
     "total_tokens": "token_count",
     "input_tokens": "input_tokens",
     "output_tokens": "output_tokens",
@@ -70,6 +76,10 @@ def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool
     if value is None:
         return False
     current = getattr(record, field)
+    # Zero is an observed cost, especially for local/subscription providers.
+    # It must not be treated as an empty value and replaced during a later sync.
+    if field == "cost_usd" and current is not None:
+        return False
     if isinstance(current, list):
         if current:
             return False
@@ -2314,8 +2324,8 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
 @click.option(
     "--harness",
     required=True,
-    type=click.Choice(HARNESS_CHOICES),
-    help="Harness name (claude-code, gptme, codex, copilot)",
+    type=click.Choice(POST_SESSION_HARNESS_CHOICES),
+    help="Harness name (claude-code, gptme, codex, copilot, pi)",
 )
 @click.option("--model", default="unknown", help="Model name")
 @click.option("--run-type", default="unknown", help="Run type (autonomous, etc.)")
@@ -2422,6 +2432,10 @@ def post_session_cmd(
                     "session_id": ps.record.session_id,
                     "outcome": ps.record.outcome,
                     "grade": ps.grade,
+                    "provider": ps.provider,
+                    "model": ps.record.model,
+                    "stop_reason": ps.stop_reason,
+                    "cost_usd": ps.cost_usd,
                     "token_count": ps.token_count,
                 }
             )

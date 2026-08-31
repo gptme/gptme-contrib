@@ -38,6 +38,18 @@ def _make_record(
 
 
 class TestEstimateRecordCost:
+    def test_prefers_harness_reported_cost(self):
+        """A reported cost bypasses model pricing, including unknown models."""
+        record = _make_record(model="completely-unknown-model", input_tokens=None)
+        record.cost_usd = 0.0123
+        assert estimate_record_cost(record) == 0.0123
+
+    def test_reported_zero_is_authoritative(self):
+        """A real zero must not fall through to a nonzero token estimate."""
+        record = _make_record(input_tokens=1_000_000, output_tokens=1_000_000)
+        record.cost_usd = 0.0
+        assert estimate_record_cost(record) == 0.0
+
     def test_no_crash_with_real_gptme_usage(self):
         """estimate_record_cost doesn't raise — returns float or None."""
         record = _make_record()

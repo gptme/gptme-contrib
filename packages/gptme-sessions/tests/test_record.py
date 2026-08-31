@@ -33,6 +33,48 @@ def test_context_tier_roundtrip():
     assert r2.context_tier == "massive"
 
 
+def test_provider_cost_and_stop_reason_roundtrip():
+    """Observed route metadata survives dict and JSONL serialization."""
+    record = SessionRecord(
+        harness="pi",
+        provider="openai-codex",
+        model="gpt-5.6-luna",
+        stop_reason="stop",
+        cost_usd=0.0,
+    )
+
+    as_dict = record.to_dict()
+    assert as_dict["provider"] == "openai-codex"
+    assert as_dict["stop_reason"] == "stop"
+    assert as_dict["cost_usd"] == 0.0
+
+    restored = SessionRecord.from_dict(json.loads(record.to_json()))
+    assert restored.provider == "openai-codex"
+    assert restored.model == "gpt-5.6-luna"
+    assert restored.stop_reason == "stop"
+    assert restored.cost_usd == 0.0
+
+
+def test_route_metadata_does_not_shift_existing_positional_fields():
+    """Additive fields must not change the established constructor prefix."""
+    record = SessionRecord(
+        "session-id",
+        "2026-08-31T12:00:00+00:00",
+        None,
+        None,
+        "session-name",
+        "/workspace",
+        "codex",
+        "gpt-5.4",
+        "large",
+    )
+
+    assert record.harness == "codex"
+    assert record.model == "gpt-5.4"
+    assert record.context_tier == "large"
+    assert record.provider is None
+
+
 def test_deliverable_details_roundtrip():
     """deliverable_details survives to_dict/from_dict round-trip."""
     r = SessionRecord(

@@ -178,6 +178,34 @@ class TestExportCommand:
         assert len(data) == 5
         assert {row["session_id"] for row in data}
 
+    def test_export_preserves_pi_route_metadata(self, tmp_path: Path):
+        """Both structured export formats retain exact Pi route metadata."""
+        SessionStore(sessions_dir=tmp_path).append(
+            SessionRecord(
+                harness="pi",
+                provider="xai",
+                model="grok-4.6",
+                stop_reason="stop",
+                cost_usd=0.000824,
+            )
+        )
+
+        json_rc, json_out = _invoke(["export", "--format", "json"], tmp_path)
+        assert json_rc == 0
+        json_row = json.loads(json_out)[0]
+        assert json_row["provider"] == "xai"
+        assert json_row["model"] == "grok-4.6"
+        assert json_row["stop_reason"] == "stop"
+        assert json_row["cost_usd"] == pytest.approx(0.000824)
+
+        csv_rc, csv_out = _invoke(["export", "--format", "csv"], tmp_path)
+        assert csv_rc == 0
+        csv_row = next(csv.DictReader(StringIO(csv_out)))
+        assert csv_row["provider"] == "xai"
+        assert csv_row["model"] == "grok-4.6"
+        assert csv_row["stop_reason"] == "stop"
+        assert float(csv_row["cost_usd"]) == pytest.approx(0.000824)
+
     def test_export_json_since_7d(self, tmp_path: Path):
         """export --format json --since 7d drops records older than the window."""
         store = _seed_store(tmp_path)

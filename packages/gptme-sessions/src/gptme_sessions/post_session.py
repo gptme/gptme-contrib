@@ -228,8 +228,8 @@ class PostSessionResult:
                                ``None`` if no trajectory was available.
         signals:               Raw signal dict from :func:`~gptme_sessions.signals.extract_from_path`,
                                or ``None`` if no trajectory was available.
-        token_count:           Total token count from the trajectory (CC format only),
-                               or ``None`` if not available.
+        token_count:           Total token count from the trajectory, or ``None`` if
+                               not available.
         input_tokens:          Input tokens from usage breakdown, or ``None`` if not present.
         output_tokens:         Output tokens from usage breakdown, or ``None`` if not present.
         cache_creation_tokens: Cache-write tokens, or ``None`` if not present.
@@ -241,6 +241,10 @@ class PostSessionResult:
         first_turn_bytes:      All messages before first assistant message (UTF-8 bytes).
         context_peak_bytes:    Max per-turn context bytes before assistant.
         session_total_bytes:   Total bytes of all message content.
+        provider:              Raw inference provider reported by the trajectory.
+        stop_reason:           Harness-native final assistant stop reason.
+        cost_usd:              Harness-reported USD-equivalent cost. For subscription
+                               providers this may be nominal rather than billed spend.
     """
 
     record: SessionRecord
@@ -258,6 +262,10 @@ class PostSessionResult:
     first_turn_bytes: int | None = None
     context_peak_bytes: int | None = None
     session_total_bytes: int | None = None
+    # Keep additive result metadata at the tail for positional compatibility.
+    provider: str | None = None
+    stop_reason: str | None = None
+    cost_usd: float | None = None
 
 
 def post_session(
@@ -410,6 +418,9 @@ def post_session(
 
     grade: float | None = None
     signals: dict[str, Any] | None = None
+    provider: str | None = None
+    stop_reason: str | None = None
+    cost_usd: float | None = None
     token_count: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -445,6 +456,15 @@ def post_session(
                 gen_ms_total = _traj_timings.get("gen_ms_total")
                 tool_ms_total = _traj_timings.get("tool_ms_total")
             if usage:
+                _provider = usage.get("provider")
+                _stop_reason = usage.get("stop_reason")
+                _cost = usage.get("cost")
+                if isinstance(_provider, str) and _provider:
+                    provider = _provider
+                if isinstance(_stop_reason, str) and _stop_reason:
+                    stop_reason = _stop_reason
+                if not isinstance(_cost, bool) and isinstance(_cost, (int, float)):
+                    cost_usd = float(_cost)
                 _in = usage.get("input_tokens")
                 _out = usage.get("output_tokens")
                 _cc = usage.get("cache_creation_tokens")
@@ -702,8 +722,7 @@ def post_session(
             len(caller_deliverables),
         )
         outcome_flip_reason = (
-            f"no_trajectory_caller_deliverables:{outcome}"
-            f"->productive:n={len(caller_deliverables)}"
+            f"no_trajectory_caller_deliverables:{outcome}->productive:n={len(caller_deliverables)}"
         )
         outcome = "productive"
 
@@ -739,6 +758,12 @@ def post_session(
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
     }
+    if provider is not None:
+        record_kwargs["provider"] = provider
+    if stop_reason is not None:
+        record_kwargs["stop_reason"] = stop_reason
+    if cost_usd is not None:
+        record_kwargs["cost_usd"] = cost_usd
     if outcome_flip_reason is not None:
         record_kwargs["outcome_flip_reason"] = outcome_flip_reason
     if context_tier is not None:
@@ -880,6 +905,9 @@ def post_session(
         record=record,
         grade=grade,
         signals=signals,
+        provider=provider,
+        stop_reason=stop_reason,
+        cost_usd=cost_usd,
         token_count=token_count,
         input_tokens=input_tokens,
         output_tokens=output_tokens,

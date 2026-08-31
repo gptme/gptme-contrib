@@ -62,11 +62,15 @@ _PRICING_CONFIG: object = _UNSET
 
 
 def estimate_record_cost(record: "SessionRecord") -> float | None:
-    """Estimate USD cost for a single session record.
+    """Return reported USD cost, or estimate it from usage when absent.
 
-    Returns None if gptme-usage is not installed, pricing is unknown,
+    A harness-reported ``cost_usd`` is authoritative, including a real zero.
+    Otherwise returns None if gptme-usage is not installed, pricing is unknown,
     or the record lacks token data.
     """
+    if record.cost_usd is not None:
+        return float(record.cost_usd)
+
     try:
         from gptme_usage.harness_models import estimate_session_cost
     except ImportError:

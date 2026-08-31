@@ -200,7 +200,7 @@ class SessionRecord:
     project: str | None = None  # workspace/project path
 
     # Operational context
-    harness: str | None = "unknown"  # claude-code, gptme, codex
+    harness: str | None = "unknown"  # claude-code, gptme, codex, pi
     model: str | None = "unknown"  # raw model string (e.g. claude-opus-4-6)
     context_tier: str | None = None  # standard, extended, large, massive
     ab_group: str | None = None  # A/B group assignment ("treatment" or "control")
@@ -318,6 +318,14 @@ class SessionRecord:
     # post_session() from the hook's per-session events file. Empty for
     # harnesses that don't run the hook.
     lesson_events: list[dict[str, Any]] = field(default_factory=list)
+
+    # Additive route metadata. Keep new public fields at the dataclass tail so
+    # existing positional SessionRecord constructors retain their old mapping.
+    provider: str | None = None  # raw inference provider (e.g. openai-codex, xai)
+    stop_reason: str | None = None  # harness-native final assistant stop reason
+    # Harness-reported USD-equivalent cost. For subscription/OAuth providers
+    # this may be nominal API-equivalent cost, not incremental billed spend.
+    cost_usd: float | None = None
 
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,

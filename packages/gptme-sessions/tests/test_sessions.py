@@ -3572,6 +3572,46 @@ def test_post_session_cli_basic(tmp_path: Path, capsys, monkeypatch):
     assert records[0].outcome == "unknown"
 
 
+def test_post_session_cli_accepts_pi_with_explicit_trajectory(tmp_path: Path, capsys, monkeypatch):
+    """Pi recording works before automatic Pi discovery is implemented."""
+    import sys
+
+    from gptme_sessions.cli import main
+
+    trajectory = Path(__file__).parent / "fixtures" / "pi" / "productive-codex.jsonl"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gptme-sessions",
+            "--sessions-dir",
+            str(tmp_path),
+            "post-session",
+            "--harness",
+            "pi",
+            "--trajectory",
+            str(trajectory),
+            "--json",
+        ],
+    )
+
+    assert main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["outcome"] == "productive"
+    assert output["provider"] == "openai-codex"
+    assert output["model"] == "gpt-5.6-luna"
+    assert output["stop_reason"] == "stop"
+    assert output["cost_usd"] == pytest.approx(0.0004264)
+
+    records = SessionStore(sessions_dir=tmp_path).load_all()
+    assert len(records) == 1
+    assert records[0].harness == "pi"
+    assert records[0].provider == "openai-codex"
+    assert records[0].model == "gpt-5.6-luna"
+    assert records[0].stop_reason == "stop"
+    assert records[0].cost_usd == pytest.approx(0.0004264)
+
+
 def test_post_session_cli_timeout_exit_code(tmp_path: Path, capsys, monkeypatch):
     """CLI post-session: exit code 124 with no evidence → unknown."""
     import sys
@@ -3596,6 +3636,8 @@ def test_post_session_cli_timeout_exit_code(tmp_path: Path, capsys, monkeypatch)
     assert rc == 0
     captured = capsys.readouterr()
     assert "outcome=unknown" in captured.out
+    records = SessionStore(sessions_dir=tmp_path).load_all()
+    assert records[0].stop_reason is None
 
 
 def test_post_session_cli_json_output(tmp_path: Path, capsys, monkeypatch):
@@ -6404,6 +6446,61 @@ def test_assign_if_missing_no_false_positive_on_zero():
     changed = _assign_if_missing(record, "duration_seconds", 42)
     assert changed
     assert record.duration_seconds == 42
+
+
+def test_extract_result_populates_pi_route_metadata_for_new_record():
+    """sync maps Pi route metadata onto a newly discovered session record."""
+    from gptme_sessions.cli import _apply_extract_result_to_kwargs
+
+    record_kwargs: dict = {}
+    _apply_extract_result_to_kwargs(
+        record_kwargs,
+        {
+            "productive": True,
+            "usage": {
+                "provider": "xai",
+                "model": "grok-4.6",
+                "cost": 0.0,
+                "stop_reason": "stop",
+            },
+        },
+    )
+
+    assert record_kwargs["provider"] == "xai"
+    assert record_kwargs["model"] == "grok-4.6"
+    assert record_kwargs["cost_usd"] == 0.0
+    assert record_kwargs["stop_reason"] == "stop"
+
+
+def test_extract_result_does_not_replace_observed_zero_cost():
+    """sync backfill treats zero as observed cost, not a missing sentinel."""
+    from gptme_sessions.cli import _apply_extract_result_to_record
+
+    record = SessionRecord(
+        harness="pi",
+        provider=None,
+        model="unknown",
+        cost_usd=0.0,
+        stop_reason=None,
+    )
+    changed = _apply_extract_result_to_record(
+        record,
+        {
+            "productive": False,
+            "usage": {
+                "provider": "openai-codex",
+                "model": "gpt-5.6-luna",
+                "cost": 1.25,
+                "stop_reason": "stop",
+            },
+        },
+    )
+
+    assert changed
+    assert record.provider == "openai-codex"
+    assert record.model == "gpt-5.6-luna"
+    assert record.cost_usd == 0.0
+    assert record.stop_reason == "stop"
 
 
 def test_sync_signals_backfills_existing_records(tmp_path: Path, capsys, monkeypatch):
