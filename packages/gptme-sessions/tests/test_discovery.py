@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from gptme_sessions.discovery import (
     discover_codex_sessions,
     discover_copilot_sessions,
     discover_gptme_sessions,
+    discover_pi_sessions,
     extract_cc_model,
     extract_project,
     extract_session_name,
@@ -650,6 +652,349 @@ def test_discover_codex_sessions_env_var(tmp_path: Path, monkeypatch: pytest.Mon
     assert result[0].name == "env-session.jsonl"
 
 
+# --- discover_pi_sessions ---
+
+
+def _make_pi_session(
+    root: Path,
+    relative_path: str,
+    timestamp: str,
+    session_id: str,
+) -> Path:
+    """Create a minimal valid native Pi v3 tree session."""
+    jsonl = root / relative_path
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "type": "session",
+            "version": 3,
+            "id": session_id,
+            "timestamp": timestamp,
+            "cwd": "/workspace/pi-project",
+        },
+        {
+            "type": "session_info",
+            "id": f"{session_id}-info",
+            "parentId": None,
+            "timestamp": timestamp,
+            "name": f"session-{session_id}",
+        },
+        {
+            "type": "message",
+            "id": f"{session_id}-user",
+            "parentId": f"{session_id}-info",
+            "timestamp": timestamp,
+            "message": {"role": "user", "content": "hello"},
+        },
+    ]
+    jsonl.write_text("".join(json.dumps(record) + "\n" for record in records))
+    return jsonl
+
+
+def test_discover_pi_sessions_recursive_and_chronological(tmp_path: Path) -> None:
+    """Pi discovery covers nested default and flat custom-session layouts."""
+    earlier = _make_pi_session(
+        tmp_path,
+        "--workspace-project--/zzz.jsonl",
+        "2026-03-05T08:00:00Z",
+        "pi-earlier",
+    )
+    later = _make_pi_session(
+        tmp_path,
+        "run-sh/aaa.jsonl",
+        "2026-03-05T20:00:00Z",
+        "pi-later",
+    )
+    _make_pi_session(
+        tmp_path,
+        "run-sh/outside.jsonl",
+        "2026-03-04T20:00:00Z",
+        "pi-outside",
+    )
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [earlier.resolve(), later.resolve()]
+
+
+def test_discover_pi_sessions_direct_env_override_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    direct = tmp_path / "direct"
+    agent = tmp_path / "agent"
+    direct_session = _make_pi_session(direct, "direct.jsonl", "2026-03-05T10:00:00Z", "pi-direct")
+    _make_pi_session(
+        agent / "sessions",
+        "agent.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-agent",
+    )
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(direct))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [direct_session.resolve()]
+
+
+def test_discover_pi_sessions_agent_dir_env_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = tmp_path / "agent"
+    session = _make_pi_session(
+        agent / "sessions",
+        "nested/session.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-agent",
+    )
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [session.resolve()]
+
+
+def test_discover_pi_sessions_keeps_tiny_noop_and_does_not_mutate(tmp_path: Path) -> None:
+    """Small genuine sessions are retained; discovery only reads source bytes."""
+    session = _make_pi_session(
+        tmp_path,
+        "tiny.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-tiny",
+    )
+    session.chmod(0o600)
+    before_bytes = session.read_bytes()
+    before_stat = session.stat()
+    assert before_stat.st_size < 4096
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    after_stat = session.stat()
+    assert result == [session.resolve()]
+    assert session.read_bytes() == before_bytes
+    assert after_stat.st_ino == before_stat.st_ino
+    assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
+    assert after_stat.st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "partial_tail",
+    [
+        b'{"type":"message","id":"still-writing"',
+        b'{"type":"message","id":"still-writing","content":"\xf0\x9f',
+    ],
+)
+def test_discover_pi_sessions_keeps_stable_prefix_during_active_append(
+    tmp_path: Path, partial_tail: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unterminated JSON/UTF-8 tail cannot temporarily hide a live session."""
+    session = _make_pi_session(
+        tmp_path,
+        "active.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-active",
+    )
+    with session.open("ab") as session_file:
+        session_file.write(partial_tail)
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [session.resolve()]
+    assert extract_session_name("pi", session) == "session-pi-active"
+    assert "Reading stable prefix" in caplog.text
+
+
+def test_discover_pi_sessions_finds_real_native_noops() -> None:
+    fixture_root = Path(__file__).parent / "fixtures" / "pi"
+    noop_codex = (fixture_root / "noop-codex.jsonl").resolve()
+    noop_xai = (fixture_root / "noop-xai.jsonl").resolve()
+    assert noop_codex.stat().st_size < 4096
+    assert noop_xai.stat().st_size < 4096
+
+    result = discover_pi_sessions(date(2026, 8, 31), date(2026, 8, 31), pi_dir=fixture_root)
+
+    assert noop_codex in result
+    assert noop_xai in result
+
+
+def test_discover_pi_sessions_ignores_unrelated_jsonl(tmp_path: Path) -> None:
+    unrelated = tmp_path / "events.jsonl"
+    unrelated.write_text(json.dumps({"type": "session.start", "timestamp": "2026-03-05"}) + "\n")
+
+    assert discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "records,error_match",
+    [
+        (
+            [
+                {
+                    "type": "session",
+                    "version": 4,
+                    "id": "future",
+                    "timestamp": "2026-03-05T10:00:00Z",
+                    "cwd": "/workspace",
+                }
+            ],
+            "unsupported Pi session version",
+        ),
+        (
+            [
+                {
+                    "type": "session",
+                    "version": 3,
+                    "id": "print-stream",
+                    "timestamp": "2026-03-05T10:00:00Z",
+                    "cwd": "/workspace",
+                },
+                {"type": "agent_start", "timestamp": "2026-03-05T10:00:01Z"},
+            ],
+            "unsupported Pi v3 entry type",
+        ),
+    ],
+)
+def test_discover_pi_sessions_rejects_non_native_pi_formats(
+    tmp_path: Path, records: list[dict], error_match: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    candidate = tmp_path / "candidate.jsonl"
+    candidate.write_text("".join(json.dumps(record) + "\n" for record in records))
+    valid = _make_pi_session(
+        tmp_path,
+        "valid.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-valid",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [valid.resolve()]
+    assert error_match in caplog.text
+
+
+def test_discover_pi_sessions_rejects_malformed_native_json(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    candidate = tmp_path / "malformed.jsonl"
+    candidate.write_text(
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": "malformed",
+                "timestamp": "2026-03-05T10:00:00Z",
+                "cwd": "/workspace",
+            }
+        )
+        + "\n{not-json\n"
+    )
+    valid = _make_pi_session(
+        tmp_path,
+        "valid.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-valid",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [valid.resolve()]
+    assert "invalid JSON on line 2" in caplog.text
+
+
+def test_discover_pi_sessions_skips_invalid_timestamp_but_keeps_sibling(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    invalid = tmp_path / "invalid-timestamp.jsonl"
+    invalid.write_text(
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": "invalid-timestamp",
+                "timestamp": "not-a-timestamp",
+                "cwd": "/workspace",
+            }
+        )
+        + "\n"
+    )
+    valid = _make_pi_session(
+        tmp_path,
+        "valid.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-valid",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [valid.resolve()]
+    assert "invalid header timestamp" in caplog.text
+
+
+def test_discover_pi_sessions_skips_unreadable_file_but_keeps_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unreadable = _make_pi_session(
+        tmp_path,
+        "unreadable.jsonl",
+        "2026-03-05T10:00:00Z",
+        "pi-unreadable",
+    )
+    valid = _make_pi_session(
+        tmp_path,
+        "valid.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-valid",
+    )
+    real_open = Path.open
+
+    def selective_open(path: Path, *args, **kwargs):
+        if path == unreadable:
+            raise PermissionError("test permission denial")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", selective_open)
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [valid.resolve()]
+    assert "Skipping unreadable Pi session candidate" in caplog.text
+
+
+def test_discover_pi_sessions_walk_error_keeps_readable_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import gptme_sessions.discovery as discovery_module
+
+    valid = _make_pi_session(
+        tmp_path,
+        "valid.jsonl",
+        "2026-03-05T11:00:00Z",
+        "pi-valid",
+    )
+    real_walk = discovery_module.os.walk
+
+    def walk_with_error(*args, onerror=None, **kwargs):
+        assert onerror is not None
+        onerror(PermissionError("blocked test subtree"))
+        yield from real_walk(*args, onerror=onerror, **kwargs)
+
+    monkeypatch.setattr(discovery_module.os, "walk", walk_with_error)
+    with caplog.at_level(logging.WARNING):
+        result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5), pi_dir=tmp_path)
+
+    assert result == [valid.resolve()]
+    assert "Skipping unreadable Pi session directory" in caplog.text
+
+
 # --- discover_copilot_sessions ---
 
 
@@ -758,6 +1103,92 @@ class TestExtractSessionName:
         events = session_dir / "events.jsonl"
         events.touch()
         assert extract_session_name("copilot", events) == "abcdefgh"
+
+    def test_pi_uses_active_session_name(self, tmp_path: Path) -> None:
+        """pi: uses the latest active session_info name."""
+        session = _make_pi_session(
+            tmp_path,
+            "timestamped-name.jsonl",
+            "2026-03-05T11:00:00Z",
+            "pi-native-session-id",
+        )
+        assert extract_session_name("pi", session) == "session-pi-native-session-id"
+
+    def test_pi_falls_back_to_full_header_id(self, tmp_path: Path) -> None:
+        """pi: header-only sessions keep the complete native ID as their name."""
+        session = tmp_path / "header-only.jsonl"
+        session.write_text(
+            json.dumps(
+                {
+                    "type": "session",
+                    "version": 3,
+                    "id": "pi-complete-native-id",
+                    "timestamp": "2026-03-05T11:00:00Z",
+                    "cwd": "/workspace",
+                }
+            )
+            + "\n"
+        )
+        assert extract_session_name("pi", session) == "pi-complete-native-id"
+
+    def test_pi_name_follows_active_branch(self, tmp_path: Path) -> None:
+        """pi: a name on an abandoned branch must not replace the active name."""
+        timestamp = "2026-03-05T11:00:00Z"
+        session = tmp_path / "branched.jsonl"
+        records = [
+            {
+                "type": "session",
+                "version": 3,
+                "id": "pi-branched",
+                "timestamp": timestamp,
+                "cwd": "/workspace",
+            },
+            {
+                "type": "session_info",
+                "id": "root",
+                "parentId": None,
+                "timestamp": timestamp,
+                "name": "root-name",
+            },
+            {
+                "type": "message",
+                "id": "common",
+                "parentId": "root",
+                "timestamp": timestamp,
+                "message": {"role": "user", "content": "branch"},
+            },
+            {
+                "type": "session_info",
+                "id": "abandoned-name",
+                "parentId": "common",
+                "timestamp": timestamp,
+                "name": "abandoned",
+            },
+            {
+                "type": "message",
+                "id": "abandoned-leaf",
+                "parentId": "abandoned-name",
+                "timestamp": timestamp,
+                "message": {"role": "assistant", "content": "old"},
+            },
+            {
+                "type": "session_info",
+                "id": "active-name",
+                "parentId": "common",
+                "timestamp": timestamp,
+                "name": "active",
+            },
+            {
+                "type": "message",
+                "id": "active-leaf",
+                "parentId": "active-name",
+                "timestamp": timestamp,
+                "message": {"role": "assistant", "content": "current"},
+            },
+        ]
+        session.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+        assert extract_session_name("pi", session) == "active"
 
 
 # --- extract_project ---
@@ -879,3 +1310,13 @@ class TestExtractProject:
         events = tmp_path / "events.jsonl"
         events.touch()
         assert extract_project("copilot", events) is None
+
+    def test_pi_extracts_header_cwd(self, tmp_path: Path) -> None:
+        """pi: extracts the working directory from the native session header."""
+        session = _make_pi_session(
+            tmp_path,
+            "session.jsonl",
+            "2026-03-05T11:00:00Z",
+            "pi-project",
+        )
+        assert extract_project("pi", session) == "/workspace/pi-project"

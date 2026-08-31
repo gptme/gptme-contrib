@@ -72,6 +72,7 @@ gptme-sessions runs --since 14d
 # Discover trajectory files across all harnesses (no store required)
 gptme-sessions discover --since 7d
 gptme-sessions discover --harness claude-code --signals
+gptme-sessions discover --harness pi --signals
 
 # Import discovered sessions into the store (safe to re-run — deduplicates)
 gptme-sessions sync --since 14d
@@ -97,6 +98,19 @@ gptme-sessions append --harness claude-code --model opus --outcome productive
 # Custom sessions directory
 gptme-sessions --sessions-dir /path/to/state/sessions stats
 ```
+
+Pi discovery recursively scans native v3 tree sessions under
+`PI_CODING_AGENT_SESSION_DIR`, or `$PI_CODING_AGENT_DIR/sessions` and then
+`~/.pi/agent/sessions` when no direct override is set. Print-mode streams and
+unsupported native versions are visibly warned and skipped instead of being
+imported as false NOOPs. For a session Pi is actively appending, discovery uses
+the last complete newline-delimited prefix; a transient partial tail cannot hide
+that session or abort discovery of its siblings.
+
+Discovery and sync are non-mutating. A synced record retains the source
+`trajectory_path`; it does not copy or own the trajectory. Pi session JSONL is
+a historical artifact, so keep or independently back up the source tree—do not
+delete it after sync.
 
 ## Model Normalization
 

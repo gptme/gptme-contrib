@@ -20,6 +20,7 @@ from .discovery import (
     discover_codex_sessions,
     discover_copilot_sessions,
     discover_gptme_sessions,
+    discover_pi_sessions,
     extract_cc_model,
     extract_project,
     extract_session_name,
@@ -35,6 +36,7 @@ from .replay import (
     resolve_session_record_prefix,
 )
 from .record import ATTEMPT_KINDS, SessionRecord, normalize_run_type
+from .pi import PiSessionFormatError
 from .signals import extract_from_path
 from .store import (
     SessionStore,
@@ -74,6 +76,8 @@ def _assign_if_missing(record: SessionRecord, field: str, value: object) -> bool
         if current:
             return False
         if isinstance(value, list):
+            if not value:
+                return False
             setattr(record, field, value)
             return True
         return False
@@ -148,6 +152,12 @@ def _judge_fields(
     return fields
 
 
+# Keep discovery's wider harness set separate from the post-session choices.
+# This also lets the route-metadata slice add Pi post-session support without
+# making the otherwise independent follow-up branches conflict at this block.
+DISCOVERY_HARNESS_CHOICES = [*HARNESS_CHOICES, "pi"]
+
+
 def _discover_all(
     since_days: float = 30,
     harness_filter: str | None = None,
@@ -157,8 +167,9 @@ def _discover_all(
     Returns a list of dicts with keys ``harness``, ``path``, and
     ``session_date`` (a :class:`datetime.date` or ``None``).
     Dicts for ``gptme`` and ``claude-code`` harnesses also include ``model``
-    (may be ``None`` if extraction fails); ``codex`` and ``copilot`` entries
-    do not include ``model``.  Callers should use ``.get("model")`` accordingly.
+    (may be ``None`` if extraction fails); ``codex``, ``copilot``, and ``pi``
+    entries do not include ``model``. Callers should use ``.get("model")``
+    accordingly.
     Results are sorted oldest-first across all harnesses so callers get a
     unified chronological view rather than harness-grouped output.
     Used for fallback display and the ``sync`` command.
@@ -218,6 +229,30 @@ def _discover_all(
                     "project": extract_project("copilot", p),
                 }
             )
+    if harness_filter in (None, "pi"):
+        for p in discover_pi_sessions(start, today):
+            try:
+                session_name = extract_session_name("pi", p)
+                project = extract_project("pi", p)
+            except PiSessionFormatError as exc:
+                logger.warning(
+                    "Skipping Pi session changed during metadata extraction %s: %s", p, exc
+                )
+                continue
+            if session_name is None:
+                logger.warning(
+                    "Skipping Pi session no longer readable during metadata extraction: %s", p
+                )
+                continue
+            discovered.append(
+                {
+                    "harness": "pi",
+                    "path": p,
+                    "session_date": session_date_from_path("pi", p),
+                    "session_name": session_name,
+                    "project": project,
+                }
+            )
 
     # Sort chronologically across harnesses; entries without a date sort last.
     discovered.sort(key=lambda e: e.get("session_date") or date.max)
@@ -244,10 +279,29 @@ def _count_unsynced(
         return 0
     if records is None:
         records = store.load_all()
-    existing_paths = {r.journal_path for r in records if r.journal_path} | {
-        r.trajectory_path for r in records if r.trajectory_path
-    }
-    return sum(1 for e in discovered if str(e["path"]) not in existing_paths)
+    existing_paths = _existing_session_paths(records)
+    return sum(
+        1 for entry in discovered if _normalize_session_path(entry["path"]) not in existing_paths
+    )
+
+
+def _normalize_session_path(path: str | Path) -> str:
+    """Return a stable absolute spelling for trajectory-path comparisons."""
+    candidate = Path(path).expanduser()
+    try:
+        return str(candidate.resolve())
+    except (OSError, RuntimeError):
+        return str(candidate.absolute())
+
+
+def _existing_session_paths(records: list[SessionRecord]) -> set[str]:
+    """Return normalized legacy and current trajectory references in *records*."""
+    paths: set[str] = set()
+    for record in records:
+        for path in (record.journal_path, record.trajectory_path):
+            if path:
+                paths.add(_normalize_session_path(path))
+    return paths
 
 
 def _show_discovery_fallback(since_days: int = 30) -> None:
@@ -1508,7 +1562,7 @@ def dedup(
 @cli.command()
 @click.option(
     "--harness",
-    type=click.Choice(HARNESS_CHOICES),
+    type=click.Choice(DISCOVERY_HARNESS_CHOICES),
     default=None,
     help="Limit to a specific harness (default: all)",
 )
@@ -1527,7 +1581,7 @@ def discover(
     unsynced: bool,
     as_json: bool,
 ) -> None:
-    """Discover trajectory files from gptme, Claude Code, Codex, and Copilot harnesses.
+    """Discover trajectories from gptme, Claude Code, Codex, Copilot, and Pi.
 
     Shows a sync-status indicator for each session:
     [S] already imported into the store, [ ] not yet synced.
@@ -1582,6 +1636,16 @@ def discover(
                 }
             )
 
+    if harness in (None, "pi"):
+        for p in discover_pi_sessions(start, today):
+            discovered.append(
+                {
+                    "harness": "pi",
+                    "path": str(p),
+                    "session_date": session_date_from_path("pi", p),
+                }
+            )
+
     # Sort chronologically across all harnesses; entries without a date sort last.
     discovered.sort(key=lambda e: e.get("session_date") or date.max)
 
@@ -1589,9 +1653,9 @@ def discover(
     # Normalize paths so symlinks/relative paths don't cause false mismatches.
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     records = store.load_all()
-    existing_paths = {str(Path(r.journal_path).resolve()) for r in records if r.journal_path}
+    existing_paths = _existing_session_paths(records)
     for entry in discovered:
-        entry["synced"] = str(Path(entry["path"]).resolve()) in existing_paths
+        entry["synced"] = _normalize_session_path(entry["path"]) in existing_paths
 
     total_discovered = len(discovered)
 
@@ -1971,7 +2035,7 @@ def replay(
 @cli.command()
 @click.option(
     "--harness",
-    type=click.Choice(HARNESS_CHOICES),
+    type=click.Choice(DISCOVERY_HARNESS_CHOICES),
     default=None,
     help="Limit to a specific harness (default: all)",
 )
@@ -1999,9 +2063,10 @@ def sync(
 ) -> None:
     """Discover trajectory files and import them into the session store.
 
-    Scans known trajectory directories for gptme, Claude Code, Codex, and
-    Copilot sessions and appends a :class:`~gptme_sessions.record.SessionRecord`
-    for each one not already in the store.
+    Scans known trajectory directories for gptme, Claude Code, Codex, Copilot,
+    and Pi sessions and appends a
+    :class:`~gptme_sessions.record.SessionRecord` for each one not already in
+    the store.
 
     Use ``--signals`` to extract productivity signals (outcome, duration,
     deliverables) from each trajectory.  This is slower but produces richer
@@ -2010,6 +2075,10 @@ def sync(
     Re-running ``sync`` is safe: sessions already in the store (matched by
     trajectory path) are skipped.  With ``--signals``, existing records that
     have ``outcome=unknown`` (no signals yet) will be updated in-place.
+
+    Source trajectories are never copied, moved, rewritten, or deleted. Pi
+    native sessions are historical artifacts; retain or back up the source
+    tree so the stored ``trajectory_path`` remains readable.
     """
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
 
@@ -2076,7 +2145,15 @@ def sync(
 
     # Build lookup structures for deduplication and in-place updates.
     existing_records = store.load_all()
-    existing_by_path = {r.trajectory_path: r for r in existing_records if r.trajectory_path}
+    existing_by_path: dict[str, SessionRecord] = {}
+    for record in existing_records:
+        # ``journal_path`` held trajectories in records written before the
+        # dedicated trajectory_path field existed. Keep both source keys for
+        # backward-compatible deduplication, but compare canonical spellings so
+        # relative paths and symlink aliases cannot import the same session twice.
+        for stored_path in (record.journal_path, record.trajectory_path):
+            if stored_path:
+                existing_by_path[_normalize_session_path(stored_path)] = record
 
     new_records: list[SessionRecord] = []
     updated_paths: set[str] = set()
@@ -2086,7 +2163,9 @@ def sync(
 
     # Warn when a large number of new sessions would be imported.
     # This catches accidental wide-window syncs (e.g. --since 90d) that inflate stats.
-    new_count_estimate = sum(1 for e in discovered if str(e["path"]) not in existing_by_path)
+    new_count_estimate = sum(
+        1 for entry in discovered if _normalize_session_path(entry["path"]) not in existing_by_path
+    )
     if not dry_run and new_count_estimate > 100:
         window_warn = _fmt_since(since_days)
         click.echo(
@@ -2096,8 +2175,8 @@ def sync(
         )
 
     for entry in discovered:
-        path_str = str(entry["path"])
-        traj_path = entry["path"]
+        path_str = _normalize_session_path(entry["path"])
+        traj_path = Path(path_str)
 
         if path_str in existing_by_path:
             existing = existing_by_path[path_str]
@@ -2161,8 +2240,6 @@ def sync(
                             f"  warning: signals extraction failed for {path_str}: {exc}",
                             err=True,
                         )
-                        if not needs_update:  # don't double-count if model was already updated
-                            skipped += 1
                 else:
                     needs_update = True  # mark for dry-run reporting
             elif (
@@ -2174,10 +2251,6 @@ def sync(
                     f"  warning: trajectory not found, cannot backfill signals for {path_str}",
                     err=True,
                 )
-                if not needs_update:
-                    skipped += 1
-            elif not needs_update:
-                skipped += 1
 
             if needs_update:
                 if dry_run:
@@ -2186,6 +2259,8 @@ def sync(
                 else:
                     updated_paths.add(path_str)
                     updated += 1
+            else:
+                skipped += 1
             continue
 
         # Build the record with correct timestamp from the trajectory's first
