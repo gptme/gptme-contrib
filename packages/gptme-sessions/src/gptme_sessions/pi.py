@@ -63,7 +63,7 @@ def validate_pi_records(records: list[dict]) -> list[dict]:
         if not isinstance(entry, dict):
             raise PiSessionFormatError(f"Pi entry on JSONL line {index} is not an object")
         entry_type = entry.get("type")
-        if entry_type not in _PI_ENTRY_TYPES:
+        if not isinstance(entry_type, str) or entry_type not in _PI_ENTRY_TYPES:
             raise PiSessionFormatError(
                 f"unsupported Pi v3 entry type {entry_type!r} on JSONL line {index}"
             )

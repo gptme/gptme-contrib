@@ -95,25 +95,20 @@ _DEFAULT_BACKFILL_FIELDS: tuple[str, ...] = (
     "context_peak_bytes",
     "session_total_bytes",
 )
-_PI_ROUTE_BACKFILL_FIELDS: tuple[str, ...] = (
-    "provider",
-    "stop_reason",
-    "cost_usd",
-)
 
 
 def _usage_backfill_fields(harness: str | None) -> tuple[str, ...]:
     """Record fields that ``sync --signals`` should backfill for ``harness``.
 
     Copilot trajectories never contain token-count fields — only byte metrics
-    and model name are extractable. Pi extractors populate provider, stop
-    reason, and reported cost; skipping those on an otherwise complete record
-    leaves route metadata absent from the durable store and JSON/CSV exports.
+    and model name are extractable. Pi uses ``trajectory_revision`` as its
+    enrichment marker because several valid route/context fields can be absent;
+    missing-field checks would reparse unchanged history forever.
     """
     if harness == "copilot-cli":
         return _COPILOT_BACKFILL_FIELDS
     if harness == "pi":
-        return _DEFAULT_BACKFILL_FIELDS + _PI_ROUTE_BACKFILL_FIELDS
+        return ()
     return _DEFAULT_BACKFILL_FIELDS
 
 
@@ -163,6 +158,61 @@ def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool
     if isinstance(usage, dict):
         for usage_key, record_key in _USAGE_FIELD_MAP.items():
             changed |= _assign_if_missing(record, record_key, usage.get(usage_key))
+
+    return changed
+
+
+def _refresh_pi_extract_result(record: SessionRecord, result: dict) -> bool:
+    """Monotonically refresh source-derived fields on a resumed Pi session.
+
+    Pi v3 has no terminal session record: a file whose latest assistant turn
+    stopped normally can be resumed later. Preserve caller/manual annotations,
+    while promoting trajectory outcomes, counters, and discovered deliverables
+    as the append-only native tree grows.
+    """
+    changed = _apply_extract_result_to_record(record, result)
+
+    if result.get("productive") and record.outcome in ("unknown", "noop"):
+        if record.outcome != "productive":
+            record.outcome = "productive"
+            changed = True
+
+    duration = int(result.get("session_duration_s") or 0)
+    if duration > record.duration_seconds:
+        record.duration_seconds = duration
+        changed = True
+
+    for field in ("deliverables", "deliverable_details"):
+        values = result.get(field)
+        if not isinstance(values, list):
+            continue
+        current = getattr(record, field)
+        merged = list(current)
+        for value in values:
+            if value not in merged:
+                merged.append(value)
+        if merged != current:
+            setattr(record, field, merged)
+            changed = True
+
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return changed
+
+    latest_fields = {"model", "provider", "stop_reason"}
+    for usage_key, record_key in _USAGE_FIELD_MAP.items():
+        value = usage.get(usage_key)
+        if value is None:
+            continue
+        current = getattr(record, record_key)
+        if record_key in latest_fields:
+            if current != value:
+                setattr(record, record_key, value)
+                changed = True
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if current is None or value > current:
+                setattr(record, record_key, value)
+                changed = True
 
     return changed
 
@@ -346,6 +396,15 @@ def _normalize_session_path(path: str | Path) -> str:
         return str(candidate.resolve())
     except (OSError, RuntimeError):
         return str(candidate.absolute())
+
+
+def _trajectory_revision(path: Path) -> str | None:
+    """Return a cheap revision for append-only trajectory change detection."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
 
 
 def _existing_session_paths(records: list[SessionRecord]) -> set[str]:
@@ -2217,9 +2276,8 @@ def sync(
 
     # Warn when a large number of new sessions would be imported.
     # This catches accidental wide-window syncs (e.g. --since 90d) that inflate stats.
-    new_count_estimate = sum(
-        1 for entry in discovered if _normalize_session_path(entry["path"]) not in existing_by_path
-    )
+    discovered_paths = {_normalize_session_path(entry["path"]) for entry in discovered}
+    new_count_estimate = len(discovered_paths - existing_by_path.keys())
     if not dry_run and new_count_estimate > 100:
         window_warn = _fmt_since(since_days)
         click.echo(
@@ -2228,9 +2286,18 @@ def sync(
             err=True,
         )
 
+    seen_discovered_paths: set[str] = set()
     for entry in discovered:
         path_str = _normalize_session_path(entry["path"])
         traj_path = Path(path_str)
+
+        # Discovery normally canonicalizes aliases, but retain this import-side
+        # guard for alternative discovery providers and files that race through
+        # different spellings within one batch.
+        if path_str in seen_discovered_paths:
+            skipped += 1
+            continue
+        seen_discovered_paths.add(path_str)
 
         if path_str in existing_by_path:
             existing = existing_by_path[path_str]
@@ -2254,16 +2321,31 @@ def sync(
                 getattr(existing, field) is None
                 for field in _usage_backfill_fields(existing.harness)
             )
+            source_revision = _trajectory_revision(traj_path) if traj_path.is_file() else None
+            pi_source_changed = (
+                existing.harness == "pi"
+                and source_revision is not None
+                and source_revision != existing.trajectory_revision
+            )
 
             if (
                 with_signals
                 and traj_path.is_file()
-                and (existing.outcome == "unknown" or usage_backfill_needed)
+                and (existing.outcome == "unknown" or usage_backfill_needed or pi_source_changed)
             ):
                 if not dry_run:
                     try:
                         result = extract_from_path(traj_path)
-                        needs_update |= _apply_extract_result_to_record(existing, result)
+                        if existing.harness == "pi":
+                            needs_update |= _refresh_pi_extract_result(existing, result)
+                            # Persist the revision captured before extraction.
+                            # If Pi appends concurrently, the next sync sees a
+                            # different revision and re-extracts the unseen tail.
+                            if existing.trajectory_revision != source_revision:
+                                existing.trajectory_revision = source_revision
+                                needs_update = True
+                        else:
+                            needs_update |= _apply_extract_result_to_record(existing, result)
                     except Exception as exc:
                         click.echo(
                             f"  warning: signals extraction failed for {path_str}: {exc}",
@@ -2328,8 +2410,11 @@ def sync(
 
         if with_signals and traj_path.is_file() and not dry_run:
             try:
+                source_revision = _trajectory_revision(traj_path)
                 result = extract_from_path(traj_path)
                 _apply_extract_result_to_kwargs(record_kwargs, result)
+                if entry["harness"] == "pi":
+                    record_kwargs["trajectory_revision"] = source_revision
             except Exception as exc:
                 click.echo(
                     f"  warning: signals extraction failed for {path_str}: {exc}",

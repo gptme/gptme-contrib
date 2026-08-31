@@ -327,6 +327,12 @@ class SessionRecord:
     # this may be nominal API-equivalent cost, not incremental billed spend.
     cost_usd: float | None = None
 
+    # Cheap source revision captured after a successful trajectory extraction.
+    # Pi sessions are append-only and resumable, so sync uses this to refresh
+    # cumulative signals when the native JSONL grows without reparsing
+    # unchanged historical sessions on every run.
+    trajectory_revision: str | None = None
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``recommended_confidence``, ``notes``).

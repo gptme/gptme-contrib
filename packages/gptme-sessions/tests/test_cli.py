@@ -1642,14 +1642,14 @@ class TestFmtSince:
 class TestSyncRouteBackfill:
     """sync --signals must backfill Pi route metadata on complete legacy records."""
 
-    def test_usage_backfill_fields_include_pi_route_metadata(self) -> None:
+    def test_pi_uses_source_revision_instead_of_missing_field_backfill(self) -> None:
         from gptme_sessions.cli import _usage_backfill_fields
 
         pi_fields = _usage_backfill_fields("pi")
-        assert "provider" in pi_fields
-        assert "stop_reason" in pi_fields
-        assert "cost_usd" in pi_fields
-        assert "token_count" in pi_fields
+        # Pi fields such as cost/provider/stop reason can legitimately be
+        # absent. A durable trajectory revision drives the one-time legacy
+        # enrichment and later resumed-session refresh instead.
+        assert pi_fields == ()
 
         copilot_fields = _usage_backfill_fields("copilot-cli")
         assert "provider" not in copilot_fields
