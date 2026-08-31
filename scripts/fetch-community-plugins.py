@@ -148,6 +148,14 @@ def fetch_topics() -> tuple[list[dict], list[str]]:
     return entries, failed_topics
 
 
+def should_refuse_write(*, any_source_failed: bool, dry_run: bool) -> bool:
+    """True when a failed source means we must not write output.
+
+    Dry-run still prints whatever was gathered so operators can inspect it.
+    """
+    return any_source_failed and not dry_run
+
+
 def merge_entries(registry: list[dict], topic_hits: list[dict]) -> list[dict]:
     """Merge curated registry entries with topic-search discoveries.
 
@@ -201,37 +209,21 @@ def main() -> int:
     entries = merge_entries(registry_entries, topic_entries)
     print(f"Merged: {len(entries)} total entries", file=sys.stderr)
 
-    # Refuse to overwrite when any source failed and the previous file has entries —
-    # a registry failure silently drops curated repos; a topic failure drops community
-    # repos tagged with the failing topic. Either way it's as bad as a total wipe.
     any_source_failed = registry_failed or bool(failed_topics)
     failed_labels = (["registry"] if registry_failed else []) + failed_topics
 
-    # Guard 1: no previous file but all sources failed → refuse to write empty output.
-    # Previously the committed file was always present so this case couldn't arise;
-    # now docs/community_plugins.json is gitignored and absent on a fresh clone, so
-    # we must explicitly fail-closed rather than silently writing {entries: []}.
-    if any_source_failed and not entries and not args.dry_run:
+    # Fail closed on ANY source failure, including partial success. A registry
+    # miss drops curated repos; a topic miss drops community repos. Either is
+    # an incomplete index. The previous overwrite-only guard never fired on CI
+    # — docs/community_plugins.json is gitignored, so a fresh checkout has no
+    # previous file and a one-source failure would write + exit 0.
+    if should_refuse_write(any_source_failed=any_source_failed, dry_run=args.dry_run):
         print(
-            f"Error: fetch failed for: {', '.join(failed_labels)} and no entries"
-            " to write. Check GitHub API access.",
+            f"Error: fetch failed for: {', '.join(failed_labels)}."
+            " Refusing to write partial data — check GitHub API access.",
             file=sys.stderr,
         )
         return 1
-
-    # Guard 2: previous file exists with entries → refuse to overwrite with degraded data.
-    if any_source_failed and not args.dry_run and args.output.exists():
-        try:
-            prev = json.loads(args.output.read_text())
-            if prev.get("entries"):
-                print(
-                    f"Error: fetch failed for: {', '.join(failed_labels)}."
-                    " Refusing to overwrite previous data — check GitHub API access.",
-                    file=sys.stderr,
-                )
-                return 1
-        except (json.JSONDecodeError, KeyError):
-            pass
 
     output = {
         "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

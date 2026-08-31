@@ -33,6 +33,7 @@ from gptme_dashboard.generate import (
     read_agent_urls,
     read_workspace_config,
     render_markdown_to_html,
+    scan_community_plugins,
     scan_journals,
     scan_lessons,
     scan_packages,
@@ -2621,6 +2622,56 @@ def test_scan_tasks_gptodo_path_includes_body(tmp_path: Path):
     assert "page_url" in tasks[0]
     assert tasks[0]["page_url"] == "tasks/my-task.html"
     assert "Do something" in tasks[0]["body"]
+
+
+# ---------------------------------------------------------------------------
+# scan_community_plugins tests
+# ---------------------------------------------------------------------------
+
+
+def test_scan_community_plugins_missing(tmp_path: Path):
+    """Missing index file degrades to an empty list."""
+    assert scan_community_plugins(tmp_path) == []
+
+
+def test_scan_community_plugins_docs_path(tmp_path: Path):
+    """Canonical generated path is docs/community_plugins.json."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "community_plugins.json").write_text(
+        json.dumps({"entries": [{"name": "owner/repo", "type": "plugin"}]})
+    )
+    result = scan_community_plugins(tmp_path)
+    assert result == [{"name": "owner/repo", "type": "plugin"}]
+
+
+def test_scan_community_plugins_root_fallback(tmp_path: Path):
+    """Pre-#1449 root path still works for older workspaces."""
+    (tmp_path / "community_plugins.json").write_text(
+        json.dumps({"entries": [{"name": "legacy/root"}]})
+    )
+    result = scan_community_plugins(tmp_path)
+    assert result == [{"name": "legacy/root"}]
+
+
+def test_scan_community_plugins_docs_wins_over_root(tmp_path: Path):
+    """docs/ is canonical when both paths exist."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "community_plugins.json").write_text(json.dumps({"entries": [{"name": "docs/copy"}]}))
+    (tmp_path / "community_plugins.json").write_text(
+        json.dumps({"entries": [{"name": "root/copy"}]})
+    )
+    result = scan_community_plugins(tmp_path)
+    assert result == [{"name": "docs/copy"}]
+
+
+def test_scan_community_plugins_invalid_json(tmp_path: Path):
+    """Corrupt JSON degrades to an empty list instead of raising."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "community_plugins.json").write_text("{not json")
+    assert scan_community_plugins(tmp_path) == []
 
 
 # ---------------------------------------------------------------------------
