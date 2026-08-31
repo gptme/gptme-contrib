@@ -13,6 +13,9 @@ Voice interface for gptme agents using OpenAI or xAI Grok Realtime APIs.
 - **Local testing** with direct microphone/speaker I/O
 - **BobBrain camera tool** — the `/local` session exposes `look` and runs VLM
   inference only after the edge node returns an on-demand frame
+- **Goal-level body tools** — in-process MAVSDK or an authenticated remote
+  `bob-body/0` node can handle status, bounded movement, stop, turn, and local
+  interaction directly in the realtime tool bridge (never via a subagent)
 
 ## Installation
 
@@ -85,6 +88,22 @@ gptme-voice-call +46701234567
 ```
 
 Use `--dry-run` to print the generated TwiML without dialing.
+
+### Connect a remote body node
+
+Configure a private body endpoint and pass its token separately so credentials
+do not appear in URLs or logs:
+
+```bash
+GPTME_VOICE_BODY_URL=tcp://127.0.0.1:7777
+GPTME_VOICE_BODY_TOKEN=<body-node-token>
+GPTME_VOICE_BODY_CONTROLLER_ID=gptme-voice-local  # optional
+```
+
+The remote node negotiates its actual capabilities during the authenticated
+handshake. `gptme-voice` registers only the corresponding realtime tools. The
+body node remains responsible for controller leases, command TTLs, idempotency,
+deadman behavior, and collision/local safety.
 
 ### API keys
 

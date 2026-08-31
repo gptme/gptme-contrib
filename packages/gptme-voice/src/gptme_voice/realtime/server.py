@@ -903,6 +903,25 @@ class VoiceServer:
     @contextlib.asynccontextmanager
     async def _lifespan(self, _app):
         try:
+            if (
+                self.body_adapter is not None
+                and self.body_adapter.requires_startup_connection
+            ):
+                try:
+                    await self.body_adapter.ensure_connected()
+                except Exception as error:  # noqa: BLE001 - keep voice available
+                    logger.error(
+                        "Body adapter startup connection failed; body tools disabled: %s",
+                        error,
+                    )
+                    await self.body_adapter.close()
+                    self.body_adapter = None
+                else:
+                    logger.info(
+                        "Body adapter ready: %s (capabilities: %s)",
+                        self.body_adapter.name,
+                        sorted(self.body_adapter.capabilities) or "none",
+                    )
             yield
         finally:
             await self._cancel_all_twilio_body_grant_idle_revokes()

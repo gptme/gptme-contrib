@@ -18,6 +18,7 @@ class FakeAdapter:
     """Records calls; full capability set unless overridden."""
 
     name = "fake"
+    requires_startup_connection = False
 
     def __init__(
         self,

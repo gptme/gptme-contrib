@@ -81,6 +81,7 @@ Reusable Python packages, installable individually. See [packages/README.md](./p
 | [gptme-activity-summary](./packages/gptme-activity-summary/) | Activity summarization — journals, GitHub, sessions, tweets, email |
 | [gptme-backoff](./packages/gptme-backoff/) | Retry utilities: exponential backoff, jitter, async/sync decorators |
 | [gptme-bob-status](./packages/gptme-bob-status/) | Bob-specific StatusProvider for `gptme-util status` |
+| [gptme-body-protocol](./packages/gptme-body-protocol/) | Neutral versioned wire DTOs for body-node clients and servers |
 | [gptme-cc-memory](./packages/gptme-cc-memory/) | Typed, git-tracked, hook-injected session memory for Claude Code |
 | [gptme-codegraph](./packages/gptme-codegraph/) | Structural code retrieval with tree-sitter (call graph, blast/impact analysis, MCP tools) |
 | [gptme-contrib-lib](./packages/gptme-contrib-lib/) | Shared utilities |

@@ -920,13 +920,19 @@ def test_untrusted_sessions_do_not_advertise_body_tools(monkeypatch) -> None:
     assert [tool["name"] for tool in allowed.extra_tools] == ["body_status"]
 
 
-def test_server_lifespan_closes_body_adapter(monkeypatch) -> None:
+def test_server_lifespan_connects_and_closes_remote_body_adapter(monkeypatch) -> None:
     class Adapter:
         name = "fake"
-        capabilities: set[str] = set()
+        requires_startup_connection = True
 
         def __init__(self) -> None:
+            self.capabilities: set[str] = set()
+            self.connected = False
             self.closed = False
+
+        async def ensure_connected(self) -> None:
+            self.connected = True
+            self.capabilities = {"move"}
 
         async def close(self) -> None:
             self.closed = True
@@ -942,7 +948,32 @@ def test_server_lifespan_closes_body_adapter(monkeypatch) -> None:
             pass
 
     asyncio.run(run_lifespan())
+    assert adapter.connected is True
     assert adapter.closed is True
+
+
+def test_server_lifespan_disables_unreachable_remote_body(monkeypatch) -> None:
+    class Adapter:
+        name = "fake"
+        capabilities: set[str] = set()
+        requires_startup_connection = True
+
+        async def ensure_connected(self) -> None:
+            raise ConnectionError("offline")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server.body_adapter_from_env", lambda: Adapter()
+    )
+    server = VoiceServer()
+
+    async def run_lifespan() -> None:
+        async with server._lifespan(server.app):
+            assert server.body_adapter is None
+
+    asyncio.run(run_lifespan())
 
 
 def test_build_caller_instructions_no_number() -> None:
