@@ -745,8 +745,87 @@ def test_step_types_commit_bearing_kinds(kind: str):
     assert "single_commit" in labels
 
 
+def test_step_types_deduplicates_same_commit_across_producers():
+    """Short/full SHA variants for one commit count as one logical delivery."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "git_commit",
+                "value": "48225d823 fix(cli): pass model alias",
+            },
+            {
+                "kind": "commit",
+                "value": "48225d823eba894164b90290cb7a6d2ecfaf3508",
+            },
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/3646",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+
+
+def test_step_types_pr_only_is_single_commit():
+    """A PR without commit details still represents one commit-bearing delivery."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/3646",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "no_commit" not in labels
+
+
+def test_step_types_two_distinct_commits_plus_pr_is_multi():
+    """PR metadata must not collapse two distinct commit identities."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "1111111 first"},
+            {"kind": "git_commit", "value": "2222222 second"},
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/3646",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
 def test_step_types_pr_merge_pair_is_single_commit():
-    """A paired pull_request + merge_commit is one logical delivery.
+    """A PR and its merge commit are one logical delivery.
 
     Regression for gptme/gptme-contrib#1564 Greptile P1: `gh pr merge`
     records both kinds, so entry-based counting stamped multi_commit.
@@ -780,7 +859,7 @@ def test_step_types_pr_merge_pair_is_single_commit():
 
 
 def test_step_types_pr_merge_pair_plus_commit_is_multi():
-    """A PR-merge pair plus a separate commit is still multi_commit."""
+    """A PR merge plus a separate commit is still multi_commit."""
     r = SessionRecord(
         session_id="step-types",
         span_aggregates={
@@ -809,12 +888,8 @@ def test_step_types_pr_merge_pair_plus_commit_is_multi():
     assert "single_commit" not in labels
 
 
-def test_step_types_unrelated_pr_and_merge_commit_not_paired():
-    """Independently sourced pull_request + merge_commit stay two deliveries.
-
-    Regression for gptme/gptme-contrib#1564 Greptile P1: count-only pairing
-    collapsed a PR URL and an unrelated merge_commit into single_commit.
-    """
+def test_step_types_pr_metadata_does_not_inflate_merge_commit():
+    """PR metadata beside one merge commit remains one logical delivery."""
     r = SessionRecord(
         session_id="step-types",
         span_aggregates={
@@ -830,8 +905,8 @@ def test_step_types_unrelated_pr_and_merge_commit_not_paired():
     )
     r.populate_step_types()
     labels = r.step_types or []
-    assert "multi_commit" in labels
-    assert "single_commit" not in labels
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
 
 
 def test_step_types_zero_spans_not_shallow():

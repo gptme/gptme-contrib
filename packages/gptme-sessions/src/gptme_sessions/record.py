@@ -574,30 +574,32 @@ class SessionRecord:
         if error_rate > 0.10:
             step_types.append("error_prone")
 
-        # Delivery patterns (from deliverable_details). Producers emit
-        # commit/git_commit/merge_commit/pull_request for commit-bearing work;
-        # counting only the literal "commit" kind stamps completed sessions
-        # as no_commit.
+        # Delivery patterns (from deliverable_details). Commit details can be
+        # duplicated across trajectory and caller producers. Prefer unique SHA
+        # identities; identical identity-less values also count once. PRs are
+        # commit-bearing fallback evidence only when no commit detail exists.
         dd = self.deliverable_details or []
-        _commit_kinds = {"commit", "git_commit", "merge_commit", "pull_request"}
-        commit_count = sum(1 for d in dd if d.get("kind") in _commit_kinds)
+        _sha_re = re.compile(r"(?<![0-9a-f])([0-9a-f]{7,40})(?![0-9a-f])", re.IGNORECASE)
+        commit_ids: list[str] = []
+        anonymous_commit_values: set[str] = set()
+        for detail in dd:
+            if detail.get("kind") not in {"commit", "git_commit", "merge_commit"}:
+                continue
+            value = detail.get("value")
+            match = _sha_re.search(value) if isinstance(value, str) else None
+            if match is None:
+                anonymous_commit_values.add(str(value))
+                continue
+            commit_id = match.group(1).lower()
+            for known_id in commit_ids:
+                if commit_id.startswith(known_id) or known_id.startswith(commit_id):
+                    break
+            else:
+                commit_ids.append(commit_id)
 
-        # A single `gh pr merge` emits both pull_request and merge_commit
-        # with evidence.action == "gh_pr_merge". Pair only those — a bare
-        # pull_request (PR URL) plus an unrelated merge_commit must stay two
-        # deliveries, or LOO undercounts distinct work.
-        def _action(d: dict[str, Any]) -> str | None:
-            evidence = d.get("evidence")
-            if isinstance(evidence, dict):
-                action = evidence.get("action")
-                return action if isinstance(action, str) else None
-            return None
-
-        pr_n = sum(1 for d in dd if d.get("kind") == "pull_request" and _action(d) == "gh_pr_merge")
-        merge_n = sum(
-            1 for d in dd if d.get("kind") == "merge_commit" and _action(d) == "gh_pr_merge"
-        )
-        commit_count -= min(pr_n, merge_n)
+        commit_count = len(commit_ids) + len(anonymous_commit_values)
+        if commit_count == 0 and any(d.get("kind") == "pull_request" for d in dd):
+            commit_count = 1
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 
         # Partition on commit cardinality: 0 / 1 / 2+. Two-commit sessions
