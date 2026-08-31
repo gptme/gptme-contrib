@@ -1,5 +1,6 @@
 """Tests for subagent session management."""
 
+import re
 import subprocess
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -472,3 +473,85 @@ def test_sessions_cli_accepts_auth_failed_status():
     result = runner.invoke(cli, ["sessions", "--help"])
     assert result.exit_code == 0
     assert "auth_failed" in result.output
+
+
+def _write_task(tasks_dir, name, **metadata):
+    lines = ["---"]
+    for key, value in metadata.items():
+        lines.append(f"{key}: {value}")
+    lines.extend(["---", f"# {name}"])
+    (tasks_dir / f"{name}.md").write_text("\n".join(lines))
+
+
+@pytest.mark.parametrize("status", ["auth_failed", "failed"])
+def test_execute_task_agent_returns_false_on_terminal_failure(sessions_dir, monkeypatch, status):
+    """_execute_task_agent must return False on failed/auth_failed (not None)."""
+    from gptodo.cli import _execute_task_agent
+
+    tasks_dir = sessions_dir / "tasks"
+    tasks_dir.mkdir()
+    _write_task(tasks_dir, "my-task", state="todo", created="2026-08-30T00:00:00")
+    (sessions_dir / ".git").mkdir()
+    monkeypatch.chdir(sessions_dir)
+
+    fake = _make_session(status=status, error="auth-death: transient 401", backend="claude")
+    monkeypatch.setattr("gptodo.cli.spawn_agent", lambda **kwargs: fake)
+
+    ok = _execute_task_agent(
+        task_id="my-task",
+        prompt=None,
+        agent_type="general",
+        backend="claude",
+        background=False,
+        model=None,
+        timeout=60,
+    )
+    assert ok is False
+
+
+def test_execute_task_agent_returns_true_on_completed(sessions_dir, monkeypatch):
+    from gptodo.cli import _execute_task_agent
+
+    tasks_dir = sessions_dir / "tasks"
+    tasks_dir.mkdir()
+    _write_task(tasks_dir, "my-task", state="todo", created="2026-08-30T00:00:00")
+    (sessions_dir / ".git").mkdir()
+    monkeypatch.chdir(sessions_dir)
+
+    fake = _make_session(status="completed", backend="claude")
+    monkeypatch.setattr("gptodo.cli.spawn_agent", lambda **kwargs: fake)
+
+    ok = _execute_task_agent(
+        task_id="my-task",
+        prompt=None,
+        agent_type="general",
+        backend="claude",
+        background=False,
+        model=None,
+        timeout=60,
+    )
+    assert ok is True
+
+
+def test_loop_counts_auth_failed_as_failure(sessions_dir, monkeypatch):
+    """Sequential gptodo loop must not count an auth_failed spawn as success."""
+    from click.testing import CliRunner
+
+    tasks_dir = sessions_dir / "tasks"
+    tasks_dir.mkdir()
+    _write_task(tasks_dir, "fail-task", state="todo", created="2026-08-30T00:00:00")
+    _write_task(tasks_dir, "ok-task", state="todo", created="2026-08-30T00:01:00")
+    (sessions_dir / ".git").mkdir()
+    monkeypatch.chdir(sessions_dir)
+
+    outcomes = {"fail-task": False, "ok-task": True}
+
+    def fake_execute(task_id, **kwargs):
+        return outcomes[task_id]
+
+    monkeypatch.setattr("gptodo.cli._execute_task_agent", fake_execute)
+
+    result = CliRunner().invoke(cli, ["loop", "-n", "2"])
+    assert result.exit_code == 0, result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "1 succeeded, 1 failed" in plain
