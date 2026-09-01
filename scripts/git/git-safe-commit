@@ -785,7 +785,14 @@ stage_explicit_pathspecs() {
         unset GIT_INDEX_FILE
     fi
 
+    # Paths with embedded newlines are excluded from abort tracking: the
+    # per-path dump and the `update-index --index-info` restore feed are both
+    # newline-delimited, so such a record would split and corrupt the restore.
+    # Newline paths are documented out of scope script-wide; excluding them
+    # here means they keep whatever state exists at abort (pre-trap behavior)
+    # instead of being restored wrongly.
     for path in "${!entries_after[@]}"; do
+        case "$path" in *$'\n'*) continue ;; esac
         if [ "${entries_before[$path]:-}" != "${entries_after[$path]}" ]; then
             GSC_ABORT_PATHS+=("$path")
             GSC_ABORT_BEFORE["$path"]="${entries_before[$path]:-}"
@@ -795,6 +802,7 @@ stage_explicit_pathspecs() {
     # A path whose entry our add REMOVED (file deleted on disk → staged
     # deletion) also gets its pre-run entry restored on abort.
     for path in "${!entries_before[@]}"; do
+        case "$path" in *$'\n'*) continue ;; esac
         if [ -z "${entries_after[$path]:-}" ]; then
             GSC_ABORT_PATHS+=("$path")
             GSC_ABORT_BEFORE["$path"]="${entries_before[$path]}"

@@ -1942,6 +1942,53 @@ def test_abort_restores_unmerged_conflict_stages(git_repo: Path):
     assert conflict.read_text() == "resolved by caller"
 
 
+def test_abort_skips_newline_pathname(git_repo: Path):
+    """A pathname containing a newline cannot ride the newline-delimited
+    dump/restore feed (`update-index --index-info`), so such paths are
+    excluded from abort tracking (Greptile finding on #1579): they keep
+    whatever state exists at abort instead of being restored wrongly."""
+    evil = git_repo / "evil\nname.md"
+    evil.write_text("version A")
+    subprocess.run(
+        ["git", "add", "--", "evil\nname.md"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    evil.write_text("version B")
+    # Trigger the dirty guard via an unstaged tracked modification
+    (git_repo / "README.md").write_text("dirty")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "evil\nname.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "could not restore" not in result.stderr
+    ls = subprocess.run(
+        ["git", "ls-files", "--stage", "-z", "--", "evil\nname.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    entries = [e for e in ls.split("\0") if e]
+    assert len(entries) == 1, f"index corrupted for newline path: {entries!r}"
+    # Out-of-scope path keeps this run's staging (documented pre-trap
+    # behavior) rather than getting a corrupt partial restore.
+    staged_blob = subprocess.run(
+        ["git", "show", ":evil\nname.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert staged_blob == "version B"
+
+
 def test_successful_commit_keeps_trap_inert(git_repo: Path):
     """The success path must not unstage anything or emit the abort note."""
     f = git_repo / "ok.md"
