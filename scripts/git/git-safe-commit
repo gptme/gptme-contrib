@@ -50,33 +50,86 @@ cleanup_pathspec_stdin_tmp() {
     fi
 }
 
-# Unstage-on-abort: paths this run staged (stage_explicit_pathspecs) must not
-# stay staged when the run exits without committing. A staged-but-uncommitted
-# file in a shared worktree is live ammunition for the sweep class: a sibling's
-# branch switch / reset / commit flow can consume or delete it (incident
-# 2026-09-01: an aborted run left a new journal file staged; it was swept from
-# index AND disk before any commit existed). On abort, restore only the paths
-# THIS run newly staged — pre-existing staged content (the caller's or a
-# sibling's) is left untouched. Previously-untracked files return to untracked
-# on disk; tracked files keep their worktree modifications.
-GSC_NEWLY_STAGED=()
+# Unstage-on-abort: index entries this run staged (stage_explicit_pathspecs)
+# must not stay staged when the run exits without committing. A
+# staged-but-uncommitted file in a shared worktree is live ammunition for the
+# sweep class: a sibling's branch switch / reset / commit flow can consume or
+# delete it (incident 2026-09-01: an aborted run left a new journal file
+# staged; it was swept from index AND disk before any commit existed).
+#
+# On abort, restore the exact pre-run index state for each path whose entry
+# OUR `git add` changed — and only while the entry still holds the blob our
+# add produced. Concretely, per path:
+#   - entry unchanged by our add                  → never touched
+#   - entry no longer holds our add's blob        → a sibling re-staged it
+#                                                   since; leave theirs alone
+#   - our add created the entry                   → remove it (file returns to
+#                                                   untracked on disk)
+#   - our add replaced a pre-existing staged blob → put the prior mode+blob
+#                                                   back via update-index
+# Worktree files are never modified — only index entries.
+GSC_ABORT_PATHS=()
+declare -A GSC_ABORT_BEFORE=() # path -> "mode oid" pre-add ("" = no entry)
+declare -A GSC_ABORT_AFTER=()  # path -> "mode oid" our add produced
 GSC_COMMIT_DONE=0
 
-# shellcheck disable=SC2317
-unstage_abandoned_pathspecs() {
-    if [ "$GSC_COMMIT_DONE" -eq 1 ] || [ "${#GSC_NEWLY_STAGED[@]}" -eq 0 ]; then
+# Print "mode oid" for the path's current index entry ("" if absent).
+gsc_index_entry() {
+    local line mode rest
+    line="$(git ls-files --stage -- "$1" 2>/dev/null | head -n1)"
+    if [ -z "$line" ]; then
+        echo ""
         return 0
     fi
-    local attempt
+    mode="${line%% *}"
+    rest="${line#* }"
+    echo "$mode ${rest%% *}"
+}
+
+# Restore one path's index entry to its pre-run state, retrying through
+# transient index.lock contention. $2 is "mode oid" or "" (no entry).
+# shellcheck disable=SC2317  # reached only via the EXIT trap
+gsc_restore_index_entry() {
+    local path="$1" before="$2" attempt
     # shellcheck disable=SC2034  # loop counter, value unused
     for attempt in 1 2 3; do
-        if git restore --staged -- "${GSC_NEWLY_STAGED[@]}" 2>/dev/null; then
-            echo "note: unstaged ${#GSC_NEWLY_STAGED[@]} path(s) staged by this aborted run (files remain on disk)" >&2
-            return 0
+        if [ -z "$before" ]; then
+            git update-index --force-remove -- "$path" 2>/dev/null && return 0
+        else
+            git update-index --cacheinfo "${before%% *},${before#* },$path" 2>/dev/null && return 0
         fi
         sleep 0.4
     done
-    echo "warning: failed to unstage abort-path staging; unstage manually: git restore --staged -- ${GSC_NEWLY_STAGED[*]}" >&2
+    return 1
+}
+
+# shellcheck disable=SC2317  # reached only via the EXIT trap
+unstage_abandoned_pathspecs() {
+    if [ "$GSC_COMMIT_DONE" -eq 1 ] || [ "${#GSC_ABORT_PATHS[@]}" -eq 0 ]; then
+        return 0
+    fi
+    local path current restored=0 skipped=0 failed=0
+    for path in "${GSC_ABORT_PATHS[@]}"; do
+        current="$(gsc_index_entry "$path")"
+        if [ "$current" != "${GSC_ABORT_AFTER[$path]}" ]; then
+            # The entry no longer holds the blob our add staged — a sibling
+            # (or the operator) re-staged this path after us. Theirs wins.
+            skipped=$((skipped + 1))
+            continue
+        fi
+        if gsc_restore_index_entry "$path" "${GSC_ABORT_BEFORE[$path]}"; then
+            restored=$((restored + 1))
+        else
+            failed=$((failed + 1))
+            echo "warning: could not restore pre-run index state for '$path'; fix manually: git restore --staged -- '$path'" >&2
+        fi
+    done
+    if [ "$restored" -gt 0 ]; then
+        echo "note: unstaged ${restored} path(s) staged by this aborted run (files remain on disk)" >&2
+    fi
+    if [ "$skipped" -gt 0 ]; then
+        echo "note: left ${skipped} path(s) alone — re-staged by another process after this run" >&2
+    fi
 }
 
 # shellcheck disable=SC2317
@@ -553,17 +606,45 @@ stage_explicit_pathspecs() {
     # any file(s) known to git", which forces an awkward `git add` step
     # exactly when the wrapper is supposed to remove it.
     #
-    # Record which paths gain a staged entry from OUR add (vs. already staged
-    # before we ran), so the abort trap can unstage exactly those and nothing
-    # else. Names are compared line-wise; paths with embedded newlines are out
-    # of scope, consistent with the rest of this script.
-    local staged_before staged_after
-    staged_before="$(git diff --cached --name-only -- "${PATHSPECS[@]}" 2>/dev/null | sort -u)"
+    # Snapshot the index entries (mode + blob oid) for the explicit pathspecs
+    # before and after OUR add, so the abort trap can restore exactly the
+    # entries this run changed — including a pre-existing staged blob that our
+    # add replaced — and can detect a sibling re-staging a path after us.
+    # -z output keeps paths unquoted; embedded newlines remain out of scope,
+    # consistent with the rest of this script.
+    local -A entries_before=() entries_after=()
+    local line mode rest path
+    while IFS= read -r -d '' line; do
+        [ -z "$line" ] && continue
+        mode="${line%% *}"
+        rest="${line#* }"
+        path="${line#*$'\t'}"
+        entries_before["$path"]="$mode ${rest%% *}"
+    done < <(git ls-files --stage -z -- "${PATHSPECS[@]}" 2>/dev/null)
     git add -- "${PATHSPECS[@]}" || return $?
-    staged_after="$(git diff --cached --name-only -- "${PATHSPECS[@]}" 2>/dev/null | sort -u)"
-    while IFS= read -r path; do
-        [ -n "$path" ] && GSC_NEWLY_STAGED+=("$path")
-    done < <(comm -13 <(printf '%s\n' "$staged_before") <(printf '%s\n' "$staged_after"))
+    while IFS= read -r -d '' line; do
+        [ -z "$line" ] && continue
+        mode="${line%% *}"
+        rest="${line#* }"
+        path="${line#*$'\t'}"
+        entries_after["$path"]="$mode ${rest%% *}"
+    done < <(git ls-files --stage -z -- "${PATHSPECS[@]}" 2>/dev/null)
+    for path in "${!entries_after[@]}"; do
+        if [ "${entries_before[$path]:-}" != "${entries_after[$path]}" ]; then
+            GSC_ABORT_PATHS+=("$path")
+            GSC_ABORT_BEFORE["$path"]="${entries_before[$path]:-}"
+            GSC_ABORT_AFTER["$path"]="${entries_after[$path]}"
+        fi
+    done
+    # A path whose entry our add REMOVED (file deleted on disk → staged
+    # deletion) also gets its pre-run entry restored on abort.
+    for path in "${!entries_before[@]}"; do
+        if [ -z "${entries_after[$path]:-}" ]; then
+            GSC_ABORT_PATHS+=("$path")
+            GSC_ABORT_BEFORE["$path"]="${entries_before[$path]}"
+            GSC_ABORT_AFTER["$path"]=""
+        fi
+    done
 }
 
 resolve_pre_commit_hook() {

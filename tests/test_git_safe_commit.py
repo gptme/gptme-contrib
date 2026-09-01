@@ -1707,6 +1707,84 @@ def test_abort_preserves_preexisting_staged_content(git_repo: Path):
     assert new_file.exists()
 
 
+def test_abort_restores_replaced_staged_blob(git_repo: Path):
+    """When the explicit path already had staged content and the worktree held
+    different content, our `git add` replaces the staged blob. An abort must
+    put the caller's prior staged blob back, not leave this run's content
+    staged (Greptile finding on #1579)."""
+    doc = git_repo / "doc.md"
+    doc.write_text("version A")
+    subprocess.run(
+        ["git", "add", "doc.md"], cwd=git_repo, check=True, capture_output=True
+    )
+    doc.write_text("version B")
+    # Trigger the dirty guard via an unstaged tracked modification
+    (git_repo / "README.md").write_text("dirty")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "doc.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    staged_blob = subprocess.run(
+        ["git", "show", ":doc.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert staged_blob == "version A", "caller's prior staged blob was lost"
+    assert doc.read_text() == "version B", "worktree content must be untouched"
+
+
+def test_abort_skips_path_restaged_by_sibling(git_repo: Path):
+    """If another process re-stages one of our paths after our `git add` but
+    before the abort, the trap must leave that newer index entry alone
+    (Greptile finding on #1579). Simulated via a failing pre-commit hook that
+    plays the sibling."""
+    # Hooks dir lives OUTSIDE the repo so the dirty guard (untracked-path
+    # check) does not abort before the hook gets a chance to run.
+    hooks = git_repo.parent / "sibling-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"cd '{git_repo}'\n"
+        'printf "sibling content" > raced.md\n'
+        "git add raced.md\n"
+        "exit 1\n"
+    )
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    (git_repo / "raced.md").write_text("our content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "raced.md", "-m", "test: hook fails"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "left 1 path(s) alone" in result.stderr
+    staged_blob = subprocess.run(
+        ["git", "show", ":raced.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert staged_blob == "sibling content", "sibling's newer staging was clobbered"
+
+
 def test_successful_commit_keeps_trap_inert(git_repo: Path):
     """The success path must not unstage anything or emit the abort note."""
     f = git_repo / "ok.md"
