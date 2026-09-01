@@ -181,7 +181,11 @@ class RemoteAdapter:
             )
             response = await self._exchange(message)
             if "telemetry" in response:
-                self._telemetry = self._validated_telemetry(response)
+                try:
+                    self._telemetry = self._validated_telemetry(response)
+                except ValueError:
+                    await self.close()
+                    raise
             return response
 
     async def _exchange(self, message: Handshake | Command) -> dict[str, Any]:

@@ -274,6 +274,7 @@ def test_remote_adapter_rejects_non_object_telemetry(response_type: str) -> None
                 operation = adapter.stop()
             with pytest.raises(ValueError, match="telemetry must be a JSON object"):
                 await operation
+            assert adapter._writer is None
         finally:
             await adapter.close()
             server.close()
