@@ -1873,11 +1873,11 @@ def test_abort_unstages_identical_noop_sibling_add(git_repo: Path):
     assert raced.exists() and raced.read_text() == "our content"
 
 
-def test_abort_leaves_conflicted_path_resolution_alone(git_repo: Path):
-    """A path with unmerged (stage 1/2/3) entries is excluded from abort
-    tracking: the snapshot cannot represent conflict stages, and restoring one
-    side's blob as stage 0 would fabricate a resolution (Greptile finding on
-    #1579). The caller's in-worktree resolution stays staged instead."""
+def test_abort_restores_unmerged_conflict_stages(git_repo: Path):
+    """When an explicit path has unresolved stage-1/2/3 entries and this run
+    `git add`s a worktree resolution, abort must restore the original unmerged
+    dump instead of leaving a fabricated stage-0 entry (Greptile finding on
+    #1579). The worktree resolution stays on disk."""
     conflict = git_repo / "conflict.md"
     conflict.write_text("base")
     subprocess.run(
@@ -1907,6 +1907,14 @@ def test_abort_leaves_conflicted_path_resolution_alone(git_repo: Path):
         ["git", "merge", "side"], cwd=git_repo, capture_output=True, text=True
     )
     assert merge.returncode != 0, "expected a merge conflict"
+    before = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "conflict.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert before.count("\t") >= 2, "expected unmerged stages, got:\n" + before
 
     conflict.write_text("resolved by caller")
     # Trigger the dirty guard via an unstaged tracked modification
@@ -1920,27 +1928,18 @@ def test_abort_leaves_conflicted_path_resolution_alone(git_repo: Path):
     )
 
     assert result.returncode != 0
-    ls = subprocess.run(
+    after = subprocess.run(
         ["git", "ls-files", "--stage", "--", "conflict.md"],
         cwd=git_repo,
         capture_output=True,
         text=True,
         check=True,
-    )
-    lines = ls.stdout.strip().splitlines()
-    assert len(lines) == 1 and " 0\t" in lines[0], (
-        "expected the caller's stage-0 resolution to survive: " + ls.stdout
-    )
-    staged_blob = subprocess.run(
-        ["git", "show", ":conflict.md"],
-        cwd=git_repo,
-        capture_output=True,
-        text=True,
-        check=True,
     ).stdout
-    assert (
-        staged_blob == "resolved by caller"
-    ), "abort must not fabricate a different resolution"
+    assert after == before, (
+        "abort collapsed or mutated conflict stages:\n"
+        f"before:\n{before}after:\n{after}\nstderr:\n{result.stderr}"
+    )
+    assert conflict.read_text() == "resolved by caller"
 
 
 def test_successful_commit_keeps_trap_inert(git_repo: Path):
