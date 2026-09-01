@@ -4542,6 +4542,105 @@ def test_extract_signals_codex_patch_apply_end_file_writes():
     assert is_productive(signals) is True
 
 
+def test_extract_signals_codex_wait_and_patch_combined():
+    """Combined regression fixture: exec → cell ID → wait → block-list commit + patch_apply_end.
+
+    Covers the exact pattern from the 2026-08-24..30 false-noop cluster (issue #1567):
+    - exec custom_tool_call returns only a cell ID (async dispatch)
+    - wait function_call block-list output carries the actual commit line(s)
+    - event_msg patch_apply_end records file changes alongside the commit
+
+    All three signals must appear in the extracted result and is_productive must be True.
+    """
+    msgs = [
+        {
+            "timestamp": "2026-08-25T14:00:00Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        # exec dispatches async shell; output is only the cell ID placeholder
+        {
+            "timestamp": "2026-08-25T14:00:10Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec_combined",
+                "name": "exec",
+                "input": (
+                    'const r = await tools.exec_command({"cmd":'
+                    '"git add -A && git commit -m \\"fix: combined\\"",'
+                    '"workdir":"/workspace"});\ntext(r.output);\n'
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-08-25T14:00:11Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_combined",
+                "output": "Script running with cell ID abc456\nWall time 0.0 seconds\nOutput:\n",
+            },
+        },
+        # wait continuation returns actual commit in a block-list
+        {
+            "timestamp": "2026-08-25T14:00:15Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait",
+                "call_id": "call_wait_combined",
+                "arguments": '{"cell_id":"abc456","yield_time_ms":30000}',
+            },
+        },
+        {
+            "timestamp": "2026-08-25T14:00:20Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait_combined",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "Script completed\nWall time 8.3 seconds\nOutput:\n",
+                    },
+                    {
+                        "type": "input_text",
+                        "text": (
+                            '{"exit_code":0,"output":"[master cafe5678] fix: combined\\n'
+                            ' 2 files changed, 10 insertions(+)\\n"}'
+                        ),
+                    },
+                ],
+            },
+        },
+        # patch_apply_end records the file-level changes from the nested apply_patch
+        {
+            "timestamp": "2026-08-25T14:00:21Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "call_id": "call_exec_combined",
+                "success": True,
+                "changes": {
+                    "/workspace/src/fix.py": {"type": "update"},
+                    "/workspace/src/new_helper.py": {"type": "add"},
+                },
+            },
+        },
+    ]
+
+    signals = extract_signals_codex(msgs)
+
+    assert signals["tool_calls"].get("exec") == 1
+    assert signals["tool_calls"].get("wait") == 1
+    assert signals["tool_calls"].get("apply_patch") == 1
+    assert signals["git_commits"] == ["fix: combined (cafe5678)"]
+    assert "/workspace/src/fix.py" in signals["file_writes"]
+    assert "/workspace/src/new_helper.py" in signals["file_writes"]
+    assert is_productive(signals) is True
+
+
 def test_extract_usage_codex():
     """Extract model, token, and rate-limit info from Codex trajectory."""
     msgs = [
@@ -4887,6 +4986,96 @@ def test_extract_from_path_codex(tmp_path: Path):
     assert result["tool_calls"]["exec_command"] == 1
     assert "usage" in result
     assert result["usage"]["model"] == "gpt-5.3-codex"
+
+
+def test_extract_from_path_codex_wait_patch_combined(tmp_path: Path):
+    """extract_from_path correctly handles exec → wait → patch_apply_end in one pass.
+
+    Regression coverage for issue #1567: the combined exec/wait/patch_apply_end
+    shape caused false NOOPs because extract_from_path returned empty git_commits
+    and productive=False even when the session had real commits.
+    """
+    from gptme_sessions.signals import extract_from_path
+
+    trajectory_file = tmp_path / "rollout.jsonl"
+    msgs = [
+        {
+            "timestamp": "2026-08-25T14:00:00Z",
+            "type": "session_meta",
+            "payload": {"originator": "codex_exec"},
+        },
+        {
+            "timestamp": "2026-08-25T14:00:10Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec_fp",
+                "name": "exec",
+                "input": 'const r = await tools.exec_command({"cmd":"git commit -m \\"fix: fp\\""});\ntext(r.output);\n',
+            },
+        },
+        {
+            "timestamp": "2026-08-25T14:00:11Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec_fp",
+                "output": "Script running with cell ID fp123\nWall time 0.0 seconds\nOutput:\n",
+            },
+        },
+        {
+            "timestamp": "2026-08-25T14:00:15Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "wait",
+                "call_id": "call_wait_fp",
+                "arguments": '{"cell_id":"fp123","yield_time_ms":30000}',
+            },
+        },
+        {
+            "timestamp": "2026-08-25T14:00:25Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait_fp",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "Script completed\nWall time 14.1 seconds\nOutput:\n",
+                    },
+                    {
+                        "type": "input_text",
+                        "text": '{"exit_code":0,"output":"[master dead1234] fix: fp\\n 1 file changed\\n"}',
+                    },
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-08-25T14:00:26Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "call_id": "call_exec_fp",
+                "success": True,
+                "changes": {
+                    "/workspace/src/fix.py": {"type": "update"},
+                },
+            },
+        },
+    ]
+    with open(trajectory_file, "w") as f:
+        for msg in msgs:
+            f.write(json.dumps(msg) + "\n")
+
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "codex"
+    assert result["productive"] is True
+    assert result["git_commits"] == ["fix: fp (dead1234)"]
+    assert "/workspace/src/fix.py" in result["file_writes"]
+    assert result["tool_calls"].get("exec") == 1
+    assert result["tool_calls"].get("wait") == 1
+    assert result["tool_calls"].get("apply_patch") == 1
 
 
 def test_extract_from_path_copilot(tmp_path: Path):

@@ -609,11 +609,29 @@ def post_session(
                 # Trajectory explicitly says this was noop — caller SHAs are
                 # from concurrent sessions.
                 if caller_deliverables:
-                    logger.warning(
-                        "Dropping %d git-range commit(s): trajectory determined "
-                        "noop with no deliverables (SHAs from concurrent session)",
-                        len(caller_deliverables),
-                    )
+                    _traj_tool_calls = (signals or {}).get("tool_calls") or {}
+                    if _traj_tool_calls:
+                        # Extractor recognized the format (non-empty tool_calls) but
+                        # found no commits/writes. This is the "no-deliverables-with-commits"
+                        # pattern: trajectory tool-call shape is known yet deliverables are
+                        # empty while caller has git-range evidence. Sustained occurrences
+                        # (especially with positive judge scores) indicate an extraction gap
+                        # for a new or changed tool-call shape — check for new Codex shapes.
+                        logger.warning(
+                            "no-deliverables-with-commits: trajectory recognized %d tool "
+                            "call type(s) (%s) but found no deliverables; dropping %d "
+                            "caller commit(s) as concurrent-session SHAs. Sustained "
+                            "recurrence suggests a signal-extraction gap.",
+                            len(_traj_tool_calls),
+                            ", ".join(sorted(_traj_tool_calls)[:5]),
+                            len(caller_deliverables),
+                        )
+                    else:
+                        logger.warning(
+                            "Dropping %d git-range commit(s): trajectory determined "
+                            "noop with no deliverables (SHAs from concurrent session)",
+                            len(caller_deliverables),
+                        )
                 deliverables = []
             else:
                 # Either the trajectory didn't rule out work, or it is
