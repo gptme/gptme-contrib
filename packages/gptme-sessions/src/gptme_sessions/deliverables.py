@@ -2,14 +2,56 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal
+
+OwnershipVerdict = Literal[
+    "trajectory_observed",
+    "session_trailer_owned",
+    "explicitly_foreign",
+    "ambiguous",
+]
 
 
 def looks_like_sha(value: str) -> bool:
     """Return True for bare SHA-like hex strings used as deliverables."""
     lowered = value.lower().strip()
     return 7 <= len(lowered) <= 40 and all(c in "0123456789abcdef" for c in lowered)
+
+
+def sha_in_traj_prefixes(sha: str, traj_sha_prefixes: set[str] | None) -> bool:
+    """Return True if a caller SHA matches a trajectory commit prefix."""
+    if not traj_sha_prefixes:
+        return False
+    sha_lower = sha.lower().strip()
+    return any(sha_lower.startswith(prefix) for prefix in traj_sha_prefixes)
+
+
+def classify_commit_ownership(
+    sha: str,
+    *,
+    session_id: str | None = None,
+    trailer_ids: Sequence[str] | None = None,
+    traj_sha_prefixes: set[str] | None = None,
+) -> OwnershipVerdict:
+    """Return the typed ownership verdict for one candidate commit SHA.
+
+    A bound trajectory is authoritative: a SHA observed there is owned even
+    when git trailers are missing. A ``Git-Session-Id`` trailer matching
+    ``session_id`` is owned even if the trajectory missed the SHA. Any other
+    trailer is explicitly foreign. An untagged shared-range SHA is
+    *ambiguous*, not session-owned — keeping it is how session 73be credited
+    six sibling commits.
+    """
+    if sha_in_traj_prefixes(sha, traj_sha_prefixes):
+        return "trajectory_observed"
+    values = [str(v).strip() for v in (trailer_ids or []) if str(v).strip()]
+    if values:
+        normalized_session_id = session_id.strip().lower() if session_id else None
+        if normalized_session_id and normalized_session_id in {v.lower() for v in values}:
+            return "session_trailer_owned"
+        return "explicitly_foreign"
+    return "ambiguous"
 
 
 def deliverable_kind(value: str) -> str:

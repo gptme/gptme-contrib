@@ -1,4 +1,42 @@
-from gptme_sessions.deliverables import build_deliverable_detail, project_deliverable_details
+from gptme_sessions.deliverables import (
+    build_deliverable_detail,
+    classify_commit_ownership,
+    project_deliverable_details,
+)
+
+
+def test_classify_commit_ownership_trajectory_beats_missing_trailer():
+    sha = "abc1234567890abcdef1234567890abcdef1234"
+    assert classify_commit_ownership(sha, traj_sha_prefixes={"abc1234"}) == "trajectory_observed"
+
+
+def test_classify_commit_ownership_trailer_match_is_owned():
+    sha = "abc1234567890abcdef1234567890abcdef1234"
+    assert (
+        classify_commit_ownership(sha, session_id="73be", trailer_ids=["73be"])
+        == "session_trailer_owned"
+    )
+
+
+def test_classify_commit_ownership_trailer_match_is_case_insensitive():
+    sha = "abc1234567890abcdef1234567890abcdef1234"
+    assert (
+        classify_commit_ownership(sha, session_id="Session-Mine", trailer_ids=["session-mine"])
+        == "session_trailer_owned"
+    )
+
+
+def test_classify_commit_ownership_other_trailer_is_foreign():
+    sha = "abc1234567890abcdef1234567890abcdef1234"
+    assert (
+        classify_commit_ownership(sha, session_id="73be", trailer_ids=["6869"])
+        == "explicitly_foreign"
+    )
+
+
+def test_classify_commit_ownership_untagged_is_ambiguous():
+    sha = "b59e7f7f48353205eb6adbde9f06094b9dbf9f35"
+    assert classify_commit_ownership(sha, session_id="73be") == "ambiguous"
 
 
 def test_build_deliverable_detail_allows_explicit_kind_override():

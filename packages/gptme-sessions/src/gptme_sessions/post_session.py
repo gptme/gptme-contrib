@@ -24,12 +24,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .deliverables import (
     build_deliverable_detail,
+    classify_commit_ownership,
     looks_like_sha,
     project_deliverable_details,
 )
@@ -66,6 +68,20 @@ def _caller_sha_in_traj(sha: str, traj_sha_prefixes: set[str]) -> bool:
     """Return True if a full 40-char SHA from the caller appears in trajectory commits."""
     sha_lower = sha.lower().strip()
     return any(sha_lower.startswith(prefix) for prefix in traj_sha_prefixes)
+
+
+def _trailer_ids_for(
+    sha: str, commit_trailers: Mapping[str, Sequence[str]] | None
+) -> list[str] | None:
+    """Look up Git-Session-Id trailers for a caller SHA (full or lowercase)."""
+    if not commit_trailers:
+        return None
+    raw = commit_trailers.get(sha)
+    if raw is None:
+        raw = commit_trailers.get(sha.lower())
+    if raw is None:
+        return None
+    return [str(v) for v in raw]
 
 
 def _build_caller_deliverable_details(
@@ -294,6 +310,7 @@ def post_session(
     harness_stderr_path: Path | None = None,
     failure_reason: str | None = None,
     error: str | None = None,
+    commit_trailers: Mapping[str, Sequence[str]] | None = None,
 ) -> PostSessionResult:
     """Record a completed agent session and extract trajectory signals.
 
@@ -364,6 +381,11 @@ def post_session(
         the first ``/journal/`` write in the trajectory signals.
     session_id:
         Override the auto-generated session ID.
+    commit_trailers:
+        Optional map of caller commit SHA → ``Git-Session-Id`` trailer values.
+        Used to distinguish session-trailer-owned SHAs from untagged/ambiguous
+        shared-range commits when a bound trajectory has file edits but no
+        commit SHA. Missing entries are treated as untagged (ambiguous).
     harness_session_id:
         Harness-native session id used by the ``match-lessons`` hook to name its
         per-session events file (for Claude Code, the transcript UUID). Used to
@@ -557,52 +579,119 @@ def post_session(
         # No caller deliverables: use trajectory exclusively.
         deliverables = traj_deliverables
     elif signals is not None:
-        # Trajectory was available — it is authoritative, but only for
-        # deliverables it can actually validate.  File paths in trajectory
-        # deliverables have no SHA to cross-check, so caller SHAs pass through.
+        # Trajectory was available — it is authoritative. File-only
+        # trajectories cannot validate caller SHAs, so untagged shared-range
+        # commits are ambiguous and dropped unless a Git-Session-Id trailer
+        # proves ownership.
         if traj_deliverables:
             traj_sha_prefixes = _extract_traj_sha_prefixes(traj_deliverables)
             if traj_sha_prefixes:
                 # Trajectory has commit SHAs — validate caller SHAs against them
                 # and preserve non-SHA caller deliverables like PR URLs or files.
+                # Trailer-owned SHAs the extractor missed are still session-owned.
                 validated_shas = [
                     d
                     for d in caller_deliverables
                     if looks_like_sha(d) and _caller_sha_in_traj(d, traj_sha_prefixes)
                 ]
-                unvalidated_shas = [
-                    d for d in caller_deliverables if looks_like_sha(d) and d not in validated_shas
-                ]
+                trailer_owned_shas: list[str] = []
+                dropped_shas: list[str] = []
+                for d in caller_deliverables:
+                    if not looks_like_sha(d) or d in validated_shas:
+                        continue
+                    verdict = classify_commit_ownership(
+                        d,
+                        session_id=session_id,
+                        trailer_ids=_trailer_ids_for(d, commit_trailers),
+                        traj_sha_prefixes=traj_sha_prefixes,
+                    )
+                    if verdict == "session_trailer_owned":
+                        trailer_owned_shas.append(d)
+                    else:
+                        dropped_shas.append(d)
                 passthrough_non_sha = [d for d in caller_deliverables if not looks_like_sha(d)]
-                if unvalidated_shas:
+                if dropped_shas:
                     logger.warning(
                         "Dropping %d git-range commit(s) absent from trajectory "
                         "(likely from a concurrent session): %s",
-                        len(unvalidated_shas),
-                        unvalidated_shas[:5],
+                        len(dropped_shas),
+                        dropped_shas[:5],
                     )
                 deliverables = list(
-                    dict.fromkeys(traj_deliverables + validated_shas + passthrough_non_sha)
+                    dict.fromkeys(
+                        traj_deliverables
+                        + validated_shas
+                        + trailer_owned_shas
+                        + passthrough_non_sha
+                    )
                 )
-                extra_deliverable_details = _build_caller_deliverable_details(
-                    validated_shas,
-                    provenance_class="session_committed",
-                    evidence={"source": "caller", "validation": "trajectory_sha_prefix"},
-                ) + _build_caller_deliverable_details(
-                    passthrough_non_sha,
-                    provenance_class="fallback_observed",
-                    evidence={"source": "caller", "reason": "non_sha_passthrough"},
+                extra_deliverable_details = (
+                    _build_caller_deliverable_details(
+                        validated_shas,
+                        provenance_class="session_committed",
+                        evidence={"source": "caller", "validation": "trajectory_sha_prefix"},
+                    )
+                    + _build_caller_deliverable_details(
+                        trailer_owned_shas,
+                        provenance_class="session_trailer_owned",
+                        evidence={"source": "caller", "validation": "git_session_id_trailer"},
+                    )
+                    + _build_caller_deliverable_details(
+                        passthrough_non_sha,
+                        provenance_class="fallback_observed",
+                        evidence={"source": "caller", "reason": "non_sha_passthrough"},
+                    )
                 )
             else:
-                # Trajectory has no SHAs (file paths only) — can't validate
-                # caller SHAs.  Keep both sets, caller items first to preserve
-                # the pre-existing deliverable ordering convention.
-                deliverables = list(dict.fromkeys(caller_deliverables + traj_deliverables))
-                extra_deliverable_details = _build_caller_deliverable_details(
-                    caller_deliverables,
-                    provenance_class="fallback_observed",
-                    evidence={"source": "caller", "reason": "trajectory_has_no_sha"},
-                )
+                # Trajectory has file paths but no commit SHA. Untagged caller
+                # SHAs from a shared git range are ambiguous, not owned
+                # (ErikBjare/bob session 73be). Keep trajectory files and only
+                # those caller SHAs whose Git-Session-Id trailer matches.
+                kept_caller: list[str] = []
+                extra_deliverable_details = []
+                dropped_ambiguous: list[str] = []
+                dropped_foreign: list[str] = []
+                for item in caller_deliverables:
+                    if looks_like_sha(item):
+                        verdict = classify_commit_ownership(
+                            item,
+                            session_id=session_id,
+                            trailer_ids=_trailer_ids_for(item, commit_trailers),
+                        )
+                        if verdict == "session_trailer_owned":
+                            kept_caller.append(item)
+                            extra_deliverable_details.extend(
+                                _build_caller_deliverable_details(
+                                    [item],
+                                    provenance_class="session_trailer_owned",
+                                    evidence={
+                                        "source": "caller",
+                                        "validation": "git_session_id_trailer",
+                                    },
+                                )
+                            )
+                        elif verdict == "explicitly_foreign":
+                            dropped_foreign.append(item)
+                        else:
+                            dropped_ambiguous.append(item)
+                    else:
+                        kept_caller.append(item)
+                        extra_deliverable_details.extend(
+                            _build_caller_deliverable_details(
+                                [item],
+                                provenance_class="fallback_observed",
+                                evidence={"source": "caller", "reason": "non_sha_passthrough"},
+                            )
+                        )
+                if dropped_ambiguous or dropped_foreign:
+                    logger.warning(
+                        "Dropping %d ambiguous and %d foreign git-range commit(s); "
+                        "trajectory has file edits but no commit SHA: %s",
+                        len(dropped_ambiguous),
+                        len(dropped_foreign),
+                        (dropped_ambiguous + dropped_foreign)[:5],
+                    )
+                deliverables = list(dict.fromkeys(kept_caller + traj_deliverables))
         else:
             # Trajectory ran but found no deliverables.
             if traj_productive is False and trajectory_reliable:

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from gptme_sessions.deliverables import looks_like_sha
 from gptme_sessions.post_session import PostSessionResult, post_session
 from gptme_sessions.record import SessionRecord
 from gptme_sessions.store import SessionStore
@@ -705,6 +706,140 @@ def test_post_session_trajectory_commit_validation_keeps_non_sha_caller_delivera
             "evidence": {"source": "caller", "reason": "non_sha_passthrough"},
         },
     ]
+
+
+SESSION_73BE_SIBLING_SHAS = [
+    "b59e7f7f48353205eb6adbde9f06094b9dbf9f35",
+    "bd825297b9f934991db6a1010797748ce5761771",
+    "56e141c4ea533d96a1bc47d55a397091323c11aa",
+    "d25a6a15376a38b60a97af4b56318d424d76624f",
+    "d2c9af6be5ee79940876b4efcf4033250c7fe7ed",
+    "5a2abcb1bbe170422e80b51c2d9cb7573ea0c8c9",
+]
+
+
+def test_post_session_file_only_trajectory_drops_untagged_caller_shas(tmp_path: Path):
+    """File-only trajectory + untagged shared-range SHAs must not credit siblings.
+
+    Session 73be kept six untagged caller SHAs as fallback_observed with
+    reason=trajectory_has_no_sha. Those SHAs are ambiguous, not owned. The
+    session's own file edits stay visible.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    own_file = "/tmp/dashboard-smoke-73be.js"
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": [own_file],
+        "deliverable_details": [
+            {
+                "value": own_file,
+                "kind": "file",
+                "provenance_class": "tool_authored",
+                "evidence": {"source": "trajectory", "tool_name": "save"},
+            }
+        ],
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="gptme",
+            model="gpt-5.5",
+            session_id="73be",
+            duration_seconds=3000,
+            exit_code=124,
+            trajectory_path=fake_traj,
+            deliverables=list(SESSION_73BE_SIBLING_SHAS),
+        )
+
+    assert result.record.deliverables == [own_file]
+    assert all(not looks_like_sha(d) for d in result.record.deliverables)
+    for sha in SESSION_73BE_SIBLING_SHAS:
+        assert sha not in result.record.deliverables
+    assert result.record.outcome == "productive"
+
+
+def test_post_session_file_only_trajectory_keeps_trailer_owned_sha(tmp_path: Path):
+    """A matching Git-Session-Id trailer still owns the commit (A3)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    own_file = "scripts/vitals-portal.py"
+    own_sha = "abc1234567890abcdef1234567890abcdef1234"
+    sibling_sha = "deadbeef01234567012345670123456701234567"
+
+    fake_signals = {
+        "session_duration_s": 60,
+        "productive": True,
+        "deliverables": [own_file],
+        "deliverable_details": [
+            {
+                "value": own_file,
+                "kind": "file",
+                "provenance_class": "tool_authored",
+                "evidence": {"source": "trajectory", "tool_name": "patch"},
+            }
+        ],
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="gptme",
+            model="sonnet",
+            session_id="session-mine",
+            duration_seconds=60,
+            trajectory_path=fake_traj,
+            deliverables=[own_sha, sibling_sha],
+            commit_trailers={own_sha: ["session-mine"]},
+        )
+
+    assert result.record.deliverables == [own_sha, own_file]
+    assert sibling_sha not in result.record.deliverables
+    assert result.record.deliverable_details[0]["provenance_class"] == "session_trailer_owned"
+
+
+def test_post_session_73be_fixture_rejects_sibling_shas_and_keeps_files(tmp_path: Path):
+    """A5: the real 73be SHA list cannot be owned evidence."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    files = [
+        "/home/bob/bob/packages/metaproductivity/src/metaproductivity/vitals/dashboard_routes.py",
+        "/tmp/dashboard-smoke-73be.js",
+    ]
+    fake_signals = {
+        "session_duration_s": 3000,
+        "productive": True,
+        "deliverables": files,
+        "deliverable_details": [
+            {
+                "value": path,
+                "kind": "file",
+                "provenance_class": "tool_authored",
+                "evidence": {"source": "trajectory", "tool_name": "save"},
+            }
+            for path in files
+        ],
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
+        result = post_session(
+            store=store,
+            harness="gptme",
+            model="gpt-5.5",
+            session_id="73be",
+            duration_seconds=3009,
+            exit_code=124,
+            trajectory_path=fake_traj,
+            deliverables=list(SESSION_73BE_SIBLING_SHAS) + files,
+        )
+
+    assert result.record.deliverables == files
+    owned_text = " ".join(result.record.deliverables)
+    assert "1577" not in owned_text
+    assert all(sha not in result.record.deliverables for sha in SESSION_73BE_SIBLING_SHAS)
 
 
 def test_post_session_caller_only_deliverables_when_no_trajectory(tmp_path: Path):

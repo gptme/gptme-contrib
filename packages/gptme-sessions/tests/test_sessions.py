@@ -3173,7 +3173,12 @@ def test_post_session_partial_commit_pair_timeout_is_unknown(tmp_path: Path):
 
 
 def test_post_session_explicit_deliverables_merged_with_trajectory(tmp_path: Path):
-    """Explicit deliverables are merged with trajectory deliverables."""
+    """Explicit non-SHA deliverables are merged with trajectory deliverables.
+
+    Ambiguous SHAs (untagged, no trailer proof) from file-only trajectories are
+    dropped to avoid crediting sibling sessions. Non-SHA items are kept as
+    fallback_observed.
+    """
     import json as _json
 
     traj = tmp_path / "session.jsonl"
@@ -3204,15 +3209,16 @@ def test_post_session_explicit_deliverables_merged_with_trajectory(tmp_path: Pat
     traj.write_text("\n".join(_json.dumps(m) for m in msgs) + "\n")
 
     store = SessionStore(sessions_dir=tmp_path / "store")
-    explicit = ["abc123def456"]
+    # Non-SHA explicit deliverable (e.g., PR URL or file path)
+    explicit = ["https://github.com/gptme/gptme/pull/1234"]
     result = post_session(
         store=store,
         harness="claude-code",
         trajectory_path=traj,
         deliverables=explicit,
     )
-    # Shell-provided SHAs merged with trajectory file paths
-    assert result.record.deliverables == ["abc123def456", "/tmp/foo.py"]
+    # Non-SHA caller items stay first (pre-PR contract); trajectory files follow.
+    assert result.record.deliverables == ["https://github.com/gptme/gptme/pull/1234", "/tmp/foo.py"]
 
 
 def test_post_session_empty_deliverables_uses_trajectory(tmp_path: Path):
