@@ -2575,6 +2575,135 @@ def sync(
         click.echo(", ".join(parts))
 
 
+@cli.command("regrade")
+@click.option("--harness", default=None, help="Restrict to a specific harness (e.g. codex)")
+@click.option(
+    "--outcome",
+    default="noop",
+    type=click.Choice(["productive", "noop", "failed", "unknown", "violated_policy", "all"]),
+    show_default=True,
+    help="Only regrade records whose current outcome matches this value ('all' = no filter)",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="Only regrade records newer than this window (e.g. 10d, 2026-08-24)",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would change without rewriting the store")
+@click.pass_context
+def regrade(
+    ctx: click.Context,
+    harness: str | None,
+    outcome: str,
+    since: str | None,
+    dry_run: bool,
+) -> None:
+    """Re-extract trajectory signals for existing session records.
+
+    Useful after a signal-extractor bug fix to backfill sessions that were
+    incorrectly graded (e.g., productive runs classified as noop because the
+    extractor missed a new tool-call shape).
+
+    Unlike ``sync --signals``, this command forces re-extraction even when
+    ``outcome`` is already set (not just ``unknown``), as long as the field
+    has not been manually annotated.  Annotated fields are preserved.
+
+    After running this command, the store is updated in place.  Bandit
+    posteriors are caller-side; recompute them separately from the corrected
+    records (e.g. ``gptme-sessions export --harness codex --since 10d``).
+
+    Example — fix false-noops from the Codex wait-continuation bug (#1567):
+
+        gptme-sessions regrade --harness codex --since 10d --dry-run
+        gptme-sessions regrade --harness codex --since 10d
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since) if since else None
+    effective_outcome = None if outcome == "all" else outcome
+
+    candidates = store.query(
+        harness=harness,
+        outcome=effective_outcome,
+        since_days=since_days,
+    )
+
+    if not candidates:
+        click.echo("No matching records found.")
+        return
+
+    regraded = 0
+    no_trajectory = 0
+    unchanged = 0
+    errors = 0
+
+    for rec in candidates:
+        traj = Path(rec.trajectory_path) if rec.trajectory_path else None
+        if traj is None or not traj.is_file():
+            no_trajectory += 1
+            if dry_run:
+                click.echo(
+                    f"  no-trajectory: {rec.session_id}  "
+                    f"outcome={rec.outcome}  (would reset to unknown)"
+                )
+            else:
+                if "outcome" not in rec.annotated_fields:
+                    rec.outcome = "unknown"
+                    regraded += 1
+            continue
+
+        try:
+            result = extract_from_path(traj)
+        except Exception as exc:
+            click.echo(
+                f"  error: extraction failed for {rec.session_id}: {exc}",
+                err=True,
+            )
+            errors += 1
+            continue
+
+        new_outcome = "productive" if result.get("productive") else "noop"
+        outcome_changed = False
+
+        if "outcome" not in rec.annotated_fields and rec.outcome != new_outcome:
+            if dry_run:
+                click.echo(
+                    f"  would regrade: {rec.session_id}  "
+                    f"{rec.outcome} → {new_outcome}  "
+                    f"commits={len(result.get('git_commits', []))}  "
+                    f"files={len(result.get('file_writes', []))}"
+                )
+            else:
+                rec.outcome = new_outcome
+                outcome_changed = True
+
+        if not dry_run:
+            # Backfill deliverables/duration that the old extractor missed.
+            # _apply_extract_result_to_record skips outcome when != "unknown",
+            # so it is safe to call after we've already set the new outcome.
+            _apply_extract_result_to_record(rec, result)
+
+        if outcome_changed:
+            regraded += 1
+        elif not dry_run:
+            unchanged += 1
+
+    if not dry_run and candidates:
+        # rewrite() has upsert semantics: mutated candidates take precedence
+        # over existing records; all other records are preserved.
+        store.rewrite(candidates)
+
+    parts = []
+    verb = "Would regrade" if dry_run else "Regraded"
+    parts.append(f"{verb} {regraded} record(s)")
+    if no_trajectory:
+        parts.append(f"{no_trajectory} missing trajectory (reset to unknown)")
+    if unchanged:
+        parts.append(f"{unchanged} already correct")
+    if errors:
+        parts.append(f"{errors} extraction error(s)")
+    click.echo(", ".join(parts) + ".")
+
+
 @cli.command("repair-grades")
 @click.option("--dry-run", is_flag=True, help="Show what would change without rewriting the store")
 @click.pass_context
