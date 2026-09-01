@@ -13,7 +13,7 @@ import pytest
 
 from click.testing import CliRunner
 
-from gptme_sessions.cli import cli
+from gptme_sessions.cli import _regrade_outcome, cli
 from gptme_sessions.record import SessionRecord
 from gptme_sessions.store import SessionStore
 
@@ -1824,6 +1824,28 @@ class TestSyncRouteBackfill:
         assert records[0].trajectory_revision == trajectory_revision_for(fake_file)
 
 
+class TestRegradeOutcomeHelper:
+    """Unit tests for ``_regrade_outcome`` — the mapping must freeze
+    process-derived and operator-annotated outcomes itself, not rely on
+    a caller-side guard.
+    """
+
+    def test_maps_productive_and_noop(self) -> None:
+        assert _regrade_outcome("noop", True) == "productive"
+        assert _regrade_outcome("unknown", False) == "noop"
+        assert _regrade_outcome("productive", False) == "noop"
+
+    def test_preserves_process_outcomes(self) -> None:
+        assert _regrade_outcome("failed", False) == "failed"
+        assert _regrade_outcome("failed", True) == "failed"
+        assert _regrade_outcome("violated_policy", True) == "violated_policy"
+
+    def test_preserves_annotated_outcomes(self) -> None:
+        assert _regrade_outcome("noop", True, annotated=True) == "noop"
+        assert _regrade_outcome("productive", False, annotated=True) == "productive"
+        assert _regrade_outcome("failed", False, annotated=True) == "failed"
+
+
 class TestRegradeCommand:
     """Tests for the ``regrade`` command."""
 
@@ -1901,7 +1923,8 @@ class TestRegradeCommand:
         rc, out = _invoke(["regrade", "--dry-run"], tmp_path)
 
         assert rc == 0, out
-        assert "would regrade" in out.lower() or "Would regrade" in out
+        assert "would regrade" in out.lower()
+        assert "Would regrade 1 record(s)" in out
 
         # Store must be unchanged.
         persisted = store.load_all()[0]
@@ -1975,6 +1998,106 @@ class TestRegradeCommand:
         persisted = store.load_all()[0]
         # Annotated outcome must not change.
         assert persisted.outcome == "noop"
+        assert "→ productive" not in out
+        assert "Regraded 0 record(s)" in out
+
+    def test_regrade_dry_run_preserves_annotated_outcome(self, tmp_path: Path, monkeypatch) -> None:
+        """Dry-run must not report an annotated outcome as a would-regrade."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj = self._make_codex_traj(tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="annotated-dry-run",
+                harness="codex",
+                outcome="noop",
+                trajectory_path=str(traj),
+                annotated_fields=["outcome"],
+            )
+        )
+
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda _: {
+                "productive": True,
+                "git_commits": ["fix: something (ccc3333)"],
+                "file_writes": [],
+                "deliverables": ["fix: something (ccc3333)"],
+                "deliverable_details": [],
+                "session_duration_s": 200,
+                "inferred_category": None,
+                "usage": None,
+            },
+        )
+
+        rc, out = _invoke(["regrade", "--dry-run"], tmp_path)
+
+        assert rc == 0, out
+        assert "would regrade:" not in out.lower()
+        assert "Would regrade 0 record(s)" in out
+        assert store.load_all()[0].outcome == "noop"
+
+    def test_regrade_all_preserves_annotated_outcome(self, tmp_path: Path, monkeypatch) -> None:
+        """--outcome all still freezes operator-annotated outcomes."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj = self._make_codex_traj(tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="annotated-all",
+                harness="codex",
+                outcome="noop",
+                trajectory_path=str(traj),
+                annotated_fields=["outcome"],
+            )
+        )
+        store.append(
+            SessionRecord(
+                session_id="false-noop",
+                harness="codex",
+                outcome="noop",
+                trajectory_path=str(traj),
+            )
+        )
+
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda _: {
+                "productive": True,
+                "git_commits": ["fix: x (eee5555)"],
+                "file_writes": [],
+                "deliverables": ["fix: x (eee5555)"],
+                "deliverable_details": [],
+                "session_duration_s": 90,
+                "inferred_category": None,
+                "usage": None,
+            },
+        )
+
+        rc, out = _invoke(["regrade", "--outcome", "all"], tmp_path)
+
+        assert rc == 0, out
+        records = {r.session_id: r for r in store.load_all()}
+        assert records["annotated-all"].outcome == "noop"
+        assert records["false-noop"].outcome == "productive"
+
+    def test_regrade_missing_trajectory_preserves_annotated(self, tmp_path: Path) -> None:
+        """A missing trajectory must not reset an annotated outcome to unknown."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="annotated-missing-traj",
+                harness="codex",
+                outcome="noop",
+                trajectory_path=str(tmp_path / "nonexistent.jsonl"),
+                annotated_fields=["outcome"],
+            )
+        )
+
+        rc, out = _invoke(["regrade", "--outcome", "noop"], tmp_path)
+
+        assert rc == 0, out
+        persisted = store.load_all()[0]
+        assert persisted.outcome == "noop"
+        assert "reset to unknown" not in out
 
     def test_regrade_no_trajectory_resets_to_unknown(self, tmp_path: Path) -> None:
         """Records with missing trajectory files are reset to outcome=unknown."""

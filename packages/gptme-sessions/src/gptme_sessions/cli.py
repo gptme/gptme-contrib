@@ -2581,14 +2581,22 @@ def sync(
 _PROCESS_OUTCOMES = frozenset({"failed", "violated_policy"})
 
 
-def _regrade_outcome(current: str, productive: bool) -> str:
+def _regrade_outcome(
+    current: str,
+    productive: bool,
+    *,
+    annotated: bool = False,
+) -> str:
     """Map extractor productivity onto a stored outcome without erasing failures.
 
     ``extract_from_path`` only reports productive vs not. ``failed`` and
     ``violated_policy`` come from process exit / policy and must be preserved
     — a nonproductive trajectory must not collapse them to ``noop``.
+    Operator-annotated outcomes are frozen the same way: the helper itself
+    returns ``current``, so a caller cannot overwrite them by forgetting a
+    separate guard.
     """
-    if current in _PROCESS_OUTCOMES:
+    if annotated or current in _PROCESS_OUTCOMES:
         return current
     return "productive" if productive else "noop"
 
@@ -2667,8 +2675,7 @@ def regrade(
         traj = Path(rec.trajectory_path) if rec.trajectory_path else None
         if traj is None or not traj.is_file():
             if rec.outcome in _PROCESS_OUTCOMES or "outcome" in rec.annotated_fields:
-                if not dry_run:
-                    unchanged += 1
+                unchanged += 1
                 continue
             no_trajectory += 1
             if dry_run:
@@ -2679,7 +2686,7 @@ def regrade(
             else:
                 rec.outcome = "unknown"
                 mutated.append(rec)
-                regraded += 1
+            regraded += 1
             continue
 
         try:
@@ -2692,11 +2699,14 @@ def regrade(
             errors += 1
             continue
 
-        new_outcome = _regrade_outcome(rec.outcome, bool(result.get("productive")))
-        outcome_changed = False
+        new_outcome = _regrade_outcome(
+            rec.outcome,
+            bool(result.get("productive")),
+            annotated="outcome" in rec.annotated_fields,
+        )
         record_changed = False
 
-        if "outcome" not in rec.annotated_fields and rec.outcome != new_outcome:
+        if rec.outcome != new_outcome:
             if dry_run:
                 click.echo(
                     f"  would regrade: {rec.session_id}  "
@@ -2706,8 +2716,10 @@ def regrade(
                 )
             else:
                 rec.outcome = new_outcome
-                outcome_changed = True
                 record_changed = True
+            regraded += 1
+        else:
+            unchanged += 1
 
         if not dry_run:
             # Backfill deliverables/duration that the old extractor missed.
@@ -2717,11 +2729,6 @@ def regrade(
                 record_changed = True
             if record_changed:
                 mutated.append(rec)
-
-        if outcome_changed:
-            regraded += 1
-        elif not dry_run:
-            unchanged += 1
 
     if not dry_run and mutated:
         # Extraction happens outside the lock; three-way merge a final
