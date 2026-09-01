@@ -30,3 +30,8 @@ while preserving its actual fork topology and usage:
 The Bob-owned raw retained sessions are intentionally not part of this
 repository. The public upstream source names above provide provenance for the
 sanitized regression copies.
+
+`scripts/check_pi_compat.py` pins live catalog membership for models still in
+Pi 0.84.4 (`claude-opus-4-5`, `claude-opus-4-6`, `gpt-5.4`, `gpt-5.6-luna`,
+`grok-4.6`). `provider-error-upstream.jsonl` and `branch-upstream.jsonl` use
+models already retired from that pin; they stay as parser-shape fixtures.

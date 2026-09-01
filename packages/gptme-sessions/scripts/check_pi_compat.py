@@ -36,10 +36,28 @@ PINNED_STOP_REASONS = frozenset(
 )
 PINNED_MODEL_CATALOG_HASHES = {
     ".manifest.json": "68eafe33e43efce9dac778d9290ed75ff65ed680d45828a1aa26b947b2fef237",
+    "anthropic.json": "4d44dd3f78d21dd1d0fba878bd58026914ba98dba3083212059b4710dc13eeb3",
     "openai-codex.json": "2712c2924a4a75213dddc743c0e5f08d50a781fe807f16d5afb5fb65b41c64c7",
     "xai.json": "9668b607ac69237089e84efa3f0590dc1e28d8e24c9d1afa3a2b7cf72efa30e0",
 }
-PINNED_FIXTURE_MODELS = frozenset({("openai-codex", "gpt-5.6-luna"), ("xai", "grok-4.6")})
+# Live fixture models that must still exist in the pinned catalogs above.
+PINNED_FIXTURE_MODELS = frozenset(
+    {
+        ("anthropic", "claude-opus-4-5"),
+        ("anthropic", "claude-opus-4-6"),
+        ("openai-codex", "gpt-5.4"),
+        ("openai-codex", "gpt-5.6-luna"),
+        ("xai", "grok-4.6"),
+    }
+)
+# Retained fixtures whose models have already left the pinned catalogs.
+# Parser-shape coverage only; they cannot participate in live catalog pinning.
+RETIRED_FIXTURE_MODELS = frozenset(
+    {
+        ("google-antigravity", "claude-opus-4-5-thinking"),
+        ("openai-codex", "gpt-5.3-codex"),
+    }
+)
 
 _RELEASE_URL = (
     "https://github.com/earendil-works/pi/releases/download/"
@@ -124,6 +142,13 @@ def _catalog_models(raw_catalog: bytes) -> frozenset[tuple[str, str]]:
 def check_archive(archive_bytes: bytes) -> list[str]:
     """Return compatibility failures found in a Pi release source archive."""
     failures: list[str] = []
+    needed_catalogs = {f"{provider}.json" for provider, _model in PINNED_FIXTURE_MODELS}
+    hashed_catalogs = {name for name in PINNED_MODEL_CATALOG_HASHES if name != ".manifest.json"}
+    missing_catalogs = sorted(needed_catalogs - hashed_catalogs)
+    if missing_catalogs:
+        failures.append(
+            "pinned catalogs missing for fixture providers: " + ", ".join(missing_catalogs)
+        )
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
         session_manager = _read_archive_member(archive, _SESSION_MANAGER).decode("utf-8")
         ai_types = _read_archive_member(archive, _AI_TYPES).decode("utf-8")

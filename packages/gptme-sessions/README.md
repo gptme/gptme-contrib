@@ -127,9 +127,13 @@ uv run python3 scripts/check_pi_compat.py
 ```
 
 The command downloads Pi's release source archive and fails if the session
-version, entry types, stop reasons, pinned route catalogs, or fixture models no
-longer match. Network/download failures are errors rather than false green
-checks. Update the parser and retained fixtures before advancing the pin.
+version, entry types, stop reasons, pinned route catalogs (Anthropic, OpenAI
+Codex, xAI), or live fixture models no longer match. Two retained upstream
+fixtures use models already retired from those catalogs
+(`google-antigravity`/`claude-opus-4-5-thinking` and `openai-codex`/`gpt-5.3-codex`);
+they remain parser-shape coverage only. Network/download failures are errors
+rather than false green checks. Update the parser and retained fixtures before
+advancing the pin.
 
 ## Model Normalization
 
