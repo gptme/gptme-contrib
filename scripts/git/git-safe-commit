@@ -69,19 +69,28 @@ cleanup_pathspec_stdin_tmp() {
 #                                                   back via update-index
 # Worktree files are never modified — only index entries.
 #
-# Concurrency contract: the EXIT trap runs while fd 9 still holds the commit
-# flock (fds close after traps), so every git-safe-commit sibling is fully
-# serialized against this cleanup. A raw `git add` from outside the wrapper
-# can still race the read-then-restore pair below, but such adds are outside
-# the wrapper's serialization contract and race every staging operation in
-# this script identically; the blob-match check above narrows the exposure to
-# that already-unsupported window.
+# Concurrency contract:
+# - The EXIT trap runs while fd 9 still holds the commit flock (fds close
+#   after traps), so every git-safe-commit sibling is serialized against
+#   this cleanup.
+# - Against a raw `git add` from outside the wrapper, abort restore takes
+#   git's index.lock, copies the index, re-checks each path still holds our
+#   blob, applies restores to the copy, and installs via rename. A concurrent
+#   writer cannot create index.lock in that window — they error instead of
+#   being clobbered (the previous compare-then-update-index race).
+# - Identical-blob restage: `git add` of content already in the index is a
+#   no-op (git does not rewrite the entry). That is still OUR staging and is
+#   restored. A sibling that staged a *different* blob is detected by the
+#   oid check and left alone. Worktree files are never modified, so a
+#   sibling can re-add after this abort.
 GSC_ABORT_PATHS=()
 declare -A GSC_ABORT_BEFORE=() # path -> "mode oid" pre-add ("" = no entry)
 declare -A GSC_ABORT_AFTER=()  # path -> "mode oid" our add produced
 GSC_COMMIT_DONE=0
+GSC_HELD_INDEX_LOCK=""
 
 # Print "mode oid" for the path's current index entry ("" if absent).
+# Honors GIT_INDEX_FILE so restore can run against a locked snapshot.
 gsc_index_entry() {
     local line mode rest
     line="$(git ls-files --stage -- "$1" 2>/dev/null | head -n1)"
@@ -94,19 +103,56 @@ gsc_index_entry() {
     echo "$mode ${rest%% *}"
 }
 
-# Restore one path's index entry to its pre-run state, retrying through
-# transient index.lock contention. $2 is "mode oid" or "" (no entry).
+# Absolute path to a git-path (index, index.lock, …).
+# shellcheck disable=SC2317  # reached only via the EXIT trap
+gsc_absolute_git_path() {
+    local p
+    p="$(git rev-parse --path-format=absolute --git-path "$1" 2>/dev/null)" || p=""
+    if [ -n "$p" ] && [[ "$p" == /* ]]; then
+        echo "$p"
+        return 0
+    fi
+    p="$(git rev-parse --git-path "$1")"
+    if [[ "$p" != /* ]]; then
+        p="$(pwd)/$p"
+    fi
+    echo "$p"
+}
+
+# Restore one path's index entry to its pre-run state. Callers set
+# GIT_INDEX_FILE to a private snapshot so this does not take index.lock.
+# $2 is "mode oid" or "" (no entry).
 # shellcheck disable=SC2317  # reached only via the EXIT trap
 gsc_restore_index_entry() {
-    local path="$1" before="$2" attempt
+    local path="$1" before="$2"
+    if [ -z "$before" ]; then
+        git update-index --force-remove -- "$path" 2>/dev/null
+        return $?
+    fi
+    # --add is required when our add staged a deletion (path absent
+    # from the index); it is a no-op when replacing an existing entry.
+    git update-index --add --cacheinfo "${before%% *},${before#* },$path" 2>/dev/null
+    return $?
+}
+
+# shellcheck disable=SC2317  # reached only via the EXIT trap
+gsc_release_index_lock() {
+    if [ -n "${GSC_HELD_INDEX_LOCK}" ]; then
+        rm -f "${GSC_HELD_INDEX_LOCK}"
+        GSC_HELD_INDEX_LOCK=""
+    fi
+}
+
+# Acquire git's index.lock with O_EXCL (noclobber redirect). Retry through
+# transient contention from a concurrent git process.
+# shellcheck disable=SC2317  # reached only via the EXIT trap
+gsc_acquire_index_lock() {
+    local lock_path="$1" attempt
     # shellcheck disable=SC2034  # loop counter, value unused
-    for attempt in 1 2 3; do
-        if [ -z "$before" ]; then
-            git update-index --force-remove -- "$path" 2>/dev/null && return 0
-        else
-            # --add is required when our add staged a deletion (path absent
-            # from the index); it is a no-op when replacing an existing entry.
-            git update-index --add --cacheinfo "${before%% *},${before#* },$path" 2>/dev/null && return 0
+    for attempt in 1 2 3 4 5; do
+        if (set -C; echo "git-safe-commit $$" > "$lock_path") 2>/dev/null; then
+            GSC_HELD_INDEX_LOCK="$lock_path"
+            return 0
         fi
         sleep 0.4
     done
@@ -119,6 +165,30 @@ unstage_abandoned_pathspecs() {
         return 0
     fi
     local path current restored=0 skipped=0 failed=0
+    local index_path lock_path tmp_index changed=0
+    local old_gif="${GIT_INDEX_FILE-}"
+
+    index_path="$(gsc_absolute_git_path index)"
+    lock_path="${index_path}.lock"
+    if ! gsc_acquire_index_lock "$lock_path"; then
+        echo "warning: could not lock index to restore abort staging; paths may remain staged" >&2
+        return 0
+    fi
+
+    tmp_index="$(mktemp "${index_path}.gsc.XXXXXX")" || {
+        echo "warning: could not snapshot index to restore abort staging; paths may remain staged" >&2
+        gsc_release_index_lock
+        return 0
+    }
+    if ! cp "$index_path" "$tmp_index"; then
+        echo "warning: could not snapshot index to restore abort staging; paths may remain staged" >&2
+        rm -f "$tmp_index"
+        gsc_release_index_lock
+        return 0
+    fi
+
+    GIT_INDEX_FILE="$tmp_index"
+    export GIT_INDEX_FILE
     for path in "${GSC_ABORT_PATHS[@]}"; do
         current="$(gsc_index_entry "$path")"
         if [ "$current" != "${GSC_ABORT_AFTER[$path]}" ]; then
@@ -129,11 +199,34 @@ unstage_abandoned_pathspecs() {
         fi
         if gsc_restore_index_entry "$path" "${GSC_ABORT_BEFORE[$path]}"; then
             restored=$((restored + 1))
+            changed=1
         else
             failed=$((failed + 1))
             echo "warning: could not restore pre-run index state for '$path'; fix manually: git restore --staged -- '$path'" >&2
         fi
     done
+    if [ -n "$old_gif" ]; then
+        GIT_INDEX_FILE="$old_gif"
+        export GIT_INDEX_FILE
+    else
+        unset GIT_INDEX_FILE
+    fi
+
+    if [ "$changed" -eq 1 ]; then
+        # Git's install protocol: write the new index into index.lock, then
+        # rename over index. Concurrent writers fail at create(index.lock).
+        if mv "$tmp_index" "$lock_path" && mv "$lock_path" "$index_path"; then
+            GSC_HELD_INDEX_LOCK=""
+            tmp_index=""
+        else
+            echo "warning: failed to install restored index; paths may remain staged" >&2
+            gsc_release_index_lock
+        fi
+    else
+        gsc_release_index_lock
+    fi
+    [ -n "$tmp_index" ] && rm -f "$tmp_index"
+
     if [ "$restored" -gt 0 ]; then
         echo "note: unstaged ${restored} path(s) staged by this aborted run (files remain on disk)" >&2
     fi
@@ -146,6 +239,7 @@ unstage_abandoned_pathspecs() {
 on_exit_cleanup() {
     unstage_abandoned_pathspecs
     cleanup_pathspec_stdin_tmp
+    gsc_release_index_lock
 }
 trap on_exit_cleanup EXIT
 

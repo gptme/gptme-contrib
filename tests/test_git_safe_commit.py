@@ -1822,6 +1822,38 @@ def test_abort_skips_path_restaged_by_sibling(git_repo: Path):
     assert staged_blob == "sibling content", "sibling's newer staging was clobbered"
 
 
+def test_abort_unstages_identical_noop_sibling_add(git_repo: Path):
+    """A sibling `git add` of the same already-staged bytes is a no-op
+    (git does not rewrite the index entry). That is still this run's staging
+    and must be restored on abort — there is no independent sibling entry to
+    preserve. Worktree content is untouched so the sibling can re-add
+    (Greptile identical-restage finding on #1579)."""
+    hooks = git_repo.parent / "noop-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\n" f"cd '{git_repo}'\n" "git add raced.md\n" "exit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    raced = git_repo / "raced.md"
+    raced.write_text("our content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "raced.md", "-m", "test: hook fails"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "raced.md" not in _staged_paths(git_repo)
+    assert raced.exists() and raced.read_text() == "our content"
+
+
 def test_successful_commit_keeps_trap_inert(git_repo: Path):
     """The success path must not unstage anything or emit the abort note."""
     f = git_repo / "ok.md"
