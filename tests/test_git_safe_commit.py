@@ -1740,6 +1740,43 @@ def test_abort_restores_replaced_staged_blob(git_repo: Path):
     assert doc.read_text() == "version B", "worktree content must be untouched"
 
 
+def test_abort_restores_staged_deletion(git_repo: Path):
+    """If our add staged a deletion, abort must put the prior index entry
+    back (path absent from the index needs `update-index --add --cacheinfo`)."""
+    doomed = git_repo / "doomed.md"
+    doomed.write_text("keep me in index")
+    subprocess.run(
+        ["git", "add", "doomed.md"], cwd=git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add doomed"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    doomed.unlink()
+    (git_repo / "README.md").write_text("dirty")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "doomed.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "doomed.md" not in _staged_paths(git_repo)
+    ls = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "doomed.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert ls.stdout.strip(), "pre-run index entry was not restored"
+    assert not doomed.exists(), "worktree deletion must be left alone"
+
+
 def test_abort_skips_path_restaged_by_sibling(git_repo: Path):
     """If another process re-stages one of our paths after our `git add` but
     before the abort, the trap must leave that newer index entry alone

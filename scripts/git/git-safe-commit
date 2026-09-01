@@ -96,7 +96,9 @@ gsc_restore_index_entry() {
         if [ -z "$before" ]; then
             git update-index --force-remove -- "$path" 2>/dev/null && return 0
         else
-            git update-index --cacheinfo "${before%% *},${before#* },$path" 2>/dev/null && return 0
+            # --add is required when our add staged a deletion (path absent
+            # from the index); it is a no-op when replacing an existing entry.
+            git update-index --add --cacheinfo "${before%% *},${before#* },$path" 2>/dev/null && return 0
         fi
         sleep 0.4
     done
