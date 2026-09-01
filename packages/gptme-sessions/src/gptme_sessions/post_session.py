@@ -691,7 +691,7 @@ def post_session(
                         len(dropped_foreign),
                         (dropped_ambiguous + dropped_foreign)[:5],
                     )
-                deliverables = list(dict.fromkeys(traj_deliverables + kept_caller))
+                deliverables = list(dict.fromkeys(kept_caller + traj_deliverables))
         else:
             # Trajectory ran but found no deliverables.
             if traj_productive is False and trajectory_reliable:

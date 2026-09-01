@@ -796,9 +796,9 @@ def test_post_session_file_only_trajectory_keeps_trailer_owned_sha(tmp_path: Pat
             commit_trailers={own_sha: ["session-mine"]},
         )
 
-    assert result.record.deliverables == [own_file, own_sha]
+    assert result.record.deliverables == [own_sha, own_file]
     assert sibling_sha not in result.record.deliverables
-    assert result.record.deliverable_details[-1]["provenance_class"] == "session_trailer_owned"
+    assert result.record.deliverable_details[0]["provenance_class"] == "session_trailer_owned"
 
 
 def test_post_session_73be_fixture_rejects_sibling_shas_and_keeps_files(tmp_path: Path):

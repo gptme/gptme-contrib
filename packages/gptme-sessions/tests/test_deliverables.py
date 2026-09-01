@@ -18,6 +18,14 @@ def test_classify_commit_ownership_trailer_match_is_owned():
     )
 
 
+def test_classify_commit_ownership_trailer_match_is_case_insensitive():
+    sha = "abc1234567890abcdef1234567890abcdef1234"
+    assert (
+        classify_commit_ownership(sha, session_id="Session-Mine", trailer_ids=["session-mine"])
+        == "session_trailer_owned"
+    )
+
+
 def test_classify_commit_ownership_other_trailer_is_foreign():
     sha = "abc1234567890abcdef1234567890abcdef1234"
     assert (

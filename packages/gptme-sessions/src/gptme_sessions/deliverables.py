@@ -47,7 +47,8 @@ def classify_commit_ownership(
         return "trajectory_observed"
     values = [str(v).strip() for v in (trailer_ids or []) if str(v).strip()]
     if values:
-        if session_id and session_id in values:
+        normalized_session_id = session_id.strip().lower() if session_id else None
+        if normalized_session_id and normalized_session_id in {v.lower() for v in values}:
             return "session_trailer_owned"
         return "explicitly_foreign"
     return "ambiguous"
