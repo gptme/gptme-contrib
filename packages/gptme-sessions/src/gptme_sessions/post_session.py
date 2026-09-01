@@ -673,16 +673,7 @@ def post_session(
                         elif verdict == "explicitly_foreign":
                             dropped_foreign.append(item)
                         else:
-                            # Ambiguous SHA-like deliverables (e.g., PR URLs or non-commit IDs)
-                            # are kept as fallback since they're explicitly provided by caller
-                            kept_caller.append(item)
-                            extra_deliverable_details.extend(
-                                _build_caller_deliverable_details(
-                                    [item],
-                                    provenance_class="fallback_observed",
-                                    evidence={"source": "caller", "reason": "non_sha_passthrough"},
-                                )
-                            )
+                            dropped_ambiguous.append(item)
                     else:
                         kept_caller.append(item)
                         extra_deliverable_details.extend(
@@ -700,7 +691,7 @@ def post_session(
                         len(dropped_foreign),
                         (dropped_ambiguous + dropped_foreign)[:5],
                     )
-                deliverables = list(dict.fromkeys(kept_caller + traj_deliverables))
+                deliverables = list(dict.fromkeys(traj_deliverables + kept_caller))
         else:
             # Trajectory ran but found no deliverables.
             if traj_productive is False and trajectory_reliable:
