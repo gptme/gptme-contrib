@@ -1609,3 +1609,491 @@ def test_safe_commit_real_hook_failure_message_is_actionable(tmp_path: Path):
 
     # Old misleading header must NOT appear when no files were modified
     assert "checking for auto-staging" not in combined
+
+
+def _staged_paths(repo: Path) -> set[str]:
+    out = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return {line for line in out.stdout.splitlines() if line}
+
+
+def test_dirty_guard_abort_unstages_newly_staged_file(git_repo: Path):
+    """Unstage-on-abort: when the dirty-worktree guard refuses after
+    stage_explicit_pathspecs ran, the paths THIS run staged must not stay
+    staged (a staged-but-uncommitted file in a shared worktree can be swept by
+    a sibling's branch switch/reset — 2026-09-01 incident). The file itself
+    must remain on disk, back to untracked."""
+    # Unstaged tracked modification outside the pathspec → guard blocks
+    (git_repo / "README.md").write_text("modified outside scope")
+    new_file = git_repo / "new-journal.md"
+    new_file.write_text("precious content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "new-journal.md", "-m", "test: should abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Refusing to run pre-commit in a dirty worktree" in result.stderr
+    assert "unstaged 1 path(s) staged by this aborted run" in result.stderr
+    assert "new-journal.md" not in _staged_paths(
+        git_repo
+    ), "aborted run left its file staged — sweep-class ammunition"
+    assert new_file.exists() and new_file.read_text() == "precious content"
+
+
+def test_failing_hook_abort_unstages_newly_staged_file(git_repo: Path):
+    """Same guarantee when the pre-commit hook itself fails after staging."""
+    hooks = git_repo / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    new_file = git_repo / "new-file.md"
+    new_file.write_text("content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "new-file.md", "-m", "test: hook fails"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "new-file.md" not in _staged_paths(git_repo)
+    assert new_file.exists()
+
+
+def test_abort_preserves_preexisting_staged_content(git_repo: Path):
+    """Only paths newly staged by the aborted run are unstaged — content the
+    caller (or a sibling) staged beforehand is left untouched."""
+    pre_staged = git_repo / "already-staged.md"
+    pre_staged.write_text("caller staged this")
+    subprocess.run(
+        ["git", "add", "already-staged.md"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    # Trigger the dirty guard via an unstaged tracked modification
+    (git_repo / "README.md").write_text("dirty")
+    new_file = git_repo / "fresh.md"
+    new_file.write_text("fresh")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "already-staged.md", "fresh.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    staged = _staged_paths(git_repo)
+    assert "already-staged.md" in staged, "pre-existing staged content was dropped"
+    assert "fresh.md" not in staged
+    assert new_file.exists()
+
+
+def test_abort_restores_replaced_staged_blob(git_repo: Path):
+    """When the explicit path already had staged content and the worktree held
+    different content, our `git add` replaces the staged blob. An abort must
+    put the caller's prior staged blob back, not leave this run's content
+    staged (Greptile finding on #1579)."""
+    doc = git_repo / "doc.md"
+    doc.write_text("version A")
+    subprocess.run(
+        ["git", "add", "doc.md"], cwd=git_repo, check=True, capture_output=True
+    )
+    doc.write_text("version B")
+    # Trigger the dirty guard via an unstaged tracked modification
+    (git_repo / "README.md").write_text("dirty")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "doc.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    staged_blob = subprocess.run(
+        ["git", "show", ":doc.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert staged_blob == "version A", "caller's prior staged blob was lost"
+    assert doc.read_text() == "version B", "worktree content must be untouched"
+
+
+def test_abort_restores_staged_deletion(git_repo: Path):
+    """If our add staged a deletion, abort must put the prior index entry
+    back (path absent from the index needs `update-index --add --cacheinfo`)."""
+    doomed = git_repo / "doomed.md"
+    doomed.write_text("keep me in index")
+    subprocess.run(
+        ["git", "add", "doomed.md"], cwd=git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add doomed"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    doomed.unlink()
+    (git_repo / "README.md").write_text("dirty")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "doomed.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "doomed.md" not in _staged_paths(git_repo)
+    ls = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "doomed.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert ls.stdout.strip(), "pre-run index entry was not restored"
+    assert not doomed.exists(), "worktree deletion must be left alone"
+
+
+def test_abort_skips_path_restaged_by_sibling(git_repo: Path):
+    """If another process re-stages one of our paths after our `git add` but
+    before the abort, the trap must leave that newer index entry alone
+    (Greptile finding on #1579). Simulated via a failing pre-commit hook that
+    plays the sibling."""
+    # Hooks dir lives OUTSIDE the repo so the dirty guard (untracked-path
+    # check) does not abort before the hook gets a chance to run.
+    hooks = git_repo.parent / "sibling-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"cd '{git_repo}'\n"
+        'printf "sibling content" > raced.md\n'
+        "git add raced.md\n"
+        "exit 1\n"
+    )
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    (git_repo / "raced.md").write_text("our content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "raced.md", "-m", "test: hook fails"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "left 1 path(s) alone" in result.stderr
+    staged_blob = subprocess.run(
+        ["git", "show", ":raced.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert staged_blob == "sibling content", "sibling's newer staging was clobbered"
+
+
+def test_partial_git_add_failure_unstages_succeeded_paths(git_repo: Path):
+    """A mixed pathspec list stages the valid paths then fails. The abort
+    trap must still unstage whatever DID get added, or those files remain
+    sweep-class ammunition (in-band review P1 on #1579)."""
+    good = git_repo / "good.md"
+    good.write_text("keep me on disk")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "good.md", "missing.md", "-m", "test: partial add"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "good.md" not in _staged_paths(git_repo)
+    assert good.exists() and good.read_text() == "keep me on disk"
+
+
+def test_abort_unstages_identical_noop_sibling_add(git_repo: Path):
+    """A sibling `git add` of the same already-staged bytes is a no-op
+    (git does not rewrite the index entry). That is still this run's staging
+    and must be restored on abort — there is no independent sibling entry to
+    preserve. Worktree content is untouched so the sibling can re-add
+    (Greptile identical-restage finding on #1579)."""
+    hooks = git_repo.parent / "noop-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\n" f"cd '{git_repo}'\n" "git add raced.md\n" "exit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    raced = git_repo / "raced.md"
+    raced.write_text("our content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "raced.md", "-m", "test: hook fails"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "raced.md" not in _staged_paths(git_repo)
+    assert raced.exists() and raced.read_text() == "our content"
+
+
+def test_abort_restores_unmerged_conflict_stages(git_repo: Path):
+    """When an explicit path has unresolved stage-1/2/3 entries and this run
+    `git add`s a worktree resolution, abort must restore the original unmerged
+    dump instead of leaving a fabricated stage-0 entry (Greptile finding on
+    #1579). The worktree resolution stays on disk."""
+    conflict = git_repo / "conflict.md"
+    conflict.write_text("base")
+    subprocess.run(
+        ["git", "add", "conflict.md"], cwd=git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "base"], cwd=git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", "side"], cwd=git_repo, check=True, capture_output=True
+    )
+    conflict.write_text("side version")
+    subprocess.run(
+        ["git", "commit", "-am", "side"], cwd=git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "checkout", "test-branch"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    conflict.write_text("main version")
+    subprocess.run(
+        ["git", "commit", "-am", "main"], cwd=git_repo, check=True, capture_output=True
+    )
+    merge = subprocess.run(
+        ["git", "merge", "side"], cwd=git_repo, capture_output=True, text=True
+    )
+    assert merge.returncode != 0, "expected a merge conflict"
+    before = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "conflict.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert before.count("\t") >= 2, "expected unmerged stages, got:\n" + before
+
+    conflict.write_text("resolved by caller")
+    # Trigger the dirty guard via an unstaged tracked modification
+    (git_repo / "README.md").write_text("dirty")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "conflict.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    after = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "conflict.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert after == before, (
+        "abort collapsed or mutated conflict stages:\n"
+        f"before:\n{before}after:\n{after}\nstderr:\n{result.stderr}"
+    )
+    assert conflict.read_text() == "resolved by caller"
+
+
+def test_abort_skips_newline_pathname(git_repo: Path):
+    """A pathname containing a newline cannot ride the newline-delimited
+    dump/restore feed (`update-index --index-info`), so such paths are
+    excluded from abort tracking (Greptile finding on #1579): they keep
+    whatever state exists at abort instead of being restored wrongly."""
+    evil = git_repo / "evil\nname.md"
+    evil.write_text("version A")
+    subprocess.run(
+        ["git", "add", "--", "evil\nname.md"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    evil.write_text("version B")
+    # Trigger the dirty guard via an unstaged tracked modification
+    (git_repo / "README.md").write_text("dirty")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "evil\nname.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "could not restore" not in result.stderr
+    ls = subprocess.run(
+        ["git", "ls-files", "--stage", "-z", "--", "evil\nname.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    entries = [e for e in ls.split("\0") if e]
+    assert len(entries) == 1, f"index corrupted for newline path: {entries!r}"
+    # Out-of-scope path keeps this run's staging (documented pre-trap
+    # behavior) rather than getting a corrupt partial restore.
+    staged_blob = subprocess.run(
+        ["git", "show", ":evil\nname.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert staged_blob == "version B"
+
+
+def test_successful_commit_keeps_trap_inert(git_repo: Path):
+    """The success path must not unstage anything or emit the abort note."""
+    f = git_repo / "ok.md"
+    f.write_text("fine")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "ok.md", "-m", "test: success"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "unstaged" not in result.stderr
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert "test: success" in log.stdout
+
+
+def _fresh_repo(tmp_path: Path) -> Path:
+    """`git init` with identity, no commits, no .git/index."""
+    subprocess.run(
+        ["git", "init", "-b", "test-branch", str(tmp_path)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.hooksPath", "/dev/null"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    return tmp_path
+
+
+def test_safe_commit_initial_commit_without_index(tmp_path: Path):
+    """Fresh `git init` has no .git/index. Snapshotting via cp -p used to
+    fail with 'could not snapshot the index' and block the first commit
+    (AI-review P1 on #1579). git add used to create the index lazily."""
+    repo = _fresh_repo(tmp_path)
+    assert not (repo / ".git" / "index").exists()
+    (repo / "README.md").write_text("first\n")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "README.md", "-m", "feat: first commit"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "could not snapshot" not in result.stderr
+    log = subprocess.run(
+        ["git", "log", "--oneline"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "feat: first commit" in log.stdout
+    assert (repo / ".git" / "index").exists()
+
+
+def test_abort_unstages_newly_staged_file_on_fresh_repo(tmp_path: Path):
+    """First-commit abort still unstages: the file returns to untracked
+    instead of remaining staged-but-uncommitted (or failing the snapshot)."""
+    repo = _fresh_repo(tmp_path)
+    hooks = repo / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    new_file = repo / "new-file.md"
+    new_file.write_text("content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "new-file.md", "-m", "test: hook fails"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "could not snapshot" not in result.stderr
+    assert "new-file.md" not in _staged_paths(repo)
+    assert new_file.exists() and new_file.read_text() == "content"
