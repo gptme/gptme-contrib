@@ -340,3 +340,36 @@ def test_capture_cc_weekly_limit_stream_json(tmp_path: Path):
     assert reason == FAILURE_REASON_RATE_LIMIT
     assert err is not None
     assert "429" in err or "rate_limit" in err or "weekly limit" in err.lower()
+
+
+def test_capture_allowed_rate_limit_event_not_rate_limit(tmp_path: Path):
+    """An informational allowed rate_limit_event must not classify a later exit."""
+    traj = tmp_path / "conversation.jsonl"
+    records = [
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "allowed",
+                "rateLimitType": "five_hour",
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Sure, I can do that."}],
+            },
+        },
+    ]
+    traj.write_text(
+        "".join(json.dumps(rec) + "\n" for rec in records),
+        encoding="utf-8",
+    )
+    reason, _ = capture_session_failure(
+        exit_code=1,
+        duration_seconds=45,
+        input_tokens=0,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+    assert reason == FAILURE_REASON_NONZERO

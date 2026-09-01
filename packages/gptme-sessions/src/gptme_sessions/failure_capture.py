@@ -116,8 +116,11 @@ def _structured_error_signals(rec: dict) -> list[str]:
         info = rec.get("rate_limit_info")
         info_dict = info if isinstance(info, dict) else {}
         status = info_dict.get("status")
-        limit_type = info_dict.get("rateLimitType")
-        signals.append(f"rate_limit_event status={status} type={limit_type}")
+        # Informational "allowed" windows must not stamp a later unrelated
+        # nonzero exit as rate_limit (Greptile P1 on gptme-contrib#1582).
+        if status == "rejected":
+            limit_type = info_dict.get("rateLimitType")
+            signals.append(f"rate_limit_event status={status} type={limit_type}")
     err = rec.get("error")
     if isinstance(err, str) and err.strip():
         signals.append(err.strip())
