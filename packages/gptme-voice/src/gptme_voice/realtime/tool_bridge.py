@@ -1031,7 +1031,8 @@ class GptmeToolBridge:
                 up = self._clamp(
                     float(arguments.get("up_m", 0.0)), self.body_max_altitude_m
                 )
-                position = adapter.telemetry().get("position") or {}
+                raw_position = adapter.telemetry().get("position")
+                position = raw_position if isinstance(raw_position, dict) else {}
                 current_altitude = position.get("relative_altitude_m")
                 if current_altitude is None:
                     # Without a relative-altitude fix the absolute ceiling

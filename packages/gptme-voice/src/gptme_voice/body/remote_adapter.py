@@ -148,6 +148,9 @@ class RemoteAdapter:
         telemetry = response.get("telemetry", {})
         if not isinstance(telemetry, dict):
             raise ValueError("body response telemetry must be a JSON object")
+        position = telemetry.get("position")
+        if position is not None and not isinstance(position, dict):
+            raise ValueError("body response telemetry position must be a JSON object")
         return telemetry
 
     async def takeoff(self, altitude_m: float) -> dict[str, Any]:

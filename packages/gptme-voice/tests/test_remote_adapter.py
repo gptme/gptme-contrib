@@ -283,6 +283,35 @@ def test_remote_adapter_rejects_non_object_telemetry(response_type: str) -> None
     asyncio.run(scenario())
 
 
+def test_remote_adapter_rejects_non_object_position_telemetry() -> None:
+    async def scenario() -> None:
+        async def malformed_node(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            await reader.readline()
+            handshake = dict(_HANDSHAKE_OK)
+            handshake["telemetry"] = {"position": "unknown"}
+            writer.write((json.dumps(handshake) + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(malformed_node, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        adapter = RemoteAdapter("secret", port=port)
+        try:
+            with pytest.raises(
+                ValueError, match="telemetry position must be a JSON object"
+            ):
+                await adapter.ensure_connected()
+            assert adapter._writer is None
+        finally:
+            await adapter.close()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
 def test_remote_adapter_rejects_mismatched_command_id() -> None:
     async def scenario() -> None:
         async def mismatched_node(
