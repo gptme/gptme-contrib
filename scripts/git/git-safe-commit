@@ -68,6 +68,14 @@ cleanup_pathspec_stdin_tmp() {
 #   - our add replaced a pre-existing staged blob → put the prior mode+blob
 #                                                   back via update-index
 # Worktree files are never modified — only index entries.
+#
+# Concurrency contract: the EXIT trap runs while fd 9 still holds the commit
+# flock (fds close after traps), so every git-safe-commit sibling is fully
+# serialized against this cleanup. A raw `git add` from outside the wrapper
+# can still race the read-then-restore pair below, but such adds are outside
+# the wrapper's serialization contract and race every staging operation in
+# this script identically; the blob-match check above narrows the exposure to
+# that already-unsupported window.
 GSC_ABORT_PATHS=()
 declare -A GSC_ABORT_BEFORE=() # path -> "mode oid" pre-add ("" = no entry)
 declare -A GSC_ABORT_AFTER=()  # path -> "mode oid" our add produced
