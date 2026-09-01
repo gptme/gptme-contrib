@@ -1822,6 +1822,25 @@ def test_abort_skips_path_restaged_by_sibling(git_repo: Path):
     assert staged_blob == "sibling content", "sibling's newer staging was clobbered"
 
 
+def test_partial_git_add_failure_unstages_succeeded_paths(git_repo: Path):
+    """A mixed pathspec list stages the valid paths then fails. The abort
+    trap must still unstage whatever DID get added, or those files remain
+    sweep-class ammunition (in-band review P1 on #1579)."""
+    good = git_repo / "good.md"
+    good.write_text("keep me on disk")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "good.md", "missing.md", "-m", "test: partial add"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "good.md" not in _staged_paths(git_repo)
+    assert good.exists() and good.read_text() == "keep me on disk"
+
+
 def test_abort_unstages_identical_noop_sibling_add(git_repo: Path):
     """A sibling `git add` of the same already-staged bytes is a no-op
     (git does not rewrite the index entry). That is still this run's staging

@@ -717,7 +717,7 @@ stage_explicit_pathspecs() {
     # -z output keeps paths unquoted; embedded newlines remain out of scope,
     # consistent with the rest of this script.
     local -A entries_before=() entries_after=()
-    local line mode rest path
+    local line mode rest path git_add_exit=0
     while IFS= read -r -d '' line; do
         [ -z "$line" ] && continue
         mode="${line%% *}"
@@ -725,7 +725,12 @@ stage_explicit_pathspecs() {
         path="${line#*$'\t'}"
         entries_before["$path"]="$mode ${rest%% *}"
     done < <(git ls-files --stage -z -- "${PATHSPECS[@]}" 2>/dev/null)
-    git add -- "${PATHSPECS[@]}" || return $?
+    # Snapshot AFTER even when git add returns non-zero: a mixed pathspec
+    # list stages the valid paths and then fails (typo, ignored file).
+    # Returning here would leave those paths in GSC_ABORT_PATHS's blind
+    # spot — staged-but-uncommitted, the sweep-class bug this trap exists
+    # to close.
+    git add -- "${PATHSPECS[@]}" || git_add_exit=$?
     while IFS= read -r -d '' line; do
         [ -z "$line" ] && continue
         mode="${line%% *}"
@@ -749,6 +754,7 @@ stage_explicit_pathspecs() {
             GSC_ABORT_AFTER["$path"]=""
         fi
     done
+    return "$git_add_exit"
 }
 
 resolve_pre_commit_hook() {
@@ -791,7 +797,7 @@ fi
 
 check_index_corruption
 
-stage_explicit_pathspecs
+stage_explicit_pathspecs || exit $?
 
 MANUAL_PRECOMMIT_RAN=0
 if [ "$NO_VERIFY" -ne 1 ]; then
