@@ -55,6 +55,11 @@ def test_require_handshake_ok_rejects_missing_protocol() -> None:
         require_handshake_ok({"type": "handshake_ok", "capabilities": ["status"]})
 
 
+def test_require_handshake_ok_is_controller_auth_not_mutual() -> None:
+    """handshake_ok is type + protocol echo; no body-side token proof."""
+    require_handshake_ok({"type": "handshake_ok", "protocol": "bob-body/0"})
+
+
 def test_require_command_result_rejects_mismatched_id() -> None:
     with pytest.raises(ValueError, match="command_id"):
         require_command_result(

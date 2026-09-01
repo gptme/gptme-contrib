@@ -37,11 +37,13 @@ def is_loopback_host(host: str) -> bool:
 
 
 class RemoteAdapter:
-    """Translate model-facing body goals into authenticated body-node messages.
+    """Translate model-facing body goals into controller-authenticated messages.
 
     The body node owns controller leases, command deadlines, idempotency, and
     local safety. This adapter owns framing, handshake negotiation, and the
     translation from the stable voice tool contract to the neutral wire DTOs.
+    The handshake authenticates this controller to the body; it does not prove
+    the peer holds the token.
     """
 
     name = "remote"

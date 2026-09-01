@@ -55,7 +55,13 @@ def decode_message(line: bytes) -> dict[str, Any]:
 
 
 def require_handshake_ok(response: dict[str, Any]) -> None:
-    """Reject anything that is not a compatible handshake_ok."""
+    """Reject anything that is not a compatible handshake_ok.
+
+    ``bob-body/0`` authenticates the controller: the client sends the bearer
+    token, and this check requires ``type=handshake_ok`` plus a protocol echo.
+    It is not a mutual proof that the peer holds the token. A later protocol
+    can add a challenge if body-to-controller authentication is required.
+    """
     if response.get("type") != "handshake_ok":
         raise PermissionError(
             response.get("detail") or response.get("code", "body handshake rejected")
