@@ -716,13 +716,21 @@ stage_explicit_pathspecs() {
     # add replaced — and can detect a sibling re-staging a path after us.
     # -z output keeps paths unquoted; embedded newlines remain out of scope,
     # consistent with the rest of this script.
-    local -A entries_before=() entries_after=()
-    local line mode rest path git_add_exit=0
+    # Paths with unmerged entries (stage 1/2/3) are EXCLUDED from abort
+    # tracking: the one-entry-per-path snapshot cannot represent conflict
+    # stages, and restoring one side's blob as a stage-0 entry would fabricate
+    # a resolution. Such paths keep whatever state exists at abort time
+    # (pre-trap behavior).
+    local -A entries_before=() entries_after=() unmerged=()
+    local line mode rest stage path git_add_exit=0
     while IFS= read -r -d '' line; do
         [ -z "$line" ] && continue
         mode="${line%% *}"
         rest="${line#* }"
+        stage="${rest#* }"
+        stage="${stage%%$'\t'*}"
         path="${line#*$'\t'}"
+        [ "$stage" != "0" ] && unmerged["$path"]=1
         entries_before["$path"]="$mode ${rest%% *}"
     done < <(git ls-files --stage -z -- "${PATHSPECS[@]}" 2>/dev/null)
     # Snapshot AFTER even when git add returns non-zero: a mixed pathspec
@@ -735,10 +743,14 @@ stage_explicit_pathspecs() {
         [ -z "$line" ] && continue
         mode="${line%% *}"
         rest="${line#* }"
+        stage="${rest#* }"
+        stage="${stage%%$'\t'*}"
         path="${line#*$'\t'}"
+        [ "$stage" != "0" ] && unmerged["$path"]=1
         entries_after["$path"]="$mode ${rest%% *}"
     done < <(git ls-files --stage -z -- "${PATHSPECS[@]}" 2>/dev/null)
     for path in "${!entries_after[@]}"; do
+        [ -n "${unmerged[$path]:-}" ] && continue
         if [ "${entries_before[$path]:-}" != "${entries_after[$path]}" ]; then
             GSC_ABORT_PATHS+=("$path")
             GSC_ABORT_BEFORE["$path"]="${entries_before[$path]:-}"
@@ -748,6 +760,7 @@ stage_explicit_pathspecs() {
     # A path whose entry our add REMOVED (file deleted on disk → staged
     # deletion) also gets its pre-run entry restored on abort.
     for path in "${!entries_before[@]}"; do
+        [ -n "${unmerged[$path]:-}" ] && continue
         if [ -z "${entries_after[$path]:-}" ]; then
             GSC_ABORT_PATHS+=("$path")
             GSC_ABORT_BEFORE["$path"]="${entries_before[$path]}"

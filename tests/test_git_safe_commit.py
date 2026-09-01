@@ -1873,6 +1873,76 @@ def test_abort_unstages_identical_noop_sibling_add(git_repo: Path):
     assert raced.exists() and raced.read_text() == "our content"
 
 
+def test_abort_leaves_conflicted_path_resolution_alone(git_repo: Path):
+    """A path with unmerged (stage 1/2/3) entries is excluded from abort
+    tracking: the snapshot cannot represent conflict stages, and restoring one
+    side's blob as stage 0 would fabricate a resolution (Greptile finding on
+    #1579). The caller's in-worktree resolution stays staged instead."""
+    conflict = git_repo / "conflict.md"
+    conflict.write_text("base")
+    subprocess.run(
+        ["git", "add", "conflict.md"], cwd=git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "base"], cwd=git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", "side"], cwd=git_repo, check=True, capture_output=True
+    )
+    conflict.write_text("side version")
+    subprocess.run(
+        ["git", "commit", "-am", "side"], cwd=git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "checkout", "test-branch"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    conflict.write_text("main version")
+    subprocess.run(
+        ["git", "commit", "-am", "main"], cwd=git_repo, check=True, capture_output=True
+    )
+    merge = subprocess.run(
+        ["git", "merge", "side"], cwd=git_repo, capture_output=True, text=True
+    )
+    assert merge.returncode != 0, "expected a merge conflict"
+
+    conflict.write_text("resolved by caller")
+    # Trigger the dirty guard via an unstaged tracked modification
+    (git_repo / "README.md").write_text("dirty")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "conflict.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    ls = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "conflict.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = ls.stdout.strip().splitlines()
+    assert len(lines) == 1 and " 0\t" in lines[0], (
+        "expected the caller's stage-0 resolution to survive: " + ls.stdout
+    )
+    staged_blob = subprocess.run(
+        ["git", "show", ":conflict.md"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert (
+        staged_blob == "resolved by caller"
+    ), "abort must not fabricate a different resolution"
+
+
 def test_successful_commit_keeps_trap_inert(git_repo: Path):
     """The success path must not unstage anything or emit the abort note."""
     f = git_repo / "ok.md"
