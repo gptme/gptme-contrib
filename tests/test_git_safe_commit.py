@@ -1609,3 +1609,122 @@ def test_safe_commit_real_hook_failure_message_is_actionable(tmp_path: Path):
 
     # Old misleading header must NOT appear when no files were modified
     assert "checking for auto-staging" not in combined
+
+
+def _staged_paths(repo: Path) -> set[str]:
+    out = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return {line for line in out.stdout.splitlines() if line}
+
+
+def test_dirty_guard_abort_unstages_newly_staged_file(git_repo: Path):
+    """Unstage-on-abort: when the dirty-worktree guard refuses after
+    stage_explicit_pathspecs ran, the paths THIS run staged must not stay
+    staged (a staged-but-uncommitted file in a shared worktree can be swept by
+    a sibling's branch switch/reset — 2026-09-01 incident). The file itself
+    must remain on disk, back to untracked."""
+    # Unstaged tracked modification outside the pathspec → guard blocks
+    (git_repo / "README.md").write_text("modified outside scope")
+    new_file = git_repo / "new-journal.md"
+    new_file.write_text("precious content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "new-journal.md", "-m", "test: should abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Refusing to run pre-commit in a dirty worktree" in result.stderr
+    assert "unstaged 1 path(s) staged by this aborted run" in result.stderr
+    assert "new-journal.md" not in _staged_paths(
+        git_repo
+    ), "aborted run left its file staged — sweep-class ammunition"
+    assert new_file.exists() and new_file.read_text() == "precious content"
+
+
+def test_failing_hook_abort_unstages_newly_staged_file(git_repo: Path):
+    """Same guarantee when the pre-commit hook itself fails after staging."""
+    hooks = git_repo / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    new_file = git_repo / "new-file.md"
+    new_file.write_text("content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "new-file.md", "-m", "test: hook fails"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "new-file.md" not in _staged_paths(git_repo)
+    assert new_file.exists()
+
+
+def test_abort_preserves_preexisting_staged_content(git_repo: Path):
+    """Only paths newly staged by the aborted run are unstaged — content the
+    caller (or a sibling) staged beforehand is left untouched."""
+    pre_staged = git_repo / "already-staged.md"
+    pre_staged.write_text("caller staged this")
+    subprocess.run(
+        ["git", "add", "already-staged.md"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    # Trigger the dirty guard via an unstaged tracked modification
+    (git_repo / "README.md").write_text("dirty")
+    new_file = git_repo / "fresh.md"
+    new_file.write_text("fresh")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "already-staged.md", "fresh.md", "-m", "test: abort"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    staged = _staged_paths(git_repo)
+    assert "already-staged.md" in staged, "pre-existing staged content was dropped"
+    assert "fresh.md" not in staged
+    assert new_file.exists()
+
+
+def test_successful_commit_keeps_trap_inert(git_repo: Path):
+    """The success path must not unstage anything or emit the abort note."""
+    f = git_repo / "ok.md"
+    f.write_text("fine")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "ok.md", "-m", "test: success"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "unstaged" not in result.stderr
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert "test: success" in log.stdout

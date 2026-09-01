@@ -49,7 +49,42 @@ cleanup_pathspec_stdin_tmp() {
         rm -f "${PATHSPEC_STDIN_TMP}"
     fi
 }
-trap cleanup_pathspec_stdin_tmp EXIT
+
+# Unstage-on-abort: paths this run staged (stage_explicit_pathspecs) must not
+# stay staged when the run exits without committing. A staged-but-uncommitted
+# file in a shared worktree is live ammunition for the sweep class: a sibling's
+# branch switch / reset / commit flow can consume or delete it (incident
+# 2026-09-01: an aborted run left a new journal file staged; it was swept from
+# index AND disk before any commit existed). On abort, restore only the paths
+# THIS run newly staged — pre-existing staged content (the caller's or a
+# sibling's) is left untouched. Previously-untracked files return to untracked
+# on disk; tracked files keep their worktree modifications.
+GSC_NEWLY_STAGED=()
+GSC_COMMIT_DONE=0
+
+# shellcheck disable=SC2317
+unstage_abandoned_pathspecs() {
+    if [ "$GSC_COMMIT_DONE" -eq 1 ] || [ "${#GSC_NEWLY_STAGED[@]}" -eq 0 ]; then
+        return 0
+    fi
+    local attempt
+    # shellcheck disable=SC2034  # loop counter, value unused
+    for attempt in 1 2 3; do
+        if git restore --staged -- "${GSC_NEWLY_STAGED[@]}" 2>/dev/null; then
+            echo "note: unstaged ${#GSC_NEWLY_STAGED[@]} path(s) staged by this aborted run (files remain on disk)" >&2
+            return 0
+        fi
+        sleep 0.4
+    done
+    echo "warning: failed to unstage abort-path staging; unstage manually: git restore --staged -- ${GSC_NEWLY_STAGED[*]}" >&2
+}
+
+# shellcheck disable=SC2317
+on_exit_cleanup() {
+    unstage_abandoned_pathspecs
+    cleanup_pathspec_stdin_tmp
+}
+trap on_exit_cleanup EXIT
 
 # Copy stdin to a seekable temp file so we can both validate contents and
 # rewrite --pathspec-from-file=- for git commit (stdin cannot be rewound).
@@ -517,7 +552,18 @@ stage_explicit_pathspecs() {
     # `git commit <path>` rejects untracked pathspecs with "did not match
     # any file(s) known to git", which forces an awkward `git add` step
     # exactly when the wrapper is supposed to remove it.
-    git add -- "${PATHSPECS[@]}"
+    #
+    # Record which paths gain a staged entry from OUR add (vs. already staged
+    # before we ran), so the abort trap can unstage exactly those and nothing
+    # else. Names are compared line-wise; paths with embedded newlines are out
+    # of scope, consistent with the rest of this script.
+    local staged_before staged_after
+    staged_before="$(git diff --cached --name-only -- "${PATHSPECS[@]}" 2>/dev/null | sort -u)"
+    git add -- "${PATHSPECS[@]}" || return $?
+    staged_after="$(git diff --cached --name-only -- "${PATHSPECS[@]}" 2>/dev/null | sort -u)"
+    while IFS= read -r path; do
+        [ -n "$path" ] && GSC_NEWLY_STAGED+=("$path")
+    done < <(comm -13 <(printf '%s\n' "$staged_before") <(printf '%s\n' "$staged_after"))
 }
 
 resolve_pre_commit_hook() {
@@ -609,6 +655,11 @@ COMMIT_EXIT=$?
 if [ "$COMMIT_EXIT" -ne 0 ]; then
     exit "$COMMIT_EXIT"
 fi
+
+# The staged paths are now part of a commit — the abort trap must not touch
+# them. (The catastrophic-deletion auto-revert below deliberately re-stages
+# via `git reset --soft` and tells the operator so; that state is kept too.)
+GSC_COMMIT_DONE=1
 
 # Post-commit safety net: detect catastrophic index corruption (issue #642).
 # Even if pre-commit hooks pass (phantom filter suppresses warnings), verify
