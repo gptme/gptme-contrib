@@ -938,11 +938,18 @@ def test_post_session_format_blind_trajectory_keeps_caller_deliverables(tmp_path
     assert result.record.outcome_flip_reason == "format_blind_trajectory_caller_deliverables"
 
 
-def test_post_session_nonzero_tool_calls_still_drops_caller_deliverables(tmp_path: Path):
+def test_post_session_nonzero_tool_calls_still_drops_caller_deliverables(tmp_path: Path, caplog):
     """Inverse of the format-blind guard: when the trajectory DID parse tool
     calls (non-empty tool_calls) and says noop, it remains an authoritative
     noop — caller git-range commits (likely from a concurrent session) are
-    still dropped."""
+    still dropped.
+
+    Also locks the operator-facing ``no-deliverables-with-commits`` marker so
+    the diagnostic payload cannot silently regress to the generic concurrent-
+    commit drop warning.
+    """
+    import logging
+
     store = SessionStore(sessions_dir=tmp_path)
     fake_traj = tmp_path / "trajectory.jsonl"
     fake_traj.write_text("")
@@ -955,17 +962,25 @@ def test_post_session_nonzero_tool_calls_still_drops_caller_deliverables(tmp_pat
     }
     concurrent_sha = "deadbeef" + "01234567" * 4
     with patch.object(_post_session_mod, "extract_from_path", return_value=fake_signals):
-        result = post_session(
-            store=store,
-            harness="codex",
-            model="gpt-5.6-sol",
-            duration_seconds=620,
-            trajectory_path=fake_traj,
-            deliverables=[concurrent_sha],
-        )
+        with caplog.at_level(logging.WARNING, logger="gptme_sessions.post_session"):
+            result = post_session(
+                store=store,
+                harness="codex",
+                model="gpt-5.6-sol",
+                duration_seconds=620,
+                trajectory_path=fake_traj,
+                deliverables=[concurrent_sha],
+            )
 
     assert result.record.outcome == "noop"
     assert result.record.deliverables == []
+    named = [r.message for r in caplog.records if "no-deliverables-with-commits" in r.message]
+    assert named, "extraction-gap warning marker must stay in operator logs"
+    assert "exec_command" in named[0]
+    assert "signal-extraction gap" in named[0]
+    assert not any(
+        "Dropping" in r.message and "concurrent session" in r.message for r in caplog.records
+    )
 
 
 def test_post_session_trajectory_empty_deliverables_keeps_caller_when_productive(
