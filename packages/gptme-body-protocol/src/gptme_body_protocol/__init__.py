@@ -65,7 +65,12 @@ def require_handshake_ok(response: dict[str, Any]) -> None:
 
 
 def require_command_result(response: dict[str, Any], command_id: str) -> None:
-    """Reject mismatched, delayed, or non-result command frames."""
+    """Reject mismatched, delayed, or non-result command frames.
+
+    Protocol version is gated at handshake_ok. Native body nodes omit
+    ``protocol`` on ``command_result``; ``decode_message`` still rejects a
+    foreign protocol when the field is present.
+    """
     if response.get("type") != "command_result":
         raise ValueError(f"unexpected body response type: {response.get('type')!r}")
     if response.get("command_id") != command_id:

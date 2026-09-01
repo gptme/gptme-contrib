@@ -61,3 +61,11 @@ def test_require_command_result_rejects_mismatched_id() -> None:
             {"type": "command_result", "command_id": "other"},
             "remote-0001",
         )
+
+
+def test_require_command_result_allows_omitted_protocol() -> None:
+    """Handshake is the version gate; native nodes omit protocol on results."""
+    require_command_result(
+        {"type": "command_result", "command_id": "remote-0001"},
+        "remote-0001",
+    )
