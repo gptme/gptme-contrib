@@ -3217,8 +3217,8 @@ def test_post_session_explicit_deliverables_merged_with_trajectory(tmp_path: Pat
         trajectory_path=traj,
         deliverables=explicit,
     )
-    # Non-SHA deliverables merged with trajectory file paths (trajectory items first)
-    assert result.record.deliverables == ["/tmp/foo.py", "https://github.com/gptme/gptme/pull/1234"]
+    # Non-SHA caller items stay first (pre-PR contract); trajectory files follow.
+    assert result.record.deliverables == ["https://github.com/gptme/gptme/pull/1234", "/tmp/foo.py"]
 
 
 def test_post_session_empty_deliverables_uses_trajectory(tmp_path: Path):
