@@ -2045,3 +2045,154 @@ class TestRegradeCommand:
         records = {r.session_id: r for r in store.load_all()}
         assert records["codex-noop"].outcome == "productive"
         assert records["cc-noop"].outcome == "noop"
+
+    def test_regrade_preserves_failed_on_nonproductive_extract(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Failed is process-derived; a nonproductive trajectory must not collapse it to noop."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj = self._make_codex_traj(tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="failed-crash",
+                harness="codex",
+                outcome="failed",
+                exit_code=1,
+                trajectory_path=str(traj),
+            )
+        )
+
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda _: {
+                "productive": False,
+                "git_commits": [],
+                "file_writes": [],
+                "deliverables": [],
+                "deliverable_details": [],
+                "session_duration_s": 12,
+                "inferred_category": None,
+                "usage": None,
+            },
+        )
+
+        rc, out = _invoke(["regrade", "--outcome", "failed"], tmp_path)
+
+        assert rc == 0, out
+        persisted = store.load_all()[0]
+        assert persisted.outcome == "failed"
+        assert "→ noop" not in out
+
+    def test_regrade_all_does_not_erase_failed(self, tmp_path: Path, monkeypatch) -> None:
+        """--outcome all flips false-noops but leaves failed records intact."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj = self._make_codex_traj(tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="false-noop",
+                harness="codex",
+                outcome="noop",
+                trajectory_path=str(traj),
+            )
+        )
+        store.append(
+            SessionRecord(
+                session_id="still-failed",
+                harness="codex",
+                outcome="failed",
+                exit_code=1,
+                trajectory_path=str(traj),
+            )
+        )
+        store.append(
+            SessionRecord(
+                session_id="policy-hit",
+                harness="codex",
+                outcome="violated_policy",
+                trajectory_path=str(traj),
+            )
+        )
+
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda _: {
+                "productive": True,
+                "git_commits": ["fix: x (eee5555)"],
+                "file_writes": [],
+                "deliverables": ["fix: x (eee5555)"],
+                "deliverable_details": [],
+                "session_duration_s": 90,
+                "inferred_category": None,
+                "usage": None,
+            },
+        )
+
+        rc, out = _invoke(["regrade", "--outcome", "all"], tmp_path)
+
+        assert rc == 0, out
+        records = {r.session_id: r for r in store.load_all()}
+        assert records["false-noop"].outcome == "productive"
+        assert records["still-failed"].outcome == "failed"
+        assert records["policy-hit"].outcome == "violated_policy"
+
+    def test_regrade_missing_trajectory_preserves_failed(self, tmp_path: Path) -> None:
+        """A missing trajectory must not reset process-derived failed to unknown."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="failed-missing-traj",
+                harness="codex",
+                outcome="failed",
+                exit_code=1,
+                trajectory_path=str(tmp_path / "nonexistent.jsonl"),
+            )
+        )
+
+        rc, out = _invoke(["regrade", "--outcome", "failed"], tmp_path)
+
+        assert rc == 0, out
+        persisted = store.load_all()[0]
+        assert persisted.outcome == "failed"
+        assert "reset to unknown" not in out
+
+    def test_regrade_preserves_concurrent_record_updates(self, tmp_path: Path, monkeypatch) -> None:
+        """A concurrent annotation during extraction must survive rewrite."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj = self._make_codex_traj(tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="race-1",
+                harness="codex",
+                model="old-model",
+                outcome="noop",
+                trajectory_path=str(traj),
+            )
+        )
+
+        def _extract(_path: Path) -> dict:
+            with store.lock():
+                records = store.load_all()
+                records[0].model = "concurrent-model"
+                if "model" not in records[0].annotated_fields:
+                    records[0].annotated_fields.append("model")
+                store.rewrite(records)
+            return {
+                "productive": True,
+                "git_commits": ["fix: race (fff6666)"],
+                "file_writes": [],
+                "deliverables": ["fix: race (fff6666)"],
+                "deliverable_details": [],
+                "session_duration_s": 80,
+                "inferred_category": None,
+                "usage": None,
+            }
+
+        monkeypatch.setattr("gptme_sessions.cli.extract_from_path", _extract)
+
+        rc, out = _invoke(["regrade", "--harness", "codex"], tmp_path)
+
+        assert rc == 0, out
+        persisted = store.load_all()[0]
+        assert persisted.outcome == "productive"
+        assert persisted.model == "concurrent-model"
+        assert "model" in persisted.annotated_fields
