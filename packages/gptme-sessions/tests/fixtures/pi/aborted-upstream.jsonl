@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"be5d8844-6169-4ee6-a3b5-ca54a045b712","timestamp":"2026-03-13T19:33:24.328Z","cwd":"/workspace/pi-upstream-fixture"}
+{"type":"model_change","id":"2de09da9","parentId":null,"timestamp":"2026-03-13T19:33:24.328Z","provider":"openai-codex","modelId":"gpt-5.4"}
+{"type":"thinking_level_change","id":"dc849f47","parentId":"2de09da9","timestamp":"2026-03-13T19:33:24.328Z","thinkingLevel":"medium"}
+{"type":"message","id":"3af3c79f","parentId":"dc849f47","timestamp":"2026-03-13T19:35:13.575Z","message":{"role":"user","content":[{"type":"text","text":"rm 3dgs-demo.html"}],"timestamp":1773430513564}}
+{"type":"message","id":"c152b977","parentId":"3af3c79f","timestamp":"2026-03-13T19:35:14.667Z","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.4","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"aborted","timestamp":1773430513568,"errorMessage":"Operation aborted"}}
