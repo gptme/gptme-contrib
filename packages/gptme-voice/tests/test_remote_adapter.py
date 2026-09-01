@@ -129,14 +129,15 @@ def test_remote_adapter_requires_token() -> None:
 def test_is_loopback_host() -> None:
     assert is_loopback_host("127.0.0.1")
     assert is_loopback_host("::1")
-    assert is_loopback_host("localhost")
+    assert not is_loopback_host("localhost")
     assert not is_loopback_host("10.0.0.4")
     assert not is_loopback_host("body.example")
 
 
-def test_remote_adapter_rejects_non_loopback_host() -> None:
+@pytest.mark.parametrize("host", ["localhost", "localhost.", "10.0.0.4"])
+def test_remote_adapter_rejects_non_literal_loopback_host(host: str) -> None:
     with pytest.raises(ValueError, match="loopback-only"):
-        RemoteAdapter("secret", host="10.0.0.4")
+        RemoteAdapter("secret", host=host)
 
 
 def test_remote_adapter_from_env_rejects_non_loopback(

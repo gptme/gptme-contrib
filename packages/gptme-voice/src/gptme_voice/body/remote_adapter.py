@@ -25,13 +25,11 @@ _REQUIRED_WIRE_CAPABILITIES = {"status", "move", "turn", "stop"}
 
 
 def is_loopback_host(host: str) -> bool:
-    """True for literal loopback addresses and localhost.
+    """True only for literal loopback addresses.
 
-    Hostnames are not resolved. Plaintext body control is local-only, so a
-    DNS name other than localhost is treated as non-loopback.
+    Plaintext body control is local-only. Hostnames are deliberately rejected
+    because name resolution could select a non-loopback peer after this check.
     """
-    if host.lower().rstrip(".") == "localhost":
-        return True
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
