@@ -111,7 +111,7 @@ class RemoteAdapter:
                     for wire_capability, adapter_capability in _WIRE_TO_ADAPTER_CAPABILITY.items()
                     if wire_capability in wire_capabilities
                 }
-                self._telemetry = response.get("telemetry") or {}
+                self._telemetry = self._validated_telemetry(response)
             except BaseException:
                 await self.close()
                 raise
@@ -142,6 +142,13 @@ class RemoteAdapter:
 
     def telemetry(self) -> dict[str, Any]:
         return self._telemetry.copy()
+
+    @staticmethod
+    def _validated_telemetry(response: dict[str, Any]) -> dict[str, Any]:
+        telemetry = response.get("telemetry", {})
+        if not isinstance(telemetry, dict):
+            raise ValueError("body response telemetry must be a JSON object")
+        return telemetry
 
     async def takeoff(self, altitude_m: float) -> dict[str, Any]:
         return {"error": "This body has no takeoff capability."}
@@ -174,7 +181,7 @@ class RemoteAdapter:
             )
             response = await self._exchange(message)
             if "telemetry" in response:
-                self._telemetry = response["telemetry"]
+                self._telemetry = self._validated_telemetry(response)
             return response
 
     async def _exchange(self, message: Handshake | Command) -> dict[str, Any]:

@@ -234,6 +234,54 @@ def test_remote_adapter_rejects_incompatible_protocol() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("response_type", ["handshake_ok", "command_result"])
+def test_remote_adapter_rejects_non_object_telemetry(response_type: str) -> None:
+    async def scenario() -> None:
+        async def malformed_node(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            await reader.readline()
+            handshake = dict(_HANDSHAKE_OK)
+            if response_type == "handshake_ok":
+                handshake["telemetry"] = []
+            writer.write((json.dumps(handshake) + "\n").encode())
+            await writer.drain()
+            if response_type == "command_result":
+                request = json.loads(await reader.readline())
+                writer.write(
+                    (
+                        json.dumps(
+                            {
+                                "type": "command_result",
+                                "command_id": request["command_id"],
+                                "telemetry": [],
+                            }
+                        )
+                        + "\n"
+                    ).encode()
+                )
+                await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(malformed_node, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        adapter = RemoteAdapter("secret", port=port)
+        try:
+            if response_type == "handshake_ok":
+                operation = adapter.ensure_connected()
+            else:
+                await adapter.ensure_connected()
+                operation = adapter.stop()
+            with pytest.raises(ValueError, match="telemetry must be a JSON object"):
+                await operation
+        finally:
+            await adapter.close()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
 def test_remote_adapter_rejects_mismatched_command_id() -> None:
     async def scenario() -> None:
         async def mismatched_node(
