@@ -761,11 +761,24 @@ stage_explicit_pathspecs() {
         gsc_release_index_lock
         return 1
     }
-    if ! cp -p "$index_path" "$tmp_index"; then
-        echo "error: could not snapshot index to stage pathspecs" >&2
+    # Fresh `git init` has no .git/index yet (git creates it lazily on the
+    # first add). `cp -p` would fail and block the initial commit; an empty
+    # mktemp file is also invalid ("index file smaller than expected").
+    # Write a real empty index so git add can proceed.
+    if [ -e "$index_path" ]; then
+        if ! cp -p "$index_path" "$tmp_index"; then
+            echo "error: could not snapshot index to stage pathspecs" >&2
+            rm -f "$tmp_index"
+            gsc_release_index_lock
+            return 1
+        fi
+    else
         rm -f "$tmp_index"
-        gsc_release_index_lock
-        return 1
+        if ! GIT_INDEX_FILE="$tmp_index" git read-tree --empty; then
+            echo "error: could not create empty index to stage pathspecs" >&2
+            gsc_release_index_lock
+            return 1
+        fi
     fi
 
     GIT_INDEX_FILE="$tmp_index"

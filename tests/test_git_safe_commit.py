@@ -2010,3 +2010,90 @@ def test_successful_commit_keeps_trap_inert(git_repo: Path):
         text=True,
     )
     assert "test: success" in log.stdout
+
+
+def _fresh_repo(tmp_path: Path) -> Path:
+    """`git init` with identity, no commits, no .git/index."""
+    subprocess.run(
+        ["git", "init", "-b", "test-branch", str(tmp_path)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.hooksPath", "/dev/null"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    return tmp_path
+
+
+def test_safe_commit_initial_commit_without_index(tmp_path: Path):
+    """Fresh `git init` has no .git/index. Snapshotting via cp -p used to
+    fail with 'could not snapshot the index' and block the first commit
+    (AI-review P1 on #1579). git add used to create the index lazily."""
+    repo = _fresh_repo(tmp_path)
+    assert not (repo / ".git" / "index").exists()
+    (repo / "README.md").write_text("first\n")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "README.md", "-m", "feat: first commit"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "could not snapshot" not in result.stderr
+    log = subprocess.run(
+        ["git", "log", "--oneline"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "feat: first commit" in log.stdout
+    assert (repo / ".git" / "index").exists()
+
+
+def test_abort_unstages_newly_staged_file_on_fresh_repo(tmp_path: Path):
+    """First-commit abort still unstages: the file returns to untracked
+    instead of remaining staged-but-uncommitted (or failing the snapshot)."""
+    repo = _fresh_repo(tmp_path)
+    hooks = repo / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    new_file = repo / "new-file.md"
+    new_file.write_text("content")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "new-file.md", "-m", "test: hook fails"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "could not snapshot" not in result.stderr
+    assert "new-file.md" not in _staged_paths(repo)
+    assert new_file.exists() and new_file.read_text() == "content"
