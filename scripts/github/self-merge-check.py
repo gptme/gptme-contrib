@@ -918,7 +918,7 @@ def fetch_greptile_status(
 # --- Our own AI reviewer's explicit abstention -------------------------------
 #
 # The self-hosted reviewer (ErikBjare/bob#1122) can decline to review at all.
-# Today that happens on submodule-pointer bumps, where the diff is a SHA and no
+# That happens on submodule-pointer bumps, where the diff is a SHA and no
 # source, so there is nothing in it to assess. It says so verbatim:
 #
 #     ℹ️ **Submodule pointer change only — not reviewed.**
@@ -934,8 +934,14 @@ def fetch_greptile_status(
 # staleness, consensus and identity requirements. Reaching this function's
 # `False` return means only "the reviewer did not decline"; it grants nothing.
 #
-# The reviewer encodes abstention as `score: null` in its structured marker.
-# Reading that field avoids coupling this safety gate to human-facing prose.
+# `score: null` is necessary but not sufficient. The reviewer also serialises
+# null when every in-scope finding was dropped by policy (out-of-scope /
+# informational-only) so that those reviews cannot mint a 5/5. That is still a
+# review of real source — treating it as "not reviewed" deadlocked contrib#1579
+# and #1580 (Greptile 5/5 at head, operator had to merge). The marker's
+# additive `submodule_only` bit is the pointer-bump signal; explicit false
+# means "reviewed, no in-scope score". Older markers omit the key and must
+# fail closed (the #850 shape).
 AI_REVIEW_COMMENT_MARKER = "<!-- bob-ai-review {"
 AI_REVIEW_MARKER_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
 
@@ -1022,6 +1028,13 @@ def ai_review_abstained(
     if "score" in marker:
         score = marker["score"]
         if score is None:
+            # Null score is an abstention only for a gitlink-only pointer bump
+            # (the #850 hole). Policy-drop reviews also serialise score as null
+            # so they cannot mint a 5/5, but they ARE reviews of real source.
+            # `submodule_only is False` is the new explicit "reviewed, no
+            # in-scope score". Omission (legacy markers) fails closed.
+            if marker.get("submodule_only") is False:
+                return False
             return True
         if isinstance(score, int) and not isinstance(score, bool) and 1 <= score <= 5:
             return False

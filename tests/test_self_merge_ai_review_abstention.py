@@ -392,3 +392,91 @@ def test_abstention_for_the_current_head_still_blocks() -> None:
             head_sha="c096e25e50f8aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
     assert current is True
+
+
+# ---------------------------------------------------------------------------
+# Policy-drop null scores are reviews, not abstentions (contrib#1579 / #1580)
+# ---------------------------------------------------------------------------
+
+# Explicit gitlink-only marker (the #850 shape, now labelled).
+SUBMODULE_ONLY_BODY = """## 🤖 AI code review
+
+### Confidence Score: N/A
+
+Not scored — this diff moves a submodule pointer and contains no source to
+assess. Treat it as *not reviewed*, not as approved.
+
+<!-- bob-ai-review {"sha": "c096e25e50f8", "score": null, "engine": "llm", "submodule_only": true, "history": []} -->
+"""
+
+# Out-of-scope P2s, empty in-scope findings, score null. Real source.
+INFORMATIONAL_ONLY_BODY = """## 🤖 AI code review
+
+### Confidence Score: N/A
+
+Not scored — every finding was dropped by policy.
+
+<!-- bob-ai-review {"sha": "c096e25e50f8", "score": null, "engine": "llm", "submodule_only": false, "history": []} -->
+"""
+
+# 0 in-scope findings, degraded consensus (1/3 passes). Still a review.
+DEGRADED_CLEAN_BODY = """## 🤖 AI code review
+
+### Confidence Score: 5/5 — No findings on this head
+
+<sub>ℹ️ Consensus was degraded on this run: 1 of 3 passes answered, so findings were filtered at 1-of-1 agreement rather than 2-of-3 — less filtered than usual.</sub>
+
+✅ **No findings.** The diff looks correct to me on this pass.
+
+<!-- bob-ai-review {"sha": "c096e25e50f8", "score": 5, "engine": "llm", "submodule_only": false, "consensus": {"requested": 3, "answered": 1, "jobs_requested": 9, "jobs_answered": 3, "min_agreement": 1, "min_agreement_requested": 2, "rejected": 0, "failures": []}, "history": []} -->
+"""
+
+
+def test_informational_only_null_score_is_not_an_abstention() -> None:
+    """contrib#1580: out-of-scope-only reviews serialise score null.
+
+    They cannot mint a 5/5, but they are reviews of real source. The gate must
+    not refuse them as "not reviewed" when Greptile has independently cleared
+    the head.
+    """
+    assert _abstained(INFORMATIONAL_ONLY_BODY) is False
+
+
+def test_degraded_consensus_zero_findings_is_not_an_abstention() -> None:
+    """contrib#1579: a posted 0-finding review at the head, 1/3 passes answered.
+
+    Degraded consensus is a recall warning on the *positive* AI-fallback path,
+    not an abstention. Greptile 5/5 at the same head still counts.
+    """
+    assert _abstained(DEGRADED_CLEAN_BODY) is False
+
+
+def test_explicit_submodule_only_null_score_is_still_an_abstention() -> None:
+    """The #850 hole stays closed when the marker names a pointer bump."""
+    assert _abstained(SUBMODULE_ONLY_BODY) is True
+
+
+def test_legacy_null_score_without_submodule_key_still_abstains() -> None:
+    """Older markers omit `submodule_only`. Omission must fail closed."""
+    assert _abstained(ABSTENTION_BODY) is True
+
+
+def test_evaluate_pr_allows_informational_only_when_greptile_cleared_head() -> None:
+    """The #1580 deadlock: Greptile 5/5, AI review posted, score null, source PR."""
+    result = _evaluate(INFORMATIONAL_ONLY_BODY)
+    assert not any(ABSTENTION_REASON in r for r in result.reasons)
+    assert result.eligible
+
+
+def test_evaluate_pr_allows_degraded_zero_findings_when_greptile_cleared_head() -> None:
+    """The #1579 deadlock: Greptile 5/5, native 0-findings review, 1/3 consensus."""
+    result = _evaluate(DEGRADED_CLEAN_BODY)
+    assert not any(ABSTENTION_REASON in r for r in result.reasons)
+    assert result.eligible
+
+
+def test_evaluate_pr_still_blocks_explicit_submodule_abstention() -> None:
+    """Greptile 5/5 must not rescue a gitlink-only unreviewed bump (#850)."""
+    result = _evaluate(SUBMODULE_ONLY_BODY)
+    assert not result.eligible
+    assert ABSTENTION_REASON in result.reasons
