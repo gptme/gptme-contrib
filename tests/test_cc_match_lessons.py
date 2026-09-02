@@ -1244,6 +1244,10 @@ def test_cc_dropout_epsilon_validated_core_env_override(hook, monkeypatch):
     assert hook._get_dropout_epsilon_validated_core() == 1.0
     monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", "not-a-float")
     assert hook._get_dropout_epsilon_validated_core() == 0.05  # fallback to default
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", "nan")
+    assert (
+        hook._get_dropout_epsilon_validated_core() == 0.05
+    )  # NaN is not a probability
 
 
 def test_cc_dropout_epsilon_for_class(hook, monkeypatch):

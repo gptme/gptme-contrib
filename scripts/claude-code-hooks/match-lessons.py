@@ -1347,7 +1347,7 @@ def _get_dropout_epsilon() -> float:
         epsilon = float(raw)
     except ValueError:
         return 0.0
-    if epsilon <= 0.0:
+    if math.isnan(epsilon) or epsilon <= 0.0:
         return 0.0
     return min(epsilon, 1.0)
 
@@ -1365,6 +1365,10 @@ def _get_dropout_epsilon_validated_core() -> float:
     try:
         epsilon = float(raw)
     except ValueError:
+        return 0.05
+    # float("nan") succeeds; min/max retain NaN and later `eff_epsilon > 0`
+    # silently disables validated-core sampling. Treat non-finite as unset.
+    if math.isnan(epsilon):
         return 0.05
     return min(max(epsilon, 0.0), 1.0)
 
