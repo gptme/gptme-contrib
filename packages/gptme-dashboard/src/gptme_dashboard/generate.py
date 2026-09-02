@@ -1361,8 +1361,7 @@ def generate_sparkline_svg(
             polyline + f" {last_x:.1f},{height - pad:.1f} {first_x:.1f},{height - pad:.1f}"
         )
         svg_parts.append(
-            f'<polygon points="{fill_points}" '
-            f'fill="{color}" fill-opacity="0.15" stroke="none"/>'
+            f'<polygon points="{fill_points}" fill="{color}" fill-opacity="0.15" stroke="none"/>'
         )
 
     svg_parts.append(
