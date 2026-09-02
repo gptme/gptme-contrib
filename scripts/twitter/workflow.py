@@ -268,9 +268,10 @@ class TweetDraft:
         reject_reason: str | None = None,
         quality_score: int | None = None,
         thread: List[str] | None = None,
+        quote_tweet_id: str | None = None,
     ):
         self.text = text
-        self.type = type  # tweet, reply, thread
+        self.type = type  # tweet, reply, thread, quote
         self.in_reply_to = in_reply_to
         self.scheduled_time = scheduled_time
         self.context = context or {}
@@ -278,6 +279,7 @@ class TweetDraft:
         self.reject_reason = reject_reason
         self.quality_score = quality_score  # 0-3 star rating (matches blog post system)
         self.thread = thread or []  # List of follow-up tweet texts
+        self.quote_tweet_id = quote_tweet_id  # id of the tweet this draft quotes
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage"""
@@ -300,6 +302,9 @@ class TweetDraft:
         # Only include thread if it's set and non-empty
         if self.thread:
             result["thread"] = self.thread
+        # Only include quote_tweet_id if it's set
+        if self.quote_tweet_id:
+            result["quote_tweet_id"] = self.quote_tweet_id
         return result
 
     @classmethod
@@ -345,6 +350,7 @@ class TweetDraft:
             reject_reason=data.get("reject_reason"),  # Optional, backward compatible
             quality_score=data.get("quality_score"),  # Optional, backward compatible
             thread=fixed_thread,
+            quote_tweet_id=data.get("quote_tweet_id", data.get("quote")),
         )
         created_at = data.get("created_at", data.get("created"))
         if created_at is None:
@@ -1092,9 +1098,10 @@ def _validate_draft_length(draft: "TweetDraft") -> list[tuple[str, int]]:
 @cli.command()
 @click.argument("text")
 @click.option(
-    "--type", default="tweet", type=click.Choice(["tweet", "reply", "thread"])
+    "--type", default="tweet", type=click.Choice(["tweet", "reply", "thread", "quote"])
 )
 @click.option("--reply-to", help="Tweet ID to reply to")
+@click.option("--quote-id", help="Tweet ID to quote (required when --type quote)")
 @click.option("--schedule", help="Schedule time (ISO format)")
 @click.option(
     "--skip-url-check",
@@ -1105,6 +1112,7 @@ def draft(
     text: str,
     type: str,
     reply_to: str | None,
+    quote_id: str | None,
     schedule: str | None,
     skip_url_check: bool,
 ) -> None:
@@ -1152,6 +1160,11 @@ def draft(
             op.complete(success=False, error="too_long")
             sys.exit(1)
 
+        if type == "quote" and not quote_id:
+            console.print("[red]✗ --type quote requires --quote-id <tweet-id>[/red]")
+            op.complete(success=False, error="missing_quote_id")
+            sys.exit(1)
+
         scheduled_time = datetime.fromisoformat(schedule) if schedule else None
 
         draft = TweetDraft(
@@ -1159,6 +1172,7 @@ def draft(
             type=type,
             in_reply_to=reply_to,
             scheduled_time=scheduled_time,
+            quote_tweet_id=quote_id,
         )
 
         path = save_draft(draft, "new")
@@ -1496,6 +1510,30 @@ def _outbound_allowed(draft: TweetDraft) -> bool:
     return bool(guard_outbound(_outbound_text(draft), "twitter", AGENT_DIR))
 
 
+def _create_tweet_kwargs(
+    draft: TweetDraft, *, user_auth: bool = False
+) -> Dict[str, Any]:
+    """Build the keyword args for posting a draft's main tweet.
+
+    A quote-tweet is a standalone post in the Twitter v2 API — the client
+    rejects combining reply + quote. So when the draft quotes a tweet,
+    ``quote_tweet_id`` is used and ``in_reply_to`` is dropped; otherwise the
+    normal reply/standalone path runs. Thread follow-ups never go through here
+    (they are always replies within the draft's own thread).
+    """
+    if draft.quote_tweet_id:
+        return {
+            "text": draft.text,
+            "quote_tweet_id": draft.quote_tweet_id,
+            "user_auth": user_auth,
+        }
+    return {
+        "text": draft.text,
+        "in_reply_to_tweet_id": draft.in_reply_to,
+        "user_auth": user_auth,
+    }
+
+
 def _post_tweet_with_thread(client, draft: TweetDraft, tweet_id: str) -> None:
     """Post thread follow-ups after main tweet is posted."""
     if draft.thread:
@@ -1708,12 +1746,8 @@ def post(
                 continue
 
             try:
-                # Post the main tweet
-                response = client.create_tweet(
-                    text=draft.text,
-                    in_reply_to_tweet_id=draft.in_reply_to,
-                    user_auth=False,
-                )
+                # Post the main tweet (quote_tweet_id takes precedence over reply)
+                response = client.create_tweet(**_create_tweet_kwargs(draft))
 
                 if response.data:
                     tweet_id = response.data["id"]
@@ -2164,9 +2198,7 @@ def process_timeline_tweets(
                                 require_auth=True, headless=True
                             )
                             post_response = client_for_post.create_tweet(
-                                text=draft.text,
-                                in_reply_to_tweet_id=draft.in_reply_to,
-                                user_auth=False,
+                                **_create_tweet_kwargs(draft)
                             )
                             if post_response.data:
                                 tweet_id = post_response.data["id"]
@@ -2724,11 +2756,7 @@ def auto(
                     continue
 
                 try:
-                    response = client.create_tweet(
-                        text=draft.text,
-                        in_reply_to_tweet_id=draft.in_reply_to,
-                        user_auth=False,
-                    )
+                    response = client.create_tweet(**_create_tweet_kwargs(draft))
 
                     if response.data:
                         tweet_id = response.data["id"]
