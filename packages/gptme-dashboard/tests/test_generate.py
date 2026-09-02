@@ -4328,3 +4328,87 @@ def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Pat
     )
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_narrow_viewport_containment_css_present(workspace: Path, tmp_path: Path):
+    """Generated pages must carry the narrow-viewport containment block.
+
+    Wide tables are the dominant source of horizontal page overflow: without
+    this block a single wide row widens `body` and the whole document scrolls
+    sideways at phone widths (measured 762px document width in a 390px
+    viewport before the fix).
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    for page in ("index.html", "lessons/workflow/test-lesson.html"):
+        html = (output / page).read_text()
+        assert "@media (max-width: 700px)" in html, f"{page}: missing narrow-viewport block"
+        narrow = html.split("@media (max-width: 700px)", 1)[1][:600]
+        assert "display: block" in narrow, f"{page}: table not made a scroll container"
+        assert "overflow-x: auto" in narrow, f"{page}: table missing horizontal scroll"
+        # It must be the LAST media block in the stylesheet, otherwise a
+        # per-page rule emitted by `extra_style` can override the containment.
+        style = html.split("</style>", 1)[0]
+        assert style.rindex("@media (") == style.rindex(
+            "@media (max-width: 700px)"
+        ), f"{page}: containment block must come last in the stylesheet"
+
+
+def test_no_horizontal_overflow_at_390px(workspace: Path, tmp_path: Path):
+    """A 390px viewport must not scroll the document horizontally.
+
+    Real browser measurement; skipped when playwright is unavailable (it is not
+    a package dependency). Serves the site under a `/dashboard/` prefix so this
+    also covers the subpath deployment shape.
+    """
+    import functools
+    import http.server
+    import socketserver
+    import threading
+
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright  # noqa: PLC0415
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    prefix = "/dashboard/"
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def translate_path(self, path: str) -> str:
+            clean = path.split("?", 1)[0].split("#", 1)[0]
+            if clean.startswith(prefix):
+                clean = clean[len(prefix) - 1 :]
+            return str(output) + clean
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    socketserver.TCPServer.allow_reuse_address = True
+    server = socketserver.TCPServer(
+        ("127.0.0.1", 0), functools.partial(Handler, directory=str(output))
+    )
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch()
+            except Exception as exc:  # no browser binaries installed
+                pytest.skip(f"chromium unavailable: {exc}")
+            page = browser.new_page(viewport={"width": 390, "height": 844})
+            for name in ("index.html", "lessons/workflow/test-lesson.html"):
+                page.goto(f"http://127.0.0.1:{port}{prefix}{name}", wait_until="load")
+                width = page.evaluate(
+                    "() => [document.documentElement.scrollWidth,"
+                    " document.documentElement.clientWidth]"
+                )
+                assert width[0] <= width[1], (
+                    f"{name}: document scrolls horizontally at 390px "
+                    f"(scrollWidth={width[0]}, viewport={width[1]})"
+                )
+            browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()

@@ -60,6 +60,30 @@ footer {
 }
 
 {% block extra_style %}{% endblock %}
+
+/* Narrow-viewport containment (must stay last so it wins over per-page styles).
+
+   Wide tables are the dominant source of horizontal page overflow: a table
+   sizes to its content, so one wide row widens `body` and the whole document
+   scrolls sideways. Turning the table into a block-level scroll container
+   keeps the overflow inside the table instead of on the page, while the
+   surrounding headings and controls stay put. `.heatmap-wrap` already does
+   the same thing for the activity heatmap. */
+@media (max-width: 700px) {
+  .container { max-width: 100%; overflow-x: hidden; }
+  table {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* An overflowing block-level table must not also collapse its own columns. */
+  thead, tbody { width: max-content; min-width: 100%; }
+  pre, code { max-width: 100%; overflow-x: auto; }
+  /* Long unbroken identifiers (paths, slugs, URLs) must wrap, not push. */
+  td, th, li, p { overflow-wrap: anywhere; }
+}
 </style>
 {% block extra_head %}{% endblock %}
 </head>
