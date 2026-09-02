@@ -15,7 +15,7 @@ FAILURE_REASON_RATE_LIMIT = "rate_limit"
 FAILURE_REASON_TIMEOUT = "timeout"
 
 _ERROR_LINE_RE = re.compile(
-    r"(?i)(error|exception|traceback|failed|rate.?limit|401|403|429|authentication)"
+    r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|401|403|429|authentication)"
 )
 _ASSISTANT_ROLES = frozenset({"assistant"})
 
@@ -100,6 +100,39 @@ def _trajectory_has_assistant(trajectory_path: Path | None) -> bool:
     return False
 
 
+def _structured_error_signals(rec: dict) -> list[str]:
+    """Pull CC stream-json error fields that never appear in assistant text.
+
+    Claude Code weekly-limit deaths look like a synthetic assistant turn whose
+    visible copy is ``You've hit your weekly limit``. The actual classifier
+    signals live on sibling fields: ``type=rate_limit_event``,
+    ``error=rate_limit``, ``api_error_status=429``. Scanning only
+    ``message.content`` misses all three, so the session records as
+    ``nonzero_exit_unclassified``.
+    """
+    signals: list[str] = []
+    rec_type = rec.get("type")
+    if rec_type == "rate_limit_event":
+        info = rec.get("rate_limit_info")
+        info_dict = info if isinstance(info, dict) else {}
+        status = info_dict.get("status")
+        # Informational "allowed" windows must not stamp a later unrelated
+        # nonzero exit as rate_limit (Greptile P1 on gptme-contrib#1582).
+        if status == "rejected":
+            limit_type = info_dict.get("rateLimitType")
+            signals.append(f"rate_limit_event status={status} type={limit_type}")
+    err = rec.get("error")
+    if isinstance(err, str) and err.strip():
+        signals.append(err.strip())
+    status = rec.get("api_error_status")
+    if status is not None:
+        signals.append(f"api_error_status:{status}")
+    result = rec.get("result")
+    if rec.get("is_error") and isinstance(result, str) and result.strip():
+        signals.append(result.strip()[:500])
+    return signals
+
+
 def _extract_trajectory_error_line(trajectory_path: Path | None) -> str | None:
     if trajectory_path is None or not trajectory_path.is_file():
         return None
@@ -114,11 +147,11 @@ def _extract_trajectory_error_line(trajectory_path: Path | None) -> str | None:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                candidates: list[str] = list(_structured_error_signals(rec))
                 content = _record_content_text(rec)
-                if not content:
-                    continue
-                for part in content.splitlines():
-                    part = part.strip()
+                if content:
+                    candidates.extend(part.strip() for part in content.splitlines() if part.strip())
+                for part in candidates:
                     if part and _ERROR_LINE_RE.search(part):
                         last_match = part[:500]
     except OSError:
@@ -138,7 +171,7 @@ def classify_failure_reason(
         return FAILURE_REASON_TIMEOUT
     if error_text:
         lower = error_text.lower()
-        if ("rate" in lower and "limit" in lower) or "429" in error_text:
+        if ("rate" in lower and "limit" in lower) or "429" in error_text or "weekly limit" in lower:
             return FAILURE_REASON_RATE_LIMIT
         # Check invalid_request_error BEFORE auth: a 400 bad-request from a
         # provider (e.g. deepseek rejecting tool_calls format) is NOT an auth

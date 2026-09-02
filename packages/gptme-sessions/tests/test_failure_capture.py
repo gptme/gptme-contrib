@@ -270,3 +270,106 @@ def test_capture_cc_session_with_assistant_not_pre_response(tmp_path: Path):
         harness_stderr_path=None,
     )
     assert reason == FAILURE_REASON_NONZERO
+
+
+def test_classify_cc_weekly_limit_copy():
+    """CC user-facing weekly-limit copy has 'limit' but not 'rate'."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=53,
+        input_tokens=0,
+        has_assistant_turn=True,
+        error_text="You've hit your weekly limit · resets Sep 1, 6pm (UTC)",
+    )
+    assert result == FAILURE_REASON_RATE_LIMIT
+
+
+def test_capture_cc_weekly_limit_stream_json(tmp_path: Path):
+    """CC seven_day weekly-limit stream-json must classify as rate_limit.
+
+    Live 2026-08-31 email-run storm (13/13 surviving logs): synthetic assistant
+    turn + rate_limit_event + api_error_status=429. Content-only extraction
+    previously returned nonzero_exit_unclassified because has_assistant_turn
+    blocked the pre_response fallback and the visible copy never said 'rate'.
+    """
+    traj = tmp_path / "conversation.jsonl"
+    records = [
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "rejected",
+                "rateLimitType": "seven_day",
+                "overageStatus": "rejected",
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "You've hit your weekly limit · resets Sep 1, 6pm (UTC)",
+                    }
+                ],
+            },
+            "error": "rate_limit",
+            "is_api_error_message": True,
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your weekly limit · resets Sep 1, 6pm (UTC)",
+            "num_turns": 1,
+        },
+    ]
+    traj.write_text(
+        "".join(json.dumps(rec) + "\n" for rec in records),
+        encoding="utf-8",
+    )
+    reason, err = capture_session_failure(
+        exit_code=1,
+        duration_seconds=53,
+        input_tokens=0,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+    assert reason == FAILURE_REASON_RATE_LIMIT
+    assert err is not None
+    assert "429" in err or "rate_limit" in err or "weekly limit" in err.lower()
+
+
+def test_capture_allowed_rate_limit_event_not_rate_limit(tmp_path: Path):
+    """An informational allowed rate_limit_event must not classify a later exit."""
+    traj = tmp_path / "conversation.jsonl"
+    records = [
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "allowed",
+                "rateLimitType": "five_hour",
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Sure, I can do that."}],
+            },
+        },
+    ]
+    traj.write_text(
+        "".join(json.dumps(rec) + "\n" for rec in records),
+        encoding="utf-8",
+    )
+    reason, _ = capture_session_failure(
+        exit_code=1,
+        duration_seconds=45,
+        input_tokens=0,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+    assert reason == FAILURE_REASON_NONZERO
