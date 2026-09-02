@@ -4282,6 +4282,7 @@ def _extract_js_function(html: str, name: str) -> str:
                 return html[start : i + 1]
     raise ValueError(f"Unclosed function {name!r} found in HTML")
 
+
 def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Path):
     """safeUrl relative-path fallback must not admit protocol-relative URLs.
 
