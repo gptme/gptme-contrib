@@ -4220,3 +4220,46 @@ def test_generate_json_has_page_field(workspace: Path):
         assert isinstance(
             plugin["has_page"], bool
         ), f"has_page must be a bool, got {type(plugin['has_page'])}"
+
+
+def test_static_data_json_fetch_is_relative(workspace: Path, tmp_path: Path):
+    """The data.json fetch in static mode must use a relative URL ('./data.json').
+
+    When the dashboard is deployed under a subpath (e.g. /dashboard/), an
+    absolute '/data.json' fetch hits the wrong path and returns 404 — breaking
+    static search entirely. The fetch must be page-relative so it resolves to
+    '/dashboard/data.json' when served under /dashboard/.
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Must use page-relative fetch, not root-absolute
+    assert "fetch('./data.json')" in html, (
+        "Static data.json fetch must use './data.json' (page-relative) not '/data.json' "
+        "to work when the dashboard is deployed under a subpath like /dashboard/"
+    )
+    assert (
+        "fetch('/data.json')" not in html
+    ), "Root-absolute '/data.json' fetch breaks when served under a subpath"
+
+
+def test_static_search_urls_are_relative(workspace: Path, tmp_path: Path):
+    """Search result URLs built by _buildClientIndex must be page-relative.
+
+    When the dashboard is at /dashboard/index.html, search result links like
+    '/lessons/…' navigate to the root instead of '/dashboard/lessons/…'.
+    The pageUrl() helper must return relative paths (no leading '/') so that
+    clicking a result navigates correctly within the deployed subpath.
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # pageUrl must not prepend '/' — should be e.g. 'lessons/…', not '/lessons/…'
+    build_idx = html.index("_buildClientIndex")
+    page_url_idx = html.index("pageUrl", build_idx)
+    # The definition: look for the pattern with or without leading slash
+    snippet = html[page_url_idx : page_url_idx + 120]
+    assert "'/' +" not in snippet, (
+        "pageUrl() must not prepend '/' to page_url — it produces root-absolute URLs "
+        "that break navigation when the dashboard is served under a subpath"
+    )
