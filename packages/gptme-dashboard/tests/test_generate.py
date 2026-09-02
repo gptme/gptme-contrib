@@ -5085,3 +5085,94 @@ def test_tasks_index_not_overwritten_by_index_task(workspace: Path, tmp_path: Pa
         "tasks/index.html was overwritten by index.md detail page — "
         "scan_tasks must exclude index.md"
     )
+
+
+def test_static_index_not_fetched_until_user_searches(workspace: Path, tmp_path: Path):
+    """data.json must not be fetched during page load on a static deploy.
+
+    It is multi-MB on real workspaces (3.2 MB / 790 KiB gzipped for Bob's), so
+    fetching it eagerly blows the cold-load transfer budget for every visitor
+    who never searches. It must load on first search intent instead, and search
+    must still work once it lands.
+    """
+    import functools
+    import http.server
+    import socketserver
+    import threading
+
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright  # noqa: PLC0415
+
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir(exist_ok=True)
+    (tasks_dir / "zebra-lazy-index-fixture.md").write_text(
+        textwrap.dedent(
+            """\
+            ---
+            state: active
+            created: 2026-03-01
+            ---
+            # ZebraLazyIndexFixture
+
+            Searchable fixture for the lazy static-index test.
+            """
+        )
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    generate_json(workspace, output)
+
+    prefix = "/dashboard/"
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def translate_path(self, path: str) -> str:
+            clean = path.split("?", 1)[0].split("#", 1)[0]
+            if clean.startswith(prefix):
+                clean = clean[len(prefix) - 1 :]
+            return str(output) + clean
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    socketserver.TCPServer.allow_reuse_address = True
+    server = socketserver.TCPServer(
+        ("127.0.0.1", 0), functools.partial(Handler, directory=str(output))
+    )
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch()
+            except Exception as exc:  # no browser binaries installed
+                pytest.skip(f"chromium unavailable: {exc}")
+            page = browser.new_page()
+            requested: list[str] = []
+            page.on("request", lambda r: requested.append(r.url))
+
+            page.goto(f"http://127.0.0.1:{port}{prefix}index.html", wait_until="load")
+            # Give initDynamic()'s /api/status probe time to fail and settle.
+            page.wait_for_timeout(1500)
+
+            assert not [u for u in requested if u.endswith("data.json")], (
+                "data.json was fetched during page load; it must be deferred until "
+                f"the user searches (requests: {requested})"
+            )
+
+            # First search intent must pull the index in and then find the fixture.
+            page.evaluate("() => openSearch()")
+            page.fill("#global-search-input", "ZebraLazyIndexFixture")
+            page.wait_for_selector(
+                "#search-results-area a", state="attached", timeout=15000
+            )
+
+            assert [u for u in requested if u.endswith("data.json")], (
+                f"data.json was never fetched on search intent (requests: {requested})"
+            )
+            href = page.get_attribute("#search-results-area a", "href")
+            assert href and "zebra-lazy-index-fixture" in href, href
+            browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
