@@ -1825,6 +1825,56 @@ def test_extract_usage_cc_partial_result_falls_back_per_field():
     assert usage["cache_read_tokens"] == 300
 
 
+def test_extract_usage_cc_stop_reason_final_wins():
+    """stop_reason reflects the last assistant message's stop_reason."""
+    msgs = [
+        {
+            "type": "assistant",
+            "message": {
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "tool_use",
+                "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "end_turn",
+                "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        },
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["stop_reason"] == "end_turn"
+
+
+def test_extract_usage_cc_stop_reason_absent_when_not_set():
+    """stop_reason is absent from returned dict when no assistant has one."""
+    msgs = [_make_cc_assistant_usage(10, 5)]
+    usage = extract_usage_cc(msgs)
+    assert "stop_reason" not in usage
+
+
+def test_extract_usage_cc_stop_sequence_captured():
+    """stop_sequence reason (e.g. from /end skill) is captured."""
+    msgs = [
+        {
+            "type": "assistant",
+            "message": {
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "stop_sequence",
+                "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        },
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["stop_reason"] == "stop_sequence"
+
+
 def test_detect_format_cc_with_preamble():
     """CC trajectories starting with non-standard record types are still detected correctly.
 
