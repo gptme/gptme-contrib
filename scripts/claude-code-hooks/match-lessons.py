@@ -1377,8 +1377,10 @@ def _get_dropout_epsilon_for_class(policy_class: str, global_epsilon: float) -> 
     """Return the effective dropout probability for a given policy class.
 
     - exempt: always 0.0 (never withheld, regardless of global_epsilon)
-    - validated_core: LESSON_DROPOUT_EPSILON_VALIDATED_CORE (default 0.05),
-      but only once the global switch (LESSON_DROPOUT_EPSILON) is > 0
+    - validated_core: min(global_epsilon, LESSON_DROPOUT_EPSILON_VALIDATED_CORE)
+      (default 0.05), but only once the global switch (LESSON_DROPOUT_EPSILON) is > 0.
+      Bounded by global_epsilon so the per-class differential can only reduce
+      dropout relative to the global setting, never exceed it.
     - holdout / unknown: global_epsilon (LESSON_DROPOUT_EPSILON)
     """
     if policy_class == "exempt":
@@ -1386,7 +1388,7 @@ def _get_dropout_epsilon_for_class(policy_class: str, global_epsilon: float) -> 
     if global_epsilon <= 0.0:
         return 0.0
     if policy_class == "validated_core":
-        return _get_dropout_epsilon_validated_core()
+        return min(global_epsilon, _get_dropout_epsilon_validated_core())
     return global_epsilon
 
 

@@ -1278,6 +1278,21 @@ def test_cc_dropout_epsilon_for_class_global_zero_disables_validated_core(
     assert hook._get_dropout_epsilon_for_class("exempt", 0.0) == 0.0
 
 
+def test_cc_dropout_epsilon_for_class_validated_core_bounded_by_global(
+    hook, monkeypatch
+):
+    """validated_core epsilon must never exceed the global epsilon — otherwise
+    a small global dropout (meant to be gentle) would withhold the lessons the
+    feature is meant to preserve at a HIGHER rate than ordinary lessons."""
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", "0.05")
+    # global epsilon (0.01) is smaller than the validated_core default (0.05):
+    # the effective rate must be clamped down to the global epsilon.
+    assert hook._get_dropout_epsilon_for_class("validated_core", 0.01) == 0.01
+    # global epsilon (0.20) is larger than validated_core (0.05): the smaller
+    # class-specific rate wins, as before.
+    assert hook._get_dropout_epsilon_for_class("validated_core", 0.20) == 0.05
+
+
 def test_cc_dropout_exempt_lesson_never_withheld(hook, monkeypatch, tmp_path):
     """An exempt lesson must never be withheld even at epsilon=1.0 in the CC hook."""
     import random as _random
