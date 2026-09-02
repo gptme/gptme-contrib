@@ -16,12 +16,13 @@ import html
 import json
 import logging
 import os
+import posixpath
 import re
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import yaml  # type: ignore[import-untyped]
 from jinja2 import Environment, FileSystemLoader
@@ -74,14 +75,196 @@ def strip_markdown_inline(text: str) -> str:
     return text
 
 
+def slugify_heading(text: str) -> str:
+    """Slugify heading text the way GitHub does, so in-document ``#fragment``
+    links written for GitHub also resolve on the generated pages.
+
+    Lowercase, drop everything that is not a word character, space or hyphen,
+    then turn runs of whitespace into single hyphens.
+    """
+    slug = text.strip().lower()
+    slug = re.sub(r"[^\w\s-]", "", slug, flags=re.UNICODE)
+    # GitHub maps each whitespace char to a hyphen without collapsing runs, so
+    # "Phase 1 — the plan" -> "phase-1--the-plan". Match that, or fragments
+    # written against GitHub headings miss.
+    return re.sub(r"\s", "-", slug)
+
+
+def _add_heading_anchors(tokens: list) -> None:
+    """Give every rendered heading a stable, deduplicated ``id``.
+
+    Without this, ``[Work](#work)`` written in a task/journal body renders as a
+    link to an anchor that does not exist on the generated page.
+    """
+    seen: dict[str, int] = {}
+    for i, token in enumerate(tokens):
+        if token.type != "heading_open":
+            continue
+        inline = tokens[i + 1] if i + 1 < len(tokens) else None
+        text = inline.content if inline is not None and inline.type == "inline" else ""
+        slug = slugify_heading(text)
+        if not slug:
+            continue
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        token.attrSet("id", slug if count == 0 else f"{slug}-{count}")
+
+
+def _is_rewritable_link(href: str) -> bool:
+    """True for workspace-relative links we can retarget (no scheme, not root-absolute)."""
+    if not href or href.startswith(("#", "/", "?")):
+        return False
+    # Any scheme (http:, https:, mailto:, data:, ...) or protocol-relative URL
+    if href.startswith("//") or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href):
+        return False
+    return True
+
+
+def rewrite_body_links(
+    body_html: str,
+    *,
+    source_path: str,
+    page_map: dict[str, str],
+    root_prefix: str,
+    gh_repo_url: str = "",
+) -> str:
+    """Retarget workspace-relative links in a rendered body to real destinations.
+
+    Bodies are authored for the repository, so ``[x](other-task.md)`` points at a
+    file that does not exist in the generated site. Resolve each relative link
+    against the body's own source path and then:
+
+    * if the target has a generated page, link to that page (subpath-safe,
+      via ``root_prefix``);
+    * else, if the workspace has a GitHub URL, link to the file on GitHub;
+    * else leave the link untouched.
+
+    ``source_path`` is the repo-relative path of the markdown file the body came
+    from (e.g. ``tasks/my-task.md``).
+    """
+    source_dir = posixpath.dirname(source_path)
+
+    def resolve(href: str) -> str | None:
+        target, sep, fragment = href.partition("#")
+        if not target:
+            return None
+        target = unquote(target)
+        # Percent-encoding can hide an absolute path or a scheme from the
+        # pre-check (``%2Fetc%2Fpasswd`` -> ``/etc/passwd``), and posixpath.join
+        # lets an absolute second component discard source_dir entirely. Re-check
+        # after decoding so only genuinely workspace-relative targets resolve.
+        if not _is_rewritable_link(target):
+            return None
+        resolved = posixpath.normpath(posixpath.join(source_dir, target))
+        if resolved.startswith("..") or resolved == ".":
+            return None  # escapes the workspace — leave it alone
+        resolved = resolved.rstrip("/")
+        page_url = page_map.get(resolved)
+        if page_url:
+            return root_prefix + page_url + sep + fragment
+        if gh_repo_url:
+            return github_blob_url(gh_repo_url, resolved) + sep + fragment
+        return None
+
+    def replace(match: re.Match[str]) -> str:
+        href = html.unescape(match.group(1))
+        if not _is_rewritable_link(href):
+            return match.group(0)
+        new_href = resolve(href)
+        if new_href is None:
+            return match.group(0)
+        return f'href="{html.escape(new_href, quote=True)}"'
+
+    return re.sub(r'href="([^"]*)"', replace, body_html)
+
+
+def source_repo_url(item: dict) -> str:
+    """Recover the repo URL an item's source file lives in, from its own gh_url.
+
+    Submodule items carry a ``gh_url`` into their own repository
+    (``…/blob/HEAD/<path>`` or ``…/tree/HEAD/<path>``); their relative links
+    resolve inside that repo, not the parent workspace.
+    """
+    url = str(item.get("gh_url", "") or "")
+    for marker in ("/blob/HEAD/", "/tree/HEAD/"):
+        if marker in url:
+            return url.split(marker, 1)[0]
+    return ""
+
+
+def build_page_map(data: dict) -> dict[str, str]:
+    """Map repo-relative source paths to their generated page URLs.
+
+    Submodule-sourced items are skipped: their ``path`` is relative to the
+    submodule, so it cannot be resolved against a main-workspace link.
+    """
+    page_map: dict[str, str] = {}
+
+    def add(path: str, page_url: str) -> None:
+        if path and page_url:
+            page_map.setdefault(path.rstrip("/"), page_url)
+
+    for item in data.get("guidance", []):
+        if item.get("source"):
+            continue
+        path = item.get("path", "")
+        page_url = item.get("page_url", "")
+        if item.get("kind") == "lesson":
+            add(f"lessons/{path}", page_url)
+        else:  # skill — path is a directory
+            add(path, page_url)
+            add(f"{path}/SKILL.md", page_url)
+
+    for key in ("packages", "plugins"):
+        for item in data.get(key, []):
+            if item.get("source") or not item.get("body"):
+                continue
+            path = item.get("path", "")
+            page_url = item.get("page_url", "")
+            add(path, page_url)
+            add(f"{path}/README.md", page_url)
+
+    for key in ("tasks", "journals", "summaries"):
+        for item in data.get(key, []):
+            add(item.get("path", ""), item.get("page_url", ""))
+
+    return page_map
+
+
 def render_markdown_to_html(md_text: str) -> str:
     """Render markdown text to HTML using markdown-it-py (CommonMark compliant).
 
     Uses markdown-it-py instead of the ``markdown`` library because CommonMark
     does not require a blank line before lists — content like ``"External resources:\\n- item"``
     renders correctly as a ``<ul>`` without pre-processing hacks.
+
+    Headings get GitHub-style ``id`` slugs so in-document fragment links resolve.
     """
-    return _md.render(md_text)  # type: ignore[no-any-return]
+    env: dict = {}
+    tokens = _md.parse(md_text, env)
+    _add_heading_anchors(tokens)
+    return _md.renderer.render(tokens, _md.options, env)  # type: ignore[no-any-return]
+
+
+def render_body_html(
+    body: str,
+    *,
+    source_path: str = "",
+    page_map: dict[str, str] | None = None,
+    root_prefix: str = "",
+    gh_repo_url: str = "",
+) -> str:
+    """Render a detail-page body: markdown to HTML, then retarget relative links."""
+    body_html = render_markdown_to_html(body)
+    if not source_path or page_map is None:
+        return body_html
+    return rewrite_body_links(
+        body_html,
+        source_path=source_path,
+        page_map=page_map,
+        root_prefix=root_prefix,
+        gh_repo_url=gh_repo_url,
+    )
 
 
 def lesson_page_path(lesson_path: str) -> str:
@@ -1817,7 +2000,17 @@ def generate(
     )
 
     template = env.get_template("index.html")
-    readme_html = render_markdown_to_html(data["readme"]["body"]) if data.get("readme") else ""
+    readme_html = (
+        render_body_html(
+            data["readme"]["body"],
+            source_path="README.md",
+            page_map=build_page_map(data),
+            root_prefix="",
+            gh_repo_url=data.get("gh_repo_url", ""),
+        )
+        if data.get("readme")
+        else ""
+    )
 
     # Resolve effective base URL for feed generation and autodiscovery link.
     # base_url="-" suppresses feed generation entirely.
@@ -1841,6 +2034,11 @@ def generate(
     output.mkdir(parents=True, exist_ok=True)
     (output / "index.html").write_text(index_html)
 
+    # Map repo-relative source paths -> generated pages, so relative links inside
+    # detail-page bodies point at real destinations instead of raw .md files.
+    page_map = build_page_map(data)
+    gh_repo_url = data.get("gh_repo_url", "")
+
     # Generate per-item detail pages for the unified guidance list (lessons + skills)
     guidance_template = env.get_template("guidance.html")
     for item in data["guidance"]:
@@ -1852,7 +2050,17 @@ def generate(
         item_html = guidance_template.render(
             workspace_name=data["workspace_name"],
             item=item,
-            body_html=render_markdown_to_html(item["body"]),
+            body_html=render_body_html(
+                item["body"],
+                source_path=(
+                    f"lessons/{item['path']}"
+                    if item.get("kind") == "lesson"
+                    else f"{item['path']}/SKILL.md"
+                ),
+                page_map=page_map,
+                root_prefix=root_prefix,
+                gh_repo_url=source_repo_url(item) if item.get("source") else gh_repo_url,
+            ),
             root_prefix=root_prefix,
         )
         page_path = output / item["page_url"]
@@ -1868,7 +2076,13 @@ def generate(
         task_html = task_template.render(
             workspace_name=data["workspace_name"],
             task=task,
-            body_html=render_markdown_to_html(task["body"]),
+            body_html=render_body_html(
+                task["body"],
+                source_path=task.get("path", ""),
+                page_map=page_map,
+                root_prefix=root_prefix,
+                gh_repo_url=source_repo_url(task) if task.get("source") else gh_repo_url,
+            ),
             root_prefix=root_prefix,
         )
         page_path = output / task["page_url"]
@@ -1885,7 +2099,13 @@ def generate(
         journal_html = journal_template.render(
             workspace_name=data["workspace_name"],
             journal=journal,
-            body_html=render_markdown_to_html(journal["body"]),
+            body_html=render_body_html(
+                journal["body"],
+                source_path=journal.get("path", ""),
+                page_map=page_map,
+                root_prefix=root_prefix,
+                gh_repo_url=source_repo_url(journal) if journal.get("source") else gh_repo_url,
+            ),
             root_prefix=root_prefix,
         )
         page_path = output / journal["page_url"]
@@ -1902,7 +2122,13 @@ def generate(
         plugin_html = plugin_template.render(
             workspace_name=data["workspace_name"],
             plugin=plugin,
-            body_html=render_markdown_to_html(plugin["body"]),
+            body_html=render_body_html(
+                plugin["body"],
+                source_path=(f"{plugin['path']}/README.md" if plugin.get("path") else ""),
+                page_map=page_map,
+                root_prefix=root_prefix,
+                gh_repo_url=source_repo_url(plugin) if plugin.get("source") else gh_repo_url,
+            ),
             root_prefix=root_prefix,
         )
         page_path = output / plugin["page_url"]
@@ -1919,7 +2145,13 @@ def generate(
         pkg_html = package_template.render(
             workspace_name=data["workspace_name"],
             package=pkg,
-            body_html=render_markdown_to_html(pkg["body"]),
+            body_html=render_body_html(
+                pkg["body"],
+                source_path=(f"{pkg['path']}/README.md" if pkg.get("path") else ""),
+                page_map=page_map,
+                root_prefix=root_prefix,
+                gh_repo_url=source_repo_url(pkg) if pkg.get("source") else gh_repo_url,
+            ),
             root_prefix=root_prefix,
         )
         page_path = output / pkg["page_url"]
@@ -1935,7 +2167,13 @@ def generate(
         summary_html = summary_template.render(
             workspace_name=data["workspace_name"],
             summary=summary,
-            body_html=render_markdown_to_html(summary["body"]),
+            body_html=render_body_html(
+                summary["body"],
+                source_path=summary.get("path", ""),
+                page_map=page_map,
+                root_prefix=root_prefix,
+                gh_repo_url=source_repo_url(summary) if summary.get("source") else gh_repo_url,
+            ),
             root_prefix=root_prefix,
         )
         page_path = output / summary["page_url"]
