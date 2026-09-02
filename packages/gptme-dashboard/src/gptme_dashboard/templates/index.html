@@ -1806,12 +1806,12 @@ function closeSearch() {
   document.getElementById('search-result-count').textContent = '';
 }
 
-function safeUrl(u) { const s = String(u || ''); if (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) return s; if (s && !/[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(s)) return s; return '#'; }
+function safeUrl(u) { const s = String(u || ''); if (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) return s; if (s && s[0] !== '/' && !/[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(s)) return s; return '#'; }
 
 /** Build a flat search index from data.json for client-side search on static sites. */
 function _buildClientIndex(data) {
   const items = [];
-  // Returns '/path' when page_url or path is present; null when both absent (avoids broken links)
+  // Returns a relative path when page_url or path is present; null when both absent (avoids broken links)
   const pageUrl = (x) => (x.page_url || x.path) ? (x.page_url || x.path) : null;
   const addItem = (type, title, category, source, keywords, excerpt, url) => {
     if (url) items.push({ type, title: title || '', category: category || '',

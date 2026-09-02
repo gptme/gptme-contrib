@@ -4263,3 +4263,56 @@ def test_static_search_urls_are_relative(workspace: Path, tmp_path: Path):
         "pageUrl() must not prepend '/' to page_url — it produces root-absolute URLs "
         "that break navigation when the dashboard is served under a subpath"
     )
+
+
+def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Path):
+    """safeUrl relative-path fallback must not admit protocol-relative URLs.
+
+    Allowing ``lessons/foo`` is required for subpath deploys, but ``//evil.com``
+    is a different origin (browsers resolve it against the current scheme).
+    The relative branch must reject any string that starts with ``/``.
+    """
+    import shutil
+    import subprocess
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    start = html.index("function safeUrl")
+    snippet = html[start : html.index("\n", start)]
+    assert "s[0] !== '/'" in snippet, (
+        "safeUrl relative-path fallback must reject strings starting with '/' "
+        "so protocol-relative '//host' cannot bypass the sanitizer"
+    )
+
+    node = shutil.which("node")
+    if node is None:
+        return
+    cases = {
+        "https://ok.example/a": "https://ok.example/a",
+        "/lessons/foo": "/lessons/foo",
+        "lessons/foo": "lessons/foo",
+        "./data.json": "./data.json",
+        "../x": "../x",
+        "//evil.com": "#",
+        "//evil.com/phish": "#",
+        "javascript:alert(1)": "#",
+        "data:text/html,x": "#",
+        "": "#",
+    }
+    script = (
+        snippet
+        + "\nconst cases = "
+        + json.dumps(cases)
+        + (
+            ";\nfor (const [input, expected] of Object.entries(cases)) {\n"
+            "  const got = safeUrl(input);\n"
+            "  if (got !== expected) {\n"
+            "    console.error(JSON.stringify({input, expected, got}));\n"
+            "    process.exit(1);\n"
+            "  }\n"
+            "}\n"
+        )
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
