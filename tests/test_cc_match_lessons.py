@@ -1264,6 +1264,20 @@ def test_cc_dropout_epsilon_for_class(hook, monkeypatch):
     assert hook._get_dropout_epsilon_for_class("unknown", 0.15) == 0.15
 
 
+def test_cc_dropout_epsilon_for_class_global_zero_disables_validated_core(
+    hook, monkeypatch
+):
+    """Global epsilon=0 (documented no-op default) must disable validated_core
+    dropout too, not just holdout/unknown — validated_core must not use its own
+    (nonzero-by-default) epsilon while the global switch is off."""
+    monkeypatch.delenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", raising=False)
+    assert hook._get_dropout_epsilon_for_class("validated_core", 0.0) == 0.0
+    assert hook._get_dropout_epsilon_for_class("holdout", 0.0) == 0.0
+    assert hook._get_dropout_epsilon_for_class("unknown", 0.0) == 0.0
+    # exempt stays 0 regardless
+    assert hook._get_dropout_epsilon_for_class("exempt", 0.0) == 0.0
+
+
 def test_cc_dropout_exempt_lesson_never_withheld(hook, monkeypatch, tmp_path):
     """An exempt lesson must never be withheld even at epsilon=1.0 in the CC hook."""
     import random as _random
