@@ -942,6 +942,12 @@ def fetch_greptile_status(
 # additive `submodule_only` bit is the pointer-bump signal; explicit false
 # means "reviewed, no in-scope score". Older markers omit the key and must
 # fail closed (the #850 shape).
+#
+# Policy-drop is not a merge credential. `ai_review_abstained` returning False
+# only lifts the abstention block; `evaluate_pr` still requires a parseable
+# current-head Greptile score at or above the floor. A Greptile presence-only
+# record (has_review, score unparseable) plus a policy-drop marker must not
+# self-merge — that combination used to be blocked by the abstention itself.
 AI_REVIEW_COMMENT_MARKER = "<!-- bob-ai-review {"
 AI_REVIEW_MARKER_RE = re.compile(r"<!-- bob-ai-review (\{.*?\}) -->", re.DOTALL)
 
@@ -1043,6 +1049,38 @@ def ai_review_abstained(
     # Markers written before score provenance was added are not abstentions:
     # the old reviewer had no explicit structured abstention state.
     return False
+
+
+def _is_policy_drop_null_marker(
+    marker: dict[str, Any] | None | _MarkerLookupFailed | _MarkerUnset,
+    *,
+    head_sha: str = "",
+) -> bool:
+    """True when the latest AI-review marker is an explicit policy-drop null.
+
+    ``score: null`` + ``submodule_only: false`` means the reviewer looked at
+    real source and dropped every in-scope finding — not an abstention, and
+    not a scored verdict. Callers that lift the abstention block on this
+    shape must still require independent scored evidence (a parseable
+    current-head Greptile score).
+
+    A marker written for an older head is ignored, matching
+    ``ai_review_abstained``: it is not a verdict on the current diff and
+    must not tighten the general score-floor fail-open.
+    """
+    if not isinstance(marker, dict):
+        return False
+    if not (
+        "score" in marker
+        and marker["score"] is None
+        and marker.get("submodule_only") is False
+    ):
+        return False
+    if head_sha:
+        marker_sha = str(marker.get("sha") or "")
+        if marker_sha and not _sha_matches_head(marker_sha, head_sha):
+            return False
+    return True
 
 
 # Known bot logins (exact match, case-insensitive) to exclude when counting
@@ -2685,8 +2723,12 @@ def evaluate_pr(
     # (default 5/5, override via SELF_MERGE_MIN_GREPTILE_SCORE). Without this, resolving
     # threads alone could let a low-score PR self-merge — the alice#61 (4/5) and #63 (3/5)
     # incidents where buggy control-path code shipped. Reuses the shared greptile-merge-signal
-    # evaluator (upstreamed from Bob). Parse failure (score None) does NOT block — the
-    # thread/category gates still apply; this only catches a clear sub-floor score.
+    # evaluator (upstreamed from Bob). Parse failure (score None) does NOT block in
+    # the general case — the thread/category gates still apply; this only catches
+    # a clear sub-floor score. Exception: a policy-drop AI marker (score null,
+    # submodule_only false) used to be blocked by the abstention itself. Lifting
+    # that block without a parseable Greptile score would self-merge on presence
+    # alone, so parse failure fails closed on that shape.
     if greptile["has_review"]:
         min_score = _parse_self_merge_min_greptile_score()
         score = greptile_summary_score(repo, number)
@@ -2706,6 +2748,13 @@ def evaluate_pr(
                     f"{reviewed[:12]}, head is {result.head_sha[:12]}) — "
                     "re-review of head required"
                 )
+        elif score is None and _is_policy_drop_null_marker(
+            shared_marker, head_sha=result.head_sha
+        ):
+            result.reasons.append(
+                "AI review is policy-drop (score null) and Greptile score is "
+                "unparseable — requiring a qualifying current-head Greptile score"
+            )
 
     # An explicit abstention blocks in its own right. If the structured review
     # state cannot be read, fail closed rather than silently removing the gate.

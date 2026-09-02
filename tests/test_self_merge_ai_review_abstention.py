@@ -219,8 +219,19 @@ def test_fetch_is_author_scoped_and_paginated() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _evaluate(*comment_bodies: str) -> Any:
-    """Run evaluate_pr on a PR that passes every other gate."""
+def _evaluate(
+    *comment_bodies: str,
+    greptile_score: int | None = None,
+    greptile_reviewed: str | None = None,
+    greptile_has_review: bool = True,
+) -> Any:
+    """Run evaluate_pr on a PR that passes every other gate.
+
+    ``greptile_score`` defaults to None (unparseable), which is the historical
+    fail-open for the score floor. Policy-drop markers must not inherit that
+    fail-open — tests that assert eligibility on a policy-drop body have to
+    pass a qualifying score explicitly.
+    """
     pr_data: dict[str, object] = {
         "number": 999,
         "author": {"login": "TimeToBuildBob"},
@@ -238,19 +249,31 @@ def _evaluate(*comment_bodies: str) -> Any:
         "mergeStateStatus": "CLEAN",
         "labels": [],
     }
+    greptile_status = (
+        {"has_review": True, "unresolved": 0, "total": 1}
+        if greptile_has_review
+        else {"has_review": False, "unresolved": 0, "total": 0}
+    )
     with (
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(self_merge_check, "merge_permission", return_value=True),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
             "fetch_greptile_status",
-            return_value={"has_review": True, "unresolved": 0, "total": 1},
+            return_value=greptile_status,
         ),
-        patch.object(self_merge_check, "greptile_summary_score", return_value=None),
+        patch.object(
+            self_merge_check, "greptile_summary_score", return_value=greptile_score
+        ),
+        patch.object(
+            self_merge_check,
+            "greptile_summary_reviewed_commit",
+            return_value=greptile_reviewed,
+        ),
         patch.object(
             self_merge_check,
             "fetch_unresolved_human_threads",
@@ -463,20 +486,74 @@ def test_legacy_null_score_without_submodule_key_still_abstains() -> None:
 
 def test_evaluate_pr_allows_informational_only_when_greptile_cleared_head() -> None:
     """The #1580 deadlock: Greptile 5/5, AI review posted, score null, source PR."""
-    result = _evaluate(INFORMATIONAL_ONLY_BODY)
+    result = _evaluate(
+        INFORMATIONAL_ONLY_BODY,
+        greptile_score=5,
+        greptile_reviewed="c096e25e50f8",
+    )
     assert not any(ABSTENTION_REASON in r for r in result.reasons)
     assert result.eligible
 
 
 def test_evaluate_pr_allows_degraded_zero_findings_when_greptile_cleared_head() -> None:
     """The #1579 deadlock: Greptile 5/5, native 0-findings review, 1/3 consensus."""
-    result = _evaluate(DEGRADED_CLEAN_BODY)
+    result = _evaluate(
+        DEGRADED_CLEAN_BODY,
+        greptile_score=5,
+        greptile_reviewed="c096e25e50f8",
+    )
     assert not any(ABSTENTION_REASON in r for r in result.reasons)
     assert result.eligible
 
 
 def test_evaluate_pr_still_blocks_explicit_submodule_abstention() -> None:
     """Greptile 5/5 must not rescue a gitlink-only unreviewed bump (#850)."""
-    result = _evaluate(SUBMODULE_ONLY_BODY)
+    result = _evaluate(
+        SUBMODULE_ONLY_BODY,
+        greptile_score=5,
+        greptile_reviewed="c096e25e50f8",
+    )
     assert not result.eligible
     assert ABSTENTION_REASON in result.reasons
+
+
+POLICY_DROP_UNPARSEABLE_REASON = (
+    "AI review is policy-drop (score null) and Greptile score is unparseable"
+)
+
+
+def test_evaluate_pr_blocks_policy_drop_when_greptile_score_unparseable() -> None:
+    """Presence-only Greptile plus a policy-drop marker is not scored evidence.
+
+    The score floor fails open on parse failure in the general case. That was
+    safe while a null-score marker still blocked as an abstention. Lifting the
+    abstention without a parseable Greptile score would self-merge with no
+    scored review of the current head.
+    """
+    result = _evaluate(INFORMATIONAL_ONLY_BODY)
+    assert not result.eligible
+    assert any(POLICY_DROP_UNPARSEABLE_REASON in r for r in result.reasons)
+    assert not any(ABSTENTION_REASON in r for r in result.reasons)
+
+
+def test_evaluate_pr_blocks_policy_drop_when_greptile_is_absent() -> None:
+    """A policy-drop null is not a Greptile substitute.
+
+    The positive AI-fallback path still refuses a null score. Without Greptile,
+    the PR has no scored review at all.
+    """
+    result = _evaluate(INFORMATIONAL_ONLY_BODY, greptile_has_review=False)
+    assert not result.eligible
+    assert not any(ABSTENTION_REASON in r for r in result.reasons)
+
+
+def test_stale_policy_drop_does_not_tighten_the_score_floor() -> None:
+    """A policy-drop written for an older head is not a verdict on this one.
+
+    The extra fail-closed (unparseable Greptile score) only applies to a
+    current-head marker. A stale one is ignored, same as a stale abstention.
+    """
+    stale = INFORMATIONAL_ONLY_BODY.replace("c096e25e50f8", "aaaaaaaaaaaa")
+    result = _evaluate(stale)
+    assert not any(POLICY_DROP_UNPARSEABLE_REASON in r for r in result.reasons)
+    assert result.eligible
