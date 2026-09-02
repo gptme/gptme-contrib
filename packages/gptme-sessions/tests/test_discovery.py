@@ -1630,6 +1630,21 @@ def test_expand_pi_path_file_uri_absolute(tmp_path: Path) -> None:
     assert _expand_pi_path(uri) == tmp_path
 
 
+def test_expand_pi_path_file_uri_percent_encoded() -> None:
+    """Percent-escaped file URI paths are decoded before use."""
+    assert _expand_pi_path("file:///tmp/my%20sessions") == Path("/tmp/my sessions")
+
+
+def test_expand_pi_path_windows_drive_letter_is_not_a_scheme() -> None:
+    """Windows absolute paths must not be rejected as URI schemes.
+
+    urlparse("C:\\\\Users\\\\me") reports scheme "c"; gating URI parsing on
+    "://" / "file:" keeps these as ordinary filesystem paths.
+    """
+    assert _expand_pi_path(r"C:\Users\me\sessions") == Path(r"C:\Users\me\sessions")
+    assert _expand_pi_path("C:/Users/me/sessions") == Path("C:/Users/me/sessions")
+
+
 def test_expand_pi_path_file_uri_empty_path_fails_closed() -> None:
     """Malformed file:// URI with no path component raises ValueError."""
     with pytest.raises(ValueError, match="Malformed"):
