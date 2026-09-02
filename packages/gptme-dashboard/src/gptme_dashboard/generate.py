@@ -1361,8 +1361,7 @@ def generate_sparkline_svg(
             polyline + f" {last_x:.1f},{height - pad:.1f} {first_x:.1f},{height - pad:.1f}"
         )
         svg_parts.append(
-            f'<polygon points="{fill_points}" '
-            f'fill="{color}" fill-opacity="0.15" stroke="none"/>'
+            f'<polygon points="{fill_points}" fill="{color}" fill-opacity="0.15" stroke="none"/>'
         )
 
     svg_parts.append(
@@ -1572,6 +1571,7 @@ def collect_workspace_data(
     workspace: Path,
     include_sessions: bool = False,
     sessions_days: int = 30,
+    omit_terminal_tasks: bool = True,
 ) -> dict:
     """Collect all workspace data into a dict suitable for JSON export or rendering.
 
@@ -1590,6 +1590,11 @@ def collect_workspace_data(
         it is absent.
     sessions_days:
         How many days back to scan for sessions (default 30).
+    omit_terminal_tasks:
+        When *True* (default), exclude ``done`` and ``cancelled`` tasks from the
+        output to bound the initial HTML/JSON payload.  The full task count is
+        preserved in ``stats.total_tasks_all`` so the UI can show "N of M".
+        Pass *False* to include all tasks (e.g. for archival exports).
     """
     config = read_workspace_config(workspace)
     agent_urls = read_agent_urls(workspace)
@@ -1696,6 +1701,16 @@ def collect_workspace_data(
         for task in tasks:
             task["gh_url"] = github_blob_url(gh_repo_url, task["path"])
 
+    # Filter terminal tasks to bound payload size.
+    # done/cancelled tasks are the vast majority in mature workspaces; they are
+    # preserved on their own detail pages and excluded only from the index listing
+    # and JSON export — their detail pages are always generated.
+    _TERMINAL_STATES = {"done", "cancelled"}
+    total_tasks_all = len(tasks)
+    tasks_index = (
+        [t for t in tasks if t["state"] not in _TERMINAL_STATES] if omit_terminal_tasks else tasks
+    )
+
     # Scan knowledge summaries (daily/weekly/monthly)
     summaries = scan_summaries(workspace, limit=20)
     if gh_repo_url:
@@ -1716,9 +1731,9 @@ def collect_workspace_data(
     # Scan KPI data from state files
     kpi = scan_kpi_data(workspace, days=sessions_days)
 
-    # Compute task state counts for stats
+    # Compute task state counts for stats (using index tasks, not all tasks)
     task_states: dict[str, int] = {}
-    for task in tasks:
+    for task in tasks_index:
         s = task["state"]
         task_states[s] = task_states.get(s, 0) + 1
 
@@ -1730,7 +1745,9 @@ def collect_workspace_data(
         "total_guidance": len(guidance),
         "total_sessions": len(sessions),
         "total_journals": len(journals),
-        "total_tasks": len(tasks),
+        "total_tasks": len(tasks_index),
+        "total_tasks_all": total_tasks_all,
+        "tasks_filtered": omit_terminal_tasks and (total_tasks_all > len(tasks_index)),
         "task_states": task_states,
         "total_summaries": total_summaries_count,
         "lesson_categories": lesson_categories,
@@ -1752,6 +1769,7 @@ def collect_workspace_data(
         "sessions": sessions,
         "journals": journals,
         "tasks": tasks,
+        "tasks_index": tasks_index,
         "summaries": summaries,
         "stats": stats,
         "lesson_categories": lesson_categories,
@@ -1770,6 +1788,7 @@ def generate(
     include_sessions: bool = False,
     sessions_days: int = 30,
     base_url: str = "",
+    omit_terminal_tasks: bool = True,
 ) -> dict:
     """Generate static HTML dashboard from workspace.
 
@@ -1791,7 +1810,10 @@ def generate(
     )
 
     data = collect_workspace_data(
-        workspace, include_sessions=include_sessions, sessions_days=sessions_days
+        workspace,
+        include_sessions=include_sessions,
+        sessions_days=sessions_days,
+        omit_terminal_tasks=omit_terminal_tasks,
     )
 
     template = env.get_template("index.html")
@@ -1809,7 +1831,12 @@ def generate(
 
     feed_url = (effective_base_url.rstrip("/") + "/feed.xml") if effective_base_url else ""
 
-    index_html = template.render(**data, readme_html=readme_html, feed_url=feed_url)
+    # Pass tasks_index as tasks so the template's listing only shows non-terminal tasks.
+    # data["tasks"] (all tasks) is still used below to generate every task's detail page.
+    template_ctx = {k: v for k, v in data.items() if k != "tasks"}
+    index_html = template.render(
+        **template_ctx, tasks=data["tasks_index"], readme_html=readme_html, feed_url=feed_url
+    )
 
     output.mkdir(parents=True, exist_ok=True)
     (output / "index.html").write_text(index_html)
@@ -1953,6 +1980,7 @@ def generate_json(
     output: Path | None = None,
     include_sessions: bool = False,
     sessions_days: int = 30,
+    omit_terminal_tasks: bool = True,
     _data: dict | None = None,
 ) -> str:
     """Generate JSON data dump from workspace.
@@ -1966,12 +1994,18 @@ def generate_json(
         _data
         if _data is not None
         else collect_workspace_data(
-            workspace, include_sessions=include_sessions, sessions_days=sessions_days
+            workspace,
+            include_sessions=include_sessions,
+            sessions_days=sessions_days,
+            omit_terminal_tasks=omit_terminal_tasks,
         )
     )
     # Exclude large fields (body, all_keywords) from JSON export — they are only
     # needed for HTML page generation and would bloat data.json unnecessarily.
     _JSON_EXCLUDE = {"body", "all_keywords"}
+    # Additional fields stripped from task entries: verbose prose fields that are
+    # irrelevant for index search/filtering and dominate task payload size.
+    _TASK_JSON_EXTRA_EXCLUDE = _JSON_EXCLUDE | {"next_action", "waiting_for", "depends"}
     export_data = {
         **data,
         "lessons": [
@@ -1994,7 +2028,8 @@ def generate_json(
             for plugin in data["plugins"]
         ],
         "tasks": [
-            {k: v for k, v in task.items() if k not in _JSON_EXCLUDE} for task in data["tasks"]
+            {k: v for k, v in task.items() if k not in _TASK_JSON_EXTRA_EXCLUDE}
+            for task in data["tasks_index"]
         ],
         "packages": [
             {k: v for k, v in pkg.items() if k not in _JSON_EXCLUDE}

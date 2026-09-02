@@ -79,6 +79,16 @@ def main() -> None:
         "Pass '-' to suppress sitemap generation."
     ),
 )
+@click.option(
+    "--include-terminal-tasks",
+    is_flag=True,
+    default=False,
+    help=(
+        "Include done/cancelled tasks in the output. "
+        "By default they are omitted to keep the initial payload small; "
+        "their detail pages are always generated."
+    ),
+)
 def generate(
     workspace: str,
     output: str | None,
@@ -87,6 +97,7 @@ def generate(
     sessions: bool,
     sessions_days: int,
     base_url: str,
+    include_terminal_tasks: bool,
 ) -> None:
     """Generate a static dashboard and JSON data dump for a gptme workspace."""
     from gptme_dashboard.generate import generate as do_generate
@@ -94,15 +105,29 @@ def generate(
 
     ws = Path(workspace)
     tmpl = Path(templates) if templates is not None else None
+    omit_terminal = not include_terminal_tasks
 
     if print_json and output is None:
         # Stdout-only JSON mode (for piping to jq, CI artifacts, etc.)
-        click.echo(generate_json(ws, include_sessions=sessions, sessions_days=sessions_days))
+        click.echo(
+            generate_json(
+                ws,
+                include_sessions=sessions,
+                sessions_days=sessions_days,
+                omit_terminal_tasks=omit_terminal,
+            )
+        )
         return
 
     out = Path(output) if output is not None else ws / "_site"
     data = do_generate(
-        ws, out, tmpl, include_sessions=sessions, sessions_days=sessions_days, base_url=base_url
+        ws,
+        out,
+        tmpl,
+        include_sessions=sessions,
+        sessions_days=sessions_days,
+        base_url=base_url,
+        omit_terminal_tasks=omit_terminal,
     )
     json_str = generate_json(ws, out, _data=data)
 
@@ -149,7 +174,13 @@ def generate(
         "Example: ~/.config/gptme/org.toml"
     ),
 )
-def serve(workspace: str, port: int, host: str, output: str | None, org_config: str | None) -> None:
+def serve(
+    workspace: str,
+    port: int,
+    host: str,
+    output: str | None,
+    org_config: str | None,
+) -> None:
     """Serve the dashboard with live API endpoints.
 
     Generates the static site and serves it alongside API endpoints
