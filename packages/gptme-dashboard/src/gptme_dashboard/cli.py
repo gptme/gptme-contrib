@@ -174,7 +174,13 @@ def generate(
         "Example: ~/.config/gptme/org.toml"
     ),
 )
-def serve(workspace: str, port: int, host: str, output: str | None, org_config: str | None) -> None:
+def serve(
+    workspace: str,
+    port: int,
+    host: str,
+    output: str | None,
+    org_config: str | None,
+) -> None:
     """Serve the dashboard with live API endpoints.
 
     Generates the static site and serves it alongside API endpoints
