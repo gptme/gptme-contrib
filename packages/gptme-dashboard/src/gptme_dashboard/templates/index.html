@@ -1806,13 +1806,13 @@ function closeSearch() {
   document.getElementById('search-result-count').textContent = '';
 }
 
-function safeUrl(u) { const s = String(u || ''); return (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) ? s : '#'; }
+function safeUrl(u) { const s = String(u || '').replace(/^[\u0000-\u0020]+/, ''); if (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) return s; if (s && s[0] !== '/' && s[0] !== '\\' && !/[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(s)) return s; return '#'; }
 
 /** Build a flat search index from data.json for client-side search on static sites. */
 function _buildClientIndex(data) {
   const items = [];
-  // Returns '/path' when page_url or path is present; null when both absent (avoids broken links)
-  const pageUrl = (x) => (x.page_url || x.path) ? '/' + (x.page_url || x.path) : null;
+  // Returns a relative path when page_url or path is present; null when both absent (avoids broken links)
+  const pageUrl = (x) => (x.page_url || x.path) ? (x.page_url || x.path) : null;
   const addItem = (type, title, category, source, keywords, excerpt, url) => {
     if (url) items.push({ type, title: title || '', category: category || '',
       source: source || '', keywords: keywords || [], excerpt: excerpt || '', url });
@@ -1863,7 +1863,7 @@ function _clientSearch(q, typeFilter, limit) {
 async function _loadStaticSearchIndex() {
   if (_staticSearchIndex !== null) return;  // already loaded (or failed)
   try {
-    const resp = await fetch('/data.json');
+    const resp = await fetch('./data.json');
     if (!resp.ok) {
       console.warn('gptme-dashboard: /data.json fetch failed (' + resp.status + ') — static search unavailable');
       _staticSearchIndex = false;

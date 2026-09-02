@@ -4220,3 +4220,111 @@ def test_generate_json_has_page_field(workspace: Path):
         assert isinstance(
             plugin["has_page"], bool
         ), f"has_page must be a bool, got {type(plugin['has_page'])}"
+
+
+def test_static_data_json_fetch_is_relative(workspace: Path, tmp_path: Path):
+    """The data.json fetch in static mode must use a relative URL ('./data.json').
+
+    When the dashboard is deployed under a subpath (e.g. /dashboard/), an
+    absolute '/data.json' fetch hits the wrong path and returns 404 — breaking
+    static search entirely. The fetch must be page-relative so it resolves to
+    '/dashboard/data.json' when served under /dashboard/.
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Must use page-relative fetch, not root-absolute
+    assert "fetch('./data.json')" in html, (
+        "Static data.json fetch must use './data.json' (page-relative) not '/data.json' "
+        "to work when the dashboard is deployed under a subpath like /dashboard/"
+    )
+    assert (
+        "fetch('/data.json')" not in html
+    ), "Root-absolute '/data.json' fetch breaks when served under a subpath"
+
+
+def test_static_search_urls_are_relative(workspace: Path, tmp_path: Path):
+    """Search result URLs built by _buildClientIndex must be page-relative.
+
+    When the dashboard is at /dashboard/index.html, search result links like
+    '/lessons/…' navigate to the root instead of '/dashboard/lessons/…'.
+    The pageUrl() helper must return relative paths (no leading '/') so that
+    clicking a result navigates correctly within the deployed subpath.
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # pageUrl must not prepend '/' — should be e.g. 'lessons/…', not '/lessons/…'
+    build_idx = html.index("_buildClientIndex")
+    page_url_idx = html.index("pageUrl", build_idx)
+    # The definition: look for the pattern with or without leading slash
+    snippet = html[page_url_idx : page_url_idx + 120]
+    assert "'/' +" not in snippet, (
+        "pageUrl() must not prepend '/' to page_url — it produces root-absolute URLs "
+        "that break navigation when the dashboard is served under a subpath"
+    )
+
+
+def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Path):
+    """safeUrl relative-path fallback must not admit protocol-relative URLs.
+
+    Allowing ``lessons/foo`` is required for subpath deploys, but ``//evil.com``
+    is a different origin (browsers resolve it against the current scheme).
+    The relative branch must reject any string that starts with ``/``.
+    Leading C0/space is trimmed first so ``  //evil.com`` cannot skip that
+    check, and a leading backslash is rejected (``\\evil.com``).
+    """
+    import shutil
+    import subprocess
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    start = html.index("function safeUrl")
+    snippet = html[start : html.index("\n", start)]
+    assert "s[0] !== '/'" in snippet, (
+        "safeUrl relative-path fallback must reject strings starting with '/' "
+        "so protocol-relative '//host' cannot bypass the sanitizer"
+    )
+    assert "\\u0000-\\u0020" in snippet, (
+        "safeUrl must trim leading C0 controls and space before the first-char "
+        "check so padded protocol-relative URLs cannot bypass it"
+    )
+    assert (
+        "s[0] !== '\\\\'" in snippet
+    ), "safeUrl relative-path fallback must reject a leading backslash"
+
+    node = shutil.which("node")
+    if node is None:
+        return
+    cases = {
+        "https://ok.example/a": "https://ok.example/a",
+        "/lessons/foo": "/lessons/foo",
+        "lessons/foo": "lessons/foo",
+        "./data.json": "./data.json",
+        "../x": "../x",
+        "//evil.com": "#",
+        "//evil.com/phish": "#",
+        "  //evil.com": "#",
+        "\\evil.com": "#",
+        "  lessons/foo": "lessons/foo",
+        "javascript:alert(1)": "#",
+        "data:text/html,x": "#",
+        "": "#",
+    }
+    script = (
+        snippet
+        + "\nconst cases = "
+        + json.dumps(cases)
+        + (
+            ";\nfor (const [input, expected] of Object.entries(cases)) {\n"
+            "  const got = safeUrl(input);\n"
+            "  if (got !== expected) {\n"
+            "    console.error(JSON.stringify({input, expected, got}));\n"
+            "    process.exit(1);\n"
+            "  }\n"
+            "}\n"
+        )
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
