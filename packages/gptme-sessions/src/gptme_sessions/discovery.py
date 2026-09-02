@@ -17,6 +17,8 @@ import logging
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from .pi import (
     PiSessionFormatError,
@@ -74,7 +76,31 @@ def _get_copilot_state_dir() -> Path:
 
 
 def _expand_pi_path(value: str) -> Path:
-    """Expand Pi's supported ``~`` spellings without Python's user lookup."""
+    """Expand a Pi session directory string to a filesystem :class:`Path`.
+
+    Handles Pi's supported ``~`` spellings, ``file://`` URIs (as accepted by
+    Pi 0.84.4+ in ``sessionDir``), and plain filesystem paths.  Non-``file``
+    URI schemes and malformed ``file://`` values (empty path component) fail
+    closed with :exc:`ValueError`.
+
+    URI parsing runs only when the value is actually a URI (``file:`` prefix
+    or ``://``).  ``urlparse`` treats a Windows drive letter as a scheme
+    (``C:\\Users`` → scheme ``c``), so feeding every string through it would
+    reject ordinary Windows absolute paths.
+    """
+    # Gate on URI shape, not on urlparse().scheme — see docstring.
+    if value.startswith("file:") or "://" in value:
+        parsed = urlparse(value)
+        if parsed.scheme == "file":
+            # url2pathname unquotes percent-escapes and, on Windows, converts
+            # file:///C:/... to a drive-letter path.
+            path_str = url2pathname(parsed.path)
+            if not path_str:
+                raise ValueError(f"Malformed file:// URI — no path component: {value!r}")
+            return Path(path_str)
+        if parsed.scheme:
+            raise ValueError(f"Unsupported URI scheme in Pi session dir: {parsed.scheme!r}")
+    # Plain path — preserve Pi's tilde expansion without Python's user lookup.
     if value == "~":
         return Path.home()
     if value.startswith("~/") or (os.name == "nt" and value.startswith("~\\")):
