@@ -149,6 +149,12 @@ def rewrite_body_links(
         if not target:
             return None
         target = unquote(target)
+        # Percent-encoding can hide an absolute path or a scheme from the
+        # pre-check (``%2Fetc%2Fpasswd`` -> ``/etc/passwd``), and posixpath.join
+        # lets an absolute second component discard source_dir entirely. Re-check
+        # after decoding so only genuinely workspace-relative targets resolve.
+        if not _is_rewritable_link(target):
+            return None
         resolved = posixpath.normpath(posixpath.join(source_dir, target))
         if resolved.startswith("..") or resolved == ".":
             return None  # escapes the workspace — leave it alone

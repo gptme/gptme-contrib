@@ -4807,3 +4807,49 @@ def test_readme_body_links_are_retargeted_on_index(workspace: Path, tmp_path: Pa
     index = (output / "index.html").read_text()
     assert 'href="lessons/workflow/test-lesson.html"' in index
     assert 'href="lessons/workflow/test-lesson.md"' not in index
+
+
+def test_percent_encoded_absolute_link_is_not_rewritten():
+    """``%2F...`` decodes to an absolute path; it must not escape source_dir.
+
+    posixpath.join drops the left operand when the right one is absolute, so
+    without a post-unquote check this produced links like
+    ``https://github.com/o/r/blob/HEAD//etc/passwd``.
+    """
+    from gptme_dashboard.generate import rewrite_body_links
+
+    out = rewrite_body_links(
+        '<a href="%2Fetc%2Fpasswd">x</a>',
+        source_path="tasks/a.md",
+        page_map={},
+        root_prefix="../",
+        gh_repo_url="https://github.com/o/r",
+    )
+    assert out == '<a href="%2Fetc%2Fpasswd">x</a>'
+
+
+def test_percent_encoded_scheme_link_is_not_rewritten():
+    """``https%3A//evil`` decodes to a scheme URL and must be left alone."""
+    from gptme_dashboard.generate import rewrite_body_links
+
+    out = rewrite_body_links(
+        '<a href="https%3A%2F%2Fevil.example/x">x</a>',
+        source_path="tasks/a.md",
+        page_map={},
+        root_prefix="../",
+        gh_repo_url="https://github.com/o/r",
+    )
+    assert out == '<a href="https%3A%2F%2Fevil.example/x">x</a>'
+
+
+def test_percent_encoded_relative_link_still_rewrites():
+    """Legitimate percent-encoding (a space in a filename) must still resolve."""
+    from gptme_dashboard.generate import rewrite_body_links
+
+    out = rewrite_body_links(
+        '<a href="my%20task.md">x</a>',
+        source_path="tasks/a.md",
+        page_map={"tasks/my task.md": "tasks/my-task.html"},
+        root_prefix="../",
+    )
+    assert 'href="../tasks/my-task.html"' in out
