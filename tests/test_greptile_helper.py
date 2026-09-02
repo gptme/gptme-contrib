@@ -114,13 +114,31 @@ def _iso_ago(*, minutes: int) -> str:
 
 
 def _make_greptile_comment(
-    score: int, reviewed_at: str, updated_at: str | None = None
+    score: int,
+    reviewed_at: str,
+    updated_at: str | None = None,
+    reviewed_commit: str | None = None,
 ) -> dict:
+    """Fake Greptile summary comment.
+
+    reviewed_commit: when set, append the real summary's "Last reviewed commit"
+    footer. That footer is the provenance self-merge-check.py gates on, so the
+    helper must honour it too.
+    """
+    body = (
+        f"<h3>Greptile Summary</h3>\nFindings.\n"
+        f"<h3>Confidence Score: {score}/5</h3>\nDetails."
+    )
+    if reviewed_commit:
+        body += (
+            f'\n\n<sub>Reviews (1): Last reviewed commit: ["fix(ci): x"]'
+            f"(https://github.com/o/r/commit/{reviewed_commit})</sub>"
+        )
     return {
         "user": {"login": "greptile-apps[bot]"},
         "created_at": reviewed_at,
         "updated_at": updated_at or reviewed_at,
-        "body": f"<h3>Greptile Summary</h3>\nFindings.\n<h3>Confidence Score: {score}/5</h3>\nDetails.",
+        "body": body,
     }
 
 
@@ -610,6 +628,71 @@ def test_no_pr_review_object_falls_back_to_date_heuristic():
     }
     status = _run_helper("status", fixture)
     assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+
+
+def test_summary_footer_stale_sha_forces_re_review_when_date_says_no():
+    """Regression: gptme/gptme-cloud#892 (2026-09-02).
+
+    Greptile posted no formal PR review — only an issue comment whose footer
+    named the PREVIOUS commit. The new head was committed 32s BEFORE that
+    comment landed, so the date heuristic counted zero new commits and the
+    helper reported 'already-reviewed'. Meanwhile self-merge-check.py read the
+    same footer and refused the merge as stale: the PR could neither be merged
+    nor re-reviewed, while repo-wide CI stayed red.
+    """
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 892,
+        "raw_comments": [
+            _make_greptile_comment(
+                5,
+                reviewed_at=reviewed_at,
+                updated_at=reviewed_at,
+                reviewed_commit="63f9d6b7f16420bfe5c188fb01b97d7fa0649fde",
+            ),
+        ],
+        "raw_reviews": [],  # no formal review object → footer is the only provenance
+        "raw_pr": {
+            "head": {"sha": "dcf167eaafa3d6ecd4ddc8a7861edd231e294b53"},
+            "created_at": _iso_ago(minutes=120),
+        },
+        # Head predates the review comment, so the date heuristic sees no new
+        # commits — this is exactly what masked the stale review on #892.
+        "raw_commits": [_make_commit(_iso_ago(minutes=31))],
+        "bot_reaction_count": 1,
+    }
+    status = _run_helper("status", fixture, repo="gptme/gptme-cloud")
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+
+
+def test_summary_footer_matching_head_suppresses_re_review():
+    """Loop-safety control: footer names the current head → no re-review, even
+    though the date heuristic sees a commit newer than the review timestamp.
+
+    Without this the fix above would re-trigger on every PR whose commit dates
+    postdate the review, reintroducing the #1246 spam class.
+    """
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 893,
+        "raw_comments": [
+            _make_greptile_comment(
+                5,
+                reviewed_at=reviewed_at,
+                updated_at=reviewed_at,
+                reviewed_commit="dcf167eaafa3d6ecd4ddc8a7861edd231e294b53",
+            ),
+        ],
+        "raw_reviews": [],
+        "raw_pr": {
+            "head": {"sha": "dcf167eaafa3d6ecd4ddc8a7861edd231e294b53"},
+            "created_at": _iso_ago(minutes=120),
+        },
+        "raw_commits": [_make_commit(_iso_ago(minutes=5))],  # date says "new"
+        "bot_reaction_count": 1,
+    }
+    status = _run_helper("status", fixture, repo="gptme/gptme-cloud")
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
 
 
 def test_fresh_pr_awaits_initial_review():

@@ -240,6 +240,33 @@ _our_last_trigger_json() {
     _issue_comments_json | jq "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | sort_by(.created_at) | last // {}" 2>/dev/null || echo "{}"
 }
 
+# --- Helper: sha named by the Greptile summary's "Last reviewed commit" footer ---
+# Greptile does not always post a formal PR review object; on many PRs the only
+# artifact is an issue comment whose footer names the commit it actually read.
+# That footer is the same provenance self-merge-check.py gates on, so the helper
+# must read it from the same place or the two tools disagree about staleness.
+# Delegates to the sibling greptile-merge-signal.py rather than re-implementing
+# its parser here — one regex, already covered by
+# tests/test_greptile_merge_signal_provenance.py.
+# Prints the sha, or nothing when there is no summary/footer (caller falls back).
+_greptile_summary_reviewed_sha() {
+    local signal_py out
+    signal_py="$(dirname "${BASH_SOURCE[0]}")/greptile-merge-signal.py"
+    [ -f "$signal_py" ] || return 0
+    # The self-merge gate owns the enable/disable policy for the merge signal;
+    # don't let that tool's disable flag silently drop provenance here (same
+    # reasoning as self-merge-check.py, which pops the var before invoking).
+    # NOTE: a non-zero exit here is NOT a failure. greptile-merge-signal.py uses
+    # its exit code to report *merge eligibility* (e.g. exit 1 = "safe to merge"
+    # marker absent), and still prints a complete JSON payload. Gating on the
+    # exit status would silently drop provenance for every PR that is merely
+    # ineligible — which is most of the PRs this staleness check exists to serve.
+    out=$(env -u GREPTILE_MERGE_SIGNAL_DISABLED python3 "$signal_py" \
+        --repo "$REPO" "$PR_NUMBER" 2>/dev/null) || true
+    [ -n "$out" ] || return 0
+    printf '%s' "$out" | jq -r '.reviewed_commit // ""' 2>/dev/null || true
+}
+
 # --- Helper: check if re-review is needed (new commits since latest review) ---
 # Returns 0 = re-review needed, 1 = no re-review needed
 #
@@ -264,6 +291,20 @@ _needs_re_review() {
               | select((.user.login // "") | test("greptile"; "i"))
               | select((.commit_id // "") != "")]
             | sort_by(.submitted_at) | last | (.commit_id // "")' 2>/dev/null) || reviewed_sha=""
+
+    # No formal review object carries a commit_id (Greptile frequently reviews via
+    # issue comment only). Before falling back to the date heuristic, use the
+    # summary footer's "Last reviewed commit" — it is server-side, unambiguous,
+    # and is exactly what self-merge-check.py gates on. Without this the two tools
+    # deadlock: the gate demands a re-review of head while this helper reports
+    # "no new commits" and refuses to trigger one. Observed on
+    # gptme/gptme-cloud#892 (2026-09-02): head dcf167ea was committed at 12:08:15
+    # and Greptile posted its review of the PREVIOUS commit 63f9d6b7 at 12:08:47,
+    # so `committer.date > reviewed_at` counted zero new commits and the PR sat
+    # permanently ineligible while repo-wide CI stayed red.
+    if [ -z "$reviewed_sha" ]; then
+        reviewed_sha=$(_greptile_summary_reviewed_sha) || reviewed_sha=""
+    fi
 
     if [ -n "$reviewed_sha" ]; then
         head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || head_sha=""
