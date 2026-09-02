@@ -4614,3 +4614,140 @@ fetch(dataUrl).then(async (resp) => {{
     assert recorded.count("/data.json") == 1, recorded
     assert "/dashboard/data.json" in recorded
     assert any(p.endswith("zebra-unique-task-alpha.html") for p in recorded), recorded
+# ---------------------------------------------------------------------------
+# Payload bounding — omit_terminal_tasks
+# ---------------------------------------------------------------------------
+
+
+def _make_task(tmp_path: Path, name: str, state: str) -> None:
+    """Write a minimal task file with the given state."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(exist_ok=True)
+    (tasks_dir / f"{name}.md").write_text(
+        textwrap.dedent(f"""\
+        ---
+        state: {state}
+        created: 2026-01-01T00:00:00+00:00
+        next_action: "do the thing"
+        waiting_for: "someone"
+        ---
+        # {name.replace("-", " ").title()}
+        """)
+    )
+
+
+def test_terminal_tasks_excluded_by_default(tmp_path: Path) -> None:
+    """collect_workspace_data omits done/cancelled from tasks_index by default.
+
+    data["tasks"] still contains all tasks (for detail page generation);
+    data["tasks_index"] is the filtered set for the index listing.
+    """
+    _make_task(tmp_path, "active-task", "active")
+    _make_task(tmp_path, "done-task", "done")
+    _make_task(tmp_path, "cancelled-task", "cancelled")
+    _make_task(tmp_path, "waiting-task", "waiting")
+
+    data = collect_workspace_data(tmp_path, omit_terminal_tasks=True)
+    # tasks_index is the filtered set shown in the index listing
+    index_states = {t["state"] for t in data["tasks_index"]}
+    assert "done" not in index_states, "done tasks must be omitted from tasks_index"
+    assert "cancelled" not in index_states, "cancelled tasks must be omitted from tasks_index"
+    assert "active" in index_states, "active tasks must be included"
+    assert "waiting" in index_states, "waiting tasks must be included"
+    # data["tasks"] must still contain ALL tasks for detail page generation
+    all_states = {t["state"] for t in data["tasks"]}
+    assert "done" in all_states, "done tasks must remain in data['tasks'] for detail pages"
+    assert "cancelled" in all_states, "cancelled tasks must remain in data['tasks']"
+
+
+def test_terminal_tasks_included_when_requested(tmp_path: Path) -> None:
+    """omit_terminal_tasks=False: tasks_index == tasks (all tasks)."""
+    _make_task(tmp_path, "active-task", "active")
+    _make_task(tmp_path, "done-task", "done")
+
+    data = collect_workspace_data(tmp_path, omit_terminal_tasks=False)
+    # When not filtering, tasks_index and tasks should be identical
+    assert len(data["tasks_index"]) == len(data["tasks"])
+    states = {t["state"] for t in data["tasks_index"]}
+    assert "done" in states
+    assert "active" in states
+
+
+def test_stats_total_tasks_all_reflects_unfiltered_count(tmp_path: Path) -> None:
+    """stats.total_tasks_all always equals the full task count before filtering."""
+    _make_task(tmp_path, "active-task", "active")
+    _make_task(tmp_path, "done-task", "done")
+    _make_task(tmp_path, "cancelled-task", "cancelled")
+
+    data = collect_workspace_data(tmp_path, omit_terminal_tasks=True)
+    assert data["stats"]["total_tasks_all"] == 3
+    assert data["stats"]["total_tasks"] == 1  # only active (in tasks_index)
+    assert data["stats"]["tasks_filtered"] is True
+    assert len(data["tasks_index"]) == 1  # only active
+    assert len(data["tasks"]) == 3  # all tasks still in data["tasks"]
+
+
+def test_stats_tasks_filtered_false_when_not_omitted(tmp_path: Path) -> None:
+    """stats.tasks_filtered is False when omit_terminal_tasks=False."""
+    _make_task(tmp_path, "done-task", "done")
+
+    data = collect_workspace_data(tmp_path, omit_terminal_tasks=False)
+    assert data["stats"]["tasks_filtered"] is False
+    assert data["stats"]["total_tasks_all"] == data["stats"]["total_tasks"]
+
+
+def test_generate_json_strips_verbose_task_fields(tmp_path: Path) -> None:
+    """data.json task entries omit next_action, waiting_for, depends."""
+    _make_task(tmp_path, "active-task", "active")
+
+    json_str = generate_json(tmp_path)
+    tasks = json.loads(json_str)["tasks"]
+    assert tasks, "should have at least one task"
+    task = tasks[0]
+    assert "next_action" not in task, "next_action must be stripped from task JSON"
+    assert "waiting_for" not in task, "waiting_for must be stripped from task JSON"
+    assert "depends" not in task, "depends must be stripped from task JSON"
+    # core fields must remain
+    assert "title" in task
+    assert "state" in task
+    assert "page_url" in task
+
+
+def test_generate_json_omits_terminal_tasks_by_default(tmp_path: Path) -> None:
+    """generate_json excludes done/cancelled tasks from data.json by default."""
+    _make_task(tmp_path, "active-task", "active")
+    _make_task(tmp_path, "done-task", "done")
+
+    json_str = generate_json(tmp_path)
+    tasks = json.loads(json_str)["tasks"]
+    states = {t["state"] for t in tasks}
+    assert "done" not in states
+    assert "active" in states
+
+
+def test_index_html_shows_filtered_task_count_note(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """index.html shows 'N of M' note when terminal tasks are filtered."""
+    out = tmp_path_factory.mktemp("site")
+    _make_task(tmp_path, "active-task", "active")
+    _make_task(tmp_path, "done-task", "done")
+
+    generate(tmp_path, out)
+    html = (out / "index.html").read_text()
+    # Should contain indication that tasks are filtered
+    assert "of 2" in html, "index.html must show filtered count note (N of M)"
+
+
+def test_index_html_no_filter_note_when_all_nonterminal(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """index.html does not show filter note when all tasks are non-terminal."""
+    out = tmp_path_factory.mktemp("site")
+    _make_task(tmp_path, "active-task", "active")
+    _make_task(tmp_path, "backlog-task", "backlog")
+
+    generate(tmp_path, out)
+    html = (out / "index.html").read_text()
+    # No terminal tasks → no filter note paragraph (the CSS class may still exist in <style>)
+    assert '<p class="filter-note">' not in html
