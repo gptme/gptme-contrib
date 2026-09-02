@@ -6289,7 +6289,19 @@ def test_sync_deduplicates_on_rerun(tmp_path: Path, capsys, monkeypatch):
     )
     main()
 
-    # Second sync — should skip the already-imported session
+    # Second sync — the first sync's record has no trajectory_revision yet
+    # (no --signals was passed), so this run backfills it once. That backfill
+    # counts as an update, not a no-op skip.
+    monkeypatch.setattr(
+        sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
+    )
+    rc = main()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "updated 1" in captured.out
+
+    # Third sync — trajectory_revision is now stamped and the file is
+    # unchanged, so this run should skip the already-imported session.
     monkeypatch.setattr(
         sys, "argv", ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync"]
     )
