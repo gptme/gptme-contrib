@@ -1544,3 +1544,92 @@ def test_count_tweet_chars_url_trailing_punctuation(workflow_module: Any) -> Non
     text2 = f"See {url}, amazing!"
     weighted2 = workflow_module.count_tweet_chars(text2)
     assert weighted2 < len(text2), "Punctuation after URL should not inflate count"
+
+
+# ── Quote-tweet capability ──────────────────────────────────────────────────
+
+
+def test_quote_tweet_id_round_trip(workflow_module: Any) -> None:
+    draft = workflow_module.TweetDraft(
+        text="Taking issue with this take.",
+        type="quote",
+        quote_tweet_id="999888777",
+    )
+    data = draft.to_dict()
+    assert data["quote_tweet_id"] == "999888777"
+    assert data["type"] == "quote"
+
+    restored = workflow_module.TweetDraft.from_dict(data)
+    assert restored.quote_tweet_id == "999888777"
+    assert restored.type == "quote"
+    assert restored.text == "Taking issue with this take."
+
+
+def test_from_dict_reads_legacy_quote_field(workflow_module: Any) -> None:
+    # Manually-authored draft files may use the shorter ``quote`` key.
+    draft = workflow_module.TweetDraft.from_dict(
+        {"text": "Quoting this", "type": "quote", "quote": "12345"}
+    )
+    assert draft.quote_tweet_id == "12345"
+
+
+def test_to_dict_omits_quote_when_unset(workflow_module: Any) -> None:
+    # Backward compatibility: plain drafts must not gain a quote key.
+    draft = workflow_module.TweetDraft(text="Hello", type="tweet")
+    data = draft.to_dict()
+    assert "quote_tweet_id" not in data
+    restored = workflow_module.TweetDraft.from_dict(data)
+    assert restored.quote_tweet_id is None
+
+
+def test_create_tweet_kwargs_quote_precedence_over_reply(workflow_module: Any) -> None:
+    # Twitter v2 forbids combining reply + quote, so a quote must be posted
+    # standalone (quote_tweet_id set, in_reply_to dropped) even if both are set.
+    draft = workflow_module.TweetDraft(
+        text="My take",
+        type="quote",
+        in_reply_to="111",
+        quote_tweet_id="222",
+    )
+    kwargs = workflow_module._create_tweet_kwargs(draft)
+    assert kwargs["text"] == "My take"
+    assert kwargs["quote_tweet_id"] == "222"
+    assert "in_reply_to_tweet_id" not in kwargs
+    assert kwargs["user_auth"] is False
+
+
+def test_create_tweet_kwargs_reply_path(workflow_module: Any) -> None:
+    draft = workflow_module.TweetDraft(text="A reply", type="reply", in_reply_to="555")
+    kwargs = workflow_module._create_tweet_kwargs(draft)
+    assert kwargs["in_reply_to_tweet_id"] == "555"
+    assert "quote_tweet_id" not in kwargs
+
+
+def test_create_tweet_kwargs_standalone(workflow_module: Any) -> None:
+    draft = workflow_module.TweetDraft(text="Just a tweet", type="tweet")
+    kwargs = workflow_module._create_tweet_kwargs(draft)
+    assert kwargs["in_reply_to_tweet_id"] is None
+    assert "quote_tweet_id" not in kwargs
+
+
+def test_thread_followups_stay_replies(workflow_module: Any, tmp_path: Path) -> None:
+    # _post_tweet_with_thread must keep posting follow-ups as replies (never
+    # quote), so a quoted thread does not break into disconnected tweets.
+    client_calls: list[dict] = []
+
+    class _FakeClient:
+        def create_tweet(self, **kwargs):
+            client_calls.append(kwargs)
+            return SimpleNamespace(data={"id": f"resp{len(client_calls)}"})
+
+    draft = workflow_module.TweetDraft(
+        text="Main",
+        type="quote",
+        quote_tweet_id="777",
+        thread=["follow-up one", "follow-up two"],
+    )
+    workflow_module._post_tweet_with_thread(_FakeClient(), draft, "first")
+    assert len(client_calls) == 2
+    for call in client_calls:
+        assert call["in_reply_to_tweet_id"] is not None
+        assert "quote_tweet_id" not in call
