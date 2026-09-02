@@ -150,6 +150,7 @@ th {
 }
 tr:hover { background: var(--accent-dim); }
 .task-hint { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.2rem; }
+.filter-note { font-size: 0.85rem; color: var(--text-dim); margin: 0.25rem 0 0.5rem; }
 
 /* Tags */
 .tag {
@@ -754,7 +755,8 @@ tr:hover { background: var(--accent-dim); }
 {% if tasks %}
 <!-- Tasks -->
 <section id="tasks">
-  <h2>Tasks <span class="count-badge">({{ stats.total_tasks }})</span></h2>
+  <h2>Tasks <span class="count-badge">({{ stats.total_tasks }}{% if stats.tasks_filtered %} of {{ stats.total_tasks_all }}{% endif %})</span></h2>
+  {% if stats.tasks_filtered %}<p class="filter-note">Showing active tasks only (done/cancelled excluded). <a href="tasks/">Browse all {{ stats.total_tasks_all }} tasks →</a></p>{% endif %}
   {% if stats.task_states %}
   <div class="filter-row" id="task-state-filters">
     <button class="filter-btn active" data-state="all">All <span class="chip-count">{{ stats.total_tasks }}</span></button>
