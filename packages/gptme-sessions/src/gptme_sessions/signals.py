@@ -1490,6 +1490,7 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     sys_prompt_tokens: int | None = None
     context_peak_tokens: int | None = None
     result_usage: dict | None = None
+    stop_reason: str | None = None
 
     for record in msgs:
         rec_type = record.get("type")
@@ -1517,6 +1518,11 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
                 )
             if msg.get("model"):
                 model = msg["model"]
+            # Track final stop reason — updated on every assistant turn so the
+            # last assistant message's reason is the session's terminal signal.
+            _sr = msg.get("stop_reason")
+            if isinstance(_sr, str) and _sr:
+                stop_reason = _sr
 
         elif rec_type == "result":
             # Stream-json format: result record has correct cumulative totals.
@@ -1558,7 +1564,7 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
     if total_tokens == 0 and model is None:
         return {}
-    return {
+    result: dict = {
         "model": model,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -1568,6 +1574,9 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
         "sys_prompt_tokens": sys_prompt_tokens,
         "context_peak_tokens": context_peak_tokens,
     }
+    if stop_reason is not None:
+        result["stop_reason"] = stop_reason
+    return result
 
 
 def extract_signals_codex(msgs: list[dict]) -> dict:
