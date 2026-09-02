@@ -1760,3 +1760,65 @@ class TestSyncRouteBackfill:
         assert records[0].model == "grok-4.6"
         assert records[0].cost_usd == 0.0
         assert records[0].stop_reason == "stop"
+
+    def test_sync_backfills_missing_trajectory_revision_without_reextract(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Existing non-Pi records missing revision get a cheap stat stamp."""
+        import sys
+
+        from gptme_sessions.cli import main
+        from gptme_sessions.record import trajectory_revision_for
+
+        fake_file = tmp_path / "session.jsonl"
+        fake_file.write_text("{}\n")
+
+        monkeypatch.setattr("gptme_sessions.cli.discover_gptme_sessions", lambda *a, **kw: [])
+        monkeypatch.setattr("gptme_sessions.cli.discover_cc_sessions", lambda *a, **kw: [])
+        monkeypatch.setattr(
+            "gptme_sessions.cli.discover_codex_sessions", lambda *a, **kw: [fake_file]
+        )
+        monkeypatch.setattr("gptme_sessions.cli.discover_copilot_sessions", lambda *a, **kw: [])
+        monkeypatch.setattr("gptme_sessions.cli.discover_pi_sessions", lambda *a, **kw: [])
+
+        def _fail_extract(path: Path) -> dict:
+            raise AssertionError(f"revision backfill must not re-extract {path}")
+
+        monkeypatch.setattr("gptme_sessions.cli.extract_from_path", _fail_extract)
+
+        sessions_dir = tmp_path / "sessions"
+        store = SessionStore(sessions_dir=sessions_dir)
+        store.append(
+            SessionRecord(
+                harness="codex",
+                trajectory_path=str(fake_file),
+                outcome="productive",
+                duration_seconds=90,
+                token_count=1200,
+                input_tokens=800,
+                output_tokens=400,
+                cache_creation_tokens=10,
+                cache_read_tokens=20,
+                sys_prompt_tokens=100,
+                context_peak_tokens=900,
+                context_window=128000,
+                sys_prompt_bytes=400,
+                first_turn_bytes=800,
+                context_peak_bytes=800,
+                session_total_bytes=1600,
+            )
+        )
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["gptme-sessions", "--sessions-dir", str(sessions_dir), "sync", "--signals"],
+        )
+        rc = main()
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "updated 1" in captured.out
+
+        records = store.load_all()
+        assert len(records) == 1
+        assert records[0].trajectory_revision == trajectory_revision_for(fake_file)

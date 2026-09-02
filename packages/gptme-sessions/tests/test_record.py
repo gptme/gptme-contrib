@@ -7,7 +7,23 @@ from pathlib import Path
 
 import pytest
 
-from gptme_sessions.record import HARM_CATEGORY_LABELS, SessionRecord, normalize_model
+from gptme_sessions.record import (
+    HARM_CATEGORY_LABELS,
+    SessionRecord,
+    normalize_model,
+    trajectory_revision_for,
+)
+
+
+def test_trajectory_revision_for_encodes_stat_identity(tmp_path: Path) -> None:
+    """Revision encodes device/inode/size/mtime and is None for missing paths."""
+    path = tmp_path / "session.jsonl"
+    path.write_text("{}\n")
+    revision = trajectory_revision_for(path)
+    assert revision is not None
+    stat = path.stat()
+    assert revision == f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+    assert trajectory_revision_for(tmp_path / "missing.jsonl") is None
 
 
 def test_context_tier_default():

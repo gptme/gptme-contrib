@@ -38,7 +38,7 @@ from .deliverables import (
 from .discovery import extract_project, extract_session_name
 from .failure_capture import capture_session_failure
 from .lesson_events import load_lesson_events
-from .record import SessionRecord
+from .record import SessionRecord, trajectory_revision_for
 from .signals import extract_from_path
 from .smell import compute_smell_score
 from .store import SessionStore
@@ -461,12 +461,16 @@ def post_session(
     ttft_ms_p50: float | None = None
     gen_ms_total: float | None = None
     tool_ms_total: float | None = None
+    trajectory_revision: str | None = None
 
     # --- Extract signals from trajectory ---
     if trajectory_path is not None and trajectory_path.is_file():
         try:
             result = extract_from_path(trajectory_path)
             signals = result
+            # Stamp after a successful extract so later syncs can skip
+            # unchanged files. Same contract as gptme-sessions sync.
+            trajectory_revision = trajectory_revision_for(trajectory_path)
             grade = result.get("grade")
             traj_productive = result.get("productive")
             usage = result.get("usage")
@@ -897,6 +901,8 @@ def post_session(
         project = extract_project(harness, trajectory_path)
         if project:
             record_kwargs["project"] = project
+    if trajectory_revision is not None:
+        record_kwargs["trajectory_revision"] = trajectory_revision
     # Fallback: if caller didn't provide journal_path, use the first
     # journal path extracted from the trajectory signals.
     if journal_path is None and signals:
