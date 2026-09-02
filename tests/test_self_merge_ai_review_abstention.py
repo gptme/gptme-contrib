@@ -392,3 +392,48 @@ def test_abstention_for_the_current_head_still_blocks() -> None:
             head_sha="c096e25e50f8aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
     assert current is True
+
+
+# ---------------------------------------------------------------------------
+# Policy-drop null scores are reviews, not abstentions
+# ---------------------------------------------------------------------------
+
+
+def _marker_body(*, submodule_only: object) -> str:
+    """Build a null-score marker with an explicit submodule_only payload."""
+    payload = json.dumps(
+        {
+            "sha": "c096e25e50f8",
+            "score": None,
+            "engine": "llm",
+            "submodule_only": submodule_only,
+            "history": [],
+        }
+    )
+    return f"## 🤖 AI code review\n\n<!-- bob-ai-review {payload} -->\n"
+
+
+def test_policy_drop_explicit_false_is_not_an_abstention() -> None:
+    """Reviewer assessed real source; all findings were out-of-scope."""
+    assert _abstained(_marker_body(submodule_only=False)) is False
+
+
+def test_explicit_submodule_only_true_is_still_an_abstention() -> None:
+    """The #850 hole stays closed when the marker names a pointer bump."""
+    assert _abstained(_marker_body(submodule_only=True)) is True
+
+
+def test_present_but_null_submodule_only_fails_closed() -> None:
+    """A malformed marker with submodule_only: null must still block.
+
+    dict.get's default applies only for a missing key. A present null is
+    falsy, so a truthiness check would treat it as policy-drop and fail
+    open. Only an explicit boolean False may bypass the abstention veto.
+    """
+    assert _abstained(_marker_body(submodule_only=None)) is True
+
+
+@pytest.mark.parametrize("value", [0, "", "false", "False"])
+def test_non_boolean_submodule_only_fails_closed(value: object) -> None:
+    """Anything other than boolean False is not a policy-drop signal."""
+    assert _abstained(_marker_body(submodule_only=value)) is True

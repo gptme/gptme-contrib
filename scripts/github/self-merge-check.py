@@ -1030,9 +1030,13 @@ def ai_review_abstained(
             # source but all findings were out-of-scope (policy-drop).
             # That is a review, not an abstention. Do not block — Greptile
             # and CI are the independent quality gates for this case.
-            if marker.get("submodule_only", True):
-                return True
-            return False
+            #
+            # Strict identity: only an explicit boolean False bypasses.
+            # A present-but-null value (or any non-boolean) must not fail
+            # open — ``dict.get``'s default applies only to a missing key.
+            if marker.get("submodule_only") is False:
+                return False
+            return True
         if isinstance(score, int) and not isinstance(score, bool) and 1 <= score <= 5:
             return False
         return None
