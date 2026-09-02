@@ -58,6 +58,20 @@ ANNOTATABLE_FIELDS: frozenset[str] = frozenset(
     ]
 )
 
+
+def trajectory_revision_for(path: Path) -> str | None:
+    """Return a cheap revision for append-only trajectory change detection.
+
+    Encodes device, inode, size, and mtime so an append or rewrite is visible
+    without hashing file contents. ``None`` if ``path`` cannot be stat'd.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
 # Normalize model names to short canonical forms
 MODEL_ALIASES: dict[str, str] = {
     # Anthropic Claude models (bare) — dash and dot variants
@@ -346,10 +360,13 @@ class SessionRecord:
     # this may be nominal API-equivalent cost, not incremental billed spend.
     cost_usd: float | None = None
 
-    # Cheap source revision captured after a successful trajectory extraction.
-    # Pi sessions are append-only and resumable, so sync uses this to refresh
+    # Cheap source revision captured after a successful trajectory extraction
+    # (``dev:ino:size:mtime_ns`` from :func:`trajectory_revision_for`). Pi
+    # sessions are append-only and resumable, so sync uses this to refresh
     # cumulative signals when the native JSONL grows without reparsing
-    # unchanged historical sessions on every run.
+    # unchanged historical sessions on every run. Other harnesses persist it
+    # too so later syncs can skip unchanged files and coverage can see the
+    # field.
     trajectory_revision: str | None = None
     trajectory_extract_version: int | None = None
 

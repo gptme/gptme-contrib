@@ -8,7 +8,7 @@ import pytest
 
 from gptme_sessions.deliverables import looks_like_sha
 from gptme_sessions.post_session import PostSessionResult, post_session
-from gptme_sessions.record import SessionRecord
+from gptme_sessions.record import SessionRecord, trajectory_revision_for
 from gptme_sessions.store import SessionStore
 
 # gptme_sessions/__init__.py re-exports 'post_session' (function), shadowing the
@@ -160,6 +160,43 @@ def test_post_session_backfills_session_name_and_project_from_trajectory(tmp_pat
 
     assert result.record.session_name == "12345678"
     assert result.record.project == "/home/bob/bob"
+    assert result.record.trajectory_revision == trajectory_revision_for(fake_traj)
+
+
+def test_post_session_stamps_trajectory_revision_after_extract(tmp_path: Path):
+    """Successful extract persists a cheap source revision for any harness."""
+    store = SessionStore(sessions_dir=tmp_path)
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.write_text("{}\n")
+
+    with patch.object(
+        _post_session_mod,
+        "extract_from_path",
+        return_value={"productive": True, "usage": {"model": "grok-4.6"}},
+    ):
+        result = post_session(
+            store=store,
+            harness="grok-build",
+            model="grok-4.6",
+            duration_seconds=30,
+            trajectory_path=trajectory,
+        )
+
+    assert result.record.trajectory_revision == trajectory_revision_for(trajectory)
+    persisted = SessionStore(sessions_dir=tmp_path).load_all()
+    assert persisted[0].trajectory_revision == result.record.trajectory_revision
+
+
+def test_post_session_omits_trajectory_revision_without_trajectory(tmp_path: Path):
+    """No trajectory means no revision stamp."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        duration_seconds=30,
+    )
+    assert result.record.trajectory_revision is None
 
 
 def test_post_session_ab_group_invalid(tmp_path: Path):

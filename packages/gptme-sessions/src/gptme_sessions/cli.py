@@ -35,7 +35,13 @@ from .replay import (
     resolve_replay_target,
     resolve_session_record_prefix,
 )
-from .record import ANNOTATABLE_FIELDS, ATTEMPT_KINDS, SessionRecord, normalize_run_type
+from .record import (
+    ANNOTATABLE_FIELDS,
+    ATTEMPT_KINDS,
+    SessionRecord,
+    normalize_run_type,
+    trajectory_revision_for,
+)
 from .pi import PI_EXTRACTION_SCHEMA_VERSION, PiSessionFormatError
 from .signals import extract_from_path
 from .store import (
@@ -469,12 +475,8 @@ def _normalize_session_path(path: str | Path) -> str:
 
 
 def _trajectory_revision(path: Path) -> str | None:
-    """Return a cheap revision for append-only trajectory change detection."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+    """Compatibility alias for :func:`trajectory_revision_for`."""
+    return trajectory_revision_for(path)
 
 
 def _existing_session_paths(records: list[SessionRecord]) -> set[str]:
@@ -2408,6 +2410,18 @@ def sync(
                 for field in _usage_backfill_fields(existing.harness)
             )
             source_revision = _trajectory_revision(traj_path) if traj_path.is_file() else None
+            # Cheap backfill for non-Pi harnesses: stamp revision once the
+            # source file is still readable. Does not re-extract. Pi keeps
+            # revision as an extract-success marker so a failed extract can
+            # retry instead of looking "up to date".
+            if (
+                existing.harness != "pi"
+                and source_revision is not None
+                and existing.trajectory_revision is None
+                and "trajectory_revision" not in existing.annotated_fields
+            ):
+                existing.trajectory_revision = source_revision
+                needs_update = True
             pi_source_changed = (
                 existing.harness == "pi"
                 and source_revision is not None
@@ -2507,8 +2521,9 @@ def sync(
                 source_revision = _trajectory_revision(traj_path)
                 result = extract_from_path(traj_path)
                 _apply_extract_result_to_kwargs(record_kwargs, result)
-                if entry["harness"] == "pi":
+                if source_revision is not None:
                     record_kwargs["trajectory_revision"] = source_revision
+                if entry["harness"] == "pi":
                     record_kwargs["trajectory_extract_version"] = PI_EXTRACTION_SCHEMA_VERSION
             except Exception as exc:
                 signal_failures += 1
