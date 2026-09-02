@@ -4265,6 +4265,23 @@ def test_static_search_urls_are_relative(workspace: Path, tmp_path: Path):
     )
 
 
+def _extract_js_function(html: str, name: str) -> str:
+    """Extract a complete JS function definition by brace-counting.
+
+    More robust than slicing to the first newline — works even if the function
+    body spans multiple lines (e.g. after a template reformatting).
+    """
+    start = html.index(f"function {name}")
+    depth = 0
+    for i, ch in enumerate(html[start:], start=start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start : i + 1]
+    raise ValueError(f"Unclosed function {name!r} found in HTML")
+
 def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Path):
     """safeUrl relative-path fallback must not admit protocol-relative URLs.
 
@@ -4280,8 +4297,7 @@ def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Pat
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
-    start = html.index("function safeUrl")
-    snippet = html[start : html.index("\n", start)]
+    snippet = _extract_js_function(html, "safeUrl")
     assert "s[0] !== '/'" in snippet, (
         "safeUrl relative-path fallback must reject strings starting with '/' "
         "so protocol-relative '//host' cannot bypass the sanitizer"
@@ -4530,8 +4546,7 @@ def test_static_search_served_under_dashboard_subpath(workspace: Path, tmp_path:
             else html.index("function _loadStaticSearchIndex")
         )
         client_js = html[fn_start:fn_end]
-        safe_start = html.index("function safeUrl")
-        safe_js = html[safe_start : html.index("\n", safe_start)]
+        safe_js = _extract_js_function(html, "safeUrl")
 
         script = f"""
 {safe_js}
