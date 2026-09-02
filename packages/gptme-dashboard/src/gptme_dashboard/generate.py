@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
+from itertools import groupby
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -2088,6 +2089,27 @@ def generate(
         page_path = output / task["page_url"]
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(task_html)
+
+    # Generate the full task listing at tasks/index.html.
+    # The dashboard index links here ("Browse all N tasks") because its own listing
+    # omits terminal tasks; without this page that link is a broken static target.
+    if data["tasks"]:
+        tasks_index_template = env.get_template("tasks_index.html")
+        # data["tasks"] is already sorted by (_STATE_ORDER, title), so grouping
+        # consecutively preserves the same state ordering used everywhere else.
+        task_groups = [
+            {"state": state, "tasks": list(group)}
+            for state, group in groupby(data["tasks"], key=lambda t: t["state"])
+        ]
+        tasks_index_html = tasks_index_template.render(
+            workspace_name=data["workspace_name"],
+            tasks=data["tasks"],
+            task_groups=task_groups,
+            root_prefix="../",
+        )
+        tasks_index_path = output / "tasks" / "index.html"
+        tasks_index_path.parent.mkdir(parents=True, exist_ok=True)
+        tasks_index_path.write_text(tasks_index_html)
 
     # Generate per-journal detail pages
     journal_template = env.get_template("journal.html")

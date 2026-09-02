@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}All tasks - {{ workspace_name }}{% endblock %}
+
+{% block extra_style %}
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+.breadcrumb {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 1.5rem;
+}
+.breadcrumb a { color: var(--accent); }
+
+header h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+.state-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+.state-nav a {
+  font-size: 0.8rem;
+  padding: 0.15em 0.6em;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+}
+.state-nav a:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
+
+.state-group { margin-bottom: 2rem; }
+.state-group h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+.state-group h2 .count-badge { color: var(--text-dim); font-weight: 400; font-size: 0.85rem; }
+
+ul.task-list { list-style: none; margin: 0; padding: 0; }
+ul.task-list li {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+  /* wrap rather than overflow: the 390px viewport must not scroll sideways */
+  overflow-wrap: anywhere;
+}
+ul.task-list li:last-child { border-bottom: none; }
+.task-line { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
+.task-line .meta { font-size: 0.8rem; color: var(--text-dim); }
+{% endblock %}
+
+{% block content %}
+<nav class="breadcrumb">
+  <a href="{{ root_prefix }}index.html">{{ workspace_name }}</a>
+  &rsaquo; <a href="{{ root_prefix }}index.html#tasks">Tasks</a>
+  &rsaquo; All tasks
+</nav>
+
+<header>
+  <h1>All tasks <span class="count-badge">({{ tasks | length }})</span></h1>
+  <p class="meta">Every task in the workspace, including completed and cancelled ones. The
+    <a href="{{ root_prefix }}index.html#tasks">dashboard listing</a> shows only open tasks.</p>
+  <div class="state-nav">
+    {% for group in task_groups %}<a href="#state-{{ group.state }}">{{ group.state }} ({{ group.tasks | length }})</a>{% endfor %}
+  </div>
+</header>
+
+{% for group in task_groups %}
+<section class="state-group" id="state-{{ group.state }}">
+  <h2>{{ group.state }} <span class="count-badge">({{ group.tasks | length }})</span></h2>
+  <ul class="task-list">
+    {% for task in group.tasks %}
+    <li>
+      <div class="task-line">
+        <a href="{{ root_prefix }}{{ task.page_url }}">{{ task.title }}</a>
+        {% if task.priority %}<span class="tag {% if task.priority == 'high' %}tag-active{% endif %}">{{ task.priority }}</span>{% endif %}
+        {% for t in task.tags %}<span class="tag tag-category">{{ t }}</span>{% endfor %}
+        {% if task.assigned_to %}<span class="meta">{{ task.assigned_to }}</span>{% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endfor %}
+{% endblock %}

@@ -4992,3 +4992,42 @@ def test_index_html_no_filter_note_when_all_nonterminal(
     html = (out / "index.html").read_text()
     # No terminal tasks → no filter note paragraph (the CSS class may still exist in <style>)
     assert '<p class="filter-note">' not in html
+
+
+def test_generate_writes_tasks_index_page(workspace: Path, tmp_path: Path):
+    """The 'Browse all N tasks' link target (tasks/index.html) is generated.
+
+    The dashboard index omits terminal tasks from its listing and links to
+    tasks/ instead; without this page that link is a broken static target.
+    """
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "build-feature.md").write_text(
+        "---\nstate: active\npriority: high\ncreated: 2026-03-01\n---\n# Build Feature\n"
+    )
+    (tasks_dir / "old-thing.md").write_text(
+        "---\nstate: done\ncreated: 2026-01-01\n---\n# Old Thing\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    index_html = (output / "index.html").read_text()
+    assert 'href="tasks/"' in index_html, "index should link to the full task listing"
+
+    tasks_index = output / "tasks" / "index.html"
+    assert tasks_index.exists()
+    html = tasks_index.read_text()
+    # Terminal tasks are excluded from the dashboard listing but must appear here.
+    assert "Old Thing" in html
+    assert "Build Feature" in html
+    # Links are root-relative from tasks/, i.e. one level up then back down.
+    assert 'href="../tasks/old-thing.html"' in html
+    assert (output / "tasks" / "old-thing.html").exists()
+
+
+def test_generate_skips_tasks_index_without_tasks(workspace: Path, tmp_path: Path):
+    """No tasks means no tasks/ directory to index."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    assert not (output / "tasks" / "index.html").exists()
