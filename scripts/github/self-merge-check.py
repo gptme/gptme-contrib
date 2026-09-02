@@ -1022,7 +1022,17 @@ def ai_review_abstained(
     if "score" in marker:
         score = marker["score"]
         if score is None:
-            return True
+            # ``submodule_only: true`` (or omitted — fail-closed for
+            # gptme-cloud#850) means the reviewer had no source to assess
+            # and the PR is "not reviewed". Block.
+            #
+            # ``submodule_only: false`` means the reviewer assessed real
+            # source but all findings were out-of-scope (policy-drop).
+            # That is a review, not an abstention. Do not block — Greptile
+            # and CI are the independent quality gates for this case.
+            if marker.get("submodule_only", True):
+                return True
+            return False
         if isinstance(score, int) and not isinstance(score, bool) and 1 <= score <= 5:
             return False
         return None
