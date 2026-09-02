@@ -4412,3 +4412,189 @@ def test_no_horizontal_overflow_at_390px(workspace: Path, tmp_path: Path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_static_search_served_under_dashboard_subpath(workspace: Path, tmp_path: Path):
+    """Serve a generated site under /dashboard/, search a known task, follow the result.
+
+    Proves the static-search contract for subpath deploys:
+    - page-relative ``./data.json`` resolves to ``/dashboard/data.json`` (200)
+    - root ``/data.json`` is not requested and 404s if probed
+    - client search finds a known task
+    - the result href resolves under ``/dashboard/`` and returns 200
+    """
+    import http.server
+    import shutil
+    import socketserver
+    import subprocess
+    import threading
+    import urllib.error
+    import urllib.request
+    from urllib.parse import unquote, urlparse
+
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "zebra-unique-task-alpha.md").write_text(
+        textwrap.dedent(
+            """\
+            ---
+            state: active
+            created: 2026-03-01
+            ---
+            # ZebraUniqueTaskAlpha
+
+            Searchable fixture for subpath static search.
+            """
+        )
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    generate_json(workspace, output)
+    site_root = output.resolve()
+    assert (site_root / "data.json").is_file()
+    assert (site_root / "tasks" / "zebra-unique-task-alpha.html").is_file()
+
+    html = (site_root / "index.html").read_text()
+    assert "fetch('./data.json')" in html
+    assert "fetch('/data.json')" not in html
+
+    recorded: list[str] = []
+
+    class SubpathHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+        def do_GET(self) -> None:
+            path = unquote(urlparse(self.path).path)
+            recorded.append(path)
+            if path == "/data.json":
+                self.send_error(404, "root data.json must not be used under /dashboard/")
+                return
+            prefix = "/dashboard/"
+            if path == "/dashboard":
+                path = prefix
+            if not path.startswith(prefix):
+                self.send_error(404)
+                return
+            rel = path[len(prefix) :]
+            if rel == "" or rel.endswith("/"):
+                rel += "index.html"
+            target = (site_root / rel).resolve()
+            try:
+                target.relative_to(site_root)
+            except ValueError:
+                self.send_error(403)
+                return
+            if not target.is_file():
+                self.send_error(404)
+                return
+            data = target.read_bytes()
+            content_type = "application/octet-stream"
+            if target.suffix == ".html":
+                content_type = "text/html; charset=utf-8"
+            elif target.suffix == ".json":
+                content_type = "application/json"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SubpathHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        origin = f"http://127.0.0.1:{port}"
+        page_url = f"{origin}/dashboard/index.html"
+
+        with urllib.request.urlopen(page_url, timeout=5) as resp:
+            assert resp.status == 200
+        with urllib.request.urlopen(f"{origin}/dashboard/data.json", timeout=5) as resp:
+            assert resp.status == 200
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(f"{origin}/data.json", timeout=5)
+        assert err.value.code == 404
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is required to resolve relative URLs and run client search")
+
+        fn_start = html.index("function _buildClientIndex")
+        load_marker = "async function _loadStaticSearchIndex"
+        fn_end = (
+            html.index(load_marker)
+            if load_marker in html
+            else html.index("function _loadStaticSearchIndex")
+        )
+        client_js = html[fn_start:fn_end]
+        safe_start = html.index("function safeUrl")
+        safe_js = html[safe_start : html.index("\n", safe_start)]
+
+        script = f"""
+{safe_js}
+var _staticSearchIndex = null;
+{client_js}
+const pageUrl = {json.dumps(page_url)};
+const dataUrl = new URL('./data.json', pageUrl).href;
+if (dataUrl !== {json.dumps(origin + "/dashboard/data.json")}) {{
+  console.error(JSON.stringify({{dataUrl}}));
+  process.exit(2);
+}}
+const rootDataUrl = new URL('/data.json', pageUrl).href;
+fetch(dataUrl).then(async (resp) => {{
+  if (!resp.ok) {{
+    console.error('data.json status ' + resp.status);
+    process.exit(3);
+  }}
+  const data = await resp.json();
+  _staticSearchIndex = _buildClientIndex(data);
+  const {{results, total}} = _clientSearch('ZebraUniqueTaskAlpha', 'task', 20);
+  if (!total || !results.length) {{
+    console.error(JSON.stringify({{total, results}}));
+    process.exit(4);
+  }}
+  const href = safeUrl(results[0].url);
+  const resolved = new URL(href, pageUrl).href;
+  if (!resolved.startsWith({json.dumps(origin + "/dashboard/")})) {{
+    console.error(JSON.stringify({{href, resolved}}));
+    process.exit(5);
+  }}
+  const page = await fetch(resolved);
+  if (!page.ok) {{
+    console.error('result status ' + page.status + ' ' + resolved);
+    process.exit(6);
+  }}
+  const body = await page.text();
+  if (!body.includes('ZebraUniqueTaskAlpha')) {{
+    console.error('result page missing task title');
+    process.exit(7);
+  }}
+  // Confirm the root-absolute data URL is a different path than the relative fetch.
+  if (rootDataUrl === dataUrl) {{
+    console.error('relative fetch collapsed to root');
+    process.exit(8);
+  }}
+  console.log(JSON.stringify({{dataUrl, href, resolved, total}}));
+}}).catch((err) => {{
+  console.error(String(err));
+  process.exit(1);
+}});
+"""
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, check=False, timeout=15
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["dataUrl"] == f"{origin}/dashboard/data.json"
+        assert payload["resolved"].startswith(f"{origin}/dashboard/")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert "/data.json" in recorded  # the explicit 404 probe in this test
+    assert recorded.count("/data.json") == 1, recorded
+    assert "/dashboard/data.json" in recorded
+    assert any(p.endswith("zebra-unique-task-alpha.html") for p in recorded), recorded
