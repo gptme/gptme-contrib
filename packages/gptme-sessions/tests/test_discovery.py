@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from gptme_sessions.discovery import (
+    _expand_pi_path,
     _first_event_cwd,
     _quick_date_from_jsonl,
     _quick_datetime_from_jsonl,
@@ -1603,3 +1604,52 @@ class TestExtractProject:
             "pi-project",
         )
         assert extract_project("pi", session) == "/workspace/pi-project"
+
+
+# --- _expand_pi_path (file:// URI handling) ---
+
+
+def test_expand_pi_path_plain_path(tmp_path: Path) -> None:
+    """Plain paths pass through unchanged."""
+    assert _expand_pi_path(str(tmp_path)) == tmp_path
+
+
+def test_expand_pi_path_tilde_home() -> None:
+    """Tilde-only resolves to home directory."""
+    assert _expand_pi_path("~") == Path.home()
+
+
+def test_expand_pi_path_tilde_subdir() -> None:
+    """~/subdir resolves relative to home."""
+    assert _expand_pi_path("~/pi-sessions") == Path.home() / "pi-sessions"
+
+
+def test_expand_pi_path_file_uri_absolute(tmp_path: Path) -> None:
+    """file:///absolute/path resolves to the filesystem path."""
+    uri = f"file://{tmp_path}"
+    assert _expand_pi_path(uri) == tmp_path
+
+
+def test_expand_pi_path_file_uri_empty_path_fails_closed() -> None:
+    """Malformed file:// URI with no path component raises ValueError."""
+    with pytest.raises(ValueError, match="Malformed"):
+        _expand_pi_path("file://")
+
+
+def test_expand_pi_path_non_file_scheme_fails_closed() -> None:
+    """Non-file URI schemes (http, https, etc.) raise ValueError."""
+    with pytest.raises(ValueError, match="Unsupported"):
+        _expand_pi_path("http://example.com/sessions")
+
+
+def test_discover_pi_sessions_file_uri_session_dir_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PI_CODING_AGENT_SESSION_DIR=file:///... resolves and discovers sessions."""
+    session = _make_pi_session(tmp_path, "session.jsonl", "2026-03-05T10:00:00Z", "pi-uri")
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", f"file://{tmp_path}")
+    monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+
+    result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
+
+    assert result == [session.resolve()]

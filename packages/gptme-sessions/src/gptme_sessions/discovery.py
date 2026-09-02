@@ -17,6 +17,7 @@ import logging
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .pi import (
     PiSessionFormatError,
@@ -74,7 +75,21 @@ def _get_copilot_state_dir() -> Path:
 
 
 def _expand_pi_path(value: str) -> Path:
-    """Expand Pi's supported ``~`` spellings without Python's user lookup."""
+    """Expand a Pi session directory string to a filesystem :class:`Path`.
+
+    Handles Pi's supported ``~`` spellings, ``file://`` URIs (as accepted by
+    Pi 0.84.4+ in ``sessionDir``), and plain filesystem paths.  Non-``file``
+    URI schemes and malformed ``file://`` values (empty path component) fail
+    closed with :exc:`ValueError`.
+    """
+    parsed = urlparse(value)
+    if parsed.scheme == "file":
+        if not parsed.path:
+            raise ValueError(f"Malformed file:// URI — no path component: {value!r}")
+        return Path(parsed.path)
+    if parsed.scheme and parsed.scheme not in ("", "~"):
+        raise ValueError(f"Unsupported URI scheme in Pi session dir: {parsed.scheme!r}")
+    # Plain path — preserve Pi's tilde expansion without Python's user lookup.
     if value == "~":
         return Path.home()
     if value.startswith("~/") or (os.name == "nt" and value.startswith("~\\")):
