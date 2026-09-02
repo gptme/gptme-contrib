@@ -2575,6 +2575,182 @@ def sync(
         click.echo(", ".join(parts))
 
 
+# Process-level outcomes that trajectory extraction cannot reconstruct.
+# post_session() sets these from exit_code / policy checks, which outrank
+# the extractor's binary productive/noop mapping.
+_PROCESS_OUTCOMES = frozenset({"failed", "violated_policy"})
+
+
+def _regrade_outcome(
+    current: str,
+    productive: bool,
+    *,
+    annotated: bool = False,
+) -> str:
+    """Map extractor productivity onto a stored outcome without erasing failures.
+
+    ``extract_from_path`` only reports productive vs not. ``failed`` and
+    ``violated_policy`` come from process exit / policy and must be preserved
+    — a nonproductive trajectory must not collapse them to ``noop``.
+    Operator-annotated outcomes are frozen the same way: the helper itself
+    returns ``current``, so a caller cannot overwrite them by forgetting a
+    separate guard.
+    """
+    if annotated or current in _PROCESS_OUTCOMES:
+        return current
+    return "productive" if productive else "noop"
+
+
+@cli.command("regrade")
+@click.option("--harness", default=None, help="Restrict to a specific harness (e.g. codex)")
+@click.option(
+    "--outcome",
+    default="noop",
+    type=click.Choice(["productive", "noop", "failed", "unknown", "violated_policy", "all"]),
+    show_default=True,
+    help="Only regrade records whose current outcome matches this value ('all' = no filter)",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="Only regrade records newer than this window (e.g. 10d, 2026-08-24)",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would change without rewriting the store")
+@click.pass_context
+def regrade(
+    ctx: click.Context,
+    harness: str | None,
+    outcome: str,
+    since: str | None,
+    dry_run: bool,
+) -> None:
+    """Re-extract trajectory signals for existing session records.
+
+    Useful after a signal-extractor bug fix to backfill sessions that were
+    incorrectly graded (e.g., productive runs classified as noop because the
+    extractor missed a new tool-call shape).
+
+    Unlike ``sync --signals``, this command forces re-extraction even when
+    ``outcome`` is already set (not just ``unknown``), as long as the field
+    has not been manually annotated.  Annotated fields are preserved.
+
+    Process-level outcomes (``failed``, ``violated_policy``) are never
+    overwritten — the extractor cannot reconstruct them from a trajectory.
+
+    After running this command, the store is updated in place.  Bandit
+    posteriors are caller-side; recompute them separately from the corrected
+    records (e.g. ``gptme-sessions export --harness codex --since 10d``).
+
+    Example — fix false-noops from the Codex wait-continuation bug (#1567):
+
+        gptme-sessions regrade --harness codex --since 10d --dry-run
+        gptme-sessions regrade --harness codex --since 10d
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    since_days = _parse_since(since) if since else None
+    effective_outcome = None if outcome == "all" else outcome
+
+    candidates = store.query(
+        harness=harness,
+        outcome=effective_outcome,
+        since_days=since_days,
+    )
+
+    if not candidates:
+        click.echo("No matching records found.")
+        return
+
+    # Snapshot before mutation so a locked three-way merge can keep concurrent
+    # field updates. Extraction is slow, so it stays outside the store lock
+    # (same pattern as sync).
+    original_records = {rec.session_id: rec.to_dict() for rec in candidates}
+    mutated: list[SessionRecord] = []
+
+    regraded = 0
+    no_trajectory = 0
+    unchanged = 0
+    errors = 0
+
+    for rec in candidates:
+        traj = Path(rec.trajectory_path) if rec.trajectory_path else None
+        if traj is None or not traj.is_file():
+            if rec.outcome in _PROCESS_OUTCOMES or "outcome" in rec.annotated_fields:
+                unchanged += 1
+                continue
+            no_trajectory += 1
+            if dry_run:
+                click.echo(
+                    f"  no-trajectory: {rec.session_id}  "
+                    f"outcome={rec.outcome}  (would reset to unknown)"
+                )
+            else:
+                rec.outcome = "unknown"
+                mutated.append(rec)
+            regraded += 1
+            continue
+
+        try:
+            result = extract_from_path(traj)
+        except Exception as exc:
+            click.echo(
+                f"  error: extraction failed for {rec.session_id}: {exc}",
+                err=True,
+            )
+            errors += 1
+            continue
+
+        new_outcome = _regrade_outcome(
+            rec.outcome,
+            bool(result.get("productive")),
+            annotated="outcome" in rec.annotated_fields,
+        )
+        record_changed = False
+
+        if rec.outcome != new_outcome:
+            if dry_run:
+                click.echo(
+                    f"  would regrade: {rec.session_id}  "
+                    f"{rec.outcome} → {new_outcome}  "
+                    f"commits={len(result.get('git_commits', []))}  "
+                    f"files={len(result.get('file_writes', []))}"
+                )
+            else:
+                rec.outcome = new_outcome
+                record_changed = True
+            regraded += 1
+        else:
+            unchanged += 1
+
+        if not dry_run:
+            # Backfill deliverables/duration that the old extractor missed.
+            # _apply_extract_result_to_record skips outcome when != "unknown",
+            # so it is safe to call after we've already set the new outcome.
+            if _apply_extract_result_to_record(rec, result):
+                record_changed = True
+            if record_changed:
+                mutated.append(rec)
+
+    if not dry_run and mutated:
+        # Extraction happens outside the lock; three-way merge a final
+        # locked re-read so no concurrent record mutation is lost.
+        # rewrite() has upsert semantics: only mutated candidates are
+        # supplied, so untouched records are not rewritten from a stale copy.
+        with store.lock():
+            _merge_concurrent_record_updates(mutated, store.load_all(), original_records)
+            store.rewrite(mutated)
+
+    parts = []
+    verb = "Would regrade" if dry_run else "Regraded"
+    parts.append(f"{verb} {regraded} record(s)")
+    if no_trajectory:
+        parts.append(f"{no_trajectory} missing trajectory (reset to unknown)")
+    if unchanged:
+        parts.append(f"{unchanged} already correct")
+    if errors:
+        parts.append(f"{errors} extraction error(s)")
+    click.echo(", ".join(parts) + ".")
+
+
 @cli.command("repair-grades")
 @click.option("--dry-run", is_flag=True, help="Show what would change without rewriting the store")
 @click.pass_context
