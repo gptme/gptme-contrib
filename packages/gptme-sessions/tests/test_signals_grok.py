@@ -66,9 +66,12 @@ def _text(content: str = "Done.") -> dict:
 
 
 def _end_record(
-    input_tokens: int = 100, output_tokens: int = 50, model: str = "grok-4.5-build"
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+    model: str = "grok-4.5-build",
+    stop_reason: str | None = "end_turn",
 ) -> dict:
-    return {
+    record = {
         "type": "end",
         "usage": {
             "input_tokens": input_tokens,
@@ -77,6 +80,9 @@ def _end_record(
         },
         "modelUsage": {model: {"input_tokens": input_tokens, "output_tokens": output_tokens}},
     }
+    if stop_reason is not None:
+        record["stopReason"] = stop_reason
+    return record
 
 
 # ─── _detect_format ──────────────────────────────────────────────────────────
@@ -289,6 +295,25 @@ def test_extract_usage_grok_reads_from_end_record():
     assert usage["input_tokens"] == 7170
     assert usage["output_tokens"] == 114
     assert usage["model"] == "grok-4.5-build"
+    assert usage["stop_reason"] == "end_turn"
+
+
+def test_extract_usage_grok_stop_reason_without_usage():
+    msgs = [
+        _available_commands(),
+        {"type": "end", "stopReason": "error"},
+    ]
+    usage = extract_usage_grok(msgs)
+    assert usage == {"stop_reason": "error"}
+
+
+def test_extract_usage_grok_omits_stop_reason_when_absent():
+    msgs = [
+        _available_commands(),
+        _end_record(stop_reason=None),
+    ]
+    usage = extract_usage_grok(msgs)
+    assert "stop_reason" not in usage
 
 
 def test_extract_usage_grok_empty_trajectory():
