@@ -1806,7 +1806,7 @@ function closeSearch() {
   document.getElementById('search-result-count').textContent = '';
 }
 
-function safeUrl(u) { const s = String(u || ''); if (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) return s; if (s && s[0] !== '/' && !/[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(s)) return s; return '#'; }
+function safeUrl(u) { const s = String(u || '').replace(/^[\u0000-\u0020]+/, ''); if (/^https?:\/\//i.test(s) || /^\/[^/]/.test(s)) return s; if (s && s[0] !== '/' && s[0] !== '\\' && !/[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(s)) return s; return '#'; }
 
 /** Build a flat search index from data.json for client-side search on static sites. */
 function _buildClientIndex(data) {

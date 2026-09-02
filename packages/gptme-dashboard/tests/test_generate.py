@@ -4271,6 +4271,8 @@ def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Pat
     Allowing ``lessons/foo`` is required for subpath deploys, but ``//evil.com``
     is a different origin (browsers resolve it against the current scheme).
     The relative branch must reject any string that starts with ``/``.
+    Leading C0/space is trimmed first so ``  //evil.com`` cannot skip that
+    check, and a leading backslash is rejected (``\\evil.com``).
     """
     import shutil
     import subprocess
@@ -4284,6 +4286,13 @@ def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Pat
         "safeUrl relative-path fallback must reject strings starting with '/' "
         "so protocol-relative '//host' cannot bypass the sanitizer"
     )
+    assert "\\u0000-\\u0020" in snippet, (
+        "safeUrl must trim leading C0 controls and space before the first-char "
+        "check so padded protocol-relative URLs cannot bypass it"
+    )
+    assert (
+        "s[0] !== '\\\\'" in snippet
+    ), "safeUrl relative-path fallback must reject a leading backslash"
 
     node = shutil.which("node")
     if node is None:
@@ -4296,6 +4305,9 @@ def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Pat
         "../x": "../x",
         "//evil.com": "#",
         "//evil.com/phish": "#",
+        "  //evil.com": "#",
+        "\\evil.com": "#",
+        "  lessons/foo": "lessons/foo",
         "javascript:alert(1)": "#",
         "data:text/html,x": "#",
         "": "#",
