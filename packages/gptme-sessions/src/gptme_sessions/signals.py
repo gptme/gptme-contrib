@@ -2943,13 +2943,13 @@ def extract_usage_grok(msgs: list[dict]) -> dict:
 
     Reads from the final 'end' record which has cumulative session totals.
     Model name comes from the modelUsage dict (keyed by model id).
+    Terminal ``stopReason`` (e.g. ``end_turn``) is copied onto ``stop_reason``
+    so post_session / sync can persist the harness-native stop signal.
     """
     for record in reversed(msgs):
         if record.get("type") != "end":
             continue
         usage_data = record.get("usage") or {}
-        if not usage_data:
-            continue
         result: dict = {}
         input_tokens = usage_data.get("input_tokens")
         output_tokens = usage_data.get("output_tokens")
@@ -2965,7 +2965,11 @@ def extract_usage_grok(msgs: list[dict]) -> dict:
             model_name = next(iter(model_usage), None)
             if model_name:
                 result["model"] = model_name
-        return result
+        raw_stop = record.get("stopReason")
+        if isinstance(raw_stop, str) and raw_stop:
+            result["stop_reason"] = raw_stop
+        if result:
+            return result
     return {}
 
 

@@ -1684,6 +1684,11 @@ class TestSyncRouteBackfill:
         assert "provider" not in gptme_fields
         assert "cost_usd" not in gptme_fields
         assert "token_count" in gptme_fields
+        assert "stop_reason" not in gptme_fields
+
+        grok_fields = _usage_backfill_fields("grok-build")
+        assert "stop_reason" in grok_fields
+        assert "token_count" in grok_fields
 
     def test_sync_signals_backfills_pi_route_metadata_for_existing_known_record(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

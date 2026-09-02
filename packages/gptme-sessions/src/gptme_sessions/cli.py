@@ -103,12 +103,15 @@ def _usage_backfill_fields(harness: str | None) -> tuple[str, ...]:
     Copilot trajectories never contain token-count fields — only byte metrics
     and model name are extractable. Pi uses ``trajectory_revision`` as its
     enrichment marker because several valid route/context fields can be absent;
-    missing-field checks would reparse unchanged history forever.
+    missing-field checks would reparse unchanged history forever. Grok Build
+    end records carry a terminal ``stopReason`` that older records omitted.
     """
     if harness == "copilot-cli":
         return _COPILOT_BACKFILL_FIELDS
     if harness == "pi":
         return ()
+    if harness == "grok-build":
+        return (*_DEFAULT_BACKFILL_FIELDS, "stop_reason")
     return _DEFAULT_BACKFILL_FIELDS
 
 
