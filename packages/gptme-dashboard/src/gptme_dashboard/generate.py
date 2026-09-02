@@ -172,6 +172,20 @@ def rewrite_body_links(
     return re.sub(r'href="([^"]*)"', replace, body_html)
 
 
+def source_repo_url(item: dict) -> str:
+    """Recover the repo URL an item's source file lives in, from its own gh_url.
+
+    Submodule items carry a ``gh_url`` into their own repository
+    (``…/blob/HEAD/<path>`` or ``…/tree/HEAD/<path>``); their relative links
+    resolve inside that repo, not the parent workspace.
+    """
+    url = str(item.get("gh_url", "") or "")
+    for marker in ("/blob/HEAD/", "/tree/HEAD/"):
+        if marker in url:
+            return url.split(marker, 1)[0]
+    return ""
+
+
 def build_page_map(data: dict) -> dict[str, str]:
     """Map repo-relative source paths to their generated page URLs.
 
@@ -1957,7 +1971,17 @@ def generate(
     )
 
     template = env.get_template("index.html")
-    readme_html = render_markdown_to_html(data["readme"]["body"]) if data.get("readme") else ""
+    readme_html = (
+        render_body_html(
+            data["readme"]["body"],
+            source_path="README.md",
+            page_map=build_page_map(data),
+            root_prefix="",
+            gh_repo_url=data.get("gh_repo_url", ""),
+        )
+        if data.get("readme")
+        else ""
+    )
 
     # Resolve effective base URL for feed generation and autodiscovery link.
     # base_url="-" suppresses feed generation entirely.
@@ -2001,7 +2025,7 @@ def generate(
                 ),
                 page_map=page_map,
                 root_prefix=root_prefix,
-                gh_repo_url="" if item.get("source") else gh_repo_url,
+                gh_repo_url=source_repo_url(item) if item.get("source") else gh_repo_url,
             ),
             root_prefix=root_prefix,
         )
@@ -2023,7 +2047,7 @@ def generate(
                 source_path=task.get("path", ""),
                 page_map=page_map,
                 root_prefix=root_prefix,
-                gh_repo_url="" if task.get("source") else gh_repo_url,
+                gh_repo_url=source_repo_url(task) if task.get("source") else gh_repo_url,
             ),
             root_prefix=root_prefix,
         )
@@ -2046,7 +2070,7 @@ def generate(
                 source_path=journal.get("path", ""),
                 page_map=page_map,
                 root_prefix=root_prefix,
-                gh_repo_url="" if journal.get("source") else gh_repo_url,
+                gh_repo_url=source_repo_url(journal) if journal.get("source") else gh_repo_url,
             ),
             root_prefix=root_prefix,
         )
@@ -2069,7 +2093,7 @@ def generate(
                 source_path=(f"{plugin['path']}/README.md" if plugin.get("path") else ""),
                 page_map=page_map,
                 root_prefix=root_prefix,
-                gh_repo_url="" if plugin.get("source") else gh_repo_url,
+                gh_repo_url=source_repo_url(plugin) if plugin.get("source") else gh_repo_url,
             ),
             root_prefix=root_prefix,
         )
@@ -2092,7 +2116,7 @@ def generate(
                 source_path=(f"{pkg['path']}/README.md" if pkg.get("path") else ""),
                 page_map=page_map,
                 root_prefix=root_prefix,
-                gh_repo_url="" if pkg.get("source") else gh_repo_url,
+                gh_repo_url=source_repo_url(pkg) if pkg.get("source") else gh_repo_url,
             ),
             root_prefix=root_prefix,
         )
@@ -2114,7 +2138,7 @@ def generate(
                 source_path=summary.get("path", ""),
                 page_map=page_map,
                 root_prefix=root_prefix,
-                gh_repo_url="" if summary.get("source") else gh_repo_url,
+                gh_repo_url=source_repo_url(summary) if summary.get("source") else gh_repo_url,
             ),
             root_prefix=root_prefix,
         )

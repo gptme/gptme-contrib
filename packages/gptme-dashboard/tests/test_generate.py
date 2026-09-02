@@ -4779,3 +4779,31 @@ def test_generated_task_page_has_no_dead_md_links(workspace: Path, tmp_path: Pat
     assert 'href="linked-task.md"' not in page
     assert 'id="work"' in page
     assert (output / "tasks" / "linked-task.html").exists()
+
+
+def test_source_repo_url_recovers_submodule_repo():
+    from gptme_dashboard.generate import source_repo_url
+
+    assert (
+        source_repo_url({"gh_url": "https://github.com/gptme/gptme-contrib/blob/HEAD/lessons/a.md"})
+        == "https://github.com/gptme/gptme-contrib"
+    )
+    assert (
+        source_repo_url({"gh_url": "https://github.com/gptme/gptme-contrib/tree/HEAD/skills/x"})
+        == "https://github.com/gptme/gptme-contrib"
+    )
+    assert source_repo_url({}) == ""
+
+
+def test_readme_body_links_are_retargeted_on_index(workspace: Path, tmp_path: Path):
+    """The index README body is a workspace body too — its links must resolve."""
+    (workspace / "README.md").write_text(
+        "# Home\n\nSee [the lesson](lessons/workflow/test-lesson.md).\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    index = (output / "index.html").read_text()
+    assert 'href="lessons/workflow/test-lesson.html"' in index
+    assert 'href="lessons/workflow/test-lesson.md"' not in index
