@@ -593,7 +593,7 @@ def test_generate_empty_workspace(tmp_path: Path):
 def test_render_markdown_to_html():
     """Test basic markdown rendering."""
     result = render_markdown_to_html("# Hello\n\nWorld")
-    assert "<h1>" in result
+    assert '<h1 id="hello">' in result
     assert "Hello" in result
     assert "<p>" in result
 
@@ -4614,3 +4614,168 @@ fetch(dataUrl).then(async (resp) => {{
     assert recorded.count("/data.json") == 1, recorded
     assert "/dashboard/data.json" in recorded
     assert any(p.endswith("zebra-unique-task-alpha.html") for p in recorded), recorded
+
+
+# --- Body link rewriting and heading anchors (subpath-safe nested links) ---
+
+
+def test_slugify_heading_matches_github_style():
+    from gptme_dashboard.generate import slugify_heading
+
+    assert slugify_heading("Why this work") == "why-this-work"
+    assert slugify_heading("Done when?!") == "done-when"
+    assert slugify_heading("Phase 1 — the plan") == "phase-1--the-plan"
+    assert slugify_heading("") == ""
+
+
+def test_headings_get_anchor_ids_with_dedup():
+    from gptme_dashboard.generate import render_markdown_to_html
+
+    html_out = render_markdown_to_html("# Top\n\n## Work\n\ntext\n\n## Work\n\nmore\n")
+    assert '<h1 id="top">' in html_out
+    assert '<h2 id="work">' in html_out
+    assert '<h2 id="work-1">' in html_out
+
+
+def test_in_page_fragment_link_resolves_to_generated_heading():
+    from gptme_dashboard.generate import render_body_html
+
+    html_out = render_body_html(
+        "[jump](#work)\n\n## Work\n\nbody\n",
+        source_path="tasks/a.md",
+        page_map={},
+        root_prefix="../",
+    )
+    assert 'href="#work"' in html_out
+    assert 'id="work"' in html_out
+
+
+def test_relative_md_link_rewritten_to_generated_page():
+    from gptme_dashboard.generate import render_body_html
+
+    html_out = render_body_html(
+        "See [other](other-task.md) and [lesson](../lessons/workflow/foo.md).",
+        source_path="tasks/my-task.md",
+        page_map={
+            "tasks/other-task.md": "tasks/other-task.html",
+            "lessons/workflow/foo.md": "lessons/workflow/foo.html",
+        },
+        root_prefix="../",
+    )
+    assert 'href="../tasks/other-task.html"' in html_out
+    assert 'href="../lessons/workflow/foo.html"' in html_out
+    assert ".md" not in html_out
+
+
+def test_relative_link_fragment_is_preserved():
+    from gptme_dashboard.generate import render_body_html
+
+    html_out = render_body_html(
+        "[other](other-task.md#work)",
+        source_path="tasks/my-task.md",
+        page_map={"tasks/other-task.md": "tasks/other-task.html"},
+        root_prefix="../",
+    )
+    assert 'href="../tasks/other-task.html#work"' in html_out
+
+
+def test_unmapped_relative_link_falls_back_to_github_source():
+    from gptme_dashboard.generate import render_body_html
+
+    html_out = render_body_html(
+        "[core](../ABOUT.md)",
+        source_path="tasks/my-task.md",
+        page_map={},
+        root_prefix="../",
+        gh_repo_url="https://github.com/ErikBjare/bob",
+    )
+    assert 'href="https://github.com/ErikBjare/bob/blob/HEAD/ABOUT.md"' in html_out
+
+
+def test_unmapped_relative_link_kept_when_no_github_url():
+    from gptme_dashboard.generate import render_body_html
+
+    html_out = render_body_html(
+        "[core](../ABOUT.md)",
+        source_path="tasks/my-task.md",
+        page_map={},
+        root_prefix="../",
+    )
+    assert 'href="../ABOUT.md"' in html_out
+
+
+def test_external_and_absolute_links_are_untouched():
+    from gptme_dashboard.generate import render_body_html
+
+    html_out = render_body_html(
+        "[a](https://example.com/x.md) [b](mailto:x@y.z) [c](/root/x.md) [d](//cdn/x.md)",
+        source_path="tasks/my-task.md",
+        page_map={},
+        root_prefix="../",
+        gh_repo_url="https://github.com/ErikBjare/bob",
+    )
+    assert 'href="https://example.com/x.md"' in html_out
+    assert 'href="mailto:x@y.z"' in html_out
+    assert 'href="/root/x.md"' in html_out
+    assert 'href="//cdn/x.md"' in html_out
+
+
+def test_link_escaping_out_of_workspace_is_untouched():
+    from gptme_dashboard.generate import render_body_html
+
+    html_out = render_body_html(
+        "[up](../../outside.md)",
+        source_path="tasks/my-task.md",
+        page_map={},
+        root_prefix="../",
+        gh_repo_url="https://github.com/ErikBjare/bob",
+    )
+    assert 'href="../../outside.md"' in html_out
+
+
+def test_build_page_map_covers_item_kinds(workspace: Path):
+    from gptme_dashboard.generate import build_page_map, collect_workspace_data
+
+    page_map = build_page_map(collect_workspace_data(workspace))
+    assert page_map["lessons/workflow/test-lesson.md"] == "lessons/workflow/test-lesson.html"
+    # every mapped page url is a generated .html path, never a raw source file
+    assert all(url.endswith(".html") for url in page_map.values())
+
+
+def test_generated_task_page_has_no_dead_md_links(workspace: Path, tmp_path: Path):
+    """End-to-end: a task body linking a sibling task renders a working page link."""
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir(exist_ok=True)
+    (tasks_dir / "linked-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        ---
+        # Linked Task
+
+        Target.
+        """)
+    )
+    (tasks_dir / "linking-task.md").write_text(
+        textwrap.dedent("""\
+        ---
+        state: active
+        ---
+        # Linking Task
+
+        See [the other](linked-task.md) and jump to [Work](#work).
+
+        ## Work
+
+        body
+        """)
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    page = (output / "tasks" / "linking-task.html").read_text()
+    assert 'href="../tasks/linked-task.html"' in page
+    assert 'href="linked-task.md"' not in page
+    assert 'id="work"' in page
+    assert (output / "tasks" / "linked-task.html").exists()
