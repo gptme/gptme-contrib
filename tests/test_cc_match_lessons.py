@@ -1298,9 +1298,9 @@ def test_cc_dropout_exempt_lesson_never_withheld(hook, monkeypatch, tmp_path):
     import random as _random
 
     log_dir = tmp_path / "drop"
-    exempt_path = "lessons/exempt/my-exempt-lesson.md"
+    exempt_path = tmp_path / "lessons" / "exempt" / "my-exempt-lesson.md"
 
-    # Inject a manifest that classifies this lesson as exempt (no root, uses lessons/ heuristic)
+    # Inject a manifest and use the absolute paths produced by scan_lessons.
     hook._policy_manifest_cache = {
         "version": 1,
         "validated_core": [],
@@ -1313,15 +1313,45 @@ def test_cc_dropout_exempt_lesson_never_withheld(hook, monkeypatch, tmp_path):
         monkeypatch.setenv("GPTME_SESSION_ID", "sess-cc-exempt")
 
         _random.seed(42)
-        matches = [{"path": exempt_path, "title": "Exempt Lesson"}]
+        matches = [{"path": str(exempt_path), "title": "Exempt Lesson"}]
         predicted: list = []
         kept_m, kept_p = hook._apply_lesson_dropout_multi(
             matches, predicted, "sess-cc-exempt", tmp_path
         )
         assert len(kept_m) == 1, "Exempt lesson was withheld — should be kept"
-        assert kept_m[0]["path"] == exempt_path
+        assert kept_m[0]["path"] == str(exempt_path)
     finally:
         hook._policy_manifest_cache = None
+
+
+@pytest.mark.parametrize("failure", ["malformed", "unreadable"])
+def test_cc_dropout_unreadable_manifest_falls_back_to_global_epsilon(
+    hook, monkeypatch, tmp_path, failure
+):
+    """A broken policy manifest must not abort dropout or lesson delivery."""
+    manifest_file = tmp_path / "manifest.yaml"
+    manifest_file.write_text("[" if failure == "malformed" else "{}", encoding="utf-8")
+    hook._policy_manifest_cache = None
+    monkeypatch.setattr(hook, "_policy_manifest_path", lambda: manifest_file)
+    if failure == "unreadable":
+        real_open = open
+
+        def unreadable_manifest(path, *args, **kwargs):
+            if path == manifest_file:
+                raise PermissionError("manifest is unreadable")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", unreadable_manifest)
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON", "1.0")
+    monkeypatch.setenv("LESSON_DROPOUT_LOG_DIR", str(tmp_path / "drop"))
+
+    matches = [{"path": str(tmp_path / "lessons" / "broken.md"), "title": "Broken"}]
+    kept_m, kept_p = hook._apply_lesson_dropout_multi(
+        matches, [], f"sess-cc-{failure}", tmp_path
+    )
+
+    assert kept_m == []
+    assert kept_p == []
 
 
 def test_cc_dropout_withheld_has_effective_epsilon(hook, monkeypatch, tmp_path):
