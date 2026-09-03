@@ -406,6 +406,39 @@ def test_commit_for_line_duplicate_trailers(monkeypatch):
     assert atts[0].trailer_session_id == "sess-first"
 
 
+def test_commit_for_line_uncommitted(monkeypatch):
+    """A working-tree-only line returns an uncommitted Attribution, not a crash."""
+    porcelain = (
+        "0000000000000000000000000000000000000000 84 84 1\n"
+        "author Not Committed Yet\n"
+        "author-mail <not.committed.yet>\n"
+        "author-time 1788472197\n"
+        "author-tz +0000\n"
+        "summary Version of SOUL.md from SOUL.md\n"
+        "filename SOUL.md\n"
+        "\t<!-- Trace test -->"
+    )
+
+    calls = []
+
+    def _fake(args, **kwargs):
+        calls.append(args)
+        result = MagicMock()
+        result.stdout = porcelain
+        return result
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    atts = commit_for_line("SOUL.md", 84)
+
+    # `git show` must not be invoked for the all-zeros sentinel sha.
+    assert len(calls) == 1
+    assert len(atts) == 1
+    assert atts[0].sha == "0" * 40
+    assert atts[0].author == "Not Committed Yet"
+    assert atts[0].when == datetime(2026, 9, 3, 21, 49, 57, tzinfo=timezone.utc)
+    assert atts[0].trailer_session_id is None
+
+
 # ---------------------------------------------------------------------------
 # render_text / render_json
 # ---------------------------------------------------------------------------
