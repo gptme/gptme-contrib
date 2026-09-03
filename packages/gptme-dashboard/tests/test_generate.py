@@ -4024,20 +4024,18 @@ def test_static_search_js_present(workspace: Path, tmp_path: Path):
 
 
 def test_static_search_initdynamic_sets_api_flag(workspace: Path, tmp_path: Path):
-    """initDynamic's catch block must set _apiAvailable=false then await _loadStaticSearchIndex."""
+    """initDynamic's catch block must switch to static mode without loading data."""
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
+    body = _extract_js_function(html, "initDynamic")
 
-    # Verify the catch block inside initDynamic (identified by its comment) contains both
-    # assignments — not just that the strings appear somewhere in the file.
-    catch_block = re.compile(
-        r"catch\s*\(e\)\s*\{[^}]*No backend[^}]*_apiAvailable\s*=\s*false[^}]*await\s+_loadStaticSearchIndex\(\)",
+    assert re.search(
+        r"catch\s*\(e\)\s*\{[^}]*No backend[^}]*_apiAvailable\s*=\s*false",
+        body,
         re.DOTALL,
-    )
-    assert catch_block.search(
-        html
-    ), "initDynamic catch block must set _apiAvailable=false and await _loadStaticSearchIndex()"
+    ), "initDynamic catch block must set _apiAvailable=false"
+    assert "_loadStaticSearchIndex" not in body
 
 
 def test_search_button_always_present(workspace: Path, tmp_path: Path):
@@ -4047,19 +4045,6 @@ def test_search_button_always_present(workspace: Path, tmp_path: Path):
     html = (output / "index.html").read_text()
     assert 'id="search-btn"' in html, "Search button must always be in the HTML"
 
-
-def test_static_search_initdynamic_awaits_load(workspace: Path, tmp_path: Path):
-    """_loadStaticSearchIndex must be awaited in BOTH failure paths of initDynamic."""
-    output = tmp_path / "site"
-    generate(workspace, output)
-    html = (output / "index.html").read_text()
-    # Both the !resp.ok and catch branches in initDynamic must await the loader —
-    # a single occurrence would mean one branch was missed.
-    count = html.count("await _loadStaticSearchIndex()")
-    assert count >= 2, (
-        f"initDynamic must await _loadStaticSearchIndex() in BOTH failure branches "
-        f"(!resp.ok and catch), found only {count} occurrence(s)"
-    )
 
 
 def test_static_search_haystack_includes_source(workspace: Path, tmp_path: Path):
@@ -4137,12 +4122,7 @@ def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
 
 
 def test_static_search_null_static_index_shows_loading(workspace: Path, tmp_path: Path):
-    """runSearch must show 'Loading' when _apiAvailable===false but _staticSearchIndex===null.
-
-    Race window: _apiAvailable is set to false synchronously before _loadStaticSearchIndex
-    resolves. A 250 ms debounce can fire runSearch into the _apiAvailable===false branch
-    while the index is still null, producing misleading "No results".
-    """
+    """runSearch must show 'Loading' while the lazy static index loads."""
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
@@ -4281,6 +4261,29 @@ def _extract_js_function(html: str, name: str) -> str:
             if depth == 0:
                 return html[start : i + 1]
     raise ValueError(f"Unclosed function {name!r} found in HTML")
+
+
+def test_static_search_initdynamic_does_not_load_index(workspace: Path, tmp_path: Path):
+    """initDynamic must NOT load the static index — data.json is deferred to search intent.
+
+    Both failure paths (``!resp.ok`` and ``catch``) still have to flip
+    ``_apiAvailable`` to false so runSearch takes the client-side branch, but
+    neither may pull data.json: it is multi-MB on real workspaces and would be
+    paid by every visitor who never searches.
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    body = _extract_js_function(html, "initDynamic")
+
+    assert "_loadStaticSearchIndex" not in body, (
+        "initDynamic must not load the static search index at page load; "
+        "openSearch()/runSearch() load it on first user intent"
+    )
+    assert body.count("_apiAvailable = false") >= 2, (
+        "both initDynamic failure branches (!resp.ok and catch) must set "
+        "_apiAvailable = false so runSearch uses the client-side index"
+    )
 
 
 def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Path):

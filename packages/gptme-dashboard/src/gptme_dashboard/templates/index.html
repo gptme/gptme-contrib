@@ -1867,11 +1867,12 @@ function _clientSearch(q, typeFilter, limit) {
 /** Load data.json and build the static search index, lazily, on first user intent.
  *  Never called during page load: data.json is multi-MB on real workspaces, so
  *  fetching it eagerly blows the cold-load transfer budget for every visitor who
- *  never searches. Concurrent callers share one in-flight request.
- *  Sets _staticSearchIndex to an array on success or false on failure (never stays null). */
+ *  never searches. Concurrent callers share one in-flight request. A failed request
+ *  shows the unavailable state for the current attempt, then becomes retryable. */
 function _loadStaticSearchIndex() {
-  if (_staticSearchIndex !== null) return Promise.resolve();  // already loaded (or failed)
+  if (Array.isArray(_staticSearchIndex)) return Promise.resolve();  // already loaded
   if (_staticSearchIndexPromise) return _staticSearchIndexPromise;  // in flight
+  _staticSearchIndex = null;
   _staticSearchIndexPromise = (async () => {
     try {
       const resp = await fetch('./data.json');
@@ -1882,7 +1883,11 @@ function _loadStaticSearchIndex() {
       }
       const data = await resp.json();
       _staticSearchIndex = _buildClientIndex(data);
-    } catch (_) { _staticSearchIndex = false; }
+    } catch (_) {
+      _staticSearchIndex = false;
+    } finally {
+      _staticSearchIndexPromise = null;
+    }
   })();
   return _staticSearchIndexPromise;
 }
@@ -1935,7 +1940,9 @@ async function runSearch(q, typeFilter) {
       document.getElementById('search-result-count').textContent = '';
       _loadStaticSearchIndex().then(() => {
         const input = document.getElementById('global-search-input');
-        if (input && input.value.trim() === q) runSearch(q, typeFilter);
+        const liveQuery = input ? input.value.trim() : '';
+        const liveFilter = document.getElementById('search-type-filter').value;
+        if (liveQuery.length >= 2) runSearch(liveQuery, liveFilter);
       });
       return;
     }
