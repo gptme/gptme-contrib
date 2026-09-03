@@ -41,6 +41,21 @@ ATTEMPT_KINDS: frozenset[str] = frozenset(["repetition", "infra_retry", "unknown
 # Valid values for the dropout_depth field.
 DROPOUT_DEPTH_VALUES: frozenset[str] = frozenset(["shallow", "deep"])
 
+# How a child session was spawned by its parent.  These are NOT
+# interchangeable in analysis: an ``agent-tool`` subagent shares the parent's
+# context window and token budget, while every other kind is a separate process
+# with its own.  ``None`` means the session has no recorded parent (a top-level
+# run, or a spawner that predates the field).
+DISPATCH_KINDS: frozenset[str] = frozenset(
+    [
+        "agent-tool",  # in-session Claude Code Agent tool subagent
+        "worker",  # spawn-workers.sh child
+        "gptodo-spawn",  # gptodo spawn / delegate child
+        "pm-dispatch",  # project-monitoring runloops dispatch
+        "fanout",  # autonomous-fanout.sh child
+    ]
+)
+
 # Scalar fields the ``annotate`` CLI can explicitly override. Persisting this
 # provenance lets later source extraction distinguish operator decisions from
 # values it owns and may refresh.
@@ -339,6 +354,13 @@ class SessionRecord:
     run_type: str | None = "unknown"  # deprecated: use trigger instead
     trigger: str | None = None  # how session started: timer, dispatch, manual, spawn
 
+    # Out-of-process dispatch lineage.  ``parent_session_id`` is the session_id
+    # of the session that spawned this one; ``dispatch_kind`` names the spawn
+    # mechanism (see DISPATCH_KINDS).  Together they give product roll-ups a
+    # directed join instead of timestamp-proximity guessing.
+    parent_session_id: str | None = None
+    dispatch_kind: str | None = None
+
     # Work classification
     category: str | None = None  # inferred from commits/files (what actually happened)
     recommended_category: str | None = None  # from Thompson sampling / CASCADE (what was intended)
@@ -531,6 +553,16 @@ class SessionRecord:
         # cannot persist an invalid value that consumers would silently misclassify.
         if self.attempt_kind is not None and self.attempt_kind not in ATTEMPT_KINDS:
             self.attempt_kind = None
+        # Discard unrecognized dispatch_kind values for the same reason.
+        if self.dispatch_kind is not None and self.dispatch_kind not in DISPATCH_KINDS:
+            self.dispatch_kind = None
+        # A session cannot be its own parent.  A spawner that leaks its own id
+        # into the child environment would otherwise create a self-loop that
+        # silently breaks every lineage walk.
+        if self.parent_session_id is not None and (
+            not self.parent_session_id.strip() or self.parent_session_id == self.session_id
+        ):
+            self.parent_session_id = None
         # Cross-field consistency: when explicitly not selected (False), the detail fields
         # have no meaning — clear them to prevent downstream consumers from reading an
         # inconsistent combination (e.g. dropout_selected=False, dropout_depth="deep").

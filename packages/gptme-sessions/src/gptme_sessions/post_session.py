@@ -294,6 +294,8 @@ def post_session(
     tier_version: str | None = None,
     run_type: str | None = None,
     trigger: str | None = None,
+    parent_session_id: str | None = None,
+    dispatch_kind: str | None = None,
     category: str | None = None,
     recommended_category: str | None = None,
     selector_mode: str | None = None,
@@ -329,6 +331,14 @@ def post_session(
         A/B group assignment for this session (e.g. ``"treatment"`` or ``"control"``).
     tier_version:
         Version of the context tier configuration used for this session.
+    parent_session_id:
+        ``session_id`` of the session that spawned this one.  Defaults to the
+        ``BOB_PARENT_SESSION_ID`` environment variable so spawners only have to
+        export it once.  Ignored when it equals this session's own id.
+    dispatch_kind:
+        How this session was spawned — one of
+        :data:`~gptme_sessions.record.DISPATCH_KINDS`.  Defaults to the
+        ``BOB_DISPATCH_KIND`` environment variable.
     run_type:
         Pipeline / trigger name (e.g. ``"autonomous"``, ``"monitoring"``).
         Kept for backward compatibility; prefer ``trigger`` going forward.
@@ -885,6 +895,14 @@ def post_session(
         record_kwargs["tier_version"] = tier_version
     if trigger is not None:
         record_kwargs["trigger"] = trigger
+    # Dispatch lineage: explicit argument wins, else the spawner's environment.
+    # SessionRecord validates both (unknown kind -> None, self-parent -> None).
+    resolved_parent = parent_session_id or os.environ.get("BOB_PARENT_SESSION_ID") or None
+    if resolved_parent is not None:
+        record_kwargs["parent_session_id"] = resolved_parent
+    resolved_dispatch_kind = dispatch_kind or os.environ.get("BOB_DISPATCH_KIND") or None
+    if resolved_dispatch_kind is not None:
+        record_kwargs["dispatch_kind"] = resolved_dispatch_kind
     if actual_category is not None:
         record_kwargs["category"] = actual_category
     if recommended_category is not None:
