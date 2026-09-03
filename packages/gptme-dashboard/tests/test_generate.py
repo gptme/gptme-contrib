@@ -5031,3 +5031,35 @@ def test_generate_skips_tasks_index_without_tasks(workspace: Path, tmp_path: Pat
     output = tmp_path / "site"
     generate(workspace, output)
     assert not (output / "tasks" / "index.html").exists()
+
+
+def test_tasks_index_not_overwritten_by_index_task(workspace: Path, tmp_path: Path):
+    """A task named index.md must not overwrite the tasks/index.html listing.
+
+    task_page_path("index") == "tasks/index.html", which collides with the
+    tasks index listing page.  scan_tasks must skip index.md (like readme.md)
+    so the listing page is never clobbered.
+    """
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "index.md").write_text(
+        "---\nstate: active\ncreated: 2026-01-01\n---\n# Index Task\n"
+    )
+    (tasks_dir / "normal-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-01-01\n---\n# Normal Task\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    tasks_index = output / "tasks" / "index.html"
+    assert tasks_index.exists(), "tasks/index.html must exist"
+    html = tasks_index.read_text()
+    # The listing page must contain the normal task, not the index task's detail.
+    assert "Normal Task" in html
+    # The tasks listing page must not be overwritten by the index.md detail page.
+    # If it were, it would be a plain detail page lacking the state-group nav.
+    assert "Index Task" not in html, (
+        "tasks/index.html was overwritten by index.md detail page — "
+        "scan_tasks must exclude index.md"
+    )

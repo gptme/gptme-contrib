@@ -814,7 +814,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
 
     if _gptodo_load_tasks is not None:
         for t in _gptodo_load_tasks(tasks_dir):
-            if t.path.name.lower() == "readme.md":
+            if t.path.name.lower() in ("readme.md", "index.md"):
                 continue
             if not t.metadata:
                 continue  # Skip files without YAML frontmatter
@@ -863,7 +863,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
     else:
         # gptodo not installed — fall back to manual frontmatter parsing
         for md_file in sorted(tasks_dir.glob("*.md")):
-            if md_file.name.lower() == "readme.md":
+            if md_file.name.lower() in ("readme.md", "index.md"):
                 continue
             entry = _task_to_dict(md_file)
             if entry is not None:
