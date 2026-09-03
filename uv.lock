@@ -29,6 +29,7 @@ members = [
     "gptme-attention-tracker",
     "gptme-backoff",
     "gptme-bob-status",
+    "gptme-body-protocol",
     "gptme-browser-semantic",
     "gptme-cc-memory",
     "gptme-claude-code",
@@ -1788,6 +1789,20 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
+name = "gptme-body-protocol"
+version = "0.1.0"
+source = { editable = "packages/gptme-body-protocol" }
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" }]
+provides-extras = ["test"]
+
+[[package]]
 name = "gptme-browser-semantic"
 version = "0.1.0"
 source = { editable = "packages/gptme-browser-semantic" }
@@ -2621,6 +2636,7 @@ dependencies = [
     { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
     { name = "click" },
     { name = "gptme" },
+    { name = "gptme-body-protocol" },
     { name = "httpx" },
     { name = "openai" },
     { name = "starlette" },
@@ -2645,6 +2661,7 @@ requires-dist = [
     { name = "audioop-lts", marker = "python_full_version >= '3.13'", specifier = ">=0.2" },
     { name = "click", specifier = ">=8.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
+    { name = "gptme-body-protocol", editable = "packages/gptme-body-protocol" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mavsdk", marker = "extra == 'body'", specifier = ">=2.0" },
     { name = "openai", specifier = ">=1.0.0" },

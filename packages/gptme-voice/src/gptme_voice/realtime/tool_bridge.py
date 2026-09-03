@@ -1031,7 +1031,8 @@ class GptmeToolBridge:
                 up = self._clamp(
                     float(arguments.get("up_m", 0.0)), self.body_max_altitude_m
                 )
-                position = adapter.telemetry().get("position") or {}
+                raw_position = adapter.telemetry().get("position")
+                position = raw_position if isinstance(raw_position, dict) else {}
                 current_altitude = position.get("relative_altitude_m")
                 if current_altitude is None:
                     # Without a relative-altitude fix the absolute ceiling
@@ -1066,6 +1067,8 @@ class GptmeToolBridge:
             if name == "body_turn" and "rotate" in caps:
                 yaw = self._clamp(float(arguments.get("yaw_deg", 0.0)), 180.0)
                 return await _call(adapter.turn(yaw))
+            if name == "body_interact" and "interact" in caps:
+                return await _call(adapter.interact())
         except (KeyError, TypeError, ValueError) as e:
             return {"error": f"Invalid arguments for {name}: {e}"}
         except asyncio.TimeoutError:

@@ -18,6 +18,7 @@ class FakeAdapter:
     """Records calls; full capability set unless overridden."""
 
     name = "fake"
+    requires_startup_connection = False
 
     def __init__(
         self,
@@ -229,6 +230,23 @@ def test_bridge_move_allows_level_and_descent_without_altitude_telemetry(loop):
 
     _call(bridge, "body_move", {"up_m": -3.0})
     assert adapter.calls[-1] == ("move", (0.0, 0.0, -3.0))
+
+
+def test_bridge_move_treats_non_object_position_as_missing_altitude(loop):
+    class Adapter(FakeAdapter):
+        def telemetry(self) -> dict[str, Any]:
+            return {"position": "unknown"}
+
+    adapter = Adapter()
+    bridge = GptmeToolBridge(body_adapter=adapter)
+
+    climb = _call(bridge, "body_move", {"up_m": 5.0})
+    assert "error" in climb
+    assert "altitude unknown" in climb["error"]
+    assert adapter.calls == []
+
+    _call(bridge, "body_move", {"forward_m": 1.0, "up_m": 0.0})
+    assert adapter.calls[-1] == ("move", (1.0, 0.0, 0.0))
 
 
 def test_bridge_capability_gate_blocks_uncapable_calls(loop):

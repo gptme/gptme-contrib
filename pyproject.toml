@@ -56,6 +56,7 @@ torch = { index = "pytorch-cpu" }
 # but noisy across machines. See alice journal 2026-08-18.
 numpy = { index = "pypi" }
 gptme = { git = "https://github.com/gptme/gptme.git", branch = "master" }
+gptme-body-protocol = { workspace = true }
 gptme-vision-node = { workspace = true }
 gptme-sessions = { workspace = true }
 gptme-usage = { workspace = true }

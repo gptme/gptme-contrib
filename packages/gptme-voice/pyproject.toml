@@ -13,6 +13,7 @@ dependencies = [
     "twilio>=9.0.0",
     "audioop-lts>=0.2; python_version >= '3.13'",
     "gptme",
+    "gptme-body-protocol",
     "httpx>=0.27",
 ]
 

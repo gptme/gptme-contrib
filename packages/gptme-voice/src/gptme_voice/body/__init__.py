@@ -7,6 +7,7 @@ the optional ``gptme-voice[body]`` extra.
 
 from .adapter import (
     CAP_ALTITUDE,
+    CAP_INTERACT,
     CAP_MOVE,
     CAP_ROTATE,
     BodyAdapter,
@@ -14,13 +15,16 @@ from .adapter import (
     body_adapter_from_env,
     body_tool_schemas,
 )
+from .remote_adapter import RemoteAdapter
 
 __all__ = [
     "CAP_ALTITUDE",
+    "CAP_INTERACT",
     "CAP_MOVE",
     "CAP_ROTATE",
     "BodyAdapter",
     "NullAdapter",
+    "RemoteAdapter",
     "body_adapter_from_env",
     "body_tool_schemas",
 ]

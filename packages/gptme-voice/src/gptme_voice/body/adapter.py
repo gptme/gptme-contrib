@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 CAP_MOVE = "move"  # horizontal translation (goto/move/return home)
 CAP_ROTATE = "rotate"  # yaw control
 CAP_ALTITUDE = "altitude"  # vertical control (takeoff/land/up-down)
+CAP_INTERACT = "interact"  # trigger the body's default local interaction
 
 
 @runtime_checkable
@@ -35,6 +37,7 @@ class BodyAdapter(Protocol):
 
     capabilities: set[str]
     name: str
+    requires_startup_connection: bool
 
     async def ensure_connected(self) -> None: ...
 
@@ -61,6 +64,8 @@ class BodyAdapter(Protocol):
 
     async def return_home(self) -> dict[str, Any]: ...
 
+    async def interact(self) -> dict[str, Any]: ...
+
     def telemetry(self) -> dict[str, Any]: ...
 
 
@@ -73,6 +78,7 @@ class NullAdapter:
 
     capabilities: set[str] = set()
     name = "null"
+    requires_startup_connection = False
 
     async def ensure_connected(self) -> None:
         return None
@@ -112,6 +118,9 @@ class NullAdapter:
         return await self._unsupported()
 
     async def return_home(self) -> dict[str, Any]:
+        return await self._unsupported()
+
+    async def interact(self) -> dict[str, Any]:
         return await self._unsupported()
 
 
@@ -242,6 +251,21 @@ def body_tool_schemas(adapter: BodyAdapter | None) -> list[dict]:
             }
         )
 
+    if CAP_INTERACT in caps:
+        tools.append(
+            {
+                "type": "function",
+                "name": "body_interact",
+                "description": (
+                    "Use this when the caller wants you to engage whatever is "
+                    "immediately in front of the body: pick it up, press it, "
+                    "talk to it, or otherwise interact with that nearby object "
+                    "or landmark. Do not use it to walk, turn, or stop."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            }
+        )
+
     if CAP_ALTITUDE in caps:
         tools.append(
             {
@@ -285,12 +309,54 @@ def body_adapter_from_env() -> BodyAdapter | None:
     - ``mavsdk://<system_address>`` -> MavsdkAdapter, e.g.
       ``mavsdk://udpin://0.0.0.0:14540`` (SITL) or
       ``mavsdk://serial:///dev/ttyUSB0:57600`` (SiK radio)
+    - ``tcp://<loopback>:<port>`` -> authenticated RemoteAdapter. Plaintext
+      TCP is loopback-only so the bearer token never leaves the machine.
+      The token comes from ``GPTME_VOICE_BODY_TOKEN`` rather than the URL
+      to avoid log leaks.
+
+    Remote capabilities are discovered during the asynchronous handshake, so
+    construction performs no I/O. The server connects remote adapters before
+    building its realtime tool schema.
     """
     url = os.environ.get("GPTME_VOICE_BODY_URL", "").strip()
     if not url:
         return None
     if url == "null":
         return NullAdapter()
+    if url.startswith("tcp://"):
+        parsed = urlparse(url)
+        token = os.environ.get("GPTME_VOICE_BODY_TOKEN", "")
+        if not token:
+            logger.warning(
+                "GPTME_VOICE_BODY_URL uses tcp:// but GPTME_VOICE_BODY_TOKEN "
+                "is empty (body disabled)"
+            )
+            return None
+        if (
+            parsed.hostname is None
+            or parsed.port is None
+            or parsed.path not in {"", "/"}
+        ):
+            logger.warning("Invalid remote body URL: %s (body disabled)", url)
+            return None
+        from .remote_adapter import RemoteAdapter, is_loopback_host
+
+        if not is_loopback_host(parsed.hostname):
+            logger.warning(
+                "GPTME_VOICE_BODY_URL tcp:// host %s is not loopback "
+                "(plaintext remote bodies are disabled)",
+                parsed.hostname,
+            )
+            return None
+
+        return RemoteAdapter(
+            token,
+            host=parsed.hostname,
+            port=parsed.port,
+            controller_id=os.environ.get(
+                "GPTME_VOICE_BODY_CONTROLLER_ID", "gptme-voice-local"
+            ),
+        )
     if url.startswith("mavsdk://"):
         try:
             __import__("mavsdk")

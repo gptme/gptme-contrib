@@ -51,6 +51,7 @@ class MavsdkAdapter:
 
     capabilities = {"move", "rotate", "altitude"}
     name = "mavsdk"
+    requires_startup_connection = False
 
     def __init__(
         self,
@@ -278,6 +279,9 @@ class MavsdkAdapter:
                 "status": "holding",
                 "message": "Motion stopped; holding position.",
             }
+
+    async def interact(self) -> dict[str, Any]:
+        return {"error": "MAVSDK bodies have no generic interaction capability."}
 
     async def return_home(self) -> dict[str, Any]:
         async with self._command_lock:
