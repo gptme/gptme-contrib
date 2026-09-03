@@ -1225,3 +1225,48 @@ def test_non_introspectable_two_arg_internal_typeerror_propagates_when_fallback_
     asyncio.run(_run())
     # Callback must NOT have run with incomplete data.
     assert calls == []
+
+
+def test_send_text_message_delivers_verbatim_user_turn() -> None:
+    """A text turn must arrive as the caller's own words, not a subagent result.
+
+    ``inject_message`` prefixes ``[Subagent result]:`` because it delivers async
+    tool output. The ``/local`` headless-test path needs a real user utterance so
+    the model treats it as a spoken turn and may call tools (e.g. ``look``).
+    """
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            baseline = len(fake_ws.sent)
+
+            await client.send_text_message("what do you see?")
+
+            events = fake_ws.sent[baseline:]
+            assert [e["type"] for e in events] == [
+                "conversation.item.create",
+                "response.create",
+            ]
+            item = events[0]["item"]
+            assert item["role"] == "user"
+            assert item["content"] == [
+                {"type": "input_text", "text": "what do you see?"}
+            ]
+
+            # Contrast: inject_message still tags its payload.
+            await client.inject_message("what do you see?")
+            injected = fake_ws.sent[-2]["item"]["content"][0]["text"]
+            assert injected.startswith("[Subagent result]:")
+
+            await client.disconnect()
+
+    asyncio.run(_exercise())

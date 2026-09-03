@@ -2829,6 +2829,13 @@ class VoiceServer:
                 elif data.get("type") == "commit":
                     await realtime_client.commit_audio()
 
+                elif data.get("type") == "text":
+                    # Headless text turn: drive a full conversation turn
+                    # (including tool calls) without sending audio.
+                    text = data.get("text", "")
+                    if isinstance(text, str) and text.strip():
+                        await realtime_client.send_text_message(text)
+
         except WebSocketDisconnect:
             pass  # Normal path when _schedule_hangup closes the WebSocket
         except RuntimeError as exc:

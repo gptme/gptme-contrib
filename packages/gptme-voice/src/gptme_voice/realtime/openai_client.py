@@ -644,6 +644,28 @@ class OpenAIRealtimeClient:
         # Start receiving messages
         self._receive_task = asyncio.create_task(self._receive_loop())
 
+    async def send_text_message(self, text: str) -> None:
+        """Send a caller utterance as text and trigger a response.
+
+        Text equivalent of a spoken turn: unlike :meth:`inject_message` (which
+        tags the content as an async subagent result), this delivers ``text``
+        verbatim as the user's own turn. Used by the ``/local`` test endpoint so
+        a headless client can drive a full turn — including tool calls — without
+        a microphone.
+        """
+        logger.info("Sending text message: %s...", text[:100])
+        await self._send_event(
+            "conversation.item.create",
+            {
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                }
+            },
+        )
+        await self._send_event("response.create", {})
+
     async def inject_message(self, text: str) -> None:
         """Inject a message into the conversation and trigger a response.
 
