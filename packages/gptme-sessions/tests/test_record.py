@@ -803,8 +803,257 @@ def test_step_types_commit_bearing_kinds(kind: str):
     assert "single_commit" in labels
 
 
+def test_step_types_deduplicates_same_commit_across_producers():
+    """Short/full SHA variants for one commit count as one logical delivery."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "git_commit",
+                "value": "48225d823 fix(cli): pass model alias",
+            },
+            {
+                "kind": "commit",
+                "value": "48225d823eba894164b90290cb7a6d2ecfaf3508",
+            },
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/3646",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+
+
+def test_step_types_pr_only_is_single_commit():
+    """A PR without commit details still represents one commit-bearing delivery."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/3646",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "no_commit" not in labels
+
+
+def test_step_types_two_distinct_commits_plus_pr_is_multi():
+    """PR metadata must not collapse two distinct commit identities."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "1111111 first"},
+            {"kind": "git_commit", "value": "2222222 second"},
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/3646",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_commit_message_hex_does_not_override_sha():
+    """Hex tokens in the commit message must not become the identity.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1: unanchored
+    ``search()`` picked the first 7+ hex token, collapsing two distinct
+    SHAs that shared a message token into single_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "fix: revert deadbeef123 (aaa1111)"},
+            {"kind": "commit", "value": "fix: revert deadbeef123 (bbb2222)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_trailing_sha_not_overridden_by_leading_message_token():
+    """Trajectory ``hex-token message (sha)`` must keep the trailing SHA.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1 (round 3): leading-SHA
+    precedence treated a hex token at the start of a trajectory commit message
+    as identity, collapsing two distinct trailing SHAs into single_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "deadbeef123 fix: revert (aaa1111)"},
+            {"kind": "commit", "value": "deadbeef123 fix: revert (bbb2222)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_grok_and_trajectory_same_sha_is_single():
+    """Grok leading SHA and trajectory trailing SHA for one hash are one delivery.
+
+    Kind-aware parsing is load-bearing: a global leading-SHA or trailing-SHA
+    rule would disagree across producers and stamp multi_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "git_commit",
+                "value": "aaa1111 fix: revert change (deadbeef)",
+            },
+            {"kind": "commit", "value": "deadbeef123 fix: revert change (aaa1111)"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+
+
+def test_step_types_grok_leading_sha_not_overridden_by_message_paren():
+    """Grok ``sha message (hex)`` must keep the leading SHA as identity.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1 (round 2): preferring
+    trailing parenthetical SHA made ``abc1234 fix: revert change (deadbeef)``
+    disagree with caller evidence ``abc1234``, stamping multi_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "git_commit",
+                "value": "abc1234 fix: revert change (deadbeef)",
+            },
+            {"kind": "commit", "value": "abc1234"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+
+
+def test_step_types_pr_url_and_text_same_pr_is_single():
+    """URL and ``PR #N`` forms of the same PR are one delivery.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1 (round 2): when
+    merge-SHA resolution fails, ``owner/repo#N`` and ``#N`` were counted
+    as two deliveries.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/42",
+            },
+            {"kind": "pull_request", "value": "merge PR #42"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
+
+
+def test_step_types_two_pr_only_is_multi():
+    """Distinct PR-only deliveries keep their cardinality.
+
+    Regression for gptme/gptme-contrib#1565 Greptile P1: the no-commit
+    fallback hardcoded commit_count=1, collapsing two PRs into
+    single_commit.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/3646",
+            },
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme-contrib/pull/1565",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
 def test_step_types_pr_merge_pair_is_single_commit():
-    """A paired pull_request + merge_commit is one logical delivery.
+    """A PR and its merge commit are one logical delivery.
 
     Regression for gptme/gptme-contrib#1564 Greptile P1: `gh pr merge`
     records both kinds, so entry-based counting stamped multi_commit.
@@ -838,7 +1087,7 @@ def test_step_types_pr_merge_pair_is_single_commit():
 
 
 def test_step_types_pr_merge_pair_plus_commit_is_multi():
-    """A PR-merge pair plus a separate commit is still multi_commit."""
+    """A PR merge plus a separate commit is still multi_commit."""
     r = SessionRecord(
         session_id="step-types",
         span_aggregates={
@@ -867,12 +1116,8 @@ def test_step_types_pr_merge_pair_plus_commit_is_multi():
     assert "single_commit" not in labels
 
 
-def test_step_types_unrelated_pr_and_merge_commit_not_paired():
-    """Independently sourced pull_request + merge_commit stay two deliveries.
-
-    Regression for gptme/gptme-contrib#1564 Greptile P1: count-only pairing
-    collapsed a PR URL and an unrelated merge_commit into single_commit.
-    """
+def test_step_types_pr_metadata_does_not_inflate_merge_commit():
+    """PR metadata beside one merge commit remains one logical delivery."""
     r = SessionRecord(
         session_id="step-types",
         span_aggregates={
@@ -888,8 +1133,8 @@ def test_step_types_unrelated_pr_and_merge_commit_not_paired():
     )
     r.populate_step_types()
     labels = r.step_types or []
-    assert "multi_commit" in labels
-    assert "single_commit" not in labels
+    assert "single_commit" in labels
+    assert "multi_commit" not in labels
 
 
 def test_step_types_zero_spans_not_shallow():

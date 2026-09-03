@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .deliverables import looks_like_sha
+
 # Harm category taxonomy (idea #191 — ESRRSim-inspired, 7×~3 subcategories).
 # See knowledge/technical-designs/dual-rubric-harm-category-taxonomy.md.
 HARM_CATEGORY_TAXONOMY: dict[str, str] = {
@@ -208,6 +210,102 @@ def compute_trajectory_grade(
     if denominator == 0.0:
         return None
     return numerator / denominator
+
+
+_TRAILING_PAREN_SHA_RE = re.compile(r"\(([0-9a-f]{7,40})\)\s*$", re.IGNORECASE)
+_LEADING_SHA_RE = re.compile(r"^([0-9a-f]{7,40})(?![0-9a-f])", re.IGNORECASE)
+_PR_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", re.IGNORECASE)
+_PR_NUMBER_RE = re.compile(r"PR\s+#(\d+)", re.IGNORECASE)
+
+
+def _commit_identity(value: object, kind: str | None = None) -> str | None:
+    """Extract a SHA identity from a commit deliverable value.
+
+    Producers encode identity in different slots of the same string:
+
+    - Grok ``git_commit``: ``sha message``. The leading SHA is identity; a
+      parenthetical hex token in the message is not.
+    - Trajectory ``commit`` / ``merge_commit``: ``message (sha)``. The trailing
+      parenthetical SHA is identity; a leading hex token in the message is not.
+    - Caller / unknown: a bare SHA, else the producer-encoded slot when
+      present (trailing paren, then leading SHA).
+    """
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if looks_like_sha(stripped):
+        return stripped.lower()
+    leading = _LEADING_SHA_RE.match(stripped)
+    trailing = _TRAILING_PAREN_SHA_RE.search(stripped)
+    # Grok writes ``sha message``; prefer the leading token even when the
+    # commit message itself ends in ``(hex)``.
+    if kind == "git_commit":
+        if leading:
+            return leading.group(1).lower()
+        if trailing:
+            return trailing.group(1).lower()
+        return None
+    # Trajectory and merge-commit values put the real SHA in trailing parens.
+    # A message that happens to start with a hex token must not win.
+    if trailing:
+        return trailing.group(1).lower()
+    if leading:
+        return leading.group(1).lower()
+    return None
+
+
+def _remember_commit_id(commit_ids: list[str], commit_id: str) -> None:
+    """Record a SHA, merging short/full forms of the same hash."""
+    for known_id in commit_ids:
+        if commit_id.startswith(known_id) or known_id.startswith(commit_id):
+            return
+    commit_ids.append(commit_id)
+
+
+def _pr_identity(value: object) -> str:
+    """Stable identity for a pull-request deliverable."""
+    if not isinstance(value, str):
+        return str(value)
+    stripped = value.strip()
+    url = _PR_URL_RE.search(stripped)
+    if url:
+        return f"{url.group(1).lower()}/{url.group(2).lower()}#{url.group(3)}"
+    number = _PR_NUMBER_RE.search(stripped)
+    if number:
+        return f"#{number.group(1)}"
+    return stripped.lower()
+
+
+def _remember_pr_id(pr_ids: list[str], pr_id: str) -> None:
+    """Record a PR identity, merging ``#N`` with ``owner/repo#N``.
+
+    Caller URLs normalize to ``owner/repo#N``; trajectory text like
+    ``merge PR #N`` normalizes to ``#N``. Those are the same delivery when
+    merge-SHA resolution failed and both producers recorded the PR.
+    Distinct qualified identities with the same number stay distinct.
+    """
+    if "#" not in pr_id:
+        if pr_id not in pr_ids:
+            pr_ids.append(pr_id)
+        return
+    number = pr_id.rsplit("#", 1)[-1]
+    qualified = not pr_id.startswith("#")
+    for i, known in enumerate(pr_ids):
+        if "#" not in known:
+            continue
+        if known.rsplit("#", 1)[-1] != number:
+            continue
+        known_qualified = not known.startswith("#")
+        if known == pr_id:
+            return
+        if not qualified and known_qualified:
+            return
+        if qualified and not known_qualified:
+            pr_ids[i] = pr_id
+            return
+    pr_ids.append(pr_id)
 
 
 @dataclass
@@ -645,30 +743,31 @@ class SessionRecord:
         if error_rate > 0.10:
             step_types.append("error_prone")
 
-        # Delivery patterns (from deliverable_details). Producers emit
-        # commit/git_commit/merge_commit/pull_request for commit-bearing work;
-        # counting only the literal "commit" kind stamps completed sessions
-        # as no_commit.
+        # Delivery patterns (from deliverable_details). Commit details can be
+        # duplicated across trajectory and caller producers. Prefer unique SHA
+        # identities; identical identity-less values also count once. PRs are
+        # commit-bearing fallback evidence only when no commit detail exists.
         dd = self.deliverable_details or []
-        _commit_kinds = {"commit", "git_commit", "merge_commit", "pull_request"}
-        commit_count = sum(1 for d in dd if d.get("kind") in _commit_kinds)
+        commit_ids: list[str] = []
+        anonymous_commit_values: set[str] = set()
+        for detail in dd:
+            if detail.get("kind") not in {"commit", "git_commit", "merge_commit"}:
+                continue
+            value = detail.get("value")
+            commit_id = _commit_identity(value, kind=detail.get("kind"))
+            if commit_id is None:
+                anonymous_commit_values.add(str(value))
+                continue
+            _remember_commit_id(commit_ids, commit_id)
 
-        # A single `gh pr merge` emits both pull_request and merge_commit
-        # with evidence.action == "gh_pr_merge". Pair only those — a bare
-        # pull_request (PR URL) plus an unrelated merge_commit must stay two
-        # deliveries, or LOO undercounts distinct work.
-        def _action(d: dict[str, Any]) -> str | None:
-            evidence = d.get("evidence")
-            if isinstance(evidence, dict):
-                action = evidence.get("action")
-                return action if isinstance(action, str) else None
-            return None
-
-        pr_n = sum(1 for d in dd if d.get("kind") == "pull_request" and _action(d) == "gh_pr_merge")
-        merge_n = sum(
-            1 for d in dd if d.get("kind") == "merge_commit" and _action(d) == "gh_pr_merge"
-        )
-        commit_count -= min(pr_n, merge_n)
+        commit_count = len(commit_ids) + len(anonymous_commit_values)
+        if commit_count == 0:
+            pr_ids: list[str] = []
+            for detail in dd:
+                if detail.get("kind") != "pull_request":
+                    continue
+                _remember_pr_id(pr_ids, _pr_identity(detail.get("value")))
+            commit_count = len(pr_ids)
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 
         # Partition on commit cardinality: 0 / 1 / 2+. Two-commit sessions
