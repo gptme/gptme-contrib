@@ -4046,7 +4046,6 @@ def test_search_button_always_present(workspace: Path, tmp_path: Path):
     assert 'id="search-btn"' in html, "Search button must always be in the HTML"
 
 
-
 def test_static_search_haystack_includes_source(workspace: Path, tmp_path: Path):
     """_clientSearch haystack must include item.source so source-filtered search works."""
     output = tmp_path / "site"
@@ -5166,13 +5165,11 @@ def test_static_index_not_fetched_until_user_searches(workspace: Path, tmp_path:
             # First search intent must pull the index in and then find the fixture.
             page.evaluate("() => openSearch()")
             page.fill("#global-search-input", "ZebraLazyIndexFixture")
-            page.wait_for_selector(
-                "#search-results-area a", state="attached", timeout=15000
-            )
+            page.wait_for_selector("#search-results-area a", state="attached", timeout=15000)
 
-            assert [u for u in requested if u.endswith("data.json")], (
-                f"data.json was never fetched on search intent (requests: {requested})"
-            )
+            assert [
+                u for u in requested if u.endswith("data.json")
+            ], f"data.json was never fetched on search intent (requests: {requested})"
             href = page.get_attribute("#search-results-area a", "href")
             assert href and "zebra-lazy-index-fixture" in href, href
             browser.close()
