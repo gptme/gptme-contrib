@@ -555,3 +555,125 @@ def test_loop_counts_auth_failed_as_failure(sessions_dir, monkeypatch):
     assert result.exit_code == 0, result.output
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     assert "1 succeeded, 1 failed" in plain
+
+
+# ── Dispatch lineage tests (BOB_PARENT_SESSION_ID / BOB_DISPATCH_KIND) ────────
+
+
+@pytest.mark.parametrize("backend", ["gptme", "claude", "codex"])
+def test_spawn_agent_foreground_sets_dispatch_kind(sessions_dir, backend):
+    """BOB_DISPATCH_KIND=gptodo-spawn is injected for every backend, foreground."""
+    captured_env: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return _make_proc(returncode=0, stdout="done")
+
+    with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
+        spawn_agent(
+            task_id="t-dk",
+            prompt="work",
+            backend=backend,
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert captured_env.get("BOB_DISPATCH_KIND") == "gptodo-spawn"
+
+
+@pytest.mark.parametrize("backend", ["gptme", "claude", "codex"])
+def test_spawn_agent_foreground_sets_parent_session_id_from_cc_session_id(
+    sessions_dir, backend, monkeypatch
+):
+    """BOB_PARENT_SESSION_ID is set from CC_SESSION_ID when available."""
+    monkeypatch.setenv("CC_SESSION_ID", "cc-parent-abc123")
+    monkeypatch.delenv("BOB_SESSION_ID", raising=False)
+
+    captured_env: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return _make_proc(returncode=0, stdout="done")
+
+    with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
+        spawn_agent(
+            task_id="t-pid-cc",
+            prompt="work",
+            backend=backend,
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert captured_env.get("BOB_PARENT_SESSION_ID") == "cc-parent-abc123"
+
+
+@pytest.mark.parametrize("backend", ["gptme", "claude"])
+def test_spawn_agent_foreground_sets_parent_session_id_from_bob_session_id(
+    sessions_dir, backend, monkeypatch
+):
+    """BOB_PARENT_SESSION_ID falls back to BOB_SESSION_ID when CC_SESSION_ID absent."""
+    monkeypatch.delenv("CC_SESSION_ID", raising=False)
+    monkeypatch.setenv("BOB_SESSION_ID", "bob-parent-xyz789")
+
+    captured_env: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return _make_proc(returncode=0, stdout="done")
+
+    with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
+        spawn_agent(
+            task_id="t-pid-bob",
+            prompt="work",
+            backend=backend,
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert captured_env.get("BOB_PARENT_SESSION_ID") == "bob-parent-xyz789"
+
+
+def test_spawn_agent_foreground_no_parent_session_id_when_env_absent(sessions_dir, monkeypatch):
+    """No BOB_PARENT_SESSION_ID key when neither CC_SESSION_ID nor BOB_SESSION_ID is set."""
+    monkeypatch.delenv("CC_SESSION_ID", raising=False)
+    monkeypatch.delenv("BOB_SESSION_ID", raising=False)
+
+    captured_env: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return _make_proc(returncode=0, stdout="done")
+
+    with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
+        spawn_agent(
+            task_id="t-nopid",
+            prompt="work",
+            backend="claude",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert "BOB_PARENT_SESSION_ID" not in captured_env
+    assert captured_env.get("BOB_DISPATCH_KIND") == "gptodo-spawn"
+
+
+def test_spawn_agent_foreground_dispatch_kind_overrides_inherited(sessions_dir, monkeypatch):
+    """BOB_DISPATCH_KIND=gptodo-spawn overrides any inherited value (e.g. 'worker')."""
+    monkeypatch.setenv("BOB_DISPATCH_KIND", "worker")
+
+    captured_env: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return _make_proc(returncode=0, stdout="done")
+
+    with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
+        spawn_agent(
+            task_id="t-override",
+            prompt="work",
+            backend="gptme",
+            background=False,
+            workspace=sessions_dir,
+        )
+
+    assert captured_env.get("BOB_DISPATCH_KIND") == "gptodo-spawn"
