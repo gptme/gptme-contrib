@@ -2757,6 +2757,15 @@ class VoiceServer:
         Allows testing without Twilio by connecting directly from a browser
         or test client.
         """
+        peer_host = _websocket_peer_host(websocket)
+        if peer_host not in {"127.0.0.1", "::1", "localhost"}:
+            logger.warning(
+                "Rejecting unauthenticated /local client %s",
+                peer_host or "unknown",
+            )
+            await websocket.close(code=1008)
+            return
+
         await websocket.accept()
 
         caller_id = self._get_local_caller_id(websocket)

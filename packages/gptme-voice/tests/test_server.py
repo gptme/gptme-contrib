@@ -110,6 +110,19 @@ class _DummyTwilioWebSocket(_DummyWebSocket):
         return {}
 
 
+class _PeerWebSocket:
+    def __init__(self, host: str | None) -> None:
+        self.client = None if host is None else (host, 12345)
+        self.accepted = False
+        self.close_code: int | None = None
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def close(self, code: int = 1000) -> None:
+        self.close_code = code
+
+
 class _FakeRealtimeClient:
     def __init__(self) -> None:
         self.sent_audio: list[bytes] = []
@@ -149,6 +162,17 @@ class _DummyToolBridge:
 
     def get_timings(self) -> list[dict[str, object]]:
         return []
+
+
+@pytest.mark.parametrize("host", ["203.0.113.1", None])
+def test_local_websocket_rejects_non_loopback_peer(host: str | None) -> None:
+    server = VoiceServer()
+    websocket = _PeerWebSocket(host)
+
+    asyncio.run(server.handle_local_websocket(websocket))
+
+    assert websocket.accepted is False
+    assert websocket.close_code == 1008
 
 
 def test_body_adapter_only_reaches_trusted_transports(monkeypatch) -> None:
