@@ -2098,7 +2098,7 @@ def generate(
         # data["tasks"] is already sorted by (_STATE_ORDER, title), so grouping
         # consecutively preserves the same state ordering used everywhere else.
         task_groups = [
-            {"state": state, "tasks": list(group)}
+            {"state": state, "state_slug": slugify_heading(state), "tasks": list(group)}
             for state, group in groupby(data["tasks"], key=lambda t: t["state"])
         ]
         tasks_index_html = tasks_index_template.render(

@@ -71,12 +71,12 @@ ul.task-list li:last-child { border-bottom: none; }
   <p class="meta">Every task in the workspace, including completed and cancelled ones. The
     <a href="{{ root_prefix }}index.html#tasks">dashboard listing</a> shows only open tasks.</p>
   <div class="state-nav">
-    {% for group in task_groups %}<a href="#state-{{ group.state }}">{{ group.state }} ({{ group.tasks | length }})</a>{% endfor %}
+    {% for group in task_groups %}<a href="#state-{{ group.state_slug }}">{{ group.state }} ({{ group.tasks | length }})</a>{% endfor %}
   </div>
 </header>
 
 {% for group in task_groups %}
-<section class="state-group" id="state-{{ group.state }}">
+<section class="state-group" id="state-{{ group.state_slug }}">
   <h2>{{ group.state }} <span class="count-badge">({{ group.tasks | length }})</span></h2>
   <ul class="task-list">
     {% for task in group.tasks %}

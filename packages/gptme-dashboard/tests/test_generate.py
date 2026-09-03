@@ -5008,6 +5008,9 @@ def test_generate_writes_tasks_index_page(workspace: Path, tmp_path: Path):
     (tasks_dir / "old-thing.md").write_text(
         "---\nstate: done\ncreated: 2026-01-01\n---\n# Old Thing\n"
     )
+    (tasks_dir / "custom-state.md").write_text(
+        "---\nstate: in progress?!\ncreated: 2026-02-01\n---\n# Custom State\n"
+    )
 
     output = tmp_path / "site"
     generate(workspace, output)
@@ -5021,6 +5024,9 @@ def test_generate_writes_tasks_index_page(workspace: Path, tmp_path: Path):
     # Terminal tasks are excluded from the dashboard listing but must appear here.
     assert "Old Thing" in html
     assert "Build Feature" in html
+    assert 'href="#state-in-progress"' in html
+    assert 'id="state-in-progress"' in html
+    assert 'id="state-in progress?!"' not in html
     # Links are root-relative from tasks/, i.e. one level up then back down.
     assert 'href="../tasks/old-thing.html"' in html
     assert (output / "tasks" / "old-thing.html").exists()
