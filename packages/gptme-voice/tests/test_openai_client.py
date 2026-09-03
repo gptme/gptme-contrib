@@ -1249,7 +1249,15 @@ def test_send_text_message_delivers_verbatim_user_turn() -> None:
             await client.connect()
             baseline = len(fake_ws.sent)
 
-            await client.send_text_message("what do you see?")
+            send_task = asyncio.create_task(
+                client.send_text_message("what do you see?")
+            )
+            await asyncio.sleep(0)
+            assert not send_task.done()
+            assert fake_ws.sent[baseline:] == []
+
+            await client._handle_event({"type": "session.created"})
+            await send_task
 
             events = fake_ws.sent[baseline:]
             assert [e["type"] for e in events] == [

@@ -653,6 +653,10 @@ class OpenAIRealtimeClient:
         a headless client can drive a full turn — including tool calls — without
         a microphone.
         """
+        if self._session_ready is None:
+            raise RuntimeError("Not connected to OpenAI Realtime API")
+        await self._session_ready.wait()
+
         logger.info("Sending text message: %s...", text[:100])
         await self._send_event(
             "conversation.item.create",
