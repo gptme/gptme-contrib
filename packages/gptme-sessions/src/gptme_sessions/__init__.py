@@ -75,8 +75,12 @@ from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
 from .transcript import (
     NormalizedMessage,
     SessionTranscript,
+    SessionTree,
+    SubagentNode,
     TRANSCRIPT_SCHEMA_VERSION,
+    read_session_tree,
     read_transcript,
+    subagent_record_files,
 )
 
 __all__ = [
@@ -124,8 +128,12 @@ __all__ = [
     "PostSessionResult",
     "NormalizedMessage",
     "SessionTranscript",
+    "SessionTree",
+    "SubagentNode",
     "TRANSCRIPT_SCHEMA_VERSION",
+    "read_session_tree",
     "read_transcript",
+    "subagent_record_files",
     "SpanAggregates",
     "ToolSpan",
     "extract_spans_from_cc_jsonl",

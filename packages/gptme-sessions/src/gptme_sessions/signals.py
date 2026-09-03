@@ -2993,6 +2993,16 @@ def extract_from_path(jsonl_path: Path) -> dict:
                 f"{jsonl_path} is a directory and does not contain conversation.jsonl"
             )
     msgs = parse_trajectory(jsonl_path)
+    # Include subagent records so their tool calls, tokens and file writes
+    # count toward the parent session (trajectory attribution, item 1).
+    # Best-effort: subagent resolution must never break signal extraction.
+    try:
+        from .transcript import subagent_record_files
+
+        for sub_file in subagent_record_files(jsonl_path):
+            msgs.extend(parse_trajectory(sub_file))
+    except Exception:
+        pass
     fmt = detect_format(msgs)
     if fmt == "claude_code":
         signals = extract_signals_cc(msgs)
