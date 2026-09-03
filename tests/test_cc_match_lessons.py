@@ -1230,6 +1230,18 @@ def test_extract_frontmatter_regex_fallback_quoted_active_not_dropped(
 # --- Class-aware dropout: differential epsilon (Phase 1) ---
 
 
+def test_cc_dropout_epsilon_global_non_finite(hook, monkeypatch):
+    """Non-finite LESSON_DROPOUT_EPSILON (inf, -inf, nan) must return 0.0, matching
+    the validated_core helper's handling — prevents accidental 100% dropout from a
+    mis-set env var (e.g. LESSON_DROPOUT_EPSILON=inf)."""
+    for non_finite in ("nan", "inf", "-inf"):
+        monkeypatch.setenv("LESSON_DROPOUT_EPSILON", non_finite)
+        result = hook._get_dropout_epsilon()
+        assert (
+            result == 0.0
+        ), f"Expected 0.0 for LESSON_DROPOUT_EPSILON={non_finite!r}, got {result}"
+
+
 def test_cc_dropout_epsilon_validated_core_default(hook, monkeypatch):
     monkeypatch.delenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", raising=False)
     assert hook._get_dropout_epsilon_validated_core() == 0.05
@@ -1324,10 +1336,12 @@ def test_cc_dropout_exempt_lesson_never_withheld(hook, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["malformed", "unreadable"])
-def test_cc_dropout_unreadable_manifest_falls_back_to_global_epsilon(
+def test_cc_dropout_unavailable_manifest_skips_dropout(
     hook, monkeypatch, tmp_path, failure
 ):
-    """A broken policy manifest must not abort dropout or lesson delivery."""
+    """A broken policy manifest activates the '*' sentinel, which must skip dropout
+    entirely to preserve the exempt guarantee: when classification is unreliable,
+    no lesson is withheld — not even lessons that would otherwise be holdout."""
     manifest_file = tmp_path / "manifest.yaml"
     manifest_file.write_text("[" if failure == "malformed" else "{}", encoding="utf-8")
     hook._policy_manifest_cache = None
@@ -1349,7 +1363,8 @@ def test_cc_dropout_unreadable_manifest_falls_back_to_global_epsilon(
         matches, [], f"sess-cc-{failure}", tmp_path
     )
 
-    assert kept_m == []
+    # Both failure modes activate the "*" sentinel → dropout is skipped, all lessons kept.
+    assert kept_m == matches, "Lessons should be kept when manifest is unavailable"
     assert kept_p == []
 
 
@@ -1363,9 +1378,20 @@ def test_cc_dropout_withheld_has_effective_epsilon(hook, monkeypatch, tmp_path):
     monkeypatch.setenv("LESSON_DROPOUT_LOG_DIR", str(log_dir))
     monkeypatch.setenv("GPTME_SESSION_ID", "sess-cc-eff-eps")
 
+    # Provide a real manifest (no "*" sentinel) so dropout is not suppressed.
+    # Without a manifest, the sentinel path skips dropout to preserve exempt safety.
+    hook._policy_manifest_cache = {
+        "version": 1,
+        "validated_core": [],
+        "exempt": [],
+        "holdout_population": [],  # real manifest, no "*" sentinel
+    }
     _random.seed(0)
     matches = [{"path": "lessons/holdout/my-lesson.md", "title": "Holdout"}]
-    hook._apply_lesson_dropout_multi(matches, [], "sess-cc-eff-eps", tmp_path)
+    try:
+        hook._apply_lesson_dropout_multi(matches, [], "sess-cc-eff-eps", tmp_path)
+    finally:
+        hook._policy_manifest_cache = None
 
     log_file = log_dir / "sess-cc-eff-eps.jsonl"
     records = [json.loads(line) for line in log_file.read_text().splitlines() if line]

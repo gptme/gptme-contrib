@@ -1347,7 +1347,10 @@ def _get_dropout_epsilon() -> float:
         epsilon = float(raw)
     except ValueError:
         return 0.0
-    if math.isnan(epsilon) or epsilon <= 0.0:
+    # Treat non-finite values (inf, -inf, nan) as unset — matching
+    # _get_dropout_epsilon_validated_core's handling so that a mis-set env var
+    # (e.g. LESSON_DROPOUT_EPSILON=inf) does not silently enable 100% dropout.
+    if not math.isfinite(epsilon) or epsilon <= 0.0:
         return 0.0
     return min(epsilon, 1.0)
 
@@ -1452,6 +1455,14 @@ def _apply_lesson_dropout(
     if epsilon <= 0.0 or not lessons:
         return lessons
 
+    # When the manifest is unavailable (the "*" sentinel is active), classification
+    # is unreliable — lessons that would be "exempt" in a real manifest are
+    # indistinguishable from "holdout" and could be dropped. Skip dropout entirely
+    # to preserve the PR's guarantee that exempt lessons are never withheld.
+    manifest = _load_policy_manifest()
+    if "*" in manifest.get("holdout_population", []):
+        return lessons
+
     kept: list[dict] = []
     for lesson in lessons:
         policy_class, _ = _classify_lesson(lesson.get("path", ""))
@@ -1487,6 +1498,14 @@ def _apply_lesson_dropout_multi(
     # lesson-loo-analysis.py can distinguish treatment-group sessions
     # (epsilon>0, possibly 0 withheld) from control-group sessions (epsilon=0).
     if epsilon <= 0.0:
+        return matches, predicted
+
+    # When the manifest is unavailable (the "*" sentinel is active), classification
+    # is unreliable — lessons that would be "exempt" in a real manifest are
+    # indistinguishable from "holdout" and could be dropped. Skip dropout entirely
+    # to preserve the guarantee that exempt lessons are never withheld.
+    manifest = _load_policy_manifest()
+    if "*" in manifest.get("holdout_population", []):
         return matches, predicted
 
     withheld: list[dict] = []
