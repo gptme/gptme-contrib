@@ -39,6 +39,9 @@ _MAX_INSTRUCTIONS_LEN = 4096
 # than enough for any realistic session-handshake delay while still capping
 # memory growth if the provider never confirms the session.
 _MAX_PENDING_AUDIO_CHUNKS = 500
+# A provider handshake should normally complete in under a second. Bound text
+# turns so a missing ready event cannot pin a /local connection forever.
+_SESSION_READY_TIMEOUT_SECONDS = 10.0
 # OpenAI's model catalog currently markets `gpt-realtime-2`, while the
 # Realtime API reference may still enumerate the older generic alias instead.
 # Keep the newer default, but retry once with the generic alias if the
@@ -655,7 +658,13 @@ class OpenAIRealtimeClient:
         """
         if self._session_ready is None:
             raise RuntimeError("Not connected to OpenAI Realtime API")
-        await self._session_ready.wait()
+        try:
+            await asyncio.wait_for(
+                self._session_ready.wait(),
+                timeout=_SESSION_READY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Realtime session was not ready in time") from exc
 
         logger.info("Sending text message: %s...", text[:100])
         await self._send_event(

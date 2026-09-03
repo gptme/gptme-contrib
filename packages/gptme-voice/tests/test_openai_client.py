@@ -1278,3 +1278,33 @@ def test_send_text_message_delivers_verbatim_user_turn() -> None:
             await client.disconnect()
 
     asyncio.run(_exercise())
+
+
+def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
+    """A missing provider ready event must not pin the local handler forever."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            mp.setattr(
+                "gptme_voice.realtime.openai_client._SESSION_READY_TIMEOUT_SECONDS",
+                0.01,
+            )
+            client = OpenAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            baseline = len(fake_ws.sent)
+
+            with pytest.raises(RuntimeError, match="session was not ready in time"):
+                await client.send_text_message("what do you see?")
+
+            assert fake_ws.sent[baseline:] == []
+            await client.disconnect()
+
+    asyncio.run(_exercise())
