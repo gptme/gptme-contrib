@@ -2106,13 +2106,15 @@ def generate(
             ),
         )
         task_groups = []
-        state_slug_counts: dict[str, int] = {}
+        used_state_slugs: set[str] = set()
         for state, group in groupby(grouped_tasks, key=lambda task: task["state"]):
-            state_slug = slugify_heading(state)
-            duplicate_index = state_slug_counts.get(state_slug, 0)
-            state_slug_counts[state_slug] = duplicate_index + 1
-            if duplicate_index:
-                state_slug = f"{state_slug}-{duplicate_index}"
+            base_slug = slugify_heading(state)
+            state_slug = base_slug
+            duplicate_index = 1
+            while state_slug in used_state_slugs:
+                state_slug = f"{base_slug}-{duplicate_index}"
+                duplicate_index += 1
+            used_state_slugs.add(state_slug)
             task_groups.append({"state": state, "state_slug": state_slug, "tasks": list(group)})
         tasks_index_html = tasks_index_template.render(
             workspace_name=data["workspace_name"],

@@ -5017,6 +5017,9 @@ def test_generate_writes_tasks_index_page(workspace: Path, tmp_path: Path):
     (tasks_dir / "custom-state-z.md").write_text(
         "---\nstate: in progress?!\ncreated: 2026-02-01\n---\n# Gamma Custom State\n"
     )
+    (tasks_dir / "suffix-collision.md").write_text(
+        "---\nstate: in-progress-1\ncreated: 2026-02-01\n---\n# Suffix Collision State\n"
+    )
 
     output = tmp_path / "site"
     generate(workspace, output)
@@ -5034,6 +5037,8 @@ def test_generate_writes_tasks_index_page(workspace: Path, tmp_path: Path):
     assert html.count('id="state-in-progress"') == 1
     assert html.count('href="#state-in-progress-1"') == 1
     assert html.count('id="state-in-progress-1"') == 1
+    assert html.count('href="#state-in-progress-1-1"') == 1
+    assert html.count('id="state-in-progress-1-1"') == 1
     assert 'id="state-in progress?!"' not in html
     in_progress_section = html.split('id="state-in-progress"', 1)[1].split("</section>", 1)[0]
     assert "Alpha Custom State" in in_progress_section
