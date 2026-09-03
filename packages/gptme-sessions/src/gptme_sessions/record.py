@@ -278,22 +278,20 @@ def _pr_identity(value: object) -> str:
     return stripped.lower()
 
 
-def _remember_pr_id(pr_ids: list[str], pr_id: str, *, may_alias_qualified: bool = False) -> None:
-    """Record a PR identity without guessing across repositories.
+def _pr_group_key(identity: str, aliasable_numbers: set[str]) -> str:
+    """Canonical grouping key for a PR identity.
 
-    A qualified ``owner/repo#N`` and unqualified ``#N`` may only be merged when
-    producer evidence says the unqualified value came from ``gh pr merge``.
-    Otherwise they can represent same-numbered PRs in different repositories.
+    A qualified ``owner/repo#N`` and unqualified ``#N`` only collapse into the
+    same group when producer evidence says *some* detail for PR ``N`` came
+    from ``gh pr merge`` (``aliasable_numbers``) — order-independent, so it
+    doesn't matter whether the qualified or unqualified value was seen first.
+    Otherwise they stay distinct, since same-numbered PRs can live in
+    different repositories.
     """
-    if pr_id in pr_ids:
-        return
-    if may_alias_qualified and pr_id.startswith("#"):
-        number = pr_id[1:]
-        if any(
-            not known.startswith("#") and known.rsplit("#", 1)[-1] == number for known in pr_ids
-        ):
-            return
-    pr_ids.append(pr_id)
+    if "#" not in identity:
+        return identity
+    number = identity.rsplit("#", 1)[-1]
+    return f"#{number}" if number in aliasable_numbers else identity
 
 
 @dataclass
@@ -748,45 +746,66 @@ class SessionRecord:
                 continue
             _remember_commit_id(commit_ids, commit_id)
 
-        # How many merge_commits have gh_pr_merge evidence?  Each one can "cover"
-        # exactly one gh_pr_merge PR text entry, preventing double-counting.
-        # Using a budget counter instead of a blanket any() avoids the multi-PR
-        # edge case: N PRs merged with M < N merge_commits recorded would drop
-        # all N PRs under the old any() test, under-counting by N-M deliveries.
-        _gh_pr_merge_commit_budget = sum(
-            1
+        # merge_commits with gh_pr_merge evidence: each one can "cover" exactly
+        # one gh_pr_merge-evidenced PR, preventing double-counting. A commit
+        # explicitly sha-paired to a PR (below) is removed from this pool
+        # first, so it can't *also* pay for a different, unrelated PR.
+        gh_pr_merge_commit_ids = [
+            cid
             for d in dd
             if d.get("kind") == "merge_commit"
             and isinstance(d.get("evidence"), dict)
             and d["evidence"].get("action") == "gh_pr_merge"
-        )
+            and (cid := _commit_identity(d.get("value"), kind="merge_commit")) is not None
+        ]
 
-        pr_ids: list[str] = []
+        # Numbers with at least one gh_pr_merge-evidenced detail: a qualified
+        # URL and unqualified "#N" for the same number are one delivery
+        # regardless of which one appears first in deliverable_details.
+        aliasable_numbers = {
+            number
+            for d in dd
+            if d.get("kind") == "pull_request"
+            and isinstance(d.get("evidence"), dict)
+            and d["evidence"].get("action") == "gh_pr_merge"
+            and "#" in (identity := _pr_identity(d.get("value")))
+            for number in [identity.rsplit("#", 1)[-1]]
+        }
+
+        pr_groups: dict[str, dict[str, bool]] = {}
         for detail in dd:
             if detail.get("kind") != "pull_request":
                 continue
             evidence = detail.get("evidence")
             action = evidence.get("action") if isinstance(evidence, dict) else None
             evidence_sha = evidence.get("commit_sha") if isinstance(evidence, dict) else None
-            if action == "gh_pr_merge" and _gh_pr_merge_commit_budget > 0:
-                _gh_pr_merge_commit_budget -= 1
-                continue
-            if isinstance(evidence_sha, str):
+            key = _pr_group_key(_pr_identity(detail.get("value")), aliasable_numbers)
+            group = pr_groups.setdefault(key, {"sha_paired": False, "gh_pr_merge": False})
+            if action == "gh_pr_merge":
+                group["gh_pr_merge"] = True
+            if not group["sha_paired"] and isinstance(evidence_sha, str):
                 normalized_sha = _commit_identity(evidence_sha)
                 if normalized_sha is not None and any(
                     normalized_sha.startswith(commit_id) or commit_id.startswith(normalized_sha)
                     for commit_id in commit_ids
                 ):
-                    continue
-            # gh_pr_merge evidence means this text ("merge PR #N") came from an
-            # in-repo merge — allow it to alias a qualified URL for the same number.
-            _remember_pr_id(
-                pr_ids,
-                _pr_identity(detail.get("value")),
-                may_alias_qualified=(action == "gh_pr_merge"),
-            )
+                    group["sha_paired"] = True
+                    for i, gh_cid in enumerate(gh_pr_merge_commit_ids):
+                        if normalized_sha.startswith(gh_cid) or gh_cid.startswith(normalized_sha):
+                            del gh_pr_merge_commit_ids[i]
+                            break
 
-        commit_count = len(commit_ids) + len(anonymous_commit_values) + len(pr_ids)
+        pr_count = 0
+        gh_pr_merge_commit_budget = len(gh_pr_merge_commit_ids)
+        for group in pr_groups.values():
+            if group["sha_paired"]:
+                continue
+            if group["gh_pr_merge"] and gh_pr_merge_commit_budget > 0:
+                gh_pr_merge_commit_budget -= 1
+                continue
+            pr_count += 1
+
+        commit_count = len(commit_ids) + len(anonymous_commit_values) + pr_count
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 
         # Partition on commit cardinality: 0 / 1 / 2+. Two-commit sessions
