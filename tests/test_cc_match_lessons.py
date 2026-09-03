@@ -1225,3 +1225,179 @@ def test_extract_frontmatter_regex_fallback_quoted_active_not_dropped(
     assert (
         hook.effective_status(fm2) == "active"
     ), "metadata.status: 'active' (single-quoted) must not be silently dropped"
+
+
+# --- Class-aware dropout: differential epsilon (Phase 1) ---
+
+
+def test_cc_dropout_epsilon_global_non_finite(hook, monkeypatch):
+    """Non-finite LESSON_DROPOUT_EPSILON (inf, -inf, nan) must return 0.0, matching
+    the validated_core helper's handling — prevents accidental 100% dropout from a
+    mis-set env var (e.g. LESSON_DROPOUT_EPSILON=inf)."""
+    for non_finite in ("nan", "inf", "-inf"):
+        monkeypatch.setenv("LESSON_DROPOUT_EPSILON", non_finite)
+        result = hook._get_dropout_epsilon()
+        assert (
+            result == 0.0
+        ), f"Expected 0.0 for LESSON_DROPOUT_EPSILON={non_finite!r}, got {result}"
+
+
+def test_cc_dropout_epsilon_validated_core_default(hook, monkeypatch):
+    monkeypatch.delenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", raising=False)
+    assert hook._get_dropout_epsilon_validated_core() == 0.05
+
+
+def test_cc_dropout_epsilon_validated_core_env_override(hook, monkeypatch):
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", "0.10")
+    assert hook._get_dropout_epsilon_validated_core() == 0.10
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", "0.0")
+    assert hook._get_dropout_epsilon_validated_core() == 0.0
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", "2.5")
+    assert hook._get_dropout_epsilon_validated_core() == 1.0
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", "not-a-float")
+    assert hook._get_dropout_epsilon_validated_core() == 0.05  # fallback to default
+    for non_finite in ("nan", "inf", "-inf"):
+        monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", non_finite)
+        assert hook._get_dropout_epsilon_validated_core() == 0.05
+
+
+def test_cc_dropout_epsilon_for_class(hook, monkeypatch):
+    monkeypatch.delenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", raising=False)
+    # exempt is always 0
+    assert hook._get_dropout_epsilon_for_class("exempt", 0.20) == 0.0
+    assert hook._get_dropout_epsilon_for_class("exempt", 1.0) == 0.0
+    # validated_core uses lower env-controlled epsilon (default 0.05)
+    eff = hook._get_dropout_epsilon_for_class("validated_core", 0.20)
+    assert eff == 0.05
+    assert eff < 0.20
+    # holdout/unknown use global epsilon
+    assert hook._get_dropout_epsilon_for_class("holdout", 0.20) == 0.20
+    assert hook._get_dropout_epsilon_for_class("unknown", 0.15) == 0.15
+
+
+def test_cc_dropout_epsilon_for_class_global_zero_disables_validated_core(
+    hook, monkeypatch
+):
+    """Global epsilon=0 (documented no-op default) must disable validated_core
+    dropout too, not just holdout/unknown — validated_core must not use its own
+    (nonzero-by-default) epsilon while the global switch is off."""
+    monkeypatch.delenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", raising=False)
+    assert hook._get_dropout_epsilon_for_class("validated_core", 0.0) == 0.0
+    assert hook._get_dropout_epsilon_for_class("holdout", 0.0) == 0.0
+    assert hook._get_dropout_epsilon_for_class("unknown", 0.0) == 0.0
+    # exempt stays 0 regardless
+    assert hook._get_dropout_epsilon_for_class("exempt", 0.0) == 0.0
+
+
+def test_cc_dropout_epsilon_for_class_validated_core_bounded_by_global(
+    hook, monkeypatch
+):
+    """validated_core epsilon must never exceed the global epsilon — otherwise
+    a small global dropout (meant to be gentle) would withhold the lessons the
+    feature is meant to preserve at a HIGHER rate than ordinary lessons."""
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON_VALIDATED_CORE", "0.05")
+    # global epsilon (0.01) is smaller than the validated_core default (0.05):
+    # the effective rate must be clamped down to the global epsilon.
+    assert hook._get_dropout_epsilon_for_class("validated_core", 0.01) == 0.01
+    # global epsilon (0.20) is larger than validated_core (0.05): the smaller
+    # class-specific rate wins, as before.
+    assert hook._get_dropout_epsilon_for_class("validated_core", 0.20) == 0.05
+
+
+def test_cc_dropout_exempt_lesson_never_withheld(hook, monkeypatch, tmp_path):
+    """An exempt lesson must never be withheld even at epsilon=1.0 in the CC hook."""
+    import random as _random
+
+    log_dir = tmp_path / "drop"
+    exempt_path = tmp_path / "lessons" / "exempt" / "my-exempt-lesson.md"
+
+    # Inject a manifest and use the absolute paths produced by scan_lessons.
+    hook._policy_manifest_cache = {
+        "version": 1,
+        "validated_core": [],
+        "exempt": ["exempt/my-exempt-lesson"],
+        "holdout_population": [],
+    }
+    try:
+        monkeypatch.setenv("LESSON_DROPOUT_EPSILON", "1.0")
+        monkeypatch.setenv("LESSON_DROPOUT_LOG_DIR", str(log_dir))
+        monkeypatch.setenv("GPTME_SESSION_ID", "sess-cc-exempt")
+
+        _random.seed(42)
+        matches = [{"path": str(exempt_path), "title": "Exempt Lesson"}]
+        predicted: list = []
+        kept_m, kept_p = hook._apply_lesson_dropout_multi(
+            matches, predicted, "sess-cc-exempt", tmp_path
+        )
+        assert len(kept_m) == 1, "Exempt lesson was withheld — should be kept"
+        assert kept_m[0]["path"] == str(exempt_path)
+    finally:
+        hook._policy_manifest_cache = None
+
+
+@pytest.mark.parametrize("failure", ["malformed", "unreadable"])
+def test_cc_dropout_unavailable_manifest_skips_dropout(
+    hook, monkeypatch, tmp_path, failure
+):
+    """A broken policy manifest activates the '*' sentinel, which must skip dropout
+    entirely to preserve the exempt guarantee: when classification is unreliable,
+    no lesson is withheld — not even lessons that would otherwise be holdout."""
+    manifest_file = tmp_path / "manifest.yaml"
+    manifest_file.write_text("[" if failure == "malformed" else "{}", encoding="utf-8")
+    hook._policy_manifest_cache = None
+    monkeypatch.setattr(hook, "_policy_manifest_path", lambda: manifest_file)
+    if failure == "unreadable":
+        real_open = open
+
+        def unreadable_manifest(path, *args, **kwargs):
+            if path == manifest_file:
+                raise PermissionError("manifest is unreadable")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", unreadable_manifest)
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON", "1.0")
+    monkeypatch.setenv("LESSON_DROPOUT_LOG_DIR", str(tmp_path / "drop"))
+
+    matches = [{"path": str(tmp_path / "lessons" / "broken.md"), "title": "Broken"}]
+    kept_m, kept_p = hook._apply_lesson_dropout_multi(
+        matches, [], f"sess-cc-{failure}", tmp_path
+    )
+
+    # Both failure modes activate the "*" sentinel → dropout is skipped, all lessons kept.
+    assert kept_m == matches, "Lessons should be kept when manifest is unavailable"
+    assert kept_p == []
+
+
+def test_cc_dropout_withheld_has_effective_epsilon(hook, monkeypatch, tmp_path):
+    """Withheld records in CC hook must include effective_epsilon."""
+    import json
+    import random as _random
+
+    log_dir = tmp_path / "drop"
+    monkeypatch.setenv("LESSON_DROPOUT_EPSILON", "1.0")
+    monkeypatch.setenv("LESSON_DROPOUT_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("GPTME_SESSION_ID", "sess-cc-eff-eps")
+
+    # Provide a real manifest (no "*" sentinel) so dropout is not suppressed.
+    # Without a manifest, the sentinel path skips dropout to preserve exempt safety.
+    hook._policy_manifest_cache = {
+        "version": 1,
+        "validated_core": [],
+        "exempt": [],
+        "holdout_population": [],  # real manifest, no "*" sentinel
+    }
+    _random.seed(0)
+    matches = [{"path": "lessons/holdout/my-lesson.md", "title": "Holdout"}]
+    try:
+        hook._apply_lesson_dropout_multi(matches, [], "sess-cc-eff-eps", tmp_path)
+    finally:
+        hook._policy_manifest_cache = None
+
+    log_file = log_dir / "sess-cc-eff-eps.jsonl"
+    records = [json.loads(line) for line in log_file.read_text().splitlines() if line]
+    assert records, "No log written"
+    withheld = records[0]["withheld"]
+    assert withheld, "No withheld lessons"
+    assert (
+        "effective_epsilon" in withheld[0]
+    ), "effective_epsilon missing from withheld record in CC hook"

@@ -1347,9 +1347,52 @@ def _get_dropout_epsilon() -> float:
         epsilon = float(raw)
     except ValueError:
         return 0.0
-    if epsilon <= 0.0:
+    # Treat non-finite values (inf, -inf, nan) as unset — matching
+    # _get_dropout_epsilon_validated_core's handling so that a mis-set env var
+    # (e.g. LESSON_DROPOUT_EPSILON=inf) does not silently enable 100% dropout.
+    if not math.isfinite(epsilon) or epsilon <= 0.0:
         return 0.0
     return min(epsilon, 1.0)
+
+
+def _get_dropout_epsilon_validated_core() -> float:
+    """Get dropout epsilon for validated_core lessons (default 0.05).
+
+    Only meaningful when global LESSON_DROPOUT_EPSILON > 0 (the global switch activates
+    the dropout system; this controls how aggressively validated_core lessons are sampled).
+    Override with LESSON_DROPOUT_EPSILON_VALIDATED_CORE env var.
+    """
+    raw = os.environ.get("LESSON_DROPOUT_EPSILON_VALIDATED_CORE")
+    if raw is None:
+        return 0.05
+    try:
+        epsilon = float(raw)
+    except ValueError:
+        return 0.05
+    # float() accepts NaN and infinities, but neither is a probability.
+    # Treat non-finite values as unset instead of clamping infinity to 1.0.
+    if not math.isfinite(epsilon):
+        return 0.05
+    return min(max(epsilon, 0.0), 1.0)
+
+
+def _get_dropout_epsilon_for_class(policy_class: str, global_epsilon: float) -> float:
+    """Return the effective dropout probability for a given policy class.
+
+    - exempt: always 0.0 (never withheld, regardless of global_epsilon)
+    - validated_core: min(global_epsilon, LESSON_DROPOUT_EPSILON_VALIDATED_CORE)
+      (default 0.05), but only once the global switch (LESSON_DROPOUT_EPSILON) is > 0.
+      Bounded by global_epsilon so the per-class differential can only reduce
+      dropout relative to the global setting, never exceed it.
+    - holdout / unknown: global_epsilon (LESSON_DROPOUT_EPSILON)
+    """
+    if policy_class == "exempt":
+        return 0.0
+    if global_epsilon <= 0.0:
+        return 0.0
+    if policy_class == "validated_core":
+        return min(global_epsilon, _get_dropout_epsilon_validated_core())
+    return global_epsilon
 
 
 def _get_dropout_log_dir(workspace: Path) -> Path:
@@ -1402,6 +1445,9 @@ def _apply_lesson_dropout(
     """Randomly withhold lessons for causal leave-one-out analysis.
 
     Controlled by LESSON_DROPOUT_EPSILON (float [0,1]). Default 0 = no-op.
+    Uses class-aware epsilon: validated_core uses LESSON_DROPOUT_EPSILON_VALIDATED_CORE
+    (default 0.05), exempt is never withheld.
+
     Does NOT log — logging is done by _apply_lesson_dropout_multi which
     collects withheld lessons from both pools into one unified record.
     """
@@ -1409,11 +1455,20 @@ def _apply_lesson_dropout(
     if epsilon <= 0.0 or not lessons:
         return lessons
 
+    # When the manifest is unavailable (the "*" sentinel is active), classification
+    # is unreliable — lessons that would be "exempt" in a real manifest are
+    # indistinguishable from "holdout" and could be dropped. Skip dropout entirely
+    # to preserve the PR's guarantee that exempt lessons are never withheld.
+    manifest = _load_policy_manifest()
+    if "*" in manifest.get("holdout_population", []):
+        return lessons
+
     kept: list[dict] = []
     for lesson in lessons:
-        if random.random() < epsilon:
-            # Withheld — skip
-            pass
+        policy_class, _ = _classify_lesson(lesson.get("path", ""))
+        eff_epsilon = _get_dropout_epsilon_for_class(policy_class, epsilon)
+        if eff_epsilon > 0.0 and random.random() < eff_epsilon:
+            pass  # Withheld — skip
         else:
             kept.append(lesson)
 
@@ -1426,11 +1481,16 @@ def _apply_lesson_dropout_multi(
     session_id: str,
     workspace: Path,
 ) -> tuple[list[dict], list[dict]]:
-    """Apply dropout to both matches and predicted, logging ONE unified record.
+    """Apply class-aware dropout to both matches and predicted, logging ONE unified record.
 
     Processes both pools together so that the analysis script receives a
     single JSONL record per hook invocation containing all withheld lessons,
     not two split records with partial withheld lists.
+
+    Class-aware epsilons (all require global LESSON_DROPOUT_EPSILON > 0 to activate):
+    - exempt: 0.0 (never withheld regardless of global epsilon)
+    - validated_core: LESSON_DROPOUT_EPSILON_VALIDATED_CORE (default 0.05)
+    - holdout / unknown: LESSON_DROPOUT_EPSILON (global epsilon)
     """
     epsilon = _get_dropout_epsilon()
 
@@ -1440,14 +1500,28 @@ def _apply_lesson_dropout_multi(
     if epsilon <= 0.0:
         return matches, predicted
 
+    # When the manifest is unavailable (the "*" sentinel is active), classification
+    # is unreliable — lessons that would be "exempt" in a real manifest are
+    # indistinguishable from "holdout" and could be dropped. Skip dropout entirely
+    # to preserve the guarantee that exempt lessons are never withheld.
+    manifest = _load_policy_manifest()
+    if "*" in manifest.get("holdout_population", []):
+        return matches, predicted
+
     withheld: list[dict] = []
 
     def _do_dropout(lessons: list[dict]) -> list[dict]:
         kept: list[dict] = []
         for lesson in lessons:
-            if random.random() < epsilon:
+            policy_class, _ = _classify_lesson(lesson.get("path", ""))
+            eff_epsilon = _get_dropout_epsilon_for_class(policy_class, epsilon)
+            if eff_epsilon > 0.0 and random.random() < eff_epsilon:
                 withheld.append(
-                    {"path": lesson["path"], "title": lesson.get("title", "")}
+                    {
+                        "path": lesson["path"],
+                        "title": lesson.get("title", ""),
+                        "effective_epsilon": eff_epsilon,
+                    }
                 )
             else:
                 kept.append(lesson)
