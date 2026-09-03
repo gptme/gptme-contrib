@@ -12,6 +12,7 @@ except ImportError:
 def isolated_local_embedding_cache(tmp_path, monkeypatch):
     """Keep the local embedding cache out of ~/.cache during tests."""
     monkeypatch.setenv("GPTME_RAG_EMBEDDING_CACHE", str(tmp_path / "local-embeddings.sqlite"))
+    yield
 
 
 @pytest.fixture(autouse=True)
