@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from _thread import LockType
 from collections.abc import Callable
 from pathlib import Path
 
@@ -287,7 +288,7 @@ def cached_encode(
     model_name: str,
     cache: "_SQLiteEmbeddingCache | None",
     stats: dict[str, int] | None = None,
-    stats_lock: threading.Lock | None = None,
+    stats_lock: LockType | None = None,
 ) -> list[list[float]]:
     """Embed ``texts`` with ``encode``, computing only cache misses.
 
@@ -335,7 +336,7 @@ def cached_encode(
 
 def _increment_cache_stats(
     stats: dict[str, int] | None,
-    lock: threading.Lock | None,
+    lock: LockType | None,
     *,
     cached: int,
     embedded: int,
