@@ -278,32 +278,20 @@ def _pr_identity(value: object) -> str:
     return stripped.lower()
 
 
-def _remember_pr_id(pr_ids: list[str], pr_id: str) -> None:
-    """Record a PR identity, merging ``#N`` with ``owner/repo#N``.
+def _remember_pr_id(pr_ids: list[str], pr_id: str, *, may_alias_qualified: bool = False) -> None:
+    """Record a PR identity without guessing across repositories.
 
-    Caller URLs normalize to ``owner/repo#N``; trajectory text like
-    ``merge PR #N`` normalizes to ``#N``. Those are the same delivery when
-    merge-SHA resolution failed and both producers recorded the PR.
-    Distinct qualified identities with the same number stay distinct.
+    A qualified ``owner/repo#N`` and unqualified ``#N`` may only be merged when
+    producer evidence says the unqualified value came from ``gh pr merge``.
+    Otherwise they can represent same-numbered PRs in different repositories.
     """
-    if "#" not in pr_id:
-        if pr_id not in pr_ids:
-            pr_ids.append(pr_id)
+    if pr_id in pr_ids:
         return
-    number = pr_id.rsplit("#", 1)[-1]
-    qualified = not pr_id.startswith("#")
-    for i, known in enumerate(pr_ids):
-        if "#" not in known:
-            continue
-        if known.rsplit("#", 1)[-1] != number:
-            continue
-        known_qualified = not known.startswith("#")
-        if known == pr_id:
-            return
-        if not qualified and known_qualified:
-            return
-        if qualified and not known_qualified:
-            pr_ids[i] = pr_id
+    if may_alias_qualified and pr_id.startswith("#"):
+        number = pr_id[1:]
+        if any(
+            not known.startswith("#") and known.rsplit("#", 1)[-1] == number for known in pr_ids
+        ):
             return
     pr_ids.append(pr_id)
 
@@ -745,8 +733,8 @@ class SessionRecord:
 
         # Delivery patterns (from deliverable_details). Commit details can be
         # duplicated across trajectory and caller producers. Prefer unique SHA
-        # identities; identical identity-less values also count once. PRs are
-        # commit-bearing fallback evidence only when no commit detail exists.
+        # identities; identical identity-less values also count once. A PR is
+        # metadata only when its evidence ties it to one of those commits.
         dd = self.deliverable_details or []
         commit_ids: list[str] = []
         anonymous_commit_values: set[str] = set()
@@ -760,14 +748,36 @@ class SessionRecord:
                 continue
             _remember_commit_id(commit_ids, commit_id)
 
-        commit_count = len(commit_ids) + len(anonymous_commit_values)
-        if commit_count == 0:
-            pr_ids: list[str] = []
-            for detail in dd:
-                if detail.get("kind") != "pull_request":
+        pr_ids: list[str] = []
+        for detail in dd:
+            if detail.get("kind") != "pull_request":
+                continue
+            evidence = detail.get("evidence")
+            action = evidence.get("action") if isinstance(evidence, dict) else None
+            evidence_sha = evidence.get("commit_sha") if isinstance(evidence, dict) else None
+            if action == "gh_pr_merge" and any(
+                isinstance(commit_detail.get("evidence"), dict)
+                and commit_detail["evidence"].get("action") == "gh_pr_merge"
+                for commit_detail in dd
+                if commit_detail.get("kind") == "merge_commit"
+            ):
+                continue
+            if isinstance(evidence_sha, str):
+                normalized_sha = _commit_identity(evidence_sha)
+                if normalized_sha is not None and any(
+                    normalized_sha.startswith(commit_id) or commit_id.startswith(normalized_sha)
+                    for commit_id in commit_ids
+                ):
                     continue
-                _remember_pr_id(pr_ids, _pr_identity(detail.get("value")))
-            commit_count = len(pr_ids)
+            # gh_pr_merge evidence means this text ("merge PR #N") came from an
+            # in-repo merge — allow it to alias a qualified URL for the same number.
+            _remember_pr_id(
+                pr_ids,
+                _pr_identity(detail.get("value")),
+                may_alias_qualified=(action == "gh_pr_merge"),
+            )
+
+        commit_count = len(commit_ids) + len(anonymous_commit_values) + len(pr_ids)
         file_count = sum(1 for d in dd if d.get("kind") == "file")
 
         # Partition on commit cardinality: 0 / 1 / 2+. Two-commit sessions
