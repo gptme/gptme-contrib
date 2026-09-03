@@ -9,7 +9,7 @@ import sys
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TextIO
 
@@ -171,12 +171,28 @@ class SessionStore:
                 os.fsync(f.fileno())
         return self.path
 
-    def load_all(self) -> list[SessionRecord]:
-        """Load all session records from the JSONL store."""
-        if not self.path.exists():
+    def archive_paths(self) -> list[Path]:
+        """Rotated archive files for this store, oldest name first.
+
+        Named ``<stem>-archive-*.jsonl`` next to the active file (e.g.
+        ``session-records-archive-2026-07.jsonl``).  Archives are append-only:
+        ``rotate()`` writes to them and nothing ever rewrites them, which is
+        the whole point — the active file stays small enough that a
+        read-modify-write cycle is cheap.
+        """
+        stem = (
+            self.path.name[: -len(".jsonl")]
+            if self.path.name.endswith(".jsonl")
+            else self.path.stem
+        )
+        return sorted(self.sessions_dir.glob(f"{stem}-archive-*.jsonl"))
+
+    def _load_path(self, path: Path) -> list[SessionRecord]:
+        """Parse one JSONL file, skipping malformed lines."""
+        if not path.exists():
             return []
         records = []
-        with open(self.path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -184,6 +200,28 @@ class SessionStore:
                         records.append(SessionRecord.from_dict(json.loads(line)))
                     except (json.JSONDecodeError, TypeError, AttributeError):
                         continue
+        return records
+
+    def load_all(self, include_archives: bool = False) -> list[SessionRecord]:
+        """Load session records from the JSONL store.
+
+        Defaults to the **active file only**.  That default is load-bearing:
+        every mutation path is ``load_all()`` → mutate → ``rewrite()``, and
+        ``rewrite()`` has upsert semantics, so pulling archived records into
+        that list would re-inject the entire history back into the active file
+        on the next field update — exactly the write amplification rotation
+        exists to remove.
+
+        Pass ``include_archives=True`` for read-only history consumers
+        (analytics, blame, LOO). Archived records come first, so the result
+        stays roughly chronological.
+        """
+        if not include_archives:
+            return self._load_path(self.path)
+        records: list[SessionRecord] = []
+        for archive in self.archive_paths():
+            records.extend(self._load_path(archive))
+        records.extend(self._load_path(self.path))
         return records
 
     def rewrite(self, records: list[SessionRecord]) -> Path:
@@ -253,6 +291,145 @@ class SessionStore:
                 tmp_path.unlink(missing_ok=True)
                 raise
         return self.path
+
+    def rotate(self, keep_days: int = 30, now: datetime | None = None) -> dict[str, int]:
+        """Move records older than ``keep_days`` out of the active file.
+
+        Why this exists: every per-session field update (grade write-back,
+        ``stamp_attempt_kind``, alignment, bandit stamp) is a full
+        ``rewrite()`` of the active file.  With an unbounded ledger that is a
+        multi-megabyte read **and** write per update, several times per
+        session — measured at 90-150 GB/day of logical writes against a
+        ledger that only grows ~2 KB per session.  Rotation caps the cost of
+        a rewrite at ``keep_days`` worth of records.
+
+        **Move, never delete.**  Archives are appended and fsynced *before*
+        the active file is replaced, so a crash at any point leaves records
+        duplicated (recoverable) rather than lost.  Re-running is safe:
+        records whose ``session_id`` is already present in the target archive
+        are not appended twice.
+
+        Records with a missing or unparseable ``timestamp`` are **kept
+        active** — guessing an age for them risks archiving something a
+        mutation path still needs.  Malformed JSONL lines are likewise
+        preserved in place.
+
+        Returns counts: ``archived``, ``kept``, ``skipped_duplicate``.
+        """
+        if keep_days < 0:
+            raise ValueError("keep_days must be >= 0")
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=keep_days)
+
+        with self.lock():
+            if not self.path.exists():
+                return {"archived": 0, "kept": 0, "skipped_duplicate": 0}
+
+            keep_lines: list[str] = []
+            by_month: dict[str, list[tuple[str, str]]] = {}  # month -> [(session_id, raw)]
+            with open(self.path, encoding="utf-8") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    month = self._archive_month(raw, cutoff)
+                    if month is None:
+                        keep_lines.append(raw)
+                        continue
+                    try:
+                        session_id = str(json.loads(raw).get("session_id", ""))
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        keep_lines.append(raw)
+                        continue
+                    by_month.setdefault(month, []).append((session_id, raw))
+
+            if not by_month:
+                return {"archived": 0, "kept": len(keep_lines), "skipped_duplicate": 0}
+
+            archived = 0
+            skipped = 0
+            for month, entries in sorted(by_month.items()):
+                archive_path = (
+                    self.sessions_dir / f"{self.path.name[: -len('.jsonl')]}-archive-{month}.jsonl"
+                )
+                existing = self._archive_session_ids(archive_path)
+                # Append first, fsync, and only then drop from the active file.
+                with open(archive_path, "a", encoding="utf-8") as af:
+                    for session_id, raw in entries:
+                        if session_id and session_id in existing:
+                            skipped += 1
+                            continue
+                        af.write(raw + "\n")
+                        if session_id:
+                            existing.add(session_id)
+                        archived += 1
+                    af.flush()
+                    os.fsync(af.fileno())
+
+            tmp_path = self.path.with_name(
+                f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+            )
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    for line in keep_lines:
+                        f.write(line + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                tmp_path.replace(self.path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+
+        logger.info(
+            "rotated session store: archived=%d kept=%d skipped_duplicate=%d (keep_days=%d)",
+            archived,
+            len(keep_lines),
+            skipped,
+            keep_days,
+        )
+        return {"archived": archived, "kept": len(keep_lines), "skipped_duplicate": skipped}
+
+    @staticmethod
+    def _archive_month(raw: str, cutoff: datetime) -> str | None:
+        """Return the ``YYYY-MM`` archive bucket for a raw line, or None to keep it.
+
+        Keeps anything it cannot confidently age out: malformed JSON, a
+        missing/unparseable timestamp, or a timestamp at-or-after the cutoff.
+        """
+        try:
+            ts = json.loads(raw).get("timestamp")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return None
+        if not isinstance(ts, str) or not ts:
+            return None
+        try:
+            parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if parsed >= cutoff:
+            return None
+        return parsed.strftime("%Y-%m")
+
+    @staticmethod
+    def _archive_session_ids(archive_path: Path) -> set[str]:
+        """session_ids already present in an archive file (for idempotent rotation)."""
+        ids: set[str] = set()
+        if not archive_path.exists():
+            return ids
+        with open(archive_path, encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    sid = json.loads(raw).get("session_id")
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    continue
+                if sid:
+                    ids.add(str(sid))
+        return ids
 
     def stamp_attempt_kind(self, session_id: str, attempt_kind: str) -> bool:
         """Stamp the eval attempt classification onto an already-written record.

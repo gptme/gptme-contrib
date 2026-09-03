@@ -3691,6 +3691,69 @@ def stamp_attempt_kind(ctx: click.Context, session_id: str, attempt_kind: str) -
         raise click.ClickException(f"no session record found for session_id={full_id!r}")
 
 
+@cli.command("rotate")
+@click.option(
+    "--keep-days",
+    type=int,
+    default=30,
+    show_default=True,
+    help="Keep records newer than this many days in the active file.",
+)
+@click.option("--dry-run", is_flag=True, help="Report what would move; change nothing.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the counts as JSON.")
+@click.pass_context
+def rotate(ctx: click.Context, keep_days: int, dry_run: bool, as_json: bool) -> None:
+    """Move records older than --keep-days into monthly archive files.
+
+    Every per-session field update rewrites the whole active store, so an
+    unbounded ledger turns a ~2 KB update into a multi-megabyte read+write.
+    Rotation caps that cost. Records are *moved*, never deleted: archives are
+    appended and fsynced before the active file is replaced, and re-running is
+    idempotent.
+
+    History consumers should read active + archives together (``load_all(
+    include_archives=True)``) — check yours before scheduling this.
+
+    \b
+        gptme-sessions rotate --keep-days 30 --dry-run
+    """
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    by_month: dict[str, int] = {}
+    result: dict[str, object]
+    if dry_run:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
+        kept = 0
+        if store.path.exists():
+            with open(store.path, encoding="utf-8") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    month = SessionStore._archive_month(raw, cutoff)
+                    if month is None:
+                        kept += 1
+                    else:
+                        by_month[month] = by_month.get(month, 0) + 1
+        result = {
+            "dry_run": True,
+            "archived": sum(by_month.values()),
+            "kept": kept,
+            "by_month": by_month,
+        }
+    else:
+        result = {"dry_run": False, **store.rotate(keep_days=keep_days)}
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        prefix = "would archive" if dry_run else "archived"
+        click.echo(f"{prefix} {result['archived']} record(s); kept {result['kept']} active")
+        if result.get("skipped_duplicate"):
+            click.echo(f"skipped {result['skipped_duplicate']} already-archived record(s)")
+        for month, count in sorted(by_month.items()):
+            click.echo(f"  {month}: {count}")
+
+
 def main() -> int:
     """Entry point for console_scripts (backward-compatible wrapper).
 
