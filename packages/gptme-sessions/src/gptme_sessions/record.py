@@ -748,6 +748,19 @@ class SessionRecord:
                 continue
             _remember_commit_id(commit_ids, commit_id)
 
+        # How many merge_commits have gh_pr_merge evidence?  Each one can "cover"
+        # exactly one gh_pr_merge PR text entry, preventing double-counting.
+        # Using a budget counter instead of a blanket any() avoids the multi-PR
+        # edge case: N PRs merged with M < N merge_commits recorded would drop
+        # all N PRs under the old any() test, under-counting by N-M deliveries.
+        _gh_pr_merge_commit_budget = sum(
+            1
+            for d in dd
+            if d.get("kind") == "merge_commit"
+            and isinstance(d.get("evidence"), dict)
+            and d["evidence"].get("action") == "gh_pr_merge"
+        )
+
         pr_ids: list[str] = []
         for detail in dd:
             if detail.get("kind") != "pull_request":
@@ -755,12 +768,8 @@ class SessionRecord:
             evidence = detail.get("evidence")
             action = evidence.get("action") if isinstance(evidence, dict) else None
             evidence_sha = evidence.get("commit_sha") if isinstance(evidence, dict) else None
-            if action == "gh_pr_merge" and any(
-                isinstance(commit_detail.get("evidence"), dict)
-                and commit_detail["evidence"].get("action") == "gh_pr_merge"
-                for commit_detail in dd
-                if commit_detail.get("kind") == "merge_commit"
-            ):
+            if action == "gh_pr_merge" and _gh_pr_merge_commit_budget > 0:
+                _gh_pr_merge_commit_budget -= 1
                 continue
             if isinstance(evidence_sha, str):
                 normalized_sha = _commit_identity(evidence_sha)
