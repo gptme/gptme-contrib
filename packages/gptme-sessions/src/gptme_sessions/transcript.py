@@ -891,7 +891,9 @@ def _agent_tool_use_ids(records: list[dict]) -> list[tuple[str, dict]]:
                 and block.get("type") == "tool_use"
                 and block.get("name") == "Agent"
             ):
-                out.append((block.get("id"), block))
+                tool_id = block.get("id")
+                if tool_id is not None:
+                    out.append((tool_id, block))
     return out
 
 
