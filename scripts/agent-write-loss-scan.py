@@ -211,6 +211,21 @@ def parse_conversation_jsonl(
 # ---------------------------------------------------------------------------
 
 
+def _git_since(write_ts: float) -> str:
+    """Format a Unix timestamp for ``git log --since``.
+
+    Do NOT use git's ``@<seconds>`` form here: git parses it with approxidate,
+    which rejects values too small to look like a real date (anything below
+    roughly 1e8) and then silently falls back to *now*. A bogus cutoff of "now"
+    filters out every commit, so writes carrying a missing or zero timestamp
+    would all be misreported as LOST. An explicit ISO-8601 instant parses
+    correctly across the whole range.
+    """
+    return datetime.fromtimestamp(max(0, int(write_ts)), timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S%z"
+    )
+
+
 def _post_write_blobs(
     repo_root: Path, rel_path: str, write_ts: float
 ) -> list[tuple[str, int]]:
@@ -222,7 +237,7 @@ def _post_write_blobs(
             "--format=C|%ct",
             "--raw",
             "--no-abbrev",
-            f"--since=@{int(write_ts)}",
+            f"--since={_git_since(write_ts)}",
             "--",
             rel_path,
         ],
