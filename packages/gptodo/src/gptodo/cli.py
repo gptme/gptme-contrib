@@ -3024,17 +3024,42 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             op == "set" and field == "waiting_for" and value is not None
             for op, field, value in changes
         )
-        if (
-            transitioning_to_waiting
-            and waiting_for_present
-            and not post.metadata.get("waiting_since")
-        ):
+        if transitioning_to_waiting and waiting_for_present:
             from datetime import datetime as _dt, timezone as _tz
 
             # Full ISO datetime for intra-day resolution (ErikBjare request, 2026-06-16).
             # validate_task_frontmatter.py's validate_timestamp() accepts both YYYY-MM-DD
             # and full ISO datetime via datetime.fromisoformat().
-            post.metadata["waiting_since"] = _dt.now(_tz.utc).isoformat(timespec="seconds")
+            _now_iso = _dt.now(_tz.utc).isoformat(timespec="seconds")
+            if not post.metadata.get("waiting_since"):
+                post.metadata["waiting_since"] = _now_iso
+
+            # Cumulative waiting history (TASKS.md schema), written here so it can
+            # never disagree with waiting_since. Both fields were documented but
+            # had no live writer until 2026-09-03 — the only writer was a one-shot
+            # git-history backfill with no caller, so every value in the tree was
+            # frozen at whenever someone last ran it by hand.
+            #
+            # The discriminator is the *prior* state, not a missing waiting_since:
+            # leaving waiting does not clear waiting_since, so its absence would
+            # miss exactly the re-parks these fields exist to count.
+            if _prior_state != "waiting":
+                # first_waiting_since is stamped once and never overwritten — it
+                # is the cumulative blocker age that survives re-parks.
+                _since = post.metadata.get("waiting_since")
+                post.metadata.setdefault(
+                    "first_waiting_since", str(_since) if _since is not None else _now_iso
+                )
+
+                # waiting_spell_count counts distinct waiting spells; >= 3 is the
+                # re-park signal read by task_metadata_hygiene_audit check 16.
+                # Absent (or hand-corrupted) means "no spells recorded yet", so
+                # the post-increment value is 1.
+                try:
+                    _prior_spells = int(post.metadata.get("waiting_spell_count") or 0)
+                except (TypeError, ValueError):
+                    _prior_spells = 0
+                post.metadata["waiting_spell_count"] = max(_prior_spells, 0) + 1
 
         # Strip now-stale actionable/blocker metadata when the edit lands the task
         # in a terminal state (TASKS.md best-practice #7: terminal tasks must not

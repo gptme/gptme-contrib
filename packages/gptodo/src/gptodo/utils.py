@@ -166,6 +166,14 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     "next_action",
     "waiting_for",
     "waiting_since",
+    # Cumulative waiting history (TASKS.md schema). `waiting_since` is reset on
+    # every re-park, so it cannot answer "how long has this really been stuck?".
+    # `first_waiting_since` is stamped on the first waiting entry and never
+    # overwritten; `waiting_spell_count` counts distinct waiting entries and is
+    # the re-park signal read by task_metadata_hygiene_audit check 16. Both are
+    # written by `gptodo edit --set state waiting` alongside `waiting_since`.
+    "first_waiting_since",
+    "waiting_spell_count",
     "depends",  # deprecated alias for requires, but still accepted
     "requires",
     "blocks",  # deprecated (inverse semantics), still accepted
