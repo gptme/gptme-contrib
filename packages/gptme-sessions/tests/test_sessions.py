@@ -3773,6 +3773,38 @@ def test_detect_format_codex_interactive():
     assert detect_format(msgs) == "codex"
 
 
+@pytest.mark.parametrize(
+    "originator",
+    [
+        "codex_exec",
+        "codex_interactive",
+        "codex-tui",
+        "codex_cli_rs",
+    ],
+)
+def test_detect_format_codex_all_originators(originator: str) -> None:
+    """All known Codex originator values are recognised as the 'codex' format.
+
+    Regression for #1567: codex-tui (gpt-5.5 TUI sessions) and codex_cli_rs
+    (Rust CLI rewrite sessions) were silently falling through to the 'gptme'
+    default, causing extract_from_path() to return zero deliverables and the
+    session to be graded as noop even when work was shipped.
+    """
+    msgs = [
+        {
+            "timestamp": "2026-08-31T20:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "test-session",
+                "originator": originator,
+                "cwd": "/home/bob/bob",
+            },
+        }
+    ]
+    assert detect_format(msgs) == "codex"
+    assert _detect_format(msgs) == "codex"
+
+
 def test_extract_signals_codex_basic():
     """Extract signals from a minimal Codex trajectory.
 

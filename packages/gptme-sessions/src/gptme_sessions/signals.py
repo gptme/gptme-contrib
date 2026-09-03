@@ -353,7 +353,16 @@ def _detect_format(msgs: list[dict]) -> str:
         # Codex: first line is always session_meta
         if first.get("type") == "session_meta":
             payload = first.get("payload") or {}
-            if payload.get("originator") in ("codex_exec", "codex_interactive"):
+            # "codex_exec" / "codex_interactive" = older CLI shapes;
+            # "codex-tui" = interactive TUI (gpt-5.5 era);
+            # "codex_cli_rs" = Rust-rewrite CLI.
+            # All share the same JSONL schema and extractor.
+            if payload.get("originator") in (
+                "codex_exec",
+                "codex_interactive",
+                "codex-tui",
+                "codex_cli_rs",
+            ):
                 return "codex"
         # Copilot: first line is always session.start
         if first.get("type") == "session.start":
