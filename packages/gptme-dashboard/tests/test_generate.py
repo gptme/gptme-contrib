@@ -5008,8 +5008,14 @@ def test_generate_writes_tasks_index_page(workspace: Path, tmp_path: Path):
     (tasks_dir / "old-thing.md").write_text(
         "---\nstate: done\ncreated: 2026-01-01\n---\n# Old Thing\n"
     )
-    (tasks_dir / "custom-state.md").write_text(
-        "---\nstate: in progress?!\ncreated: 2026-02-01\n---\n# Custom State\n"
+    (tasks_dir / "custom-state-a.md").write_text(
+        "---\nstate: in progress?!\ncreated: 2026-02-01\n---\n# Alpha Custom State\n"
+    )
+    (tasks_dir / "other-custom-state.md").write_text(
+        "---\nstate: blocked externally\ncreated: 2026-02-01\n---\n# Beta Custom State\n"
+    )
+    (tasks_dir / "custom-state-z.md").write_text(
+        "---\nstate: in progress?!\ncreated: 2026-02-01\n---\n# Gamma Custom State\n"
     )
 
     output = tmp_path / "site"
@@ -5024,9 +5030,12 @@ def test_generate_writes_tasks_index_page(workspace: Path, tmp_path: Path):
     # Terminal tasks are excluded from the dashboard listing but must appear here.
     assert "Old Thing" in html
     assert "Build Feature" in html
-    assert 'href="#state-in-progress"' in html
-    assert 'id="state-in-progress"' in html
+    assert html.count('href="#state-in-progress"') == 1
+    assert html.count('id="state-in-progress"') == 1
     assert 'id="state-in progress?!"' not in html
+    in_progress_section = html.split('id="state-in-progress"', 1)[1].split("</section>", 1)[0]
+    assert "Alpha Custom State" in in_progress_section
+    assert "Gamma Custom State" in in_progress_section
     # Links are root-relative from tasks/, i.e. one level up then back down.
     assert 'href="../tasks/old-thing.html"' in html
     assert (output / "tasks" / "old-thing.html").exists()

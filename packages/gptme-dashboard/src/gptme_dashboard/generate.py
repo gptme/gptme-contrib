@@ -2095,11 +2095,19 @@ def generate(
     # omits terminal tasks; without this page that link is a broken static target.
     if data["tasks"]:
         tasks_index_template = env.get_template("tasks_index.html")
-        # data["tasks"] is already sorted by (_STATE_ORDER, title), so grouping
-        # consecutively preserves the same state ordering used everywhere else.
+        # Include the state in the local sort key so custom states (which all share
+        # the fallback order) stay contiguous for groupby.
+        grouped_tasks = sorted(
+            data["tasks"],
+            key=lambda task: (
+                _STATE_ORDER.get(task["state"], 99),
+                task["state"],
+                task["title"],
+            ),
+        )
         task_groups = [
             {"state": state, "state_slug": slugify_heading(state), "tasks": list(group)}
-            for state, group in groupby(data["tasks"], key=lambda t: t["state"])
+            for state, group in groupby(grouped_tasks, key=lambda task: task["state"])
         ]
         tasks_index_html = tasks_index_template.render(
             workspace_name=data["workspace_name"],
