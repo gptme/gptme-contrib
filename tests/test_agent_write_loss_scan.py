@@ -182,6 +182,31 @@ def test_classify_write_persisted(tmp_path: Path) -> None:
     assert result.outcome == "PERSISTED"
 
 
+def test_classify_write_persisted_for_old_commit_with_epoch_write_ts(
+    tmp_path: Path,
+) -> None:
+    """A write_ts too small for git's date parser must not swallow the commit.
+
+    ``git log --since=@<n>`` silently falls back to *now* when ``<n>`` is too
+    small to look like a real date (anything under roughly 1e8). That made every
+    write with a missing/zero timestamp classify as LOST, and made the
+    ``write_ts=0.0`` case above a second-boundary coin flip.
+    """
+    repo = _init_repo(tmp_path)
+    content = "old committed content"
+    _commit_file(repo, "old.txt", content + "\n", timestamp=1_600_000_000)
+
+    ev = WriteEvent(
+        session_id="sess-epoch",
+        tool="save",
+        rel_path="old.txt",
+        write_ts=0.0,
+        written_blob=_git_blob_sha((content + "\n").encode()),
+    )
+    result = classify_write(ev, repo)
+    assert result.outcome == "PERSISTED"
+
+
 def test_classify_write_lost_when_only_commit_predates_write(tmp_path: Path) -> None:
     """A pre-write commit must not make a later lost save look superseded."""
     repo = _init_repo(tmp_path)
