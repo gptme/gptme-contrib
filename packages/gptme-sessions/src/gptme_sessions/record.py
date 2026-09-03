@@ -278,20 +278,14 @@ def _pr_identity(value: object) -> str:
     return stripped.lower()
 
 
-def _pr_group_key(identity: str, aliasable_numbers: set[str]) -> str:
+def _pr_group_key(identity: str, aliasable_prs: dict[str, str]) -> str:
     """Canonical grouping key for a PR identity.
 
-    A qualified ``owner/repo#N`` and unqualified ``#N`` only collapse into the
-    same group when producer evidence says *some* detail for PR ``N`` came
-    from ``gh pr merge`` (``aliasable_numbers``) — order-independent, so it
-    doesn't matter whether the qualified or unqualified value was seen first.
-    Otherwise they stay distinct, since same-numbered PRs can live in
-    different repositories.
+    An unqualified ``#N`` aliases to the sole qualified ``owner/repo#N`` with
+    ``gh pr merge`` evidence. Qualified identities always remain distinct, so
+    same-numbered PRs in different repositories cannot collapse.
     """
-    if "#" not in identity:
-        return identity
-    number = identity.rsplit("#", 1)[-1]
-    return f"#{number}" if number in aliasable_numbers else identity
+    return aliasable_prs.get(identity, identity)
 
 
 @dataclass
@@ -750,26 +744,41 @@ class SessionRecord:
         # one gh_pr_merge-evidenced PR, preventing double-counting. A commit
         # explicitly sha-paired to a PR (below) is removed from this pool
         # first, so it can't *also* pay for a different, unrelated PR.
-        gh_pr_merge_commit_ids = [
-            cid
-            for d in dd
-            if d.get("kind") == "merge_commit"
-            and isinstance(d.get("evidence"), dict)
-            and d["evidence"].get("action") == "gh_pr_merge"
-            and (cid := _commit_identity(d.get("value"), kind="merge_commit")) is not None
-        ]
+        gh_pr_merge_commit_ids: list[str] = []
+        for detail in dd:
+            evidence = detail.get("evidence")
+            if (
+                detail.get("kind") != "merge_commit"
+                or not isinstance(evidence, dict)
+                or evidence.get("action") != "gh_pr_merge"
+            ):
+                continue
+            commit_id = _commit_identity(detail.get("value"), kind="merge_commit")
+            if commit_id is not None:
+                _remember_commit_id(gh_pr_merge_commit_ids, commit_id)
 
-        # Numbers with at least one gh_pr_merge-evidenced detail: a qualified
-        # URL and unqualified "#N" for the same number are one delivery
-        # regardless of which one appears first in deliverable_details.
-        aliasable_numbers = {
-            number
-            for d in dd
-            if d.get("kind") == "pull_request"
-            and isinstance(d.get("evidence"), dict)
-            and d["evidence"].get("action") == "gh_pr_merge"
-            and "#" in (identity := _pr_identity(d.get("value")))
-            for number in [identity.rsplit("#", 1)[-1]]
+        # An unqualified "#N" with gh_pr_merge evidence may alias to exactly
+        # one qualified PR with that number. Never alias qualified identities
+        # to each other: same-numbered PRs can belong to different repositories.
+        merge_numbers: set[str] = set()
+        qualified_prs: dict[str, set[str]] = {}
+        for detail in dd:
+            if detail.get("kind") != "pull_request":
+                continue
+            identity = _pr_identity(detail.get("value"))
+            if "#" not in identity:
+                continue
+            number = identity.rsplit("#", 1)[-1]
+            if identity.startswith("#"):
+                evidence = detail.get("evidence")
+                if isinstance(evidence, dict) and evidence.get("action") == "gh_pr_merge":
+                    merge_numbers.add(number)
+            else:
+                qualified_prs.setdefault(number, set()).add(identity)
+        aliasable_prs = {
+            f"#{number}": next(iter(qualified_prs[number]))
+            for number in merge_numbers
+            if len(qualified_prs.get(number, ())) == 1
         }
 
         pr_groups: dict[str, dict[str, bool]] = {}
@@ -779,7 +788,7 @@ class SessionRecord:
             evidence = detail.get("evidence")
             action = evidence.get("action") if isinstance(evidence, dict) else None
             evidence_sha = evidence.get("commit_sha") if isinstance(evidence, dict) else None
-            key = _pr_group_key(_pr_identity(detail.get("value")), aliasable_numbers)
+            key = _pr_group_key(_pr_identity(detail.get("value")), aliasable_prs)
             group = pr_groups.setdefault(key, {"sha_paired": False, "gh_pr_merge": False})
             if action == "gh_pr_merge":
                 group["gh_pr_merge"] = True

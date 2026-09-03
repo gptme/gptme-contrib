@@ -1049,6 +1049,34 @@ def test_step_types_unqualified_pr_without_merge_evidence_stays_distinct():
     assert "single_commit" not in labels
 
 
+def test_step_types_same_number_qualified_cross_repo_prs_stay_distinct():
+    """gh_pr_merge evidence must not merge two qualified cross-repo PRs."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/org-a/repo-a/pull/42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/org-b/repo-b/pull/42",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
 def test_step_types_two_pr_only_is_multi():
     """Distinct PR-only deliveries keep their cardinality.
 
@@ -1229,6 +1257,45 @@ def test_step_types_two_gh_pr_merge_one_commit_is_multi():
     r.populate_step_types()
     labels = r.step_types or []
     assert "multi_commit" in labels, f"expected multi_commit, got {labels}"
+    assert "single_commit" not in labels
+
+
+def test_step_types_duplicate_gh_pr_merge_commits_do_not_double_budget():
+    """Duplicate producer records for one merge commit buy one PR pairing."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "pull_request",
+                "value": "merge PR #43",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
     assert "single_commit" not in labels
 
 
