@@ -18,6 +18,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass  # avoid circular import; subagent_record_files imported lazily
 
 _EXIT_CODE_RE = re.compile(r"(?:Exit code|exit code):\s*(\d+)")
 
@@ -252,6 +256,10 @@ class ToolSpan:
     cache_creation_tokens: int | None = None
     cache_read_tokens: int | None = None
     cost_usd: float | None = None
+    # Subagent provenance (item 1b): present when the span comes from a child
+    # transcript rather than the parent session's own JSONL.
+    spawn_depth: int = 0
+    agent_type: str | None = None  # e.g. "claude" / "general-purpose" / None for parent
 
 
 @dataclass
@@ -335,37 +343,32 @@ class SpanAggregates:
         )
 
 
-def extract_spans_from_cc_jsonl(
-    path: Path | str,
-    session_id: str | None = None,
+def _extract_cc_spans_from_text(
+    text: str,
+    session_id: str,
+    turn_offset: int = 0,
+    spawn_depth: int = 0,
+    agent_type: str | None = None,
 ) -> list[ToolSpan]:
-    """Extract ToolSpan objects from a Claude Code JSONL trajectory file.
+    """Core loop: extract ToolSpan objects from one CC JSONL file's text.
 
-    Parses assistant tool_use dispatches and user tool_result arrivals,
-    pairs them by tool_use_id, and computes per-span timing.
+    Separated from the public function so that ``extract_spans_from_cc_jsonl``
+    can call it for the parent *and* all subagent files (item 1a), tagging
+    each span with its provenance (item 1b).
 
     Args:
-        path: Path to the .jsonl trajectory file.
-        session_id: Session ID to assign to all spans. Defaults to the
-            filename stem (e.g. ``"abc123"`` for ``abc123.jsonl``).
-
-    Returns:
-        List of spans in chronological dispatch order.
+        text: Raw JSONL content (already read from disk).
+        session_id: Session ID to attribute these spans to.
+        turn_offset: Add this to every span's ``turn_index`` so parent and
+            child spans can be sorted in a global turn order if needed.
+        spawn_depth: Depth in the subagent tree (0 = parent).
+        agent_type: Agent type string from the subagent's ``.meta.json``.
     """
-    path = Path(path)
-    if session_id is None:
-        session_id = path.stem
-
     # pending maps tool_use_id → (tool_name, dispatch_ts, dispatch_ts_str,
     #                             input_size, turn_index, attributed_usage)
     pending: dict[str, tuple[str, datetime | None, str, int, int, _TurnUsage | None]] = {}
     spans: list[ToolSpan] = []
-    turn_index = 0
-
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+    turn_index = turn_offset
 
     for line in text.splitlines():
         line = line.strip()
@@ -447,8 +450,80 @@ def extract_spans_from_cc_jsonl(
                         cache_creation_tokens=usage.cache_creation_tokens if usage else None,
                         cache_read_tokens=usage.cache_read_tokens if usage else None,
                         cost_usd=usage.cost_usd if usage else None,
+                        spawn_depth=spawn_depth,
+                        agent_type=agent_type,
                     )
                 )
+
+    return spans
+
+
+def extract_spans_from_cc_jsonl(
+    path: Path | str,
+    session_id: str | None = None,
+    include_subagents: bool = True,
+) -> list[ToolSpan]:
+    """Extract ToolSpan objects from a Claude Code JSONL trajectory file.
+
+    Parses assistant tool_use dispatches and user tool_result arrivals,
+    pairs them by tool_use_id, and computes per-span timing.
+
+    When ``include_subagents=True`` (default), also reads every child
+    transcript under ``<session>/subagents/`` so that subagent tool calls
+    count for the parent session (item 1a). Each span carries ``spawn_depth``
+    and ``agent_type`` for downstream attribution (item 1b).
+
+    Args:
+        path: Path to the .jsonl trajectory file.
+        session_id: Session ID to assign to all spans. Defaults to the
+            filename stem (e.g. ``"abc123"`` for ``abc123.jsonl``).
+        include_subagents: When True (default), also extract spans from every
+            child transcript in the session's subagents/ directory.
+
+    Returns:
+        List of spans in chronological dispatch order (parent first, then
+        subagents in discovery order).
+    """
+    path = Path(path)
+    if session_id is None:
+        session_id = path.stem
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    spans = _extract_cc_spans_from_text(text, session_id, spawn_depth=0)
+
+    if include_subagents:
+        # Lazy import to avoid circular dependency (transcript → signals → spans).
+        from .transcript import subagent_record_files  # noqa: PLC0415
+
+        for child_path in subagent_record_files(path):
+            # Read depth and agentType from the .meta.json sidecar.
+            # Convention: agent-<id>.jsonl → agent-<id>.meta.json, same dir.
+            meta_path = child_path.with_suffix(".meta.json")
+            meta: dict = {}
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            depth = int(meta.get("spawnDepth", 1) or 1)
+            a_type = meta.get("agentType") or None
+
+            try:
+                child_text = child_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            spans.extend(
+                _extract_cc_spans_from_text(
+                    child_text,
+                    session_id=session_id,
+                    spawn_depth=depth,
+                    agent_type=a_type,
+                )
+            )
 
     return spans
 
