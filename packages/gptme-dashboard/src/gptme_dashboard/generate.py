@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
+from itertools import groupby
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -813,7 +814,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
 
     if _gptodo_load_tasks is not None:
         for t in _gptodo_load_tasks(tasks_dir):
-            if t.path.name.lower() == "readme.md":
+            if t.path.name.lower() in ("readme.md", "index.md"):
                 continue
             if not t.metadata:
                 continue  # Skip files without YAML frontmatter
@@ -862,7 +863,7 @@ def scan_tasks(workspace: Path) -> list[dict]:
     else:
         # gptodo not installed — fall back to manual frontmatter parsing
         for md_file in sorted(tasks_dir.glob("*.md")):
-            if md_file.name.lower() == "readme.md":
+            if md_file.name.lower() in ("readme.md", "index.md"):
                 continue
             entry = _task_to_dict(md_file)
             if entry is not None:
@@ -2088,6 +2089,42 @@ def generate(
         page_path = output / task["page_url"]
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(task_html)
+
+    # Generate the full task listing at tasks/index.html.
+    # The dashboard index links here ("Browse all N tasks") because its own listing
+    # omits terminal tasks; without this page that link is a broken static target.
+    if data["tasks"]:
+        tasks_index_template = env.get_template("tasks_index.html")
+        # Include the state in the local sort key so custom states (which all share
+        # the fallback order) stay contiguous for groupby.
+        grouped_tasks = sorted(
+            data["tasks"],
+            key=lambda task: (
+                _STATE_ORDER.get(task["state"], 99),
+                task["state"],
+                task["title"],
+            ),
+        )
+        task_groups = []
+        used_state_slugs: set[str] = set()
+        for state, group in groupby(grouped_tasks, key=lambda task: task["state"]):
+            base_slug = slugify_heading(state)
+            state_slug = base_slug
+            duplicate_index = 1
+            while state_slug in used_state_slugs:
+                state_slug = f"{base_slug}-{duplicate_index}"
+                duplicate_index += 1
+            used_state_slugs.add(state_slug)
+            task_groups.append({"state": state, "state_slug": state_slug, "tasks": list(group)})
+        tasks_index_html = tasks_index_template.render(
+            workspace_name=data["workspace_name"],
+            tasks=data["tasks"],
+            task_groups=task_groups,
+            root_prefix="../",
+        )
+        tasks_index_path = output / "tasks" / "index.html"
+        tasks_index_path.parent.mkdir(parents=True, exist_ok=True)
+        tasks_index_path.write_text(tasks_index_html)
 
     # Generate per-journal detail pages
     journal_template = env.get_template("journal.html")

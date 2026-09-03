@@ -4992,3 +4992,96 @@ def test_index_html_no_filter_note_when_all_nonterminal(
     html = (out / "index.html").read_text()
     # No terminal tasks → no filter note paragraph (the CSS class may still exist in <style>)
     assert '<p class="filter-note">' not in html
+
+
+def test_generate_writes_tasks_index_page(workspace: Path, tmp_path: Path):
+    """The 'Browse all N tasks' link target (tasks/index.html) is generated.
+
+    The dashboard index omits terminal tasks from its listing and links to
+    tasks/ instead; without this page that link is a broken static target.
+    """
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "build-feature.md").write_text(
+        "---\nstate: active\npriority: high\ncreated: 2026-03-01\n---\n# Build Feature\n"
+    )
+    (tasks_dir / "old-thing.md").write_text(
+        "---\nstate: done\ncreated: 2026-01-01\n---\n# Old Thing\n"
+    )
+    (tasks_dir / "custom-state-a.md").write_text(
+        "---\nstate: in progress?!\ncreated: 2026-02-01\n---\n# Alpha Custom State\n"
+    )
+    (tasks_dir / "other-custom-state.md").write_text(
+        "---\nstate: in-progress\ncreated: 2026-02-01\n---\n# Beta Custom State\n"
+    )
+    (tasks_dir / "custom-state-z.md").write_text(
+        "---\nstate: in progress?!\ncreated: 2026-02-01\n---\n# Gamma Custom State\n"
+    )
+    (tasks_dir / "suffix-collision.md").write_text(
+        "---\nstate: in-progress-1\ncreated: 2026-02-01\n---\n# Suffix Collision State\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    index_html = (output / "index.html").read_text()
+    assert 'href="tasks/"' in index_html, "index should link to the full task listing"
+
+    tasks_index = output / "tasks" / "index.html"
+    assert tasks_index.exists()
+    html = tasks_index.read_text()
+    # Terminal tasks are excluded from the dashboard listing but must appear here.
+    assert "Old Thing" in html
+    assert "Build Feature" in html
+    assert html.count('href="#state-in-progress"') == 1
+    assert html.count('id="state-in-progress"') == 1
+    assert html.count('href="#state-in-progress-1"') == 1
+    assert html.count('id="state-in-progress-1"') == 1
+    assert html.count('href="#state-in-progress-1-1"') == 1
+    assert html.count('id="state-in-progress-1-1"') == 1
+    assert 'id="state-in progress?!"' not in html
+    in_progress_section = html.split('id="state-in-progress"', 1)[1].split("</section>", 1)[0]
+    assert "Alpha Custom State" in in_progress_section
+    assert "Gamma Custom State" in in_progress_section
+    # Links are root-relative from tasks/, i.e. one level up then back down.
+    assert 'href="../tasks/old-thing.html"' in html
+    assert (output / "tasks" / "old-thing.html").exists()
+
+
+def test_generate_skips_tasks_index_without_tasks(workspace: Path, tmp_path: Path):
+    """No tasks means no tasks/ directory to index."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    assert not (output / "tasks" / "index.html").exists()
+
+
+def test_tasks_index_not_overwritten_by_index_task(workspace: Path, tmp_path: Path):
+    """A task named index.md must not overwrite the tasks/index.html listing.
+
+    task_page_path("index") == "tasks/index.html", which collides with the
+    tasks index listing page.  scan_tasks must skip index.md (like readme.md)
+    so the listing page is never clobbered.
+    """
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "index.md").write_text(
+        "---\nstate: active\ncreated: 2026-01-01\n---\n# Index Task\n"
+    )
+    (tasks_dir / "normal-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-01-01\n---\n# Normal Task\n"
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+
+    tasks_index = output / "tasks" / "index.html"
+    assert tasks_index.exists(), "tasks/index.html must exist"
+    html = tasks_index.read_text()
+    # The listing page must contain the normal task, not the index task's detail.
+    assert "Normal Task" in html
+    # The tasks listing page must not be overwritten by the index.md detail page.
+    # If it were, it would be a plain detail page lacking the state-group nav.
+    assert "Index Task" not in html, (
+        "tasks/index.html was overwritten by index.md detail page — "
+        "scan_tasks must exclude index.md"
+    )
