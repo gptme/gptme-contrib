@@ -1366,9 +1366,9 @@ def _get_dropout_epsilon_validated_core() -> float:
         epsilon = float(raw)
     except ValueError:
         return 0.05
-    # float("nan") succeeds; min/max retain NaN and later `eff_epsilon > 0`
-    # silently disables validated-core sampling. Treat non-finite as unset.
-    if math.isnan(epsilon):
+    # float() accepts NaN and infinities, but neither is a probability.
+    # Treat non-finite values as unset instead of clamping infinity to 1.0.
+    if not math.isfinite(epsilon):
         return 0.05
     return min(max(epsilon, 0.0), 1.0)
 
