@@ -175,6 +175,23 @@ def test_cache_file_is_private(tmp_path: Path) -> None:
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 
+def test_cache_file_is_private_before_sqlite_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "cache.sqlite"
+    modes_seen_at_connect: list[int] = []
+    real_connect = emb.sqlite3.connect
+
+    def recording_connect(database, *args, **kwargs):
+        modes_seen_at_connect.append(stat.S_IMODE(os.stat(database).st_mode))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(emb.sqlite3, "connect", recording_connect)
+    emb._SQLiteEmbeddingCache(path)
+
+    assert modes_seen_at_connect == [0o600]
+
+
 def test_open_local_embedding_cache_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

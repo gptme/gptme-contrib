@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import urllib.request
 from pathlib import Path
 
@@ -60,6 +61,70 @@ def test_openrouter_embedding_batches_and_caches(monkeypatch: pytest.MonkeyPatch
         assert list(vector) == pytest.approx([0.6, 0.8])
     assert calls == [["alpha"], ["beta"]]
     assert embedding.stats["cached_texts"] == 2
+
+
+def test_openrouter_embedding_degrades_when_cache_read_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    calls: list[list[str]] = []
+
+    def fake_urlopen(request: urllib.request.Request, timeout: int):
+        payload = json.loads(request.data.decode("utf-8"))  # type: ignore[union-attr]
+        calls.append(payload["input"])
+        return _FakeResponse(
+            {
+                "data": [
+                    {"index": index, "embedding": [3.0, 4.0]}
+                    for index, _text in enumerate(payload["input"])
+                ],
+                "usage": {},
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    embedding = OpenRouterEmbedding(api_key="test-key", cache_path=tmp_path / "embeddings.sqlite")
+
+    def broken_get_many(_model, _hashes):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(embedding.cache, "get_many", broken_get_many)
+
+    vectors = embedding(["alpha"])
+
+    assert calls == [["alpha"]]
+    assert list(vectors[0]) == pytest.approx([0.6, 0.8])
+
+
+def test_openrouter_embedding_degrades_when_cache_write_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    calls: list[list[str]] = []
+
+    def fake_urlopen(request: urllib.request.Request, timeout: int):
+        payload = json.loads(request.data.decode("utf-8"))  # type: ignore[union-attr]
+        calls.append(payload["input"])
+        return _FakeResponse(
+            {
+                "data": [
+                    {"index": index, "embedding": [3.0, 4.0]}
+                    for index, _text in enumerate(payload["input"])
+                ],
+                "usage": {},
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    embedding = OpenRouterEmbedding(api_key="test-key", cache_path=tmp_path / "embeddings.sqlite")
+
+    def broken_put_many(_model, _items):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(embedding.cache, "put_many", broken_put_many)
+
+    vectors = embedding(["alpha"])
+
+    assert calls == [["alpha"]]
+    assert list(vectors[0]) == pytest.approx([0.6, 0.8])
 
 
 def test_openrouter_embedding_requires_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

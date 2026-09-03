@@ -105,6 +105,17 @@ def _default_openrouter_cache_path() -> Path:
     return cache_root / "gptme-rag" / "openrouter-embeddings.sqlite"
 
 
+def _ensure_private_cache_file(path: Path) -> None:
+    """Create ``path`` with 0600 mode before sqlite opens it."""
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
 class _SQLiteEmbeddingCache:
     """Small SQLite cache keyed by embedding model and content hash.
 
@@ -120,6 +131,7 @@ class _SQLiteEmbeddingCache:
         path = path.expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
         self.max_rows = max_rows
+        _ensure_private_cache_file(path)
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         os.chmod(path, 0o600)
         self.conn.execute(
@@ -399,7 +411,15 @@ class OpenRouterEmbedding(EmbeddingFunction):
             return []
 
         hashes = [_SQLiteEmbeddingCache.content_hash(text) for text in texts]
-        cached = self.cache.get_many(self.model_name, list(dict.fromkeys(hashes)))
+        try:
+            cached = self.cache.get_many(self.model_name, list(dict.fromkeys(hashes)))
+        except (sqlite3.Error, ValueError) as exc:
+            logger.warning(
+                "OpenRouter embedding cache read failed; embedding all %d texts: %s",
+                len(texts),
+                exc,
+            )
+            cached = {}
         self.stats["cached_texts"] += sum(1 for content_hash in hashes if content_hash in cached)
 
         missing = [
@@ -412,7 +432,12 @@ class OpenRouterEmbedding(EmbeddingFunction):
                 cached[hashes[idx]] = vector
                 fresh.append((hashes[idx], vector))
 
-        self.cache.put_many(self.model_name, fresh)
+        try:
+            self.cache.put_many(self.model_name, fresh)
+        except sqlite3.Error as exc:
+            logger.warning(
+                "OpenRouter embedding cache write failed for %d texts: %s", len(fresh), exc
+            )
         return [cached[content_hash] for content_hash in hashes]
 
     @staticmethod
