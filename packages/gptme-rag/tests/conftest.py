@@ -9,6 +9,12 @@ except ImportError:
 
 
 @pytest.fixture(autouse=True)
+def isolated_local_embedding_cache(tmp_path, monkeypatch):
+    """Keep the local embedding cache out of ~/.cache during tests."""
+    monkeypatch.setenv("GPTME_RAG_EMBEDDING_CACHE", str(tmp_path / "local-embeddings.sqlite"))
+
+
+@pytest.fixture(autouse=True)
 def cleanup_chroma():
     """Clean up ChromaDB between tests."""
     yield

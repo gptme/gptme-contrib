@@ -41,6 +41,13 @@ overridden with `OPENROUTER_EMBEDDING_MODEL`. If `--embedding-function
 openrouter` is requested without an API key, `gptme-rag` falls back to the local
 ModernBERT embedding backend.
 
+Local (sentence-transformers) embeddings are cached by chunk content hash in
+`~/.cache/gptme-rag/local-embeddings.sqlite` (`XDG_CACHE_HOME` respected).
+Change detection is per file, so an appended line re-submits every chunk of
+that file; the cache turns the unchanged chunks into lookups instead of CPU
+re-embeds. Set `GPTME_RAG_EMBEDDING_CACHE=/path/to/cache.sqlite` to relocate it
+or `GPTME_RAG_EMBEDDING_CACHE=off` to disable.
+
 ## Development
 
 ```bash

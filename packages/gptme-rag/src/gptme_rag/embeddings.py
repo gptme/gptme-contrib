@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 from chromadb.api.types import Documents, EmbeddingFunction
@@ -22,7 +23,12 @@ DEFAULT_OPENROUTER_MAX_TOKENS_PER_REQUEST = 24_000
 
 
 class ModernBERTEmbedding(EmbeddingFunction):
-    def __init__(self, model_name: str = "joe32140/ModernBERT-base-msmarco", device: str = "cpu"):
+    def __init__(
+        self,
+        model_name: str = "joe32140/ModernBERT-base-msmarco",
+        device: str = "cpu",
+        cache_path: Path | None = None,
+    ):
         """Initialize ModernBERT embedding function.
 
         Args:
@@ -34,6 +40,9 @@ class ModernBERTEmbedding(EmbeddingFunction):
                   Better for tasks requiring deeper semantic understanding.
                   Can handle longer chunks (up to 8192 tokens).
             device: Device to run the model on (defaults to 'cpu')
+            cache_path: SQLite file for the content-hash embedding cache. ``None``
+                reads ``GPTME_RAG_EMBEDDING_CACHE`` (a path, or ``off`` to
+                disable) and otherwise uses ``~/.cache/gptme-rag/local-embeddings.sqlite``.
 
         Note:
             The msmarco variant is specifically optimized for retrieval tasks and should give
@@ -43,6 +52,18 @@ class ModernBERTEmbedding(EmbeddingFunction):
         self.model_name = model_name
         self.is_msmarco = "msmarco" in model_name.lower()
         self.model = SentenceTransformer(model_name, device=device)
+        self.cache = _open_local_embedding_cache(cache_path)
+        self.stats = {"cached_texts": 0, "embedded_texts": 0}
+
+    def _encode(self, texts: list[str]) -> list[list[float]]:
+        # Batch inputs for efficiency
+        embeddings: list[list[float]] = self.model.encode(
+            texts,
+            batch_size=32,  # Adjust based on GPU memory
+            convert_to_numpy=True,
+            normalize_embeddings=True,  # Normalize for cosine similarity
+        ).tolist()
+        return embeddings
 
     def __call__(self, texts: Documents) -> list[list[float]]:  # type: ignore[override]
         """Generate embeddings for the input texts.
@@ -53,14 +74,13 @@ class ModernBERTEmbedding(EmbeddingFunction):
         Returns:
             List of embeddings
         """
-        # Batch inputs for efficiency
-        embeddings: list[list[float]] = self.model.encode(
-            texts,
-            batch_size=32,  # Adjust based on GPU memory
-            convert_to_numpy=True,
-            normalize_embeddings=True,  # Normalize for cosine similarity
-        ).tolist()
-        return embeddings
+        return cached_encode(
+            list(texts),
+            encode=self._encode,
+            model_name=self.model_name,
+            cache=self.cache,
+            stats=self.stats,
+        )
 
 
 def resolve_openrouter_api_key() -> str | None:
@@ -159,6 +179,92 @@ class _SQLiteEmbeddingCache:
                 [(model, content_hash, json.dumps(vector)) for content_hash, vector in items],
             )
             self.conn.commit()
+
+
+LOCAL_EMBEDDING_CACHE_ENV = "GPTME_RAG_EMBEDDING_CACHE"
+_CACHE_DISABLED_VALUES = frozenset({"0", "off", "false", "no", "none"})
+
+
+def _default_local_cache_path() -> Path:
+    cache_root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return cache_root / "gptme-rag" / "local-embeddings.sqlite"
+
+
+def _open_local_embedding_cache(cache_path: Path | None) -> "_SQLiteEmbeddingCache | None":
+    """Open the content-hash cache for local (sentence-transformers) embeddings.
+
+    Local embedding on CPU is the dominant cost of an incremental index run:
+    change detection is per *file* (content hash), so one appended line
+    re-embeds every chunk of that file, although all but the last chunk are
+    byte-identical to what is already stored. Caching by chunk content hash
+    turns those into lookups.
+
+    Resolution order: explicit ``cache_path``; ``GPTME_RAG_EMBEDDING_CACHE``
+    (``off``/``0``/``false`` disables, anything else is a path); the default
+    under ``XDG_CACHE_HOME``. Returns ``None`` when disabled or unopenable —
+    embedding must never fail because the cache did.
+    """
+    if cache_path is None:
+        raw = os.environ.get(LOCAL_EMBEDDING_CACHE_ENV, "").strip()
+        if raw.lower() in _CACHE_DISABLED_VALUES:
+            return None
+        cache_path = Path(raw) if raw else _default_local_cache_path()
+    try:
+        return _SQLiteEmbeddingCache(cache_path)
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning("Local embedding cache unavailable at %s: %s", cache_path, exc)
+        return None
+
+
+def cached_encode(
+    texts: list[str],
+    *,
+    encode: Callable[[list[str]], list[list[float]]],
+    model_name: str,
+    cache: "_SQLiteEmbeddingCache | None",
+    stats: dict[str, int] | None = None,
+) -> list[list[float]]:
+    """Embed ``texts`` with ``encode``, computing only cache misses.
+
+    Duplicate texts within one call are embedded once. Cache read/write
+    failures degrade to plain encoding. ``stats`` (``cached_texts`` /
+    ``embedded_texts``) is incremented in place when given.
+    """
+    if not texts:
+        return []
+    if cache is None:
+        vectors = encode(list(texts))
+        if stats is not None:
+            stats["embedded_texts"] = stats.get("embedded_texts", 0) + len(texts)
+        return vectors
+
+    hashes = [_SQLiteEmbeddingCache.content_hash(text) for text in texts]
+    try:
+        cached = cache.get_many(model_name, list(dict.fromkeys(hashes)))
+    except sqlite3.Error as exc:
+        logger.warning("Embedding cache read failed; embedding all %d texts: %s", len(texts), exc)
+        cached = {}
+    n_cached = sum(1 for content_hash in hashes if content_hash in cached)
+
+    missing: dict[str, str] = {}
+    for content_hash, text in zip(hashes, texts):
+        if content_hash not in cached and content_hash not in missing:
+            missing[content_hash] = text
+    if missing:
+        fresh_vectors = encode(list(missing.values()))
+        fresh = list(zip(missing.keys(), fresh_vectors))
+        cached.update(fresh)
+        try:
+            cache.put_many(model_name, fresh)
+        except sqlite3.Error as exc:
+            logger.warning("Embedding cache write failed for %d texts: %s", len(fresh), exc)
+    if stats is not None:
+        stats["cached_texts"] = stats.get("cached_texts", 0) + n_cached
+        stats["embedded_texts"] = stats.get("embedded_texts", 0) + len(missing)
+    logger.debug(
+        "cached_encode: %d texts, %d cache hits, %d embedded", len(texts), n_cached, len(missing)
+    )
+    return [cached[content_hash] for content_hash in hashes]
 
 
 class OpenRouterEmbedding(EmbeddingFunction):
@@ -322,18 +428,20 @@ def _l2_normalize(vector: list[float]) -> list[float]:
 class GenericSentenceTransformerEmbedding(EmbeddingFunction):
     """Generic embedding function for any sentence-transformers model."""
 
-    def __init__(self, model_name: str, device: str = "cpu"):
+    def __init__(self, model_name: str, device: str = "cpu", cache_path: Path | None = None):
         """Initialize with any sentence-transformers model.
 
         Args:
             model_name: Hugging Face model name (e.g., "all-MiniLM-L6-v2", "all-mpnet-base-v2")
             device: Device to run the model on (defaults to 'cpu')
+            cache_path: See :class:`ModernBERTEmbedding`.
         """
         self.model_name = model_name
         self.model = SentenceTransformer(model_name, device=device)
+        self.cache = _open_local_embedding_cache(cache_path)
+        self.stats = {"cached_texts": 0, "embedded_texts": 0}
 
-    def __call__(self, texts: Documents) -> list[list[float]]:  # type: ignore[override]
-        """Generate embeddings for the input texts."""
+    def _encode(self, texts: list[str]) -> list[list[float]]:
         embeddings: list[list[float]] = self.model.encode(
             texts,
             batch_size=32,
@@ -341,3 +449,13 @@ class GenericSentenceTransformerEmbedding(EmbeddingFunction):
             normalize_embeddings=True,
         ).tolist()
         return embeddings
+
+    def __call__(self, texts: Documents) -> list[list[float]]:  # type: ignore[override]
+        """Generate embeddings for the input texts."""
+        return cached_encode(
+            list(texts),
+            encode=self._encode,
+            model_name=self.model_name,
+            cache=self.cache,
+            stats=self.stats,
+        )
