@@ -140,7 +140,13 @@ class _SQLiteEmbeddingCache:
         path = path.expanduser()
         # 0o700: cache directory is owner-only; defence-in-depth alongside
         # the per-file 0o600 set by _ensure_private_cache_file.
+        # Note: mkdir(mode=) is ignored when the directory already exists; the
+        # explicit chmod below corrects pre-existing directories.
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(path.parent, 0o700)
+        except OSError:
+            pass  # best-effort; the file-level 0o600 is the primary guard
         self.max_rows = max_rows
         _ensure_private_cache_file(path)
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
