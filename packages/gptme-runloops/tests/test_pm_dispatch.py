@@ -2503,3 +2503,111 @@ class TestRepoExclusionList:
         assert deferred == 0
         assert skipped_excluded == 1
         assert callback_calls == ["gptme/gptme"]
+
+
+# --- LaneDispatcher slot_log_dir ---
+
+
+class TestLaneDispatcherSlotLogDir:
+    """Verify slot_log_dir routes stdout+stderr to per-slot log files."""
+
+    def _make_script(self, tmp_path: Path) -> str:
+        """Create a trivial bash script for _launch_slot_unit to reference."""
+        script = tmp_path / "slot.sh"
+        script.write_text("#!/bin/bash\necho hello\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_slot_log_dir_adds_output_properties(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When slot_log_dir is set, SystemOutput+StandardError appear in cmd."""
+        import subprocess
+
+        captured_cmds: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            result = subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+            return result
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        log_dir = tmp_path / "pm-slot-logs"
+        mgr = SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        ld = LaneDispatcher(slot_manager=mgr, slot_log_dir=log_dir)
+
+        item = SlotItem("gptme/gptme", 1, ["notification"], "Test item")
+        script = self._make_script(tmp_path)
+        unit_name = "bob-pm-fast-slot-test"
+        ld._launch_unit(
+            unit_name,
+            unit_name,  # legacy_name same as unit_name for test
+            "gptme-gptme-1",
+            "fast",
+            item,
+            "claude-code",
+            "sonnet",
+            script,
+        )
+
+        assert len(captured_cmds) == 1
+        cmd = captured_cmds[0]
+        # Log dir must be created
+        assert log_dir.is_dir()
+        # Expected log file path
+        log_file = log_dir / f"{unit_name}.log"
+        stdout_prop = f"--property=StandardOutput=append:{log_file}"
+        stderr_prop = f"--property=StandardError=append:{log_file}"
+        assert stdout_prop in cmd, f"StandardOutput property missing from cmd: {cmd}"
+        assert stderr_prop in cmd, f"StandardError property missing from cmd: {cmd}"
+
+    def test_no_slot_log_dir_omits_output_properties(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When slot_log_dir is None (default), no output redirect in cmd."""
+        import subprocess
+
+        captured_cmds: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        mgr = SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        ld = LaneDispatcher(slot_manager=mgr)  # slot_log_dir=None (default)
+
+        item = SlotItem("gptme/gptme", 1, ["notification"], "Test item")
+        script = self._make_script(tmp_path)
+        unit_name = "bob-pm-fast-slot-test"
+        ld._launch_unit(
+            unit_name,
+            unit_name,
+            "gptme-gptme-1",
+            "fast",
+            item,
+            "claude-code",
+            "sonnet",
+            script,
+        )
+
+        assert len(captured_cmds) == 1
+        cmd = captured_cmds[0]
+        assert not any("StandardOutput" in arg for arg in cmd)
+        assert not any("StandardError" in arg for arg in cmd)
