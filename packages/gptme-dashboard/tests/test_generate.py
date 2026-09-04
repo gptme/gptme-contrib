@@ -4089,17 +4089,18 @@ def test_static_search_broken_url_guard(workspace: Path, tmp_path: Path):
 
 
 def test_static_search_failed_load_sentinel(workspace: Path, tmp_path: Path):
-    """runSearch must show a user-visible error when data.json load fails (_staticSearchIndex===false)."""
+    """runSearch must retry and show a user-visible message when data.json load fails (_staticSearchIndex===false)."""
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
     assert (
         "_staticSearchIndex = false" in html
     ), "_loadStaticSearchIndex must set false sentinel on failure"
+    # false is now handled in the combined null||false branch that auto-retries
     assert "_staticSearchIndex === false" in html, "runSearch must branch on false sentinel"
     assert (
-        "Search unavailable" in html
-    ), "user must see an error message when static index load failed"
+        "Retrying search index" in html
+    ), "user must see a retry message when static index load failed"
 
 
 def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):

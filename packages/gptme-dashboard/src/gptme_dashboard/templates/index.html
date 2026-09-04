@@ -1246,7 +1246,10 @@ async function initDynamic() {
   const overlay = document.getElementById('search-overlay');
   if (overlay && overlay.classList.contains('open')) {
     const pending = document.getElementById('global-search-input').value.trim();
-    if (pending && pending.length >= 2) runSearch(pending, document.getElementById('search-type-filter').value);
+    if (pending && pending.length >= 2) {
+      clearTimeout(_searchTimer);  // cancel any pending debounce to avoid duplicate runSearch
+      runSearch(pending, document.getElementById('search-type-filter').value);
+    }
   }
 }
 
@@ -1797,9 +1800,9 @@ function openSearch() {
   document.getElementById('search-overlay').classList.add('open');
   document.getElementById('global-search-input').focus();
   _searchSelected = -1;
-  // Opening the overlay is explicit search intent — start the static index
-  // fetch now so the first keystroke does not wait on the network.
-  if (_apiAvailable === false) _loadStaticSearchIndex();
+  // Static index is fetched lazily on first query intent (first keystroke), not
+  // on overlay-open. Visitors who open and close search without typing never
+  // download the multi-MB data.json.
 }
 
 function closeSearch() {
@@ -1933,23 +1936,23 @@ async function runSearch(q, typeFilter) {
 
   // Static mode: use client-side index built from data.json
   if (_apiAvailable === false) {
-    if (_staticSearchIndex === null) {
-      // Not loaded yet — start the lazy fetch and re-run once it resolves.
+    if (_staticSearchIndex === null || _staticSearchIndex === false) {
+      // Not loaded yet (null) or a previous attempt failed (false) — (re-)start the
+      // lazy fetch. Guard with !_staticSearchIndexPromise so that rapid keystrokes
+      // while the fetch is in-flight attach only one re-run callback instead of one
+      // per keystroke (which would cause redundant O(n) rescans when data lands).
+      const isRetry = (_staticSearchIndex === false);
       document.getElementById('search-results-area').innerHTML =
-        '<div class="search-empty">Loading search index…</div>';
+        '<div class="search-empty">' + (isRetry ? 'Retrying search index…' : 'Loading search index…') + '</div>';
       document.getElementById('search-result-count').textContent = '';
-      _loadStaticSearchIndex().then(() => {
-        const input = document.getElementById('global-search-input');
-        const liveQuery = input ? input.value.trim() : '';
-        const liveFilter = document.getElementById('search-type-filter').value;
-        if (liveQuery.length >= 2) runSearch(liveQuery, liveFilter);
-      });
-      return;
-    }
-    if (_staticSearchIndex === false) {
-      document.getElementById('search-results-area').innerHTML =
-        '<div class="search-empty">Search unavailable — could not load static index</div>';
-      document.getElementById('search-result-count').textContent = '';
+      if (!_staticSearchIndexPromise) {
+        _loadStaticSearchIndex().then(() => {
+          const input = document.getElementById('global-search-input');
+          const liveQuery = input ? input.value.trim() : '';
+          const liveFilter = document.getElementById('search-type-filter').value;
+          if (liveQuery.length >= 2) runSearch(liveQuery, liveFilter);
+        });
+      }
       return;
     }
     const { results, total } = _clientSearch(q, typeFilter, 20);
